@@ -1,105 +1,157 @@
 //! Plan rewrite certificates with stable hashing.
 //!
 //! Certificates attest that a sequence of rewrite steps transformed a plan DAG
-//! from one state to another. The hash function is deterministic and stable
-//! across Rust versions (FNV-1a, not `DefaultHasher`).
+//! from one state to another. The hash function is deterministic, stable
+//! across Rust versions, and **cryptographically strong** so a third party
+//! cannot construct two distinct plans that hash to the same value.
+//!
+//! br-asupersync-eyb1s5: prior versions used 64-bit FNV-1a, which has no
+//! collision resistance against an attacker who controls the plan input
+//! (e.g., a malicious extractor producing a plan that hashes to the same
+//! value as a benign certificate). The hash now wraps the full 256-bit
+//! SHA-256 digest. The wire/golden representation switched from a `u64`
+//! to a 64-character lowercase hex string.
 
 use super::analysis::SideConditionChecker;
 use super::rewrite::{
     RewritePolicy, RewriteReport, RewriteRule, RewriteStep, check_side_conditions,
 };
 use super::{PlanDag, PlanId, PlanNode};
+use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------------------------
-// Stable hashing (FNV-1a 64-bit)
+// Stable hashing (SHA-256, 256-bit)
 // ---------------------------------------------------------------------------
 
-const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-const FNV_PRIME: u64 = 0x0100_0000_01b3;
-
-/// Deterministic 64-bit hash of a plan DAG.
+/// Deterministic 256-bit hash of a plan DAG.
 ///
-/// Uses FNV-1a for cross-version stability. The hash covers node structure,
-/// labels, children order, durations, and the root pointer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PlanHash(u64);
+/// Uses SHA-256 for both cross-version stability and collision resistance
+/// against adversarial inputs. The hash covers node structure, labels,
+/// children order, durations, and the root pointer.
+///
+/// Encoding (do not change without bumping `CertificateVersion`):
+/// each scalar is fed in little-endian and length-prefixed where variable;
+/// node discriminants use the byte tags 0=Leaf, 1=Join, 2=Race, 3=Timeout.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PlanHash([u8; 32]);
 
 impl PlanHash {
-    /// Returns the raw 64-bit hash value.
+    /// Returns the raw 32-byte hash value.
     #[must_use]
-    pub const fn value(self) -> u64 {
-        self.0
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
     }
 
-    /// Compute the stable hash of a plan DAG.
+    /// Returns the hash as a 64-character lowercase hex string.
+    ///
+    /// Used for stable wire/golden representation and human-readable
+    /// error fields. Round-trippable via [`Self::from_hex`].
+    #[must_use]
+    pub fn to_hex(&self) -> String {
+        let mut out = String::with_capacity(64);
+        use std::fmt::Write;
+        for byte in &self.0 {
+            let _ = write!(out, "{byte:02x}");
+        }
+        out
+    }
+
+    /// Parses a 64-character lowercase hex string into a `PlanHash`.
+    ///
+    /// Returns `None` on length mismatch or non-hex characters.
+    #[must_use]
+    pub fn from_hex(hex: &str) -> Option<Self> {
+        if hex.len() != 64 {
+            return None;
+        }
+        let bytes = hex.as_bytes();
+        let mut out = [0u8; 32];
+        for (i, byte) in out.iter_mut().enumerate() {
+            let pair = [*bytes.get(i * 2)?, *bytes.get(i * 2 + 1)?];
+            let s = std::str::from_utf8(&pair).ok()?;
+            *byte = u8::from_str_radix(s, 16).ok()?;
+        }
+        Some(Self(out))
+    }
+
+    /// Test-only helper: build a `PlanHash` from a 64-bit seed, embedded in
+    /// the leading 8 bytes of the digest with the rest zero. Stable across
+    /// the binary so tests that pin a specific hash value can keep doing so
+    /// without re-deriving from a `PlanDag` shape.
+    #[cfg(test)]
+    pub(crate) fn from_u64_seed(seed: u64) -> Self {
+        let mut out = [0u8; 32];
+        out[..8].copy_from_slice(&seed.to_le_bytes());
+        Self(out)
+    }
+
+    /// Compute the stable SHA-256 hash of a plan DAG.
     #[must_use]
     pub fn of(dag: &PlanDag) -> Self {
-        let mut h = FNV_OFFSET;
-        // Hash node count as a frame marker.
-        h = fnv_u64(h, dag.nodes.len() as u64);
+        let mut hasher = Sha256::new();
+        // Frame marker: node count.
+        hasher.update((dag.nodes.len() as u64).to_le_bytes());
         for node in &dag.nodes {
-            h = hash_node(h, node);
+            hash_node(&mut hasher, node);
         }
         // Hash root presence and value.
         match dag.root {
             Some(id) => {
-                h = fnv_u8(h, 1);
-                h = fnv_u64(h, id.index() as u64);
+                hasher.update([1u8]);
+                hasher.update((id.index() as u64).to_le_bytes());
             }
             None => {
-                h = fnv_u8(h, 0);
+                hasher.update([0u8]);
             }
         }
-        Self(h)
+        let digest: [u8; 32] = hasher.finalize().into();
+        Self(digest)
     }
 }
 
-fn fnv_u8(h: u64, byte: u8) -> u64 {
-    (h ^ u64::from(byte)).wrapping_mul(FNV_PRIME)
-}
-
-fn fnv_u64(mut h: u64, val: u64) -> u64 {
-    for &byte in &val.to_le_bytes() {
-        h = fnv_u8(h, byte);
+impl std::fmt::Debug for PlanHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PlanHash({})", self.to_hex())
     }
-    h
 }
 
-fn fnv_bytes(mut h: u64, bytes: &[u8]) -> u64 {
-    for &byte in bytes {
-        h = fnv_u8(h, byte);
+impl std::fmt::Display for PlanHash {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.to_hex())
     }
-    h
 }
 
-fn hash_node(mut h: u64, node: &PlanNode) -> u64 {
+fn hash_node(hasher: &mut Sha256, node: &PlanNode) {
     match node {
         PlanNode::Leaf { label } => {
-            h = fnv_u8(h, 0); // discriminant
-            h = fnv_u64(h, label.len() as u64);
-            h = fnv_bytes(h, label.as_bytes());
+            hasher.update([0u8]); // discriminant
+            hasher.update((label.len() as u64).to_le_bytes());
+            hasher.update(label.as_bytes());
         }
         PlanNode::Join { children } => {
-            h = fnv_u8(h, 1);
-            h = fnv_u64(h, children.len() as u64);
+            hasher.update([1u8]);
+            hasher.update((children.len() as u64).to_le_bytes());
             for child in children {
-                h = fnv_u64(h, child.index() as u64);
+                hasher.update((child.index() as u64).to_le_bytes());
             }
         }
         PlanNode::Race { children } => {
-            h = fnv_u8(h, 2);
-            h = fnv_u64(h, children.len() as u64);
+            hasher.update([2u8]);
+            hasher.update((children.len() as u64).to_le_bytes());
             for child in children {
-                h = fnv_u64(h, child.index() as u64);
+                hasher.update((child.index() as u64).to_le_bytes());
             }
         }
         PlanNode::Timeout { child, duration } => {
-            h = fnv_u8(h, 3);
-            h = fnv_u64(h, child.index() as u64);
-            h = fnv_u64(h, u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX));
+            hasher.update([3u8]);
+            hasher.update((child.index() as u64).to_le_bytes());
+            hasher.update(
+                u64::try_from(duration.as_nanos())
+                    .unwrap_or(u64::MAX)
+                    .to_le_bytes(),
+            );
         }
     }
-    h
 }
 
 // ---------------------------------------------------------------------------
@@ -182,22 +234,27 @@ impl RewriteCertificate {
     }
 
     /// Stable identity hash of this certificate (for dedup / indexing).
+    ///
+    /// br-asupersync-eyb1s5: returns the full SHA-256 digest of the
+    /// certificate's identity-relevant fields (version, policy, hashes,
+    /// step list). Encoded as a `PlanHash` so callers see one hash type.
     #[must_use]
-    pub fn fingerprint(&self) -> u64 {
-        let mut h = FNV_OFFSET;
-        h = fnv_u64(h, u64::from(self.version.number()));
+    pub fn fingerprint(&self) -> PlanHash {
+        let mut hasher = Sha256::new();
+        hasher.update(self.version.number().to_le_bytes());
         // Hash policy as packed bits: assoc|comm|dist|require_binary_joins|timeout_simplification
         let policy_bits: u8 = pack_policy(self.policy);
-        h = fnv_u8(h, policy_bits);
-        h = fnv_u64(h, self.before_hash.value());
-        h = fnv_u64(h, self.after_hash.value());
-        h = fnv_u64(h, self.steps.len() as u64);
+        hasher.update([policy_bits]);
+        hasher.update(self.before_hash.as_bytes());
+        hasher.update(self.after_hash.as_bytes());
+        hasher.update((self.steps.len() as u64).to_le_bytes());
         for step in &self.steps {
-            h = fnv_u8(h, step.rule as u8);
-            h = fnv_u64(h, step.before.index() as u64);
-            h = fnv_u64(h, step.after.index() as u64);
+            hasher.update([step.rule as u8]);
+            hasher.update((step.before.index() as u64).to_le_bytes());
+            hasher.update((step.after.index() as u64).to_le_bytes());
         }
-        h
+        let digest: [u8; 32] = hasher.finalize().into();
+        PlanHash(digest)
     }
 
     /// Eliminate redundant steps to produce a minimal certificate.
@@ -388,9 +445,12 @@ pub struct CompactCertificate {
 }
 
 impl CompactCertificate {
-    /// Fixed header size: version(4) + policy(1) + 2*hash(16) + 2*node_count(8) = 29 bytes,
-    /// plus step_count(4) = 33 bytes total header.
-    pub const HEADER_SIZE: usize = 33;
+    /// Fixed header size: version(4) + policy(1) + 2*hash(64) + 2*node_count(8) = 77 bytes,
+    /// plus step_count(4) = 81 bytes total header.
+    ///
+    /// br-asupersync-eyb1s5: hash bytes grew from 8 (FNV-1a u64) to 32
+    /// (SHA-256), so the header expanded by 48 bytes.
+    pub const HEADER_SIZE: usize = 81;
 
     /// Upper bound on wire size in bytes.
     #[must_use]
@@ -665,11 +725,15 @@ pub enum VerifyError {
         found: u32,
     },
     /// The after-hash in the certificate doesn't match the DAG.
+    ///
+    /// br-asupersync-eyb1s5: hashes are the full SHA-256 digest, encoded
+    /// as a 64-character lowercase hex string for human-readable error
+    /// reporting. Use [`PlanHash::from_hex`] to reconstruct.
     HashMismatch {
-        /// Hash recorded in the certificate.
-        expected: u64,
-        /// Hash computed from the DAG.
-        actual: u64,
+        /// Hash recorded in the certificate (hex).
+        expected: String,
+        /// Hash computed from the DAG (hex).
+        actual: String,
     },
     /// The after-node count in the certificate doesn't match the DAG.
     NodeCountMismatch {
@@ -903,6 +967,25 @@ fn verify_race_assoc_result(
     verify_side_conditions(idx, step, policy, dag)
 }
 
+/// Returns true iff `a` and `b` are permutations of each other (same multiset).
+///
+/// The `Commute` rewrite rules (JoinCommute / RaceCommute) are valid only
+/// when the after-node carries the SAME children as the before-node (in
+/// possibly different order). Without this check, a forged certificate
+/// could replace a Commute step's `after` with an arbitrary Join/Race
+/// node carrying COMPLETELY DIFFERENT children — the previous shape-only
+/// check would silently accept it (br-asupersync-kpd3k3).
+fn is_permutation(a: &[PlanId], b: &[PlanId]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut a_sorted: Vec<u32> = a.iter().map(|id| id.index() as u32).collect();
+    let mut b_sorted: Vec<u32> = b.iter().map(|id| id.index() as u32).collect();
+    a_sorted.sort_unstable();
+    b_sorted.sort_unstable();
+    a_sorted == b_sorted
+}
+
 fn verify_join_commute_result(
     idx: usize,
     step: &CertifiedStep,
@@ -915,22 +998,38 @@ fn verify_join_commute_result(
             step: idx,
             node: step.before,
         })?;
-    if !matches!(before, PlanNode::Join { .. }) {
+    let PlanNode::Join {
+        children: before_children,
+    } = before
+    else {
         return Err(StepVerifyError::InvalidBeforeShape {
             step: idx,
             expected: "Join before JoinCommute",
         });
-    }
+    };
     let after = dag
         .node(step.after)
         .ok_or(StepVerifyError::MissingAfterNode {
             step: idx,
             node: step.after,
         })?;
-    if !matches!(after, PlanNode::Join { .. }) {
+    let PlanNode::Join {
+        children: after_children,
+    } = after
+    else {
         return Err(StepVerifyError::InvalidAfterShape {
             step: idx,
             expected: "Join after JoinCommute",
+        });
+    };
+    // Replay-style check: a Commute rule MUST preserve the multiset of
+    // children. Without this assertion the verifier accepts forged
+    // certificates whose `after` carries unrelated children — the prior
+    // shape-only check passed any well-formed Join. (br-asupersync-kpd3k3.)
+    if !is_permutation(before_children, after_children) {
+        return Err(StepVerifyError::InvalidAfterShape {
+            step: idx,
+            expected: "Join with same multiset of children as before (JoinCommute)",
         });
     }
     verify_side_conditions(idx, step, policy, dag)
@@ -948,22 +1047,38 @@ fn verify_race_commute_result(
             step: idx,
             node: step.before,
         })?;
-    if !matches!(before, PlanNode::Race { .. }) {
+    let PlanNode::Race {
+        children: before_children,
+    } = before
+    else {
         return Err(StepVerifyError::InvalidBeforeShape {
             step: idx,
             expected: "Race before RaceCommute",
         });
-    }
+    };
     let after = dag
         .node(step.after)
         .ok_or(StepVerifyError::MissingAfterNode {
             step: idx,
             node: step.after,
         })?;
-    if !matches!(after, PlanNode::Race { .. }) {
+    let PlanNode::Race {
+        children: after_children,
+    } = after
+    else {
         return Err(StepVerifyError::InvalidAfterShape {
             step: idx,
             expected: "Race after RaceCommute",
+        });
+    };
+    // Replay-style check: a Commute rule MUST preserve the multiset of
+    // children. Without this assertion the verifier accepts forged
+    // certificates whose `after` carries unrelated children — the prior
+    // shape-only check passed any well-formed Race. (br-asupersync-kpd3k3.)
+    if !is_permutation(before_children, after_children) {
+        return Err(StepVerifyError::InvalidAfterShape {
+            step: idx,
+            expected: "Race with same multiset of children as before (RaceCommute)",
         });
     }
     verify_side_conditions(idx, step, policy, dag)
@@ -1182,8 +1297,8 @@ pub fn verify(cert: &RewriteCertificate, dag: &PlanDag) -> Result<(), VerifyErro
     let actual = PlanHash::of(dag);
     if cert.after_hash != actual {
         return Err(VerifyError::HashMismatch {
-            expected: cert.after_hash.value(),
-            actual: actual.value(),
+            expected: cert.after_hash.to_hex(),
+            actual: actual.to_hex(),
         });
     }
     let actual_node_count = dag.nodes.len();
@@ -1440,7 +1555,10 @@ mod tests {
         let fp1 = cert.fingerprint();
         let fp2 = cert.fingerprint();
         assert_eq!(fp1, fp2);
-        assert_ne!(fp1, 0);
+        assert!(
+            fp1.as_bytes().iter().any(|b| *b != 0),
+            "fingerprint must not be all-zero"
+        );
     }
 
     #[test]
@@ -1668,7 +1786,7 @@ mod tests {
     #[test]
     fn minimize_removes_consecutive_duplicates() {
         init_test();
-        let hash = PlanHash(0x1234);
+        let hash = PlanHash::from_u64_seed(0x1234);
         let cert = RewriteCertificate {
             version: CertificateVersion::CURRENT,
             policy: RewritePolicy::conservative(),
@@ -1819,7 +1937,7 @@ mod tests {
     #[test]
     fn minimize_then_compact_reduces_size() {
         init_test();
-        let hash = PlanHash(0xABCD);
+        let hash = PlanHash::from_u64_seed(0xABCD);
         let cert = RewriteCertificate {
             version: CertificateVersion::CURRENT,
             policy: RewritePolicy::conservative(),
@@ -1872,8 +1990,8 @@ mod tests {
         let cert = RewriteCertificate {
             version: CertificateVersion::CURRENT,
             policy: RewritePolicy::conservative(),
-            before_hash: PlanHash(0xABCD),
-            after_hash: PlanHash(0xABCD),
+            before_hash: PlanHash::from_u64_seed(0xABCD),
+            after_hash: PlanHash::from_u64_seed(0xABCD),
             before_node_count: (u32::MAX as usize) + 1,
             after_node_count: 1,
             steps: Vec::new(),
@@ -1899,8 +2017,8 @@ mod tests {
         let cert = RewriteCertificate {
             version: CertificateVersion::CURRENT,
             policy: RewritePolicy::conservative(),
-            before_hash: PlanHash(0x1234),
-            after_hash: PlanHash(0x1234),
+            before_hash: PlanHash::from_u64_seed(0x1234),
+            after_hash: PlanHash::from_u64_seed(0x1234),
             before_node_count: 1,
             after_node_count: 1,
             steps: vec![CertifiedStep {
@@ -2323,7 +2441,7 @@ mod tests {
         init_test();
 
         // Create certificate with redundant steps
-        let hash = PlanHash(0xDEADBEEF);
+        let hash = PlanHash::from_u64_seed(0xDEADBEEF);
         let cert_with_redundancy = RewriteCertificate {
             version: CertificateVersion::CURRENT,
             policy: RewritePolicy::conservative(),
@@ -2472,5 +2590,105 @@ mod tests {
         }
 
         insta::assert_snapshot!("plan_certificate_hash_stability", hash_outputs.join("\n"));
+    }
+
+    // -----------------------------------------------------------------------
+    // br-asupersync-kpd3k3: replay-style multiset check on Commute rules
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn join_commute_rejects_forged_after_with_unrelated_children() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let x = dag.leaf("x");
+        let y = dag.leaf("y");
+        let before = dag.join(vec![a, b]);
+        let after = dag.join(vec![x, y]);
+        dag.set_root(before);
+
+        let cert = RewriteCertificate {
+            version: CertificateVersion::CURRENT,
+            policy: RewritePolicy::assume_all(),
+            before_hash: PlanHash::of(&dag),
+            after_hash: PlanHash::of(&dag),
+            before_node_count: dag.nodes.len(),
+            after_node_count: dag.nodes.len(),
+            steps: vec![CertifiedStep {
+                rule: RewriteRule::JoinCommute,
+                before,
+                after,
+                detail: "forged JoinCommute".to_string(),
+            }],
+        };
+
+        match verify_steps(&cert, &dag) {
+            Err(StepVerifyError::InvalidAfterShape { .. }) => {}
+            other => panic!("expected InvalidAfterShape, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn race_commute_rejects_forged_after_with_unrelated_children() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let x = dag.leaf("x");
+        let y = dag.leaf("y");
+        let before = dag.race(vec![a, b]);
+        let after = dag.race(vec![x, y]);
+        dag.set_root(before);
+
+        let cert = RewriteCertificate {
+            version: CertificateVersion::CURRENT,
+            policy: RewritePolicy::assume_all(),
+            before_hash: PlanHash::of(&dag),
+            after_hash: PlanHash::of(&dag),
+            before_node_count: dag.nodes.len(),
+            after_node_count: dag.nodes.len(),
+            steps: vec![CertifiedStep {
+                rule: RewriteRule::RaceCommute,
+                before,
+                after,
+                detail: "forged RaceCommute".to_string(),
+            }],
+        };
+
+        match verify_steps(&cert, &dag) {
+            Err(StepVerifyError::InvalidAfterShape { .. }) => {}
+            other => panic!("expected InvalidAfterShape, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn join_commute_accepts_legitimate_permutation() {
+        init_test();
+        let mut dag = PlanDag::new();
+        let a = dag.leaf("a");
+        let b = dag.leaf("b");
+        let c = dag.leaf("c");
+        let before = dag.join(vec![a, b, c]);
+        let after = dag.join(vec![c, a, b]);
+        dag.set_root(before);
+
+        let cert = RewriteCertificate {
+            version: CertificateVersion::CURRENT,
+            policy: RewritePolicy::assume_all(),
+            before_hash: PlanHash::of(&dag),
+            after_hash: PlanHash::of(&dag),
+            before_node_count: dag.nodes.len(),
+            after_node_count: dag.nodes.len(),
+            steps: vec![CertifiedStep {
+                rule: RewriteRule::JoinCommute,
+                before,
+                after,
+                detail: "legitimate JoinCommute permutation".to_string(),
+            }],
+        };
+
+        verify_steps(&cert, &dag)
+            .expect("legitimate JoinCommute permutation must verify (multiset preserved)");
     }
 }
