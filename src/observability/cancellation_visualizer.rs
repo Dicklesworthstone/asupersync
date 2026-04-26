@@ -7,7 +7,7 @@ use crate::observability::cancellation_tracer::{
     CancellationTrace, CancellationTraceId, CancellationTraceStep, EntityType, PropagationAnomaly,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
 /// Configuration for visualization output.
@@ -395,7 +395,12 @@ impl CancellationVisualizer {
 
     /// Identify performance bottlenecks in the traces.
     fn identify_bottlenecks(&self, traces: &[CancellationTrace]) -> Vec<BottleneckInfo> {
-        let mut entity_delays: HashMap<String, Vec<Duration>> = HashMap::new();
+        // br-asupersync-ovp553: BTreeMap so the returned
+        // Vec<BottleneckInfo> is in canonical (sorted) order. The previous
+        // HashMap iteration at line 411 produced a non-deterministic
+        // ordering that broke deterministic-replay tooling consuming
+        // analyzer output.
+        let mut entity_delays: BTreeMap<String, Vec<Duration>> = BTreeMap::new();
 
         for trace in traces {
             for step in &trace.steps {

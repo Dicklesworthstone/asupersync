@@ -7,7 +7,7 @@ use crate::observability::cancellation_tracer::{
     CancellationTrace, EntityType, PropagationAnomaly,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, SystemTime};
 
 /// Configuration for deep analysis.
@@ -379,7 +379,11 @@ impl CancellationAnalyzer {
 
     /// Identify performance bottlenecks using statistical analysis.
     fn identify_bottlenecks(&self, traces: &[CancellationTrace]) -> Vec<BottleneckAnalysis> {
-        let mut entity_timings: HashMap<String, Vec<Duration>> = HashMap::new();
+        // br-asupersync-ovp553: BTreeMap (sorted-by-key) instead of HashMap
+        // so the iteration at line 405 below is canonically ordered. The
+        // produced `Vec<BottleneckAnalysis>` is consumed by deterministic-
+        // replay tooling that relies on stable per-entity ordering.
+        let mut entity_timings: BTreeMap<String, Vec<Duration>> = BTreeMap::new();
         let mut total_trace_time_ms = 0.0;
 
         // Collect timing data per entity
@@ -510,7 +514,10 @@ impl CancellationAnalyzer {
 
     /// Identify entities with consistently slow cleanup.
     fn identify_slow_cleanup_entities(&self, traces: &[CancellationTrace]) -> Vec<String> {
-        let mut entity_cleanup_times: HashMap<String, Vec<Duration>> = HashMap::new();
+        // br-asupersync-ovp553: BTreeMap so the returned Vec<String> below
+        // is in canonical (sorted) order — required for deterministic
+        // replay of the analyzer output.
+        let mut entity_cleanup_times: BTreeMap<String, Vec<Duration>> = BTreeMap::new();
 
         for trace in traces {
             if let Some(_total_time) = trace.total_propagation_time {
@@ -561,7 +568,11 @@ impl CancellationAnalyzer {
 
     /// Rank entities by overall performance.
     fn rank_entity_performance(&self, traces: &[CancellationTrace]) -> Vec<EntityPerformance> {
-        let mut entity_data: HashMap<String, Vec<Duration>> = HashMap::new();
+        // br-asupersync-ovp553: BTreeMap so the returned
+        // Vec<EntityPerformance> at line 607's iteration is in canonical
+        // (sorted-by-entity-id) order. entity_anomalies stays a HashMap
+        // because it's only LOOKED UP (not iterated for output).
+        let mut entity_data: BTreeMap<String, Vec<Duration>> = BTreeMap::new();
         let mut entity_anomalies: HashMap<String, usize> = HashMap::new();
 
         // Collect performance data
