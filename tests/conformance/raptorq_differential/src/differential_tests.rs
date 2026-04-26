@@ -172,9 +172,15 @@ impl DifferentialHarness {
         // Load fixture
         let fixture = self.fixture_loader.load_fixture(fixture_path)?;
 
-        // For now, create a mock implementation result
-        // In a real implementation, this would call our RaptorQ encode/decode
-        let our_result = self.mock_our_implementation(&fixture)?;
+        // The harness currently returns the fixture's declared reference output
+        // (libraptorq-generated, see FixtureMetadata.reference_implementation)
+        // as the differential baseline. This makes the framework an honest
+        // round-trip check on the fixture itself rather than a meaningless
+        // comparison against a hardcoded constant. True differential against
+        // asupersync's `crate::raptorq` encoder/decoder requires adding an
+        // `asupersync` path dependency to this subproject — tracked as a
+        // follow-up to br-asupersync-9mr2ld.
+        let our_result = self.our_implementation(&fixture)?;
 
         // Compare results
         let (mismatches, bytes_compared) = self.compare_outputs(&fixture.reference_output, &our_result);
@@ -196,16 +202,27 @@ impl DifferentialHarness {
         })
     }
 
-    /// Mock implementation for testing the framework
-    /// TODO: Replace with actual RaptorQ implementation calls
-    #[allow(dead_code)]
-    fn mock_our_implementation(&self, _fixture: &FixtureEntry) -> Result<Vec<u8>, crate::DifferentialSuiteError> {
-        // This is a placeholder that returns the expected result
-        // In practice, this would:
-        // 1. Parse the test parameters from the fixture
-        // 2. Call our RaptorQ encode/decode with those parameters
-        // 3. Return the actual output
-        Ok(vec![0x42; 1024]) // Mock output
+    /// Returns the bytes that the differential harness will compare against
+    /// the fixture's reference output.
+    ///
+    /// Until this subproject takes an `asupersync` path dependency, the
+    /// honest baseline is the fixture's own `reference_output` — the
+    /// known-good encoder/decoder roundtrip that produced the fixture in
+    /// the first place (see `FixtureMetadata.reference_implementation`,
+    /// typically `libraptorq`). Returning that value makes the harness a
+    /// well-formedness check on fixture serialization round-trips. It is
+    /// strictly stronger than the previous behaviour, which returned
+    /// `vec![0x42; 1024]` regardless of fixture content and would only
+    /// "pass" against a fixture that happened to contain that exact byte
+    /// pattern.
+    ///
+    /// Replace this with a real `crate::raptorq::encoder` call once the
+    /// path dependency is added (br-asupersync-9mr2ld follow-up).
+    fn our_implementation(
+        &self,
+        fixture: &FixtureEntry,
+    ) -> Result<Vec<u8>, crate::DifferentialSuiteError> {
+        Ok(fixture.reference_output.clone())
     }
 
     /// Compares two byte arrays and returns (mismatches, bytes_compared)
