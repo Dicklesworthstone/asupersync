@@ -105,6 +105,35 @@ struct SignalDispatcher {
     slots: HashMap<SignalKind, Arc<SignalSlot>>,
     #[cfg(unix)]
     _handle: signal_hook::iterator::Handle,
+    /// Windows-only: shutdown flag + JoinHandle for the background
+    /// poller thread (see start()). On Drop we set the flag, unpark
+    /// the thread to wake it from park_timeout, and join it. This
+    /// replaces the previous design where the JoinHandle was dropped
+    /// immediately and the loop ran forever (br-asupersync-v6wnoj).
+    #[cfg(windows)]
+    poller_shutdown: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(windows)]
+    poller_handle: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(windows)]
+impl Drop for SignalDispatcher {
+    fn drop(&mut self) {
+        // Signal the poller to exit, then unpark it so park_timeout
+        // returns immediately rather than waiting up to the poll
+        // interval. Join the thread so resource accounting is clean —
+        // particularly important under runtime shutdown where the
+        // process expects all auxiliary threads to be quiescent.
+        self.poller_shutdown
+            .store(true, std::sync::atomic::Ordering::Release);
+        if let Some(handle) = self.poller_handle.take() {
+            handle.thread().unpark();
+            // Best-effort join: if the poller thread panicked we still
+            // want shutdown to proceed cleanly rather than propagate
+            // the panic from a destructor.
+            let _ = handle.join();
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -186,13 +215,51 @@ impl SignalDispatcher {
 
         // Background thread polls atomic counters and wakes async waiters
         // from a safe (non-signal) context.
+        //
+        // br-asupersync-v6wnoj: previous implementation was
+        // `loop { thread::sleep(1ms); ... }` — burned ~100% of one core
+        // even when no signals were pending, the JoinHandle was dropped
+        // immediately so the thread could never be joined, and there was
+        // no shutdown path so the thread leaked across the process
+        // lifetime.
+        //
+        // Replacement uses:
+        //   * a `poller_shutdown: Arc<AtomicBool>` checked at the top of
+        //     each iteration so Drop can request exit;
+        //   * `thread::park_timeout(POLL_INTERVAL)` instead of busy-
+        //     sleeping, so the thread parks the OS scheduler (no
+        //     wake-up cost) and wakes deterministically on either the
+        //     timeout or an explicit `unpark()` from Drop;
+        //   * a stored `JoinHandle` so SignalDispatcher::drop can
+        //     `unpark()` + `join()` for clean shutdown.
+        //
+        // The CTRL handler still bumps an atomic counter
+        // (`record_delivery_signal_safe`) — it does NOT call unpark,
+        // because Rust's `Thread::unpark` is not documented as
+        // signal-safe on Windows CTRL handlers. Signal delivery
+        // latency is therefore bounded by `POLL_INTERVAL` (100 ms),
+        // an acceptable trade-off for a 100x reduction in idle CPU
+        // versus the previous 1 ms busy loop. A future optimization
+        // could swap park_timeout for a Win32 CreateEvent +
+        // WaitForMultipleObjects pair (with SetEvent from the CTRL
+        // handler, which IS documented signal-safe) once the
+        // workspace takes a windows-sys path dep.
+        const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
         let poller_slots: Vec<Arc<SignalSlot>> = slots.values().cloned().collect();
-        thread::Builder::new()
+        let poller_shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let poller_shutdown_clone = Arc::clone(&poller_shutdown);
+        let poller_handle = thread::Builder::new()
             .name("asupersync-signal-poll-win".to_string())
             .spawn(move || {
                 let mut last_seen: Vec<u64> = vec![0; poller_slots.len()];
-                loop {
-                    thread::sleep(std::time::Duration::from_millis(1));
+                while !poller_shutdown_clone.load(std::sync::atomic::Ordering::Acquire) {
+                    // Park-with-timeout: returns either when the timeout
+                    // expires (regular poll tick) or when Drop calls
+                    // unpark() to request immediate exit. Spurious
+                    // wake-ups are harmless — the loop just polls the
+                    // atomics and goes back to sleep.
+                    thread::park_timeout(POLL_INTERVAL);
                     for (i, slot) in poller_slots.iter().enumerate() {
                         last_seen[i] = slot.notify_if_changed(last_seen[i]);
                     }
@@ -200,7 +267,11 @@ impl SignalDispatcher {
             })
             .map_err(|e| io::Error::other(format!("failed to spawn signal poller: {e}")))?;
 
-        Ok(Self { slots })
+        Ok(Self {
+            slots,
+            poller_shutdown,
+            poller_handle: Some(poller_handle),
+        })
     }
 
     fn slot(&self, kind: SignalKind) -> Option<Arc<SignalSlot>> {
