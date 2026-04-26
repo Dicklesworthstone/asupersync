@@ -3235,7 +3235,7 @@ mod tests {
         let notify = Arc::new(parking_lot::Mutex::new(
             crate::record::region::RegionCloseState {
                 closed: false,
-                waiters: Vec::new(),
+                waiters: Default::default(),
             },
         ));
         let wake_count_a = Arc::new(AtomicUsize::new(0));

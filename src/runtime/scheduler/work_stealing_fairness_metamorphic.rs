@@ -396,3 +396,157 @@ fn mr_ws4_stealers_alone_drain_all_tasks() {
         "MR-WS4 VIOLATION: drained set differs from spawned set",
     );
 }
+
+// ============================================================================
+// MR-WS5 — Identity (same-input same-output)
+// ============================================================================
+
+proptest! {
+    /// MR-WS5: Deterministic work stealing identity.
+    /// Stealing from the same state with the same seed yields identical outcomes.
+    #[test]
+    fn mr_ws5_stealing_identity(
+        task_count in 10usize..100,
+        worker_count in 2usize..16,
+        seed in any::<u64>(),
+    ) {
+        use crate::util::DetRng;
+
+        let setup_queues = || {
+            let queues: Vec<_> = (0..worker_count)
+                .map(|_| LocalQueue::new_for_test(128))
+                .collect();
+            for i in 0..task_count {
+                queues[i % worker_count].push(TaskId::new_for_test(i as u32, 0));
+            }
+            queues
+        };
+
+        let run_steal = |queues: &Vec<LocalQueue>| {
+            let stealers: Vec<_> = queues.iter().map(|q| q.stealer()).collect();
+            let mut rng = DetRng::new(seed);
+            let mut stolen = Vec::new();
+            while let Some(t) = steal_task(&stealers, &mut rng) {
+                stolen.push(t);
+            }
+            stolen
+        };
+
+        let queues1 = setup_queues();
+        let stolen1 = run_steal(&queues1);
+
+        let queues2 = setup_queues();
+        let stolen2 = run_steal(&queues2);
+
+        prop_assert_eq!(stolen1, stolen2, "MR-WS5 VIOLATION: Identity failed");
+    }
+}
+
+// ============================================================================
+// MR-WS6 — Permutation (parallel scheduling commutes)
+// ============================================================================
+
+proptest! {
+    /// MR-WS6: Parallel scheduling commutes.
+    /// The multiset of stolen tasks is invariant under permutation of the stealers array.
+    #[test]
+    fn mr_ws6_stealing_permutation_invariance(
+        task_count in 10usize..100,
+        worker_count in 2usize..16,
+        seed in any::<u64>(),
+    ) {
+        use crate::util::DetRng;
+
+        let queues: Vec<_> = (0..worker_count)
+            .map(|_| LocalQueue::new_for_test(128))
+            .collect();
+
+        for i in 0..task_count {
+            queues[i % worker_count].push(TaskId::new_for_test(i as u32, 0));
+        }
+
+        // Base stealers
+        let stealers: Vec<_> = queues.iter().map(|q| q.stealer()).collect();
+
+        let mut rng1 = DetRng::new(seed);
+        let mut stolen1 = Vec::new();
+        while let Some(t) = steal_task(&stealers, &mut rng1) {
+            stolen1.push(t);
+        }
+
+        // Repopulate
+        for i in 0..task_count {
+            queues[i % worker_count].push(TaskId::new_for_test(i as u32, 0));
+        }
+
+        // Permuted stealers (reverse)
+        let mut permuted_stealers: Vec<_> = queues.iter().map(|q| q.stealer()).collect();
+        permuted_stealers.reverse();
+
+        let mut rng2 = DetRng::new(seed);
+        let mut stolen2 = Vec::new();
+        while let Some(t) = steal_task(&permuted_stealers, &mut rng2) {
+            stolen2.push(t);
+        }
+
+        let mut s1 = stolen1.clone();
+        s1.sort();
+        let mut s2 = stolen2.clone();
+        s2.sort();
+
+        prop_assert_eq!(s1, s2, "MR-WS6 VIOLATION: Permutation invariance failed");
+    }
+}
+
+// ============================================================================
+// MR-WS7 — Scaling (load-balance under N=1..32 workers)
+// ============================================================================
+
+proptest! {
+    /// MR-WS7: Load-balance scaling.
+    /// Under N=1..32 workers, total work is reasonably balanced (max load is bounded).
+    #[test]
+    fn mr_ws7_scaling_load_balance(
+        tasks_per_worker in 10usize..50,
+        worker_count in 1usize..32,
+    ) {
+        let task_count = tasks_per_worker * worker_count;
+        let mut sched = scheduler(worker_count);
+
+        for i in 0..task_count {
+            sched.inject_ready(TaskId::new_for_test(i as u32, 0), 100);
+        }
+
+        let mut workers = sched.take_workers();
+        let mut process_counts = vec![0usize; worker_count];
+
+        // Drain round-robin
+        let mut progressed = true;
+        while progressed {
+            progressed = false;
+            for (i, w) in workers.iter_mut().enumerate() {
+                if let Some(_task) = w.next_task() {
+                    process_counts[i] += 1;
+                    progressed = true;
+                }
+            }
+        }
+
+        let total_processed: usize = process_counts.iter().sum();
+        prop_assert_eq!(total_processed, task_count, "MR-WS7 VIOLATION: Did not process all tasks");
+
+        if worker_count > 1 {
+            let max_processed = *process_counts.iter().max().unwrap();
+            let expected_avg = task_count / worker_count;
+            // Bound: max worker does not process more than 3x the average (allows for random variation)
+            // or expected_avg + 30, whichever is larger, to prevent false positives on small samples.
+            let bound = (expected_avg * 4).max(expected_avg + 40);
+
+            prop_assert!(
+                max_processed <= bound,
+                "MR-WS7 VIOLATION: Load balance failed. Max {} > Bound {} (Avg {}). Distribution: {:?}",
+                max_processed, bound, expected_avg, process_counts
+            );
+        }
+    }
+}

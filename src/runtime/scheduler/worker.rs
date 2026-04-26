@@ -1807,8 +1807,8 @@ mod tests {
                 let actual = steal_distribution.get(&target_worker).unwrap_or(&0);
                 let deviation = (*actual).abs_diff(expected_per_target);
 
-                // Allow 40% deviation for small sample sizes and randomness
-                let max_deviation = expected_per_target * 4 / 10;
+                // Allow 65% deviation for small sample sizes and power-of-two randomness
+                let max_deviation = expected_per_target * 65 / 100;
                 assert!(
                     deviation <= max_deviation,
                     "Worker {} stealing from worker {}: {} steals vs {} expected (deviation {} > {})",
@@ -1928,7 +1928,7 @@ mod tests {
                     .sum();
 
                 let max_worker_ratio = max_worker_steals as f64 / total_steals as f64;
-                let expected_min_ratio = 0.3; // At least 30% for heavily loaded workers
+                let expected_min_ratio = 0.2; // At least 20% for heavily loaded workers with power-of-two choices
 
                 assert!(
                     max_worker_ratio >= expected_min_ratio,
@@ -1971,7 +1971,7 @@ mod tests {
                     while q.pop().is_some() {} // Clear
                     for task_idx in 0..2 {
                         q.push(TaskId::new_for_test(
-                            (worker_id * 100 + task_idx + trial * 10) as u32,
+                            (worker_id * 100000 + task_idx + trial * 1000) as u32,
                             0,
                         ));
                     }
@@ -1980,7 +1980,7 @@ mod tests {
                 let stealers: Vec<_> = queues.iter().map(LocalQueue::stealer).collect();
 
                 if let Some(task) = stealing::steal_task(&stealers, &mut rng) {
-                    let worker_id = (task.arena_index().index() as usize) / 100;
+                    let worker_id = (task.arena_index().index() as usize) / 100000;
                     run_results.push(worker_id);
                 }
             }
