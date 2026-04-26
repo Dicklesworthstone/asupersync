@@ -10,7 +10,7 @@ use crate::types::rref::{RRef, RRefAccessWitness, RRefError};
 use crate::types::{Budget, CancelReason, CurveBudget, RRefAccess, RegionId, TaskId, Time};
 use parking_lot::RwLock;
 use std::cell::Cell;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 // Thread-local flag to detect reentrant calls and prevent deadlock
 thread_local! {
@@ -327,6 +327,11 @@ pub struct RegionRecord {
     state: AtomicRegionState,
     /// Inner mutable state (guarded by a lock).
     inner: RwLock<RegionInner>,
+    /// br-asupersync-bjrqu3 — Count of `resolve_obligation` calls
+    /// that fired when `pending_obligations` was already 0. Surfaces
+    /// the double-resolve invariant violation that the previous
+    /// `saturating_sub` shape silently masked.
+    double_resolve_count: AtomicU64,
     /// Tracing span for region lifecycle (only active with tracing-integration feature).
     #[cfg(feature = "tracing-integration")]
     span: Span,
@@ -389,6 +394,7 @@ impl RegionRecord {
                 pending_obligations: 0,
                 heap: RegionHeap::new(),
             }),
+            double_resolve_count: AtomicU64::new(0),
             span,
         }
     }
@@ -644,9 +650,50 @@ impl RegionRecord {
     }
 
     /// Marks an obligation slot as resolved for this region.
+    ///
+    /// br-asupersync-bjrqu3 — On a double-resolve (the counter is
+    /// already 0), the previous shape used `saturating_sub`, which
+    /// silently masked the invariant violation. The "no obligation
+    /// leaks" invariant relies on `pending_obligations == 0` at
+    /// region-close time; with the saturate, a buggy caller that
+    /// resolves twice could leave a real obligation orphaned while
+    /// the counter still showed 0. Now: in debug builds we panic on
+    /// the bug (loud regression signal); in release builds we
+    /// saturate AND increment a per-region double-resolve counter
+    /// so operators can detect the invariant violation via
+    /// [`Self::double_resolve_count`].
     pub fn resolve_obligation(&self) {
         let mut inner = self.inner.write();
-        inner.pending_obligations = inner.pending_obligations.saturating_sub(1);
+        match inner.pending_obligations.checked_sub(1) {
+            Some(n) => inner.pending_obligations = n,
+            None => {
+                debug_assert!(
+                    false,
+                    "double-resolve detected on Region: \
+                     resolve_obligation called when pending_obligations was 0 \
+                     (br-asupersync-bjrqu3)"
+                );
+                self.double_resolve_count.fetch_add(1, Ordering::Relaxed);
+                #[cfg(feature = "tracing-integration")]
+                tracing::warn!(
+                    "Region::resolve_obligation called when pending_obligations==0 \
+                     (br-asupersync-bjrqu3) — counter saturated, double-resolve \
+                     count incremented"
+                );
+            }
+        }
+    }
+
+    /// br-asupersync-bjrqu3 — Number of times `resolve_obligation`
+    /// was called when `pending_obligations` was already zero. A
+    /// non-zero value indicates a double-resolve protocol violation
+    /// (typically: same obligation guard's `commit` AND `abort`
+    /// were both invoked, or `Drop` ran twice via unsafe ABI). In
+    /// debug builds the first such call panics; in release the
+    /// counter increments so operators can detect the violation.
+    #[must_use]
+    pub fn double_resolve_count(&self) -> u64 {
+        self.double_resolve_count.load(Ordering::Relaxed)
     }
 
     /// Adds a finalizer to run when the region closes.
@@ -793,25 +840,38 @@ impl RegionRecord {
     /// Begins closing the region.
     ///
     /// Returns true if the transition succeeded.
+    ///
+    /// br-asupersync-g0fk7p — perform the Open → Closing atomic
+    /// transition WHILE the `inner` write lock is held so an
+    /// admission path (`add_child`, `add_task_internal`,
+    /// `try_reserve_obligation`) that took the same lock and is
+    /// running its locked double-check cannot observe `Open` while
+    /// `begin_close` simultaneously flips the state. Without this
+    /// ordering, the locked double-check at the bottom of
+    /// `add_child` could pass concurrently with the state
+    /// transition, allowing a "task added after close-begin" race
+    /// that violates the lab-oracle invariant. Safety was already
+    /// preserved (the admitted work is tracked and waited on), but
+    /// the spec-level admission-after-close-begin oracle now has a
+    /// firm guarantee.
     pub fn begin_close(&self, reason: Option<CancelReason>) -> bool {
-        {
-            let mut inner = self.inner.write();
-            if self.state.load() == RegionState::Closed {
-                return false;
-            }
+        let mut inner = self.inner.write();
+        if self.state.load() == RegionState::Closed {
+            return false;
+        }
 
-            if let Some(reason) = reason {
-                if let Some(existing) = &mut inner.cancel_reason {
-                    existing.strengthen(&reason);
-                } else {
-                    inner.cancel_reason = Some(reason);
-                }
+        if let Some(reason) = reason {
+            if let Some(existing) = &mut inner.cancel_reason {
+                existing.strengthen(&reason);
+            } else {
+                inner.cancel_reason = Some(reason);
             }
         }
 
         let transitioned = self
             .state
             .transition(RegionState::Open, RegionState::Closing);
+        drop(inner);
         if transitioned {
             self.trace_state_change(RegionState::Closing);
         }
@@ -2968,5 +3028,78 @@ mod tests {
             local_tasks, expected_tasks,
             "remote snapshot must NOT silently drop local tasks (silent-loss regression)"
         );
+    }
+
+    /// br-asupersync-bjrqu3 — In release builds, double-resolve
+    /// must NOT silently saturate; instead, the per-region
+    /// `double_resolve_count` increments so operators can detect the
+    /// invariant violation. (Debug builds panic via debug_assert!,
+    /// so this test specifically exercises the release behavior by
+    /// constructing the over-decrement scenario without the
+    /// debug-assert firing — under release builds the
+    /// `debug_assert!(false, ...)` is compiled out, the saturation
+    /// occurs, and the counter increments.)
+    #[test]
+    fn resolve_obligation_double_resolve_increments_counter_in_release() {
+        // Skip the body in debug builds because debug_assert!(false)
+        // would abort the test process.
+        if cfg!(debug_assertions) {
+            return;
+        }
+
+        let region = RegionRecord::new(
+            RegionId::new_for_test(1, 0),
+            None,
+            Budget::default(),
+        );
+        // Reserve one slot, resolve once (legit), resolve again (bug).
+        region
+            .try_reserve_obligation()
+            .expect("reservation should succeed on Open region");
+        region.resolve_obligation();
+        assert_eq!(region.pending_obligations(), 0);
+        assert_eq!(region.double_resolve_count(), 0);
+
+        region.resolve_obligation();
+        // Counter saturated at 0 + double-resolve increment.
+        assert_eq!(region.pending_obligations(), 0);
+        assert_eq!(
+            region.double_resolve_count(),
+            1,
+            "double-resolve must increment the counter (release-mode behavior)"
+        );
+    }
+
+    /// br-asupersync-g0fk7p — once `begin_close` has fired, no
+    /// further admissions succeed. The `begin_close` path now does
+    /// the Open → Closing atomic transition while still holding the
+    /// inner write lock, so an admit() that took the same lock
+    /// after begin_close cannot observe Open and silently sneak in.
+    #[test]
+    fn admission_after_begin_close_is_rejected() {
+        let region = RegionRecord::new(
+            RegionId::new_for_test(2, 0),
+            None,
+            Budget::default(),
+        );
+        // Pre-close: admissions succeed.
+        region
+            .add_child(RegionId::new_for_test(3, 0))
+            .expect("child admission should succeed pre-close");
+        region
+            .add_task(TaskId::new_for_test(1, 0))
+            .expect("task admission should succeed pre-close");
+        // Begin close.
+        let closed = region.begin_close(None);
+        assert!(closed, "begin_close should transition Open -> Closing");
+        // Post-close: admissions rejected (state is Closing, not Open).
+        assert!(matches!(
+            region.add_child(RegionId::new_for_test(4, 0)),
+            Err(AdmissionError::Closed)
+        ));
+        assert!(matches!(
+            region.add_task(TaskId::new_for_test(2, 0)),
+            Err(AdmissionError::Closed)
+        ));
     }
 }
