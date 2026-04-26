@@ -814,6 +814,17 @@ pub trait MetricsProvider: Send + Sync + 'static {
 
     /// Called after each scheduler tick.
     fn scheduler_tick(&self, tasks_polled: usize, duration: Duration);
+
+    // === Panic Metrics ===
+
+    /// br-asupersync-zcu3c4 — Called when an isolated panic is recorded by
+    /// `runtime::panic_isolation::PanicIsolator`. `location` is one of the
+    /// stable string tags `task_execution`, `finalizer_execution`,
+    /// `region_cleanup`, `obligation_handling`, `scheduler_internal` (see
+    /// `PanicLocation`). Default is a no-op so existing providers continue
+    /// to compile and silently ignore panic events; production providers
+    /// should override to count panics by location.
+    fn record_panic(&self, _location: &'static str) {}
 }
 
 /// Metrics provider that does nothing.

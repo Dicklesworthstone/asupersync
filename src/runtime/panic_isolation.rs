@@ -328,8 +328,10 @@ impl PanicIsolator {
                     self.report_panic(&context);
                 }
 
-                // Update metrics
-                self.metrics.record_panic(&context);
+                // Update metrics — UFCS to disambiguate from the trait
+                // `MetricsProvider::record_panic(&'static str)` that was
+                // added in br-asupersync-zcu3c4.
+                MetricsProviderPanicExt::record_panic(&*self.metrics, &context);
 
                 PanicIsolationResult::Panicked(context)
             }
@@ -565,20 +567,19 @@ pub trait MetricsProviderPanicExt {
 }
 
 impl<T: ?Sized + MetricsProvider> MetricsProviderPanicExt for T {
+    /// br-asupersync-zcu3c4 — Routes the panic to
+    /// [`MetricsProvider::record_panic`] with the canonical location tag.
+    /// Was previously a no-op stub; production metrics providers can now
+    /// override `record_panic` to count panics by location.
     fn record_panic(&self, context: &PanicContext) {
-        // Record panic metrics - implementation would depend on the metrics system
-        // For now, we'll just use a placeholder since the actual MetricsProvider
-        // interface would need to be extended.
-        let _location_tag = match &context.location {
+        let location_tag: &'static str = match &context.location {
             PanicLocation::TaskExecution { .. } => "task_execution",
             PanicLocation::FinalizerExecution { .. } => "finalizer_execution",
             PanicLocation::RegionCleanup { .. } => "region_cleanup",
             PanicLocation::ObligationHandling { .. } => "obligation_handling",
             PanicLocation::SchedulerInternal { .. } => "scheduler_internal",
         };
-
-        // Metrics recording would happen here
-        // self.increment_counter("runtime.panics.isolated", &[("location", location_tag)]);
+        MetricsProvider::record_panic(self, location_tag);
     }
 }
 
@@ -759,5 +760,116 @@ mod tests {
 
         let other_region = isolator.isolate_task_execution(task_id, region_b, 1, || 7);
         assert!(matches!(other_region, PanicIsolationResult::Success(7)));
+    }
+
+    /// br-asupersync-zcu3c4 — verifies that the previously-stubbed
+    /// `MetricsProviderPanicExt::record_panic` now actually delegates to
+    /// `MetricsProvider::record_panic`, with the canonical location tag.
+    /// Stub used to compute `_location_tag` and discard it; production
+    /// dashboards never observed any panic-rate signal.
+    #[test]
+    fn record_panic_routes_to_metrics_provider() {
+        use std::sync::Mutex as StdMutex;
+
+        #[derive(Default)]
+        struct CapturingMetrics {
+            panics: StdMutex<Vec<&'static str>>,
+        }
+
+        impl crate::observability::metrics::MetricsProvider for CapturingMetrics {
+            fn task_spawned(&self, _: RegionId, _: TaskId) {}
+            fn task_completed(
+                &self,
+                _: TaskId,
+                _: crate::observability::metrics::OutcomeKind,
+                _: std::time::Duration,
+            ) {
+            }
+            fn region_created(&self, _: RegionId, _: Option<RegionId>) {}
+            fn region_closed(&self, _: RegionId, _: std::time::Duration) {}
+            fn cancellation_requested(&self, _: RegionId, _: crate::types::CancelKind) {}
+            fn drain_completed(&self, _: RegionId, _: std::time::Duration) {}
+            fn deadline_set(&self, _: RegionId, _: std::time::Duration) {}
+            fn deadline_exceeded(&self, _: RegionId) {}
+            fn deadline_warning(&self, _: &str, _: &'static str, _: std::time::Duration) {}
+            fn deadline_violation(&self, _: &str, _: std::time::Duration) {}
+            fn deadline_remaining(&self, _: &str, _: std::time::Duration) {}
+            fn checkpoint_interval(&self, _: &str, _: std::time::Duration) {}
+            fn task_stuck_detected(&self, _: &str) {}
+            fn obligation_created(&self, _: RegionId) {}
+            fn obligation_discharged(&self, _: RegionId) {}
+            fn obligation_leaked(&self, _: RegionId) {}
+            fn scheduler_tick(&self, _: usize, _: std::time::Duration) {}
+            fn record_panic(&self, location: &'static str) {
+                self.panics.lock().unwrap().push(location);
+            }
+        }
+
+        let metrics = CapturingMetrics::default();
+        let task_id = TaskId::from_arena(ArenaIndex::new(1, 0));
+        let region_id = RegionId::from_arena(ArenaIndex::new(2, 0));
+
+        // Build a panic context for each of the 5 PanicLocation variants and
+        // route through the extension trait. Each must produce exactly one
+        // record_panic call with the matching canonical tag.
+        let cases: Vec<(PanicLocation, &'static str)> = vec![
+            (
+                PanicLocation::TaskExecution {
+                    task_id,
+                    region_id,
+                    poll_attempt: 1,
+                },
+                "task_execution",
+            ),
+            (
+                PanicLocation::FinalizerExecution {
+                    region_id,
+                    finalizer_type: FinalizerType::Sync,
+                },
+                "finalizer_execution",
+            ),
+            (
+                PanicLocation::RegionCleanup {
+                    region_id,
+                    cleanup_phase: CleanupPhase::Finalizers,
+                },
+                "region_cleanup",
+            ),
+            (
+                PanicLocation::ObligationHandling {
+                    obligation_id: ObligationId::from_arena(ArenaIndex::new(3, 0)),
+                    region_id,
+                },
+                "obligation_handling",
+            ),
+            (
+                PanicLocation::SchedulerInternal {
+                    worker_id: Some(0),
+                    operation: "test".to_string(),
+                },
+                "scheduler_internal",
+            ),
+        ];
+
+        for (location, _expected) in &cases {
+            let ctx = PanicContext {
+                panic_id: 0,
+                location: location.clone(),
+                timestamp: Instant::now(),
+                panic_message: Some("test".to_string()),
+                backtrace: None,
+                region_id: Some(region_id),
+                task_id: Some(task_id),
+                obligation_id: None,
+            };
+            <CapturingMetrics as MetricsProviderPanicExt>::record_panic(&metrics, &ctx);
+        }
+
+        let observed: Vec<&'static str> = metrics.panics.lock().unwrap().clone();
+        let expected: Vec<&'static str> = cases.iter().map(|(_, t)| *t).collect();
+        assert_eq!(
+            observed, expected,
+            "every PanicLocation must route to a record_panic call with the canonical tag"
+        );
     }
 }

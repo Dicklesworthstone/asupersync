@@ -168,18 +168,17 @@ impl ViolationRecord {
     }
 }
 
-/// Captures a stack trace for debugging purposes.
+/// Captures a stack trace for the violation diagnostic.
+///
+/// br-asupersync-z00sw8 — Delegates to
+/// [`crate::lab::util::stack_trace::capture_stack_trace_default`], which
+/// uses the `backtrace` crate (gated on the `lab-stack-traces` feature)
+/// to produce a real multi-frame trace. The previous implementation
+/// returned `format!("Stack trace capture at {Location::caller()}")` in
+/// debug and a constant string in release — neither carried any forensic
+/// value when an oracle violation fired.
 fn capture_stack_trace() -> String {
-    // In a real implementation, we'd use a backtrace crate
-    // For now, provide a placeholder that can be enhanced
-    #[cfg(debug_assertions)]
-    {
-        format!("Stack trace capture at {}", std::panic::Location::caller())
-    }
-    #[cfg(not(debug_assertions))]
-    {
-        "Stack trace disabled in release builds".to_string()
-    }
+    crate::lab::util::stack_trace::capture_stack_trace_default()
 }
 
 /// Statistics about violations detected by the oracle.
@@ -721,10 +720,7 @@ impl CancellationProtocolOracle {
             .entry(task)
             .or_insert_with(TaskProtocolRecord::new);
         if record.mask_depth == 0 {
-            self.record_violation(CancellationProtocolViolation::UnmatchedMaskExit {
-                task,
-                time,
-            });
+            self.record_violation(CancellationProtocolViolation::UnmatchedMaskExit { task, time });
             return;
         }
         record.mask_depth -= 1;
