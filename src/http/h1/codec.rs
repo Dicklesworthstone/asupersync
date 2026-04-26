@@ -488,6 +488,23 @@ pub(super) fn validate_header_field(name: &str, value: &str) -> Result<(), HttpE
     Ok(())
 }
 
+/// br-asupersync-zepgmq — Fuzz-target re-exporter for the H1
+/// header-line bounds parser. `#[doc(hidden)]`; only exists for
+/// direct fuzz harness access.
+#[doc(hidden)]
+pub fn fuzz_parse_header_line_bounds(
+    line_bytes: &[u8],
+) -> Result<(usize, usize, usize), HttpError> {
+    parse_header_line_bounds(line_bytes)
+}
+
+/// br-asupersync-8dl9j7 — Fuzz-target re-exporter for the H1
+/// chunked-encoding chunk-size-line parser.
+#[doc(hidden)]
+pub fn fuzz_parse_chunk_size_line(line: &[u8]) -> Result<usize, HttpError> {
+    parse_chunk_size_line(line)
+}
+
 /// Look up a header value (case-insensitive name match).
 #[cfg(test)]
 fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {

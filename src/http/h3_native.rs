@@ -987,6 +987,36 @@ fn qpack_decode_base(
     }
 }
 
+/// br-asupersync-mbn0uo — Fuzz-target re-exporter for the H3
+/// status-code parser. `#[doc(hidden)]`; only exists for direct
+/// fuzz harness access.
+#[doc(hidden)]
+pub fn fuzz_parse_status_code(value: &str) -> Result<u16, H3NativeError> {
+    parse_status_code(value)
+}
+
+/// br-asupersync-zv7n9x — Fuzz-target re-exporter for the QPACK
+/// required-insert-count decoder.
+#[doc(hidden)]
+pub fn fuzz_qpack_decode_required_insert_count(
+    encoded_insert_count: u64,
+    total_inserts: u64,
+    max_table_capacity: usize,
+) -> Result<u64, H3NativeError> {
+    qpack_decode_required_insert_count(encoded_insert_count, total_inserts, max_table_capacity)
+}
+
+/// br-asupersync-czy6d8 — Fuzz-target re-exporter for the QPACK
+/// base decoder.
+#[doc(hidden)]
+pub fn fuzz_qpack_decode_base(
+    required_insert_count: u64,
+    sign: bool,
+    delta_base: u64,
+) -> Result<u64, H3NativeError> {
+    qpack_decode_base(required_insert_count, sign, delta_base)
+}
+
 fn qpack_relative_to_absolute(
     base: u64,
     relative_index: u64,

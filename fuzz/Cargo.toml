@@ -2103,3 +2103,51 @@ path = "fuzz_targets/fuzz_h3_settings_bool_parser.rs"
 test = false
 doc = false
 bench = false
+
+# br-asupersync-mbn0uo — H3 status-code parser fuzz
+[[bin]]
+name = "h3_parse_status_code"
+path = "fuzz_targets/h3_parse_status_code.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-001c14 — H2 FrameHeader::parse fuzz
+[[bin]]
+name = "h2_frame_header_parse"
+path = "fuzz_targets/h2_frame_header_parse.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-8dl9j7 — H1 chunk-size-line parser fuzz
+[[bin]]
+name = "h1_parse_chunk_size_line"
+path = "fuzz_targets/h1_parse_chunk_size_line.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-zepgmq — H1 header-line bounds parser fuzz
+[[bin]]
+name = "h1_parse_header_line_bounds"
+path = "fuzz_targets/h1_parse_header_line_bounds.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-zv7n9x — H3 QPACK required-insert-count decoder fuzz
+[[bin]]
+name = "h3_qpack_decode_required_insert_count"
+path = "fuzz_targets/h3_qpack_decode_required_insert_count.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-czy6d8 — H3 QPACK base decoder fuzz
+[[bin]]
+name = "h3_qpack_decode_base"
+path = "fuzz_targets/h3_qpack_decode_base.rs"
+test = false
+doc = false
+bench = false
