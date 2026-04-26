@@ -385,10 +385,55 @@ impl Stream {
     }
 
     /// Transition state on receiving headers.
-    pub fn recv_headers(&mut self, end_stream: bool, end_headers: bool) -> Result<(), H2Error> {
+    pub fn recv_headers(
+        &mut self,
+        end_stream: bool,
+        end_headers: bool,
+        is_client: bool,
+    ) -> Result<(), H2Error> {
         // Validate the state transition BEFORE modifying any fields.
         // Setting headers_complete before validation would allow
         // recv_continuation to accumulate fragments on a closed stream.
+        //
+        // br-asupersync-pyhaov: track whether the initial header block
+        // for this stream has already been fully received. Receiving
+        // a SECOND HEADERS frame after the first one's END_HEADERS
+        // signals trailers (RFC 9113 §8.1). RFC 9113 §8.1 mandates
+        // 'Trailers MUST be sent as a HEADERS frame with both
+        // END_HEADERS and END_STREAM set'. The state machine pre-fix
+        // accepted trailing HEADERS without END_STREAM on Open /
+        // HalfClosedLocal as if it were 1xx informational, masking
+        // the malformed-trailer case on the server-receives-request
+        // direction (where 1xx informational is impossible — only
+        // SERVERS send 1xx, never clients).
+        let is_trailer_attempt =
+            self.headers_complete && matches!(self.state, StreamState::Open | StreamState::HalfClosedLocal);
+        if is_trailer_attempt && !end_stream {
+            // Server side (is_client=false): the only legitimate HEADERS-
+            // after-headers-complete is request trailers, which MUST have
+            // END_STREAM. No END_STREAM ⇒ malformed.
+            //
+            // Client side (is_client=true): the server may legitimately
+            // send 1xx informational HEADERS without END_STREAM before
+            // the final response. We CANNOT distinguish 1xx-informational
+            // from 'malformed trailers without END_STREAM' at this layer
+            // because we don't have the decoded :status here yet. The
+            // pseudo-header validator in connection.rs::decode_headers
+            // is the right place for the client-side discrimination
+            // (1xx :status passes, no-pseudo-headers + no-END_STREAM
+            // fails). For SERVER-side, we can fail closed here because
+            // 1xx-style intermediate headers are not part of the
+            // request message grammar.
+            if !is_client {
+                return Err(H2Error::stream(
+                    self.id,
+                    ErrorCode::ProtocolError,
+                    "trailers MUST have END_STREAM (RFC 9113 §8.1) — \
+                     server received second HEADERS without END_STREAM",
+                ));
+            }
+        }
+
         match self.state {
             StreamState::Idle => {
                 self.state = if end_stream {
@@ -411,8 +456,9 @@ impl Stream {
                 self.state = StreamState::Closed;
             }
             // Receiving headers without END_STREAM on an already-open stream
-            // (e.g. informational 1xx or trailing headers before DATA) is valid
-            // per RFC 7540 §8.1 — state stays unchanged.
+            // is valid per RFC 9113 §8.1 ONLY for client-side reception of
+            // 1xx informational responses; the server-side variant is
+            // rejected above. State stays unchanged.
             StreamState::Open | StreamState::HalfClosedLocal => {}
             _ => {
                 return Err(H2Error::stream(
@@ -1195,7 +1241,7 @@ mod tests {
         let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
         assert_eq!(stream.state(), StreamState::Idle);
 
-        stream.recv_headers(false, true).unwrap();
+        stream.recv_headers(false, true, false).unwrap();
         assert_eq!(stream.state(), StreamState::Open);
     }
 
@@ -1204,7 +1250,7 @@ mod tests {
         let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
         assert_eq!(stream.state(), StreamState::Idle);
 
-        stream.recv_headers(true, true).unwrap();
+        stream.recv_headers(true, true, false).unwrap();
         assert_eq!(stream.state(), StreamState::HalfClosedRemote);
     }
 
@@ -1246,7 +1292,68 @@ mod tests {
         assert_eq!(stream.state(), StreamState::Open);
 
         // Receiving trailers with end_stream
-        stream.recv_headers(true, true).unwrap();
+        stream.recv_headers(true, true, false).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedRemote);
+    }
+
+    // br-asupersync-pyhaov: SERVER receiving a second HEADERS frame
+    // (i.e., trailers — first one had END_HEADERS, headers_complete is
+    // true) WITHOUT END_STREAM is malformed per RFC 9113 §8.1. The
+    // direction parameter is_client=false enables the strict check;
+    // is_client=true preserves the legitimate 1xx-informational
+    // response path on the client side.
+    #[test]
+    fn server_rejects_trailing_headers_without_end_stream_pyhaov() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        // First HEADERS: request initial header block, no END_STREAM
+        // (request body coming).
+        stream.recv_headers(false, true, false).unwrap();
+        assert_eq!(stream.state(), StreamState::Open);
+        assert!(stream.headers_complete);
+
+        // Second HEADERS without END_STREAM — this is a TRAILER on
+        // the request side, and trailers MUST have END_STREAM. The
+        // server-side path (is_client=false) MUST reject.
+        let err = stream
+            .recv_headers(false, true, false)
+            .expect_err("server must reject trailing HEADERS without END_STREAM");
+        match err {
+            H2Error::Stream {
+                error_code: ErrorCode::ProtocolError,
+                ..
+            } => {}
+            other => panic!("expected stream PROTOCOL_ERROR, got {other:?}"),
+        }
+
+        // State must be unchanged: the rejection happens BEFORE state
+        // mutation (validation-first pattern).
+        assert_eq!(stream.state(), StreamState::Open);
+    }
+
+    #[test]
+    fn server_accepts_trailing_headers_with_end_stream_pyhaov() {
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.recv_headers(false, true, false).unwrap();
+        // Trailers WITH END_STREAM are the legitimate shape — accept.
+        stream.recv_headers(true, true, false).unwrap();
+        assert_eq!(stream.state(), StreamState::HalfClosedRemote);
+    }
+
+    #[test]
+    fn client_still_accepts_1xx_informational_without_end_stream_pyhaov() {
+        // Client receives initial 1xx informational HEADERS (no
+        // END_STREAM), then the final response HEADERS. The pyhaov
+        // server-side gate must NOT fire on the client path.
+        let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        stream.send_headers(false).unwrap(); // client sent its request HEADERS
+        // First 1xx informational from server: no END_STREAM.
+        stream
+            .recv_headers(false, true, true)
+            .expect("client must accept 1xx informational without END_STREAM");
+        // Final response HEADERS with END_STREAM closes the stream.
+        stream
+            .recv_headers(true, true, true)
+            .expect("client must accept final response after 1xx");
         assert_eq!(stream.state(), StreamState::HalfClosedRemote);
     }
 
@@ -1267,7 +1374,7 @@ mod tests {
         assert_eq!(stream.state(), StreamState::HalfClosedLocal);
 
         // Receiving trailers with end_stream closes the stream
-        stream.recv_headers(true, true).unwrap();
+        stream.recv_headers(true, true, false).unwrap();
         assert_eq!(stream.state(), StreamState::Closed);
     }
 
@@ -1328,7 +1435,7 @@ mod tests {
         assert_eq!(stream.state(), StreamState::Open);
 
         // Receiving response headers without END_STREAM (data follows)
-        stream.recv_headers(false, true).unwrap();
+        stream.recv_headers(false, true, false).unwrap();
         assert_eq!(stream.state(), StreamState::Open);
     }
 
@@ -1339,7 +1446,7 @@ mod tests {
         assert_eq!(stream.state(), StreamState::HalfClosedLocal);
 
         // Receiving headers without END_STREAM stays HalfClosedLocal
-        stream.recv_headers(false, true).unwrap();
+        stream.recv_headers(false, true, false).unwrap();
         assert_eq!(stream.state(), StreamState::HalfClosedLocal);
     }
 
@@ -1370,7 +1477,7 @@ mod tests {
         let mut stream = Stream::new(2, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
         stream.state = StreamState::ReservedRemote; // Simulate PUSH_PROMISE received
 
-        stream.recv_headers(false, true).unwrap();
+        stream.recv_headers(false, true, false).unwrap();
         assert_eq!(stream.state(), StreamState::HalfClosedLocal);
     }
 
@@ -1379,7 +1486,7 @@ mod tests {
         let mut stream = Stream::new(2, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
         stream.state = StreamState::ReservedRemote;
 
-        stream.recv_headers(true, true).unwrap();
+        stream.recv_headers(true, true, false).unwrap();
         assert_eq!(stream.state(), StreamState::Closed);
     }
 
@@ -1438,7 +1545,7 @@ mod tests {
         let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
         stream.reset(ErrorCode::Cancel);
 
-        let result = stream.recv_headers(false, true);
+        let result = stream.recv_headers(false, true, false);
         assert!(result.is_err());
     }
 
@@ -1496,10 +1603,10 @@ mod tests {
     fn cannot_recv_headers_on_half_closed_remote() {
         let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
         stream.send_headers(false).unwrap();
-        stream.recv_headers(true, true).unwrap();
+        stream.recv_headers(true, true, false).unwrap();
         assert_eq!(stream.state(), StreamState::HalfClosedRemote);
 
-        let result = stream.recv_headers(false, true);
+        let result = stream.recv_headers(false, true, false);
         assert!(result.is_err());
     }
 
@@ -1626,7 +1733,7 @@ mod tests {
     fn continuation_accumulates_fragments() {
         let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
         // Receive headers without END_HEADERS
-        stream.recv_headers(false, false).unwrap();
+        stream.recv_headers(false, false, false).unwrap();
         assert!(stream.is_receiving_headers());
 
         // Add continuations
@@ -1874,7 +1981,7 @@ mod tests {
         assert_eq!(stream.state(), StreamState::Closed);
 
         // Try to receive headers on the closed stream
-        let result = stream.recv_headers(true, true);
+        let result = stream.recv_headers(true, true, false);
         assert!(result.is_err());
     }
 
@@ -1887,7 +1994,7 @@ mod tests {
         let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
 
         // Start receiving headers without END_HEADERS
-        stream.recv_headers(false, false).unwrap();
+        stream.recv_headers(false, false, false).unwrap();
         assert!(stream.is_receiving_headers());
 
         // Add a header fragment
@@ -1908,7 +2015,7 @@ mod tests {
         assert!(result.is_err());
 
         // Headers on closed stream also fails
-        let result = stream.recv_headers(false, true);
+        let result = stream.recv_headers(false, true, false);
         assert!(result.is_err());
     }
 
@@ -1967,7 +2074,7 @@ mod tests {
         assert_eq!(stream.state(), StreamState::Open);
 
         // Receive trailers (headers with end_stream)
-        stream.recv_headers(true, true).unwrap();
+        stream.recv_headers(true, true, false).unwrap();
         assert_eq!(stream.state(), StreamState::HalfClosedRemote);
     }
 
@@ -2004,7 +2111,7 @@ mod tests {
 
         // However, proper protocol requires headers first to activate the stream
         // Receive headers to transition to half-closed(local)
-        stream.recv_headers(false, true).unwrap();
+        stream.recv_headers(false, true, false).unwrap();
         assert_eq!(stream.state(), StreamState::HalfClosedLocal);
 
         // Now can receive data
@@ -2047,7 +2154,7 @@ mod tests {
         let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
 
         // Accumulate header fragments (simulate partial CONTINUATION)
-        stream.recv_headers(false, false).unwrap();
+        stream.recv_headers(false, false, false).unwrap();
         stream
             .add_header_fragment(Bytes::from(vec![0xAA; 64]))
             .unwrap();
@@ -2239,7 +2346,7 @@ mod tests {
 
         // Attempt to receive headers with end_headers=false on a closed stream.
         // This MUST fail AND must NOT change headers_complete.
-        let result = stream.recv_headers(false, false);
+        let result = stream.recv_headers(false, false, false);
         assert!(result.is_err(), "recv_headers on Closed must fail");
 
         // Critical assertion: headers_complete must remain true (unmodified).
@@ -2255,7 +2362,7 @@ mod tests {
         let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
 
         // Start receiving headers without END_HEADERS.
-        stream.recv_headers(false, false).unwrap();
+        stream.recv_headers(false, false, false).unwrap();
         assert!(stream.is_receiving_headers());
 
         // Close the stream via reset.
@@ -2286,7 +2393,7 @@ mod tests {
         stream.reset(ErrorCode::Cancel);
 
         // Rejected recv_headers must not open continuation path.
-        assert!(stream.recv_headers(false, false).is_err());
+        assert!(stream.recv_headers(false, false, false).is_err());
         assert!(
             !stream.is_receiving_headers(),
             "rejected recv_headers must not flip headers_complete"

@@ -758,7 +758,9 @@ impl Connection {
                 "stream disappeared after get_or_create",
             )
         })?;
-        stream.recv_headers(frame.end_stream, frame.end_headers)?;
+        // br-asupersync-pyhaov: thread direction so Stream can apply
+        // the server-side trailers-MUST-have-END_STREAM rule.
+        stream.recv_headers(frame.end_stream, frame.end_headers, self.is_client)?;
 
         if let Some(priority) = frame.priority {
             stream.set_priority(priority);
@@ -1024,7 +1026,25 @@ impl Connection {
             return Ok(None);
         }
 
-        // Apply settings
+        // br-asupersync-wk370q: validate ALL settings BEFORE applying
+        // any side-effect. Pre-fix this loop applied each setting in
+        // turn (mutating self.remote_settings, self.streams,
+        // self.hpack_encoder) and returned early on the first
+        // failure — leaving partial state behind. With the SETTINGS
+        // frame as a whole rejected, the connection would proceed to
+        // GOAWAY but the per-stream initial_window_size, the HPACK
+        // encoder table size, and the connection-level
+        // remote_settings would have absorbed every setting before
+        // the failing one. That partial state is observable during
+        // the GOAWAY drain and contradicts what the peer thinks the
+        // connection state is — flow-control desync, HPACK encoder
+        // table-size leak, etc.
+        //
+        // The fix: stage every setting onto a clone of
+        // remote_settings, fail-stop on first error, and only apply
+        // side-effects after every setting in the frame validates
+        // successfully.
+        let mut staged = self.remote_settings.clone();
         for setting in &frame.settings {
             // RFC 7540 §6.5.2: A server MUST NOT send SETTINGS_ENABLE_PUSH.
             // Therefore a client that receives it must treat this as PROTOCOL_ERROR.
@@ -1033,10 +1053,16 @@ impl Connection {
                     "server MUST NOT send SETTINGS_ENABLE_PUSH",
                 ));
             }
+            staged.apply(*setting)?;
+        }
 
-            self.remote_settings.apply(*setting)?;
-
-            // Handle specific settings
+        // Validation passed — commit the staged settings atomically
+        // and apply derived side-effects in a second pass that cannot
+        // fail (set_initial_window_size is the only fallible call,
+        // and it only fails when the new value would overflow a
+        // u31; staged already accepted the value so this is safe).
+        self.remote_settings = staged;
+        for setting in &frame.settings {
             match setting {
                 Setting::InitialWindowSize(size) => {
                     self.streams.set_initial_window_size(*size)?;
@@ -1598,7 +1624,7 @@ fn validate_h2_pseudo_headers(headers: &[Header], is_request: bool) -> Result<()
     let mut method_value: Option<&[u8]> = None;
 
     for h in headers {
-        let name = h.name.as_bytes();
+        let name: &[u8] = h.name.as_bytes();
         if name.is_empty() {
             return Err("empty header name");
         }
@@ -3055,6 +3081,58 @@ mod tests {
         let err = conn.process_frame(Frame::Settings(settings)).unwrap_err();
 
         assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    // br-asupersync-wk370q: a SETTINGS frame whose body is
+    // [<valid InitialWindowSize=12345>, <invalid MaxFrameSize=100>]
+    // must be rejected ATOMICALLY — neither remote_settings nor
+    // any per-stream initial_window_size may absorb the leading
+    // valid setting. Pre-fix, the InitialWindowSize landed on
+    // remote_settings + every stream BEFORE the MaxFrameSize
+    // failure aborted the loop, producing a partial-state
+    // window for the GOAWAY drain in which our flow-control view
+    // diverged from the peer's.
+    #[test]
+    fn test_settings_partial_apply_is_rejected_atomically_wk370q() {
+        let mut conn = Connection::server(Settings::default());
+        conn.state = ConnectionState::Open;
+        let initial_window_before = conn.remote_settings.initial_window_size;
+
+        // Ensure at least one stream exists so we can verify its
+        // initial window is NOT touched by the failed SETTINGS frame.
+        conn.streams.get_or_create(1).expect("create stream 1");
+        let stream_window_before = conn
+            .streams
+            .get(1)
+            .expect("stream 1 must exist")
+            .send_window();
+
+        // Frame: [InitialWindowSize=12345 (valid), MaxFrameSize=100 (invalid)]
+        let bad_settings = SettingsFrame::new(vec![
+            Setting::InitialWindowSize(12345),
+            Setting::MaxFrameSize(100),
+        ]);
+        let err = conn
+            .process_frame(Frame::Settings(bad_settings))
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+
+        // remote_settings.initial_window_size MUST be unchanged.
+        assert_eq!(
+            conn.remote_settings.initial_window_size, initial_window_before,
+            "remote_settings.initial_window_size leaked from a partially-applied SETTINGS frame"
+        );
+
+        // Stream 1's send window MUST be unchanged.
+        let stream_window_after = conn
+            .streams
+            .get(1)
+            .expect("stream 1 must still exist")
+            .send_window();
+        assert_eq!(
+            stream_window_after, stream_window_before,
+            "stream send_window leaked from a partially-applied SETTINGS frame"
+        );
     }
 
     #[test]
