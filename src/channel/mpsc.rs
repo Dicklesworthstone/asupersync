@@ -246,14 +246,45 @@ impl<T> Sender<T> {
     }
 
     /// Attempts to send a value without blocking.
+    ///
+    /// Single-lock fast path (br-asupersync-lej99f). The previous shape went
+    /// through `try_reserve()` + `permit.try_send(value)`, which took the
+    /// channel mutex twice (once to bump `reserved`, once to push the value
+    /// and decrement `reserved`). On the uncontended path this is wasted
+    /// work — there is no observable state in which a `SendPermit` exists
+    /// between the two locks for an immediate-commit caller.
+    ///
+    /// Here we lock once, commit-or-fail, and never touch the `reserved`
+    /// counter at all. FIFO is preserved by the same `send_wakers
+    /// non-empty -> Full` rule that `try_reserve` uses.
     #[inline]
     pub fn try_send(&self, value: T) -> Result<(), SendError<T>> {
-        match self.try_reserve() {
-            Ok(permit) => permit.try_send(value),
-            Err(SendError::<()>::Disconnected(())) => Err(SendError::Disconnected(value)),
-            Err(SendError::<()>::Full(())) => Err(SendError::Full(value)),
-            Err(SendError::<()>::Cancelled(())) => unreachable!(),
+        let recv_waker = {
+            let mut inner = self.shared.inner.lock();
+
+            if self.shared.receiver_dropped.load(Ordering::Relaxed) {
+                return Err(SendError::Disconnected(value));
+            }
+
+            // Preserve FIFO: if any senders are queued, an immediate try_send
+            // would jump the line.
+            if !inner.send_wakers.is_empty() {
+                return Err(SendError::Full(value));
+            }
+
+            if !inner.has_capacity(self.shared.capacity) {
+                return Err(SendError::Full(value));
+            }
+
+            inner.queue.push_back(value);
+            // Extract the recv waker before dropping the lock so we can
+            // wake outside the critical section.
+            inner.recv_waker.take()
+        };
+        if let Some(waker) = recv_waker {
+            waker.wake();
         }
+        Ok(())
     }
 
     /// Returns true if the receiver has been dropped.
