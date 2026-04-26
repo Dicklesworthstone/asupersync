@@ -618,11 +618,20 @@ pub fn validate_bidirectional_frame(frame: &H3Frame) -> Result<(), H3NativeError
             "MAX_PUSH_ID frame not allowed on bidirectional stream",
         )),
 
-        // Unknown frames should also be rejected on bidirectional streams
-        // per RFC 9114 §6.1 strict interpretation
-        H3Frame::Unknown { .. } => Err(H3NativeError::StreamProtocol(
-            "unknown frame type not allowed on bidirectional stream",
-        )),
+        // Unknown frame types MUST be ignored on request streams per
+        // RFC 9114 §7.2.8 ("Reserved Frame Types"):
+        //
+        //   "Endpoints MUST NOT consider these frames to have any meaning
+        //    upon receipt. The payload and length of the frame are otherwise
+        //    unconstrained."
+        //
+        // The same section requires that GREASE/forward-compatibility frames
+        // (frame types of the form 0x1f * N + 0x21) be silently skipped so
+        // that future protocol extensions can roll out without coordinated
+        // upgrades. Returning an error here previously broke that guarantee
+        // and made the implementation incompatible with any peer that GREASEd
+        // its frame stream (br-asupersync-94bp7i).
+        H3Frame::Unknown { .. } => Ok(()),
     }
 }
 
@@ -6407,30 +6416,43 @@ mod tests {
     }
 
     #[test]
-    fn bidirectional_frame_validation_rejects_unknown_frames() {
-        // Unknown frames should be rejected on bidirectional streams
+    fn bidirectional_frame_validation_ignores_unknown_frames_per_rfc9114_7_2_8() {
+        // RFC 9114 §7.2.8: unknown frame types received on a request stream
+        // MUST be ignored (silently skipped). Validates the GREASE /
+        // forward-compatibility contract — see br-asupersync-94bp7i.
+
+        // Arbitrary unknown type with payload.
         let unknown_frame = H3Frame::Unknown {
-            frame_type: 0xDEADBEEF,
+            frame_type: 0xDEAD_BEEF,
             payload: vec![13, 14, 15],
         };
-        let err = validate_bidirectional_frame(&unknown_frame)
-            .expect_err("Unknown frame should be rejected");
-        assert_eq!(
-            err,
-            H3NativeError::StreamProtocol("unknown frame type not allowed on bidirectional stream")
+        validate_bidirectional_frame(&unknown_frame).expect(
+            "RFC 9114 §7.2.8 violation: unknown frame on bidi stream must be ignored, not errored",
         );
 
-        // Another unknown frame type to verify consistent behavior
-        let unknown_frame2 = H3Frame::Unknown {
+        // Empty-payload unknown type.
+        let unknown_empty = H3Frame::Unknown {
             frame_type: 0xF00D,
-            payload: vec![],
+            payload: Vec::new(),
         };
-        let err = validate_bidirectional_frame(&unknown_frame2)
-            .expect_err("Unknown frame should be rejected");
-        assert_eq!(
-            err,
-            H3NativeError::StreamProtocol("unknown frame type not allowed on bidirectional stream")
+        validate_bidirectional_frame(&unknown_empty).expect(
+            "RFC 9114 §7.2.8 violation: empty-payload unknown frame must be ignored",
         );
+
+        // Canonical GREASE frame type per RFC 9114 §7.2.8 (0x1f * N + 0x21).
+        // We exercise N = 0 (type 0x21) and N = 1 (type 0x40).
+        for grease_type in [0x21u64, 0x40u64, 0x1f * 12345 + 0x21] {
+            let grease = H3Frame::Unknown {
+                frame_type: grease_type,
+                payload: vec![0xAA; 32],
+            };
+            validate_bidirectional_frame(&grease).unwrap_or_else(|e| {
+                panic!(
+                    "RFC 9114 §7.2.8 violation: GREASE frame type 0x{grease_type:x} \
+                     rejected on bidi stream (got {e:?}); MUST be ignored"
+                )
+            });
+        }
     }
 
     #[test]
