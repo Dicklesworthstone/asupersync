@@ -12,11 +12,11 @@ use core::fmt;
 /// because the W3C 32-hex-character format is part of the on-the-wire
 /// contract with downstream collectors and cannot drift. New code that
 /// needs a "TraceId" for EvidenceLedger linkage should use the canonical
-/// franken_kernel one. (Renamed from `DistTraceId` to `DistDistTraceId` in
+/// franken_kernel one. (Renamed from `TraceId` to `DistTraceId` in
 /// br-asupersync-v4az2y so the name collision with the canonical type
 /// goes away. Wire format — `to_w3c_string` — is unchanged.)
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct DistDistTraceId {
+pub struct DistTraceId {
     high: u64,
     low: u64,
 }
