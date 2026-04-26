@@ -310,7 +310,11 @@ impl Default for RuntimeConfig {
             metrics_provider: Arc::new(NoOpMetrics),
             observability: None,
             cancel_attribution: CancelAttributionConfig::default(),
-            obligation_leak_response: ObligationLeakResponse::Log,
+            // Plan v4 §I2 makes "no obligation leaks" a non-negotiable invariant;
+            // the runtime fails fast (Panic) on detection by default. Tests and
+            // lab harnesses opt in to Log/Silent/Recover via the builder
+            // (br-asupersync-gi61n1).
+            obligation_leak_response: ObligationLeakResponse::Panic,
             leak_escalation: None,
             enable_governor: false,
             governor_interval: 32,
@@ -414,9 +418,9 @@ mod tests {
             format!("{:?}", config.logical_clock_mode)
         );
         crate::assert_with_log!(
-            config.obligation_leak_response == ObligationLeakResponse::Log,
+            config.obligation_leak_response == ObligationLeakResponse::Panic,
             "obligation_leak_response",
-            ObligationLeakResponse::Log,
+            ObligationLeakResponse::Panic,
             config.obligation_leak_response
         );
         crate::assert_with_log!(
