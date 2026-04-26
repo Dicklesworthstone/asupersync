@@ -39,6 +39,9 @@ rmp-serde = "1.3"
 pin-project = "1"
 parking_lot = "0.12"
 
+# For path-traversal fuzz target's tempdir doc-root
+tempfile = "3.25"
+
 [dev-dependencies]
 # For seed generation and corpus management
 rand = "0.9"
@@ -1834,6 +1837,16 @@ bench = false
 [[bin]]
 name = "raptorq_decision"
 path = "fuzz_targets/raptorq_decision.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync — path-traversal fuzzer for src/web/static_files.rs.
+# Empty tempdir doc-root is the oracle: every response MUST be 404.
+# Any 200 = path-traversal escape.
+[[bin]]
+name = "web_static_path"
+path = "fuzz_targets/web_static_path.rs"
 test = false
 doc = false
 bench = false
