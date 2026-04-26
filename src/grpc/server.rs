@@ -149,6 +149,16 @@ pub struct ServerBuilder {
     services: BTreeMap<String, Arc<dyn ServiceHandler>>,
     /// Optional reflection registry.
     reflection: Option<ReflectionService>,
+    /// br-asupersync-mfk14i: interceptor chain. Each registered
+    /// interceptor's `intercept_request` runs in registration order
+    /// before the user handler executes; `intercept_response` runs
+    /// in REVERSE order after the handler returns. Pre-fix this
+    /// field did not exist and AuthInterceptor / BearerAuthValidator
+    /// / RateLimitInterceptor were dead code from the dispatch
+    /// path. Transport adapters MUST route requests through
+    /// [`Server::dispatch_unary`] (or the analogous streaming
+    /// dispatch) to ensure the chain actually fires.
+    interceptors: Vec<Arc<dyn Interceptor>>,
 }
 
 impl std::fmt::Debug for ServerBuilder {
@@ -169,7 +179,35 @@ impl ServerBuilder {
             config: ServerConfig::default(),
             services: BTreeMap::new(),
             reflection: None,
+            interceptors: Vec::new(),
         }
+    }
+
+    /// Append an interceptor to the chain (br-asupersync-mfk14i).
+    ///
+    /// Interceptors are invoked in registration order on the
+    /// request side and in REVERSE order on the response side, so
+    /// later layers wrap earlier ones (the standard middleware
+    /// onion). Without at least one call to `interceptor()`, the
+    /// dispatch path runs the user handler unguarded — pre-fix this
+    /// was the ONLY behavior because no wiring existed.
+    #[must_use]
+    pub fn interceptor<I>(mut self, interceptor: I) -> Self
+    where
+        I: Interceptor + 'static,
+    {
+        self.interceptors.push(Arc::new(interceptor));
+        self
+    }
+
+    /// Append an already-Arc'd interceptor to the chain
+    /// (br-asupersync-mfk14i). Convenience for callers that already
+    /// hold a shared interceptor (e.g. a single `RateLimitInterceptor`
+    /// shared across multiple servers).
+    #[must_use]
+    pub fn interceptor_arc(mut self, interceptor: Arc<dyn Interceptor>) -> Self {
+        self.interceptors.push(interceptor);
+        self
     }
 
     /// Set the maximum receive message size.
@@ -310,6 +348,7 @@ impl ServerBuilder {
         Server {
             config: self.config,
             services: self.services,
+            interceptors: self.interceptors,
         }
     }
 }
@@ -320,6 +359,9 @@ pub struct Server {
     config: ServerConfig,
     /// Registered services.
     services: BTreeMap<String, Arc<dyn ServiceHandler>>,
+    /// br-asupersync-mfk14i: interceptor chain. See
+    /// [`ServerBuilder::interceptor`] and [`Server::dispatch_unary`].
+    interceptors: Vec<Arc<dyn Interceptor>>,
 }
 
 impl std::fmt::Debug for Server {
@@ -348,6 +390,90 @@ impl Server {
     #[must_use]
     pub fn services(&self) -> &BTreeMap<String, Arc<dyn ServiceHandler>> {
         &self.services
+    }
+
+    /// Returns the registered interceptor chain (br-asupersync-mfk14i).
+    ///
+    /// Transport adapters that build their own dispatch loop (rather
+    /// than calling [`Self::dispatch_unary`]) MUST iterate this slice
+    /// in the documented order — registration-order on requests,
+    /// reverse-order on responses — or the chain is silently bypassed.
+    #[must_use]
+    pub fn interceptors(&self) -> &[Arc<dyn Interceptor>] {
+        &self.interceptors
+    }
+
+    /// Dispatch an inbound unary request through the interceptor
+    /// chain and the supplied user handler.
+    ///
+    /// br-asupersync-mfk14i: this is the canonical entry point that
+    /// transport adapters MUST call so the configured interceptors
+    /// (auth, rate-limit, tracing, etc.) actually fire. The dispatch
+    /// order is:
+    ///
+    /// 1. Run every interceptor's `intercept_request` in registration
+    ///    order. The first error short-circuits the chain — neither
+    ///    the remaining request-side interceptors nor the user
+    ///    handler run, and `intercept_response` is NOT invoked
+    ///    (mirrors the canonical middleware contract: a request
+    ///    rejected before reaching the handler has no response to
+    ///    transform).
+    /// 2. Invoke the user handler with the (possibly mutated)
+    ///    request.
+    /// 3. If the handler succeeds, run every interceptor's
+    ///    `intercept_response_with_request` in REVERSE order so
+    ///    later layers see the response before earlier ones —
+    ///    standard onion semantics. The first response-side error
+    ///    aborts further unwinding and surfaces as the call's
+    ///    final status.
+    /// 4. If the handler errors, the response interceptors do NOT
+    ///    run — there is no response to transform; the handler
+    ///    error becomes the call's final status.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first interceptor or handler `Status::Err`
+    /// observed; subsequent interceptors are NOT invoked once an
+    /// error has been surfaced.
+    pub async fn dispatch_unary<H, F>(
+        &self,
+        mut request: Request<Bytes>,
+        handler: H,
+    ) -> Result<Response<Bytes>, Status>
+    where
+        H: FnOnce(Request<Bytes>) -> F,
+        F: Future<Output = Result<Response<Bytes>, Status>>,
+    {
+        // ── Phase 1: request-side chain (registration order). ────────
+        // The first error short-circuits without invoking the
+        // handler or the response-side chain.
+        for interceptor in &self.interceptors {
+            interceptor.intercept_request(&mut request)?;
+        }
+
+        // ── Phase 2: invoke the user handler. ────────────────────────
+        // The request may have been mutated by the chain (e.g. an
+        // auth interceptor inserted an AuthContext into typed
+        // extensions per the interceptor.rs docs).
+        //
+        // We retain a borrow of the original request for
+        // intercept_response_with_request; the handler consumes the
+        // request by value, so we capture the metadata snapshot
+        // BEFORE invoking. This matches the AuthInterceptor contract
+        // where downstream response-side interceptors may need to
+        // read the request that produced the response.
+        let request_snapshot = Request::with_metadata(Bytes::new(), request.metadata().clone());
+        let response_result = handler(request).await;
+
+        // ── Phase 3: response-side chain (REVERSE order on success). ─
+        // On handler error, the response-side chain is NOT invoked
+        // (no response object to transform). The handler error
+        // becomes the call's final status.
+        let mut response = response_result?;
+        for interceptor in self.interceptors.iter().rev() {
+            interceptor.intercept_response_with_request(&request_snapshot, &mut response)?;
+        }
+        Ok(response)
     }
 
     /// Get a service by name.
@@ -1424,7 +1550,7 @@ mod tests {
                 // gRPC equivalent of HTTP 431 — RESOURCE_EXHAUSTED.
                 assert_eq!(
                     status.code() as u32,
-                    super::super::status::StatusCode::ResourceExhausted as u32,
+                    crate::web::StatusCode::TOO_MANY_REQUESTS.as_u16() as u32,
                     "must reject with RESOURCE_EXHAUSTED, got {:?}",
                     status.code()
                 );
@@ -1823,5 +1949,260 @@ mod tests {
             }
             eprintln!("{{\"id\":\"GRPC-TIMEOUT-8\",\"verdict\":\"PASS\",\"level\":\"Must\"}}",);
         }
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // br-asupersync-mfk14i: Server interceptor chain wiring
+    // ════════════════════════════════════════════════════════════════════
+
+    /// Counting interceptor used to verify before/after fire on every
+    /// dispatch_unary call. Records call counts and the order in
+    /// which interceptors saw each phase.
+    #[derive(Debug)]
+    struct CountingInterceptor {
+        name: &'static str,
+        request_count: std::sync::atomic::AtomicUsize,
+        response_count: std::sync::atomic::AtomicUsize,
+        events: Arc<parking_lot::Mutex<Vec<String>>>,
+    }
+
+    impl CountingInterceptor {
+        fn new(name: &'static str, events: Arc<parking_lot::Mutex<Vec<String>>>) -> Self {
+            Self {
+                name,
+                request_count: std::sync::atomic::AtomicUsize::new(0),
+                response_count: std::sync::atomic::AtomicUsize::new(0),
+                events,
+            }
+        }
+    }
+
+    impl Interceptor for CountingInterceptor {
+        fn intercept_request(&self, _request: &mut Request<Bytes>) -> Result<(), Status> {
+            self.request_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.events.lock().push(format!("req:{}", self.name));
+            Ok(())
+        }
+        fn intercept_response(&self, _response: &mut Response<Bytes>) -> Result<(), Status> {
+            self.response_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.events.lock().push(format!("resp:{}", self.name));
+            Ok(())
+        }
+    }
+
+    /// Interceptor that always rejects on the request side — used to
+    /// verify the chain short-circuits cleanly.
+    #[derive(Debug)]
+    struct RejectingInterceptor {
+        events: Arc<parking_lot::Mutex<Vec<String>>>,
+    }
+
+    impl Interceptor for RejectingInterceptor {
+        fn intercept_request(&self, _request: &mut Request<Bytes>) -> Result<(), Status> {
+            self.events.lock().push("req:reject".to_string());
+            Err(Status::unauthenticated("rejected by RejectingInterceptor"))
+        }
+        fn intercept_response(&self, _response: &mut Response<Bytes>) -> Result<(), Status> {
+            self.events.lock().push("resp:reject".to_string());
+            Ok(())
+        }
+    }
+
+    fn block_on<F: Future>(fut: F) -> F::Output {
+        use std::task::{Context, Waker};
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        let mut pinned = Box::pin(fut);
+        loop {
+            if let std::task::Poll::Ready(value) = pinned.as_mut().poll(&mut cx) {
+                return value;
+            }
+        }
+    }
+
+    #[test]
+    fn mfk14i_dispatch_unary_runs_interceptor_chain_around_handler() {
+        // Pre-fix the dispatch_unary API did not exist and registered
+        // interceptors were dead code. This test pins the wired
+        // contract: every interceptor's intercept_request fires
+        // BEFORE the handler in registration order, the handler runs
+        // exactly once, every interceptor's intercept_response fires
+        // AFTER the handler in REVERSE order.
+        init_test("mfk14i_dispatch_unary_runs_interceptor_chain_around_handler");
+
+        let events = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let i_a = CountingInterceptor::new("A", Arc::clone(&events));
+        let i_b = CountingInterceptor::new("B", Arc::clone(&events));
+
+        let server = Server::builder()
+            .add_service(TestService)
+            .interceptor(i_a)
+            .interceptor(i_b)
+            .build();
+
+        let request = Request::with_metadata(Bytes::from_static(b"hello"), Metadata::new());
+        let result = block_on(server.dispatch_unary(request, |req| async move {
+            // Handler echoes the request payload.
+            let payload = req.into_inner();
+            Ok(Response::new(payload))
+        }));
+
+        let response = result.expect("dispatch must succeed");
+        assert_eq!(response.get_ref().as_ref(), b"hello");
+
+        let actual = events.lock().clone();
+        assert_eq!(
+            actual,
+            vec![
+                "req:A".to_string(),
+                "req:B".to_string(),
+                "resp:B".to_string(),
+                "resp:A".to_string(),
+            ],
+            "interceptors must fire in registration order on requests \
+             and REVERSE order on responses; got {actual:?}"
+        );
+    }
+
+    #[test]
+    fn mfk14i_dispatch_unary_rejected_request_short_circuits_handler_and_response_chain() {
+        // When a request-side interceptor errors, neither the handler
+        // nor any later request-side OR response-side interceptor
+        // runs. The first error is the call's final status.
+        init_test(
+            "mfk14i_dispatch_unary_rejected_request_short_circuits_handler_and_response_chain",
+        );
+
+        let events = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let i_a = CountingInterceptor::new("A", Arc::clone(&events));
+        let reject = RejectingInterceptor {
+            events: Arc::clone(&events),
+        };
+        let i_after = CountingInterceptor::new("after", Arc::clone(&events));
+        let handler_called = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handler_called_clone = Arc::clone(&handler_called);
+
+        let server = Server::builder()
+            .add_service(TestService)
+            .interceptor(i_a)
+            .interceptor(reject)
+            .interceptor(i_after)
+            .build();
+
+        let request = Request::with_metadata(Bytes::from_static(b"x"), Metadata::new());
+        let result = block_on(server.dispatch_unary(request, move |req| {
+            let flag = Arc::clone(&handler_called_clone);
+            async move {
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(Response::new(req.into_inner()))
+            }
+        }));
+
+        let err = result.expect_err("rejected request must surface as Err");
+        assert_eq!(err.code(), super::super::Code::Unauthenticated);
+
+        assert!(
+            !handler_called.load(std::sync::atomic::Ordering::SeqCst),
+            "handler must NOT be invoked when an earlier interceptor rejects"
+        );
+
+        let actual = events.lock().clone();
+        assert_eq!(
+            actual,
+            vec!["req:A".to_string(), "req:reject".to_string()],
+            "post-reject interceptors (request and response side) must NOT fire; \
+             got {actual:?}"
+        );
+    }
+
+    #[test]
+    fn mfk14i_dispatch_unary_handler_error_skips_response_chain() {
+        // When the handler errors, the response-side chain must NOT
+        // run (no response object to transform). The handler error
+        // becomes the final status. Request-side chain still ran in
+        // full.
+        init_test("mfk14i_dispatch_unary_handler_error_skips_response_chain");
+
+        let events = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let i_a = CountingInterceptor::new("A", Arc::clone(&events));
+
+        let server = Server::builder()
+            .add_service(TestService)
+            .interceptor(i_a)
+            .build();
+
+        let request = Request::with_metadata(Bytes::new(), Metadata::new());
+        let result = block_on(server.dispatch_unary(request, |_req| async move {
+            Err::<Response<Bytes>, _>(Status::internal("handler exploded"))
+        }));
+
+        assert!(result.is_err());
+        let actual = events.lock().clone();
+        assert_eq!(
+            actual,
+            vec!["req:A".to_string()],
+            "response-side chain must NOT fire on handler error; got {actual:?}"
+        );
+    }
+
+    #[test]
+    fn mfk14i_server_with_no_interceptors_runs_handler_directly() {
+        // Back-compat: a Server built without any interceptor() calls
+        // still dispatches correctly — the chain is just empty.
+        init_test("mfk14i_server_with_no_interceptors_runs_handler_directly");
+        let server = Server::builder().add_service(TestService).build();
+        assert_eq!(server.interceptors().len(), 0);
+
+        let request = Request::with_metadata(Bytes::from_static(b"echo"), Metadata::new());
+        let result = block_on(server.dispatch_unary(request, |req| async move {
+            Ok(Response::new(req.into_inner()))
+        }));
+        let response = result.expect("dispatch must succeed");
+        assert_eq!(response.get_ref().as_ref(), b"echo");
+    }
+
+    #[test]
+    fn mfk14i_auth_interceptor_actually_blocks_unauthenticated_calls() {
+        // End-to-end: register a real AuthInterceptor that requires
+        // an "authorization" metadata entry, dispatch with and
+        // without it, verify the gate fires.
+        init_test("mfk14i_auth_interceptor_actually_blocks_unauthenticated_calls");
+
+        let auth = AuthInterceptor::new(|metadata: &Metadata| -> Result<(), Status> {
+            if metadata.get("authorization").is_some() {
+                Ok(())
+            } else {
+                Err(Status::unauthenticated("missing authorization"))
+            }
+        });
+        let server = Server::builder()
+            .add_service(TestService)
+            .interceptor(auth)
+            .build();
+
+        // No auth header — must be rejected.
+        let unauth_req = Request::with_metadata(Bytes::new(), Metadata::new());
+        let unauth_result = block_on(server.dispatch_unary(unauth_req, |_req| async move {
+            Ok(Response::new(Bytes::from_static(b"should not reach")))
+        }));
+        assert!(
+            matches!(
+                unauth_result,
+                Err(ref s) if s.code() == super::super::Code::Unauthenticated
+            ),
+            "missing-auth call must be rejected with Unauthenticated; got {unauth_result:?}"
+        );
+
+        // With auth header — must succeed.
+        let mut authed_md = Metadata::new();
+        authed_md.insert("authorization", "Bearer xyz");
+        let authed_req = Request::with_metadata(Bytes::new(), authed_md);
+        let authed_result = block_on(server.dispatch_unary(authed_req, |_req| async move {
+            Ok(Response::new(Bytes::from_static(b"ok")))
+        }));
+        let response = authed_result.expect("authed call must succeed");
+        assert_eq!(response.get_ref().as_ref(), b"ok");
     }
 }

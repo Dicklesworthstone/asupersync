@@ -173,7 +173,32 @@ impl<H: Handler> CorsMiddleware<H> {
         match &self.policy.allow_origin {
             CorsAllowOrigin::Any => {
                 if self.policy.allow_credentials {
-                    Some(origin.to_string())
+                    // br-asupersync-d4f31s: credential-reflection vulnerability
+                    // (Fetch §3.2.5). The forbidden combination
+                    // `Allow-Origin: *` + `Allow-Credentials: true` was
+                    // previously laundered through a per-request Origin
+                    // echo — technically not the literal `*` byte, but the
+                    // SAME exfiltration: every requesting origin received
+                    // its own Origin echoed back, so any origin could read
+                    // the credentialed response. The real fix is to fail
+                    // closed: emit NO `Access-Control-Allow-Origin` header
+                    // at all under this misconfiguration. The downstream
+                    // caller path (line 216) then falls through to the
+                    // inner handler without setting any CORS response
+                    // header, so the browser's same-origin enforcement
+                    // blocks the response from being read by the foreign
+                    // origin. The `debug_assert` in `new()` still rejects
+                    // this configuration in debug builds; this guard is
+                    // the release-build fail-closed.
+                    crate::tracing_compat::warn!(
+                        origin = %origin,
+                        "CorsMiddleware: dropping Access-Control-Allow-Origin \
+                         header — Allow-Origin = Any with Allow-Credentials = \
+                         true is forbidden by Fetch §3.2.5 (credential \
+                         reflection). Configure CorsPolicy::with_exact_origins \
+                         when credentials are enabled."
+                    );
+                    None
                 } else {
                     Some("*".to_string())
                 }
@@ -2525,10 +2550,14 @@ mod tests {
     }
 
     #[test]
-    fn cors_with_credentials_echoes_origin() {
+    fn cors_credentials_with_allowlisted_origin_echoes_exact_origin() {
+        // br-asupersync-d4f31s: when credentials are enabled, the only
+        // legal way to allow cross-origin reads is an explicit
+        // origin allow-list. An allowlisted origin is echoed verbatim;
+        // Allow-Credentials is set; the request succeeds.
         let policy = CorsPolicy {
             allow_credentials: true,
-            ..CorsPolicy::default()
+            ..CorsPolicy::with_exact_origins(vec!["https://cred.example".to_string()])
         };
         let mw = CorsMiddleware::new(FnHandler::new(ok_handler), policy);
         let resp =
@@ -2543,6 +2572,67 @@ mod tests {
             resp.headers.get("access-control-allow-credentials"),
             Some(&"true".to_string())
         );
+    }
+
+    #[test]
+    fn cors_credentials_with_non_allowlisted_origin_emits_no_allow_origin() {
+        // br-asupersync-d4f31s: credentials enabled + Origin not in the
+        // explicit allow-list = the response must NOT carry
+        // Access-Control-Allow-Origin or Access-Control-Allow-Credentials.
+        // The browser's same-origin policy then blocks the foreign caller
+        // from reading the response, even though the inner handler
+        // returned 200 OK. This is the fail-closed contract per Fetch
+        // §3.2.5 — never reflect credentials to an unvetted origin.
+        let policy = CorsPolicy {
+            allow_credentials: true,
+            ..CorsPolicy::with_exact_origins(vec!["https://allowed.example".to_string()])
+        };
+        let mw = CorsMiddleware::new(FnHandler::new(ok_handler), policy);
+        let resp = mw
+            .call(Request::new("GET", "/cors").with_header("Origin", "https://attacker.example"));
+
+        assert_eq!(resp.status, StatusCode::OK, "inner handler still runs");
+        assert!(
+            !resp.headers.contains_key("access-control-allow-origin"),
+            "non-allowlisted origin must not receive Allow-Origin"
+        );
+        assert!(
+            !resp.headers.contains_key("access-control-allow-credentials"),
+            "non-allowlisted origin must not receive Allow-Credentials"
+        );
+    }
+
+    // br-asupersync-d4f31s: the CorsPolicy::default + allow_credentials=true
+    // pairing is now expected to fail-closed: no Allow-Origin emitted, no
+    // Allow-Credentials emitted, regardless of which Origin the caller
+    // presents. The constructor's debug_assert still rejects this
+    // configuration in debug builds; this test runs only in release to pin
+    // the release-mode fail-closed contract directly.
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn cors_credentials_with_any_policy_fails_closed_in_release() {
+        let policy = CorsPolicy {
+            allow_credentials: true,
+            ..CorsPolicy::default() // allow_origin: Any
+        };
+        let mw = CorsMiddleware::new(FnHandler::new(ok_handler), policy);
+
+        for origin in [
+            "https://attacker.example",
+            "https://anything-else.example",
+            "https://cred.example",
+        ] {
+            let resp = mw.call(Request::new("GET", "/cors").with_header("Origin", origin));
+            assert_eq!(resp.status, StatusCode::OK);
+            assert!(
+                !resp.headers.contains_key("access-control-allow-origin"),
+                "Any+credentials must not echo any origin (saw {origin})"
+            );
+            assert!(
+                !resp.headers.contains_key("access-control-allow-credentials"),
+                "Any+credentials must not emit Allow-Credentials (saw {origin})"
+            );
+        }
     }
 
     // --- MiddlewareStack ---
