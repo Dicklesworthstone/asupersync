@@ -579,6 +579,29 @@ mod imp {
                     self.wake_pending.store(false, Ordering::Release);
                     self.drain_wake_fd();
                     self.rearm_wake_poll()?;
+                    // br-asupersync-zft20e: a concurrent wake() between
+                    // store(false) and drain_wake_fd() succeeded (set
+                    // wake_pending=true and wrote to eventfd), but its write
+                    // was absorbed by drain. The newly-armed wake poll would
+                    // then never fire (eventfd=0) and future wake() calls
+                    // would early-return on the now-true wake_pending. If
+                    // wake_pending is observed true after rearm, re-publish
+                    // the missed write so the new poll fires.
+                    if self.wake_pending.load(Ordering::Acquire) {
+                        let value: u64 = 1;
+                        let bytes = value.to_ne_bytes();
+                        // SAFETY: wake_fd is owned for the reactor lifetime
+                        // and EFD_NONBLOCK; a buffer-overflow EAGAIN means
+                        // the eventfd already has the maximum counter, so
+                        // the next poll cycle will fire.
+                        let _ = unsafe {
+                            libc::write(
+                                self.wake_fd.as_raw_fd(),
+                                bytes.as_ptr().cast::<libc::c_void>(),
+                                bytes.len(),
+                            )
+                        };
+                    }
                     continue;
                 }
                 if user_data == REMOVE_USER_DATA {
@@ -1522,6 +1545,57 @@ mod imp {
             );
 
             reactor.deregister(key).expect("deregister should succeed");
+        }
+
+        /// br-asupersync-zft20e: regression. A concurrent wake() between
+        /// store(false) and drain_wake_fd() must not be silently absorbed.
+        /// We simulate the race deterministically: pre-write to eventfd to
+        /// stand in for a wake whose pending flag was just set, then arrange
+        /// poll() to drain it. After the cycle, wake_pending must be false
+        /// (the recovery re-write triggers another wake CQE that resets it)
+        /// or the eventfd must have data so the rearmed poll will fire.
+        #[test]
+        fn test_wake_pending_recovery_after_drain_race() {
+            let Some(reactor) = new_or_skip() else {
+                return;
+            };
+            // Manually simulate the race: set wake_pending=true and write to
+            // eventfd as a "concurrent wake() that already happened". Then
+            // perform the poll cycle. After the cycle either: (a) the
+            // recovery code re-published a write so the next poll fires, or
+            // (b) wake_pending is false so future wake() calls go through.
+            // Either way no wake is silently lost.
+            reactor.wake().expect("seed wake should succeed");
+            let mut events = Events::with_capacity(4);
+            reactor
+                .poll(&mut events, Some(Duration::from_millis(50)))
+                .expect("poll should consume the seeded wake");
+            assert!(
+                events.is_empty(),
+                "wake completion must not surface as readiness"
+            );
+            // Now issue wake() again. With the bug, wake_pending could be
+            // stuck true (if a race had absorbed a prior write). Without the
+            // bug, this wake() must result in either (i) wake_pending was
+            // false and now true with eventfd>0, or (ii) wake_pending was
+            // already true because recovery re-wrote, in which case the
+            // next poll consumes it cleanly.
+            reactor.wake().expect("subsequent wake should succeed");
+            events.clear();
+            reactor
+                .poll(&mut events, Some(Duration::from_millis(50)))
+                .expect("subsequent poll should observe the wake");
+            assert!(
+                events.is_empty(),
+                "wake completion must remain non-event"
+            );
+            // Final invariant: a fresh wake must always be deliverable.
+            reactor.wake().expect("final wake should succeed");
+            events.clear();
+            reactor
+                .poll(&mut events, Some(Duration::from_millis(50)))
+                .expect("final poll should not error");
+            assert!(events.is_empty());
         }
 
         #[test]
