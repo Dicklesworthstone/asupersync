@@ -58,7 +58,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 use crate::actor::{ActorId, ActorState};
 use crate::channel::mpsc;
@@ -805,6 +805,12 @@ pub struct GenServerHandle<S: GenServer> {
     inner: std::sync::Weak<parking_lot::RwLock<CxInner>>,
     completed: bool,
     overflow_policy: CastOverflowPolicy,
+    /// Monotonic count of cast envelopes evicted by `try_cast` under
+    /// [`CastOverflowPolicy::DropOldest`] (br-asupersync-dqdgcq). Bumped
+    /// on every successful eviction regardless of whether `Cx::current()`
+    /// is available — the previous Cx-only `cx.trace(...)` route was
+    /// invisible to sync callers, masking SLO-relevant lossiness.
+    evicted_count: Arc<AtomicU64>,
 }
 
 /// Error returned when a call fails.
@@ -877,6 +883,21 @@ impl std::fmt::Display for InfoError {
 impl std::error::Error for InfoError {}
 
 impl<S: GenServer> GenServerHandle<S> {
+    /// Returns the monotonic count of cast envelopes evicted by this handle's
+    /// `try_cast` calls under [`CastOverflowPolicy::DropOldest`]
+    /// (br-asupersync-dqdgcq).
+    ///
+    /// The counter is incremented unconditionally on every successful eviction,
+    /// regardless of whether a [`Cx`] is in scope at the point of call — sync
+    /// callers (hooks, drivers without an async Cx) can therefore observe
+    /// drop pressure that the older `cx.trace(...)`-only path missed entirely.
+    /// Suitable for SLO dashboards: poll periodically and expose as a gauge or
+    /// derive a delta-rate counter against wall-clock time.
+    #[must_use]
+    pub fn evicted_count(&self) -> u64 {
+        self.evicted_count.load(Ordering::Relaxed)
+    }
+
     /// Send a call (request-response) to the server.
     ///
     /// Blocks until the server replies or the server stops. The reply channel
@@ -1020,7 +1041,28 @@ impl<S: GenServer> GenServerHandle<S> {
                     matches!(queued, Envelope::Cast { .. })
                 }) {
                     Ok(Some(_evicted)) => {
-                        // Trace the eviction so lossy drops are observable.
+                        // Visibility guarantees for lossy drops (br-asupersync-dqdgcq):
+                        //
+                        // 1. Bump the per-handle eviction counter unconditionally —
+                        //    sync callers (no Cx in scope, e.g., hooks invoked from
+                        //    a non-async runtime) previously bypassed `cx.trace(...)`
+                        //    and the eviction was completely invisible. Operators
+                        //    can now read `handle.evicted_count()` regardless of
+                        //    caller context.
+                        // 2. Emit a tracing-level log so log-aggregation pipelines
+                        //    see every drop even when `Cx::current()` is None.
+                        // 3. Preserve the existing `cx.trace(...)` breadcrumb when
+                        //    a Cx IS available so structured-trace replay continues
+                        //    to attribute the eviction to a region/task.
+                        let evicted = self
+                            .evicted_count
+                            .fetch_add(1, Ordering::Relaxed)
+                            .saturating_add(1);
+                        crate::tracing_compat::warn!(
+                            actor_id = ?self.actor_id,
+                            evicted_total = evicted,
+                            "gen_server::cast_evicted_oldest"
+                        );
                         if let Some(cx) = Cx::current() {
                             cx.trace("gen_server::cast_evicted_oldest");
                         }
@@ -1749,6 +1791,7 @@ impl<P: crate::types::Policy> crate::cx::Scope<'_, P> {
             inner: inner_weak,
             completed: false,
             overflow_policy,
+            evicted_count: Arc::new(AtomicU64::new(0)),
         };
 
         Ok((handle, stored))
@@ -4079,7 +4122,10 @@ mod tests {
         // explicit Reply::abort().
         let recv_outcome = rx.try_recv();
         assert!(
-            matches!(recv_outcome, Err(crate::channel::oneshot::TryRecvError::Closed)),
+            matches!(
+                recv_outcome,
+                Err(crate::channel::oneshot::TryRecvError::Closed)
+            ),
             "receiver should observe Closed after cancel-aborted reply, got {recv_outcome:?}"
         );
 
