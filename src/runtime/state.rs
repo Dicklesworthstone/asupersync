@@ -2302,11 +2302,14 @@ impl RuntimeState {
                 );
             }
 
-            if let Some(region) = self.regions.get(rid.arena_index()) {
+            if let Some(region) = self.regions.get_mut(rid.arena_index()) {
                 // Use the properly chained reason.
                 // Try to transition to Closing with the reason.
                 // If already Closing/Draining/etc., strengthen the reason instead.
+                let old_state = region.state();
                 if region.begin_close(Some(region_reason.clone())) {
+                    let new_state = region.state();
+                    let _ = (old_state, new_state); // br-yj9czm: counter recomputed authoritatively, no-op transition note
                     self.record_trace_event(|seq| {
                         TraceEvent::new(
                             seq,
