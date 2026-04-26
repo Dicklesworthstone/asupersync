@@ -84,7 +84,24 @@ impl RegionId {
     }
 
     /// Creates a region ID for testing/benchmarking purposes.
+    ///
+    /// br-asupersync-bm08jx: gated behind
+    /// `cfg(any(test, feature = "test-internals"))` to prevent
+    /// downstream production crates from forging RegionIds that
+    /// match arbitrary runtime allocations. Pre-fix this was a
+    /// fully-public `pub const` constructor (only `#[doc(hidden)]`
+    /// for diagnostic discretion), so any external crate could mint
+    /// a `RegionId` with arbitrary `index`/`generation` and feed it
+    /// to runtime APIs that trust the ID shape — same threat model
+    /// as the closed asupersync-aog0xz / asupersync-wm9h2a /
+    /// asupersync-ovztin fixes for similar test-only constructors.
+    ///
+    /// Default-feature builds still see this constructor (the
+    /// `test-internals` feature is in the default set, so existing
+    /// test code keeps compiling); production crates that opt out via
+    /// `default-features = false` lose access entirely.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-internals"))]
     #[inline]
     #[must_use]
     pub const fn new_for_test(index: u32, generation: u32) -> Self {
@@ -265,7 +282,14 @@ impl TaskId {
     }
 
     /// Creates a task ID for testing/benchmarking purposes.
+    ///
+    /// br-asupersync-bm08jx: gated behind
+    /// `cfg(any(test, feature = "test-internals"))` — same rationale
+    /// as [`RegionId::new_for_test`]. Production crates that disable
+    /// `test-internals` lose access; the runtime's task arena is the
+    /// only supported source of `TaskId`s.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-internals"))]
     #[inline]
     #[must_use]
     pub const fn new_for_test(index: u32, generation: u32) -> Self {
@@ -371,7 +395,14 @@ impl ObligationId {
     }
 
     /// Creates an obligation ID for testing/benchmarking purposes.
+    ///
+    /// br-asupersync-bm08jx: gated behind
+    /// `cfg(any(test, feature = "test-internals"))` — same rationale
+    /// as [`RegionId::new_for_test`]. Production crates that disable
+    /// `test-internals` cannot forge `ObligationId`s; the runtime's
+    /// obligation table is the only supported source.
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-internals"))]
     #[inline]
     #[must_use]
     pub const fn new_for_test(index: u32, generation: u32) -> Self {
