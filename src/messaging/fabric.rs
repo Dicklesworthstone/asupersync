@@ -1005,12 +1005,29 @@ impl DecisionContract for StaticActionDecisionContract {
         &self.losses
     }
 
-    fn update_posterior(&self, posterior: &mut Posterior, observation: usize) {
-        let mut likelihoods = vec![0.1; self.states.len()];
-        if let Some(slot) = likelihoods.get_mut(observation) {
-            *slot = 0.9;
+    fn update_posterior(
+        &self,
+        posterior: &mut Posterior,
+        observation: usize,
+    ) -> Result<(), franken_decision::UpdatePosteriorError> {
+        // br-asupersync-u5uhpt: typed error instead of silent
+        // partial-update or no-op so callers can detect malformed input.
+        if posterior.len() != self.states.len() {
+            return Err(franken_decision::UpdatePosteriorError::LengthMismatch {
+                expected: self.states.len(),
+                actual: posterior.len(),
+            });
         }
+        if observation >= self.states.len() {
+            return Err(franken_decision::UpdatePosteriorError::ObservationOutOfRange {
+                observation,
+                state_count: self.states.len(),
+            });
+        }
+        let mut likelihoods = vec![0.1; self.states.len()];
+        likelihoods[observation] = 0.9;
         posterior.bayesian_update(&likelihoods);
+        Ok(())
     }
 
     fn choose_action(&self, _posterior: &Posterior) -> usize {

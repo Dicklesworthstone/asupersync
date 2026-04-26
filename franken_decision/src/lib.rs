@@ -563,6 +563,52 @@ impl Default for FallbackPolicy {
 // DecisionContract trait
 // ---------------------------------------------------------------------------
 
+/// Error returned by [`DecisionContract::update_posterior`] when the input
+/// is structurally invalid.
+///
+/// br-asupersync-u5uhpt: prior versions of `update_posterior` silently
+/// dropped the observation when the posterior length didn't match the
+/// declared state space. This variant surfaces that condition as a typed
+/// error so callers can re-initialise (or fall back) instead of letting a
+/// stale posterior drive subsequent decisions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdatePosteriorError {
+    /// The supplied posterior does not match the contract's state space.
+    LengthMismatch {
+        /// The state-space cardinality required by the contract.
+        expected: usize,
+        /// The length of the posterior the caller provided.
+        actual: usize,
+    },
+    /// The observation index is outside `0..state_space().len()`.
+    ObservationOutOfRange {
+        /// The observation index supplied by the caller.
+        observation: usize,
+        /// The state-space cardinality.
+        state_count: usize,
+    },
+}
+
+impl core::fmt::Display for UpdatePosteriorError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::LengthMismatch { expected, actual } => write!(
+                f,
+                "posterior length mismatch: expected {expected}, got {actual}"
+            ),
+            Self::ObservationOutOfRange {
+                observation,
+                state_count,
+            } => write!(
+                f,
+                "observation {observation} is out of range for state space of size {state_count}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for UpdatePosteriorError {}
+
 /// A contract defining the decision-making framework for a component.
 ///
 /// Implementors define the state space, action set, loss matrix, and
@@ -582,7 +628,20 @@ pub trait DecisionContract {
     fn loss_matrix(&self) -> &LossMatrix;
 
     /// Update the posterior given an observation at `state_index`.
-    fn update_posterior(&self, posterior: &mut Posterior, state_index: usize);
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UpdatePosteriorError::LengthMismatch`] if the posterior
+    /// length differs from `state_space().len()` and
+    /// [`UpdatePosteriorError::ObservationOutOfRange`] if the observation
+    /// index falls outside the state space (br-asupersync-u5uhpt). A
+    /// failed update leaves `posterior` unchanged so callers can recover
+    /// without observing a partially-applied update.
+    fn update_posterior(
+        &self,
+        posterior: &mut Posterior,
+        state_index: usize,
+    ) -> Result<(), UpdatePosteriorError>;
 
     /// Choose the optimal action given the current posterior.
     ///
@@ -807,11 +866,28 @@ mod tests {
         fn loss_matrix(&self) -> &LossMatrix {
             &self.losses
         }
-        fn update_posterior(&self, posterior: &mut Posterior, observation: usize) {
+        fn update_posterior(
+            &self,
+            posterior: &mut Posterior,
+            observation: usize,
+        ) -> Result<(), UpdatePosteriorError> {
+            if posterior.len() != self.states.len() {
+                return Err(UpdatePosteriorError::LengthMismatch {
+                    expected: self.states.len(),
+                    actual: posterior.len(),
+                });
+            }
+            if observation >= self.states.len() {
+                return Err(UpdatePosteriorError::ObservationOutOfRange {
+                    observation,
+                    state_count: self.states.len(),
+                });
+            }
             // Simple likelihood model: observed state gets high likelihood.
             let mut likelihoods = vec![0.1; self.states.len()];
             likelihoods[observation] = 0.9;
             posterior.bayesian_update(&likelihoods);
+            Ok(())
         }
         fn choose_action(&self, posterior: &Posterior) -> usize {
             self.losses.bayes_action(posterior)
@@ -1294,7 +1370,9 @@ mod tests {
     fn contract_update_posterior() {
         let contract = TestContract::new();
         let mut posterior = Posterior::uniform(2);
-        contract.update_posterior(&mut posterior, 0); // observe "good"
+        contract
+            .update_posterior(&mut posterior, 0)
+            .expect("update_posterior should succeed for matching length"); // observe "good"
         // After update: state 0 should be more probable.
         assert!(posterior.probs()[0] > posterior.probs()[1]);
     }
@@ -1437,7 +1515,9 @@ mod tests {
 
         // Feed 5 "good" observations: posterior should shift toward state 0.
         for _ in 0..5 {
-            contract.update_posterior(&mut posterior, 0);
+            contract
+                .update_posterior(&mut posterior, 0)
+                .expect("update_posterior succeeds in end-to-end pipeline");
         }
         assert!(posterior.probs()[0] > 0.99);
 
@@ -1456,7 +1536,9 @@ mod tests {
 
         // Now feed "bad" observations to shift posterior.
         for _ in 0..20 {
-            contract.update_posterior(&mut posterior, 1);
+            contract
+                .update_posterior(&mut posterior, 1)
+                .expect("update_posterior succeeds in end-to-end pipeline");
         }
         assert!(posterior.probs()[1] > 0.99);
 

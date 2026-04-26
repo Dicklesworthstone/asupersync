@@ -208,19 +208,34 @@ impl DecisionContract for SchedulerDecisionContract {
     }
 
     #[inline]
-    fn update_posterior(&self, posterior: &mut Posterior, observation: usize) {
-        // Defensive guard: malformed posterior dimensions should not panic
-        // scheduler decision logic.
+    fn update_posterior(
+        &self,
+        posterior: &mut Posterior,
+        observation: usize,
+    ) -> Result<(), franken_decision::UpdatePosteriorError> {
+        // br-asupersync-u5uhpt: surface the malformed-input condition as a
+        // typed error so callers can re-initialise instead of letting a
+        // stale posterior drive subsequent choose_action calls. Scheduler
+        // decision logic still must not panic, so we never modify the
+        // posterior on the error path.
         if posterior.len() != state::COUNT {
-            return;
+            return Err(franken_decision::UpdatePosteriorError::LengthMismatch {
+                expected: state::COUNT,
+                actual: posterior.len(),
+            });
+        }
+        if observation >= state::COUNT {
+            return Err(franken_decision::UpdatePosteriorError::ObservationOutOfRange {
+                observation,
+                state_count: state::COUNT,
+            });
         }
 
         // Simple likelihood model: observed state gets high probability.
         let mut likelihoods = [0.1; state::COUNT];
-        if let Some(observed) = likelihoods.get_mut(observation) {
-            *observed = 0.9;
-        }
+        likelihoods[observation] = 0.9;
         posterior.bayesian_update(&likelihoods);
+        Ok(())
     }
 
     #[inline]
@@ -494,20 +509,43 @@ mod tests {
     }
 
     #[test]
-    fn update_posterior_out_of_range_is_noop() {
+    fn update_posterior_out_of_range_returns_typed_error() {
+        // br-asupersync-u5uhpt: an out-of-range observation surfaces a
+        // typed error (not a silent no-op) and leaves the posterior
+        // unchanged so callers can fall back deterministically.
         let c = SchedulerDecisionContract::new();
         let mut posterior = Posterior::uniform(state::COUNT);
         let before = posterior.probs().to_vec();
-        c.update_posterior(&mut posterior, state::COUNT + 5);
+        let err = c
+            .update_posterior(&mut posterior, state::COUNT + 5)
+            .expect_err("out-of-range observation must surface a typed error");
+        assert!(
+            matches!(
+                err,
+                franken_decision::UpdatePosteriorError::ObservationOutOfRange { .. }
+            ),
+            "expected ObservationOutOfRange, got {err:?}"
+        );
         assert_eq!(posterior.probs(), before.as_slice());
     }
 
     #[test]
-    fn update_posterior_wrong_dimension_is_noop() {
+    fn update_posterior_wrong_dimension_returns_typed_error() {
+        // br-asupersync-u5uhpt: a wrong-dimension posterior surfaces a
+        // typed error and remains unchanged.
         let c = SchedulerDecisionContract::new();
         let mut posterior = Posterior::uniform(state::COUNT - 1);
         let before = posterior.probs().to_vec();
-        c.update_posterior(&mut posterior, state::HEALTHY);
+        let err = c
+            .update_posterior(&mut posterior, state::HEALTHY)
+            .expect_err("wrong-dimension posterior must surface a typed error");
+        assert!(
+            matches!(
+                err,
+                franken_decision::UpdatePosteriorError::LengthMismatch { .. }
+            ),
+            "expected LengthMismatch, got {err:?}"
+        );
         assert_eq!(posterior.probs(), before.as_slice());
     }
 

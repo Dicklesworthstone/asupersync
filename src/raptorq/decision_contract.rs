@@ -281,13 +281,18 @@ impl DecisionContract for RaptorQDecisionContract {
         &self.losses
     }
 
-    fn update_posterior(&self, posterior: &mut Posterior, observation: usize) {
+    fn update_posterior(
+        &self,
+        posterior: &mut Posterior,
+        observation: usize,
+    ) -> Result<(), franken_decision::UpdatePosteriorError> {
+        // br-asupersync-u5uhpt: previously this returned `()` and silently
+        // skipped on wrong-length posteriors, allowing stale beliefs to
+        // drive subsequent choose_action calls. The trait now signals the
+        // condition via a typed error so callers can re-initialise the
+        // posterior or escalate to fallback. Tracing is still emitted to
+        // preserve the diagnostic surface for SREs scanning logs.
         if posterior.len() != state::COUNT {
-            // Silent no-op on a wrong-length posterior would let stale
-            // beliefs drive subsequent choose_action calls. Surface it
-            // via tracing so SREs can diagnose the misuse rather than
-            // silently treating the decision as still-valid
-            // (br-asupersync-raptorq-update-posterior-mismatch).
             crate::tracing_compat::warn!(
                 expected = state::COUNT,
                 actual = posterior.len(),
@@ -295,13 +300,26 @@ impl DecisionContract for RaptorQDecisionContract {
                 "raptorq G7 update_posterior: wrong-length posterior — update skipped, \
                  next choose_action will fall back to the conservative action"
             );
-            return;
+            return Err(franken_decision::UpdatePosteriorError::LengthMismatch {
+                expected: state::COUNT,
+                actual: posterior.len(),
+            });
+        }
+        if observation >= state::COUNT {
+            crate::tracing_compat::warn!(
+                state_count = state::COUNT,
+                observation = observation,
+                "raptorq G7 update_posterior: observation index out of range — update skipped"
+            );
+            return Err(franken_decision::UpdatePosteriorError::ObservationOutOfRange {
+                observation,
+                state_count: state::COUNT,
+            });
         }
         let mut likelihoods = [0.1; state::COUNT];
-        if let Some(slot) = likelihoods.get_mut(observation) {
-            *slot = 0.9;
-        }
+        likelihoods[observation] = 0.9;
         posterior.bayesian_update(&likelihoods);
+        Ok(())
     }
 
     fn choose_action(&self, posterior: &Posterior) -> usize {
@@ -1338,7 +1356,9 @@ mod tests {
     fn posterior_update_concentrates_on_observation() {
         let contract = RaptorQDecisionContract::new();
         let mut posterior = Posterior::uniform(state::COUNT);
-        contract.update_posterior(&mut posterior, state::REGRESSION);
+        contract
+            .update_posterior(&mut posterior, state::REGRESSION)
+            .expect("update_posterior succeeds for matching length + valid observation");
 
         // After observing REGRESSION, its probability should increase
         let probs = posterior.probs();
@@ -1361,13 +1381,28 @@ mod tests {
     }
 
     #[test]
-    fn posterior_update_ignores_malformed_length() {
+    fn posterior_update_returns_length_mismatch_error() {
+        // br-asupersync-u5uhpt: previously a wrong-length posterior was
+        // a silent no-op. Now it surfaces a typed error and the posterior
+        // remains unchanged so callers can fall back deterministically.
         let contract = RaptorQDecisionContract::new();
         let mut malformed = Posterior::new(vec![0.34, 0.33, 0.33]).unwrap();
         let before = malformed.probs().to_vec();
 
-        contract.update_posterior(&mut malformed, state::REGRESSION);
+        let err = contract
+            .update_posterior(&mut malformed, state::REGRESSION)
+            .expect_err("wrong-length posterior must surface a typed error");
 
+        assert!(
+            matches!(
+                err,
+                franken_decision::UpdatePosteriorError::LengthMismatch {
+                    expected: state::COUNT,
+                    actual: 3,
+                }
+            ),
+            "expected LengthMismatch, got {err:?}"
+        );
         assert_eq!(
             malformed.probs(),
             before.as_slice(),
@@ -1376,13 +1411,27 @@ mod tests {
     }
 
     #[test]
-    fn posterior_update_ignores_out_of_range_observation() {
+    fn posterior_update_returns_observation_out_of_range_error() {
+        // br-asupersync-u5uhpt: an out-of-range observation must surface a
+        // typed error; the posterior must remain unchanged.
         let contract = RaptorQDecisionContract::new();
         let mut posterior = Posterior::uniform(state::COUNT);
         let before = posterior.probs().to_vec();
 
-        contract.update_posterior(&mut posterior, usize::MAX);
+        let err = contract
+            .update_posterior(&mut posterior, usize::MAX)
+            .expect_err("out-of-range observation must surface a typed error");
 
+        assert!(
+            matches!(
+                err,
+                franken_decision::UpdatePosteriorError::ObservationOutOfRange {
+                    observation: usize::MAX,
+                    state_count: state::COUNT,
+                }
+            ),
+            "expected ObservationOutOfRange, got {err:?}"
+        );
         assert_eq!(
             posterior.probs(),
             before.as_slice(),

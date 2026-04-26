@@ -455,7 +455,9 @@ fn decision_contract_posterior_normalization() {
     let mut posterior = Posterior::uniform(decision_contract::state::COUNT);
 
     // Update with observation
-    contract.update_posterior(&mut posterior, decision_contract::state::HEALTHY);
+    contract
+        .update_posterior(&mut posterior, decision_contract::state::HEALTHY)
+        .expect("update_posterior succeeds for matching length + valid observation");
 
     let probs = posterior.probs();
     let sum: f64 = probs.iter().sum();

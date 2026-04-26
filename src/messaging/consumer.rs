@@ -2554,12 +2554,28 @@ impl DecisionContract for ConsumerPullDecisionContract {
         &self.losses
     }
 
-    fn update_posterior(&self, posterior: &mut Posterior, observation: usize) {
-        let mut likelihoods = [0.1; 4];
-        if let Some(slot) = likelihoods.get_mut(observation) {
-            *slot = 0.9;
+    fn update_posterior(
+        &self,
+        posterior: &mut Posterior,
+        observation: usize,
+    ) -> Result<(), franken_decision::UpdatePosteriorError> {
+        // br-asupersync-u5uhpt: typed error instead of silent no-op.
+        if posterior.len() != 4 {
+            return Err(franken_decision::UpdatePosteriorError::LengthMismatch {
+                expected: 4,
+                actual: posterior.len(),
+            });
         }
+        if observation >= 4 {
+            return Err(franken_decision::UpdatePosteriorError::ObservationOutOfRange {
+                observation,
+                state_count: 4,
+            });
+        }
+        let mut likelihoods = [0.1; 4];
+        likelihoods[observation] = 0.9;
         posterior.bayesian_update(&likelihoods);
+        Ok(())
     }
 
     fn choose_action(&self, _posterior: &Posterior) -> usize {
@@ -2686,12 +2702,28 @@ impl DecisionContract for ConsumerOverflowDecisionContract {
         &self.losses
     }
 
-    fn update_posterior(&self, posterior: &mut Posterior, observation: usize) {
-        let mut likelihoods = [0.1; 4];
-        if let Some(slot) = likelihoods.get_mut(observation) {
-            *slot = 0.9;
+    fn update_posterior(
+        &self,
+        posterior: &mut Posterior,
+        observation: usize,
+    ) -> Result<(), franken_decision::UpdatePosteriorError> {
+        // br-asupersync-u5uhpt: typed error instead of silent no-op.
+        if posterior.len() != 4 {
+            return Err(franken_decision::UpdatePosteriorError::LengthMismatch {
+                expected: 4,
+                actual: posterior.len(),
+            });
         }
+        if observation >= 4 {
+            return Err(franken_decision::UpdatePosteriorError::ObservationOutOfRange {
+                observation,
+                state_count: 4,
+            });
+        }
+        let mut likelihoods = [0.1; 4];
+        likelihoods[observation] = 0.9;
         posterior.bayesian_update(&likelihoods);
+        Ok(())
     }
 
     fn choose_action(&self, _posterior: &Posterior) -> usize {
@@ -2805,12 +2837,28 @@ impl DecisionContract for ConsumerRedeliveryDecisionContract {
         &self.losses
     }
 
-    fn update_posterior(&self, posterior: &mut Posterior, observation: usize) {
-        let mut likelihoods = [0.1; 3];
-        if let Some(slot) = likelihoods.get_mut(observation) {
-            *slot = 0.9;
+    fn update_posterior(
+        &self,
+        posterior: &mut Posterior,
+        observation: usize,
+    ) -> Result<(), franken_decision::UpdatePosteriorError> {
+        // br-asupersync-u5uhpt: typed error instead of silent no-op.
+        if posterior.len() != 3 {
+            return Err(franken_decision::UpdatePosteriorError::LengthMismatch {
+                expected: 3,
+                actual: posterior.len(),
+            });
         }
+        if observation >= 3 {
+            return Err(franken_decision::UpdatePosteriorError::ObservationOutOfRange {
+                observation,
+                state_count: 3,
+            });
+        }
+        let mut likelihoods = [0.1; 3];
+        likelihoods[observation] = 0.9;
         posterior.bayesian_update(&likelihoods);
+        Ok(())
     }
 
     fn choose_action(&self, _posterior: &Posterior) -> usize {
