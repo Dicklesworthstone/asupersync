@@ -1191,6 +1191,12 @@ pub struct InactivationDecoder {
 
 impl InactivationDecoder {
     /// Create a new decoder for the given parameters.
+    ///
+    /// br-asupersync-cjv6x4: PANICS for `k == 0` or `k > 56403` (the
+    /// upper bound of RFC 6330's systematic-index table). Callers
+    /// that handle attacker-influenced FEC-OTI parameters and want
+    /// graceful error handling MUST use [`Self::try_new`] instead,
+    /// which returns `Result<Self, SystematicParamError>`.
     #[must_use]
     pub fn new(k: usize, symbol_size: usize, seed: u64) -> Self {
         let params = SystematicParams::for_source_block(k, symbol_size);
@@ -1199,6 +1205,27 @@ impl InactivationDecoder {
             seed,
             dense_factor_cache: parking_lot::Mutex::new(DenseFactorCache::default()),
         }
+    }
+
+    /// br-asupersync-cjv6x4: fallible variant of [`Self::new`] that
+    /// returns `Err(SystematicParamError::UnsupportedSourceBlockSize)`
+    /// for `k == 0` or `k > 56403` instead of panicking. Use this
+    /// from network-receivable decode paths where the FEC-OTI K
+    /// arrives from an attacker-influenced source.
+    pub fn try_new(
+        k: usize,
+        symbol_size: usize,
+        seed: u64,
+    ) -> Result<Self, crate::raptorq::systematic::SystematicParamError> {
+        let params = crate::raptorq::systematic::SystematicParams::try_for_source_block(
+            k,
+            symbol_size,
+        )?;
+        Ok(Self {
+            params,
+            seed,
+            dense_factor_cache: parking_lot::Mutex::new(DenseFactorCache::default()),
+        })
     }
 
     /// Returns the encoding parameters.
@@ -5892,5 +5919,35 @@ mod tests {
         assert!(wavefront.stats.wavefront_active);
         assert_eq!(wavefront.stats.wavefront_batches, 1);
         assert_eq!(wavefront.stats.wavefront_batch_size, received.len());
+    }
+
+    /// br-asupersync-cjv6x4: try_new returns Err for K = 0.
+    #[test]
+    fn inactivation_decoder_try_new_rejects_zero_k() {
+        let result = InactivationDecoder::try_new(0, 64, 1);
+        assert!(
+            result.is_err(),
+            "try_new must reject K=0 instead of panicking"
+        );
+    }
+
+    /// br-asupersync-cjv6x4: try_new returns Err for K above the
+    /// RFC 6330 systematic-index table maximum (56403).
+    #[test]
+    fn inactivation_decoder_try_new_rejects_oversized_k() {
+        let result = InactivationDecoder::try_new(56_404, 64, 1);
+        assert!(
+            result.is_err(),
+            "try_new must reject K > 56403 instead of panicking"
+        );
+    }
+
+    /// br-asupersync-cjv6x4: try_new succeeds for valid K.
+    #[test]
+    fn inactivation_decoder_try_new_accepts_valid_k() {
+        let decoder = InactivationDecoder::try_new(10, 64, 1)
+            .expect("try_new must accept K=10");
+        // Smoke check: params populated.
+        assert!(decoder.params().k >= 10);
     }
 }

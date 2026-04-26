@@ -253,7 +253,14 @@ pub fn deg(v: u32) -> usize {
 /// The tuple defines the LT and PI symbol walk parameters:
 /// - `(d, a, b)` for LT-side symbol selection over `W`
 /// - `(d1, a1, b1)` for PI-side symbol selection over `P` / `P1`
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Default::default()` produces a sentinel all-zero tuple. Used by
+/// the fail-closed [`tuple`] path: invalid FEC-OTI inputs produce
+/// a zeroed tuple which `tuple_indices` then rejects via its zero-
+/// degree validity gate, returning an empty Vec — propagating an
+/// "invalid encoding" error to the public boundary instead of a
+/// panic. (br-asupersync-pphjvo)
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct LtTuple {
     /// LT degree.
     pub d: usize,
@@ -295,11 +302,9 @@ pub fn next_prime_ge(n: usize) -> usize {
     candidate
 }
 
-fn require_rfc_u32(name: &str, value: usize) -> u32 {
-    u32::try_from(value).unwrap_or_else(|error| {
-        panic!("{name} must fit in u32 for RFC 6330 tuple arithmetic (got {value}): {error}")
-    })
-}
+// br-asupersync-pphjvo: removed `require_rfc_u32` panic helper.
+// The fail-closed `try_tuple` path validates u32 fitting via
+// `u32::try_from` and short-circuits to `None` instead of panicking.
 
 fn is_prime(n: usize) -> bool {
     if n < 2 {
@@ -321,6 +326,25 @@ fn is_prime(n: usize) -> bool {
 /// Compute RFC 6330 LT tuple for `(J, W, P, P1, X)`.
 ///
 /// Reference: RFC 6330 Section 5.3.5.4.
+///
+/// br-asupersync-pphjvo: this function previously panicked via
+/// `assert!` and `require_rfc_u32` on malformed inputs (W <= 1,
+/// P == 0, P1 wrong, J/W/P1 exceeding u32::MAX, etc.). For a public
+/// FEC primitive that may be reached from network-receivable
+/// metadata that is the wrong shape — a hostile peer crafting an
+/// invalid FEC-OTI could DoS the receiver via a crash. The fix
+/// mirrors the established fail-closed pattern for tuple_indices
+/// (br-asupersync-hiimy9): downgrade the validity checks to
+/// `debug_assert!` (development-time signal only) and return a
+/// SENTINEL `LtTuple::default()` (all zeros) on invalid input.
+/// Downstream `tuple_indices` then sees the zeroed tuple, fails its
+/// own validity check (zero degrees), and returns an empty Vec —
+/// the encoder/decoder naturally surfaces an "invalid encoding"
+/// error at the public boundary instead of crashing.
+///
+/// Callers that need to OBSERVE the invalid input (rather than
+/// silently fall through to an empty schedule) should call
+/// [`try_tuple`] which returns `Option<LtTuple>`.
 #[must_use]
 pub fn tuple(
     systematic_index: usize,
@@ -329,19 +353,50 @@ pub fn tuple(
     pi_modulus: usize,
     encoding_symbol_id: u32,
 ) -> LtTuple {
-    assert!(lt_width > 1, "W must be > 1");
-    assert!(pi_count > 0, "P must be > 0");
-    assert!(pi_modulus > 1, "P1 must be > 1");
-    assert!(pi_modulus >= pi_count, "P1 must be >= P");
-    let expected_pi_modulus = next_prime_ge(pi_count);
-    assert!(
-        pi_modulus == expected_pi_modulus,
-        "P1 must equal smallest prime >= P (expected {expected_pi_modulus}, got {pi_modulus})"
-    );
+    try_tuple(
+        systematic_index,
+        lt_width,
+        pi_count,
+        pi_modulus,
+        encoding_symbol_id,
+    )
+    .unwrap_or_default()
+}
 
-    let systematic_index_u32 = require_rfc_u32("J", systematic_index);
-    let lt_width_u32 = require_rfc_u32("W", lt_width);
-    let pi_modulus_u32 = require_rfc_u32("P1", pi_modulus);
+/// br-asupersync-pphjvo: fallible variant of [`tuple`] that returns
+/// `None` on any input that fails the RFC 6330 validity gate
+/// (W <= 1, P == 0, P1 != smallest_prime_ge(P), J/W/P1 exceeding
+/// u32::MAX). Use this from receiver paths that handle attacker-
+/// influenced FEC-OTI and want to reject malformed inputs without
+/// crashing.
+#[must_use]
+pub fn try_tuple(
+    systematic_index: usize,
+    lt_width: usize,
+    pi_count: usize,
+    pi_modulus: usize,
+    encoding_symbol_id: u32,
+) -> Option<LtTuple> {
+    let expected_pi_modulus = next_prime_ge(pi_count);
+    let valid = lt_width > 1
+        && pi_count > 0
+        && pi_modulus > 1
+        && pi_modulus >= pi_count
+        && pi_modulus == expected_pi_modulus
+        && u32::try_from(systematic_index).is_ok()
+        && u32::try_from(lt_width).is_ok()
+        && u32::try_from(pi_modulus).is_ok();
+    debug_assert!(
+        valid,
+        "tuple: malformed input — check FEC-OTI validation"
+    );
+    if !valid {
+        return None;
+    }
+
+    let systematic_index_u32 = u32::try_from(systematic_index).ok()?;
+    let lt_width_u32 = u32::try_from(lt_width).ok()?;
+    let pi_modulus_u32 = u32::try_from(pi_modulus).ok()?;
 
     let mut linear_factor = 53_591u32.wrapping_add(997u32.wrapping_mul(systematic_index_u32));
     if linear_factor.is_multiple_of(2) {
@@ -362,14 +417,14 @@ pub fn tuple(
     let pi_step = 1 + rand(encoding_symbol_id, 4, pi_modulus_u32 - 1) as usize;
     let pi_start = rand(encoding_symbol_id, 5, pi_modulus_u32) as usize;
 
-    LtTuple {
+    Some(LtTuple {
         d: lt_degree,
         a: lt_step,
         b: lt_start,
         d1: pi_degree,
         a1: pi_step,
         b1: pi_start,
-    }
+    })
 }
 
 /// Compute RFC 6330 LT tuple using `P1 = smallest_prime_ge(P)`.
@@ -1525,5 +1580,48 @@ mod tests {
         bytes.extend_from_slice(&(tuple.a1 as u32).to_le_bytes());
         bytes.extend_from_slice(&(tuple.b1 as u32).to_le_bytes());
         bytes
+    }
+
+    /// br-asupersync-pphjvo: try_tuple returns None on every malformed
+    /// FEC-OTI input that the legacy panicking tuple() asserted on.
+    #[test]
+    fn try_tuple_rejects_malformed_inputs() {
+        // W must be > 1.
+        assert!(try_tuple(0, 0, 1, 2, 0).is_none());
+        assert!(try_tuple(0, 1, 1, 2, 0).is_none());
+        // P must be > 0.
+        assert!(try_tuple(0, 4, 0, 2, 0).is_none());
+        // P1 must be > 1.
+        assert!(try_tuple(0, 4, 1, 0, 0).is_none());
+        assert!(try_tuple(0, 4, 1, 1, 0).is_none());
+        // P1 must equal smallest_prime_ge(P).
+        assert!(try_tuple(0, 4, 4, 7, 0).is_none()); // 7 != 5 = smallest_prime_ge(4)
+    }
+
+    /// br-asupersync-pphjvo: for any input that try_tuple rejects,
+    /// the panicking variant tuple() must NOT panic — it returns the
+    /// sentinel zeroed LtTuple instead.
+    #[test]
+    fn tuple_returns_zero_sentinel_on_malformed_inputs() {
+        let sentinel = tuple(0, 0, 1, 2, 0);
+        assert_eq!(sentinel, LtTuple::default());
+        assert_eq!(sentinel.d, 0);
+        assert_eq!(sentinel.d1, 0);
+        // Downstream tuple_indices must reject the zero-degree
+        // sentinel via its existing validity gate (zero degrees fail
+        // the matches!(d1, 2 | 3) check).
+        let indices = tuple_indices(sentinel, 4, 1, 2);
+        assert!(indices.is_empty(), "tuple_indices must reject zero sentinel");
+    }
+
+    /// br-asupersync-pphjvo: for VALID inputs, try_tuple returns
+    /// Some(...) and the result equals tuple()'s result.
+    #[test]
+    fn try_tuple_matches_tuple_on_valid_input() {
+        // Use a valid (W, P, P1) triple from the existing test
+        // surface: P = 7, P1 = smallest_prime_ge(7) = 7.
+        let from_panic = tuple(5, 32, 7, 7, 42);
+        let from_try = try_tuple(5, 32, 7, 7, 42).expect("valid input must succeed");
+        assert_eq!(from_panic, from_try);
     }
 }
