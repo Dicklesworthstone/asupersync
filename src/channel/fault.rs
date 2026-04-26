@@ -133,17 +133,29 @@ pub struct FaultChannelStats {
     pub messages_duplicated: u64,
     /// Number of times the reorder buffer was flushed.
     pub reorder_flushes: u64,
+    /// Cumulative count of messages that were drained from the reorder
+    /// buffer during an in-progress auto-flush, were NOT delivered
+    /// (cancel / disconnect / full mid-flush), and were restored to
+    /// the reorder buffer for a subsequent flush. A non-zero value is
+    /// not a bug — the AutoFlushGuard correctly preserves the values —
+    /// but a steadily-growing counter indicates that auto_flush is
+    /// being cancelled often enough to slow effective drain rate, and
+    /// the operator may want to call [`FaultSender::flush`] explicitly
+    /// from a non-cancelled context. (br-asupersync-rnbjfb.)
+    pub reorder_cancel_residue: u64,
 }
 
 impl std::fmt::Display for FaultChannelStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "FaultChannelStats {{ sent: {}, reordered: {}, duplicated: {}, flushes: {} }}",
+            "FaultChannelStats {{ sent: {}, reordered: {}, duplicated: {}, flushes: {}, \
+             cancel_residue: {} }}",
             self.messages_sent,
             self.messages_reordered,
             self.messages_duplicated,
             self.reorder_flushes,
+            self.reorder_cancel_residue,
         )
     }
 }
@@ -171,6 +183,15 @@ pub struct FaultSender<T: Clone> {
     stat_messages_reordered: AtomicU64,
     stat_messages_duplicated: AtomicU64,
     stat_reorder_flushes: AtomicU64,
+    /// Cumulative count of values that were drained out of the reorder
+    /// buffer for an in-progress auto-flush, did NOT reach the receiver
+    /// (because of cancel/disconnect/full mid-flush), and were
+    /// restored to the reorder buffer for a subsequent flush.
+    /// Surfaced in [`FaultChannelStats`] so SREs can see how often the
+    /// cancel-mid-reorder path is actually exercised — without this
+    /// counter the AutoFlushGuard restoration is silent
+    /// (br-asupersync-rnbjfb).
+    stat_reorder_cancel_residue: AtomicU64,
     evidence_sink: Arc<dyn EvidenceSink>,
 }
 
@@ -203,6 +224,7 @@ impl<T: Clone> FaultSender<T> {
             stat_messages_reordered: AtomicU64::new(0),
             stat_messages_duplicated: AtomicU64::new(0),
             stat_reorder_flushes: AtomicU64::new(0),
+            stat_reorder_cancel_residue: AtomicU64::new(0),
             evidence_sink,
         }
     }
@@ -292,6 +314,13 @@ impl<T: Clone> FaultSender<T> {
             buffer: &'a parking_lot::Mutex<Vec<T>>,
             pending: std::collections::VecDeque<AutoFlushItem<T>>,
             current: Option<AutoFlushItem<T>>,
+            /// Counter incremented by Drop with the number of items that
+            /// were restored to the reorder buffer because the flush
+            /// was cancelled / disconnected / full mid-iteration.
+            /// Surfaces residue via FaultChannelStats.reorder_cancel_residue
+            /// so SREs can observe how often auto-flush is being
+            /// interrupted before completion. (br-asupersync-rnbjfb.)
+            cancel_residue_counter: &'a AtomicU64,
         }
 
         impl<T> AutoFlushGuard<'_, T> {
@@ -323,8 +352,20 @@ impl<T: Clone> FaultSender<T> {
                 }
                 to_restore.extend(self.pending.drain(..).map(AutoFlushItem::into_value));
                 if !to_restore.is_empty() {
+                    let restored = to_restore.len();
                     let mut buf = self.buffer.lock();
                     buf.extend(to_restore);
+                    drop(buf);
+                    // br-asupersync-rnbjfb: surface the cancel-induced
+                    // restoration so the silent path becomes a
+                    // monotone counter visible via FaultChannelStats.
+                    // The user's CURRENT value is extracted by
+                    // take_current_value() BEFORE Drop runs, so the
+                    // residue counted here is purely buffered values
+                    // that were eligible for this auto-flush attempt
+                    // and will retry on the next flush.
+                    self.cancel_residue_counter
+                        .fetch_add(restored as u64, Ordering::Relaxed);
                 }
             }
         }
@@ -351,6 +392,7 @@ impl<T: Clone> FaultSender<T> {
             buffer: &self.reorder_buffer,
             pending: messages.into(),
             current: None,
+            cancel_residue_counter: &self.stat_reorder_cancel_residue,
         };
         let mut flush_recorded = false;
 
@@ -564,6 +606,9 @@ impl<T: Clone> FaultSender<T> {
             messages_reordered: self.stat_messages_reordered.load(Ordering::Relaxed),
             messages_duplicated: self.stat_messages_duplicated.load(Ordering::Relaxed),
             reorder_flushes: self.stat_reorder_flushes.load(Ordering::Relaxed),
+            reorder_cancel_residue: self
+                .stat_reorder_cancel_residue
+                .load(Ordering::Relaxed),
         }
     }
 
