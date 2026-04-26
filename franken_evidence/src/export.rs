@@ -36,12 +36,51 @@ use crate::EvidenceLedger;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Schema version written as the first line of each JSONL file.
 const SCHEMA_VERSION: &str = "1.0.0";
 
 /// Default maximum file size before rotation (100 MB).
 const DEFAULT_MAX_BYTES: u64 = 100 * 1024 * 1024;
+
+/// br-asupersync-ies02a — Pluggable clock used for rotation filenames.
+///
+/// `JsonlExporter::rotate` previously called
+/// `std::time::SystemTime::now()` directly, which broke deterministic
+/// replay under `LabRuntime::VirtualClock`: the same evidence batch
+/// rotated to a different filename in different runs because the
+/// timestamp baked into the rotated path was wall-clock time. Callers
+/// running deterministic tests can now supply a `RotationClock` whose
+/// `now_secs()` returns a virtual / counter-driven time; the default
+/// implementation `WallClock` preserves the original production
+/// behaviour.
+pub trait RotationClock: Send + Sync {
+    /// Returns "now" in seconds since some reference epoch. Used solely
+    /// to build the rotated filename — uniqueness is required, monotonicity
+    /// is preferred, and the absolute value's meaning is opaque to the
+    /// exporter.
+    fn now_secs(&self) -> u64;
+}
+
+/// Default `RotationClock` that reads `SystemTime::now()`.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct WallClock;
+
+impl RotationClock for WallClock {
+    fn now_secs(&self) -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0)
+    }
+}
+
+impl<F: Fn() -> u64 + Send + Sync> RotationClock for F {
+    fn now_secs(&self) -> u64 {
+        (self)()
+    }
+}
 
 /// JSONL exporter for [`EvidenceLedger`] entries.
 ///
@@ -53,15 +92,32 @@ pub struct JsonlExporter {
     bytes_written: u64,
     entries_written: u64,
     max_bytes: u64,
+    /// br-asupersync-ies02a — Clock used for rotation filenames.
+    clock: Arc<dyn RotationClock>,
 }
 
 /// Configuration for [`JsonlExporter`].
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ExporterConfig {
     /// Maximum file size in bytes before rotation. Set to 0 to disable rotation.
     pub max_bytes: u64,
     /// Buffer capacity for the writer.
     pub buf_capacity: usize,
+    /// br-asupersync-ies02a — Clock used to build rotated filenames.
+    /// Defaults to [`WallClock`] (reads `SystemTime::now()`); deterministic
+    /// tests should supply a virtual clock so rotated paths are stable
+    /// across runs.
+    pub clock: Arc<dyn RotationClock>,
+}
+
+impl std::fmt::Debug for ExporterConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExporterConfig")
+            .field("max_bytes", &self.max_bytes)
+            .field("buf_capacity", &self.buf_capacity)
+            .field("clock", &"<dyn RotationClock>")
+            .finish()
+    }
 }
 
 impl Default for ExporterConfig {
@@ -69,6 +125,7 @@ impl Default for ExporterConfig {
         Self {
             max_bytes: DEFAULT_MAX_BYTES,
             buf_capacity: 8192,
+            clock: Arc::new(WallClock),
         }
     }
 }
@@ -101,6 +158,7 @@ impl JsonlExporter {
             bytes_written,
             entries_written: 0,
             max_bytes: config.max_bytes,
+            clock: Arc::clone(&config.clock),
         })
     }
 
@@ -146,14 +204,15 @@ impl JsonlExporter {
     }
 
     /// Rotate the file: close current, rename to timestamped name, open fresh.
+    ///
+    /// br-asupersync-ies02a — uses the configured `RotationClock` rather
+    /// than `SystemTime::now()` so deterministic tests can pin the
+    /// rotated filename across runs.
     fn rotate(&mut self) -> io::Result<()> {
         self.writer.flush()?;
 
-        // Generate rotated filename: path.YYYYMMDD_HHMMSS.jsonl
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-        let secs = now.as_secs();
+        // Generate rotated filename: path.<secs>.jsonl
+        let secs = self.clock.now_secs();
         let rotated_name = format!(
             "{}.{secs}.jsonl",
             self.path.file_stem().unwrap_or_default().to_string_lossy()
@@ -377,5 +436,52 @@ mod tests {
         let entry_bytes = exporter.append(&test_entry("x")).unwrap();
         assert!(entry_bytes > 0);
         assert_eq!(exporter.bytes_written(), header_bytes + entry_bytes);
+    }
+
+    /// br-asupersync-ies02a — Rotation uses the configured `RotationClock`
+    /// rather than `SystemTime::now()`. Pinning the clock to a fixed
+    /// value makes the rotated filename deterministic across runs.
+    #[test]
+    fn rotation_uses_configured_clock() {
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("evidence.jsonl");
+
+        // Fixed-instant clock: every rotation lands on the same second.
+        let config = ExporterConfig {
+            max_bytes: 64,
+            buf_capacity: 8192,
+            clock: Arc::new(|| 1_700_000_000u64),
+        };
+        let mut exporter = JsonlExporter::open_with_config(path.clone(), &config).unwrap();
+
+        // Write enough entries to force at least one rotation.
+        for i in 0..32 {
+            exporter
+                .append(&test_entry(&format!("payload-{i}")))
+                .unwrap();
+        }
+        exporter.flush().unwrap();
+
+        // The deterministic clock fixes the rotated filename. Search the
+        // directory for `evidence.1700000000.jsonl`.
+        let expected_rotated = dir.path().join("evidence.1700000000.jsonl");
+        assert!(
+            expected_rotated.exists(),
+            "expected deterministic rotated filename {:?}",
+            expected_rotated
+        );
+    }
+
+    /// br-asupersync-ies02a — Default config still uses `WallClock`
+    /// (preserves prior production behaviour).
+    #[test]
+    fn default_config_uses_wall_clock() {
+        let cfg = ExporterConfig::default();
+        // WallClock returns a "large" current-epoch second — well above
+        // 1 billion (any plausible UNIX epoch second since ~Sept 2001).
+        let now = cfg.clock.now_secs();
+        assert!(now > 1_000_000_000, "default clock returned {now}");
     }
 }

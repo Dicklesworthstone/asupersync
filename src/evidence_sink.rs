@@ -109,9 +109,18 @@ impl EvidenceSink for JsonlSink {
     }
 
     fn next_evidence_ts(&self) -> u64 {
+        // br-asupersync-n1g6sm — wrapping_add preserves uniqueness across
+        // the full u64 cycle. The previous saturating_add path collided
+        // at u64::MAX (fetch_add(1) on the atomic at u64::MAX-1 returns
+        // u64::MAX-1 then saturating_add(1) yields u64::MAX; the next
+        // call sees the atomic wrap to 0, returns u64::MAX from the
+        // saturating add too — TWO consecutive calls return the same
+        // value, breaking ordering and replay-time deduplication).
+        // wrapping_add never collides; the consumer is responsible for
+        // tolerating wraparound in long-lived deployments.
         self.timestamp_seq
             .fetch_add(1, Ordering::Relaxed)
-            .saturating_add(1)
+            .wrapping_add(1)
     }
 }
 
@@ -157,9 +166,11 @@ impl EvidenceSink for CollectorSink {
     }
 
     fn next_evidence_ts(&self) -> u64 {
+        // br-asupersync-n1g6sm — see JsonlSink::next_evidence_ts for the
+        // collision analysis; same fix.
         self.timestamp_seq
             .fetch_add(1, Ordering::Relaxed)
-            .saturating_add(1)
+            .wrapping_add(1)
     }
 }
 
@@ -608,5 +619,21 @@ mod tests {
             h.join().expect("thread panicked");
         }
         assert_eq!(sink.len(), 100, "expected 100 entries, got {}", sink.len());
+    }
+
+    /// br-asupersync-n1g6sm — `next_evidence_ts` must produce strictly
+    /// distinct values across the wrap boundary. The previous shape
+    /// (`saturating_add(1)`) collided at u64::MAX (two consecutive
+    /// calls returned the same value). We test only the small-counter
+    /// regime here — the wrap-collision argument is structural in the
+    /// switch from saturating_add to wrapping_add.
+    #[test]
+    fn next_evidence_ts_is_distinct_for_consecutive_calls() {
+        let sink = CollectorSink::new();
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..1024 {
+            let ts = sink.next_evidence_ts();
+            assert!(seen.insert(ts), "ts {ts} collided with prior call");
+        }
     }
 }
