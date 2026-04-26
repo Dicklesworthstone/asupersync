@@ -12,10 +12,10 @@
 //! - Cannot be cloned (each obligation is unique)
 //! - Dropping without resolution triggers leak detection
 
+use crate::util::DetHashMap;
 use core::fmt;
 use parking_lot::RwLock;
 use smallvec::SmallVec;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -621,8 +621,8 @@ pub(crate) struct ObligationEntry {
 #[derive(Clone)]
 #[allow(clippy::struct_field_names)]
 struct RegistryMirror {
-    by_id: Arc<RwLock<HashMap<ObligationId, ObligationEntry>>>,
-    by_object: Arc<RwLock<HashMap<ObjectId, Vec<ObligationId>>>>,
+    by_id: Arc<RwLock<DetHashMap<ObligationId, ObligationEntry>>>,
+    by_object: Arc<RwLock<DetHashMap<ObjectId, Vec<ObligationId>>>>,
     by_holder: Arc<RwLock<Vec<HolderSlot>>>,
     by_region: Arc<RwLock<Vec<RegionSlot>>>,
 }
@@ -700,11 +700,21 @@ fn remove_obligation_from_region_slot(
 ///
 /// Provides indexed lookup by ID, object, task, and region. Used by the
 /// runtime to detect leaked obligations and check region quiescence.
+///
+/// br-asupersync-zhtjy9: backed by [`DetHashMap`] (project-fixed
+/// SipHash seed) instead of `std::collections::HashMap` (random
+/// per-process seed). The pre-fix shape produced different
+/// iteration orders across processes, so leak-detection reports
+/// and region-quiescence summaries diverged across replays;
+/// crashpack hashes that incorporated the registry contents were
+/// instable. Same fix-shape as the closed asupersync-q6vujm /
+/// asupersync-ks0t6j / asupersync-jg4yyx (sibling
+/// `types/symbol_set.rs` fix in this same commit).
 pub struct SymbolicObligationRegistry {
     /// Obligations by ID.
-    by_id: Arc<RwLock<HashMap<ObligationId, ObligationEntry>>>,
+    by_id: Arc<RwLock<DetHashMap<ObligationId, ObligationEntry>>>,
     /// Obligations by object ID.
-    by_object: Arc<RwLock<HashMap<ObjectId, Vec<ObligationId>>>>,
+    by_object: Arc<RwLock<DetHashMap<ObjectId, Vec<ObligationId>>>>,
     /// Obligations by holder task (arena-slot indexed, generation-safe).
     by_holder: Arc<RwLock<Vec<HolderSlot>>>,
     /// Obligations by region (arena-slot indexed, generation-safe).
@@ -718,8 +728,8 @@ impl SymbolicObligationRegistry {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            by_id: Arc::new(RwLock::new(HashMap::new())),
-            by_object: Arc::new(RwLock::new(HashMap::new())),
+            by_id: Arc::new(RwLock::new(DetHashMap::default())),
+            by_object: Arc::new(RwLock::new(DetHashMap::default())),
             by_holder: Arc::new(RwLock::new(Vec::new())),
             by_region: Arc::new(RwLock::new(Vec::new())),
             next_id: AtomicU64::new(1),

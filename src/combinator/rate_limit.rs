@@ -1179,9 +1179,20 @@ impl RateLimiterRegistry {
             .clone()
     }
 
-    /// Get metrics for all limiters.
+    /// Get metrics for all limiters, keyed by limiter name in a
+    /// deterministic (lexicographic) iteration order.
+    ///
+    /// br-asupersync-sap5a9: returns [`std::collections::BTreeMap`]
+    /// instead of `HashMap` so callers that fold this into a content
+    /// hash (crashpack manifests, trace certificates, debug
+    /// snapshots) get a stable result across replays. The internal
+    /// `limiters` map remains a `HashMap` for O(1) named lookup; the
+    /// public iteration view is sorted to close the determinism gap.
+    /// Mirrors the closed asupersync-q6vujm /
+    /// asupersync-ks0t6j fix-shape (deterministic iteration for any
+    /// view a hash consumer might fold over).
     #[must_use]
-    pub fn all_metrics(&self) -> HashMap<String, RateLimitMetrics> {
+    pub fn all_metrics(&self) -> std::collections::BTreeMap<String, RateLimitMetrics> {
         let limiters = self.limiters.read();
         limiters
             .iter()

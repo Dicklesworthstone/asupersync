@@ -4,8 +4,8 @@
 //! progress, and reports when decode thresholds are reached.
 
 use crate::types::{Symbol, SymbolId, SymbolKind};
+use crate::util::DetHashMap;
 use parking_lot::RwLock;
-use std::collections::HashMap;
 
 /// Estimated overhead per symbol for bookkeeping.
 const SYMBOL_OVERHEAD_BYTES: usize = 32;
@@ -91,10 +91,20 @@ pub enum InsertResult {
 }
 
 /// A collection of symbols with threshold tracking.
+///
+/// br-asupersync-jg4yyx: backed by [`DetHashMap`] (project-fixed
+/// SipHash seed) instead of `std::collections::HashMap` (random
+/// per-process seed). Pre-fix, two `SymbolSet` instances built from
+/// the same input sequence iterated in different orders across
+/// replays / processes — defeating crashpack-hash determinism and
+/// any oracle that snapshots the symbol set as a golden artifact.
+/// Same fix-shape as the closed asupersync-q6vujm
+/// (`trace/distributed/collector.rs`) and asupersync-ks0t6j
+/// (`runtime/scheduler/three_lane.rs FairnessMonitor`).
 #[derive(Debug, Default)]
 pub struct SymbolSet {
-    symbols: HashMap<SymbolId, Symbol>,
-    block_counts: HashMap<u8, BlockProgress>,
+    symbols: DetHashMap<SymbolId, Symbol>,
+    block_counts: DetHashMap<u8, BlockProgress>,
     total_count: usize,
     total_bytes: usize,
     memory_budget: Option<usize>,
@@ -115,8 +125,8 @@ impl SymbolSet {
     #[must_use]
     pub fn with_config(config: ThresholdConfig) -> Self {
         Self {
-            symbols: HashMap::new(),
-            block_counts: HashMap::new(),
+            symbols: DetHashMap::default(),
+            block_counts: DetHashMap::default(),
             total_count: 0,
             total_bytes: 0,
             memory_budget: None,
