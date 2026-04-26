@@ -235,6 +235,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "raptorq_decode_random"
+path = "fuzz_targets/raptorq_decode_random.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "grpc_server"
 path = "fuzz_targets/grpc_server.rs"
 test = false
@@ -1768,6 +1775,13 @@ bench = false
 [[bin]]
 name = "hpack_rfc7541_edge_cases"
 path = "fuzz_targets/hpack_rfc7541_edge_cases.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "length_delimited_decode"
+path = "fuzz_targets/length_delimited_decode.rs"
 test = false
 doc = false
 bench = false

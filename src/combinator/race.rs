@@ -552,6 +552,12 @@ pub fn verify_losers_drained<T, E>(
 /// # Panics
 ///
 /// Panics with the offending [`LoserDrainViolation`] if the check fails.
+//
+// Currently unused at the call site — the result-constructor wiring promised
+// by br-asupersync-ttoyaz did not land in the same commit as the helper.
+// Marked `#[allow(dead_code)]` so the lib continues to compile under
+// `#![deny(dead_code)]`; the wiring is a follow-up.
+#[allow(dead_code)]
 #[track_caller]
 fn assert_losers_drained<T, E>(losers: &[&Outcome<T, E>]) -> LosersDrainedWitness {
     match verify_losers_drained(losers) {
@@ -597,6 +603,12 @@ pub fn race2_outcomes<T, E>(
     o1: Outcome<T, E>,
     o2: Outcome<T, E>,
 ) -> Race2Result<T, E> {
+    // L-LOSER-DRAINED check: the loser must satisfy the §4.2 invariant
+    // before we hand the race result back. (br-asupersync-ttoyaz)
+    let _witness = match winner {
+        RaceWinner::First => assert_losers_drained::<T, E>(&[&o2]),
+        RaceWinner::Second => assert_losers_drained::<T, E>(&[&o1]),
+    };
     match winner {
         RaceWinner::First => (o1, RaceWinner::First, o2),
         RaceWinner::Second => (o2, RaceWinner::Second, o1),
@@ -722,6 +734,12 @@ pub fn race_all_outcomes<T, E>(
             loser_outcomes.push((i, outcome));
         }
     }
+
+    // L-LOSER-DRAINED check: the §4.2 invariant must hold for every loser
+    // before we expose the race result. (br-asupersync-ttoyaz)
+    let loser_refs: Vec<&Outcome<T, E>> =
+        loser_outcomes.iter().map(|(_, outcome)| outcome).collect();
+    let _witness = assert_losers_drained::<T, E>(&loser_refs);
 
     RaceAllResult::new(
         winner_outcome.expect("winner not found"),
