@@ -228,6 +228,19 @@ pub struct DecodingPipeline {
     object_size: Option<u64>,
     block_plans: Option<Vec<BlockPlan>>,
     auth_context: Option<SecurityContext>,
+    /// br-asupersync-f4mdcr: count of symbols accepted with
+    /// authentication INTENTIONALLY skipped because
+    /// `config.verify_auth = false`. Surfaced via
+    /// [`Self::skipped_verifications`] so operators alerting on
+    /// "authenticated symbol pipeline" health have an audit trail
+    /// instead of silent acceptance.
+    skipped_verifications: u64,
+    /// br-asupersync-f4mdcr: tracks whether we have already emitted
+    /// the one-time WARN log for the verify-auth-disabled path. The
+    /// log is emitted once per pipeline instance to avoid spamming
+    /// per-symbol log lines while still giving operators a visible
+    /// signal that auth is off.
+    verify_auth_disabled_warned: bool,
 }
 
 impl DecodingPipeline {
@@ -249,7 +262,24 @@ impl DecodingPipeline {
             object_size: None,
             block_plans: None,
             auth_context: None,
+            skipped_verifications: 0,
+            verify_auth_disabled_warned: false,
         }
+    }
+
+    /// br-asupersync-f4mdcr: total number of `feed()` calls that
+    /// accepted a symbol with authentication INTENTIONALLY skipped
+    /// because `config.verify_auth = false`. Operators can scrape
+    /// this counter via the runtime's observability surface to alert
+    /// on misconfigured pipelines that quietly disable auth in
+    /// production. Pre-fix the skip was silent — no log, no counter,
+    /// no observability hook fired — so a deployment that misset
+    /// `verify_auth = false` accepted unauthenticated symbols
+    /// without any operator-visible signal.
+    #[must_use]
+    #[inline]
+    pub const fn skipped_verifications(&self) -> u64 {
+        self.skipped_verifications
     }
 
     /// Creates a new decoding pipeline with authentication enabled.
@@ -314,6 +344,27 @@ impl DecodingPipeline {
                         RejectReason::AuthenticationFailed,
                     ));
                 }
+            }
+        } else {
+            // br-asupersync-f4mdcr: auth is disabled by configuration.
+            // The pre-fix shape silently accepted the symbol with NO
+            // log, NO counter, NO observability hook — operators
+            // alerting on `starvation_events: 0, priority_inversions: 0`
+            // had no way to detect a deployment that quietly turned
+            // off auth. Now we emit a one-time WARN per pipeline
+            // instance and increment a `skipped_verifications`
+            // counter that observers can poll via
+            // [`Self::skipped_verifications`].
+            self.skipped_verifications = self.skipped_verifications.saturating_add(1);
+            if !self.verify_auth_disabled_warned {
+                self.verify_auth_disabled_warned = true;
+                crate::tracing_compat::warn!(
+                    target: "asupersync::decoding",
+                    "br-asupersync-f4mdcr: DecodingPipeline configured \
+                     with verify_auth=false; subsequent symbols are accepted \
+                     without authentication. Skipped count is exposed via \
+                     DecodingPipeline::skipped_verifications()."
+                );
             }
         }
 
