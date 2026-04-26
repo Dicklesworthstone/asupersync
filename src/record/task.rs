@@ -70,6 +70,15 @@ pub enum TaskPhase {
 }
 
 impl TaskPhase {
+    /// Returns `true` for terminal phases (currently only [`TaskPhase::Completed`]).
+    /// Added by br-asupersync-xxcss5 follow-up to unblock the Lyapunov
+    /// governor's live-task scan that filters out terminal records.
+    #[inline]
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed)
+    }
+
     /// Returns whether transitioning from `self` to `next` is a legal
     /// state machine transition.
     ///

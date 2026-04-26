@@ -49,6 +49,7 @@ pub struct TaskTable {
     tasks_with_deadline: usize,
 }
 
+impl TaskTable {
     /// Records a task phase transition for incremental bookkeeping.
     ///
     /// O(1) — updates cached counters used for Lyapunov governor snapshots.
@@ -89,6 +90,9 @@ pub struct TaskTable {
     }
 
     /// Internal helper to unregister a task's metadata (called on removal or terminal transition).
+    /// Currently unused at the call site — wiring to `remove`/`remove_and_recycle`
+    /// is pending under br-asupersync-xxcss5; allow(dead_code) until then.
+    #[allow(dead_code)]
     #[inline]
     fn note_task_removed(&mut self, phase: crate::record::task::TaskPhase, deadline: Option<crate::types::Time>) {
         let idx = phase as usize;
@@ -127,10 +131,12 @@ pub struct TaskTable {
     {
         if let Some(record) = self.tasks.get_mut(task_id.arena_index()) {
             let old_phase = record.phase.load();
-            let old_deadline = record.deadline;
+            // br-xxcss5: TaskRecord lacks a deadline field; deadline tracking
+            // is a no-op pending the field being plumbed in.
+            let old_deadline: Option<crate::types::Time> = None;
             let res = f(record);
             let new_phase = record.phase.load();
-            let new_deadline = record.deadline;
+            let new_deadline: Option<crate::types::Time> = None;
             self.note_phase_transition(old_phase, new_phase);
             self.note_deadline_changed(old_deadline, new_deadline);
             Some(res)
@@ -172,7 +178,6 @@ pub struct TaskTable {
         self.tasks_with_deadline
     }
 
-impl TaskTable {
     /// Creates a new empty task table.
     #[must_use]
     #[inline]
@@ -225,7 +230,11 @@ impl TaskTable {
     #[inline]
     pub fn insert(&mut self, mut record: TaskRecord) -> ArenaIndex {
         let phase = record.phase.load();
-        let deadline = record.deadline;
+        // br-xxcss5: TaskRecord does not carry a deadline field (yet); pass
+        // None so the Lyapunov deadline-sum counter stays at 0 until the
+        // field is plumbed in. Wiring the actual deadline source here would
+        // require coordinating with the deadline-monitor surface.
+        let deadline: Option<crate::types::Time> = None;
         let idx = self.tasks.insert_with(|idx| {
             // Canonicalize record.id to its arena slot to keep table invariants intact.
             record.id = TaskId::from_arena(idx);
@@ -377,15 +386,9 @@ impl TaskTable {
         })
     }
 
-    /// Updates a task record using a closure.
-    #[inline]
-    pub fn update_task<F, R>(&mut self, task_id: TaskId, f: F) -> Option<R>
-    where
-        F: FnOnce(&mut TaskRecord) -> R,
-    {
-        let record = self.tasks.get_mut(task_id.arena_index())?;
-        Some(f(record))
-    }
+    // Note: the simple `update_task` previously defined here was superseded
+    // by the phase/deadline-aware version at the top of this impl block
+    // (br-asupersync-xxcss5).
 
     /// Removes a task record from the arena.
     ///
