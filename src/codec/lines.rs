@@ -389,7 +389,25 @@ mod tests {
         assert!(dbg.contains("LinesCodec"), "{dbg}");
         let cloned = codec.clone();
         assert_eq!(cloned.max_length(), codec.max_length());
+        // br-asupersync-4wvgz5: the default is bounded to prevent
+        // line-length DoS. usize::MAX is now opt-in via with_unbounded().
         let def = LinesCodec::default();
-        assert_eq!(def.max_length(), usize::MAX);
+        assert_eq!(def.max_length(), DEFAULT_MAX_LINE_LENGTH);
+        assert_eq!(LinesCodec::new().max_length(), DEFAULT_MAX_LINE_LENGTH);
+        assert_eq!(LinesCodec::with_unbounded().max_length(), usize::MAX);
+    }
+
+    /// br-asupersync-4wvgz5: a peer that streams bytes without `\n`
+    /// must hit the bounded-default ceiling, not OOM the host.
+    #[test]
+    fn default_max_length_bounds_unterminated_stream() {
+        let mut codec = LinesCodec::new();
+        let mut buf = BytesMut::new();
+        // Push DEFAULT_MAX_LINE_LENGTH+1 bytes with no newline.
+        buf.put_slice(&vec![b'x'; DEFAULT_MAX_LINE_LENGTH + 1]);
+        assert!(matches!(
+            codec.decode(&mut buf),
+            Err(LinesCodecError::MaxLineLengthExceeded)
+        ));
     }
 }
