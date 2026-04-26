@@ -867,7 +867,9 @@ impl NoLeakProver {
 
             self.steps.push(ProofStep {
                 property: LivenessProperty::EventualResolution,
-                subject: ProofSubject::Obligation(ObligationId::new_for_test(0, 0)),
+                subject: ProofSubject::Obligation(ObligationId::from_arena(
+                    crate::util::ArenaIndex::new(0, 0),
+                )),
                 time: trace_end,
                 verified: false,
                 description: format!(
@@ -878,7 +880,9 @@ impl NoLeakProver {
         } else {
             self.steps.push(ProofStep {
                 property: LivenessProperty::EventualResolution,
-                subject: ProofSubject::Obligation(ObligationId::new_for_test(0, 0)),
+                subject: ProofSubject::Obligation(ObligationId::from_arena(
+                    crate::util::ArenaIndex::new(0, 0),
+                )),
                 time: trace_end,
                 verified: true,
                 description: "ghost_counter = 0 at trace end".to_string(),

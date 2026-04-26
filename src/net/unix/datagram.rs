@@ -41,11 +41,26 @@ use std::path::{Path, PathBuf};
 use std::task::{Context, Poll};
 
 #[inline]
+fn cancelled_poll<T>() -> Poll<io::Result<T>> {
+    Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")))
+}
+
+#[inline]
 fn empty_datagram_recv_from_buffer_error() -> io::Error {
     io::Error::new(
         io::ErrorKind::InvalidInput,
         "UnixDatagram::recv_from requires a non-empty buffer",
     )
+}
+
+#[inline]
+fn would_block_errno(errno: Errno) -> bool {
+    errno == Errno::EAGAIN || errno == Errno::EWOULDBLOCK
+}
+
+#[inline]
+fn errno_poll_error<T>(errno: Errno) -> Poll<io::Result<T>> {
+    Poll::Ready(Err(io::Error::from_raw_os_error(errno as i32)))
 }
 
 /// A Unix domain socket datagram.
@@ -315,6 +330,17 @@ impl UnixDatagram {
         }
     }
 
+    fn pending_on_interest<T>(
+        &mut self,
+        cx: &Context<'_>,
+        interest: Interest,
+    ) -> Poll<io::Result<T>> {
+        match self.register_interest(cx, interest) {
+            Ok(()) => Poll::Pending,
+            Err(err) => Poll::Ready(Err(err)),
+        }
+    }
+
     /// Sends data to the specified address.
     ///
     /// # Cancel-Safety
@@ -348,15 +374,12 @@ impl UnixDatagram {
         let path_ref = path.as_ref();
         std::future::poll_fn(|cx| {
             if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-                return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+                return cancelled_poll();
             }
             match self.inner.send_to(buf, path_ref) {
                 Ok(n) => Poll::Ready(Ok(n)),
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    if let Err(err) = self.register_interest(cx, Interest::WRITABLE) {
-                        return Poll::Ready(Err(err));
-                    }
-                    Poll::Pending
+                    self.pending_on_interest(cx, Interest::WRITABLE)
                 }
                 Err(e) => Poll::Ready(Err(e)),
             }
@@ -398,15 +421,12 @@ impl UnixDatagram {
 
         std::future::poll_fn(|cx| {
             if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-                return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+                return cancelled_poll();
             }
             match self.inner.recv_from(buf) {
                 Ok((n, addr)) => Poll::Ready(Ok((n, addr))),
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    if let Err(err) = self.register_interest(cx, Interest::READABLE) {
-                        return Poll::Ready(Err(err));
-                    }
-                    Poll::Pending
+                    self.pending_on_interest(cx, Interest::READABLE)
                 }
                 Err(e) => Poll::Ready(Err(e)),
             }
@@ -448,15 +468,12 @@ impl UnixDatagram {
     pub async fn send(&mut self, buf: &[u8]) -> io::Result<usize> {
         std::future::poll_fn(|cx| {
             if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-                return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+                return cancelled_poll();
             }
             match self.inner.send(buf) {
                 Ok(n) => Poll::Ready(Ok(n)),
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    if let Err(err) = self.register_interest(cx, Interest::WRITABLE) {
-                        return Poll::Ready(Err(err));
-                    }
-                    Poll::Pending
+                    self.pending_on_interest(cx, Interest::WRITABLE)
                 }
                 Err(e) => Poll::Ready(Err(e)),
             }
@@ -497,15 +514,12 @@ impl UnixDatagram {
     pub async fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         std::future::poll_fn(|cx| {
             if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-                return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+                return cancelled_poll();
             }
             match self.inner.recv(buf) {
                 Ok(n) => Poll::Ready(Ok(n)),
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    if let Err(err) = self.register_interest(cx, Interest::READABLE) {
-                        return Poll::Ready(Err(err));
-                    }
-                    Poll::Pending
+                    self.pending_on_interest(cx, Interest::READABLE)
                 }
                 Err(e) => Poll::Ready(Err(e)),
             }
@@ -614,7 +628,7 @@ impl UnixDatagram {
         use std::os::unix::io::AsRawFd;
 
         if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            return cancelled_poll();
         }
 
         // For datagrams, a 1-byte MSG_PEEK probe checks readiness without consuming data.
@@ -625,13 +639,10 @@ impl UnixDatagram {
             MsgFlags::MSG_PEEK | MsgFlags::MSG_DONTWAIT,
         ) {
             Ok(_) => Poll::Ready(Ok(())),
-            Err(errno) if errno == Errno::EAGAIN || errno == Errno::EWOULDBLOCK => {
-                if let Err(e) = self.register_interest(cx, Interest::READABLE) {
-                    return Poll::Ready(Err(e));
-                }
-                Poll::Pending
+            Err(errno) if would_block_errno(errno) => {
+                self.pending_on_interest(cx, Interest::READABLE)
             }
-            Err(errno) => Poll::Ready(Err(io::Error::from_raw_os_error(errno as i32))),
+            Err(errno) => errno_poll_error(errno),
         }
     }
 
@@ -643,17 +654,12 @@ impl UnixDatagram {
         use std::os::unix::io::AsFd;
 
         if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            return cancelled_poll();
         }
 
         let mut fds = [PollFd::new(self.inner.as_fd(), PollFlags::POLLOUT)];
         match poll(&mut fds, PollTimeout::ZERO) {
-            Ok(0) => {
-                if let Err(e) = self.register_interest(cx, Interest::WRITABLE) {
-                    return Poll::Ready(Err(e));
-                }
-                Poll::Pending
-            }
+            Ok(0) => self.pending_on_interest(cx, Interest::WRITABLE),
             Ok(_) => {
                 let Some(revents) = fds[0].revents() else {
                     return Poll::Ready(Err(io::Error::other("poll returned unknown event bits")));
@@ -671,13 +677,10 @@ impl UnixDatagram {
                         "poll indicates socket error: {revents:?}"
                     ))))
                 } else {
-                    if let Err(e) = self.register_interest(cx, Interest::WRITABLE) {
-                        return Poll::Ready(Err(e));
-                    }
-                    Poll::Pending
+                    self.pending_on_interest(cx, Interest::WRITABLE)
                 }
             }
-            Err(errno) => Poll::Ready(Err(io::Error::from_raw_os_error(errno as i32))),
+            Err(errno) => errno_poll_error(errno),
         }
     }
 
@@ -689,7 +692,7 @@ impl UnixDatagram {
 
         std::future::poll_fn(|cx| {
             if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-                return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+                return cancelled_poll();
             }
             match socket::recv(
                 self.inner.as_raw_fd(),
@@ -697,13 +700,10 @@ impl UnixDatagram {
                 MsgFlags::MSG_PEEK | MsgFlags::MSG_DONTWAIT,
             ) {
                 Ok(n) => Poll::Ready(Ok(n)),
-                Err(errno) if errno == Errno::EAGAIN || errno == Errno::EWOULDBLOCK => {
-                    if let Err(e) = self.register_interest(cx, Interest::READABLE) {
-                        return Poll::Ready(Err(e));
-                    }
-                    Poll::Pending
+                Err(errno) if would_block_errno(errno) => {
+                    self.pending_on_interest(cx, Interest::READABLE)
                 }
-                Err(errno) => Poll::Ready(Err(io::Error::from_raw_os_error(errno as i32))),
+                Err(errno) => errno_poll_error(errno),
             }
         })
         .await
@@ -750,7 +750,7 @@ impl UnixDatagram {
 
         std::future::poll_fn(|cx| {
             if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-                return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+                return cancelled_poll();
             }
             let mut iov = [IoSliceMut::new(buf)];
             match socket::recvmsg::<socket::UnixAddr>(
@@ -769,13 +769,10 @@ impl UnixDatagram {
                     let addr = Self::socket_addr_from_unix_addr(&addr)?;
                     Poll::Ready(Ok((msg.bytes, addr)))
                 }
-                Err(errno) if errno == Errno::EAGAIN || errno == Errno::EWOULDBLOCK => {
-                    if let Err(e) = self.register_interest(cx, Interest::READABLE) {
-                        return Poll::Ready(Err(e));
-                    }
-                    Poll::Pending
+                Err(errno) if would_block_errno(errno) => {
+                    self.pending_on_interest(cx, Interest::READABLE)
                 }
-                Err(errno) => Poll::Ready(Err(io::Error::from_raw_os_error(errno as i32))),
+                Err(errno) => errno_poll_error(errno),
             }
         })
         .await

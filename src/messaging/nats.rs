@@ -216,15 +216,15 @@ impl fmt::Debug for NatsConfig {
         // without exposing the underlying value's length (a
         // length-leak side channel would be visible if we used
         // Some(value.len()) or similar).
-        fn redact(opt: &Option<String>) -> Option<&'static str> {
-            opt.as_ref().map(|_| "<redacted>")
-        }
+        let user = self.user.as_deref().map(|_| "<redacted>");
+        let password = self.password.as_deref().map(|_| "<redacted>");
+        let token = self.token.as_deref().map(|_| "<redacted>");
         f.debug_struct("NatsConfig")
             .field("host", &self.host)
             .field("port", &self.port)
-            .field("user", &redact(&self.user))
-            .field("password", &redact(&self.password))
-            .field("token", &redact(&self.token))
+            .field("user", &user)
+            .field("password", &password)
+            .field("token", &token)
             .field("name", &self.name)
             .field("verbose", &self.verbose)
             .field("pedantic", &self.pedantic)
@@ -1329,8 +1329,7 @@ impl NatsClient {
             .server_info
             .lock()
             .as_ref()
-            .map(|info| info.headers)
-            .unwrap_or(false);
+            .is_some_and(|info| info.headers);
         if !server_supports_headers {
             return Err(NatsError::Protocol(
                 "server did not advertise headers:true in INFO; HPUB is not allowed".to_string(),

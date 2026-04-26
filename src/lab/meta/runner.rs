@@ -9,6 +9,7 @@ use crate::lab::oracle::OracleViolation;
 use crate::lab::{LabConfig, LabRuntime, OracleSuite};
 use crate::record::ObligationKind;
 use crate::types::{Budget, ObligationId, RegionId, TaskId, Time};
+use crate::util::ArenaIndex;
 
 use super::mutation::{ALL_ORACLE_INVARIANTS, BuiltinMutation, invariant_from_violation};
 
@@ -40,20 +41,20 @@ impl MetaHarness {
     }
 
     pub(crate) fn next_region(&mut self) -> RegionId {
-        let id = RegionId::new_for_test(self.next_region, 0);
+        let id = RegionId::from_arena(ArenaIndex::new(self.next_region, 0));
         self.next_region = self.next_region.saturating_add(1);
         id
     }
 
     pub(crate) fn next_task(&mut self) -> TaskId {
-        let id = TaskId::new_for_test(self.next_task, 0);
+        let id = TaskId::from_arena(ArenaIndex::new(self.next_task, 0));
         self.next_task = self.next_task.saturating_add(1);
         id
     }
 
     #[allow(dead_code)]
     pub(crate) fn next_obligation(&mut self) -> ObligationId {
-        let id = ObligationId::new_for_test(self.next_obligation, 0);
+        let id = ObligationId::from_arena(ArenaIndex::new(self.next_obligation, 0));
         self.next_obligation = self.next_obligation.saturating_add(1);
         id
     }

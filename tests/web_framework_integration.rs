@@ -691,14 +691,23 @@ fn integration_response_redirect_variants() {
     test_phase!("Response Redirect Variants");
 
     let router = Router::new()
-        .route("/r302", get(FnHandler::new(|| Redirect::to("/target"))))
+        .route(
+            "/r302",
+            get(FnHandler::new(|| {
+                Redirect::to("/target").expect("valid redirect")
+            })),
+        )
         .route(
             "/r301",
-            get(FnHandler::new(|| Redirect::permanent("/target"))),
+            get(FnHandler::new(|| {
+                Redirect::permanent("/target").expect("valid redirect")
+            })),
         )
         .route(
             "/r307",
-            get(FnHandler::new(|| Redirect::temporary("/target"))),
+            get(FnHandler::new(|| {
+                Redirect::temporary("/target").expect("valid redirect")
+            })),
         );
 
     let resp = router.handle(Request::new("GET", "/r302"));

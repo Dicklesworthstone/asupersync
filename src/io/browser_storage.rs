@@ -1173,6 +1173,7 @@ impl IndexedDbHostBackend {
         Err("window or WorkerGlobalScope IndexedDB host is unavailable".to_owned())
     }
 
+    #[allow(clippy::future_not_send)]
     async fn database(&self) -> Result<IdbDatabase, String> {
         let request = Self::factory()?
             .open_with_u32(Self::DB_NAME, Self::DB_VERSION)
@@ -1194,6 +1195,7 @@ impl IndexedDbHostBackend {
             .map_err(|value| format!("IndexedDB open did not return a database: {value:?}"))
     }
 
+    #[allow(clippy::future_not_send)]
     async fn store(
         &self,
         mode: IdbTransactionMode,
@@ -1377,6 +1379,7 @@ impl Drop for IdbRequestHandlerGuard {
 }
 
 #[cfg(target_arch = "wasm32")]
+#[allow(clippy::future_not_send)]
 async fn await_request(request: &IdbRequest) -> Result<JsValue, String> {
     let request = request.clone();
     let callbacks: std::rc::Rc<
@@ -1415,10 +1418,10 @@ async fn await_request(request: &IdbRequest) -> Result<JsValue, String> {
         let on_error: Closure<dyn FnMut(Event)> = Closure::new(move |_event: Event| {
             clear_idb_request_handlers(&error_cleanup);
             let _ = error_callbacks.borrow_mut().take();
-            let error = error_request
-                .error()
-                .map(JsValue::from)
-                .unwrap_or_else(|_| JsValue::from_str("IndexedDB request failed"));
+            let error = error_request.error().map_or_else(
+                |_| JsValue::from_str("IndexedDB request failed"),
+                JsValue::from,
+            );
             let _ = reject_error.call1(&JsValue::UNDEFINED, &error);
         });
 
@@ -1437,6 +1440,7 @@ async fn await_request(request: &IdbRequest) -> Result<JsValue, String> {
 }
 
 #[cfg(target_arch = "wasm32")]
+#[allow(clippy::future_not_send)]
 async fn await_open_request(request: &IdbOpenDbRequest) -> Result<JsValue, String> {
     let request = request.clone();
     let promise = Promise::new(&mut move |resolve, reject| {
@@ -1467,10 +1471,10 @@ async fn await_open_request(request: &IdbOpenDbRequest) -> Result<JsValue, Strin
         let on_error: Closure<dyn FnMut(Event)> = Closure::new(move |_event: Event| {
             clear_idb_open_request_handlers(&error_cleanup);
             let _ = error_callbacks.borrow_mut().take();
-            let error = error_request
-                .error()
-                .map(JsValue::from)
-                .unwrap_or_else(|_| JsValue::from_str("IndexedDB open failed"));
+            let error = error_request.error().map_or_else(
+                |_| JsValue::from_str("IndexedDB open failed"),
+                JsValue::from,
+            );
             let _ = reject_error.call1(&JsValue::UNDEFINED, &error);
         });
 
@@ -1499,6 +1503,7 @@ async fn await_open_request(request: &IdbOpenDbRequest) -> Result<JsValue, Strin
 }
 
 #[cfg(target_arch = "wasm32")]
+#[allow(clippy::future_not_send)]
 async fn await_transaction(transaction: &IdbTransaction) -> Result<(), String> {
     let transaction = transaction.clone();
     let promise = Promise::new(&mut move |resolve, reject| {

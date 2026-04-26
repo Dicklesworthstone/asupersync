@@ -617,13 +617,13 @@ impl std::fmt::Display for SnapshotError {
     }
 }
 
-/// br-asupersync-poshr8: hard cap on the size of the metadata blob
-/// trailer in a snapshot frame, enforced BEFORE allocation in
-/// [`RegionSnapshot::from_bytes`]. 16 MiB comfortably exceeds the
-/// largest legitimate metadata payload observed in production
-/// workloads (typically < 64 KiB) while keeping per-frame
-/// allocation small enough that a coordinated 1k-peer flood
-/// remains containable.
+/// br-asupersync-poshr8: hard cap on the size of the metadata blob trailer in a
+/// snapshot frame.
+///
+/// Enforced BEFORE allocation in [`RegionSnapshot::from_bytes`]. 16 MiB
+/// comfortably exceeds the largest legitimate metadata payload observed in
+/// production workloads (typically < 64 KiB) while keeping per-frame allocation
+/// small enough that a coordinated 1k-peer flood remains containable.
 pub const MAX_METADATA_LEN: usize = 16 * 1024 * 1024;
 
 impl std::error::Error for SnapshotError {}

@@ -276,7 +276,7 @@ fn default_config_preserves_native_thread_name() {
 
 #[test]
 fn lab_io_cap_through_trait_not_real() {
-    let cap = LabIoCap::new();
+    let cap = LabIoCap::new_for_tests();
     let io_cap: &dyn IoCap = &cap;
     assert!(!io_cap.is_real_io(), "lab IO is not real");
     assert_eq!(io_cap.name(), "lab");
@@ -284,7 +284,7 @@ fn lab_io_cap_through_trait_not_real() {
 
 #[test]
 fn lab_io_cap_through_trait_has_lab_capabilities() {
-    let cap = LabIoCap::new();
+    let cap = LabIoCap::new_for_tests();
     let io_cap: &dyn IoCap = &cap;
     let caps = io_cap.capabilities();
     assert_eq!(caps, IoCapabilities::LAB);
@@ -296,7 +296,7 @@ fn lab_io_cap_through_trait_has_lab_capabilities() {
 
 #[test]
 fn lab_io_cap_through_trait_no_fetch() {
-    let cap = LabIoCap::new();
+    let cap = LabIoCap::new_for_tests();
     let io_cap: &dyn IoCap = &cap;
     assert!(
         io_cap.fetch_cap().is_none(),
@@ -306,7 +306,7 @@ fn lab_io_cap_through_trait_no_fetch() {
 
 #[test]
 fn lab_io_cap_through_trait_stats_accumulate() {
-    let cap = LabIoCap::new();
+    let cap = LabIoCap::new_for_tests();
     let io_cap: &dyn IoCap = &cap;
 
     assert_eq!(io_cap.stats(), IoStats::default());
@@ -325,7 +325,7 @@ fn lab_io_cap_through_trait_stats_accumulate() {
 
 #[test]
 fn browser_fetch_cap_isolated_from_lab_cap() {
-    let lab = LabIoCap::new();
+    let lab = LabIoCap::new_for_tests();
     let lab_cap: &dyn IoCap = &lab;
 
     let browser = BrowserFetchIoCap::new(
@@ -415,7 +415,7 @@ fn fetch_authority_deny_all_rejects_everything() {
 
 #[test]
 fn io_cap_trait_objects_in_heterogeneous_collection() {
-    let lab = LabIoCap::new();
+    let lab = LabIoCap::new_for_tests();
     let browser = BrowserFetchIoCap::new(
         FetchAuthority::deny_all()
             .grant_origin("https://example.com")

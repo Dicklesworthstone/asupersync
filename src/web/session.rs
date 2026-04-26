@@ -1707,9 +1707,9 @@ mod tests {
             .split(';')
             .next()
             .unwrap()
-            .splitn(2, '=')
-            .nth(1)
+            .split_once('=')
             .unwrap()
+            .1
     }
 
     /// Handler that calls `Session::regenerate()` and then PANICS,
@@ -1870,9 +1870,6 @@ mod tests {
             store.load(&original_id).is_none(),
             "original session must be deleted after rotation"
         );
-        assert!(
-            store.load(new_id).is_some(),
-            "new session must be present"
-        );
+        assert!(store.load(new_id).is_some(), "new session must be present");
     }
 }

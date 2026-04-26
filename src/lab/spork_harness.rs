@@ -26,7 +26,7 @@ use crate::cx::Cx;
 use crate::lab::config::LabConfig;
 use crate::lab::dual_run::{DualRunScenarioIdentity, ReplayMetadata, SeedLineageRecord};
 use crate::lab::runtime::{HarnessAttachmentRef, LabRuntime, SporkHarnessReport};
-use crate::types::Budget;
+use crate::types::{Budget, TaskId};
 use std::collections::BTreeMap;
 
 const LAB_SPORK_HARNESS_ADAPTER: &str = "lab.spork_harness";
@@ -73,8 +73,8 @@ impl SporkAppHarness {
     /// to drive execution.
     pub fn new(config: LabConfig, app: AppSpec) -> Result<Self, HarnessError> {
         let mut runtime = LabRuntime::new(config);
-        let cx = Cx::for_testing();
         let root_region = runtime.state.create_root_region(Budget::INFINITE);
+        let cx = Cx::new(root_region, TaskId::testing_default(), Budget::INFINITE);
 
         let app_handle = app
             .start(&mut runtime.state, &cx, root_region)

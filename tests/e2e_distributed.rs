@@ -32,6 +32,8 @@ use asupersync::types::budget::Budget;
 use asupersync::types::{Outcome, RegionId, TaskId, Time};
 use asupersync::util::DetRng;
 
+const TEST_RING_SEED: u64 = 0;
+
 // =========================================================================
 // Helpers
 // =========================================================================
@@ -146,7 +148,7 @@ impl TestCluster {
     }
 
     fn elect_leader(&mut self) -> Option<String> {
-        let mut ring = HashRing::new(8);
+        let mut ring = HashRing::new(8, TEST_RING_SEED);
         for replica in self.record.replicas.iter().filter(|r| replica_can_ack(r)) {
             ring.add_node(replica.id.clone());
         }

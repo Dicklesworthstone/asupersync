@@ -10,9 +10,11 @@ use asupersync::bytes::Bytes;
 use asupersync::http::h2::connection::{Connection, DEFAULT_CONNECTION_WINDOW_SIZE};
 use asupersync::http::h2::error::{ErrorCode, H2Error};
 use asupersync::http::h2::frame::{
-    DataFrame, Frame, HeadersFrame, SettingsFrame, WindowUpdateFrame,
+    DataFrame, Frame, HeadersFrame, Setting, SettingsFrame, WindowUpdateFrame,
 };
-use asupersync::http::h2::settings::{DEFAULT_INITIAL_WINDOW_SIZE, Setting, Settings};
+use asupersync::http::h2::settings::{DEFAULT_INITIAL_WINDOW_SIZE, Settings};
+
+const DEFAULT_INITIAL_WINDOW_SIZE_I32: i32 = DEFAULT_INITIAL_WINDOW_SIZE as i32;
 
 #[cfg(test)]
 mod conformance_window_update {
@@ -268,7 +270,7 @@ mod conformance_window_update {
         let stream1 = conn.stream(1).expect("stream 1 should exist");
         assert_eq!(
             stream1.send_window(),
-            DEFAULT_INITIAL_WINDOW_SIZE,
+            DEFAULT_INITIAL_WINDOW_SIZE_I32,
             "Stream 1 send window should be unchanged by connection update"
         );
 
@@ -289,7 +291,7 @@ mod conformance_window_update {
         let stream3 = conn.stream(3).expect("stream 3 should exist");
         assert_eq!(
             stream3.send_window(),
-            DEFAULT_INITIAL_WINDOW_SIZE,
+            DEFAULT_INITIAL_WINDOW_SIZE_I32,
             "Stream 3 window should be unchanged by stream 1 update"
         );
 
@@ -313,7 +315,7 @@ mod conformance_window_update {
         let stream1_after = conn.stream(1).expect("stream 1 should exist");
         assert_eq!(
             stream1_after.recv_window(),
-            DEFAULT_INITIAL_WINDOW_SIZE - data_size as i32,
+            DEFAULT_INITIAL_WINDOW_SIZE_I32 - data_size as i32,
             "Stream 1 recv window should be decremented by data size"
         );
 
@@ -321,7 +323,7 @@ mod conformance_window_update {
         let stream3_after = conn.stream(3).expect("stream 3 should exist");
         assert_eq!(
             stream3_after.recv_window(),
-            DEFAULT_INITIAL_WINDOW_SIZE,
+            DEFAULT_INITIAL_WINDOW_SIZE_I32,
             "Stream 3 recv window should be unchanged"
         );
 
@@ -358,7 +360,7 @@ mod conformance_window_update {
             .expect("should process data frame");
 
         let stream1_window_after_data = conn.stream(1).unwrap().recv_window();
-        let expected_after_data = DEFAULT_INITIAL_WINDOW_SIZE - data_size as i32;
+        let expected_after_data = DEFAULT_INITIAL_WINDOW_SIZE_I32 - data_size as i32;
         assert_eq!(
             stream1_window_after_data, expected_after_data,
             "Stream 1 window should be reduced after data"
@@ -367,7 +369,7 @@ mod conformance_window_update {
         // Stream 3 should still have full window
         assert_eq!(
             conn.stream(3).unwrap().recv_window(),
-            DEFAULT_INITIAL_WINDOW_SIZE,
+            DEFAULT_INITIAL_WINDOW_SIZE_I32,
             "Stream 3 should have full window"
         );
 
@@ -382,7 +384,7 @@ mod conformance_window_update {
             .expect("should process settings increase");
 
         // Both streams should have their windows adjusted by the delta
-        let delta = new_larger_window - DEFAULT_INITIAL_WINDOW_SIZE;
+        let delta = new_larger_window as i32 - DEFAULT_INITIAL_WINDOW_SIZE_I32;
         let stream1_window_after_increase = conn.stream(1).unwrap().recv_window();
         let stream3_window_after_increase = conn.stream(3).unwrap().recv_window();
 
@@ -393,7 +395,7 @@ mod conformance_window_update {
         );
         assert_eq!(
             stream3_window_after_increase,
-            DEFAULT_INITIAL_WINDOW_SIZE + delta,
+            DEFAULT_INITIAL_WINDOW_SIZE_I32 + delta,
             "Stream 3 window should increase by delta"
         );
 
@@ -408,7 +410,7 @@ mod conformance_window_update {
             .expect("should process settings decrease");
 
         // Windows should be adjusted downward
-        let decrease_delta = new_smaller_window - new_larger_window; // negative value
+        let decrease_delta = new_smaller_window as i32 - new_larger_window as i32; // negative value
         let stream1_final = conn.stream(1).unwrap().recv_window();
         let stream3_final = conn.stream(3).unwrap().recv_window();
 
@@ -520,7 +522,7 @@ mod conformance_window_update {
 
         let stream1 = conn.stream(1).expect("stream 1 should exist");
         assert!(
-            stream1.send_window() > DEFAULT_INITIAL_WINDOW_SIZE,
+            stream1.send_window() > DEFAULT_INITIAL_WINDOW_SIZE_I32,
             "Stream 1 send window should reflect new settings"
         );
 

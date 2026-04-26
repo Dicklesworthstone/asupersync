@@ -474,12 +474,14 @@ fn decision_contract_argmin_correctness() {
 
     // Healthy state → aggressive (lowest loss in row 0)
     let posterior = Posterior::new(vec![0.95, 0.02, 0.02, 0.01]).unwrap();
-    let outcome = evaluate(&contract, &posterior, &test_eval_ctx(0.95));
+    let outcome = evaluate(&contract, &posterior, &test_eval_ctx(0.95))
+        .expect("valid scheduler contract should evaluate");
     assert_eq!(outcome.action_index, decision_contract::action::AGGRESSIVE);
 
     // Congested state → conservative (lowest loss in row 1)
     let posterior = Posterior::new(vec![0.02, 0.92, 0.03, 0.03]).unwrap();
-    let outcome = evaluate(&contract, &posterior, &test_eval_ctx(0.95));
+    let outcome = evaluate(&contract, &posterior, &test_eval_ctx(0.95))
+        .expect("valid scheduler contract should evaluate");
     assert_eq!(
         outcome.action_index,
         decision_contract::action::CONSERVATIVE
@@ -493,7 +495,8 @@ fn decision_contract_fallback_policy() {
     let posterior = Posterior::uniform(decision_contract::state::COUNT);
 
     // Low calibration → fallback
-    let outcome = evaluate(&contract, &posterior, &test_eval_ctx(0.1));
+    let outcome = evaluate(&contract, &posterior, &test_eval_ctx(0.1))
+        .expect("valid scheduler contract should evaluate");
     assert!(outcome.fallback_active);
     assert_eq!(
         outcome.action_index,
@@ -532,7 +535,8 @@ fn decision_contract_snapshot_likelihoods_sanity() {
 fn decision_contract_audit_entry_validity() {
     let contract = SchedulerDecisionContract::new();
     let posterior = Posterior::new(vec![0.7, 0.1, 0.1, 0.1]).unwrap();
-    let outcome = evaluate(&contract, &posterior, &test_eval_ctx(0.92));
+    let outcome = evaluate(&contract, &posterior, &test_eval_ctx(0.92))
+        .expect("valid scheduler contract should evaluate");
 
     let evidence = outcome.audit_entry.to_evidence_ledger();
     assert_eq!(evidence.component, "scheduler");
@@ -555,7 +559,8 @@ fn decision_contract_custom_loss_matrix() {
 
     // Should not panic and should produce valid results
     let posterior = Posterior::uniform(decision_contract::state::COUNT);
-    let outcome = evaluate(&contract, &posterior, &test_eval_ctx(0.95));
+    let outcome = evaluate(&contract, &posterior, &test_eval_ctx(0.95))
+        .expect("valid scheduler contract should evaluate");
     assert!(outcome.action_index < decision_contract::action::COUNT);
 }
 
@@ -720,7 +725,8 @@ proptest! {
         let sum = p0 + p1 + p2 + p3;
         let posterior = Posterior::new(vec![p0/sum, p1/sum, p2/sum, p3/sum]).unwrap();
         let contract = SchedulerDecisionContract::new();
-        let outcome = evaluate(&contract, &posterior, &test_eval_ctx(cal));
+        let outcome = evaluate(&contract, &posterior, &test_eval_ctx(cal))
+            .expect("valid scheduler contract should evaluate");
         prop_assert!(outcome.action_index < decision_contract::action::COUNT);
     }
 }

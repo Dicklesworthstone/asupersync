@@ -7,6 +7,8 @@ use insta::assert_json_snapshot;
 use serde_json::json;
 use std::collections::BTreeMap;
 
+const TEST_RING_SEED: u64 = 0;
+
 fn assignment_map(ring: &HashRing, keys: &[u64]) -> BTreeMap<u64, String> {
     keys.iter()
         .map(|key| {
@@ -71,7 +73,7 @@ fn ring_snapshot(
 fn node_set_partitioning_scrubbed() {
     let keys: Vec<u64> = (0..24).collect();
 
-    let mut baseline = HashRing::new(32);
+    let mut baseline = HashRing::new(32, TEST_RING_SEED);
     for node in ["node-a", "node-b", "node-c"] {
         assert!(baseline.add_node(node), "baseline fixture should be unique");
     }
@@ -125,7 +127,7 @@ fn node_set_partitioning_scrubbed() {
 fn node_set_partition_summary_scrubbed() {
     let keys: Vec<u64> = (0..24).collect();
 
-    let mut baseline = HashRing::new(32);
+    let mut baseline = HashRing::new(32, TEST_RING_SEED);
     for node in ["node-a", "node-b", "node-c"] {
         assert!(baseline.add_node(node), "baseline fixture should be unique");
     }

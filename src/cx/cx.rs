@@ -310,7 +310,8 @@ thread_local! {
 /// Guard that pops the corresponding frame from the
 /// `CURRENT_CX_STACK` on drop. (br-asupersync-5ckssb)
 #[cfg_attr(feature = "test-internals", visibility::make(pub))]
-pub(crate) struct CurrentCxGuard {
+/// Guard returned by ambient current-context installation helpers.
+pub struct CurrentCxGuard {
     /// Whether this guard pushed a frame (true) or was a no-op
     /// (false, when caller passed `None`). Determines whether drop
     /// pops.

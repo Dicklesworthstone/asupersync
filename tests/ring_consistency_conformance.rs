@@ -8,6 +8,8 @@ mod tests {
     use asupersync::distributed::consistent_hash::HashRing;
     use std::collections::HashMap;
 
+    const TEST_RING_SEED: u64 = 0;
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum RequirementLevel {
         Must,
@@ -50,7 +52,7 @@ mod tests {
 
         fn run(&self) -> TestResult {
             // Black-box test: verify ordering through key assignment stability
-            let mut ring = HashRing::new(64);
+            let mut ring = HashRing::new(64, TEST_RING_SEED);
             for i in 0..8 {
                 ring.add_node(format!("node-{i}"));
             }
@@ -91,7 +93,7 @@ mod tests {
 
         fn run(&self) -> TestResult {
             let build_ring = || {
-                let mut ring = HashRing::new(32);
+                let mut ring = HashRing::new(32, TEST_RING_SEED);
                 for name in ["alpha", "beta", "gamma", "delta"] {
                     ring.add_node(name);
                 }
@@ -139,7 +141,7 @@ mod tests {
         fn run(&self) -> TestResult {
             for vnodes_per_node in [0, 1, 16, 64] {
                 for node_count in [0, 1, 3, 5] {
-                    let mut ring = HashRing::new(vnodes_per_node);
+                    let mut ring = HashRing::new(vnodes_per_node, TEST_RING_SEED);
 
                     for i in 0..node_count {
                         ring.add_node(format!("node-{i}"));
@@ -194,7 +196,7 @@ mod tests {
         }
 
         fn run(&self) -> TestResult {
-            let ring = HashRing::new(64);
+            let ring = HashRing::new(64, TEST_RING_SEED);
 
             if !ring.is_empty() {
                 return TestResult::Fail {
@@ -230,7 +232,7 @@ mod tests {
         }
 
         fn run(&self) -> TestResult {
-            let mut ring = HashRing::new(64);
+            let mut ring = HashRing::new(64, TEST_RING_SEED);
             for i in 0..5 {
                 ring.add_node(format!("node-{i}"));
             }
@@ -288,7 +290,7 @@ mod tests {
         }
 
         fn run(&self) -> TestResult {
-            let mut ring = HashRing::new(128);
+            let mut ring = HashRing::new(128, TEST_RING_SEED);
             for i in 0..8 {
                 ring.add_node(format!("node-{i}"));
             }

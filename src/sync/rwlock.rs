@@ -24,8 +24,13 @@
 //! ## Starvation Analysis
 //!
 //! - **Writer starvation**: Prevented. Writers block new readers while waiting.
-//! - **Reader starvation**: Possible under continuous write pressure. If writes
-//!   are frequent, readers may wait indefinitely as each writer blocks new reads.
+//! - **Reader starvation**: Bounded. After
+//!   [`MAX_CONSECUTIVE_WRITERS_BEFORE_READER_BATCH`] writers have been
+//!   served from the queue while readers are also queued, the next
+//!   `release_writer` forces a reader batch — draining all queued readers
+//!   before another writer can proceed. This bounds reader-side waiting to
+//!   at most N writer cycles even under continuous write load
+//!   (br-asupersync-4j40bb).
 //!
 //! ## When to Use RwLock vs Mutex
 //!
@@ -70,6 +75,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll, Waker};
 
 use crate::cx::Cx;
+
+/// br-asupersync-4j40bb: bound on consecutive writers served from the queue
+/// while readers are also queued. After this many writer hand-offs in a row,
+/// the next `release_writer` forces a reader batch (draining all queued
+/// readers) before any more writers run. This prevents indefinite reader
+/// starvation while preserving writer-preference under typical load.
+///
+/// Tuning: 16 is large enough that read-vs-write workloads don't see
+/// frequent forced flips, but small enough that worst-case reader latency
+/// is bounded to (N writer-critical-section durations).
+const MAX_CONSECUTIVE_WRITERS_BEFORE_READER_BATCH: usize = 16;
 
 /// Error returned when acquiring a read or write lock fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -145,6 +161,10 @@ struct State {
     reader_waiters: VecDeque<Waiter>,
     writer_queue: VecDeque<Waiter>,
     next_waiter_id: u64,
+    /// br-asupersync-4j40bb: count of consecutive writer hand-offs from
+    /// the queue while readers were also queued. Reset to 0 whenever a
+    /// reader batch runs (forced or natural).
+    consecutive_writers_served: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -384,6 +404,15 @@ impl<T> RwLock<T> {
                 let waker = Self::pop_writer_waiter(&mut state);
                 if waker.is_some() {
                     state.writer_active = true;
+                    // br-asupersync-4j40bb: track writer hand-offs while
+                    // readers are queued so the streak count is accurate
+                    // when release_writer eventually fires.
+                    if !state.reader_waiters.is_empty() {
+                        state.consecutive_writers_served =
+                            state.consecutive_writers_served.saturating_add(1);
+                    } else {
+                        state.consecutive_writers_served = 0;
+                    }
                 }
                 waker
             } else {
@@ -406,19 +435,52 @@ impl<T> RwLock<T> {
                 drop(state);
                 (None, wakers)
             } else {
-                let wake_writer = Self::should_wake_writer(&state);
+                // br-asupersync-4j40bb: bounded reader starvation. After N
+                // consecutive writer hand-offs while readers were also
+                // queued, force a reader batch — drain all queued readers
+                // and reset the counter — before any further writer can
+                // proceed. This bounds reader-side waiting under continuous
+                // write pressure.
+                let force_reader_batch = state.consecutive_writers_served
+                    >= MAX_CONSECUTIVE_WRITERS_BEFORE_READER_BATCH
+                    && !state.reader_waiters.is_empty();
+
+                let wake_writer =
+                    !force_reader_batch && Self::should_wake_writer(&state);
                 if wake_writer {
                     let waker = Self::pop_writer_waiter(&mut state);
                     if waker.is_some() {
                         state.writer_active = true;
+                        // Only count as "writer served while readers waited"
+                        // if there are actually queued readers — otherwise
+                        // there's no starvation to bound.
+                        if !state.reader_waiters.is_empty() {
+                            state.consecutive_writers_served =
+                                state.consecutive_writers_served.saturating_add(1);
+                        } else {
+                            state.consecutive_writers_served = 0;
+                        }
                     }
                     (waker, SmallVec::new())
+                } else if force_reader_batch {
+                    // Forced batch: drain ALL queued readers regardless of
+                    // arrival order vs the first queued writer. The
+                    // writer queue is left intact so writers run after
+                    // these readers release.
+                    let wakers = Self::drain_reader_waiters(&mut state);
+                    state.readers += wakers.len();
+                    state.consecutive_writers_served = 0;
+                    drop(state);
+                    (None, wakers)
                 } else {
                     // Only readers older than the first queued writer can proceed.
                     // Younger readers must remain queued behind that writer to
                     // preserve the lock's documented writer-preference policy.
                     let wakers = Self::take_eligible_reader_waiters(&mut state);
                     state.readers += wakers.len();
+                    if !wakers.is_empty() {
+                        state.consecutive_writers_served = 0;
+                    }
                     drop(state);
                     (None, wakers)
                 }
@@ -2427,6 +2489,118 @@ mod tests {
             wake_count > 0
         );
         crate::test_complete!("test_drop_queued_writer_wakes_readers_when_readers_active");
+    }
+
+    /// br-asupersync-4j40bb regression: under continuous write load, queued
+    /// readers must NOT wait indefinitely. After
+    /// MAX_CONSECUTIVE_WRITERS_BEFORE_READER_BATCH writer hand-offs in a
+    /// row while readers are queued, the next release_writer must force a
+    /// reader batch (drain all queued readers) before any further writer
+    /// can proceed.
+    #[test]
+    fn bounded_writer_preference_eventually_admits_starved_reader() {
+        init_test("bounded_writer_preference_eventually_admits_starved_reader");
+        let cx = test_cx();
+        let lock = RwLock::new(0_u32);
+
+        let wake_state = StdArc::new(std::sync::atomic::AtomicUsize::new(0));
+        let waker = Waker::from(StdArc::new(CountWaker(wake_state.clone())));
+        let mut task_cx = Context::from_waker(&waker);
+
+        // Acquire and release N+2 writers in succession while a reader is
+        // queued. The reader must eventually be granted (woken) within N
+        // writer cycles by the forced reader-batch path.
+        const N: usize = MAX_CONSECUTIVE_WRITERS_BEFORE_READER_BATCH;
+
+        // First take a writer so the reader is forced to queue.
+        let mut fut_initial_w = lock.write(&cx);
+        let Poll::Ready(Ok(initial_w_guard)) =
+            std::pin::Pin::new(&mut fut_initial_w).poll(&mut task_cx)
+        else {
+            panic!("expected Ready on uncontended write")
+        };
+
+        // Queue a reader that will be starved.
+        let mut fut_starved_reader = lock.read(&cx);
+        assert!(
+            std::pin::Pin::new(&mut fut_starved_reader)
+                .poll(&mut task_cx)
+                .is_pending(),
+            "reader must initially queue behind active writer"
+        );
+
+        // Queue N+2 successor writers so each release_writer hands the lock
+        // to the next queued writer rather than the reader.
+        let mut writer_futs: Vec<_> = (0..(N + 2)).map(|_| Box::pin(lock.write(&cx))).collect();
+        for f in &mut writer_futs {
+            assert!(
+                f.as_mut().poll(&mut task_cx).is_pending(),
+                "successor writers must queue"
+            );
+        }
+
+        // Release the initial writer; the chain begins. After at most N
+        // writer hand-offs, the forced reader-batch path must fire and
+        // grant the queued reader.
+        drop(initial_w_guard);
+
+        let mut readers_active = false;
+        let mut writers_drained = 0;
+        for cycle in 0..(N + 2) {
+            // The next queued writer is now active; release it.
+            // Find the writer future that is now Ready.
+            let mut popped = None;
+            for (i, f) in writer_futs.iter_mut().enumerate() {
+                if let Poll::Ready(Ok(_g)) = f.as_mut().poll(&mut task_cx) {
+                    popped = Some(i);
+                    break;
+                }
+            }
+            if let Some(i) = popped {
+                writers_drained += 1;
+                let _ = writer_futs.remove(i);
+            } else {
+                // No writer ready means the forced reader-batch fired.
+                // Verify the reader is now ready.
+                if std::pin::Pin::new(&mut fut_starved_reader)
+                    .poll(&mut task_cx)
+                    .is_ready()
+                {
+                    readers_active = true;
+                    break;
+                }
+            }
+
+            // After every release, check whether the reader was admitted.
+            if std::pin::Pin::new(&mut fut_starved_reader)
+                .poll(&mut task_cx)
+                .is_ready()
+            {
+                readers_active = true;
+                break;
+            }
+            assert!(
+                cycle < N + 1,
+                "reader should be admitted within N writer cycles, got {cycle}"
+            );
+        }
+
+        crate::assert_with_log!(
+            readers_active,
+            "starved reader admitted within N writer cycles",
+            true,
+            readers_active
+        );
+        // Sanity: we did serve writers along the way; the bound is
+        // 'eventually admit reader', not 'never serve writer'.
+        crate::assert_with_log!(
+            writers_drained > 0 && writers_drained <= N + 1,
+            "writers drained within bound",
+            true,
+            writers_drained > 0 && writers_drained <= N + 1
+        );
+
+        crate::test_complete!("bounded_writer_preference_eventually_admits_starved_reader");
     }
 
     #[test]

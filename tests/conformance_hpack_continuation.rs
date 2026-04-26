@@ -63,7 +63,7 @@ fn headers_plus_continuation_single_block_decode() {
     let mut stream = Stream::new(1, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
 
     // Receive headers without END_HEADERS
-    stream.recv_headers(false, false).unwrap();
+    stream.recv_headers(false, false, false).unwrap();
     stream.add_header_fragment(fragment1).unwrap();
 
     // Receive continuation with END_HEADERS
@@ -130,7 +130,7 @@ fn dynamic_table_updates_across_fragments() {
 
     // Process as fragmented header block
     let mut stream = Stream::new(2, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
-    stream.recv_headers(false, false).unwrap();
+    stream.recv_headers(false, false, false).unwrap();
     stream.add_header_fragment(fragment1).unwrap();
     stream.recv_continuation(fragment2, true).unwrap();
 
@@ -158,7 +158,7 @@ fn end_headers_flag_semantics() {
     let mut stream = Stream::new(3, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
 
     // Start receiving headers without END_HEADERS
-    stream.recv_headers(false, false).unwrap();
+    stream.recv_headers(false, false, false).unwrap();
     assert!(stream.is_receiving_headers());
 
     // Add continuation without END_HEADERS
@@ -240,7 +240,7 @@ fn fragmentation_at_arbitrary_boundaries() {
 
         // Process fragments
         let mut stream = Stream::new(5 + split_point as u32, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
-        stream.recv_headers(false, false).unwrap();
+        stream.recv_headers(false, false, false).unwrap();
         stream.add_header_fragment(fragment1).unwrap();
         stream.recv_continuation(fragment2, true).unwrap();
 
@@ -301,7 +301,7 @@ fn multiple_continuation_frames() {
     let mut stream = Stream::new(6, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
 
     // HEADERS frame without END_HEADERS
-    stream.recv_headers(false, false).unwrap();
+    stream.recv_headers(false, false, false).unwrap();
     stream.add_header_fragment(fragment1).unwrap();
 
     // First CONTINUATION without END_HEADERS
@@ -342,7 +342,7 @@ fn fragment_accumulation_size_limits() {
     let mut stream = Stream::new(7, 65535, 1000); // Small max header list size
 
     // Start headers
-    stream.recv_headers(false, false).unwrap();
+    stream.recv_headers(false, false, false).unwrap();
 
     // Add fragment that fits
     let small_fragment = vec![0u8; 2000];

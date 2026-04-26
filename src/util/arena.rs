@@ -823,10 +823,8 @@ mod tests {
         // u32::MAX; the slot is now Vacant at generation u32::MAX. Insert
         // again: cur_gen on the next Occupied is u32::MAX. Now remove —
         // this is the case the rvz1tq guard catches.
-        if let Some(slot) = arena.slots.get_mut(idx.index() as usize) {
-            if let Slot::Occupied { generation, .. } = slot {
-                *generation = u32::MAX;
-            }
+        if let Some(Slot::Occupied { generation, .. }) = arena.slots.get_mut(idx.index() as usize) {
+            *generation = u32::MAX;
         }
         let recovered = ArenaIndex {
             index: idx.index(),
@@ -842,7 +840,7 @@ mod tests {
         // Whether or not the debug assertion fired, the operation either
         // panicked OR completed without re-adding the slot to the free list.
         match val {
-            Ok(Some(v)) if v == 7 => {
+            Ok(Some(7)) => {
                 // Release-style behavior: slot was removed and retired.
                 assert_eq!(
                     arena.free_head, prev_free_head,

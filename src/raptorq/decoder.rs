@@ -2562,9 +2562,9 @@ fn rebuild_dense_matrix_from_equations(
         // `checked_mul` so the buffer is correctly sized for
         // legitimate inputs; this guard makes the loop fail closed
         // on malformed inputs that bypass the upstream sizing.
-        let row_off = row.checked_mul(n_cols).expect(
-            "rebuild_dense_matrix: row*n_cols overflow (br-asupersync-lw16f6)",
-        );
+        let row_off = row
+            .checked_mul(n_cols)
+            .expect("rebuild_dense_matrix: row*n_cols overflow (br-asupersync-lw16f6)");
         for &(col, coef) in &equations[eq_idx].terms {
             if let Some(dense_col) = dense_col_index(col_to_dense, col) {
                 let off = row_off
@@ -2589,10 +2589,9 @@ fn snapshot_dense_rhs(rows: &[Vec<u8>], symbol_size: usize) -> Vec<u8> {
     // PAST the saturated buffer end. Switching to `checked_mul +
     // expect` makes the overflow fail loud and immediately rather
     // than silently mis-sizing the buffer.
-    let total = rows
-        .len()
-        .checked_mul(symbol_size)
-        .expect("snapshot_dense_rhs: rows.len() * symbol_size overflows usize (br-asupersync-n47w54)");
+    let total = rows.len().checked_mul(symbol_size).expect(
+        "snapshot_dense_rhs: rows.len() * symbol_size overflows usize (br-asupersync-n47w54)",
+    );
     let mut snapshot = vec![0u8; total];
     for (row_idx, row) in rows.iter().enumerate() {
         debug_assert_eq!(row.len(), symbol_size);

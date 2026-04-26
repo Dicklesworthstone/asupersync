@@ -118,7 +118,7 @@ impl MockH2Connection {
     #[allow(dead_code)]
     fn send_initial_settings(&mut self, settings: Vec<Setting>) -> Result<(), H2Error> {
         if self.initial_settings_sent {
-            return Err(H2Error::new(
+            return Err(H2Error::connection(
                 ErrorCode::ProtocolError,
                 "Initial SETTINGS already sent".to_string(),
             ));
@@ -150,7 +150,7 @@ impl MockH2Connection {
     fn process_settings_frame(&mut self, frame: SettingsFrame) -> Result<(), H2Error> {
         if frame.ack {
             if !frame.settings.is_empty() {
-                return Err(H2Error::new(
+                return Err(H2Error::connection(
                     ErrorCode::FrameSizeError,
                     "SETTINGS ACK frame must have zero length".to_string(),
                 ));
@@ -164,7 +164,7 @@ impl MockH2Connection {
             match setting {
                 Setting::InitialWindowSize(size) => {
                     if *size > MAX_INITIAL_WINDOW_SIZE {
-                        return Err(H2Error::new(
+                        return Err(H2Error::connection(
                             ErrorCode::FlowControlError,
                             format!("SETTINGS_INITIAL_WINDOW_SIZE {} exceeds maximum", size),
                         ));
@@ -172,7 +172,7 @@ impl MockH2Connection {
                 }
                 Setting::MaxFrameSize(size) => {
                     if *size < MIN_MAX_FRAME_SIZE || *size > MAX_FRAME_SIZE {
-                        return Err(H2Error::new(
+                        return Err(H2Error::connection(
                             ErrorCode::ProtocolError,
                             format!("SETTINGS_MAX_FRAME_SIZE {} out of bounds", size),
                         ));
@@ -354,7 +354,9 @@ fn test_unknown_settings_ids_ignored() -> Result<(), Box<dyn std::error::Error>>
     // Parse frame header and payload
     let frame_len = buf.len();
     let mut header_buf = BytesMut::new();
-    header_buf.put_u24(frame_len as u32); // Length
+    header_buf.put_u8(((frame_len as u32) >> 16) as u8); // Length high byte
+    header_buf.put_u8(((frame_len as u32) >> 8) as u8); // Length mid byte
+    header_buf.put_u8(frame_len as u8); // Length low byte
     header_buf.put_u8(FrameType::Settings as u8); // Type
     header_buf.put_u8(0); // Flags (no ACK)
     header_buf.put_u32(0); // Stream ID (connection-level)
@@ -364,7 +366,9 @@ fn test_unknown_settings_ids_ignored() -> Result<(), Box<dyn std::error::Error>>
     frame_buf.extend_from_slice(&buf);
 
     // Parse the frame
-    let frame = parse_frame(&frame_buf.freeze())?;
+    let header = FrameHeader::parse(&mut frame_buf)?;
+    let payload = frame_buf.split_to(header.length as usize).freeze();
+    let frame = parse_frame(&header, payload)?;
 
     if let Frame::Settings(settings_frame) = frame {
         // Process frame - should ignore unknown settings

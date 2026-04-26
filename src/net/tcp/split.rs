@@ -48,10 +48,10 @@ pub struct ReadHalf<'a> {
     _marker: PhantomData<&'a ()>,
 }
 
-impl<'a> ReadHalf<'a> {
+impl ReadHalf<'_> {
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn new(inner: &'a net::TcpStream) -> Self {
-        Self { inner }
+    pub(crate) fn new(inner: &net::TcpStream) -> ReadHalf<'_> {
+        ReadHalf { inner }
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -148,10 +148,10 @@ pub struct WriteHalf<'a> {
     _marker: PhantomData<&'a ()>,
 }
 
-impl<'a> WriteHalf<'a> {
+impl WriteHalf<'_> {
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn new(inner: &'a net::TcpStream) -> Self {
-        Self { inner }
+    pub(crate) fn new(inner: &net::TcpStream) -> WriteHalf<'_> {
+        WriteHalf { inner }
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -342,6 +342,7 @@ pub(crate) struct TcpStreamInner {
     #[cfg(not(target_arch = "wasm32"))]
     stream: Arc<net::TcpStream>,
     #[cfg(target_arch = "wasm32")]
+    #[allow(dead_code)]
     unsupported: (),
 }
 
@@ -358,6 +359,7 @@ impl std::fmt::Debug for TcpStreamInner {
 
 impl TcpStreamInner {
     #[allow(clippy::significant_drop_tightening, clippy::too_many_lines)]
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     fn register_interest(&self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
         #[cfg(target_arch = "wasm32")]
         {
@@ -626,7 +628,7 @@ impl OwnedReadHalf {
     pub fn local_addr(&self) -> io::Result<std::net::SocketAddr> {
         #[cfg(target_arch = "wasm32")]
         {
-            return browser_tcp_unsupported_result("OwnedReadHalf::local_addr");
+            browser_tcp_unsupported_result("OwnedReadHalf::local_addr")
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -637,7 +639,7 @@ impl OwnedReadHalf {
     pub fn peer_addr(&self) -> io::Result<std::net::SocketAddr> {
         #[cfg(target_arch = "wasm32")]
         {
-            return browser_tcp_unsupported_result("OwnedReadHalf::peer_addr");
+            browser_tcp_unsupported_result("OwnedReadHalf::peer_addr")
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -654,7 +656,7 @@ impl OwnedReadHalf {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = Arc::ptr_eq(&self.inner, &write.inner);
-            return Err(ReuniteError { read: self, write });
+            Err(ReuniteError { read: self, write })
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -771,7 +773,7 @@ impl OwnedWriteHalf {
     pub fn local_addr(&self) -> io::Result<std::net::SocketAddr> {
         #[cfg(target_arch = "wasm32")]
         {
-            return browser_tcp_unsupported_result("OwnedWriteHalf::local_addr");
+            browser_tcp_unsupported_result("OwnedWriteHalf::local_addr")
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -782,7 +784,7 @@ impl OwnedWriteHalf {
     pub fn peer_addr(&self) -> io::Result<std::net::SocketAddr> {
         #[cfg(target_arch = "wasm32")]
         {
-            return browser_tcp_unsupported_result("OwnedWriteHalf::peer_addr");
+            browser_tcp_unsupported_result("OwnedWriteHalf::peer_addr")
         }
 
         #[cfg(not(target_arch = "wasm32"))]

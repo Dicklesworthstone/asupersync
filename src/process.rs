@@ -1448,7 +1448,9 @@ impl Drop for Child {
         #[cfg(unix)]
         {
             if let Some(child) = self.inner.as_ref() {
-                let pid = child.id() as libc::pid_t;
+                let Ok(pid) = libc::pid_t::try_from(child.id()) else {
+                    return;
+                };
                 let mut status: libc::c_int = 0;
                 // Safety: pid is the kernel-assigned PID for our owned
                 // child; `&mut status` is a valid out-pointer.

@@ -293,10 +293,10 @@ impl RuntimeConfig {
     /// runtime's worker count). Both shapes violate the asupersync
     /// "no ambient authority" invariant.
     ///
-    /// Production callers that want host-scaled parallelism opt in
-    /// EXPLICITLY via [`RuntimeBuilder::worker_threads`]
-    /// `(`[`ambient_default_worker_threads`]`())` — making the
-    /// wall-CPU dependency visible at the call site.
+    /// Production callers that want host-scaled parallelism opt in EXPLICITLY
+    /// by passing [`ambient_default_worker_threads`] to
+    /// [`RuntimeBuilder::worker_threads`], making the wall-CPU dependency
+    /// visible at the call site.
     pub const DEFAULT_WORKER_THREADS: usize = 4;
 
     pub(crate) const fn default_worker_threads() -> usize {

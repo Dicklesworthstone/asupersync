@@ -20,13 +20,16 @@ use crate::types::Time;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 #[cfg(not(target_arch = "wasm32"))]
 use std::future::Future;
-use std::io::{self, IoSlice, IoSliceMut, Read, Write};
+use std::io::{self, IoSlice, IoSliceMut};
+#[cfg(not(target_arch = "wasm32"))]
+use std::io::{Read, Write};
 use std::net::{self, Shutdown, SocketAddr, ToSocketAddrs};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 const FALLBACK_IO_BACKOFF: Duration = Duration::from_millis(1);
 
 #[cfg(target_arch = "wasm32")]
@@ -44,8 +47,11 @@ fn browser_tcp_poll_unsupported<T>(op: &str) -> Poll<io::Result<T>> {
 /// A TCP stream.
 #[derive(Debug)]
 pub struct TcpStream {
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     registration: Option<IoRegistration>,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     inner: Arc<net::TcpStream>,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     shutdown_on_drop: bool,
 }
 
@@ -154,7 +160,7 @@ impl TcpStream {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = stream;
-            return browser_tcp_unsupported_result("TcpStream::from_std");
+            browser_tcp_unsupported_result("TcpStream::from_std")
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -170,6 +176,7 @@ impl TcpStream {
     }
 
     /// Reconstruct a TcpStream from its parts (used by reunite).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn from_parts(
         inner: Arc<net::TcpStream>,
         registration: Option<IoRegistration>,
@@ -292,7 +299,7 @@ impl TcpStream {
     pub fn peer_addr(&self) -> io::Result<SocketAddr> {
         #[cfg(target_arch = "wasm32")]
         {
-            return browser_tcp_unsupported_result("TcpStream::peer_addr");
+            browser_tcp_unsupported_result("TcpStream::peer_addr")
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -304,7 +311,7 @@ impl TcpStream {
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         #[cfg(target_arch = "wasm32")]
         {
-            return browser_tcp_unsupported_result("TcpStream::local_addr");
+            browser_tcp_unsupported_result("TcpStream::local_addr")
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -317,7 +324,7 @@ impl TcpStream {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = how;
-            return browser_tcp_unsupported_result("TcpStream::shutdown");
+            browser_tcp_unsupported_result("TcpStream::shutdown")
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -357,7 +364,7 @@ impl TcpStream {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = nodelay;
-            return browser_tcp_unsupported_result("TcpStream::set_nodelay");
+            browser_tcp_unsupported_result("TcpStream::set_nodelay")
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -432,6 +439,7 @@ impl TcpStream {
 
     #[cfg(target_arch = "wasm32")]
     #[inline]
+    #[allow(dead_code)]
     fn register_interest(&self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
         let _ = (cx, interest);
         browser_tcp_unsupported_result("TcpStream::register_interest")
@@ -574,6 +582,7 @@ where
     Err(last_err.unwrap_or_else(|| io::Error::other("failed to connect to any address")))
 }
 
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 #[inline]
 pub(crate) fn fallback_rewake(cx: &Context<'_>) {
     if let Some(timer) = Cx::current().and_then(|c| c.timer_driver()) {
@@ -999,7 +1008,7 @@ impl TcpStreamApi for TcpStream {
     fn nodelay(&self) -> io::Result<bool> {
         #[cfg(target_arch = "wasm32")]
         {
-            return browser_tcp_unsupported_result("TcpStream::nodelay");
+            browser_tcp_unsupported_result("TcpStream::nodelay")
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -1010,7 +1019,7 @@ impl TcpStreamApi for TcpStream {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = ttl;
-            return browser_tcp_unsupported_result("TcpStream::set_ttl");
+            browser_tcp_unsupported_result("TcpStream::set_ttl")
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -1020,7 +1029,7 @@ impl TcpStreamApi for TcpStream {
     fn ttl(&self) -> io::Result<u32> {
         #[cfg(target_arch = "wasm32")]
         {
-            return browser_tcp_unsupported_result("TcpStream::ttl");
+            browser_tcp_unsupported_result("TcpStream::ttl")
         }
 
         #[cfg(not(target_arch = "wasm32"))]

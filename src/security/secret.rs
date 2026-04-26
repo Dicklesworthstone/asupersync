@@ -335,8 +335,7 @@ mod tests {
     /// stored in the SecretString are byte-for-byte identical to what
     /// the source held. (We cannot directly assert "same allocation"
     /// without exposing internals, but we can assert content fidelity
-    /// + zeroization on drop, which together imply the safety
-    /// property.)
+    /// and zeroization on drop, which together imply the safety property.)
     #[test]
     fn from_string_zeroizes_on_drop() {
         let mut s = ManuallyDrop::new(SecretString::from_string(String::from("from_string")));

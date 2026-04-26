@@ -26,7 +26,7 @@ use std::fmt::Write;
 
 /// Generate arbitrary auth keys for testing
 fn arb_auth_key() -> impl Strategy<Value = AuthKey> {
-    any::<[u8; 32]>().prop_map(AuthKey::from_bytes)
+    any::<u64>().prop_map(AuthKey::from_seed)
 }
 
 /// Generate arbitrary capability identifiers
@@ -514,7 +514,7 @@ fn mr_serialize_deserialize_roundtrip() {
 
 #[test]
 fn token_serialization_scrubbed() {
-    let key = AuthKey::from_bytes([0x11; 32]);
+    let key = AuthKey::from_seed(0x11);
     let token = MacaroonToken::mint(&key, "api:read:tenant-7", "cx/macaroons")
         .add_caveat(CaveatPredicate::TimeBefore(1_700_000_123_000))
         .add_caveat(CaveatPredicate::RegionScope(42))
@@ -668,7 +668,7 @@ mod tests {
 
     #[test]
     fn test_basic_attenuation_monotonicity() {
-        let key = AuthKey::from_bytes([1u8; 32]);
+        let key = AuthKey::from_seed(1);
         let base_token = MacaroonToken::mint(&key, "test", "loc");
 
         let attenuated = base_token

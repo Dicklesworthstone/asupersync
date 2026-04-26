@@ -2018,7 +2018,8 @@ mod tests {
             crate::types::cancel::CancelKind::ParentCancelled,
         ))];
         let refs: Vec<&Outcome<i32, &str>> = losers.iter().collect();
-        verify_losers_drained::<i32, &str>(&refs).expect("ParentCancelled must be accepted");
+        let _ =
+            verify_losers_drained::<i32, &str>(&refs).expect("ParentCancelled must be accepted");
     }
 
     #[test]

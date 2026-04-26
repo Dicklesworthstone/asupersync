@@ -178,7 +178,7 @@ mod tests {
             (0u16..1024)
                 .flat_map(|i| {
                     let n = (i.wrapping_mul(0x9E37) ^ i) as u8;
-                    std::iter::repeat(n).take(((n % 7) + 1) as usize)
+                    std::iter::repeat_n(n, ((n % 7) + 1) as usize)
                 })
                 .collect::<Vec<_>>(),
         ];

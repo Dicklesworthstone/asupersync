@@ -5,6 +5,8 @@
 use asupersync::distributed::consistent_hash::HashRing;
 use std::collections::{BTreeMap, HashMap};
 
+const TEST_RING_SEED: u64 = 0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequirementLevel {
     Must,
@@ -43,7 +45,7 @@ impl RingConformanceTest for RingOrderingTest {
 
     fn run(&self) -> TestResult {
         // Black-box test: verify ordering through key assignment consistency
-        let mut ring = HashRing::new(64);
+        let mut ring = HashRing::new(64, TEST_RING_SEED);
         for i in 0..8 {
             ring.add_node(format!("node-{i}"));
         }
@@ -91,7 +93,7 @@ impl RingConformanceTest for DeterministicAssignmentTest {
 
     fn run(&self) -> TestResult {
         let build_ring = || {
-            let mut ring = HashRing::new(32);
+            let mut ring = HashRing::new(32, TEST_RING_SEED);
             for name in ["alpha", "beta", "gamma", "delta"] {
                 ring.add_node(name);
             }
@@ -137,7 +139,7 @@ impl RingConformanceTest for WraparoundConsistencyTest {
     }
 
     fn run(&self) -> TestResult {
-        let mut ring = HashRing::new(16);
+        let mut ring = HashRing::new(16, TEST_RING_SEED);
         ring.add_node("node-a");
         ring.add_node("node-b");
 
@@ -183,7 +185,7 @@ impl RingConformanceTest for NodeVnodeCorrelationTest {
     fn run(&self) -> TestResult {
         for vnodes_per_node in [0, 1, 16, 64, 256] {
             for node_count in [0, 1, 5, 10] {
-                let mut ring = HashRing::new(vnodes_per_node);
+                let mut ring = HashRing::new(vnodes_per_node, TEST_RING_SEED);
 
                 for i in 0..node_count {
                     ring.add_node(format!("node-{i}"));
@@ -238,7 +240,7 @@ impl RingConformanceTest for IdempotentOperationsTest {
     }
 
     fn run(&self) -> TestResult {
-        let mut ring = HashRing::new(32);
+        let mut ring = HashRing::new(32, TEST_RING_SEED);
 
         // Test idempotent add
         assert!(ring.add_node("test-node"));
@@ -298,7 +300,7 @@ impl RingConformanceTest for EmptyRingBehaviorTest {
     }
 
     fn run(&self) -> TestResult {
-        let ring = HashRing::new(64);
+        let ring = HashRing::new(64, TEST_RING_SEED);
 
         if !ring.is_empty() {
             return TestResult::Fail {
@@ -334,7 +336,7 @@ impl RingConformanceTest for MinimalRemappingTest {
     }
 
     fn run(&self) -> TestResult {
-        let mut ring = HashRing::new(64);
+        let mut ring = HashRing::new(64, TEST_RING_SEED);
         for i in 0..5 {
             ring.add_node(format!("node-{i}"));
         }
@@ -392,7 +394,7 @@ impl RingConformanceTest for UniformDistributionTest {
     }
 
     fn run(&self) -> TestResult {
-        let mut ring = HashRing::new(128);
+        let mut ring = HashRing::new(128, TEST_RING_SEED);
         for i in 0..8 {
             ring.add_node(format!("node-{i}"));
         }

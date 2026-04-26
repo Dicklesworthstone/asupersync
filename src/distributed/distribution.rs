@@ -216,13 +216,7 @@ impl SymbolDistributor {
             .map_or_else(crate::time::wall_now, |d| d.now());
         let duration = Duration::from_nanos(end.duration_since(start));
 
-        self.evaluate_outcomes_with_sent(
-            encoded,
-            replicas,
-            outcomes,
-            symbols_sent_total,
-            duration,
-        )
+        self.evaluate_outcomes_with_sent(encoded, replicas, outcomes, symbols_sent_total, duration)
     }
 
     /// Computes the required acknowledgement count for the given consistency

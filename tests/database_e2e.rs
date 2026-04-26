@@ -1,5 +1,3 @@
-#![cfg(any(feature = "postgres", feature = "mysql"))]
-#![allow(clippy::all)]
 //! Real-DB end-to-end reconnection tests for [`AsyncDbPool`]
 //! [br-asupersync-na35bj].
 //!
@@ -10,6 +8,9 @@
 //! level fault injection via `sudo iptables -j REJECT --reject-with tcp-reset`
 //! on the assigned ephemeral port. There are no mocks, no in-process fakes,
 //! and no stubbed `connect()` paths.
+
+#![cfg(any(feature = "postgres", feature = "mysql"))]
+#![allow(clippy::all)]
 //!
 //! Suites:
 //!

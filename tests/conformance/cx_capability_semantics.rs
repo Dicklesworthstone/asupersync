@@ -264,7 +264,9 @@ fn inv5_positive_committed_permit_does_not_panic_on_drop() {
 
     let cx = Cx::for_testing();
     let (tx, mut rx) = session::tracked_oneshot::<u32>();
-    let permit = tx.reserve(&cx);
+    let permit = tx
+        .reserve(&cx)
+        .expect("INV5 violation: reserve failed on a fresh session");
     let _proof = permit
         .send(123)
         .expect("INV5 violation: commit failed on a fresh session");
@@ -281,7 +283,9 @@ fn inv5_positive_aborted_permit_does_not_panic_on_drop() {
 
     let cx = Cx::for_testing();
     let (tx, _rx) = session::tracked_oneshot::<u32>();
-    let permit = tx.reserve(&cx);
+    let permit = tx
+        .reserve(&cx)
+        .expect("INV5 violation: reserve failed on a fresh session");
     let _proof = permit.abort(); // explicit abort — no panic
 }
 

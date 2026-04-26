@@ -62,7 +62,7 @@ where
     while *pos < cap && attempts < MAX_DRAIN_ATTEMPTS_ON_CANCEL {
         attempts += 1;
         match Pin::new(&mut *writer).poll_write(cx, &buf[*pos..cap]) {
-            Poll::Pending | Poll::Ready(Err(_)) | Poll::Ready(Ok(0)) => break,
+            Poll::Pending | Poll::Ready(Err(_) | Ok(0)) => break,
             Poll::Ready(Ok(n)) => {
                 *pos += n;
                 drained += n as u64;

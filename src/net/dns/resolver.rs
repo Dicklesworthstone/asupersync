@@ -964,12 +964,13 @@ pub fn parse_resolv_conf_nameservers_for_test(contents: &str) -> Vec<SocketAddr>
 
 #[cfg(any(test, feature = "test-internals"))]
 #[allow(dead_code)]
-/// Test-internals hook exposing the binary DNS-response parser. Returns
-/// only Ok/Err for the parse outcome (the parsed response itself is a
+/// Test-internals hook exposing the binary DNS-response parser.
+///
+/// Returns only Ok/Err for the parse outcome (the parsed response itself is a
 /// private type). Intended for fuzz targets that need the
-/// no-panic + typed-error + no-infinite-loop oracle on attacker-controlled
-/// DNS wire bytes (label compression pointer loops, oversized labels,
-/// truncated headers, malformed RR).
+/// no-panic + typed-error + no-infinite-loop oracle on attacker-controlled DNS
+/// wire bytes (label compression pointer loops, oversized labels, truncated
+/// headers, malformed RR).
 pub fn parse_dns_response_for_fuzz(packet: &[u8], expected_id: u16) -> Result<(), DnsError> {
     parse_dns_response(packet, expected_id).map(|_| ())
 }
@@ -1412,10 +1413,15 @@ fn select_records_for_query(
 /// monomorphization explosion across all DNS query helpers.
 enum SyncTimeSource<'a> {
     /// Wall clock via `Instant::now()` — legacy sync APIs.
-    Wall { started: Instant },
+    Wall {
+        started: Instant,
+        #[cfg(not(any(test, feature = "test-internals")))]
+        marker: std::marker::PhantomData<&'a ()>,
+    },
     /// Cx-derived time. The closure must return monotonically
     /// non-decreasing `Time` values across calls within a single query
     /// (asupersync's TimerDriverHandle guarantees this).
+    #[cfg(any(test, feature = "test-internals"))]
     CxDerived {
         started: Time,
         now: &'a dyn Fn() -> Time,
@@ -1426,7 +1432,8 @@ impl SyncTimeSource<'_> {
     /// Elapsed time since the query started.
     fn elapsed(&self) -> Duration {
         match self {
-            Self::Wall { started } => started.elapsed(),
+            Self::Wall { started, .. } => started.elapsed(),
+            #[cfg(any(test, feature = "test-internals"))]
             Self::CxDerived { started, now } => {
                 let nanos = now().duration_since(*started);
                 Duration::from_nanos(nanos)
@@ -1454,6 +1461,8 @@ impl Resolver {
             timeout,
             time: SyncTimeSource::Wall {
                 started: Instant::now(),
+                #[cfg(not(any(test, feature = "test-internals")))]
+                marker: std::marker::PhantomData,
             },
             entropy,
         };
@@ -1604,6 +1613,8 @@ impl Resolver {
             timeout,
             time: SyncTimeSource::Wall {
                 started: Instant::now(),
+                #[cfg(not(any(test, feature = "test-internals")))]
+                marker: std::marker::PhantomData,
             },
             entropy,
         };
@@ -3325,6 +3336,8 @@ mod tests {
 
         let time_source = SyncTimeSource::Wall {
             started: Instant::now(),
+            #[cfg(not(any(test, feature = "test-internals")))]
+            marker: std::marker::PhantomData,
         };
         let e1 = time_source.elapsed();
         // Busy-spin to advance wall time without sleeping (sleep would

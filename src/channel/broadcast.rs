@@ -1005,7 +1005,7 @@ mod tests {
     fn reserve_cancelled_returns_err_not_permit() {
         init_test("reserve_cancelled_returns_err_not_permit");
         let cx = test_cx();
-        let (tx, mut rx) = channel::<i32>(10);
+        let (tx, rx) = channel::<i32>(10);
         // Drain initial state.
         let _ = rx;
 

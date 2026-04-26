@@ -103,6 +103,7 @@ pub struct CorsPolicy {
 ///     APIs require it),
 ///   - `X-Requested-With` (the de-facto AJAX marker that XHR-style
 ///     libraries rely on for CSRF defenses).
+///
 /// Callers needing a different allowlist should set
 /// `allow_headers` explicitly. For the rare legacy use case that
 /// truly needs wildcard, use [`CorsPolicy::with_any_headers`] —

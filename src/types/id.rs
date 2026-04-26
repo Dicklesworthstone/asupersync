@@ -18,6 +18,7 @@ use std::time::Duration;
 /// produced by `Arena::insert`; those are the only IDs that appear in
 /// per-runtime-state structures, get registered with the scheduler, and
 /// participate in deterministic replay.
+#[cfg(any(test, feature = "test-internals"))]
 static EPHEMERAL_REGION_COUNTER: AtomicU32 = AtomicU32::new(1);
 static EPHEMERAL_TASK_COUNTER: AtomicU32 = AtomicU32::new(1);
 
@@ -27,6 +28,7 @@ static EPHEMERAL_TASK_COUNTER: AtomicU32 = AtomicU32::new(1);
 /// before the runtime has registered the root region. All other
 /// production paths must use the runtime-allocated ID returned by
 /// `Arena::insert`.
+#[cfg(any(test, feature = "test-internals"))]
 #[inline]
 #[must_use]
 pub(crate) fn next_bootstrap_region_id() -> RegionId {

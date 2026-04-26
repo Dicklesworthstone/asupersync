@@ -158,23 +158,42 @@ static GLOBAL_OBSERVABILITY_CLOCK: std::sync::OnceLock<fn() -> std::time::System
 static AMBIENT_FALLBACK_WARNED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// Error returned when installing the process-global observability clock fails.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GlobalObservabilityClockInstallError {
+    /// A global observability clock has already been installed for this process.
+    AlreadyInstalled,
+}
+
+impl std::fmt::Display for GlobalObservabilityClockInstallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AlreadyInstalled => f.write_str("global observability clock already installed"),
+        }
+    }
+}
+
+impl std::error::Error for GlobalObservabilityClockInstallError {}
+
 /// Installs the process-global observability clock used by
 /// [`replayable_system_time`] when no `Cx` is in scope (br-asupersync-z5ge0x).
 ///
-/// Returns `Ok(())` on the first installation and `Err(())` on every
-/// subsequent attempt — the OnceLock semantics mean the first install
-/// wins for the lifetime of the process. Lab runtimes and replay
-/// harnesses MUST call this at test setup; production should not call
-/// it (and will then receive the explicit warn-once when ambient
-/// fallback fires).
+/// Returns `Ok(())` on the first installation and
+/// [`GlobalObservabilityClockInstallError::AlreadyInstalled`] on every
+/// subsequent attempt — the OnceLock semantics mean the first install wins for
+/// the lifetime of the process. Lab runtimes and replay harnesses MUST call this
+/// at test setup; production should not call it (and will then receive the
+/// explicit warn-once when ambient fallback fires).
 ///
 /// The provided `clock_fn` MUST be deterministic for replay
 /// guarantees — typically a closure-free `fn` pointer that consults a
 /// virtual clock in static state or a counter.
 pub fn install_global_observability_clock(
     clock_fn: fn() -> std::time::SystemTime,
-) -> Result<(), ()> {
-    GLOBAL_OBSERVABILITY_CLOCK.set(clock_fn).map_err(|_| ())
+) -> Result<(), GlobalObservabilityClockInstallError> {
+    GLOBAL_OBSERVABILITY_CLOCK
+        .set(clock_fn)
+        .map_err(|_| GlobalObservabilityClockInstallError::AlreadyInstalled)
 }
 
 /// Returns a wall-clock `SystemTime` that is replayable when an asupersync
@@ -586,7 +605,7 @@ mod tests {
         // The clock is now definitely populated (either by us or a
         // prior test); try_replayable_system_time must return Some
         // even with no Cx in scope.
-        let observed = std::thread::spawn(|| try_replayable_system_time())
+        let observed = std::thread::spawn(try_replayable_system_time)
             .join()
             .expect("isolated-thread query");
         assert!(

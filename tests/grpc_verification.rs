@@ -26,7 +26,6 @@ use common::init_test_logging;
 use asupersync::bytes::{BufMut, Bytes, BytesMut};
 use asupersync::codec::{Decoder, Encoder};
 use asupersync::grpc::{
-    Bidirectional,
     CallContext,
     // Client types
     Channel,
@@ -620,15 +619,12 @@ fn grpc_verify_016_streaming_request_closed_default() {
     test_complete!("grpc_verify_016_streaming_request_closed_default");
 }
 
-/// GRPC-VERIFY-017: Bidirectional and ClientStreaming construction
+/// GRPC-VERIFY-017: ClientStreaming construction
 ///
-/// Generic streaming types can be constructed and have correct defaults.
+/// Generic client-streaming types can be constructed and have correct defaults.
 #[test]
 fn grpc_verify_017_streaming_type_construction() {
     init_test("grpc_verify_017_streaming_type_construction");
-
-    let _bidi: Bidirectional<String, i32> = Bidirectional::new();
-    let _bidi_default: Bidirectional<u8, u8> = Bidirectional::default();
 
     let _cs: ClientStreaming<String> = ClientStreaming::new();
     let _cs_default: ClientStreaming<i32> = ClientStreaming::default();

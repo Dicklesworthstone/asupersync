@@ -55,7 +55,13 @@ fuzz_target!(|data: &[u8]| {
     // ensure the parser is stable across them. Each must return a
     // well-formed Option (no panic).
     for prefix in &[
-        "Bearer ", "BEARER ", "bearer ", "bEaReR ", "Basic ", "  Bearer ", "Bearer\t",
+        "Bearer ",
+        "BEARER ",
+        "bearer ",
+        "bEaReR ",
+        "Basic ",
+        "  Bearer ",
+        "Bearer\t",
     ] {
         let mixed = format!("{prefix}{auth}");
         let r = catch_unwind(AssertUnwindSafe(|| fuzz_bearer_token(&mixed)));

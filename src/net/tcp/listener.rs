@@ -26,6 +26,7 @@ const REARMED_ACCEPT_BACKOFF_BASE: Duration = Duration::from_millis(2);
 const REARMED_ACCEPT_BACKOFF_CAP: Duration = Duration::from_millis(32);
 const ACCEPT_STORM_WINDOW: Duration = Duration::from_millis(50);
 
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 fn listener_now() -> Time {
     Cx::current()
         .and_then(|current| current.timer_driver())
@@ -109,10 +110,12 @@ struct AcceptStormState {
 }
 
 impl TcpListener {
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn from_std(inner: net::TcpListener) -> io::Result<Self> {
         Self::from_std_with_time_getter(inner, listener_now)
     }
 
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn from_std_with_time_getter(
         inner: net::TcpListener,
         time_getter: fn() -> Time,

@@ -3667,7 +3667,7 @@ mod tests {
             "first notification must carry the initial weak reason, got {log:?}"
         );
         assert!(
-            log.iter().any(|k| *k == crate::types::CancelKind::Shutdown),
+            log.contains(&crate::types::CancelKind::Shutdown),
             "listener must be re-notified with the strengthened reason, got {log:?}"
         );
         // No duplicate same-severity notifications.

@@ -461,6 +461,7 @@ impl Default for ResourceAccounting {
 ///     and
 ///   - if multiple writers race here, each observes the freshest value
 ///     before deciding whether to swap.
+///
 /// Snapshot readers must `load(Ordering::Acquire)` to acquire the
 /// release synchronization the writer just established.
 ///

@@ -57,8 +57,9 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::types::{Budget, Outcome, RegionId, TaskId};
 use crate::util::stack_trace;
 
-/// br-asupersync-6yx9iw + br-asupersync-qdcchl: pluggable wall-clock
-/// source for the [`RegionLeakOracle`].
+/// Pluggable wall-clock source for [`RegionLeakOracle`].
+///
+/// br-asupersync-6yx9iw + br-asupersync-qdcchl.
 ///
 /// The oracle's threshold checks compare elapsed wall-clock duration
 /// against `RegionLeakConfig::max_*` ceilings. When run inside a lab

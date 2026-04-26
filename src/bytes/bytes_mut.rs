@@ -539,8 +539,8 @@ mod tests {
         }
         let v = b.into_vec();
         assert_eq!(v.len(), 1024 * 1024);
-        for i in 0..(1024 * 1024) {
-            assert_eq!(v[i], (i & 0xFF) as u8, "mismatch at byte {i}");
+        for (i, byte) in v.iter().enumerate().take(1024 * 1024) {
+            assert_eq!(*byte, (i & 0xFF) as u8, "mismatch at byte {i}");
         }
     }
 

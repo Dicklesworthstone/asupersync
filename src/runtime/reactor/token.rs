@@ -962,11 +962,11 @@ mod tests {
     /// 32-bit usize as 16+16, raising the wrap point to 65,536.
     #[test]
     fn max_generation_supports_at_least_2_to_16_cycles() {
-        assert!(
-            SlabToken::MAX_GENERATION >= 0xFFFF,
-            "br-asupersync-rtiu1s: MAX_GENERATION {} below 65535",
-            SlabToken::MAX_GENERATION
-        );
+        #[cfg(target_pointer_width = "64")]
+        assert_eq!(SlabToken::MAX_GENERATION, u32::MAX);
+
+        #[cfg(target_pointer_width = "32")]
+        assert_eq!(SlabToken::MAX_GENERATION, 0xFFFF);
     }
 
     /// br-asupersync-rtiu1s — Pack/unpack round-trip preserves

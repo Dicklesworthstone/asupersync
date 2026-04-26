@@ -310,6 +310,11 @@ pub struct CancellationDebtMonitor {
     /// br-asupersync-i40ap4 — Count of evictions triggered by per-work-type
     /// cap overflow since startup. Surfaced via [`Self::eviction_count`].
     eviction_count: AtomicU64,
+    /// br-asupersync-p9wth4 — Count of monitoring-loop panics that
+    /// were recovered via `catch_unwind` instead of killing the
+    /// observability thread. Surfaced via
+    /// [`Self::monitoring_loop_panic_count`].
+    monitoring_loop_panic_count: AtomicU64,
 }
 
 impl CancellationDebtMonitor {
@@ -325,7 +330,27 @@ impl CancellationDebtMonitor {
             recent_alerts: Arc::new(Mutex::new(VecDeque::new())),
             memory_usage_bytes: AtomicUsize::new(0),
             eviction_count: AtomicU64::new(0),
+            monitoring_loop_panic_count: AtomicU64::new(0),
         }
+    }
+
+    /// br-asupersync-p9wth4 — Count of monitoring-loop panics
+    /// recovered by `DebtRuntimeIntegration::monitoring_loop`'s
+    /// `catch_unwind`. Operators can scrape this counter to detect
+    /// when the observability loop has been hit by a panic in the
+    /// alert callback or monitor accessors.
+    #[must_use]
+    pub fn monitoring_loop_panic_count(&self) -> u64 {
+        self.monitoring_loop_panic_count.load(Ordering::Relaxed)
+    }
+
+    /// br-asupersync-p9wth4 — Increment the monitoring-loop panic
+    /// counter. Called by
+    /// `DebtRuntimeIntegration::monitoring_loop` when a tick body
+    /// panics and is recovered via `catch_unwind`.
+    pub fn record_monitoring_loop_panic(&self) {
+        self.monitoring_loop_panic_count
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// br-asupersync-i40ap4 — Number of pending-work entries evicted because

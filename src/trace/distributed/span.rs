@@ -3,7 +3,7 @@
 use super::context::SymbolTraceContext;
 use crate::types::Time;
 use crate::types::symbol::{ObjectId, SymbolId};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, btree_map::Entry};
 
 /// Status of a symbol span.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -226,30 +226,30 @@ impl SymbolSpan {
         let value = value.into();
         let sanitized = sanitize_span_value(&key, value);
 
-        if self.attributes.contains_key(&key) {
-            // Replacing an existing attribute does not change
-            // cardinality — apply the new (sanitized) value directly.
-            self.attributes.insert(key, sanitized);
-            return;
+        let at_capacity = self.attributes.len() >= MAX_SPAN_ATTRIBUTES_PER_SPAN;
+        match self.attributes.entry(key) {
+            Entry::Occupied(mut entry) => {
+                // Replacing an existing attribute does not change cardinality.
+                entry.insert(sanitized);
+            }
+            Entry::Vacant(entry) if !at_capacity => {
+                entry.insert(sanitized);
+            }
+            Entry::Vacant(_) => {
+                // Cardinality cap reached. Aggregate further inserts into
+                // a single overflow bucket rather than refusing the call
+                // (callers should not silently lose telemetry, but they
+                // should also not be able to drive the BTreeMap to
+                // arbitrary size).
+                let overflow_key = "_overflow_attributes";
+                let entry = self
+                    .attributes
+                    .entry(overflow_key.to_string())
+                    .or_insert_with(|| "0".to_string());
+                let n: u64 = entry.parse::<u64>().unwrap_or(0).saturating_add(1);
+                *entry = n.to_string();
+            }
         }
-
-        if self.attributes.len() >= MAX_SPAN_ATTRIBUTES_PER_SPAN {
-            // Cardinality cap reached. Aggregate further inserts into
-            // a single overflow bucket rather than refusing the call
-            // (callers should not silently lose telemetry, but they
-            // should also not be able to drive the BTreeMap to
-            // arbitrary size).
-            let overflow_key = "_overflow_attributes";
-            let entry = self
-                .attributes
-                .entry(overflow_key.to_string())
-                .or_insert_with(|| "0".to_string());
-            let n: u64 = entry.parse::<u64>().unwrap_or(0).saturating_add(1);
-            *entry = n.to_string();
-            return;
-        }
-
-        self.attributes.insert(key, sanitized);
     }
 
     /// Returns attributes.
@@ -290,16 +290,16 @@ impl SymbolSpan {
     }
 }
 
-/// br-asupersync-65gy5c: hard cap on the value bytes stored per
-/// span attribute. Values longer than this are truncated and
-/// suffixed with a stable hash so diagnostic continuity is
-/// preserved without leaking the entire payload.
+/// br-asupersync-65gy5c: hard cap on the value bytes stored per span attribute.
+///
+/// Values longer than this are truncated and suffixed with a stable hash so
+/// diagnostic continuity is preserved without leaking the entire payload.
 pub const MAX_SPAN_ATTRIBUTE_VALUE_LEN: usize = 1024;
 
-/// br-asupersync-65gy5c: cardinality cap on the per-span attribute
-/// map. Subsequent set_attribute calls for new keys are aggregated
-/// into a single `_overflow_attributes` counter rather than
-/// growing the BTreeMap unboundedly.
+/// br-asupersync-65gy5c: cardinality cap on the per-span attribute map.
+///
+/// Subsequent set_attribute calls for new keys are aggregated into a single
+/// `_overflow_attributes` counter rather than growing the BTreeMap unboundedly.
 pub const MAX_SPAN_ATTRIBUTES_PER_SPAN: usize = 64;
 
 /// br-asupersync-65gy5c: case-insensitive substring matches that

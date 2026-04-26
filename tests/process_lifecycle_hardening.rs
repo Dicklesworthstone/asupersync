@@ -10,6 +10,7 @@
 
 #![allow(missing_docs)]
 
+use asupersync::Cx;
 use asupersync::process::{Command, Stdio};
 use std::collections::{BTreeSet, HashSet};
 use std::path::Path;

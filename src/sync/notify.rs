@@ -290,14 +290,23 @@ impl Notify {
         self.stored_notifications.fetch_add(1, Ordering::Release);
     }
 
-    /// Passes a `notify_one` baton only to a currently active waiter.
+    /// Passes a `notify_one` baton to a post-broadcast waiter, falling back
+    /// to a stored notification when none exists yet.
     ///
-    /// Unlike [`Notify::pass_baton`], this does not store a replacement
-    /// notification when no waiter is present. This is used when a later
-    /// broadcast already covered the original waiter set, but a post-broadcast
-    /// waiter may still need the in-flight `notify_one` baton.
+    /// Used when a later broadcast already covered the original waiter set
+    /// but a post-broadcast waiter (existing OR about-to-register) may still
+    /// need the in-flight `notify_one` baton.
+    ///
+    /// br-asupersync-z5dxrw: previously this dropped the baton when no
+    /// post-broadcast waiter was present at scan time. That created a lost-
+    /// wakeup race — a waiter registering microseconds after the scan would
+    /// wait indefinitely for an event that already fired. We now always
+    /// fall back to `stored_notifications.fetch_add(1)` so a slightly-late
+    /// waiter still picks up the baton on next poll. The cost is at most
+    /// one spurious wake on a future unrelated waiter, which is preferable
+    /// to a deadlock.
     #[inline]
-    fn pass_baton_if_waiter_exists(mut waiters: parking_lot::MutexGuard<'_, WaiterSlab>) {
+    fn pass_baton_if_waiter_exists(&self, mut waiters: parking_lot::MutexGuard<'_, WaiterSlab>) {
         let start = waiters.scan_start;
         for i in start..waiters.entries.len() {
             let entry = &mut waiters.entries[i];
@@ -313,6 +322,7 @@ impl Notify {
             }
         }
         waiters.scan_start = waiters.entries.len();
+        self.stored_notifications.fetch_add(1, Ordering::Release);
     }
 }
 
@@ -528,7 +538,7 @@ impl Drop for Notified<'_> {
                     // the normal baton semantics, which store the notification when
                     // no waiter exists.
                     if generation_advanced {
-                        Notify::pass_baton_if_waiter_exists(waiters);
+                        self.notify.pass_baton_if_waiter_exists(waiters);
                     } else {
                         self.notify.pass_baton(waiters);
                     }
@@ -1333,6 +1343,67 @@ mod tests {
             ready
         );
         crate::test_complete!("notify_one_re_stores_when_no_other_waiter");
+    }
+
+    /// br-asupersync-z5dxrw regression: when a `notify_one`-notified waiter
+    /// is dropped AFTER a broadcast advanced the generation, AND no other
+    /// post-broadcast waiter is currently registered, the baton must NOT
+    /// be silently dropped. Instead it must be re-stored so a waiter that
+    /// registers immediately after the drop still receives it.
+    ///
+    /// Before the fix this scenario silently lost the wakeup — the new
+    /// waiter would block forever for an event that already fired.
+    #[test]
+    fn notify_one_baton_restored_when_no_post_broadcast_waiter_exists_yet() {
+        init_test("notify_one_baton_restored_when_no_post_broadcast_waiter_exists_yet");
+        let notify = Notify::new();
+
+        // Register one waiter.
+        let mut fut_a = notify.notified();
+        assert!(poll_once(&mut fut_a).is_pending());
+
+        // notify_one marks fut_a's slot (waker taken, notified=true).
+        notify.notify_one();
+
+        // Broadcast advances generation. fut_a's slot is skipped (waker
+        // already None) but generation has moved past fut_a's initial gen.
+        notify.notify_waiters();
+
+        // No new waiter exists yet — this is the key precondition for the
+        // race the bead describes.
+        let waiters_now = notify.waiter_count();
+        crate::assert_with_log!(
+            waiters_now == 0,
+            "no active waiters before drop",
+            0usize,
+            waiters_now
+        );
+
+        // fut_a is dropped (cancelled). The baton must NOT be lost.
+        drop(fut_a);
+
+        // The baton should now be stored as a fallback so a slightly-late
+        // post-broadcast waiter picks it up. Before the z5dxrw fix this
+        // counter stayed at 0 and the next waiter would block forever.
+        let stored = notify.stored_notifications.load(Ordering::Acquire);
+        crate::assert_with_log!(
+            stored == 1,
+            "baton re-stored as fallback after broadcast+cancel",
+            1usize,
+            stored
+        );
+
+        // A NEW post-broadcast waiter should immediately consume it.
+        let mut fut_late = notify.notified();
+        let ready = poll_once(&mut fut_late).is_ready();
+        crate::assert_with_log!(
+            ready,
+            "late post-broadcast waiter consumes restored baton",
+            true,
+            ready
+        );
+
+        crate::test_complete!("notify_one_baton_restored_when_no_post_broadcast_waiter_exists_yet");
     }
 
     /// Invariant: `notify_waiters()` with no waiters must NOT create a

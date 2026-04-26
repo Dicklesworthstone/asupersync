@@ -812,7 +812,6 @@ mod tests {
         let bytes = emoji.as_bytes();
         // Split: first 2 bytes (start of emoji), then the rest.
         let first_chunk: &[u8] = &bytes[..2];
-        let second_chunk: &[u8] = &bytes[2..];
 
         // Stage 1: BufReader sees first_chunk only. Drive read_line to
         // completion against this exhausted buffer (returns 0 bytes
@@ -821,14 +820,15 @@ mod tests {
         let mut buf = String::new();
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
-        let mut fut = reader.read_line(&mut buf);
-        let mut pinned = std::pin::Pin::new(&mut fut);
-        // Run until the underlying source is exhausted (it'll either
-        // return Pending awaiting more bytes or Ready(Ok(2)) for the
-        // 2 partial bytes treated as EOF). Either way, we drop the
-        // future before completion.
-        let _ = pinned.as_mut().poll(&mut cx);
-        drop(fut);
+        {
+            let mut fut = reader.read_line(&mut buf);
+            let mut pinned = std::pin::Pin::new(&mut fut);
+            // Run until the underlying source is exhausted (it'll either
+            // return Pending awaiting more bytes or Ready(Ok(2)) for the
+            // 2 partial bytes treated as EOF). Either way, the future ends
+            // this scope before completion.
+            let _ = pinned.as_mut().poll(&mut cx);
+        }
 
         // The LineReader pending should now hold the 2 partial bytes.
         // Drop the reader to inspect via into_parts.

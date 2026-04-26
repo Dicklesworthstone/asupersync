@@ -5,6 +5,10 @@
 use asupersync::process::Command;
 use asupersync::process::ProcessError;
 
+fn current_cx() -> asupersync::cx::Cx {
+    asupersync::cx::Cx::current().unwrap_or_else(asupersync::cx::Cx::for_testing)
+}
+
 fn run_command() -> Result<(), ProcessError> {
     let _output = Command::new("echo").arg("hello").output()?;
     Ok(())

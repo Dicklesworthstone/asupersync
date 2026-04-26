@@ -14,6 +14,7 @@
 //! - PE-01..PE-03: Error paths (not found, permission, double-wait)
 //! - PB-01..PB-04: Boundary/Env (environment, cwd, isolation)
 
+use asupersync::Cx;
 use asupersync::process::{Command, ExitStatus, ProcessError, Stdio};
 
 // ── Common ───────────────────────────────────────────────────────────
@@ -37,6 +38,10 @@ mod common {
         }
         false
     }
+}
+
+fn current_cx() -> Cx {
+    Cx::current().unwrap_or_else(Cx::for_testing)
 }
 
 // ── PL: Lifecycle ────────────────────────────────────────────────────

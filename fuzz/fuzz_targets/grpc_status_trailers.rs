@@ -41,17 +41,16 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(Ok(code_i32)) = parsed {
         // Path 2: Code::from_i32 must accept any i32.
         let code_result = catch_unwind(AssertUnwindSafe(|| Code::from_i32(code_i32)));
-        assert!(
-            code_result.is_ok(),
-            "Code::from_i32 panicked on {code_i32}"
-        );
+        assert!(code_result.is_ok(), "Code::from_i32 panicked on {code_i32}");
     }
 
     // === grpc-status-details-bin header: base64 of arbitrary bytes ===
     // Use the rest of the input as base64 candidate.
     let base64_candidate = String::from_utf8_lossy(&data[prefix_len..]);
     let engine = base64::engine::general_purpose::STANDARD;
-    let decode_result = catch_unwind(AssertUnwindSafe(|| engine.decode(base64_candidate.as_bytes())));
+    let decode_result = catch_unwind(AssertUnwindSafe(|| {
+        engine.decode(base64_candidate.as_bytes())
+    }));
     assert!(
         decode_result.is_ok(),
         "base64 decode panicked on {} bytes",

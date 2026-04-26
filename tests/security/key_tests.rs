@@ -41,7 +41,7 @@ fn from_bytes_roundtrip() {
     test_phase!("from_bytes_roundtrip");
     let key = AuthKey::from_seed(99);
     let bytes = *key.as_bytes();
-    let restored = AuthKey::from_bytes(bytes);
+    let restored = AuthKey::from_bytes(bytes).expect("from_seed key should pass strength checks");
     assert_with_log!(
         key == restored,
         "roundtrip should preserve key",

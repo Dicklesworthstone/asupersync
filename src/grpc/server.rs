@@ -67,10 +67,11 @@ pub struct ServerConfig {
 /// ecosystem convention. See [`ServerConfig::max_metadata_size`].
 pub const DEFAULT_MAX_METADATA_SIZE: usize = 8 * 1024;
 
-/// Compute the total byte size of a [`Metadata`] block as the sum of
-/// `key.len() + value.byte_len()` over every entry. Used by
-/// [`enforce_metadata_size_limit`] to bound HPACK decoder memory at
-/// the request-reception boundary.
+/// Compute the total byte size of a [`Metadata`] block.
+///
+/// Sums `key.len() + value.byte_len()` over every entry. Used by
+/// [`enforce_metadata_size_limit`] to bound HPACK decoder memory at the
+/// request-reception boundary.
 #[must_use]
 pub fn metadata_byte_size(metadata: &super::streaming::Metadata) -> usize {
     let mut total = 0usize;
@@ -84,11 +85,12 @@ pub fn metadata_byte_size(metadata: &super::streaming::Metadata) -> usize {
     total
 }
 
-/// Reject `metadata` with `Status::resource_exhausted` when its
-/// aggregate byte size exceeds `limit`. Transport adapters MUST call
-/// this on inbound HEADERS and TRAILERS frames before storing them
-/// in long-lived `CallContext`s, so a hostile peer cannot exhaust
-/// per-connection HPACK decoder memory by streaming arbitrarily long
+/// Reject `metadata` with `Status::resource_exhausted` when its aggregate byte
+/// size exceeds `limit`.
+///
+/// Transport adapters MUST call this on inbound HEADERS and TRAILERS frames
+/// before storing them in long-lived `CallContext`s, so a hostile peer cannot
+/// exhaust per-connection HPACK decoder memory by streaming arbitrarily long
 /// header lists.
 ///
 /// `limit` is typically [`ServerConfig::max_metadata_size`]

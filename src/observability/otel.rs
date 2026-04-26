@@ -1035,8 +1035,18 @@ impl OtelMetrics {
             return false;
         }
 
-        // Use counter-based sampling for determinism
-        let count = self.sample_counter.fetch_add(1, Ordering::Relaxed);
+        // br-asupersync-2dwg47 — AcqRel ordering on the sampling
+        // counter so the fetch_add observed by each thread is
+        // sequentially consistent with respect to the prior writes:
+        // every thread sees a strictly-increasing sequence of
+        // returned counts, which is the property a counter-based
+        // deterministic-sampling scheme depends on. Relaxed allows
+        // stale counter values to be observed across threads on
+        // weakly-ordered targets, breaking lab replay (same input,
+        // two replays, different sampled-event sets). AcqRel keeps
+        // the single-CAS cost (no full fence) while making the
+        // visibility property explicit.
+        let count = self.sample_counter.fetch_add(1, Ordering::AcqRel);
         // sample_rate is always 0.0..=1.0, so the cast is safe
         #[allow(clippy::cast_sign_loss)]
         let threshold = (sampling.sample_rate * 100.0) as u64;
@@ -2061,6 +2071,30 @@ pub mod span_semantics {
         }
     }
 
+    /// br-asupersync-6ofylg — OTel attribute keys are bounded by the
+    /// 1 KiB cap from the OTel spec (and most collectors' wire-level
+    /// limits). MockSpan::set_attribute previously truncated only
+    /// the value, leaving the key path open as an asymmetric
+    /// memory-amplification axis when combined with the cardinality
+    /// tracker (an attacker-controlled key with fixed prefix
+    /// produces one map entry per oversized key, each up to
+    /// arbitrarily many bytes). Mirror the closed bd-65gy5c
+    /// span.rs key cap by truncating keys to MAX_OTEL_ATTRIBUTE_KEY_LEN.
+    const MAX_OTEL_ATTRIBUTE_KEY_LEN: usize = 1024;
+
+    fn truncate_key(key: &str) -> String {
+        if key.len() <= MAX_OTEL_ATTRIBUTE_KEY_LEN {
+            key.to_string()
+        } else {
+            // Truncate by chars, not bytes, to keep the result valid
+            // UTF-8. We still bound by byte length via the
+            // MAX_OTEL_ATTRIBUTE_KEY_LEN char count: 1 KiB of ASCII
+            // is 1 KiB exactly; for non-ASCII a worst-case 4-byte
+            // char yields 4 KiB, still bounded.
+            key.chars().take(MAX_OTEL_ATTRIBUTE_KEY_LEN).collect()
+        }
+    }
+
     /// Configuration for span semantics conformance testing.
     #[derive(Debug, Clone)]
     pub struct SpanConformanceConfig {
@@ -2283,10 +2317,17 @@ pub mod span_semantics {
         }
 
         /// Set span attribute.
+        ///
+        /// br-asupersync-6ofylg — both key and value are length-
+        /// bounded. Keys longer than `MAX_OTEL_ATTRIBUTE_KEY_LEN`
+        /// are truncated (mirroring the closed bd-65gy5c span
+        /// hardening); values are truncated by the existing
+        /// `max_attribute_length` config field.
         pub fn set_attribute(&mut self, key: &str, value: &str) {
+            let key = truncate_key(key);
             let value = truncate_value(value, self.max_attribute_length);
-            if self.attributes.contains_key(key) || self.attributes.len() < self.max_attributes {
-                self.attributes.insert(key.to_string(), value);
+            if self.attributes.contains_key(&key) || self.attributes.len() < self.max_attributes {
+                self.attributes.insert(key, value);
             }
         }
 
@@ -3258,6 +3299,30 @@ pub mod span_semantics {
             span.add_event("one", HashMap::new());
             span.add_event("two", HashMap::new());
             assert_eq!(span.events.len(), 1);
+        }
+
+        /// br-asupersync-6ofylg — keys longer than
+        /// `MAX_OTEL_ATTRIBUTE_KEY_LEN` MUST be truncated to the cap.
+        #[test]
+        fn test_span_attribute_key_is_truncated_to_otel_cap() {
+            let mut span = TestSpan::new("test", SpanKind::Internal);
+            let oversized_key: String = "k".repeat(super::MAX_OTEL_ATTRIBUTE_KEY_LEN + 100);
+            span.set_attribute(&oversized_key, "value");
+            // The stored key length must equal the cap (ASCII path:
+            // bytes == chars).
+            let stored_keys: Vec<&String> = span.attributes.keys().collect();
+            assert_eq!(stored_keys.len(), 1);
+            assert_eq!(stored_keys[0].len(), super::MAX_OTEL_ATTRIBUTE_KEY_LEN);
+            // Original oversized key is NOT in the map (it was truncated).
+            assert!(!span.attributes.contains_key(&oversized_key));
+        }
+
+        /// br-asupersync-6ofylg — short keys pass through unchanged.
+        #[test]
+        fn test_span_attribute_short_key_unchanged() {
+            let mut span = TestSpan::new("test", SpanKind::Internal);
+            span.set_attribute("short_key", "value");
+            assert!(span.attributes.contains_key("short_key"));
         }
 
         #[test]

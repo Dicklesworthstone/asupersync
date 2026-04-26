@@ -48,7 +48,7 @@ use crate::remote::{
     SpawnRequest,
 };
 use crate::trace::distributed::{CausalTracker, LogicalTime, VectorClock};
-use crate::types::Time;
+use crate::types::{Budget, RegionId, TaskId, Time};
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
@@ -63,6 +63,25 @@ struct PendingResultEntry {
 
 type PendingResultsMap = BTreeMap<RemoteTaskId, PendingResultEntry>;
 type SharedPendingResults = Arc<Mutex<PendingResultsMap>>;
+
+#[inline]
+fn harness_cx() -> Cx {
+    Cx::new(
+        RegionId::testing_default(),
+        TaskId::testing_default(),
+        Budget::INFINITE,
+    )
+}
+
+#[inline]
+const fn harness_origin_region() -> RegionId {
+    RegionId::testing_default()
+}
+
+#[inline]
+const fn harness_origin_task() -> TaskId {
+    TaskId::testing_default()
+}
 
 #[derive(Clone, Debug)]
 struct StoredEnvelope {
@@ -406,7 +425,7 @@ impl SimNode {
         };
 
         if let Some((tx, reason)) = rejected {
-            let cx = Cx::for_testing();
+            let cx = harness_cx();
             let _ = tx.send(&cx, Err(RemoteError::SpawnRejected(reason)));
         }
     }
@@ -445,7 +464,7 @@ impl SimNode {
         };
 
         if let Some(tx) = tx {
-            let cx = Cx::for_testing();
+            let cx = harness_cx();
             if tx.send(&cx, Ok(outcome)).is_err() {
                 self.pending_results.lock().remove(&remote_task_id);
             }
@@ -774,8 +793,8 @@ impl DistributedHarness {
             idempotency_key: IdempotencyKey::from_raw(u128::from(task_id.raw())),
             budget: None,
             origin_node: origin.clone(),
-            origin_region: crate::types::RegionId::new_for_test(0, 0),
-            origin_task: crate::types::TaskId::new_for_test(0, 0),
+            origin_region: harness_origin_region(),
+            origin_task: harness_origin_task(),
         };
 
         let msg = RemoteMessage::SpawnRequest(req);
@@ -808,7 +827,7 @@ impl DistributedHarness {
                     None
                 };
                 if let Some(tx) = tx {
-                    let cx = Cx::for_testing();
+                    let cx = harness_cx();
                     let _ = tx.send(
                         &cx,
                         Err(RemoteError::NodeUnreachable(to.as_str().to_owned())),

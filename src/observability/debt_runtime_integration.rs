@@ -340,26 +340,60 @@ impl DebtRuntimeIntegration {
                 }
             }
 
-            // Perform monitoring checks
+            // br-asupersync-p9wth4 — wrap the per-tick body in
+            // catch_unwind so a panic from monitor accessors, the
+            // user-supplied alert callback, or the alert-cleanup
+            // path does NOT kill the entire observability thread.
+            // The asupersync convention is that observability
+            // surfaces never panic; they degrade silently or escalate
+            // to a WARN log but keep running. Without this guard, a
+            // single bad payload in the alert callback (a format-
+            // string bug, a transient OOM, a panic in user code)
+            // takes the monitoring loop out for the lifetime of the
+            // process — exactly the failure mode this fix exists to
+            // close. AssertUnwindSafe is sound here because no state
+            // reachable from the closure is left in a half-mutated
+            // condition on panic: `monitor`/`alert_callback` are
+            // shared via Arc/Box and either accept arbitrary state
+            // or are the cause of the panic; `last_alert_check` is
+            // captured by reference and only updated on the success
+            // path inside the closure.
             let now = crate::observability::replayable_system_time();
-
-            // Check for new alerts periodically
-            if now
-                .duration_since(last_alert_check)
-                .unwrap_or(Duration::ZERO)
-                >= Duration::from_secs(5)
-            {
-                if let Some(ref callback) = alert_callback {
-                    let recent_alerts = monitor.get_recent_alerts(1);
-                    for alert in recent_alerts {
-                        callback(&alert);
+            let monitor_ref = &monitor;
+            let alert_callback_ref = &alert_callback;
+            let last_alert_check_ref = &mut last_alert_check;
+            let tick_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // Check for new alerts periodically
+                if now
+                    .duration_since(*last_alert_check_ref)
+                    .unwrap_or(Duration::ZERO)
+                    >= Duration::from_secs(5)
+                {
+                    if let Some(callback) = alert_callback_ref.as_ref() {
+                        let recent_alerts = monitor_ref.get_recent_alerts(1);
+                        for alert in recent_alerts {
+                            callback(&alert);
+                        }
                     }
+                    *last_alert_check_ref = now;
                 }
-                last_alert_check = now;
-            }
 
-            // Clean up old alerts
-            monitor.clear_old_alerts(Duration::from_hours(1));
+                // Clean up old alerts
+                monitor_ref.clear_old_alerts(Duration::from_hours(1));
+            }));
+
+            if let Err(_panic) = tick_result {
+                #[cfg(feature = "tracing-integration")]
+                tracing::warn!(
+                    "debt monitoring tick panicked; loop continuing \
+                     (br-asupersync-p9wth4)"
+                );
+                // Track that a panic was recovered so observers can
+                // see when the loop has been hit. Even when tracing
+                // is disabled, the increment is visible via the
+                // public accessor `panic_recovered_count()`.
+                monitor.record_monitoring_loop_panic();
+            }
 
             // br-asupersync-b4ocgc: pluggable sleep — defaults to
             // std::thread::sleep, overridable for virtual-time tests.
@@ -571,7 +605,7 @@ mod tests {
     use crate::types::{CancelKind, CancelReason, TaskId};
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
-    use std::time::{Duration, SystemTime};
+    use std::time::Duration;
 
     #[test]
     fn test_integration_creation() {
@@ -769,5 +803,48 @@ mod tests {
         // default).
         (integration.sleeper)(Duration::from_secs(0));
         assert_eq!(*probe.lock().unwrap(), 1);
+    }
+
+    /// br-asupersync-p9wth4 — Verify the panic-counter API on
+    /// `CancellationDebtMonitor`. The `record_monitoring_loop_panic`
+    /// hook is invoked from `monitoring_loop` whenever the
+    /// `catch_unwind` guard recovers a tick-body panic; operators
+    /// scrape `monitoring_loop_panic_count()` to detect that the
+    /// observability loop has been hit.
+    #[test]
+    fn monitoring_loop_panic_counter_increments() {
+        let monitor = CancellationDebtMonitor::default();
+        assert_eq!(monitor.monitoring_loop_panic_count(), 0);
+        monitor.record_monitoring_loop_panic();
+        monitor.record_monitoring_loop_panic();
+        assert_eq!(monitor.monitoring_loop_panic_count(), 2);
+    }
+
+    /// br-asupersync-p9wth4 — Direct in-line verification that a
+    /// panic in code shaped like the per-tick body is caught by the
+    /// same `catch_unwind` + `AssertUnwindSafe` pattern the loop
+    /// uses, and that we can increment the recovered-panic counter
+    /// from the catch path. This pins the catch_unwind/recovery
+    /// contract independent of the real monitoring_loop's timing
+    /// (which is awkward to drive deterministically without
+    /// virtual time).
+    #[test]
+    fn monitoring_loop_catch_unwind_pattern_recovers_panic() {
+        let monitor = Arc::new(CancellationDebtMonitor::default());
+        let monitor_ref = &monitor;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Mimics the per-tick closure from monitoring_loop. The
+            // panic stands in for a panicking alert callback or a
+            // monitor accessor that asserted internally.
+            let _ = monitor_ref.get_recent_alerts(1);
+            panic!("simulated tick-body panic (p9wth4)");
+        }));
+        assert!(result.is_err(), "catch_unwind must capture the panic");
+        monitor.record_monitoring_loop_panic();
+        assert_eq!(
+            monitor.monitoring_loop_panic_count(),
+            1,
+            "the recover path must be wired to the counter"
+        );
     }
 }

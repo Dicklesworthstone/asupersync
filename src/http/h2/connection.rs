@@ -597,6 +597,26 @@ impl Connection {
             }
         }
 
+        // br-asupersync-lcvdj0: RFC 9113 §3.4 / §3.5 — the first frame
+        // sent and received on an HTTP/2 connection MUST be a SETTINGS
+        // frame. Any other frame received in the Handshaking state is
+        // a connection-level PROTOCOL_ERROR. Pre-fix `process_frame`
+        // dispatched on frame type without checking the connection
+        // state; a peer could send DATA / RST_STREAM / PING /
+        // WINDOW_UPDATE / HEADERS / PUSH_PROMISE on a fresh connection
+        // and (for the frame types that do not also fail their own
+        // stream-id-zero / flag validation) have it processed
+        // normally. After this guard, only SETTINGS advances out of
+        // Handshaking; everything else triggers a GOAWAY-bound
+        // PROTOCOL_ERROR.
+        if matches!(self.state, ConnectionState::Handshaking)
+            && !matches!(frame, Frame::Settings(_))
+        {
+            return Err(H2Error::protocol(
+                "first frame on the connection must be SETTINGS (RFC 9113 §3.4)",
+            ));
+        }
+
         let result = match frame {
             Frame::Data(f) => self.process_data(f),
             Frame::Headers(f) => self.process_headers(f),
@@ -1695,23 +1715,14 @@ fn validate_h2_pseudo_headers(headers: &[Header], is_request: bool) -> Result<()
             // The exception is `te`, whose name is permitted but
             // whose value MUST be exactly the token "trailers".
             match name {
-                b"connection"
-                | b"keep-alive"
-                | b"proxy-connection"
-                | b"transfer-encoding"
+                b"connection" | b"keep-alive" | b"proxy-connection" | b"transfer-encoding"
                 | b"upgrade" => {
-                    return Err(
-                        "connection-specific header field forbidden in HTTP/2 \
-                         (RFC 9113 §8.2.2)",
-                    );
+                    return Err("connection-specific header field forbidden in HTTP/2 \
+                         (RFC 9113 §8.2.2)");
                 }
-                b"te" => {
-                    if h.value.as_bytes() != b"trailers" {
-                        return Err(
-                            "te header field MUST have value \"trailers\" in HTTP/2 \
-                             (RFC 9113 §8.2.2)",
-                        );
-                    }
+                b"te" if h.value.as_bytes() != b"trailers" => {
+                    return Err("te header field MUST have value \"trailers\" in HTTP/2 \
+                         (RFC 9113 §8.2.2)");
                 }
                 _ => {}
             }
@@ -4396,8 +4407,7 @@ mod tests {
                 h(":authority", "example.com"),
                 h(forbidden, "close"),
             ];
-            let err = validate_h2_pseudo_headers(&headers, true)
-                .expect_err(forbidden);
+            let err = validate_h2_pseudo_headers(&headers, true).expect_err(forbidden);
             assert!(
                 err.contains("RFC 9113 §8.2.2"),
                 "wrong reject reason for {forbidden}: {err}"
@@ -4448,5 +4458,56 @@ mod tests {
             h("user-agent", "test"),
         ];
         assert!(validate_h2_pseudo_headers(&headers, true).is_ok());
+    }
+
+    /// br-asupersync-lcvdj0 — RFC 9113 §3.4 / §3.5 require the first
+    /// frame on a connection to be SETTINGS. A peer that sends any
+    /// other frame in the Handshaking state must elicit a
+    /// connection-level PROTOCOL_ERROR. Pre-fix the codec dispatched
+    /// through normal handlers without state-checking, so a malicious
+    /// first PING / WINDOW_UPDATE / RST_STREAM was processed silently.
+    #[test]
+    fn lcvdj0_first_frame_must_be_settings_ping_rejected() {
+        let mut conn = Connection::client(Settings::client());
+        // PING is otherwise valid in any state — but it must not be
+        // the FIRST frame. Pre-fix this would be processed and
+        // `pending_ops` would carry the corresponding ack.
+        let result = conn.process_frame(Frame::Ping(PingFrame::new([0xAA; 8])));
+        let err = result.expect_err("first frame PING must be rejected");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("first frame") && msg.contains("SETTINGS"),
+            "wrong error for non-SETTINGS first frame: {msg}"
+        );
+    }
+
+    /// br-asupersync-lcvdj0 — WINDOW_UPDATE on stream 0 is otherwise
+    /// valid mid-connection but is forbidden as the first frame.
+    #[test]
+    fn lcvdj0_first_frame_must_be_settings_window_update_rejected() {
+        let mut conn = Connection::client(Settings::client());
+        let result = conn.process_frame(Frame::WindowUpdate(WindowUpdateFrame::new(0, 1024)));
+        let err = result.expect_err("first frame WINDOW_UPDATE must be rejected");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("first frame") && msg.contains("SETTINGS"),
+            "wrong error for non-SETTINGS first frame: {msg}"
+        );
+    }
+
+    /// br-asupersync-lcvdj0 — Regression guard: a SETTINGS first
+    /// frame is accepted (handshake completes) and subsequent
+    /// non-SETTINGS frames flow through normally.
+    #[test]
+    fn lcvdj0_settings_first_frame_accepted_then_other_frames_ok() {
+        let mut conn = Connection::client(Settings::client());
+        // SETTINGS first — must succeed, transition Handshaking → Open.
+        conn.process_frame(Frame::Settings(SettingsFrame::new(vec![])))
+            .expect("SETTINGS as first frame must be accepted");
+        // Drain queued ACK.
+        let _ = conn.next_frame();
+        // After handshake, PING flows normally.
+        conn.process_frame(Frame::Ping(PingFrame::new([0xBB; 8])))
+            .expect("PING after handshake must be accepted");
     }
 }

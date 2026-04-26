@@ -51,7 +51,7 @@ fn html_page() -> Html<&'static str> {
 }
 
 fn redirect_handler() -> Redirect {
-    Redirect::permanent("/new-location")
+    Redirect::permanent("/new-location").expect("test redirect URI should be valid")
 }
 
 // =========================================================================

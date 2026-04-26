@@ -92,10 +92,11 @@ pub struct ReflectionDescribeServiceResponse {
 /// fix-side default is now `Locked` — every RPC rejects until the
 /// caller explicitly chooses either `.with_auth(...)` (production) or
 /// `.allow_anonymous()` (dev / test).
-#[derive(Clone)]
+#[derive(Clone, Default)]
 enum ReflectionAuthMode {
     /// Safe-by-default. Every reflection RPC returns
     /// `PermissionDenied` until the caller picks a mode.
+    #[default]
     Locked,
     /// Production: auth callback gates every RPC.
     Required(ReflectionAuthCallback),
@@ -103,12 +104,6 @@ enum ReflectionAuthMode {
     /// the legacy "open" behaviour for grpcurl / BloomRPC must invoke
     /// `.allow_anonymous()` so the choice is grep-able and auditable.
     Anonymous,
-}
-
-impl Default for ReflectionAuthMode {
-    fn default() -> Self {
-        Self::Locked
-    }
 }
 
 /// Reflection registry and service facade.

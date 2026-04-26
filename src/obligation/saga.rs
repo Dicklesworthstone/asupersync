@@ -493,7 +493,7 @@ impl SagaExecutionResult {
                     // per batch would make every node's view trivially consistent
                     // (no shared obligations = nothing to disagree on).
                     snapshot.observe(
-                        crate::types::ObligationId::new_for_test(0, 0),
+                        crate::types::ObligationId::from_arena(crate::util::ArenaIndex::new(0, 0)),
                         batch.merged_state,
                     );
                 }

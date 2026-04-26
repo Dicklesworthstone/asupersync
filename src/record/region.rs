@@ -463,7 +463,7 @@ impl RegionRecord {
     /// Returns a snapshot of child region IDs.
     #[must_use]
     pub fn child_ids(&self) -> Vec<RegionId> {
-        self.inner.read().children.to_vec()
+        self.inner.read().children.clone()
     }
 
     /// Copies child region IDs into the provided buffer (avoids fresh allocation).
@@ -483,7 +483,7 @@ impl RegionRecord {
     /// Returns a snapshot of task IDs.
     #[must_use]
     pub fn task_ids(&self) -> Vec<TaskId> {
-        self.inner.read().tasks.to_vec()
+        self.inner.read().tasks.clone()
     }
 
     /// Copies task IDs into the provided buffer (avoids fresh allocation).

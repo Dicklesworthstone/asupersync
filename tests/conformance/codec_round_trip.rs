@@ -38,7 +38,7 @@
 //! `FramedRead` and `FramedWrite` are exercised indirectly through `Framed`
 //! since the split halves use the same underlying codec impls.
 
-use asupersync::bytes::{BufMut, Bytes, BytesMut};
+use asupersync::bytes::{BufMut, BytesMut};
 use asupersync::codec::{
     BytesCodec, Decoder, Encoder, Framed, LengthDelimitedCodec, LinesCodec, LinesCodecError,
 };
@@ -86,7 +86,7 @@ fn bytes_codec_round_trip_preserves_bytes() {
     for seed in 1..=64u64 {
         for len in [0, 1, 7, 31, 64, 100, 1_024, 8_192] {
             let payload = rand_payload(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15), len);
-            let item = Bytes::from(payload.clone());
+            let item = BytesMut::from(payload.as_slice());
 
             let mut buf = BytesMut::new();
             codec.encode(item, &mut buf).expect("encode");
@@ -113,7 +113,7 @@ fn bytes_codec_amplification_is_identity() {
         let payload = rand_payload(0xC0DE_0000 | len as u64, len);
         let mut buf = BytesMut::new();
         codec
-            .encode(Bytes::from(payload.clone()), &mut buf)
+            .encode(BytesMut::from(payload.as_slice()), &mut buf)
             .unwrap();
         // BytesCodec is a passthrough; encoded length must equal input length.
         assert_eq!(
@@ -236,7 +236,7 @@ fn length_delimited_round_trip_preserves_bytes() {
     for seed in 1..=64u64 {
         for len in [0, 1, 4, 32, 256, 4_096, 65_536] {
             let payload = rand_payload(seed.wrapping_mul(0x94D0_49BB_1331_11EB), len);
-            let item = Bytes::from(payload.clone());
+            let item = BytesMut::from(payload.as_slice());
 
             let mut buf = BytesMut::new();
             codec.encode(item, &mut buf).expect("encode");
@@ -270,7 +270,7 @@ fn length_delimited_amplification_is_payload_plus_header() {
         let payload = vec![0xABu8; len];
         let mut buf = BytesMut::new();
         codec
-            .encode(Bytes::from(payload.clone()), &mut buf)
+            .encode(BytesMut::from(payload.as_slice()), &mut buf)
             .unwrap();
         assert_eq!(
             buf.len(),
@@ -286,7 +286,9 @@ fn length_delimited_truncated_payload_returns_none() {
     let mut codec = ld_codec();
     let payload = vec![0x42u8; 100];
     let mut buf = BytesMut::new();
-    codec.encode(Bytes::from(payload), &mut buf).unwrap();
+    codec
+        .encode(BytesMut::from(payload.as_slice()), &mut buf)
+        .unwrap();
 
     let truncated_len = buf.len() / 2;
     let mut partial = BytesMut::from(&buf[..truncated_len]);
@@ -351,10 +353,13 @@ fn framed_bytes_codec_construction_and_parts_roundtrip() {
     // a Framed and verify FramedParts {io, codec, ..} round-trips cleanly —
     // this exercises the codec storage/recovery path that is the seam between
     // Framed and the underlying codec.
-    use asupersync::io::Cursor;
+    use std::io::Cursor;
+
     let io = Cursor::new(Vec::<u8>::new());
     let framed = Framed::new(io, BytesCodec::new());
     let parts = framed.into_parts();
-    // Reconstruct from parts; encoder/decoder identity is preserved.
-    let _framed = Framed::from_parts(parts);
+    assert!(parts.read_buf.is_empty());
+    assert!(parts.write_buf.is_empty());
+    // Reconstruct from recovered transport and codec.
+    let _framed = Framed::new(parts.inner, parts.codec);
 }

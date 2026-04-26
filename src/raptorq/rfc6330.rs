@@ -431,7 +431,10 @@ pub fn tuple_indices(tuple: LtTuple, w: usize, p: usize, p1: usize) -> Vec<usize
         && tuple.a1 < p1
         && tuple.b < w
         && tuple.b1 < p1;
-    debug_assert!(valid, "tuple_indices: malformed input — check FEC-OTI validation");
+    debug_assert!(
+        valid,
+        "tuple_indices: malformed input — check FEC-OTI validation"
+    );
     if !valid {
         return Vec::new();
     }

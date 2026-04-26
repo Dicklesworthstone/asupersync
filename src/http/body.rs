@@ -1818,9 +1818,7 @@ mod tests {
 
         // Hash of "x-attacker-controlled" via the map's hasher (RandomState).
         let key = HeaderName::from_static("x-attacker-controlled");
-        let mut h_random = bh.build_hasher();
-        key.hash(&mut h_random);
-        let random_hash = h_random.finish();
+        let random_hash = bh.hash_one(&key);
 
         // Hash of the SAME key via DetHasher (the deterministic, fixed-seed,
         // attacker-readable hasher we MUST NOT be using here).

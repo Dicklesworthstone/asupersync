@@ -19,8 +19,9 @@ use std::time::Duration;
 /// this duration are eligible for `drop_idle_connections()`.
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// br-asupersync-368gxk: minimum grace period that legitimate slow
-/// clients are guaranteed before they can be flagged idle, even when
+/// br-asupersync-368gxk: minimum grace period for legitimate slow clients.
+///
+/// This period is guaranteed before a client can be flagged idle, even when
 /// `idle_timeout` is configured below this value. Protects against
 /// misconfiguration that would close TCP handshakes mid-flight.
 pub const MIN_IDLE_GRACE: Duration = Duration::from_secs(5);
@@ -296,6 +297,7 @@ impl ConnectionManager {
     ///      per `idle_timeout / 4`).
     ///   2. For each returned id, force-close the underlying socket
     ///      so the worker future returns and drops its guard.
+    ///
     /// Connections that legitimately need to remain idle (long-poll
     /// endpoints, server-sent events, websocket idle frames) should
     /// either set `idle_timeout = None` for that listener or call

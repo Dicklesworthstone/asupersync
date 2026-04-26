@@ -23,6 +23,7 @@ struct TcpSocketState {
     family: TcpSocketFamily,
     bound: Option<SocketAddr>,
     reuseaddr: bool,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     reuseport: bool,
 }
 

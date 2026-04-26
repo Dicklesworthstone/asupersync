@@ -157,6 +157,7 @@ pub trait TcpStreamApi: AsyncRead + AsyncWrite + Sized + Send + Unpin {
 ///     .await?;
 /// ```
 pub struct TcpListenerBuilder<A> {
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     addr: A,
     backlog: Option<u32>,
     reuse_addr: bool,

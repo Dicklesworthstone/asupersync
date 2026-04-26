@@ -4921,10 +4921,9 @@ mod tests {
     #[test]
     fn test_try_new_with_options_rejects_zero_worker_count_niczb3() {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
-        let err = ThreeLaneScheduler::try_new_with_options_and_task_table(
-            0, &state, None, 4, false, 32,
-        )
-        .expect_err("try_new_with_options_and_task_table(0, ...) must reject");
+        let err =
+            ThreeLaneScheduler::try_new_with_options_and_task_table(0, &state, None, 4, false, 32)
+                .expect_err("try_new_with_options_and_task_table(0, ...) must reject");
         assert_eq!(err.kind(), crate::error::ErrorKind::ConfigError);
     }
 

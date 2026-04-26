@@ -199,14 +199,20 @@ fn response_redirect_variants() {
     init_test_logging();
     test_phase!("response_redirect_variants");
 
-    let r302 = Redirect::to("/login").into_response();
+    let r302 = Redirect::to("/login")
+        .expect("test redirect URI should be valid")
+        .into_response();
     assert_eq!(r302.status, StatusCode::FOUND);
     assert_eq!(r302.headers.get("location").unwrap(), "/login");
 
-    let r301 = Redirect::permanent("/new-url").into_response();
+    let r301 = Redirect::permanent("/new-url")
+        .expect("test redirect URI should be valid")
+        .into_response();
     assert_eq!(r301.status, StatusCode::MOVED_PERMANENTLY);
 
-    let r307 = Redirect::temporary("/temp").into_response();
+    let r307 = Redirect::temporary("/temp")
+        .expect("test redirect URI should be valid")
+        .into_response();
     assert_eq!(r307.status, StatusCode::TEMPORARY_REDIRECT);
 
     test_complete!("response_redirect_variants");

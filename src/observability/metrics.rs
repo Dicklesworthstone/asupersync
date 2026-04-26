@@ -2539,14 +2539,8 @@ mod tests {
     /// despite passing through naively as 3-byte UTF-8 in the input).
     #[test]
     fn pdu7wg_escape_label_value_escapes_unicode_line_separators() {
-        assert_eq!(
-            escape_prometheus_label_value("a\u{2028}b"),
-            r"a\u{2028}b"
-        );
-        assert_eq!(
-            escape_prometheus_label_value("a\u{2029}b"),
-            r"a\u{2029}b"
-        );
+        assert_eq!(escape_prometheus_label_value("a\u{2028}b"), r"a\u{2028}b");
+        assert_eq!(escape_prometheus_label_value("a\u{2029}b"), r"a\u{2029}b");
     }
 
     /// br-asupersync-pdu7wg — C0 controls (0x01..=0x1F) other than

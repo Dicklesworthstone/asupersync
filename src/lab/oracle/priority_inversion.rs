@@ -26,8 +26,9 @@ use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// br-asupersync-qb6pss: pluggable wall-clock source for the
-/// [`PriorityInversionOracle`]. Same shape as `region_leak::TimeSource`.
+/// Pluggable wall-clock source for [`PriorityInversionOracle`].
+///
+/// br-asupersync-qb6pss: same shape as `region_leak::TimeSource`.
 /// Lab harnesses install a virtual-clock-backed closure so two replays
 /// of the same scenario produce identical inversion-duration decisions.
 pub type TimeSource = Arc<dyn Fn() -> Instant + Send + Sync>;

@@ -53,12 +53,16 @@
 //! - `poll_write` is cancel-safe (returns bytes written)
 //! - `poll_flush`/`poll_shutdown` are cancel-safe (can retry)
 
-use std::collections::{BTreeMap, VecDeque};
+#[cfg(not(target_arch = "wasm32"))]
+use std::collections::BTreeMap;
+use std::collections::VecDeque;
 use std::fmt;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::task::{Context, Poll};
 
@@ -1576,6 +1580,7 @@ fn authorize_message_channel_surface(cap: &dyn HostApiIoCap) -> Result<(), Brows
         .map_err(BrowserMessageError::Policy)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn authorize_degraded_message_channel_surface(
     cap: &dyn HostApiIoCap,
 ) -> Result<(), BrowserMessageError> {
@@ -1583,6 +1588,7 @@ fn authorize_degraded_message_channel_surface(
         .map_err(BrowserMessageError::Policy)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     match mutex.lock() {
         Ok(guard) => guard,
@@ -1590,6 +1596,7 @@ fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
 struct InMemoryMessagePortState {
     inbox: Arc<Mutex<VecDeque<QueuedBrowserMessage>>>,
@@ -1598,6 +1605,7 @@ struct InMemoryMessagePortState {
     peer_closed: Arc<AtomicBool>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl InMemoryMessagePortState {
     fn pair() -> (Self, Self) {
         let left_inbox = Arc::new(Mutex::new(VecDeque::new()));
@@ -1755,6 +1763,7 @@ impl WasmMessagePortState {
 }
 
 enum BrowserMessagePortBackend {
+    #[cfg(not(target_arch = "wasm32"))]
     InMemory(InMemoryMessagePortState),
     #[cfg(target_arch = "wasm32")]
     Host(WasmMessagePortState),
@@ -1780,6 +1789,7 @@ impl fmt::Debug for BrowserMessagePort {
 }
 
 impl BrowserMessagePort {
+    #[cfg(not(target_arch = "wasm32"))]
     fn from_in_memory(state: InMemoryMessagePortState) -> Self {
         Self {
             state: BrowserMessageState::Open,
@@ -1834,6 +1844,7 @@ impl BrowserMessagePort {
         }
 
         let result = match &self.backend {
+            #[cfg(not(target_arch = "wasm32"))]
             BrowserMessagePortBackend::InMemory(state) => state.send(message),
             #[cfg(target_arch = "wasm32")]
             BrowserMessagePortBackend::Host(state) => state.send(message),
@@ -1861,6 +1872,7 @@ impl BrowserMessagePort {
         }
 
         let next = match &self.backend {
+            #[cfg(not(target_arch = "wasm32"))]
             BrowserMessagePortBackend::InMemory(state) => state.try_recv(),
             #[cfg(target_arch = "wasm32")]
             BrowserMessagePortBackend::Host(state) => state.try_recv(),
@@ -1904,6 +1916,7 @@ impl BrowserMessagePort {
 
     fn close_backend(&self) {
         match &self.backend {
+            #[cfg(not(target_arch = "wasm32"))]
             BrowserMessagePortBackend::InMemory(state) => state.close(),
             #[cfg(target_arch = "wasm32")]
             BrowserMessagePortBackend::Host(state) => state.close(),
@@ -1939,10 +1952,10 @@ impl BrowserMessageChannelPair {
                 .map_err(|err| browser_message_host_error(&err, "MessageChannel::new"))?;
             let left_port = channel.port1();
             let right_port = channel.port2();
-            return Ok(Self {
+            Ok(Self {
                 left: BrowserMessagePort::from_host(&left_port)?,
                 right: BrowserMessagePort::from_host(&right_port)?,
-            });
+            })
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -1987,6 +2000,7 @@ impl BrowserHostApiIoCap {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
 struct InMemoryBroadcastSubscriber {
     id: u64,
@@ -2008,6 +2022,7 @@ struct InMemoryBroadcastSubscriber {
 /// preserves the within-channel-uniqueness invariant the id is
 /// actually used for (self-recognition in `send`/`close` at
 /// `subscriber.id == self.id`) while removing the cross-cycle leak.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Default)]
 struct InMemoryBroadcastChannelEntry {
     /// Per-channel monotone counter for minting subscriber IDs.
@@ -2018,13 +2033,15 @@ struct InMemoryBroadcastChannelEntry {
     subscribers: Vec<InMemoryBroadcastSubscriber>,
 }
 
-fn in_memory_broadcast_registry()
--> &'static Mutex<BTreeMap<String, InMemoryBroadcastChannelEntry>> {
+#[cfg(not(target_arch = "wasm32"))]
+fn in_memory_broadcast_registry() -> &'static Mutex<BTreeMap<String, InMemoryBroadcastChannelEntry>>
+{
     static REGISTRY: OnceLock<Mutex<BTreeMap<String, InMemoryBroadcastChannelEntry>>> =
         OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug)]
 struct InMemoryBroadcastChannelState {
     name: String,
@@ -2033,6 +2050,7 @@ struct InMemoryBroadcastChannelState {
     closed: Arc<AtomicBool>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl InMemoryBroadcastChannelState {
     fn open(name: impl Into<String>) -> Self {
         let name = name.into();
@@ -2181,6 +2199,7 @@ impl WasmBroadcastChannelState {
 }
 
 enum BrowserBroadcastChannelBackend {
+    #[cfg(not(target_arch = "wasm32"))]
     InMemory(InMemoryBroadcastChannelState),
     #[cfg(target_arch = "wasm32")]
     Host(WasmBroadcastChannelState),
@@ -2218,12 +2237,12 @@ impl BrowserBroadcastChannel {
         {
             authorize_message_channel_surface(cap)?;
             let backend = WasmBroadcastChannelState::open(&name)?;
-            return Ok(Self {
+            Ok(Self {
                 state: BrowserMessageState::Open,
                 name,
                 terminal_error: None,
                 backend: BrowserBroadcastChannelBackend::Host(backend),
-            });
+            })
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -2273,6 +2292,7 @@ impl BrowserBroadcastChannel {
         }
 
         let result = match &self.backend {
+            #[cfg(not(target_arch = "wasm32"))]
             BrowserBroadcastChannelBackend::InMemory(state) => state.send(message),
             #[cfg(target_arch = "wasm32")]
             BrowserBroadcastChannelBackend::Host(state) => state.send(message),
@@ -2300,6 +2320,7 @@ impl BrowserBroadcastChannel {
         }
 
         let next = match &self.backend {
+            #[cfg(not(target_arch = "wasm32"))]
             BrowserBroadcastChannelBackend::InMemory(state) => state.try_recv(),
             #[cfg(target_arch = "wasm32")]
             BrowserBroadcastChannelBackend::Host(state) => state.try_recv(),
@@ -2343,6 +2364,7 @@ impl BrowserBroadcastChannel {
 
     fn close_backend(&self) {
         match &self.backend {
+            #[cfg(not(target_arch = "wasm32"))]
             BrowserBroadcastChannelBackend::InMemory(state) => state.close(),
             #[cfg(target_arch = "wasm32")]
             BrowserBroadcastChannelBackend::Host(state) => state.close(),

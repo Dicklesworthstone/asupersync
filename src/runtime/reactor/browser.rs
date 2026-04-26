@@ -130,7 +130,7 @@ const BROWSER_MESSAGE_ERROR_EVENT: &str = "messageerror";
 #[cfg(target_arch = "wasm32")]
 thread_local! {
     static BROWSER_HOST_BINDINGS: RefCell<BTreeMap<(u64, Token), BrowserHostBinding>> =
-        RefCell::new(BTreeMap::new());
+        const { RefCell::new(BTreeMap::new()) };
 }
 
 #[cfg(target_arch = "wasm32")]

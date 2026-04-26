@@ -38,16 +38,12 @@
 //! ```
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
 use crate::types::cancel::CancelReason;
 use crate::types::outcome::PanicPayload;
 use crate::types::{Outcome, RegionId, TaskId, Time};
-
-/// Monotonic counter for generating unique [`MonitorRef`] values.
-static MONITOR_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 // ============================================================================
 // MonitorRef
@@ -56,15 +52,15 @@ static MONITOR_COUNTER: AtomicU64 = AtomicU64::new(1);
 /// Opaque reference to an established monitor.
 ///
 /// Returned by [`MonitorSet::establish`] and carried in [`DownNotification`].
-/// Unique across the lifetime of a runtime instance.
+/// Unique within a single runtime instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MonitorRef(u64);
 
 impl MonitorRef {
-    /// Allocates a fresh, globally unique monitor reference.
+    /// Allocates a monitor reference from a runtime-local sequence.
     #[inline]
-    fn new() -> Self {
-        Self(MONITOR_COUNTER.fetch_add(1, Ordering::Relaxed))
+    fn new(id: u64) -> Self {
+        Self(id)
     }
 
     /// Creates a `MonitorRef` with a specific id (for testing only).
@@ -218,19 +214,41 @@ struct MonitorRecord {
 /// - `by_ref`: MonitorRef → MonitorRecord (primary)
 /// - `by_monitored`: TaskId → Vec<MonitorRef> (find watchers of a terminated task)
 /// - `by_watcher_region`: RegionId → Vec<MonitorRef> (region-close cleanup)
-#[derive(Debug, Default)]
+#[derive(Debug)]
 #[allow(clippy::struct_field_names)]
 pub struct MonitorSet {
     by_ref: BTreeMap<MonitorRef, MonitorRecord>,
     by_monitored: BTreeMap<TaskId, Vec<MonitorRef>>,
     by_watcher_region: BTreeMap<RegionId, Vec<MonitorRef>>,
+    next_monitor_ref: u64,
+}
+
+impl Default for MonitorSet {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MonitorSet {
     /// Creates an empty monitor set.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            by_ref: BTreeMap::new(),
+            by_monitored: BTreeMap::new(),
+            by_watcher_region: BTreeMap::new(),
+            next_monitor_ref: 1,
+        }
+    }
+
+    #[inline]
+    fn alloc_monitor_ref(&mut self) -> MonitorRef {
+        let next = self.next_monitor_ref;
+        self.next_monitor_ref = self
+            .next_monitor_ref
+            .checked_add(1)
+            .expect("monitor ref space exhausted");
+        MonitorRef::new(next)
     }
 
     /// Establishes a monitor: `watcher` will be notified when `monitored` terminates.
@@ -244,7 +262,7 @@ impl MonitorSet {
         watcher_region: RegionId,
         monitored: TaskId,
     ) -> MonitorRef {
-        let monitor_ref = MonitorRef::new();
+        let monitor_ref = self.alloc_monitor_ref();
         let record = MonitorRecord {
             watcher,
             watcher_region,
@@ -468,10 +486,32 @@ mod tests {
 
     #[test]
     fn monitor_ref_uniqueness() {
-        let r1 = MonitorRef::new();
-        let r2 = MonitorRef::new();
+        let mut set = MonitorSet::new();
+        let region = test_region_id(0, 0);
+        let target = test_task_id(2, 0);
+        let r1 = set.establish(test_task_id(10, 0), region, target);
+        let r2 = set.establish(test_task_id(11, 0), region, target);
         assert_ne!(r1, r2);
         assert!(r1 < r2); // monotonically increasing
+    }
+
+    #[test]
+    fn fresh_monitor_sets_restart_ref_sequence() {
+        let region = test_region_id(0, 0);
+        let target = test_task_id(2, 0);
+
+        let mut first = MonitorSet::new();
+        let first_a = first.establish(test_task_id(10, 0), region, target);
+        let first_b = first.establish(test_task_id(11, 0), region, target);
+
+        let mut second = MonitorSet::new();
+        let second_a = second.establish(test_task_id(20, 0), region, target);
+        let second_b = second.establish(test_task_id(21, 0), region, target);
+
+        assert_eq!(first_a.id(), 1);
+        assert_eq!(first_b.id(), 2);
+        assert_eq!(second_a.id(), 1);
+        assert_eq!(second_b.id(), 2);
     }
 
     #[test]

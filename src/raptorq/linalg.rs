@@ -41,6 +41,15 @@ use super::gf256::{
 // Dense Row Representation
 // ============================================================================
 
+/// Index outside the bounds of a dense GF(256) row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DenseRowIndexError {
+    /// Requested element index.
+    pub index: usize,
+    /// Current row length.
+    pub len: usize,
+}
+
 /// A dense row vector over GF(256).
 ///
 /// Stores all elements contiguously in a `Vec<u8>`. Efficient for operations
@@ -147,16 +156,17 @@ impl DenseRow {
     }
 
     /// br-asupersync-tda3x0 — Fallible variant of [`Self::set`].
-    /// Returns `Err(())` on out-of-range index. Same rationale as
+    /// Returns [`DenseRowIndexError`] on out-of-range index. Same rationale as
     /// [`Self::try_get`].
     #[inline]
-    pub fn try_set(&mut self, index: usize, value: Gf256) -> Result<(), ()> {
+    pub fn try_set(&mut self, index: usize, value: Gf256) -> Result<(), DenseRowIndexError> {
+        let len = self.data.len();
         match self.data.get_mut(index) {
             Some(slot) => {
                 *slot = value.raw();
                 Ok(())
             }
-            None => Err(()),
+            None => Err(DenseRowIndexError { index, len }),
         }
     }
 

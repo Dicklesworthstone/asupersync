@@ -30,11 +30,12 @@
 
 use asupersync::bytes::BytesMut;
 use asupersync::codec::Decoder;
+use asupersync::http::h1::Request;
 use asupersync::http::h1::codec::{Http1Codec, HttpError};
 
 /// Parse a single request from a literal byte slice. Returns the decoder
 /// result so tests can assert success / typed-error / Incomplete.
-fn parse(raw: &[u8]) -> Result<Option<asupersync::http::h1::codec::Request>, HttpError> {
+fn parse(raw: &[u8]) -> Result<Option<Request>, HttpError> {
     let mut codec = Http1Codec::new();
     let mut buf = BytesMut::from(raw);
     codec.decode(&mut buf)
@@ -62,7 +63,7 @@ fn obs_fold_with_leading_sp_is_rejected_or_collapsed() {
             // would enable header smuggling downstream).
             for (name, value) in decoded.headers.iter() {
                 if name.eq_ignore_ascii_case("X-Folded") {
-                    let v = value.to_str().unwrap_or("");
+                    let v = value.as_str();
                     assert!(
                         !v.contains('\r') && !v.contains('\n'),
                         "obs-fold collapse must strip CR/LF; got {v:?}"
@@ -83,7 +84,7 @@ fn obs_fold_with_leading_ht_is_rejected_or_collapsed() {
         Ok(Some(decoded)) => {
             for (name, value) in decoded.headers.iter() {
                 if name.eq_ignore_ascii_case("X-Folded") {
-                    let v = value.to_str().unwrap_or("");
+                    let v = value.as_str();
                     assert!(
                         !v.contains('\r') && !v.contains('\n'),
                         "obs-fold collapse must strip CR/LF; got {v:?}"
@@ -123,7 +124,7 @@ fn transfer_encoding_chunked_with_content_length_is_rejected_or_te_wins() {
             // NOT the first 3 bytes of the chunk-size header that
             // CL=3 would imply.
             assert_eq!(
-                decoded.body.as_ref(),
+                decoded.body.as_slice(),
                 b"hello",
                 "TE+CL accepted only if TE wins; honoring CL=3 = smuggling vector"
             );

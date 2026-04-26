@@ -54,6 +54,7 @@ fn empty_udp_receive_buffer_error(op: &str) -> io::Error {
 /// A UDP socket.
 #[derive(Debug)]
 pub struct UdpSocket {
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     registration: Option<IoRegistration>,
     inner: Arc<StdUdpSocket>,
 }
@@ -64,7 +65,7 @@ impl UdpSocket {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = addr;
-            return browser_udp_unsupported_result("UdpSocket::bind");
+            browser_udp_unsupported_result("UdpSocket::bind")
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -100,7 +101,7 @@ impl UdpSocket {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = addr;
-            return browser_udp_unsupported_result("UdpSocket::connect");
+            browser_udp_unsupported_result("UdpSocket::connect")
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -137,7 +138,7 @@ impl UdpSocket {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = (buf, target);
-            return browser_udp_unsupported_result("UdpSocket::send_to");
+            browser_udp_unsupported_result("UdpSocket::send_to")
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -155,6 +156,7 @@ impl UdpSocket {
     }
 
     /// Poll for send_to readiness.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     fn poll_send_to(
         &mut self,
         cx: &Context<'_>,
@@ -164,7 +166,7 @@ impl UdpSocket {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = (self, cx, buf, addrs);
-            return browser_udp_poll_unsupported("UdpSocket::poll_send_to");
+            browser_udp_poll_unsupported("UdpSocket::poll_send_to")
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -201,7 +203,7 @@ impl UdpSocket {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = buf;
-            return browser_udp_unsupported_result("UdpSocket::recv_from");
+            browser_udp_unsupported_result("UdpSocket::recv_from")
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -217,27 +219,28 @@ impl UdpSocket {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = (self, cx, buf);
-            return browser_udp_poll_unsupported("UdpSocket::poll_recv_from");
+            browser_udp_poll_unsupported("UdpSocket::poll_recv_from")
         }
 
         #[cfg(not(target_arch = "wasm32"))]
-        if buf.is_empty() {
-            return Poll::Ready(Err(empty_udp_receive_buffer_error("recv_from")));
-        }
-
-        #[cfg(not(target_arch = "wasm32"))]
-        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
-        }
-        match self.inner.recv_from(buf) {
-            Ok(res) => Poll::Ready(Ok(res)),
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if let Err(err) = self.register_interest(cx, Interest::READABLE) {
-                    return Poll::Ready(Err(err));
-                }
-                Poll::Pending
+        {
+            if buf.is_empty() {
+                return Poll::Ready(Err(empty_udp_receive_buffer_error("recv_from")));
             }
-            Err(e) => Poll::Ready(Err(e)),
+
+            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            }
+            match self.inner.recv_from(buf) {
+                Ok(res) => Poll::Ready(Ok(res)),
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if let Err(err) = self.register_interest(cx, Interest::READABLE) {
+                        return Poll::Ready(Err(err));
+                    }
+                    Poll::Pending
+                }
+                Err(e) => Poll::Ready(Err(e)),
+            }
         }
     }
 
@@ -246,7 +249,7 @@ impl UdpSocket {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = buf;
-            return browser_udp_unsupported_result("UdpSocket::send");
+            browser_udp_unsupported_result("UdpSocket::send")
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -258,22 +261,24 @@ impl UdpSocket {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = (self, cx, buf);
-            return browser_udp_poll_unsupported("UdpSocket::poll_send");
+            browser_udp_poll_unsupported("UdpSocket::poll_send")
         }
 
         #[cfg(not(target_arch = "wasm32"))]
-        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
-        }
-        match self.inner.send(buf) {
-            Ok(n) => Poll::Ready(Ok(n)),
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if let Err(err) = self.register_interest(cx, Interest::WRITABLE) {
-                    return Poll::Ready(Err(err));
-                }
-                Poll::Pending
+        {
+            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
             }
-            Err(e) => Poll::Ready(Err(e)),
+            match self.inner.send(buf) {
+                Ok(n) => Poll::Ready(Ok(n)),
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if let Err(err) = self.register_interest(cx, Interest::WRITABLE) {
+                        return Poll::Ready(Err(err));
+                    }
+                    Poll::Pending
+                }
+                Err(e) => Poll::Ready(Err(e)),
+            }
         }
     }
 
@@ -282,7 +287,7 @@ impl UdpSocket {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = buf;
-            return browser_udp_unsupported_result("UdpSocket::recv");
+            browser_udp_unsupported_result("UdpSocket::recv")
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -294,27 +299,28 @@ impl UdpSocket {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = (self, cx, buf);
-            return browser_udp_poll_unsupported("UdpSocket::poll_recv");
+            browser_udp_poll_unsupported("UdpSocket::poll_recv")
         }
 
         #[cfg(not(target_arch = "wasm32"))]
-        if buf.is_empty() {
-            return Poll::Ready(Err(empty_udp_receive_buffer_error("recv")));
-        }
-
-        #[cfg(not(target_arch = "wasm32"))]
-        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
-        }
-        match self.inner.recv(buf) {
-            Ok(n) => Poll::Ready(Ok(n)),
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if let Err(err) = self.register_interest(cx, Interest::READABLE) {
-                    return Poll::Ready(Err(err));
-                }
-                Poll::Pending
+        {
+            if buf.is_empty() {
+                return Poll::Ready(Err(empty_udp_receive_buffer_error("recv")));
             }
-            Err(e) => Poll::Ready(Err(e)),
+
+            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            }
+            match self.inner.recv(buf) {
+                Ok(n) => Poll::Ready(Ok(n)),
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if let Err(err) = self.register_interest(cx, Interest::READABLE) {
+                        return Poll::Ready(Err(err));
+                    }
+                    Poll::Pending
+                }
+                Err(e) => Poll::Ready(Err(e)),
+            }
         }
     }
 
@@ -323,7 +329,7 @@ impl UdpSocket {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = buf;
-            return browser_udp_unsupported_result("UdpSocket::peek_from");
+            browser_udp_unsupported_result("UdpSocket::peek_from")
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -339,27 +345,28 @@ impl UdpSocket {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = (self, cx, buf);
-            return browser_udp_poll_unsupported("UdpSocket::poll_peek_from");
+            browser_udp_poll_unsupported("UdpSocket::poll_peek_from")
         }
 
         #[cfg(not(target_arch = "wasm32"))]
-        if buf.is_empty() {
-            return Poll::Ready(Err(empty_udp_receive_buffer_error("peek_from")));
-        }
-
-        #[cfg(not(target_arch = "wasm32"))]
-        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
-        }
-        match self.inner.peek_from(buf) {
-            Ok(res) => Poll::Ready(Ok(res)),
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if let Err(err) = self.register_interest(cx, Interest::READABLE) {
-                    return Poll::Ready(Err(err));
-                }
-                Poll::Pending
+        {
+            if buf.is_empty() {
+                return Poll::Ready(Err(empty_udp_receive_buffer_error("peek_from")));
             }
-            Err(e) => Poll::Ready(Err(e)),
+
+            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            }
+            match self.inner.peek_from(buf) {
+                Ok(res) => Poll::Ready(Ok(res)),
+                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    if let Err(err) = self.register_interest(cx, Interest::READABLE) {
+                        return Poll::Ready(Err(err));
+                    }
+                    Poll::Pending
+                }
+                Err(e) => Poll::Ready(Err(e)),
+            }
         }
     }
 
@@ -465,7 +472,7 @@ impl UdpSocket {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = socket;
-            return browser_udp_unsupported_result("UdpSocket::from_std");
+            browser_udp_unsupported_result("UdpSocket::from_std")
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -479,6 +486,7 @@ impl UdpSocket {
     }
 
     #[cfg(target_arch = "wasm32")]
+    #[allow(dead_code)]
     fn register_interest(&self, cx: &Context<'_>, interest: Interest) -> io::Result<()> {
         let _ = (cx, interest);
         browser_udp_unsupported_result("UdpSocket::register_interest")

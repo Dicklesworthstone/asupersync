@@ -247,10 +247,7 @@ impl FromRequest for Multipart {
             })?
             .clone();
 
-        if !content_type
-            .to_ascii_lowercase()
-            .contains("multipart/form-data")
-        {
+        if !is_multipart_form_data(&content_type) {
             return Err(ExtractionError::new(
                 StatusCode::UNSUPPORTED_MEDIA_TYPE,
                 format!("expected multipart/form-data, got: {content_type}"),
@@ -277,39 +274,101 @@ impl FromRequest for Multipart {
 /// body — see br-asupersync-tamnew.
 pub const MAX_BOUNDARY_LEN: usize = 70;
 
+/// Returns `true` when the media type is exactly `multipart/form-data`.
+fn is_multipart_form_data(content_type: &str) -> bool {
+    content_type
+        .split(';')
+        .next()
+        .map(str::trim)
+        .is_some_and(|media_type| media_type.eq_ignore_ascii_case("multipart/form-data"))
+}
+
 /// Extract the boundary parameter from a Content-Type header value.
 ///
-/// Returns `None` if the boundary is missing, empty, or longer than
-/// [`MAX_BOUNDARY_LEN`] (RFC 2046 §5.1.1 cap; oversize values are
+/// Returns `None` if the boundary is missing, malformed, empty, or longer
+/// than [`MAX_BOUNDARY_LEN`] (RFC 2046 §5.1.1 cap; oversize values are
 /// rejected to avoid O(body * boundary) substring search amplification).
 fn extract_boundary(content_type: &str) -> Option<String> {
-    // Look for boundary=... (possibly quoted)
-    let lower = content_type.to_ascii_lowercase();
-    let idx = lower.find("boundary=")?;
-    let after = &content_type[idx + "boundary=".len()..];
+    let (_, mut params) = content_type.split_once(';')?;
 
-    let boundary = if let Some(stripped) = after.strip_prefix('"') {
-        // Quoted boundary
-        let end = stripped.find('"')?;
-        stripped[..end].to_string()
-    } else {
-        // Unquoted — take until whitespace or semicolon
-        let end = after
-            .find([';', ' ', '\t', '\r', '\n'])
-            .unwrap_or(after.len());
-        let b = after[..end].trim();
-        if b.is_empty() {
+    while let Some((param, rest)) = next_mime_param(params) {
+        params = rest;
+        let Some((name, value)) = param.split_once('=') else {
+            continue;
+        };
+        if !name.trim().eq_ignore_ascii_case("boundary") {
+            continue;
+        }
+
+        let value = value.trim();
+        let boundary = if let Some(stripped) = value.strip_prefix('"') {
+            parse_quoted_mime_value(stripped)?
+        } else if value.is_empty() {
+            return None;
+        } else {
+            value.to_string()
+        };
+
+        // RFC 2046 §5.1.1: boundary length must be 1..=70. Reject
+        // pathological lengths that would amplify substring search cost.
+        if boundary.is_empty() || boundary.len() > MAX_BOUNDARY_LEN {
             return None;
         }
-        b.to_string()
-    };
+        return Some(boundary);
+    }
 
-    // RFC 2046 §5.1.1: boundary length must be 1..=70. Reject
-    // pathological lengths that would amplify substring search cost.
-    if boundary.is_empty() || boundary.len() > MAX_BOUNDARY_LEN {
+    None
+}
+
+fn next_mime_param(params: &str) -> Option<(&str, &str)> {
+    let trimmed = params.trim_start_matches([';', ' ', '\t', '\r', '\n']);
+    if trimmed.is_empty() {
         return None;
     }
-    Some(boundary)
+
+    let bytes = trimmed.as_bytes();
+    let mut in_quotes = false;
+    let mut escaped = false;
+
+    for (idx, byte) in bytes.iter().copied().enumerate() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match byte {
+            b'\\' if in_quotes => escaped = true,
+            b'"' => in_quotes = !in_quotes,
+            b';' if !in_quotes => return Some((trimmed[..idx].trim(), &trimmed[idx + 1..])),
+            _ => {}
+        }
+    }
+
+    Some((trimmed.trim(), ""))
+}
+
+fn parse_quoted_mime_value(stripped: &str) -> Option<String> {
+    let mut value = String::new();
+    let mut escaped = false;
+
+    for (idx, ch) in stripped.char_indices() {
+        if escaped {
+            value.push(ch);
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            '"' => {
+                if !stripped[idx + ch.len_utf8()..].trim().is_empty() {
+                    return None;
+                }
+                return Some(value);
+            }
+            _ => value.push(ch),
+        }
+    }
+
+    None
 }
 
 /// Parse multipart body given a boundary string.
@@ -686,6 +745,30 @@ mod tests {
     }
 
     #[test]
+    fn extract_boundary_ignores_similar_parameter_names() {
+        let ct = "multipart/form-data; xboundary=wrong; boundary=abc";
+        assert_eq!(extract_boundary(ct).unwrap(), "abc");
+    }
+
+    #[test]
+    fn extract_boundary_allows_whitespace_around_equals() {
+        let ct = "multipart/form-data; boundary = abc123";
+        assert_eq!(extract_boundary(ct).unwrap(), "abc123");
+    }
+
+    #[test]
+    fn extract_boundary_unterminated_quote_rejected_even_with_later_fragment() {
+        let ct = "multipart/form-data; boundary=\"unterminated; boundary=abc";
+        assert_eq!(extract_boundary(ct), None);
+    }
+
+    #[test]
+    fn extract_boundary_trailing_garbage_after_quote_rejected() {
+        let ct = "multipart/form-data; boundary=\"abc\"junk";
+        assert_eq!(extract_boundary(ct), None);
+    }
+
+    #[test]
     fn extract_boundary_at_70_char_rfc_max_accepted() {
         // br-asupersync-tamnew: RFC 2046 §5.1.1 caps boundary at 70 chars.
         // Exactly 70 chars must still be accepted.
@@ -999,6 +1082,54 @@ mod tests {
 
         let err = Multipart::from_request(req).unwrap_err();
         assert_eq!(err.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    #[test]
+    fn from_request_rejects_media_type_substring_match() {
+        let mut req = Request::new("POST", "/upload");
+        req.headers.insert(
+            "content-type".to_string(),
+            "multipart/form-datax; boundary=TEST".to_string(),
+        );
+        req.body = Bytes::from(vec![]);
+
+        let err = Multipart::from_request(req).unwrap_err();
+        assert_eq!(err.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    #[test]
+    fn from_request_uses_actual_boundary_parameter() {
+        let body = make_multipart_body(
+            "REAL",
+            &[("Content-Disposition: form-data; name=\"field\"", b"value")],
+        );
+        let mut req = Request::new("POST", "/upload");
+        req.headers.insert(
+            "content-type".to_string(),
+            "multipart/form-data; xboundary=wrong; boundary=REAL".to_string(),
+        );
+        req.body = body;
+
+        let mp = Multipart::from_request(req).unwrap();
+        assert_eq!(mp.len(), 1);
+        assert_eq!(mp.field("field").unwrap().text().unwrap(), "value");
+    }
+
+    #[test]
+    fn from_request_rejects_malformed_boundary_before_later_fragment() {
+        let body = make_multipart_body(
+            "REAL",
+            &[("Content-Disposition: form-data; name=\"field\"", b"value")],
+        );
+        let mut req = Request::new("POST", "/upload");
+        req.headers.insert(
+            "content-type".to_string(),
+            "multipart/form-data; boundary=\"unterminated; boundary=REAL".to_string(),
+        );
+        req.body = body;
+
+        let err = Multipart::from_request(req).unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
     }
 
     #[test]

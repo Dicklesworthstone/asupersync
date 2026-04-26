@@ -729,15 +729,10 @@ fn cycle_overhead_percentage(elapsed: Duration, interval: Duration) -> f64 {
 /// never exceed the hard band even on tiny `max_limit` values.
 fn derive_thresholds(max_limit: u64, soft_pct: u64, hard_pct: u64) -> (u64, u64) {
     debug_assert!(soft_pct <= hard_pct);
-    let soft = max_limit
-        .saturating_mul(soft_pct)
-        .checked_div(100)
-        .unwrap_or(0);
-    let hard = max_limit
-        .saturating_mul(hard_pct)
-        .checked_div(100)
-        .unwrap_or(0);
-    (soft.min(max_limit), hard.min(max_limit))
+    let max = u128::from(max_limit);
+    let soft = (max * u128::from(soft_pct)) / 100;
+    let hard = (max * u128::from(hard_pct)) / 100;
+    (soft.min(max) as u64, hard.min(max) as u64)
 }
 
 /// Platform-specific resource readers (br-asupersync-thfiyk).
@@ -752,6 +747,7 @@ mod platform {
     /// Falls back to a large finite value (16 GiB) when the platform
     /// reports `RLIM_INFINITY` so downstream `usage_ratio()` arithmetic
     /// stays well-defined.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     const ADDRESS_SPACE_FALLBACK: u64 = 16 * 1024 * 1024 * 1024;
 
     #[cfg(target_os = "linux")]
@@ -759,7 +755,7 @@ mod platform {
         let status = std::fs::read_to_string("/proc/self/status")?;
         for line in status.lines() {
             if let Some(rest) = line.strip_prefix("VmRSS:") {
-                let kib_str = rest.trim().split_whitespace().next().ok_or_else(|| {
+                let kib_str = rest.split_whitespace().next().ok_or_else(|| {
                     std::io::Error::new(std::io::ErrorKind::InvalidData, "VmRSS missing value")
                 })?;
                 let kib: u64 = kib_str.parse().map_err(|_| {
@@ -786,7 +782,7 @@ mod platform {
         let meminfo = std::fs::read_to_string("/proc/meminfo")?;
         for line in meminfo.lines() {
             if let Some(rest) = line.strip_prefix("MemTotal:") {
-                let kib_str = rest.trim().split_whitespace().next().ok_or_else(|| {
+                let kib_str = rest.split_whitespace().next().ok_or_else(|| {
                     std::io::Error::new(std::io::ErrorKind::InvalidData, "MemTotal missing value")
                 })?;
                 let kib: u64 = kib_str.parse().map_err(|_| {
@@ -1041,13 +1037,13 @@ mod platform {
         // Treat RLIM_INFINITY as `u64::MAX` so the caller can detect
         // "no ceiling" without depending on platform-specific
         // sentinel values.
-        let infinity = libc::RLIM_INFINITY as u64;
-        let cur = if rlim.rlim_cur as u64 == infinity {
+        let infinity = libc::RLIM_INFINITY;
+        let cur = if rlim.rlim_cur == infinity {
             u64::MAX
         } else {
             rlim.rlim_cur as u64
         };
-        let max = if rlim.rlim_max as u64 == infinity {
+        let max = if rlim.rlim_max == infinity {
             u64::MAX
         } else {
             rlim.rlim_max as u64
@@ -1064,14 +1060,14 @@ mod platform {
     }
 
     #[cfg(not(unix))]
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn address_space_rlimit() -> std::io::Result<(u64, u64)> {
         Ok((u64::MAX, u64::MAX))
     }
 
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub fn num_cpus() -> u64 {
-        std::thread::available_parallelism()
-            .map(|n| n.get() as u64)
-            .unwrap_or(1)
+        std::thread::available_parallelism().map_or(1, |n| n.get() as u64)
     }
 }
 
@@ -1550,8 +1546,8 @@ mod tests {
         assert_eq!(derive_thresholds(0, 75, 90), (0, 0));
         // Saturation: extremely large `max_limit` doesn't overflow u64.
         let (s, h) = derive_thresholds(u64::MAX, 75, 90);
-        assert!(s <= u64::MAX);
-        assert!(h <= u64::MAX);
+        assert_eq!(s, ((u128::from(u64::MAX) * 75) / 100) as u64);
+        assert_eq!(h, ((u128::from(u64::MAX) * 90) / 100) as u64);
         assert!(s <= h);
     }
 

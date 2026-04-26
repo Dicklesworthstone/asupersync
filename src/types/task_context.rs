@@ -165,7 +165,7 @@ impl CxInner {
             if self
                 .checkpoint_state
                 .last_checkpoint
-                .map_or(true, |t| drained > t)
+                .is_none_or(|t| drained > t)
             {
                 self.checkpoint_state.last_checkpoint = Some(drained);
             }
@@ -186,7 +186,7 @@ impl CxInner {
         let ns = self.fast_path_last_checkpoint_ns.load(Ordering::Relaxed);
         if ns != 0 {
             let snap = crate::types::Time::from_nanos(ns);
-            if state.last_checkpoint.map_or(true, |t| snap > t) {
+            if state.last_checkpoint.is_none_or(|t| snap > t) {
                 state.last_checkpoint = Some(snap);
             }
         }

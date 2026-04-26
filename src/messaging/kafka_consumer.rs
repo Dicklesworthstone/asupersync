@@ -2423,7 +2423,7 @@ mod tests {
     fn timer_driver_used_when_attached() {
         use crate::time::{TimerDriverHandle, VirtualClock};
         let clock = std::sync::Arc::new(VirtualClock::new());
-        let driver = TimerDriverHandle::with_clock(clock.clone());
+        let driver = TimerDriverHandle::with_virtual_clock(clock.clone());
         let driver_ref = driver.clone();
         let virtual_now_via_closure = || {
             // Simulate the closure shape used in kafka_consumer.

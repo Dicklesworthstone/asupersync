@@ -264,11 +264,13 @@ impl BrowserHostServicesContract {
     }
 }
 
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 struct DeadlineMonitorHostService {
     shutdown: Option<Arc<std::sync::atomic::AtomicBool>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 impl DeadlineMonitorHostService {
     const fn disabled() -> Self {
         Self {
@@ -278,6 +280,7 @@ impl DeadlineMonitorHostService {
     }
 }
 
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 trait RuntimeHostServices: Send + Sync {
     fn kind(&self) -> RuntimeHostServicesKind;
 
@@ -299,8 +302,10 @@ trait RuntimeHostServices: Send + Sync {
 }
 
 #[derive(Default)]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 struct NativeThreadHostServices;
 
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 impl NativeThreadHostServices {
     const fn new() -> Self {
         Self
@@ -3184,6 +3189,7 @@ impl Runtime {
 /// let result = runtime.block_on(join);
 /// ```
 #[derive(Clone)]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 enum RuntimeHandleRef {
     Strong(Arc<RuntimeInner>),
     Weak(Weak<RuntimeInner>),
@@ -3213,6 +3219,7 @@ impl RuntimeHandle {
         }
     }
 
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     fn weak(inner: &Arc<RuntimeInner>) -> Self {
         Self {
             inner: RuntimeHandleRef::Weak(Arc::downgrade(inner)),
@@ -3448,6 +3455,7 @@ struct RuntimeInner {
 }
 
 impl RuntimeInner {
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     fn initialize_runtime_state(
         config: &RuntimeConfig,
         reactor: Option<Arc<dyn Reactor>>,
@@ -3473,6 +3481,7 @@ impl RuntimeInner {
         runtime_state
     }
 
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     fn initialize_root_region(
         config: &RuntimeConfig,
         state: &Arc<crate::sync::ContendedMutex<RuntimeState>>,
@@ -3499,6 +3508,7 @@ impl RuntimeInner {
         root
     }
 
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     fn new(
         config: RuntimeConfig,
         reactor: Option<Arc<dyn Reactor>>,
@@ -3585,6 +3595,7 @@ impl RuntimeInner {
     }
 
     /// Creates the blocking pool if configured with non-zero max threads.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     fn create_blocking_pool(
         config: &RuntimeConfig,
     ) -> Option<crate::runtime::blocking_pool::BlockingPool> {
