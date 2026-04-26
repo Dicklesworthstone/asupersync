@@ -83,7 +83,7 @@ fn format_backtrace(bt: &Backtrace, config: &StackTraceConfig) -> String {
     let end = if config.max_frames == 0 {
         frames.len()
     } else {
-        (start + config.max_frames).min(frames.len())
+        start.saturating_add(config.max_frames).min(frames.len())
     };
 
     if start >= frames.len() {
@@ -210,6 +210,12 @@ mod tests {
         let trace = capture_stack_trace_depth(3);
         let frame_count = trace.matches(": ").count();
         assert!(frame_count <= 3);
+    }
+
+    #[test]
+    fn test_large_depth_does_not_overflow() {
+        let trace = capture_stack_trace_depth(usize::MAX);
+        assert!(!trace.is_empty());
     }
 
     #[test]
