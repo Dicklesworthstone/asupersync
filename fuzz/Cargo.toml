@@ -2192,3 +2192,11 @@ path = "fuzz_targets/plan_rewrite_policy.rs"
 test = false
 doc = false
 bench = false
+
+# Fuzz coverage gap: plan/analysis.rs BudgetEffect algebra
+[[bin]]
+name = "plan_analysis_budget"
+path = "fuzz_targets/plan_analysis_budget.rs"
+test = false
+doc = false
+bench = false
