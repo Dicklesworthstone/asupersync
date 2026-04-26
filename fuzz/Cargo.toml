@@ -2066,3 +2066,40 @@ path = "fuzz_targets/grpc_reflection_describe.rs"
 test = false
 doc = false
 bench = false
+
+# br-asupersync-xt60rb — H3 QPACK prefixed-integer decoder fuzz.
+# Drives `qpack_decode_field_section` with continuation-chain shapes
+# that exercise `qpack_decode_prefixed_int` (h3_native.rs:1756). Targets
+# integer overflow via `checked_shl`, the `shift > 56` cap, and the
+# `prefix_len ∈ 1..=8` guard. No panic / no OOM / no infinite loop.
+[[bin]]
+name = "fuzz_h3_qpack_prefixed_integer"
+path = "fuzz_targets/fuzz_h3_qpack_prefixed_integer.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-1pafo2 — H3 QPACK string decoder fuzz. Drives
+# `qpack_decode_field_section` with literal-name / literal-value
+# representations that exercise `qpack_decode_string` (h3_native.rs:1811):
+# Huffman-flag rejection, declared-length truncation boundary, UTF-8
+# validation, length-overflow on the prefixed-int prefix.
+[[bin]]
+name = "fuzz_h3_qpack_string_decode"
+path = "fuzz_targets/fuzz_h3_qpack_string_decode.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-ev48ox — H3 SETTINGS bool parser fuzz. Drives
+# `H3Settings::decode_payload` with every (id, value) cell over u64,
+# duplicate-ID sequences, and reserved-ID values. Exercises
+# `parse_bool_setting` (h3_native.rs:310) — every value other than
+# 0 or 1 must be rejected via `InvalidSettingValue`; a panic, OOM,
+# or accept here would let a peer flip a protocol-level capability bit.
+[[bin]]
+name = "fuzz_h3_settings_bool_parser"
+path = "fuzz_targets/fuzz_h3_settings_bool_parser.rs"
+test = false
+doc = false
+bench = false
