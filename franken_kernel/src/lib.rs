@@ -84,11 +84,45 @@ impl TraceId {
     ///
     /// The high 48 bits store `ts_ms`, the low 80 bits store `random`.
     /// The `random` value is truncated to 80 bits.
+    ///
+    /// br-asupersync-97gwup: `ts_ms` is saturated to the 48-bit
+    /// representable range (`2^48 - 1`, ≈ year 10889) before being
+    /// shifted into the high bits. Pre-fix the function did
+    /// `(ts_ms as u128) << 80` which silently dropped the high bits
+    /// of any `ts_ms >= 2^48` — corrupting the trace-id wire layout
+    /// (the truncated bits would land in random's space, producing
+    /// IDs that no longer satisfy the documented "high 48 = ts_ms,
+    /// low 80 = random" invariant). Saturation keeps the const-fn
+    /// signature and never silently corrupts the layout. Callers
+    /// that want a strict, no-saturation surface can use
+    /// [`Self::try_from_parts`] which returns `Err` on truncation.
     #[must_use]
     pub const fn from_parts(ts_ms: u64, random: u128) -> Self {
-        let ts_bits = (ts_ms as u128) << 80;
+        const MAX_TS_MS: u64 = (1u64 << 48) - 1;
+        let saturated_ts = if ts_ms > MAX_TS_MS { MAX_TS_MS } else { ts_ms };
+        let ts_bits = (saturated_ts as u128) << 80;
         let rand_bits = random & 0xFFFF_FFFF_FFFF_FFFF_FFFF; // mask to 80 bits
         Self(ts_bits | rand_bits)
+    }
+
+    /// Strict variant of [`Self::from_parts`] (br-asupersync-97gwup).
+    ///
+    /// Returns `Err(ts_ms)` when the millisecond timestamp does not
+    /// fit in the 48-bit field. Use this in places where silently
+    /// saturating to year-10889 would mask a unit-error bug (e.g.,
+    /// passing microseconds or nanoseconds by mistake).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(ts_ms)` if `ts_ms >= 2^48`.
+    pub const fn try_from_parts(ts_ms: u64, random: u128) -> Result<Self, u64> {
+        const MAX_TS_MS: u64 = (1u64 << 48) - 1;
+        if ts_ms > MAX_TS_MS {
+            return Err(ts_ms);
+        }
+        let ts_bits = (ts_ms as u128) << 80;
+        let rand_bits = random & 0xFFFF_FFFF_FFFF_FFFF_FFFF;
+        Ok(Self(ts_bits | rand_bits))
     }
 
     /// Extract the millisecond timestamp from the high 48 bits.
@@ -1366,6 +1400,68 @@ mod tests {
         let c3 = c2.child(NoCaps, Budget::UNLIMITED);
         assert_eq!(c3.trace_id(), trace);
         assert_eq!(c3.depth(), 3);
+    }
+
+    // =====================================================================
+    // br-asupersync-97gwup: from_parts / try_from_parts ts_ms truncation
+    // =====================================================================
+
+    #[test]
+    fn _97gwup_from_parts_within_range_round_trips() {
+        // 1_700_000_000_000 ms (Nov 2023) fits in 48 bits.
+        let ts = 1_700_000_000_000;
+        let trace = TraceId::from_parts(ts, 0xDEAD_BEEF);
+        assert_eq!(trace.timestamp_ms(), ts);
+    }
+
+    #[test]
+    fn _97gwup_from_parts_at_48_bit_boundary() {
+        // 2^48 - 1 is the maximum representable. round-trips exactly.
+        let ts = (1u64 << 48) - 1;
+        let trace = TraceId::from_parts(ts, 0);
+        assert_eq!(trace.timestamp_ms(), ts);
+    }
+
+    #[test]
+    fn _97gwup_from_parts_saturates_above_48_bits() {
+        // Pre-fix this would silently corrupt the layout — the high
+        // bits would land in the random portion of the trace id.
+        // Post-fix: saturated to 2^48 - 1, no corruption.
+        let oversize = (1u64 << 48) + 12345;
+        let trace = TraceId::from_parts(oversize, 0);
+        assert_eq!(trace.timestamp_ms(), (1u64 << 48) - 1);
+    }
+
+    #[test]
+    fn _97gwup_from_parts_max_u64_saturates() {
+        let trace = TraceId::from_parts(u64::MAX, 0);
+        assert_eq!(trace.timestamp_ms(), (1u64 << 48) - 1);
+    }
+
+    #[test]
+    fn _97gwup_try_from_parts_within_range_ok() {
+        let ts = 1_700_000_000_000;
+        let trace = TraceId::try_from_parts(ts, 0xCAFE).expect("in range");
+        assert_eq!(trace.timestamp_ms(), ts);
+    }
+
+    #[test]
+    fn _97gwup_try_from_parts_at_boundary_ok() {
+        let ts = (1u64 << 48) - 1;
+        assert!(TraceId::try_from_parts(ts, 0).is_ok());
+    }
+
+    #[test]
+    fn _97gwup_try_from_parts_above_boundary_err() {
+        let ts = 1u64 << 48;
+        let err = TraceId::try_from_parts(ts, 0).expect_err("out of range");
+        assert_eq!(err, ts);
+    }
+
+    #[test]
+    fn _97gwup_try_from_parts_max_u64_err() {
+        let err = TraceId::try_from_parts(u64::MAX, 0).expect_err("out of range");
+        assert_eq!(err, u64::MAX);
     }
 }
 

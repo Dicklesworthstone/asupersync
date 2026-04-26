@@ -229,7 +229,28 @@ impl RaptorQDecisionContract {
         };
         let uncertainty_score = 1000u16.saturating_sub(confidence_score);
         let ctx = eval_context(snapshot, confidence_score, uncertainty_score);
-        let outcome = evaluate(self, &posterior, &ctx);
+        // br-asupersync-g1pzep: evaluate now returns Result; for the
+        // RaptorQ contract we control the action_set so this should
+        // never produce ActionIndexOutOfRange in practice. On error we
+        // fall back to the BALANCED action with the original fallback
+        // reason preserved — keeps telemetry well-formed without
+        // panicking the caller.
+        let outcome = match evaluate(self, &posterior, &ctx) {
+            Ok(o) => o,
+            Err(_) => {
+                return GovernanceTelemetry {
+                    state_posterior_permille: posterior_permille,
+                    expected_loss_terms,
+                    chosen_action: action_label(action::CONTINUE),
+                    confidence_score,
+                    uncertainty_score,
+                    deterministic_fallback_triggered: true,
+                    deterministic_fallback_reason: "contract_action_out_of_range",
+                    replay_ref: G7_DECISION_REPLAY_REF,
+                    top_evidence_contributors: top_evidence_contributors(snapshot),
+                };
+            }
+        };
 
         GovernanceTelemetry {
             state_posterior_permille: posterior_permille,
@@ -311,10 +332,12 @@ impl DecisionContract for RaptorQDecisionContract {
                 observation = observation,
                 "raptorq G7 update_posterior: observation index out of range — update skipped"
             );
-            return Err(franken_decision::UpdatePosteriorError::ObservationOutOfRange {
-                observation,
-                state_count: state::COUNT,
-            });
+            return Err(
+                franken_decision::UpdatePosteriorError::ObservationOutOfRange {
+                    observation,
+                    state_count: state::COUNT,
+                },
+            );
         }
         let mut likelihoods = [0.1; state::COUNT];
         likelihoods[observation] = 0.9;

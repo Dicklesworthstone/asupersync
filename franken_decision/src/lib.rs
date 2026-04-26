@@ -71,7 +71,7 @@
 //!     trace_id,
 //!     ts_unix_ms: 1_700_000_000_000,
 //! };
-//! let outcome = evaluate(&contract, &posterior, &ctx);
+//! let outcome = evaluate(&contract, &posterior, &ctx).expect("legacy test invariant: contract action_index in range");
 //! assert!(!outcome.fallback_active);
 //! ```
 
@@ -147,6 +147,23 @@ pub enum ValidationError {
         /// The invalid value.
         value: f64,
     },
+    /// br-asupersync-g1pzep: a `DecisionContract` returned an
+    /// `action_index` outside the bounds of its `action_set()`. This
+    /// is a contract-implementation bug — `choose_action` /
+    /// `fallback_action` must return an index in `0..action_set().len()`.
+    /// Pre-fix the `evaluate()` function indexed into `action_set` with
+    /// the returned value via `[index]`, which panicked the runtime on
+    /// any out-of-bounds value (panic-DoS shape: a malicious or buggy
+    /// contract drops every Cx running through it).
+    ActionIndexOutOfRange {
+        /// The contract-returned index.
+        index: usize,
+        /// The size of the action_set.
+        action_set_len: usize,
+        /// Whether the index came from the fallback path or the
+        /// normal `choose_action` path.
+        from_fallback: bool,
+    },
 }
 
 impl fmt::Display for ValidationError {
@@ -189,6 +206,21 @@ impl fmt::Display for ValidationError {
             Self::EmptySpace { field } => write!(f, "{field} must not be empty"),
             Self::ThresholdOutOfRange { field, value } => {
                 write!(f, "{field} threshold {value} out of valid range")
+            }
+            Self::ActionIndexOutOfRange {
+                index,
+                action_set_len,
+                from_fallback,
+            } => {
+                let path = if *from_fallback {
+                    "fallback_action"
+                } else {
+                    "choose_action"
+                };
+                write!(
+                    f,
+                    "{path} returned action_index {index} but action_set has only {action_set_len} entries"
+                )
             }
         }
     }
@@ -765,11 +797,23 @@ pub struct EvalContext {
 /// This is the primary entry point for making auditable decisions.
 /// It computes expected losses, checks fallback conditions, and produces
 /// a [`DecisionOutcome`] with a linked [`DecisionAuditEntry`].
+///
+/// # Errors
+///
+/// br-asupersync-g1pzep: returns
+/// [`ValidationError::ActionIndexOutOfRange`] when the contract's
+/// `choose_action` or `fallback_action` returns an index that is not a
+/// valid offset into the contract's `action_set()`. Pre-fix, this
+/// shape panicked the runtime via the unchecked `[index]` indexing —
+/// a malicious or buggy contract could drop every Cx that ran through
+/// it. The fail-closed surface returns the offending index, the
+/// observed action_set length, and which path produced the bad index
+/// so operators can attribute the contract bug.
 pub fn evaluate<C: DecisionContract>(
     contract: &C,
     posterior: &Posterior,
     ctx: &EvalContext,
-) -> DecisionOutcome {
+) -> Result<DecisionOutcome, ValidationError> {
     let loss_matrix = contract.loss_matrix();
     let expected_losses = loss_matrix.expected_losses(posterior);
 
@@ -785,7 +829,19 @@ pub fn evaluate<C: DecisionContract>(
         contract.choose_action(posterior)
     };
 
-    let action_name = contract.action_set()[action_index].clone();
+    // br-asupersync-g1pzep: bounds-check the contract-returned index
+    // BEFORE indexing into the action_set. The action_set is captured
+    // by reference here so we can borrow the resolved name without
+    // re-borrowing inside the index expression.
+    let action_set = contract.action_set();
+    if action_index >= action_set.len() {
+        return Err(ValidationError::ActionIndexOutOfRange {
+            index: action_index,
+            action_set_len: action_set.len(),
+            from_fallback: fallback_active,
+        });
+    }
+    let action_name = action_set[action_index].clone();
     let expected_loss = expected_losses[&action_name];
 
     let audit_entry = DecisionAuditEntry {
@@ -801,14 +857,14 @@ pub fn evaluate<C: DecisionContract>(
         ts_unix_ms: ctx.ts_unix_ms,
     };
 
-    DecisionOutcome {
+    Ok(DecisionOutcome {
         action_index,
         action_name,
         expected_loss,
         expected_losses,
         fallback_active,
         audit_entry,
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1279,7 +1335,8 @@ mod tests {
         let posterior = Posterior::new(vec![0.9, 0.1]).unwrap();
         let ctx = test_ctx(0.95, 42);
 
-        let outcome = evaluate(&contract, &posterior, &ctx);
+        let outcome = evaluate(&contract, &posterior, &ctx)
+            .expect("legacy test invariant: contract action_index in range");
 
         assert!(!outcome.fallback_active);
         assert_eq!(outcome.action_name, "continue"); // low loss when mostly good
@@ -1294,7 +1351,8 @@ mod tests {
         let posterior = Posterior::new(vec![0.2, 0.8]).unwrap();
         let ctx = test_ctx(0.5, 43); // low calibration triggers fallback
 
-        let outcome = evaluate(&contract, &posterior, &ctx);
+        let outcome = evaluate(&contract, &posterior, &ctx)
+            .expect("legacy test invariant: contract action_index in range");
 
         assert!(outcome.fallback_active);
         assert_eq!(outcome.action_name, "continue"); // fallback action = 0
@@ -1307,7 +1365,8 @@ mod tests {
         let posterior = Posterior::new(vec![0.2, 0.8]).unwrap();
         let ctx = test_ctx(0.95, 44); // good calibration, no fallback
 
-        let outcome = evaluate(&contract, &posterior, &ctx);
+        let outcome = evaluate(&contract, &posterior, &ctx)
+            .expect("legacy test invariant: contract action_index in range");
 
         assert!(!outcome.fallback_active);
         assert_eq!(outcome.action_name, "stop"); // optimal when mostly bad
@@ -1319,7 +1378,8 @@ mod tests {
         let posterior = Posterior::uniform(2);
         let ctx = test_ctx(0.85, 99);
 
-        let outcome = evaluate(&contract, &posterior, &ctx);
+        let outcome = evaluate(&contract, &posterior, &ctx)
+            .expect("legacy test invariant: contract action_index in range");
 
         let audit = &outcome.audit_entry;
         assert_eq!(audit.decision_id, ctx.decision_id);
@@ -1338,7 +1398,8 @@ mod tests {
         let posterior = Posterior::new(vec![0.6, 0.4]).unwrap();
         let ctx = test_ctx(0.92, 100);
 
-        let outcome = evaluate(&contract, &posterior, &ctx);
+        let outcome = evaluate(&contract, &posterior, &ctx)
+            .expect("legacy test invariant: contract action_index in range");
         let evidence = outcome.audit_entry.to_evidence_ledger();
 
         assert_eq!(evidence.ts_unix_ms, 1_700_000_000_000);
@@ -1356,7 +1417,8 @@ mod tests {
         let posterior = Posterior::uniform(2);
         let ctx = test_ctx(0.88, 101);
 
-        let outcome = evaluate(&contract, &posterior, &ctx);
+        let outcome = evaluate(&contract, &posterior, &ctx)
+            .expect("legacy test invariant: contract action_index in range");
         let json = serde_json::to_string(&outcome.audit_entry).unwrap();
         let parsed: DecisionAuditEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.contract_name, "test_contract");
@@ -1523,7 +1585,8 @@ mod tests {
 
         // Make a decision: should be "continue" (low loss when good).
         let ctx = test_ctx(0.95, 200);
-        let outcome = evaluate(&contract, &posterior, &ctx);
+        let outcome = evaluate(&contract, &posterior, &ctx)
+            .expect("legacy test invariant: contract action_index in range");
         assert!(!outcome.fallback_active);
         assert_eq!(outcome.action_name, "continue");
         assert!(outcome.expected_loss < 0.01);
@@ -1544,7 +1607,8 @@ mod tests {
 
         // Decision should now be "stop".
         let ctx2 = test_ctx(0.95, 201);
-        let outcome2 = evaluate(&contract, &posterior, &ctx2);
+        let outcome2 =
+            evaluate(&contract, &posterior, &ctx2).expect("legacy test invariant: action in range");
         assert_eq!(outcome2.action_name, "stop");
     }
 
@@ -1569,7 +1633,8 @@ mod tests {
                         trace_id: TraceId::from_parts(1_700_000_000_000, u128::from(i)),
                         ts_unix_ms: 1_700_000_000_000 + i,
                     };
-                    let outcome = evaluate(c.as_ref(), &posterior, &ctx);
+                    let outcome = evaluate(c.as_ref(), &posterior, &ctx)
+                        .expect("legacy test invariant: action in range");
                     assert!(!outcome.action_name.is_empty());
                     assert_eq!(outcome.expected_losses.len(), 2);
                     let evidence = outcome.audit_entry.to_evidence_ledger();
@@ -1611,7 +1676,8 @@ mod tests {
             trace_id: tid,
             ts_unix_ms: 1_700_000_000_000,
         };
-        let outcome = evaluate(&contract, &posterior, &ctx);
+        let outcome = evaluate(&contract, &posterior, &ctx)
+            .expect("legacy test invariant: contract action_index in range");
         assert_eq!(outcome.audit_entry.decision_id, did);
         assert_eq!(outcome.audit_entry.trace_id, tid);
     }
@@ -1655,7 +1721,8 @@ mod tests {
         let contract = TestContract::new();
         let posterior = Posterior::uniform(2);
         let ctx = test_ctx(0.9, 300);
-        let outcome = evaluate(&contract, &posterior, &ctx);
+        let outcome = evaluate(&contract, &posterior, &ctx)
+            .expect("legacy test invariant: contract action_index in range");
         let dbg = format!("{outcome:?}");
         assert!(dbg.contains("DecisionOutcome"));
         assert!(dbg.contains("action_name"));
@@ -1698,6 +1765,194 @@ mod tests {
     fn validation_error_is_std_error() {
         fn assert_error<E: std::error::Error>() {}
         assert_error::<ValidationError>();
+    }
+
+    // ====================================================================
+    // br-asupersync-g1pzep: bounds-check on contract action_index.
+    // ====================================================================
+
+    /// Test contract that returns an out-of-range action_index. Used
+    /// to drive the panic-DoS surface that the bounds check fixes.
+    struct OutOfRangeContract {
+        actions: Vec<String>,
+        loss: LossMatrix,
+        out_of_range_index: usize,
+        from_fallback: bool,
+    }
+
+    impl DecisionContract for OutOfRangeContract {
+        fn name(&self) -> &str {
+            "OutOfRange"
+        }
+        fn state_space(&self) -> &[String] {
+            &self.actions
+        }
+        fn update_posterior(
+            &self,
+            _posterior: &mut Posterior,
+            _observation: usize,
+        ) -> Result<(), UpdatePosteriorError> {
+            Ok(())
+        }
+        fn action_set(&self) -> &[String] {
+            &self.actions
+        }
+        fn loss_matrix(&self) -> &LossMatrix {
+            &self.loss
+        }
+        fn fallback_policy(&self) -> &FallbackPolicy {
+            static P: std::sync::OnceLock<FallbackPolicy> = std::sync::OnceLock::new();
+            P.get_or_init(|| FallbackPolicy::new(0.0, 1e9, 1.0).expect("test fallback policy"))
+        }
+        fn choose_action(&self, _posterior: &Posterior) -> usize {
+            if self.from_fallback {
+                0
+            } else {
+                self.out_of_range_index
+            }
+        }
+        fn fallback_action(&self) -> usize {
+            self.out_of_range_index
+        }
+    }
+
+    #[test]
+    fn g1pzep_out_of_range_choose_action_returns_err() {
+        let c = OutOfRangeContract {
+            actions: vec!["a".to_string(), "b".to_string()],
+            loss: LossMatrix::new(
+                vec!["s0".to_string(), "s1".to_string()],
+                vec!["a0".to_string(), "a1".to_string()],
+                vec![0.0, 1.0, 1.0, 0.0],
+            )
+            .expect("loss"),
+            out_of_range_index: 99,
+            from_fallback: false,
+        };
+        let posterior = Posterior::new(vec![0.5, 0.5]).expect("posterior");
+        let ctx = EvalContext {
+            decision_id: DecisionId::from_raw(0),
+            trace_id: TraceId::from_raw(0),
+            calibration_score: 1.0,
+            e_process: 0.0,
+            ci_width: 0.1,
+            ts_unix_ms: 0,
+        };
+        let err = evaluate(&c, &posterior, &ctx).expect_err("must reject OOB index");
+        match err {
+            ValidationError::ActionIndexOutOfRange {
+                index,
+                action_set_len,
+                from_fallback,
+            } => {
+                assert_eq!(index, 99);
+                assert_eq!(action_set_len, 2);
+                assert!(!from_fallback);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn g1pzep_out_of_range_fallback_action_returns_err() {
+        // Fallback path: drive the policy to fire by setting
+        // calibration_score below the threshold.
+        struct AlwaysFallback {
+            actions: Vec<String>,
+            loss: LossMatrix,
+            policy: FallbackPolicy,
+        }
+        impl DecisionContract for AlwaysFallback {
+            fn name(&self) -> &str {
+                "AlwaysFallback"
+            }
+            fn state_space(&self) -> &[String] {
+                &self.actions
+            }
+            fn update_posterior(
+                &self,
+                _posterior: &mut Posterior,
+                _observation: usize,
+            ) -> Result<(), UpdatePosteriorError> {
+                Ok(())
+            }
+            fn action_set(&self) -> &[String] {
+                &self.actions
+            }
+            fn loss_matrix(&self) -> &LossMatrix {
+                &self.loss
+            }
+            fn fallback_policy(&self) -> &FallbackPolicy {
+                &self.policy
+            }
+            fn choose_action(&self, _posterior: &Posterior) -> usize {
+                0
+            }
+            fn fallback_action(&self) -> usize {
+                42 // out of range — action_set has only 2 entries
+            }
+        }
+        let c = AlwaysFallback {
+            actions: vec!["x".to_string(), "y".to_string()],
+            loss: LossMatrix::new(
+                vec!["s0".to_string(), "s1".to_string()],
+                vec!["a0".to_string(), "a1".to_string()],
+                vec![0.0, 1.0, 1.0, 0.0],
+            )
+            .expect("loss"),
+            policy: FallbackPolicy::new(0.99, 1e9, 1.0).expect("policy"),
+        };
+        let posterior = Posterior::new(vec![0.5, 0.5]).expect("posterior");
+        let ctx = EvalContext {
+            decision_id: DecisionId::from_raw(0),
+            trace_id: TraceId::from_raw(0),
+            calibration_score: 0.0, // below 0.99 threshold → fallback fires
+            e_process: 0.0,
+            ci_width: 0.1,
+            ts_unix_ms: 0,
+        };
+        let err = evaluate(&c, &posterior, &ctx).expect_err("must reject OOB fallback");
+        match err {
+            ValidationError::ActionIndexOutOfRange {
+                index,
+                action_set_len,
+                from_fallback,
+            } => {
+                assert_eq!(index, 42);
+                assert_eq!(action_set_len, 2);
+                assert!(from_fallback, "must report fallback origin");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn g1pzep_in_range_action_still_succeeds() {
+        // Sanity: legitimate in-range index still produces an Ok
+        // outcome with the named action.
+        let c = OutOfRangeContract {
+            actions: vec!["alpha".to_string(), "beta".to_string()],
+            loss: LossMatrix::new(
+                vec!["s0".to_string(), "s1".to_string()],
+                vec!["a0".to_string(), "a1".to_string()],
+                vec![0.0, 1.0, 1.0, 0.0],
+            )
+            .expect("loss"),
+            out_of_range_index: 1,
+            from_fallback: false,
+        };
+        let posterior = Posterior::new(vec![0.5, 0.5]).expect("posterior");
+        let ctx = EvalContext {
+            decision_id: DecisionId::from_raw(0),
+            trace_id: TraceId::from_raw(0),
+            calibration_score: 1.0,
+            e_process: 0.0,
+            ci_width: 0.1,
+            ts_unix_ms: 0,
+        };
+        let outcome = evaluate(&c, &posterior, &ctx).expect("in-range index ok");
+        assert_eq!(outcome.action_index, 1);
+        assert_eq!(outcome.action_name, "beta");
     }
 }
 

@@ -3268,7 +3268,16 @@ impl ThreeLaneWorker {
                 ),
                 ts_unix_ms: now_ms,
             };
-            let outcome = franken_decision::evaluate(contract, posterior, &ctx);
+            // br-asupersync-g1pzep: evaluate now returns Result. The
+            // contract here is the in-tree RaptorQDecisionContract and
+            // should never produce ActionIndexOutOfRange in practice;
+            // on error we fall back to the Lyapunov governor's
+            // suggestion (the same path used when the franken-decision
+            // contract is disabled at runtime).
+            let outcome = match franken_decision::evaluate(contract, posterior, &ctx) {
+                Ok(o) => o,
+                Err(_) => return lyapunov_suggestion,
+            };
 
             // Emit decision audit entry as evidence.
             if let Some(ref sink) = self.evidence_sink {

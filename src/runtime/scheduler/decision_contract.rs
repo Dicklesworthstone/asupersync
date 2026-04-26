@@ -225,10 +225,12 @@ impl DecisionContract for SchedulerDecisionContract {
             });
         }
         if observation >= state::COUNT {
-            return Err(franken_decision::UpdatePosteriorError::ObservationOutOfRange {
-                observation,
-                state_count: state::COUNT,
-            });
+            return Err(
+                franken_decision::UpdatePosteriorError::ObservationOutOfRange {
+                    observation,
+                    state_count: state::COUNT,
+                },
+            );
         }
 
         // Simple likelihood model: observed state gets high probability.
@@ -344,7 +346,8 @@ mod tests {
         let c = SchedulerDecisionContract::new();
         // Posterior concentrated on healthy.
         let posterior = Posterior::new(vec![0.9, 0.03, 0.03, 0.04]).unwrap();
-        let outcome = evaluate(&c, &posterior, &test_ctx(0.95));
+        let outcome =
+            evaluate(&c, &posterior, &test_ctx(0.95)).expect("test contract action_index in range");
         assert_eq!(outcome.action_index, action::AGGRESSIVE);
         assert!(!outcome.fallback_active);
     }
@@ -354,7 +357,8 @@ mod tests {
         let c = SchedulerDecisionContract::new();
         // Posterior concentrated on congested.
         let posterior = Posterior::new(vec![0.05, 0.85, 0.05, 0.05]).unwrap();
-        let outcome = evaluate(&c, &posterior, &test_ctx(0.95));
+        let outcome =
+            evaluate(&c, &posterior, &test_ctx(0.95)).expect("test contract action_index in range");
         assert_eq!(outcome.action_index, action::CONSERVATIVE);
     }
 
@@ -363,7 +367,8 @@ mod tests {
         let c = SchedulerDecisionContract::new();
         // Posterior concentrated on partitioned.
         let posterior = Posterior::new(vec![0.05, 0.05, 0.05, 0.85]).unwrap();
-        let outcome = evaluate(&c, &posterior, &test_ctx(0.95));
+        let outcome =
+            evaluate(&c, &posterior, &test_ctx(0.95)).expect("test contract action_index in range");
         assert_eq!(outcome.action_index, action::CONSERVATIVE);
     }
 
@@ -372,7 +377,8 @@ mod tests {
         let c = SchedulerDecisionContract::new();
         // Posterior concentrated on unstable.
         let posterior = Posterior::new(vec![0.05, 0.05, 0.85, 0.05]).unwrap();
-        let outcome = evaluate(&c, &posterior, &test_ctx(0.95));
+        let outcome =
+            evaluate(&c, &posterior, &test_ctx(0.95)).expect("test contract action_index in range");
         assert_eq!(outcome.action_index, action::CONSERVATIVE);
     }
 
@@ -381,7 +387,8 @@ mod tests {
         let c = SchedulerDecisionContract::new();
         let posterior = Posterior::uniform(4);
         // Low calibration triggers fallback.
-        let outcome = evaluate(&c, &posterior, &test_ctx(0.3));
+        let outcome =
+            evaluate(&c, &posterior, &test_ctx(0.3)).expect("test contract action_index in range");
         assert!(outcome.fallback_active);
         assert_eq!(outcome.action_index, action::CONSERVATIVE);
     }
@@ -392,7 +399,8 @@ mod tests {
         // So uniform should prefer conservative.
         let c = SchedulerDecisionContract::new();
         let posterior = Posterior::uniform(4);
-        let outcome = evaluate(&c, &posterior, &test_ctx(0.95));
+        let outcome =
+            evaluate(&c, &posterior, &test_ctx(0.95)).expect("test contract action_index in range");
         assert_eq!(outcome.action_index, action::CONSERVATIVE);
     }
 
@@ -400,7 +408,8 @@ mod tests {
     fn audit_entry_produces_valid_evidence() {
         let c = SchedulerDecisionContract::new();
         let posterior = Posterior::new(vec![0.7, 0.1, 0.1, 0.1]).unwrap();
-        let outcome = evaluate(&c, &posterior, &test_ctx(0.92));
+        let outcome =
+            evaluate(&c, &posterior, &test_ctx(0.92)).expect("test contract action_index in range");
         let evidence = outcome.audit_entry.to_evidence_ledger();
         assert_eq!(evidence.component, "scheduler");
         assert!(evidence.is_valid());
@@ -410,7 +419,8 @@ mod tests {
     fn decision_output_snapshot_scrubbed() {
         let c = SchedulerDecisionContract::new();
         let posterior = Posterior::new(vec![0.12, 0.18, 0.2, 0.5]).unwrap();
-        let outcome = evaluate(&c, &posterior, &test_ctx(0.91));
+        let outcome =
+            evaluate(&c, &posterior, &test_ctx(0.91)).expect("test contract action_index in range");
 
         insta::assert_json_snapshot!(
             "decision_output_scrubbed",
@@ -487,7 +497,8 @@ mod tests {
         }
 
         // Should converge toward healthy → aggressive.
-        let outcome = evaluate(&c, &posterior, &test_ctx(0.95));
+        let outcome =
+            evaluate(&c, &posterior, &test_ctx(0.95)).expect("test contract action_index in range");
         assert_eq!(outcome.action_index, action::AGGRESSIVE);
     }
 
@@ -503,7 +514,8 @@ mod tests {
         let c =
             SchedulerDecisionContract::with_losses_and_policy(losses, FallbackPolicy::default());
         let posterior = Posterior::uniform(4);
-        let outcome = evaluate(&c, &posterior, &test_ctx(0.95));
+        let outcome =
+            evaluate(&c, &posterior, &test_ctx(0.95)).expect("test contract action_index in range");
         // Conservative is very expensive everywhere, so aggressive/balanced wins.
         assert_ne!(outcome.action_index, action::CONSERVATIVE);
     }
