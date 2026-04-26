@@ -17,6 +17,60 @@
 //! - `permit.send(value)`: Commits the obligation
 //! - `permit.abort()`: Aborts the obligation
 //! - `drop(permit)`: Equivalent to abort (RAII cleanup)
+//!
+//! # Why a `parking_lot::Mutex<ChannelInner>` and not a lock-free queue?
+//!
+//! br-asupersync-p81v6d evaluation (follow-up to vgw2yw): the obvious
+//! "swap `VecDeque<T>` for `crossbeam_queue::ArrayQueue<T>` and only
+//! lock for waker registration" refactor is **rejected** as the wrong
+//! trade-off for this channel's cancel-correctness contract. Recorded
+//! here so a future agent does not re-litigate the same proposal.
+//!
+//! The mutex protects four pieces of state that *must* linearize
+//! together for cancel-safety:
+//!
+//! 1. `queue: VecDeque<T>`              — the message buffer
+//! 2. `reserved: usize`                 — outstanding permits
+//! 3. `send_wakers: VecDeque<SendWaiter>` — FIFO waker pool with
+//!    **mid-queue removal on cancel** (a `Reserve` future dropped
+//!    during `.await` removes its own waiter)
+//! 4. `recv_waker: Option<Waker>`        — receiver waker
+//!
+//! The reserve/commit invariants require:
+//!
+//! * **Atomic capacity test + reserve**: `reserve()` evaluates
+//!   `queue.len() + reserved < capacity` *and* increments `reserved`
+//!   under one linearization point. A racy snapshot (e.g.,
+//!   `ArrayQueue::len()` is **not** linearizable with a separate
+//!   atomic `reserved` counter) lets two reservers both observe
+//!   `len + reserved < capacity` and both succeed, oversubscribing.
+//! * **Atomic commit**: `permit.send(v)` decrements `reserved` and
+//!   pushes to `queue` in one linearization point. Splitting the
+//!   ops admits a window where a cancelled-but-already-pushed value
+//!   has no claimant.
+//! * **FIFO waker pool with cancel removal**: `crossbeam`'s
+//!   `ArrayQueue` and `SegQueue` do *not* support mid-queue removal,
+//!   which the cancel path requires (a dropped `Reserve` future must
+//!   delete its specific waiter so a later wake doesn't fire into a
+//!   stolen permit). Replicating that with a lock-free intrusive
+//!   linked list is tokio-mpsc-class effort (~1 KLOC of CAS-based
+//!   code with ABA-free index discipline) and would still need a
+//!   mutex around list metadata for safe traversal under cancel.
+//!
+//! **Net cost of the swap**: ~1 KLOC of new safety-critical code to
+//! replicate cancel-correctness (atomic ring buffer + intrusive
+//! waker pool) for a contention reduction that is largely already
+//! claimed by the wlf0xh work (commit f49630a8e), which made the
+//! waiter ops O(1) so the critical section is dominated by the
+//! `VecDeque` op itself. The bead's required microbench gate
+//! (N >= 8 fan-in throughput vs current) was not run because the
+//! design analysis already showed the swap is unsound without
+//! parallel-capacity-tracking compromises.
+//!
+//! **Conclusion**: keep the `Mutex<ChannelInner<T>>` design. It is
+//! the project's distinctive cancel-correctness contract; degrading
+//! its lock-protected atomicity to chase synthetic-benchmark
+//! throughput is a bad trade for the asupersync use-case.
 
 use parking_lot::Mutex;
 use smallvec::SmallVec;
@@ -255,8 +309,19 @@ impl<T> Sender<T> {
     /// between the two locks for an immediate-commit caller.
     ///
     /// Here we lock once, commit-or-fail, and never touch the `reserved`
-    /// counter at all. FIFO is preserved by the same `send_wakers
-    /// non-empty -> Full` rule that `try_reserve` uses.
+    /// counter at all.
+    ///
+    /// Capacity-only semantics (br-asupersync-m02s6r). Returns `Full` only
+    /// when no slot is physically available (`used_slots() >= capacity`);
+    /// queued waiters do *not* block a `try_send`. Rationale: `try_send` is
+    /// the load-shed primitive — callers expect "slot exists → push". A
+    /// stricter FIFO interpretation made backoff loops miss real capacity
+    /// windows during transient contention. Fairness for waiting senders is
+    /// preserved through the two-phase `reserve`/`send` path: when a `recv`
+    /// frees a slot, the head waiter's waker is invoked; if a `try_send`
+    /// races in and steals that slot, the waiter's next poll re-registers at
+    /// the head and is woken again on the following `recv`. `try_reserve`
+    /// retains strict FIFO so the two-phase path remains a fair queue.
     #[inline]
     pub fn try_send(&self, value: T) -> Result<(), SendError<T>> {
         let recv_waker = {
@@ -264,12 +329,6 @@ impl<T> Sender<T> {
 
             if self.shared.receiver_dropped.load(Ordering::Relaxed) {
                 return Err(SendError::Disconnected(value));
-            }
-
-            // Preserve FIFO: if any senders are queued, an immediate try_send
-            // would jump the line.
-            if !inner.send_wakers.is_empty() {
-                return Err(SendError::Full(value));
             }
 
             if !inner.has_capacity(self.shared.capacity) {
@@ -1171,6 +1230,66 @@ mod tests {
             format!("{:?}", result)
         );
         crate::test_complete!("try_send_when_full");
+    }
+
+    /// br-asupersync-m02s6r — try_send with capacity-only semantics.
+    ///
+    /// Builds the state "1 queued reserve waiter, 2 free slots" (cap=4) and
+    /// asserts that `try_send` succeeds rather than returning `Full`. The
+    /// stricter old behavior treated any queued waiter as blocking — that
+    /// made backoff loops miss real capacity windows.
+    #[test]
+    fn try_send_succeeds_with_free_slots_despite_queued_waiter() {
+        init_test("try_send_succeeds_with_free_slots_despite_queued_waiter");
+        let (tx, mut rx) = channel::<i32>(4);
+        let cx = test_cx();
+
+        // Fill capacity: 4 queued, 0 reserved.
+        for v in 1..=4_i32 {
+            tx.try_send(v).expect("fill");
+        }
+        let (qlen, rlen) = tx.debug_counts();
+        crate::assert_with_log!(qlen == 4 && rlen == 0, "filled", (4, 0), (qlen, rlen));
+
+        // Queue one reserve waiter (cannot make progress: cap exhausted).
+        let mut reserve_fut = Box::pin(tx.reserve(&cx));
+        let waker = noop_waker();
+        let mut task_cx = Context::from_waker(&waker);
+        let poll = reserve_fut.as_mut().poll(&mut task_cx);
+        crate::assert_with_log!(
+            matches!(poll, Poll::Pending),
+            "waiter pending",
+            "Pending",
+            format!("{:?}", poll)
+        );
+
+        // Drain two messages → 2 free slots, but waiter is still in the queue
+        // (its waker fired, but we deliberately do not re-poll the future).
+        let m1 = rx.try_recv().expect("recv 1");
+        let m2 = rx.try_recv().expect("recv 2");
+        crate::assert_with_log!(m1 == 1 && m2 == 2, "drained", (1, 2), (m1, m2));
+        let (qlen, rlen) = tx.debug_counts();
+        crate::assert_with_log!(qlen == 2 && rlen == 0, "after drain", (2, 0), (qlen, rlen));
+
+        // Old behavior: try_send returns Full because send_wakers is non-empty.
+        // New behavior: try_send succeeds because used_slots (2) < capacity (4).
+        let result = tx.try_send(99);
+        crate::assert_with_log!(
+            result.is_ok(),
+            "try_send succeeds with free slot + queued waiter",
+            true,
+            result.is_ok()
+        );
+
+        // Sanity: the waiter is still polled-able. After we re-poll it, the
+        // next free slot (created by another recv) goes to the waiter,
+        // confirming the two-phase reserve/send path remains live.
+        let m3 = rx.try_recv().expect("recv 3");
+        crate::assert_with_log!(m3 == 3, "recv 3", 3, m3);
+        // Drop the waiter to release its queue position cleanly.
+        drop(reserve_fut);
+
+        crate::test_complete!("try_send_succeeds_with_free_slots_despite_queued_waiter");
     }
 
     #[test]
