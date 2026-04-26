@@ -1346,16 +1346,55 @@ fn indexed_db_error_message(value: &JsValue) -> String {
 }
 
 #[cfg(target_arch = "wasm32")]
+/// br-asupersync-abfhxh: RAII guard that clears the IdbRequest's
+/// event handlers if the await_request future is cancelled before
+/// the Promise resolves. Pre-fix the closures stayed registered on
+/// the IdbRequest after JsFuture cancellation; when the underlying
+/// transaction later completed, the closures fired and called the
+/// dropped resolve/reject — leaking JS-allocated memory and
+/// potentially writing to freed Rust state.
+///
+/// The guard's Drop runs whenever the local goes out of scope —
+/// including async-fn cancellation — and clears the handlers iff
+/// the firing path hasn't already done so (signalled by the
+/// `callbacks` Option still being Some).
+#[cfg(target_arch = "wasm32")]
+struct IdbRequestHandlerGuard {
+    request: IdbRequest,
+    callbacks: std::rc::Rc<
+        std::cell::RefCell<Option<(Closure<dyn FnMut(Event)>, Closure<dyn FnMut(Event)>)>>,
+    >,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Drop for IdbRequestHandlerGuard {
+    fn drop(&mut self) {
+        if self.callbacks.borrow().is_some() {
+            clear_idb_request_handlers(&self.request);
+            self.callbacks.borrow_mut().take();
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
 async fn await_request(request: &IdbRequest) -> Result<JsValue, String> {
     let request = request.clone();
+    let callbacks: std::rc::Rc<
+        std::cell::RefCell<Option<(Closure<dyn FnMut(Event)>, Closure<dyn FnMut(Event)>)>>,
+    > = std::rc::Rc::new(std::cell::RefCell::new(None));
+    // br-asupersync-abfhxh: bind the guard BEFORE the Promise so its
+    // Drop fires after the Promise's await is cancelled / completes.
+    let _guard = IdbRequestHandlerGuard {
+        request: request.clone(),
+        callbacks: callbacks.clone(),
+    };
+    let cb_for_promise = callbacks.clone();
     let promise = Promise::new(&mut move |resolve, reject| {
-        let callbacks = std::rc::Rc::new(std::cell::RefCell::new(None));
-
         let success_request = request.clone();
         let success_cleanup = request.clone();
         let resolve_success = resolve.clone();
         let reject_success = reject.clone();
-        let success_callbacks = callbacks.clone();
+        let success_callbacks = cb_for_promise.clone();
         let on_success: Closure<dyn FnMut(Event)> = Closure::new(move |_event: Event| {
             clear_idb_request_handlers(&success_cleanup);
             let _ = success_callbacks.borrow_mut().take();
@@ -1372,7 +1411,7 @@ async fn await_request(request: &IdbRequest) -> Result<JsValue, String> {
         let error_request = request.clone();
         let error_cleanup = request.clone();
         let reject_error = reject.clone();
-        let error_callbacks = callbacks.clone();
+        let error_callbacks = cb_for_promise.clone();
         let on_error: Closure<dyn FnMut(Event)> = Closure::new(move |_event: Event| {
             clear_idb_request_handlers(&error_cleanup);
             let _ = error_callbacks.borrow_mut().take();
@@ -1386,12 +1425,15 @@ async fn await_request(request: &IdbRequest) -> Result<JsValue, String> {
         request.set_onsuccess(Some(on_success.as_ref().unchecked_ref()));
         request.set_onerror(Some(on_error.as_ref().unchecked_ref()));
 
-        *callbacks.borrow_mut() = Some((on_success, on_error));
+        *cb_for_promise.borrow_mut() = Some((on_success, on_error));
     });
 
     JsFuture::from(promise)
         .await
         .map_err(|error| indexed_db_error_message(&error))
+    // _guard drops here; if callbacks is still Some (cancel path), it
+    // clears the handlers. If callbacks is None (firing path already
+    // cleared), the guard's Drop is a no-op.
 }
 
 #[cfg(target_arch = "wasm32")]

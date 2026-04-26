@@ -591,7 +591,31 @@ impl WasmWritableStreamSink {
 
 #[cfg(target_arch = "wasm32")]
 impl Drop for WasmWritableStreamSink {
+    /// br-asupersync-e0i5xa: abort the underlying browser
+    /// WritableStream before releasing the writer lock. Pre-fix the
+    /// Drop only called release_lock(); anything on the JS side that
+    /// still held a reference to the WritableStream could keep
+    /// posting writes that buffered indefinitely in the browser-side
+    /// queue (memory-exhaustion DoS for malicious pages).
+    ///
+    /// Sequence: abort_with_reason() FIRST so the stream controller
+    /// observes the abort and rejects subsequent writes; then
+    /// release_lock() so the writer slot is freed. The
+    /// abort_with_reason call returns a Promise that the JS engine
+    /// resolves on its own; the Promise being dropped here is fine
+    /// because abort() effects are visible to the controller before
+    /// the Promise resolves.
+    ///
+    /// Idempotency: if `closed` is already true (the user explicitly
+    /// called close() or abort_with_reason() before drop), skip the
+    /// abort to avoid a redundant rejection in the JS console.
     fn drop(&mut self) {
+        if !self.closed {
+            let _ = self
+                .writer
+                .abort_with_reason(&JsValue::from_str("rust-side dropped"));
+            self.closed = true;
+        }
         self.writer.release_lock();
     }
 }
@@ -796,7 +820,9 @@ impl<R> BrowserReadableStream<R> {
         self.total_read
     }
 
-    /// Cancels the stream with the given reason.
+    /// Cancels the stream with the given reason. Updates Rust-side
+    /// state only; subclass-specific propagation to the underlying
+    /// source happens in the WASM-specialised impl below.
     ///
     /// After cancellation, all subsequent reads return `io::ErrorKind::ConnectionAborted`.
     pub fn cancel(&mut self, reason: impl Into<String>) {
@@ -834,19 +860,53 @@ impl<R> BrowserReadableStream<R> {
 #[cfg(target_arch = "wasm32")]
 impl BrowserReadableStream<WasmReadableStreamSource> {
     /// Creates a browser-readable bridge backed by a real WHATWG `ReadableStream`.
+    ///
+    /// br-asupersync-zdfgjo: now requires a `BrowserStreamIoCap` so the
+    /// caller's capability is verified through the same authorisation
+    /// path as `from_web_message_port` (see `authorize_message_channel_surface`).
+    /// Pre-fix this constructor was `pub` with no capability parameter,
+    /// letting any code with a reachable path mint a stream that the
+    /// rest of the runtime treated as authorised.
     pub fn from_web_readable_stream(
+        cap: &dyn crate::io::cap::HostApiIoCap,
         stream: &ReadableStream,
         config: BrowserStreamConfig,
     ) -> Result<Self, BrowserStreamError> {
+        cap.authorize(&crate::io::cap::HostApiRequest::new(
+            crate::io::cap::HostApiSurface::MessageChannel,
+        ))
+        .map_err(|e| {
+            BrowserStreamError::HostError(format!("host-api authorization denied: {e}"))
+        })?;
         let source = WasmReadableStreamSource::new(stream)?;
         Ok(Self::new(source, config))
     }
 
     /// Creates a browser-readable bridge with default stream configuration.
+    ///
+    /// br-asupersync-zdfgjo: now requires `BrowserStreamIoCap` (see
+    /// [`Self::from_web_readable_stream`]).
     pub fn from_web_readable_stream_with_defaults(
+        cap: &dyn crate::io::cap::HostApiIoCap,
         stream: &ReadableStream,
     ) -> Result<Self, BrowserStreamError> {
-        Self::from_web_readable_stream(stream, BrowserStreamConfig::default())
+        Self::from_web_readable_stream(cap, stream, BrowserStreamConfig::default())
+    }
+
+    /// br-asupersync-xcgmcz: WASM-specialised cancel that propagates
+    /// to the underlying browser ReadableStream. The generic
+    /// [`BrowserReadableStream::cancel`] only updates Rust-side state;
+    /// for the WASM source we additionally call the source's
+    /// `cancel_with_reason` so any JS-side producer (fetch() body,
+    /// transform chain, service-worker pipe) stops feeding data into
+    /// a black hole.
+    pub fn cancel_propagating(&mut self, reason: &str) {
+        if self.state == BrowserStreamState::Open || self.state == BrowserStreamState::Closing {
+            self.source.cancel_with_reason(reason);
+            self.state = BrowserStreamState::Errored;
+            self.cancel_reason = Some(reason.to_owned());
+            self.accounting.mark_aborted();
+        }
     }
 }
 
@@ -1089,19 +1149,30 @@ impl<W> BrowserWritableStream<W> {
 #[cfg(target_arch = "wasm32")]
 impl BrowserWritableStream<WasmWritableStreamSink> {
     /// Creates a browser-writable bridge backed by a real WHATWG `WritableStream`.
+    ///
+    /// br-asupersync-zdfgjo: now requires a `BrowserStreamIoCap` (see
+    /// [`BrowserReadableStream::from_web_readable_stream`]).
     pub fn from_web_writable_stream(
+        cap: &dyn crate::io::cap::HostApiIoCap,
         stream: &WritableStream,
         config: BrowserStreamConfig,
     ) -> Result<Self, BrowserStreamError> {
+        cap.authorize(&crate::io::cap::HostApiRequest::new(
+            crate::io::cap::HostApiSurface::MessageChannel,
+        ))
+        .map_err(|e| {
+            BrowserStreamError::HostError(format!("host-api authorization denied: {e}"))
+        })?;
         let sink = WasmWritableStreamSink::new(stream)?;
         Ok(Self::new(sink, config))
     }
 
     /// Creates a browser-writable bridge with default stream configuration.
     pub fn from_web_writable_stream_with_defaults(
+        cap: &dyn crate::io::cap::HostApiIoCap,
         stream: &WritableStream,
     ) -> Result<Self, BrowserStreamError> {
-        Self::from_web_writable_stream(stream, BrowserStreamConfig::default())
+        Self::from_web_writable_stream(cap, stream, BrowserStreamConfig::default())
     }
 }
 
