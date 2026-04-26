@@ -1,0 +1,5 @@
+---
+source: tests/opportunity_golden.rs
+expression: "format!(\"{result}\")"
+---
+score=0.30 decision=REJECT reason="score below 1.0 — not worthwhile"

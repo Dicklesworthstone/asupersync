@@ -1,0 +1,5 @@
+---
+source: tests/opportunity_golden.rs
+expression: "format!(\"{result}\")"
+---
+score=1.60 decision=NEEDS_EVIDENCE reason="score below threshold but promising (1.0–2.0)"

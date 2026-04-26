@@ -1,0 +1,5 @@
+---
+source: tests/opportunity_golden.rs
+expression: "format!(\"{result}\")"
+---
+score=2.80 decision=IMPLEMENT reason="score meets threshold (>= 2.0)" reason="low implementation effort"
