@@ -802,6 +802,27 @@ pub struct CancelBroadcaster<S: CancelSink> {
     sink: S,
     /// Local sequence counter.
     next_sequence: AtomicU64,
+    /// br-asupersync-ml5ba5 — Per-broadcaster random tag mixed into
+    /// the synthetic token_id `prepare_cancel` mints when no local
+    /// `SymbolCancelToken` exists for an object. Without this,
+    /// every broadcaster computed the same synthetic
+    /// `object_id.high ^ object_id.low`, which (1) collided across
+    /// senders that both cancelled the same object without holding a
+    /// local token, causing the receiver's `(object_id, token_id,
+    /// sequence)` dedup set to incorrectly suppress the second
+    /// sender's cancel when sequence numbers happened to overlap
+    /// (each broadcaster's `next_sequence` starts from 0); and
+    /// (2) was publicly derivable from the on-the-wire ObjectId, so
+    /// an attacker could mint cancels with the predictable token_id
+    /// and arbitrary sequence numbers to flush the dedup set or
+    /// pre-poison it. Sender_tag is OS-random per-broadcaster, so
+    /// two different broadcasters produce distinct synthetic
+    /// token_ids for the same ObjectId — preserving the
+    /// single-sender contract (same broadcaster + same object →
+    /// same synthetic, since `sender_tag` is stable for the
+    /// broadcaster's lifetime) while defeating cross-sender
+    /// collision.
+    sender_tag: u64,
     /// Atomic metrics counters.
     initiated: AtomicU64,
     received: AtomicU64,
@@ -839,6 +860,13 @@ impl SeenSequences {
 impl<S: CancelSink> CancelBroadcaster<S> {
     /// Creates a new broadcaster with the given sink.
     pub fn new(sink: S) -> Self {
+        // br-asupersync-ml5ba5 — Mint a per-broadcaster random
+        // sender_tag from the OS entropy source. The tag is stable
+        // for the broadcaster's lifetime and is mixed into synthetic
+        // token_ids when no local token exists for an object.
+        let mut tag_buf = [0u8; 8];
+        getrandom::fill(&mut tag_buf).expect("OS entropy source unavailable");
+        let sender_tag = u64::from_ne_bytes(tag_buf);
         Self {
             peers: RwLock::new(SmallVec::new()),
             active_tokens: RwLock::new(HashMap::new()),
@@ -846,6 +874,7 @@ impl<S: CancelSink> CancelBroadcaster<S> {
             max_seen: 10_000,
             sink,
             next_sequence: AtomicU64::new(0),
+            sender_tag,
             initiated: AtomicU64::new(0),
             received: AtomicU64::new(0),
             forwarded: AtomicU64::new(0),
@@ -888,10 +917,15 @@ impl<S: CancelSink> CancelBroadcaster<S> {
         now: Time,
     ) -> CancelMessage {
         // Extract token and ID without holding the lock during cancel.
+        // br-asupersync-ml5ba5 — synthetic fallback now mixes
+        // self.sender_tag so two broadcasters cancelling the same
+        // ObjectId without a local token produce distinct token_ids,
+        // defeating the cross-sender dedup collision and the
+        // publicly-derivable token_id attack.
         let (token, token_id) = {
             let tokens = self.active_tokens.read();
             tokens.get(&object_id).map_or_else(
-                || (None, object_id.high() ^ object_id.low()),
+                || (None, self.sender_tag ^ object_id.high() ^ object_id.low()),
                 |token| (Some(token.clone()), token.token_id()),
             )
         };
@@ -1921,6 +1955,73 @@ mod tests {
             Time::from_millis(10),
         );
         assert_eq!(msg.token_id(), token_id);
+    }
+
+    /// br-asupersync-ml5ba5 — Two distinct broadcasters cancelling
+    /// the same ObjectId without holding a local token must produce
+    /// distinct synthetic token_ids. The previous fallback
+    /// `object_id.high() ^ object_id.low()` collapsed both to the
+    /// same value, so a receiver dedup keyed on `(object_id,
+    /// token_id, sequence)` could incorrectly suppress the second
+    /// broadcaster's cancel when both sender's `next_sequence`
+    /// happened to overlap (each starts from 0). The fix mixes a
+    /// per-broadcaster random `sender_tag`.
+    #[test]
+    fn cross_sender_synthetic_token_id_does_not_collide() {
+        let object_id = ObjectId::new_for_test(0xCAFE);
+        let reason = CancelReason::user("cross-sender test");
+
+        // Two broadcasters, no local tokens registered.
+        let bcast_a = CancelBroadcaster::new(NullSink);
+        let bcast_b = CancelBroadcaster::new(NullSink);
+
+        let msg_a = bcast_a.prepare_cancel(object_id, &reason, Time::from_millis(10));
+        let msg_b = bcast_b.prepare_cancel(object_id, &reason, Time::from_millis(20));
+
+        // The synthetic token_ids differ across senders. (Tiny chance
+        // — 2^-64 — of a random sender_tag collision; cosmically
+        // unlikely.)
+        assert_ne!(
+            msg_a.token_id(),
+            msg_b.token_id(),
+            "br-asupersync-ml5ba5: two broadcasters must produce distinct synthetic token_ids"
+        );
+
+        // Receiver dedup contract: a fresh broadcaster receiving both
+        // messages must NOT classify the second as a duplicate of
+        // the first. Since the seen-key is (object_id, token_id,
+        // sequence) and the token_ids differ, both messages survive
+        // dedup independently.
+        let receiver = CancelBroadcaster::new(NullSink);
+        let f_a = receiver.receive_message(&msg_a, Time::from_millis(30));
+        let f_b = receiver.receive_message(&msg_b, Time::from_millis(40));
+        assert!(f_a.is_some(), "first cancel must forward");
+        assert!(
+            f_b.is_some(),
+            "br-asupersync-ml5ba5: second sender's cancel must NOT be suppressed as duplicate"
+        );
+    }
+
+    /// br-asupersync-ml5ba5 — Same-broadcaster path: two
+    /// `prepare_cancel` calls on the same broadcaster + same
+    /// ObjectId without a local token MUST mint the same synthetic
+    /// token_id (the dedup contract that lets the receiver see them
+    /// as the same logical cancel). `sender_tag` is stable per
+    /// broadcaster, so this holds.
+    #[test]
+    fn same_sender_synthetic_token_id_is_stable() {
+        let object_id = ObjectId::new_for_test(0xBEEF);
+        let reason = CancelReason::user("stable");
+
+        let bcast = CancelBroadcaster::new(NullSink);
+        let msg1 = bcast.prepare_cancel(object_id, &reason, Time::from_millis(10));
+        let msg2 = bcast.prepare_cancel(object_id, &reason, Time::from_millis(20));
+
+        assert_eq!(
+            msg1.token_id(),
+            msg2.token_id(),
+            "br-asupersync-ml5ba5: same broadcaster must produce stable synthetic token_id"
+        );
     }
 
     #[test]
