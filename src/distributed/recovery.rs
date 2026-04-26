@@ -686,6 +686,45 @@ pub struct RecoveryOrchestrator {
     cancelled: bool,
 }
 
+fn validate_recovered_snapshot(
+    trigger: &RecoveryTrigger,
+    snapshot: &RegionSnapshot,
+) -> Result<(), Error> {
+    let expected_region = trigger.region_id();
+    if snapshot.region_id != expected_region {
+        return Err(Error::new(ErrorKind::RecoveryFailed).with_message(format!(
+            "recovered snapshot region {:?} does not match trigger region {:?}",
+            snapshot.region_id, expected_region
+        )));
+    }
+
+    match trigger {
+        RecoveryTrigger::NodeRestart {
+            last_known_sequence,
+            ..
+        } if snapshot.sequence < *last_known_sequence => Err(Error::new(ErrorKind::RecoveryFailed)
+            .with_message(format!(
+                "recovered snapshot sequence {} is older than last known sequence {}",
+                snapshot.sequence, last_known_sequence
+            ))),
+        RecoveryTrigger::InconsistencyDetected {
+            local_sequence,
+            remote_sequence,
+            ..
+        } => {
+            let minimum_expected = (*local_sequence).max(*remote_sequence);
+            if snapshot.sequence < minimum_expected {
+                return Err(Error::new(ErrorKind::RecoveryFailed).with_message(format!(
+                    "recovered snapshot sequence {} is older than observed inconsistency floor {}",
+                    snapshot.sequence, minimum_expected
+                )));
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
 impl RecoveryOrchestrator {
     /// Creates a new orchestrator.
     #[must_use]
@@ -806,6 +845,10 @@ impl RecoveryOrchestrator {
                 return Err(e);
             }
         };
+        if let Err(e) = validate_recovered_snapshot(trigger, &snapshot) {
+            self.recovering = false;
+            return Err(e);
+        }
 
         // Collect contributing replicas (O(R) clones where R = unique replicas).
         let mut seen_replicas = HashSet::new();
@@ -1489,6 +1532,123 @@ mod tests {
         assert_eq!(result.snapshot.children, original.children);
         assert_eq!(result.snapshot.metadata, original.metadata);
         assert_eq!(result.snapshot.finalizer_count, original.finalizer_count);
+    }
+
+    #[test]
+    fn orchestrator_rejects_stale_node_restart_snapshot() {
+        let snapshot = create_test_snapshot();
+        let encoded = encode_test_snapshot(&snapshot);
+        let symbols: Vec<CollectedSymbol> = encoded
+            .symbols
+            .iter()
+            .map(|s| CollectedSymbol {
+                symbol: s.clone(),
+                tag: AuthenticationTag::zero(),
+                source_replica: "r0".to_string(),
+                collected_at: Time::ZERO,
+                verified: false,
+            })
+            .collect();
+        let trigger = RecoveryTrigger::NodeRestart {
+            region_id: snapshot.region_id,
+            last_known_sequence: snapshot.sequence + 1,
+        };
+        let mut orchestrator = RecoveryOrchestrator::new(
+            RecoveryConfig::default(),
+            RecoveryDecodingConfig {
+                verify_integrity: false,
+                ..Default::default()
+            },
+        );
+
+        let err = orchestrator
+            .recover_from_symbols(&trigger, &symbols, encoded.params, Duration::from_millis(5))
+            .expect_err("stale restart recovery must be rejected");
+
+        assert_eq!(err.kind(), ErrorKind::RecoveryFailed);
+        assert!(
+            err.to_string().contains("older than last known sequence"),
+            "unexpected stale restart error: {err}"
+        );
+    }
+
+    #[test]
+    fn orchestrator_rejects_cross_region_snapshot() {
+        let snapshot = create_test_snapshot();
+        let encoded = encode_test_snapshot(&snapshot);
+        let symbols: Vec<CollectedSymbol> = encoded
+            .symbols
+            .iter()
+            .map(|s| CollectedSymbol {
+                symbol: s.clone(),
+                tag: AuthenticationTag::zero(),
+                source_replica: "r0".to_string(),
+                collected_at: Time::ZERO,
+                verified: false,
+            })
+            .collect();
+        let trigger = RecoveryTrigger::ManualTrigger {
+            region_id: RegionId::new_for_test(999, 0),
+            initiator: "test".to_string(),
+            reason: None,
+        };
+        let mut orchestrator = RecoveryOrchestrator::new(
+            RecoveryConfig::default(),
+            RecoveryDecodingConfig {
+                verify_integrity: false,
+                ..Default::default()
+            },
+        );
+
+        let err = orchestrator
+            .recover_from_symbols(&trigger, &symbols, encoded.params, Duration::from_millis(5))
+            .expect_err("cross-region recovery must be rejected");
+
+        assert_eq!(err.kind(), ErrorKind::RecoveryFailed);
+        assert!(
+            err.to_string().contains("does not match trigger region"),
+            "unexpected region mismatch error: {err}"
+        );
+    }
+
+    #[test]
+    fn orchestrator_rejects_inconsistency_recovery_below_observed_remote_sequence() {
+        let snapshot = create_test_snapshot();
+        let encoded = encode_test_snapshot(&snapshot);
+        let symbols: Vec<CollectedSymbol> = encoded
+            .symbols
+            .iter()
+            .map(|s| CollectedSymbol {
+                symbol: s.clone(),
+                tag: AuthenticationTag::zero(),
+                source_replica: "r0".to_string(),
+                collected_at: Time::ZERO,
+                verified: false,
+            })
+            .collect();
+        let trigger = RecoveryTrigger::InconsistencyDetected {
+            region_id: snapshot.region_id,
+            local_sequence: snapshot.sequence,
+            remote_sequence: snapshot.sequence + 10,
+        };
+        let mut orchestrator = RecoveryOrchestrator::new(
+            RecoveryConfig::default(),
+            RecoveryDecodingConfig {
+                verify_integrity: false,
+                ..Default::default()
+            },
+        );
+
+        let err = orchestrator
+            .recover_from_symbols(&trigger, &symbols, encoded.params, Duration::from_millis(5))
+            .expect_err("recovery below observed remote sequence must be rejected");
+
+        assert_eq!(err.kind(), ErrorKind::RecoveryFailed);
+        assert!(
+            err.to_string()
+                .contains("older than observed inconsistency floor"),
+            "unexpected inconsistency-floor error: {err}"
+        );
     }
 
     // =====================================================================
