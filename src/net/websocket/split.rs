@@ -1537,6 +1537,7 @@ mod tests {
                 matches!(err, WsError::Io(ref e) if e.kind() == io::ErrorKind::Interrupted),
                 "expected interrupted split send after explicit Cx cancellation, got {err:?}"
             );
+            drop(send);
             let guard = write.shared.lock();
             assert!(
                 guard.io.written.is_empty(),

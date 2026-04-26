@@ -1318,6 +1318,7 @@ mod tests {
                 matches!(err, WsError::Io(ref e) if e.kind() == io::ErrorKind::Interrupted),
                 "expected interrupted send after explicit Cx cancellation, got {err:?}"
             );
+            drop(send);
             assert!(
                 ws.io.written.is_empty(),
                 "cancelled server send must not commit bytes after a pending write"
