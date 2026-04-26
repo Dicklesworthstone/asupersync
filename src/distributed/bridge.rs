@@ -210,6 +210,19 @@ pub struct SyncState {
     pub last_sync_time: Option<Time>,
     /// Last sync error, if any.
     pub last_sync_error: Option<String>,
+    /// br-asupersync-nyp2ts: separate inbound dedup gate. Tracks the
+    /// highest sequence number we have applied via
+    /// [`RegionBridge::apply_snapshot`] (inbound traffic from peers
+    /// or recovery). Kept distinct from `last_synced_sequence`
+    /// (which is updated by outbound `sync()` and so reflects the
+    /// LOCAL sequence counter we last published) and from
+    /// `RegionBridge::sequence` (the local outbound generation
+    /// counter, bumped by `create_snapshot`). Conflating these
+    /// namespaces caused valid newer inbound snapshots to be
+    /// silently dropped whenever the local node had generated more
+    /// outbound snapshots than the inbound carried — see
+    /// br-asupersync-nyp2ts.
+    pub last_applied_inbound_sequence: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -511,7 +524,7 @@ impl RegionBridge {
     ) -> Self {
         mode.assert_valid();
         match mode {
-            RegionMode::Local | RegionMode::Hybrid { .. } => Self {
+            RegionMode::Local => Self {
                 local: RegionRecord::new(id, parent, budget),
                 distributed: None,
                 mode,
@@ -519,6 +532,37 @@ impl RegionBridge {
                 config: BridgeConfig::default(),
                 sequence: 0,
             },
+            RegionMode::Hybrid {
+                replication_factor,
+                max_lag,
+            } => {
+                // Hybrid = local-primary with async replication. We must keep a
+                // local copy AND replicate. ConsistencyLevel::One + min_quorum=1
+                // means the local write is sufficient to consider the operation
+                // committed; replicas are asynchronously caught up. SyncMode is
+                // Asynchronous and sync_timeout is the max replication lag.
+                let dist_config = DistributedRegionConfig {
+                    min_quorum: 1,
+                    replication_factor,
+                    write_consistency: ConsistencyLevel::One,
+                    ..Default::default()
+                };
+                let bridge_config = BridgeConfig {
+                    sync_mode: SyncMode::Asynchronous,
+                    sync_timeout: max_lag,
+                    ..Default::default()
+                };
+                let distributed =
+                    DistributedRegionRecord::new(id, dist_config, parent, budget);
+                Self {
+                    local: RegionRecord::new(id, parent, budget),
+                    distributed: Some(distributed),
+                    mode,
+                    sync_state: SyncState::default(),
+                    config: bridge_config,
+                    sequence: 0,
+                }
+            }
             RegionMode::Distributed {
                 replication_factor,
                 consistency,
@@ -611,8 +655,12 @@ impl RegionBridge {
             }
         });
 
-        let local_changed = self.local.begin_close(reason);
-
+        // br-asupersync-60rane: attempt the distributed transition
+        // FIRST so that its `?` failure bails out before any local
+        // mutation. The previous order (local first) left the bridge
+        // in `local=Closing, distributed=Active` on dist failure,
+        // which `effective_state()` then reports as
+        // `Inconsistent` with no rollback path.
         let distributed_transition = if let Some(ref mut dist) = self.distributed {
             match dist.state {
                 DistributedRegionState::Closing | DistributedRegionState::Closed => None,
@@ -621,6 +669,8 @@ impl RegionBridge {
         } else {
             None
         };
+
+        let local_changed = self.local.begin_close(reason);
 
         if local_changed || distributed_transition.is_some() {
             self.mark_sync_pending();
@@ -653,8 +703,12 @@ impl RegionBridge {
 
     /// Completes the close operation.
     pub fn complete_close(&mut self, now: Time) -> Result<CloseResult, Error> {
-        let local_changed = self.local.complete_close();
-
+        // br-asupersync-60rane: attempt the distributed transition
+        // FIRST so that its `?` failure bails out before any local
+        // mutation. The previous order (local first) could leave the
+        // bridge in `local=Closed, distributed=non-Closed` on dist
+        // failure, which `effective_state()` then reports as
+        // `Inconsistent` with no rollback path.
         let distributed_transition = if let Some(ref mut dist) = self.distributed {
             match dist.state {
                 DistributedRegionState::Closed => None,
@@ -663,6 +717,8 @@ impl RegionBridge {
         } else {
             None
         };
+
+        let local_changed = self.local.complete_close();
 
         if local_changed || distributed_transition.is_some() {
             self.mark_sync_pending();
@@ -802,11 +858,17 @@ impl RegionBridge {
                 .with_message("snapshot region ID does not match bridge"));
         }
 
-        // Cross-cluster delivery can reorder or duplicate snapshots. Once this
-        // bridge has observed a sequence, older or duplicate deliveries must
-        // not rewind local state or sync metadata.
-        let current_sequence = self.sequence.max(self.sync_state.last_synced_sequence);
-        if snapshot.sequence <= current_sequence {
+        // br-asupersync-nyp2ts: the inbound dedup gate uses ONLY the
+        // inbound counter. Cross-cluster delivery can reorder or
+        // duplicate inbound snapshots, and the gate must drop those —
+        // but it must NOT also drop perfectly valid inbound snapshots
+        // just because the local node has generated more outbound
+        // snapshots in the meantime (`self.sequence`) or already
+        // pushed a higher sequence outbound via `sync()`
+        // (`last_synced_sequence`). Outbound and inbound live in
+        // independent namespaces. Compare against
+        // `last_applied_inbound_sequence` only.
+        if snapshot.sequence <= self.sync_state.last_applied_inbound_sequence {
             return Ok(());
         }
 
@@ -854,9 +916,35 @@ impl RegionBridge {
             cancel_reason,
         );
 
+        // br-asupersync-c2m5w7: also align the distributed record's
+        // state machine. Without this, applying a snapshot that
+        // transitions local from Open to Closing leaves
+        // self.distributed in its prior state — and
+        // `effective_state()` would then report `Inconsistent` until
+        // some other lifecycle op realigns. We bypass
+        // `validate_transition` here because recovery is an
+        // out-of-band restore, not an in-band lifecycle step;
+        // RegionRecord::apply_distributed_snapshot already follows
+        // the same convention. The transitions-history VecDeque is
+        // intentionally NOT mutated from here — that history is for
+        // in-band lifecycle events and reaching into it from the
+        // bridge would bypass the private `MAX_TRANSITION_HISTORY`
+        // cap enforced by `record_transition`.
+        if let Some(ref mut dist) = self.distributed {
+            let target = snapshot.state.to_distributed();
+            if dist.state != target {
+                dist.state = target;
+                dist.last_replicated = Some(snapshot.timestamp);
+            }
+        }
+
         // Keep future locally created snapshots monotonic after recovery/apply.
         self.sequence = self.sequence.max(snapshot.sequence);
         self.sync_state.last_synced_sequence = snapshot.sequence;
+        // br-asupersync-nyp2ts: track the inbound high-water mark
+        // separately so the dedup gate above can compare against it
+        // without conflating with outbound generation.
+        self.sync_state.last_applied_inbound_sequence = snapshot.sequence;
         self.sync_state.last_sync_time = Some(snapshot.timestamp);
         self.sync_state.sync_pending = false;
         self.sync_state.pending_ops = 0;
@@ -1824,8 +1912,16 @@ mod tests {
 
         assert!(bridge.mode().is_replicated());
         assert!(!bridge.mode().is_distributed());
-        // Hybrid mode doesn't create distributed record in with_mode.
-        assert!(bridge.distributed().is_none());
+        // Hybrid keeps a local copy AND replicates asynchronously: the
+        // distributed record must exist so replication paths fire.
+        let dist = bridge
+            .distributed()
+            .expect("hybrid mode must create a distributed record so it actually replicates");
+        assert_eq!(dist.config.replication_factor, 2);
+        assert_eq!(dist.config.min_quorum, 1);
+        assert_eq!(dist.config.write_consistency, ConsistencyLevel::One);
+        // Bridge config should reflect async-with-lag semantics.
+        assert_eq!(bridge.config.sync_mode, SyncMode::Asynchronous);
     }
 
     #[test]
@@ -2202,5 +2298,126 @@ mod tests {
             matches!(sync, SyncResult::NotNeeded),
             "hybrid mode without distributed record must report NotNeeded even with pending ops"
         );
+    }
+
+    // =====================================================================
+    // br-asupersync-nyp2ts: inbound vs outbound dedup namespaces
+    // =====================================================================
+
+    /// Builds an `Open`-state RegionSnapshot for `bridge.id()` at the
+    /// requested sequence number. Used by the nyp2ts regression
+    /// tests below.
+    fn nyp2ts_snapshot_at(bridge: &RegionBridge, sequence: u64) -> RegionSnapshot {
+        RegionSnapshot {
+            region_id: bridge.id(),
+            state: RegionState::Open,
+            timestamp: Time::from_secs(sequence),
+            sequence,
+            tasks: vec![],
+            children: vec![],
+            finalizer_count: 0,
+            budget: BudgetSnapshot {
+                deadline_nanos: None,
+                polls_remaining: None,
+                cost_remaining: None,
+            },
+            cancel_reason: None,
+            parent: None,
+            metadata: vec![],
+        }
+    }
+
+    #[test]
+    fn nyp2ts_outbound_create_does_not_gate_inbound_apply() {
+        // Pre-fix the dedup gate compared snapshot.sequence against
+        // self.sequence (outbound counter), so generating outbound
+        // snapshots locally caused valid inbound snapshots with a
+        // smaller sequence to be silently dropped. Post-fix the gate
+        // is keyed only on last_applied_inbound_sequence — outbound
+        // generation is irrelevant to inbound application.
+        let mut bridge = create_local_bridge();
+
+        // Generate 5 outbound snapshots: self.sequence advances to 5,
+        // last_applied_inbound_sequence stays at 0.
+        for _ in 0..5 {
+            let _ = bridge.create_snapshot(Time::from_secs(0));
+        }
+        assert_eq!(bridge.sequence, 5, "outbound counter must have advanced");
+        assert_eq!(
+            bridge.sync_state.last_applied_inbound_sequence, 0,
+            "no inbound snapshots have been applied yet"
+        );
+
+        // Inbound snapshot from a peer with its OWN sequence=3. Pre-
+        // fix this would silently drop because 3 <= max(self.sequence=5,
+        // last_synced_sequence=0) = 5. Post-fix it applies cleanly
+        // because 3 > last_applied_inbound_sequence=0.
+        let inbound = nyp2ts_snapshot_at(&bridge, 3);
+        bridge.apply_snapshot(&inbound).unwrap();
+
+        assert_eq!(
+            bridge.sync_state.last_applied_inbound_sequence, 3,
+            "inbound snapshot must have been applied (was silently dropped pre-fix)"
+        );
+    }
+
+    #[test]
+    fn nyp2ts_outbound_sync_does_not_gate_inbound_apply() {
+        // Same shape as above but with the outbound counter promoted
+        // by sync() (which also advances last_synced_sequence). The
+        // inbound apply must still go through.
+        let mut bridge = create_distributed_bridge();
+        bridge.sync_state.sync_pending = true;
+        let _ = bridge.sync(Time::from_secs(10)).unwrap();
+        assert!(
+            bridge.sync_state.last_synced_sequence > 0,
+            "outbound sync must have advanced last_synced_sequence"
+        );
+
+        let inbound_seq = bridge.sync_state.last_synced_sequence - 1;
+        // Edge case: if outbound sync only emitted seq=1, fall back
+        // to seq=1 since 0 is not > last_applied_inbound_sequence=0.
+        let inbound_seq = inbound_seq.max(1);
+        let inbound = nyp2ts_snapshot_at(&bridge, inbound_seq);
+        bridge.apply_snapshot(&inbound).unwrap();
+
+        assert_eq!(
+            bridge.sync_state.last_applied_inbound_sequence, inbound_seq,
+            "inbound apply must succeed even when outbound sync ran first"
+        );
+    }
+
+    #[test]
+    fn nyp2ts_inbound_dedup_still_drops_duplicates_and_older() {
+        // The dedup gate must still drop duplicate or older inbound
+        // snapshots — that's the legitimate behaviour the gate
+        // exists for. After applying seq=10, applying seq=10 again
+        // (duplicate) and seq=5 (older) must both be silent no-ops.
+        let mut bridge = create_local_bridge();
+
+        let first = nyp2ts_snapshot_at(&bridge, 10);
+        bridge.apply_snapshot(&first).unwrap();
+        assert_eq!(bridge.sync_state.last_applied_inbound_sequence, 10);
+
+        // Duplicate.
+        let dup = nyp2ts_snapshot_at(&bridge, 10);
+        bridge.apply_snapshot(&dup).unwrap();
+        assert_eq!(
+            bridge.sync_state.last_applied_inbound_sequence, 10,
+            "duplicate inbound must not advance the counter"
+        );
+
+        // Older.
+        let older = nyp2ts_snapshot_at(&bridge, 5);
+        bridge.apply_snapshot(&older).unwrap();
+        assert_eq!(
+            bridge.sync_state.last_applied_inbound_sequence, 10,
+            "older inbound must not rewind the counter"
+        );
+
+        // Strictly newer must apply.
+        let newer = nyp2ts_snapshot_at(&bridge, 11);
+        bridge.apply_snapshot(&newer).unwrap();
+        assert_eq!(bridge.sync_state.last_applied_inbound_sequence, 11);
     }
 }
