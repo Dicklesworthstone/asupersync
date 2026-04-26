@@ -942,6 +942,29 @@ impl RuntimeState {
         self.tasks.task(task_id)
     }
 
+    /// Requests cancellation of a task.
+    ///
+    /// O(1) — maintained incrementally for O(1) Lyapunov snapshots.
+    pub fn cancel_task(&mut self, task_id: TaskId, reason: &CancelReason) -> bool {
+        let budget = reason.cleanup_budget();
+        self.update_task(task_id, |record| {
+            record.request_cancel_with_budget(reason.clone(), budget)
+        })
+        .unwrap_or(false)
+    }
+
+    /// Completes a task with the given outcome.
+    ///
+    /// O(1) — maintained incrementally for O(1) Lyapunov snapshots.
+    pub fn complete_task(
+        &mut self,
+        task_id: TaskId,
+        outcome: crate::record::task::TaskOutcome,
+    ) -> bool {
+        self.update_task(task_id, |record| record.complete(outcome))
+            .unwrap_or(false)
+    }
+
     /// Returns a mutable reference to a task record by ID.
     ///
     /// NOTE: Direct use of `task_mut` bypasses O(1) Lyapunov counter updates.
@@ -2191,8 +2214,7 @@ impl RuntimeState {
             let mut newly_cancelled = false;
             let mut is_cancelling = false;
             let res = self.update_task(task_id, |task_record| {
-                newly_cancelled =
-                    task_record.request_cancel_with_budget(reason.clone(), budget);
+                newly_cancelled = task_record.request_cancel_with_budget(reason.clone(), budget);
                 is_cancelling = task_record.state.is_cancelling();
             });
             if res.is_none() {
@@ -2325,11 +2347,7 @@ impl RuntimeState {
                         // inspection can find the chain break. Do NOT
                         // chain the root target reason here — that would
                         // restore the very bug we're fixing.
-                        CancelReason::with_origin(
-                            CancelKind::ParentCancelled,
-                            parent_id,
-                            now,
-                        )
+                        CancelReason::with_origin(CancelKind::ParentCancelled, parent_id, now)
                     }
                 };
 
@@ -2436,7 +2454,7 @@ impl RuntimeState {
                     newly_cancelled =
                         task.request_cancel_with_budget(task_reason.clone(), task_budget);
                     let already_cancelling = task.state.is_cancelling();
-                    
+
                     if newly_cancelled {
                         // Task was newly cancelled, add to list
                         tasks_to_cancel_result = Some((task_id, task_budget.priority));
@@ -2455,7 +2473,7 @@ impl RuntimeState {
                 if let Some(t) = tasks_to_cancel_result {
                     tasks_to_cancel.push(t);
                 }
-                
+
                 // Trace log
                 debug!(
                     from_region = ?rid,
@@ -3142,19 +3160,18 @@ impl RuntimeState {
                                     log_cancel_protocol_violation(
                                         "region drain transition",
                                         &validation_result,
-                                        );
-                                        // Continue with transition but log violation
-                                        }
+                                    );
+                                    // Continue with transition but log violation
+                                }
 
-                                        let old_state = region.state();
-                                        region.begin_drain();
-                                        let new_state = region.state();
-                                        let _ = (old_state, new_state); // br-yj9czm: counter recomputed authoritatively, no-op transition note
+                                let old_state = region.state();
+                                region.begin_drain();
+                                let new_state = region.state();
+                                let _ = (old_state, new_state); // br-yj9czm: counter recomputed authoritatively, no-op transition note
 
-                                        self.notify_runtime_epoch_advance(
-                                        super::epoch_tracker::ModuleId::RegionTable,
-                                        );
-
+                                self.notify_runtime_epoch_advance(
+                                    super::epoch_tracker::ModuleId::RegionTable,
+                                );
                             }
                             false
                         }
