@@ -1904,6 +1904,52 @@ impl PgStream {
         }
     }
 
+    /// br-asupersync-1wygbs: best-effort PostgreSQL Terminate frame
+    /// (`'X'` 0x58 followed by big-endian 4-byte length=4) before TCP
+    /// shutdown. Per the PostgreSQL FE/BE protocol, a backend that
+    /// sees its TCP peer disappear without a prior Terminate retains
+    /// session-scoped state (prepared statements, temp tables,
+    /// advisory locks, idle-in-transaction state) until tcp_keepalive
+    /// or idle_session_timeout fires — typically minutes to hours.
+    /// Sending the Terminate first prompts immediate cleanup.
+    ///
+    /// The write is intentionally NON-blocking and best-effort: this
+    /// runs from `Drop`, so it cannot await, cannot park the thread,
+    /// and must tolerate any error (already-closed socket, broken
+    /// pipe, partial write). Each successful 5-byte write closes the
+    /// server-side leak; a failure leaves us no worse off than the
+    /// previous shutdown-only behaviour.
+    ///
+    /// TLS is intentionally skipped — encrypting the frame would
+    /// require driving an async TLS handshake from sync Drop. The
+    /// existing TLS shutdown (drop-on-close) is preserved; the server
+    /// still reclaims state via idle_session_timeout (slower but
+    /// unavoidable from sync Drop). Future work could route TLS
+    /// connection close through an async helper.
+    fn try_send_terminate_frame(&self) {
+        const TERMINATE_FRAME: [u8; 5] = [b'X', 0, 0, 0, 4];
+        match self {
+            Self::Plain(s) => {
+                // Grab the inner std::net::TcpStream — set non-blocking
+                // so a stalled peer cannot park this thread, then write
+                // the 5 bytes. Errors are silently dropped: a failed
+                // Terminate is no worse than the pre-fix shutdown-only
+                // behaviour.
+                if let Some(std_stream) = s.try_as_std() {
+                    let _ = std_stream.set_nonblocking(true);
+                    use std::io::Write;
+                    let mut writer: &std::net::TcpStream = &std_stream;
+                    let _ = writer.write_all(&TERMINATE_FRAME);
+                }
+            }
+            #[cfg(feature = "tls")]
+            Self::Tls(_) => {
+                // See doc — TLS path requires async TLS encrypt; left
+                // for a future async-helper refactor.
+            }
+        }
+    }
+
     /// Whether this stream is TLS-encrypted. Used by SCRAM channel-binding
     /// selection (br-asupersync-7n2xsi).
     #[cfg(feature = "tls")]
@@ -2211,8 +2257,27 @@ impl CancelTarget {
 }
 
 impl Drop for PgConnectionInner {
+    /// br-asupersync-1wygbs: best-effort PostgreSQL Terminate frame
+    /// before TCP shutdown. The previous shape only called
+    /// `stream.shutdown(Both)`, which leaves session-scoped backend
+    /// state (prepared statements, temp tables, advisory locks,
+    /// idle-in-transaction state) live on the server until
+    /// tcp_keepalive / idle_session_timeout fires (default
+    /// minutes-to-hours). After 2-3 connection-drop cycles,
+    /// pg_stat_activity / lock tables accumulate orphans.
+    ///
+    /// The fix sends the 5-byte Terminate message ([b'X', 0, 0, 0, 4])
+    /// non-blocking before the shutdown. The write may fail (broken
+    /// pipe, TLS, etc.), but every successful one prevents server-side
+    /// leakage. TLS is intentionally NOT exercised here — encrypting
+    /// the Terminate would require driving an async TLS handshake from
+    /// inside Drop, which is impossible without blocking the calling
+    /// thread on a runtime; for TLS the shutdown alone remains the
+    /// current behaviour and the server still reclaims state via
+    /// idle_session_timeout (slower but unavoidable in sync Drop).
     fn drop(&mut self) {
         if !self.closed {
+            self.stream.try_send_terminate_frame();
             let _ = self.stream.shutdown(std::net::Shutdown::Both);
             self.closed = true;
         }

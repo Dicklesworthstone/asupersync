@@ -324,6 +324,34 @@ impl TcpStream {
         self.inner.shutdown(how)
     }
 
+    /// br-asupersync-1wygbs: returns a reference to the underlying
+    /// `std::net::TcpStream` for callers that need a synchronous,
+    /// non-blocking write directly on the OS socket — the only known
+    /// caller is `database/postgres.rs::PgStream::try_send_terminate_frame`,
+    /// which writes the 5-byte PostgreSQL Terminate frame from inside
+    /// `Drop` (where async I/O is unreachable) so the server can reclaim
+    /// session-scoped state immediately rather than waiting for
+    /// idle_session_timeout. Returns `None` on platforms where the
+    /// stream has no `std::net` backing (wasm32 browser TCP).
+    ///
+    /// `#[allow(dead_code)]` because the postgres callsite is gated
+    /// behind the `postgres` cargo feature; under the default feature
+    /// set this method has no caller, but it is part of the public
+    /// (crate-internal) API surface.
+    #[inline]
+    #[must_use]
+    #[allow(dead_code)]
+    pub(crate) fn try_as_std(&self) -> Option<&net::TcpStream> {
+        #[cfg(target_arch = "wasm32")]
+        {
+            None
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Some(&self.inner)
+        }
+    }
+
     /// Set TCP_NODELAY.
     pub fn set_nodelay(&self, nodelay: bool) -> io::Result<()> {
         #[cfg(target_arch = "wasm32")]
