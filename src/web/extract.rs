@@ -718,13 +718,23 @@ impl<T: DeserializeOwned> FromRequest for Form<T> {
             ));
         }
 
-        if let Some(ct) = header_value_ci(&req, "content-type") {
-            if !matches_content_type_media_type(ct, "application/x-www-form-urlencoded") {
-                return Err(ExtractionError::new(
-                    super::response::StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                    format!("expected application/x-www-form-urlencoded, got {ct}"),
-                ));
-            }
+        // br-asupersync-mxqraw: Content-Type MUST be present AND must be
+        // application/x-www-form-urlencoded. Previously we accepted any
+        // body when Content-Type was absent, parsing arbitrary payloads
+        // (JSON, XML, raw bytes) as form-encoded — so an attacker could
+        // forge a Form<T> deserialisation by sending a JSON body without
+        // a Content-Type header. Default-deny: missing header is a 415.
+        let Some(ct) = header_value_ci(&req, "content-type") else {
+            return Err(ExtractionError::new(
+                super::response::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "Form requires Content-Type: application/x-www-form-urlencoded",
+            ));
+        };
+        if !matches_content_type_media_type(ct, "application/x-www-form-urlencoded") {
+            return Err(ExtractionError::new(
+                super::response::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                format!("expected application/x-www-form-urlencoded, got {ct}"),
+            ));
         }
 
         let body_str = std::str::from_utf8(req.body.as_ref())
@@ -1243,10 +1253,18 @@ mod tests {
     }
 
     #[test]
-    fn form_missing_content_type_still_parses_urlencoded_body() {
+    fn form_missing_content_type_rejects_with_415() {
+        // br-asupersync-mxqraw: Form requires Content-Type:
+        // application/x-www-form-urlencoded. Missing Content-Type is a
+        // 415 — default-deny prevents an attacker from forging Form<T>
+        // deserialisation by submitting a foreign-format body (JSON, XML,
+        // raw bytes) without declaring its media type.
         let req = Request::new("POST", "/form").with_body(Bytes::from_static(b"user=alice"));
-        let Form(values) = Form::<HashMap<String, String>>::from_request(req).unwrap();
-        assert_eq!(values.get("user").map(String::as_str), Some("alice"));
+        let err = Form::<HashMap<String, String>>::from_request(req).unwrap_err();
+        assert_eq!(
+            err.status,
+            crate::web::response::StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
     }
 
     #[test]
