@@ -64,6 +64,17 @@ pub struct FramedRead<R, D> {
     buffer: BytesMut,
     eof: bool,
     max_buffer_len: usize,
+    /// br-asupersync-3asq77: once the decoder (or the read path) has
+    /// surfaced an `Err`, the stream is poisoned. Subsequent
+    /// `poll_next` calls return `Poll::Ready(None)` rather than
+    /// re-decoding the same bytes (which would yield the same error in
+    /// an infinite loop, hanging any caller using `collect` /
+    /// `for_each`). Decoder-level recovery — when the codec knows how
+    /// to advance past an offending frame — belongs in the decoder
+    /// (see `LengthDelimitedCodec::Skip` from br-asupersync-o7e5xu);
+    /// `FramedRead` itself has no way to know framing semantics, so
+    /// the only correct policy here is fail-closed.
+    poisoned: bool,
 }
 
 impl<R, D> FramedRead<R, D> {
@@ -81,6 +92,7 @@ impl<R, D> FramedRead<R, D> {
             buffer: BytesMut::with_capacity(capacity),
             eof: false,
             max_buffer_len: DEFAULT_MAX_BUFFER_LEN,
+            poisoned: false,
         }
     }
 
@@ -157,6 +169,20 @@ where
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
+
+        // br-asupersync-3asq77: once any error has been surfaced, the
+        // stream is terminally poisoned. Re-polling must NOT re-emit
+        // the same bytes through the decoder (which would re-produce
+        // the same error in a tight infinite loop, hanging any caller
+        // that uses `collect` / `for_each`). Returning `None` at this
+        // gate is the safe fail-closed policy; decoder-level recovery
+        // (e.g. `LengthDelimitedCodec`'s Skip state) is the right
+        // place to advance past offending bytes when the codec
+        // actually knows the framing.
+        if this.poisoned {
+            return Poll::Ready(None);
+        }
+
         let mut read_passes = 0usize;
         let mut should_yield = false;
 
@@ -170,7 +196,10 @@ where
                         return Poll::Pending;
                     }
                 } // Need more data
-                Err(e) => return Poll::Ready(Some(Err(e))),
+                Err(e) => {
+                    this.poisoned = true;
+                    return Poll::Ready(Some(Err(e)));
+                }
             }
 
             // If we hit EOF, give the decoder one last chance.
@@ -178,7 +207,10 @@ where
                 return match this.decoder.decode_eof(&mut this.buffer) {
                     Ok(Some(item)) => Poll::Ready(Some(Ok(item))),
                     Ok(None) => Poll::Ready(None),
-                    Err(e) => Poll::Ready(Some(Err(e))),
+                    Err(e) => {
+                        this.poisoned = true;
+                        Poll::Ready(Some(Err(e)))
+                    }
                 };
             }
 
@@ -188,7 +220,10 @@ where
 
             match Pin::new(&mut this.inner).poll_read(cx, &mut read_buf) {
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(e.into()))),
+                Poll::Ready(Err(e)) => {
+                    this.poisoned = true;
+                    return Poll::Ready(Some(Err(e.into())));
+                }
                 Poll::Ready(Ok(())) => {
                     let filled = read_buf.filled();
                     if filled.is_empty() {
@@ -223,6 +258,7 @@ where
                                          see br-asupersync-bj427s)"
                                     ),
                                 );
+                                this.poisoned = true;
                                 return Poll::Ready(Some(Err(err.into())));
                             }
                         }
@@ -620,6 +656,187 @@ mod tests {
             }
             _ => {} // Pending or Ready(Ok) or Ready(None) all fine
         }
+    }
+
+    // br-asupersync-3asq77: stream-poison after decoder error prevents
+    // infinite re-emit of the same Err.
+
+    /// Decoder that always returns Err, regardless of input. Used to
+    /// drive the FramedRead poison path.
+    struct AlwaysErrDecoder;
+
+    impl Decoder for AlwaysErrDecoder {
+        type Item = ();
+        type Error = io::Error;
+
+        fn decode(
+            &mut self,
+            _src: &mut BytesMut,
+        ) -> Result<Option<Self::Item>, Self::Error> {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "always-fail decoder",
+            ))
+        }
+    }
+
+    /// Decoder that returns Err only from decode_eof. Used to verify
+    /// the EOF error path also poisons the stream.
+    struct EofErrDecoder;
+
+    impl Decoder for EofErrDecoder {
+        type Item = ();
+        type Error = io::Error;
+
+        fn decode(
+            &mut self,
+            _src: &mut BytesMut,
+        ) -> Result<Option<Self::Item>, Self::Error> {
+            Ok(None)
+        }
+
+        fn decode_eof(
+            &mut self,
+            _src: &mut BytesMut,
+        ) -> Result<Option<Self::Item>, Self::Error> {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "eof-fail decoder",
+            ))
+        }
+    }
+
+    #[test]
+    fn _3asq77_decode_err_poisons_stream_then_terminates() {
+        // First poll: decoder returns Err — must surface it once.
+        // Second poll: must return None (poisoned), NOT another Err.
+        let reader = SliceReader::new(b"some bytes that would re-decode");
+        let mut framed = FramedRead::new(reader, AlwaysErrDecoder);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut framed).poll_next(&mut cx);
+        assert!(
+            matches!(first, Poll::Ready(Some(Err(ref e))) if e.kind() == io::ErrorKind::InvalidData),
+            "first poll must surface the decoder Err exactly once, got {first:?}"
+        );
+
+        let second = Pin::new(&mut framed).poll_next(&mut cx);
+        assert!(
+            matches!(second, Poll::Ready(None)),
+            "second poll on a poisoned FramedRead must return None, not re-emit \
+             the same Err — got {second:?}"
+        );
+
+        // Third poll must remain terminated — verifies the poison flag
+        // is sticky across many polls.
+        let third = Pin::new(&mut framed).poll_next(&mut cx);
+        assert!(
+            matches!(third, Poll::Ready(None)),
+            "subsequent polls on a poisoned FramedRead must keep returning \
+             None, got {third:?}"
+        );
+    }
+
+    #[test]
+    fn _3asq77_decode_err_does_not_busy_loop_on_repeated_polls() {
+        // Tight loop simulating `stream::collect` / `for_each` after
+        // a decode error. Pre-poison this would have produced the same
+        // Err N times forever; post-poison the stream must terminate
+        // after exactly one Err.
+        let reader = SliceReader::new(b"x");
+        let mut framed = FramedRead::new(reader, AlwaysErrDecoder);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut errs = 0;
+        let mut nones = 0;
+        for _ in 0..16 {
+            match Pin::new(&mut framed).poll_next(&mut cx) {
+                Poll::Ready(Some(Err(_))) => errs += 1,
+                Poll::Ready(None) => nones += 1,
+                other => panic!("unexpected poll outcome: {other:?}"),
+            }
+        }
+        assert_eq!(errs, 1, "decoder Err must be surfaced exactly once");
+        assert_eq!(
+            nones, 15,
+            "every subsequent poll must return None (terminated stream)"
+        );
+    }
+
+    #[test]
+    fn _3asq77_decode_eof_err_also_poisons_stream() {
+        // The EOF decode path is a second Err exit — it must also
+        // poison so callers can't loop on `decode_eof` errors either.
+        let reader = SliceReader::new(b""); // immediate EOF
+        let mut framed = FramedRead::new(reader, EofErrDecoder);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut framed).poll_next(&mut cx);
+        assert!(
+            matches!(first, Poll::Ready(Some(Err(ref e))) if e.kind() == io::ErrorKind::InvalidData),
+            "first poll must surface the decode_eof Err once, got {first:?}"
+        );
+
+        let second = Pin::new(&mut framed).poll_next(&mut cx);
+        assert!(
+            matches!(second, Poll::Ready(None)),
+            "FramedRead must be poisoned after a decode_eof Err, got {second:?}"
+        );
+    }
+
+    #[test]
+    fn _3asq77_io_err_also_poisons_stream() {
+        // The underlying-reader error path is a third Err exit and
+        // must also poison the stream — a flaky reader that returns
+        // an io::Error then "recovers" should not re-arm the framing
+        // pipeline behind FramedRead's back.
+        let reader = ErrorReader::new(io::ErrorKind::ConnectionReset);
+        let mut framed = FramedRead::new(reader, LinesCodec::new());
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut framed).poll_next(&mut cx);
+        match first {
+            Poll::Ready(Some(Err(LinesCodecError::Io(ref e))))
+                if e.kind() == io::ErrorKind::ConnectionReset => {}
+            other => panic!("expected ConnectionReset on first poll, got {other:?}"),
+        }
+
+        let second = Pin::new(&mut framed).poll_next(&mut cx);
+        assert!(
+            matches!(second, Poll::Ready(None)),
+            "FramedRead must be poisoned after an io error, got {second:?}"
+        );
+    }
+
+    #[test]
+    fn _3asq77_max_buffer_cap_err_also_poisons_stream() {
+        // The bj427s max_buffer_len cap is the fourth Err exit — same
+        // poison contract applies, otherwise a slowloris peer that
+        // keeps the connection open after the cap fires would re-trip
+        // the cap on every poll.
+        let payload: Vec<u8> = vec![b'A'; 256];
+        let reader = SliceReader::new(&payload);
+        let mut framed = FramedRead::new(reader, LinesCodec::new()).with_max_buffer_len(64);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let first = Pin::new(&mut framed).poll_next(&mut cx);
+        match first {
+            Poll::Ready(Some(Err(LinesCodecError::Io(ref e))))
+                if e.kind() == io::ErrorKind::InvalidData => {}
+            other => panic!("expected InvalidData on first poll, got {other:?}"),
+        }
+
+        let second = Pin::new(&mut framed).poll_next(&mut cx);
+        assert!(
+            matches!(second, Poll::Ready(None)),
+            "FramedRead must be poisoned after the max_buffer_len cap fires, \
+             got {second:?}"
+        );
     }
 
     #[test]
