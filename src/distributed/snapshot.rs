@@ -423,12 +423,26 @@ impl RegionSnapshot {
         metadata.sort_unstable();
         metadata.dedup();
 
-        let preferred_cancel = if (self.sequence, self.timestamp.as_nanos(), self.state.as_u8())
-            >= (
-                other.sequence,
-                other.timestamp.as_nanos(),
-                other.state.as_u8(),
-            ) {
+        // br-asupersync-3qv992: tiebreaker MUST be deterministic across
+        // nodes and IMMUNE to wall-clock skew. Pre-fix used
+        // `timestamp.as_nanos()` as the secondary key — content-derived in
+        // the sense that both nodes see the same value embedded in the
+        // snapshot, but an attacker who controls one node's clock could
+        // artificially advance/retard the timestamp to bias which
+        // cancel_reason wins.
+        //
+        // Post-fix uses the cancel_reason itself (Option<String>, which
+        // implements lexicographic Ord) as the tiebreaker. This is fully
+        // content-derived: all nodes see identical bytes; merge(A,B) and
+        // merge(B,A) deterministically agree; no clock dependency. The
+        // bias toward lexicographically-larger reasons is the standard
+        // last-writer-wins CRDT pattern with content as the witness.
+        //
+        // state.as_u8() retained as a final tertiary tiebreaker for the
+        // edge case where sequence AND cancel_reason are both equal.
+        let preferred_cancel = if (self.sequence, &self.cancel_reason, self.state.as_u8())
+            >= (other.sequence, &other.cancel_reason, other.state.as_u8())
+        {
             (&self.cancel_reason, &other.cancel_reason)
         } else {
             (&other.cancel_reason, &self.cancel_reason)
@@ -1260,6 +1274,97 @@ mod tests {
                 "concurrent_deletes": scrub_snapshot_for_crdt_merge_snapshot_test(&concurrent_deletes),
                 "mixed_insert_delete": scrub_snapshot_for_crdt_merge_snapshot_test(&mixed_insert_delete),
             })
+        );
+    }
+
+    // ─── br-asupersync-3qv992 deterministic tiebreaker ────────────────
+
+    /// Build two RegionSnapshots that differ ONLY in cancel_reason and
+    /// timestamp. With the wall-clock-based pre-fix tiebreaker, the snapshot
+    /// with the larger timestamp would always win — exposing a clock-skew
+    /// bias attack. Post-fix uses cancel_reason itself as the tiebreaker.
+    fn snap_with(
+        sequence: u32,
+        timestamp_secs: u64,
+        cancel_reason: Option<&str>,
+    ) -> RegionSnapshot {
+        RegionSnapshot {
+            region_id: RegionId::new_for_test(7, 0),
+            state: RegionState::Closing,
+            timestamp: Time::from_secs(timestamp_secs),
+            sequence,
+            tasks: vec![],
+            children: vec![],
+            finalizer_count: 0,
+            budget: BudgetSnapshot {
+                deadline_nanos: None,
+                polls_remaining: None,
+                cost_remaining: None,
+            },
+            cancel_reason: cancel_reason.map(str::to_string),
+            parent: None,
+            metadata: vec![],
+        }
+    }
+
+    #[test]
+    fn merge_tiebreaker_immune_to_clock_skew() {
+        // Two snapshots with EQUAL sequence but different cancel_reasons.
+        // Pre-fix (timestamp-based): snapshot with later timestamp wins —
+        // an attacker advancing their clock forces their reason to win.
+        // Post-fix (cancel_reason-based): the lexicographically-larger
+        // reason wins regardless of timestamp.
+        //
+        // 'aaa' < 'zzz', so 'zzz' wins regardless of which snapshot has
+        // the later wall-clock timestamp.
+
+        // Case 1: 'zzz' snapshot has the LATER timestamp (would have won
+        // pre-fix anyway — sanity check, not regression).
+        let a = snap_with(5, 100, Some("aaa"));
+        let z = snap_with(5, 200, Some("zzz"));
+        let merged_az = a.merge_crdt(&z).unwrap();
+        let merged_za = z.merge_crdt(&a).unwrap();
+        assert_eq!(merged_az.cancel_reason.as_deref(), Some("zzz"));
+        assert_eq!(merged_za.cancel_reason.as_deref(), Some("zzz"));
+        // Symmetry: merge(a,z) and merge(z,a) yield the same winner.
+        assert_eq!(merged_az.cancel_reason, merged_za.cancel_reason);
+
+        // Case 2 (REGRESSION GUARD): 'zzz' snapshot has the EARLIER
+        // timestamp. Pre-fix would have made 'aaa' win because its
+        // timestamp was later. Post-fix MUST still pick 'zzz'.
+        let a_late = snap_with(5, 200, Some("aaa"));
+        let z_early = snap_with(5, 100, Some("zzz"));
+        let merged = a_late.merge_crdt(&z_early).unwrap();
+        assert_eq!(
+            merged.cancel_reason.as_deref(),
+            Some("zzz"),
+            "post-fix tiebreaker MUST be content-derived, not clock-derived"
+        );
+        // Reverse order: same winner.
+        let merged_rev = z_early.merge_crdt(&a_late).unwrap();
+        assert_eq!(merged_rev.cancel_reason.as_deref(), Some("zzz"));
+    }
+
+    #[test]
+    fn merge_tiebreaker_with_none_loses_to_some() {
+        // Some > None per Option's Ord — so any Some(_) beats None.
+        let none_snap = snap_with(5, 1000, None);
+        let some_snap = snap_with(5, 0, Some("recorded"));
+        let merged = none_snap.merge_crdt(&some_snap).unwrap();
+        assert_eq!(merged.cancel_reason.as_deref(), Some("recorded"));
+    }
+
+    #[test]
+    fn merge_tiebreaker_higher_sequence_always_wins() {
+        // Sequence is the PRIMARY key — content tiebreaker only kicks in
+        // at sequence ties. Verify primary-key precedence is preserved.
+        let low = snap_with(1, 100, Some("low-seq-but-zzz"));
+        let high = snap_with(2, 0, Some("aaa"));
+        let merged = low.merge_crdt(&high).unwrap();
+        assert_eq!(
+            merged.cancel_reason.as_deref(),
+            Some("aaa"),
+            "higher sequence wins regardless of content"
         );
     }
 
