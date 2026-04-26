@@ -1,3 +1,10 @@
+[workspace]
+# Standalone subproject — not part of the asupersync workspace at /data/projects/asupersync
+# (the root workspace.exclude list excludes only "fuzz" and "asupersync-wasm"; this
+# subproject is implicitly excluded by being in tests/conformance/, but needs the
+# explicit empty [workspace] table so `cargo` doesn't try to inherit the parent
+# workspace settings.)
+
 [package]
 name = "raptorq-differential"
 version = "0.1.0"
@@ -10,6 +17,14 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0"
 tempfile = "3.0"
+# br-asupersync-dagagh: NOTE — adding `asupersync = { path = "../../.." }`
+# here is the next step but is currently blocked: the parent asupersync
+# crate's `cargo check` with default features fails the differential
+# subproject's lint baseline (deny(unused) elevates feature-gated dead
+# functions to errors when this subproject builds the parent fresh).
+# Once that lint mismatch is resolved, add the path-dep and replace
+# our_implementation() in src/differential_tests.rs with a real
+# asupersync::raptorq::SystematicEncoder + Decoder roundtrip.
 
 [dev-dependencies]
 tempfile = "3.0"

@@ -156,11 +156,17 @@ impl ReferenceImplementation {
             return Err(ReferenceError::Timeout { timeout: self.timeout });
         }
 
+        // br-asupersync-dagagh: derive the lossy strings BEFORE moving
+        // output.stdout into `data` to avoid the borrow-after-move compile
+        // error that previously blocked the entire subproject from building.
+        let stdout_text = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr_text = String::from_utf8_lossy(&output.stderr).to_string();
+        let exit_code = output.status.code().unwrap_or(-1);
         Ok(ReferenceOutput {
             data: output.stdout,
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-            exit_code: output.status.code().unwrap_or(-1),
+            stdout: stdout_text,
+            stderr: stderr_text,
+            exit_code,
             execution_time,
         })
     }
@@ -209,11 +215,17 @@ impl ReferenceImplementation {
             return Err(ReferenceError::Timeout { timeout: self.timeout });
         }
 
+        // br-asupersync-dagagh: derive the lossy strings BEFORE moving
+        // output.stdout into `data` to avoid the borrow-after-move compile
+        // error that previously blocked the entire subproject from building.
+        let stdout_text = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr_text = String::from_utf8_lossy(&output.stderr).to_string();
+        let exit_code = output.status.code().unwrap_or(-1);
         Ok(ReferenceOutput {
             data: output.stdout,
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-            exit_code: output.status.code().unwrap_or(-1),
+            stdout: stdout_text,
+            stderr: stderr_text,
+            exit_code,
             execution_time,
         })
     }
