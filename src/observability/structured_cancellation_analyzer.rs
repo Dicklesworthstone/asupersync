@@ -150,7 +150,7 @@ impl StructuredCancellationAnalyzer {
                 memory_usage_percentage: 0.0,
                 top_entities: Vec::new(),
             })),
-            last_cleanup: Arc::new(Mutex::new(std::time::SystemTime::now())),
+            last_cleanup: Arc::new(Mutex::new(super::replayable_system_time())),
         }
     }
 
@@ -284,7 +284,7 @@ impl StructuredCancellationAnalyzer {
     /// Clear alerts older than the specified duration.
     pub fn clear_old_alerts(&self, max_age: Duration) {
         let mut alerts = self.alerts.lock().unwrap();
-        let cutoff = std::time::SystemTime::now() - max_age;
+        let cutoff = super::replayable_system_time() - max_age;
         alerts.retain(|alert| alert.triggered_at > cutoff);
     }
 
@@ -377,7 +377,7 @@ impl StructuredCancellationAnalyzer {
                     slow_count as f64 / entity_traces.len() as f64 * 100.0
                 },
                 threshold: 50.0,
-                triggered_at: std::time::SystemTime::now(),
+                triggered_at: super::replayable_system_time(),
                 remediation_suggestions: vec![
                     "Check for blocking operations in cancellation handlers".to_string(),
                     "Consider optimizing cleanup logic".to_string(),
@@ -400,7 +400,7 @@ impl StructuredCancellationAnalyzer {
                     total_anomalies as f64 / entity_traces.len() as f64
                 },
                 threshold: 1.0,
-                triggered_at: std::time::SystemTime::now(),
+                triggered_at: super::replayable_system_time(),
                 remediation_suggestions: vec![
                     "Investigate cancellation protocol violations".to_string(),
                     "Review structured concurrency patterns".to_string(),
@@ -467,7 +467,7 @@ impl StructuredCancellationAnalyzer {
     /// Clean up old traces to manage memory usage.
     fn maybe_cleanup_old_traces(&self) {
         let mut last_cleanup = self.last_cleanup.lock().unwrap();
-        let now = std::time::SystemTime::now();
+        let now = super::replayable_system_time();
 
         // Only cleanup every 5 minutes
         if now.duration_since(*last_cleanup).unwrap_or(Duration::ZERO) < Duration::from_secs(300) {

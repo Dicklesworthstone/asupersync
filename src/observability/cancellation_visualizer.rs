@@ -324,7 +324,7 @@ impl CancellationVisualizer {
     /// Generate a real-time dashboard view.
     #[must_use]
     pub fn generate_dashboard(&self, traces: &[CancellationTrace]) -> CancellationDashboard {
-        let now = std::time::SystemTime::now();
+        let now = super::replayable_system_time();
         let active_traces = traces.iter().filter(|t| !t.is_complete).count();
         let completed_traces = traces.iter().filter(|t| t.is_complete).count();
 

@@ -3971,7 +3971,7 @@ impl ThreeLaneWorker {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let cancel_ack = Self::consume_cancel_ack_locked(&mut state, task_id);
-                if let Some(record) = state.task_mut(task_id) {
+                state.update_task(task_id, |record| {
                     if !record.state.is_terminal() {
                         let mut completed_via_cancel = false;
                         if matches!(task_outcome, crate::types::Outcome::Ok(())) {
@@ -4015,7 +4015,7 @@ impl ThreeLaneWorker {
                             record.complete(task_outcome);
                         }
                     }
-                }
+                });
 
                 let waiters = state.task_completed(task_id);
                 let finalizers = state.drain_ready_async_finalizers();
@@ -4148,11 +4148,11 @@ impl ThreeLaneWorker {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let _cancel_ack = Self::consume_cancel_ack_locked(&mut state, task_id);
-                if let Some(record) = state.task_mut(task_id) {
+                state.update_task(task_id, |record| {
                     if !record.state.is_terminal() {
                         record.complete(crate::types::Outcome::Panicked(panic_payload));
                     }
-                }
+                });
 
                 let waiters = state.task_completed(task_id);
                 let finalizers = state.drain_ready_async_finalizers();
@@ -4211,23 +4211,29 @@ impl ThreeLaneWorker {
     }
 
     fn consume_cancel_ack_from_table(tt: &mut TaskTable, task_id: TaskId) -> bool {
-        let Some(record) = tt.task_mut(task_id) else {
-            return false;
+        let (is_ack, cx_inner) = {
+            let Some(record) = tt.task(task_id) else {
+                return false;
+            };
+            let Some(inner) = record.cx_inner.as_ref() else {
+                return false;
+            };
+            if !inner.read().cancel_acknowledged {
+                return false;
+            }
+            (true, Arc::clone(inner))
         };
-        let Some(inner) = record.cx_inner.as_ref() else {
-            return false;
-        };
-        // Read-first: skip the write lock when cancel_acknowledged is false
-        // (the common case). Only upgrade to write when the flag is set.
-        if !inner.read().cancel_acknowledged {
-            return false;
-        }
-        let mut guard = inner.write();
-        if guard.cancel_acknowledged {
-            guard.cancel_acknowledged = false;
-            drop(guard);
-            let _ = record.acknowledge_cancel();
-            return true;
+
+        if is_ack {
+            let mut guard = cx_inner.write();
+            if guard.cancel_acknowledged {
+                guard.cancel_acknowledged = false;
+                drop(guard);
+                tt.update_task(task_id, |record| {
+                    let _ = record.acknowledge_cancel();
+                });
+                return true;
+            }
         }
         false
     }

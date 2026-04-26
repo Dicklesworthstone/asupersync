@@ -274,7 +274,7 @@ impl DebtRuntimeIntegration {
         check_interval: Duration,
         alert_callback: Option<Box<dyn Fn(&DebtAlert) + Send + Sync>>,
     ) {
-        let mut last_alert_check = SystemTime::now();
+        let mut last_alert_check = super::replayable_system_time();
 
         loop {
             // Check shutdown signal
@@ -286,7 +286,7 @@ impl DebtRuntimeIntegration {
             }
 
             // Perform monitoring checks
-            let now = SystemTime::now();
+            let now = super::replayable_system_time();
 
             // Check for new alerts periodically
             if now
@@ -563,7 +563,7 @@ mod tests {
         let integration = DebtRuntimeIntegration::default();
 
         let good_snapshot = DebtSnapshot {
-            snapshot_time: SystemTime::now(),
+            snapshot_time: super::replayable_system_time(),
             total_pending: 0,
             pending_by_type: HashMap::new(),
             debt_percentage: 5.0,

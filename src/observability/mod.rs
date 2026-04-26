@@ -132,6 +132,27 @@ pub use task_inspector::{
     TaskSummaryWire,
 };
 
+/// Returns a wall-clock `SystemTime` that is replayable when an asupersync
+/// `Cx` with an installed timer driver is in scope.
+///
+/// In production (no virtual timer driver) this is equivalent to
+/// `SystemTime::now()`. In the lab runtime, it derives a deterministic
+/// `SystemTime` from the virtual clock so emitted observability records
+/// (metric timestamps, debt snapshots, cancellation trace steps) compare
+/// byte-for-byte across replays.
+///
+/// This is the canonical replacement for direct `std::time::SystemTime::now()`
+/// calls inside `src/observability/*` per asupersync_plan_v4.md §I7
+/// (no ambient authority for time queries).
+#[must_use]
+pub(crate) fn replayable_system_time() -> std::time::SystemTime {
+    if let Some(cx) = crate::cx::Cx::current() {
+        let nanos = cx.now_for_observability().as_nanos();
+        return std::time::UNIX_EPOCH + std::time::Duration::from_nanos(nanos);
+    }
+    std::time::SystemTime::now()
+}
+
 #[allow(clippy::cast_precision_loss)]
 fn sample_unit_interval(key: u64) -> f64 {
     const TWO_POW_53_F64: f64 = 9_007_199_254_740_992.0;

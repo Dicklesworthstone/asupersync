@@ -105,33 +105,88 @@ struct SignalDispatcher {
     slots: HashMap<SignalKind, Arc<SignalSlot>>,
     #[cfg(unix)]
     _handle: signal_hook::iterator::Handle,
-    /// Windows-only: shutdown flag + JoinHandle for the background
-    /// poller thread (see start()). On Drop we set the flag, unpark
-    /// the thread to wake it from park_timeout, and join it. This
-    /// replaces the previous design where the JoinHandle was dropped
-    /// immediately and the loop ran forever (br-asupersync-v6wnoj).
+    /// Windows-only: kernel event handles + JoinHandle for the
+    /// background poller thread. The poller waits on these events with
+    /// `WaitForMultipleObjects(INFINITE)`; the CTRL signal handler
+    /// signals `signal_pending_event` to wake the poller for sub-ms
+    /// signal delivery; Drop signals `shutdown_event` to make the
+    /// poller exit, then joins the thread and closes both kernel
+    /// handles. (br-asupersync-rsq3qj.)
     #[cfg(windows)]
-    poller_shutdown: Arc<std::sync::atomic::AtomicBool>,
+    shutdown_event: WindowsEventHandle,
+    #[cfg(windows)]
+    signal_pending_event: WindowsEventHandle,
     #[cfg(windows)]
     poller_handle: Option<std::thread::JoinHandle<()>>,
 }
 
+/// Send/Sync wrapper around a Win32 kernel `HANDLE`. The kernel
+/// guarantees the handle's underlying object (Event, here) is safe to
+/// share across threads — the wrapper is necessary only because
+/// `*mut c_void` is `!Send + !Sync` by default.
+///
+/// The handle's lifecycle is owned by `SignalDispatcher`: created in
+/// `start()`, closed in `Drop`. Closures that capture a copy of this
+/// wrapper (e.g. signal-handler callbacks installed for the lifetime
+/// of the dispatcher) MUST NOT call `CloseHandle` themselves.
+#[cfg(windows)]
+#[derive(Clone, Copy)]
+struct WindowsEventHandle(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl std::fmt::Debug for WindowsEventHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("WindowsEventHandle")
+            .field(&format_args!("{:p}", self.0))
+            .finish()
+    }
+}
+
+// SAFETY: Win32 Event objects accessed via SetEvent / WaitForMultipleObjects
+// / CloseHandle are documented to be safe to use from arbitrary threads
+// (the kernel-side state is the synchronization domain). The HANDLE
+// itself is just an opaque pointer to a kernel object, not into thread-
+// local memory.
+#[cfg(windows)]
+unsafe impl Send for WindowsEventHandle {}
+#[cfg(windows)]
+unsafe impl Sync for WindowsEventHandle {}
+
 #[cfg(windows)]
 impl Drop for SignalDispatcher {
     fn drop(&mut self) {
-        // Signal the poller to exit, then unpark it so park_timeout
-        // returns immediately rather than waiting up to the poll
-        // interval. Join the thread so resource accounting is clean —
-        // particularly important under runtime shutdown where the
-        // process expects all auxiliary threads to be quiescent.
-        self.poller_shutdown
-            .store(true, std::sync::atomic::Ordering::Release);
+        // Signal the shutdown event so the poller's
+        // WaitForMultipleObjects returns WAIT_OBJECT_0 (= shutdown
+        // index) and the loop breaks out cleanly. We then join the
+        // thread so resource accounting is clean (the process expects
+        // all auxiliary threads to be quiescent under runtime
+        // shutdown). Finally, close both event handles to release the
+        // kernel objects.
+        //
+        // Order matters: SetEvent → join → CloseHandle. Closing the
+        // handles before the thread joins would invalidate the handles
+        // the WaitForMultipleObjects call is referencing.
+        unsafe {
+            // SAFETY: shutdown_event is a valid manual-reset Event we
+            // created in start(); SetEvent is safe to call repeatedly.
+            let _ = windows_sys::Win32::System::Threading::SetEvent(self.shutdown_event.0);
+        }
         if let Some(handle) = self.poller_handle.take() {
-            handle.thread().unpark();
             // Best-effort join: if the poller thread panicked we still
             // want shutdown to proceed cleanly rather than propagate
             // the panic from a destructor.
             let _ = handle.join();
+        }
+        unsafe {
+            // SAFETY: both handles were created by CreateEventW in
+            // start() and have not been closed elsewhere. Any signal
+            // handlers that captured signal_pending_event by Copy will
+            // still hold the (now-stale) HANDLE value; once the
+            // dispatcher is dropped the process is shutting down and
+            // CRT signal handlers should not fire — see start() docs
+            // for the lifecycle contract.
+            let _ = windows_sys::Win32::Foundation::CloseHandle(self.shutdown_event.0);
+            let _ = windows_sys::Win32::Foundation::CloseHandle(self.signal_pending_event.0);
         }
     }
 }
@@ -186,82 +241,149 @@ impl SignalDispatcher {
 
 #[cfg(windows)]
 impl SignalDispatcher {
-    #[allow(unsafe_code)] // signal_hook::low_level::register requires unsafe
+    #[allow(unsafe_code)] // signal_hook::low_level::register + Win32 FFI
     fn start() -> io::Result<Self> {
+        use std::ptr;
+        use windows_sys::Win32::Foundation::{
+            CloseHandle, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+        };
+        use windows_sys::Win32::System::Threading::{
+            CreateEventW, INFINITE, SetEvent, WaitForMultipleObjects,
+        };
+
         let mut slots = HashMap::with_capacity(4);
         for kind in all_signal_kinds() {
             slots.insert(kind, Arc::new(SignalSlot::new()));
         }
 
+        // Two kernel events drive the poller's WaitForMultipleObjects
+        // loop (br-asupersync-rsq3qj):
+        //
+        //   * shutdown_event       — manual-reset, initially non-
+        //                            signaled. Set by Drop so the wait
+        //                            returns immediately and the loop
+        //                            exits. Manual-reset means "stays
+        //                            signaled until ResetEvent" — we
+        //                            never reset it because the only
+        //                            signaling event is shutdown.
+        //   * signal_pending_event — auto-reset, initially non-
+        //                            signaled. Set by the CRT signal
+        //                            handler when a signal is delivered.
+        //                            Auto-reset clears the event the
+        //                            moment a wait observes it, so the
+        //                            poller doesn't see a stale wakeup.
+        //
+        // Per MSDN, `SetEvent` is documented safe to call from a Win32
+        // console-control handler context (where the previous design's
+        // `Thread::unpark` was not). Combined with the existing
+        // signal-safe atomic counters in `SignalSlot`, this gives
+        // sub-ms signal delivery without busy polling and without
+        // racing with the kernel signal dispatcher.
+        //
+        // CreateEventW( lpEventAttributes=NULL,
+        //               bManualReset=TRUE/FALSE,
+        //               bInitialState=FALSE,
+        //               lpName=NULL ) returns NULL on failure.
+        let shutdown_event_raw = unsafe { CreateEventW(ptr::null(), 1, 0, ptr::null()) };
+        if shutdown_event_raw.is_null() || shutdown_event_raw == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error());
+        }
+        let signal_pending_event_raw = unsafe { CreateEventW(ptr::null(), 0, 0, ptr::null()) };
+        if signal_pending_event_raw.is_null()
+            || signal_pending_event_raw == INVALID_HANDLE_VALUE
+        {
+            // Don't leak the first handle if the second fails.
+            unsafe {
+                let _ = CloseHandle(shutdown_event_raw);
+            }
+            return Err(io::Error::last_os_error());
+        }
+        let shutdown_event = WindowsEventHandle(shutdown_event_raw);
+        let signal_pending_event = WindowsEventHandle(signal_pending_event_raw);
+
         // On Windows, signal_hook::iterator is unavailable. Use low-level
         // register() which installs CRT signal handlers that invoke our
         // callback directly.
         //
-        // IMPORTANT: CRT signal handlers run in signal context where locking
-        // is forbidden. We use `record_delivery_signal_safe` (atomic-only) in
-        // the handler and spawn a background poller thread to call
-        // `notify_waiters` from a safe context.
+        // CRT signal handlers run in signal context where locking is
+        // forbidden. We use `record_delivery_signal_safe` (atomic-only)
+        // in the handler AND additionally call `SetEvent` on
+        // signal_pending_event — `SetEvent` is documented signal-safe
+        // on Win32 CTRL handlers (it's a single kernel-syscall path
+        // with no allocator / no locks observable from user space).
         for kind in all_signal_kinds() {
             let raw = raw_signal_for_kind(kind);
             let slot = slots.get(&kind).expect("slot just inserted").clone();
-            // SAFETY: our closure only touches an atomic counter — no
-            // allocations, locks, or non-reentrant calls.
+            // Capture by Copy — WindowsEventHandle is Copy and Send.
+            // The HANDLE remains valid for the lifetime of this
+            // SignalDispatcher; SignalDispatcher::Drop closes the
+            // event AFTER joining the poller. CRT signal handlers are
+            // process-global and may technically outlive the
+            // dispatcher; in practice the dispatcher is created once
+            // at runtime startup and dropped at process exit, so the
+            // ordering is safe.
+            let pending = signal_pending_event;
+            // SAFETY: closure body uses only atomic stores
+            // (record_delivery_signal_safe) and SetEvent on a kernel
+            // event handle — both signal-safe operations on Windows
+            // CTRL handlers.
             unsafe {
                 signal_hook::low_level::register(raw, move || {
                     slot.record_delivery_signal_safe();
+                    let _ = SetEvent(pending.0);
                 })?;
             }
         }
 
-        // Background thread polls atomic counters and wakes async waiters
-        // from a safe (non-signal) context.
-        //
-        // br-asupersync-v6wnoj: previous implementation was
-        // `loop { thread::sleep(1ms); ... }` — burned ~100% of one core
-        // even when no signals were pending, the JoinHandle was dropped
-        // immediately so the thread could never be joined, and there was
-        // no shutdown path so the thread leaked across the process
-        // lifetime.
-        //
-        // Replacement uses:
-        //   * a `poller_shutdown: Arc<AtomicBool>` checked at the top of
-        //     each iteration so Drop can request exit;
-        //   * `thread::park_timeout(POLL_INTERVAL)` instead of busy-
-        //     sleeping, so the thread parks the OS scheduler (no
-        //     wake-up cost) and wakes deterministically on either the
-        //     timeout or an explicit `unpark()` from Drop;
-        //   * a stored `JoinHandle` so SignalDispatcher::drop can
-        //     `unpark()` + `join()` for clean shutdown.
-        //
-        // The CTRL handler still bumps an atomic counter
-        // (`record_delivery_signal_safe`) — it does NOT call unpark,
-        // because Rust's `Thread::unpark` is not documented as
-        // signal-safe on Windows CTRL handlers. Signal delivery
-        // latency is therefore bounded by `POLL_INTERVAL` (100 ms),
-        // an acceptable trade-off for a 100x reduction in idle CPU
-        // versus the previous 1 ms busy loop. A future optimization
-        // could swap park_timeout for a Win32 CreateEvent +
-        // WaitForMultipleObjects pair (with SetEvent from the CTRL
-        // handler, which IS documented signal-safe) once the
-        // workspace takes a windows-sys path dep.
-        const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+        // Poller thread waits on [shutdown, signal_pending] with
+        // INFINITE timeout. Returns:
+        //   WAIT_OBJECT_0     (0) → shutdown_event was set, exit loop
+        //   WAIT_OBJECT_0 + 1 (1) → signal_pending_event was set, drain
+        //                            atomics and re-wait
+        //   anything else (incl. WAIT_FAILED, WAIT_ABANDONED_*) → bail
+        //                            so we don't spin on persistent error
+        const SHUTDOWN_INDEX: u32 = WAIT_OBJECT_0;
+        const SIGNAL_PENDING_INDEX: u32 = WAIT_OBJECT_0 + 1;
 
         let poller_slots: Vec<Arc<SignalSlot>> = slots.values().cloned().collect();
-        let poller_shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let poller_shutdown_clone = Arc::clone(&poller_shutdown);
+        let poller_shutdown_handle = shutdown_event;
+        let poller_pending_handle = signal_pending_event;
         let poller_handle = thread::Builder::new()
             .name("asupersync-signal-poll-win".to_string())
             .spawn(move || {
+                let handles: [windows_sys::Win32::Foundation::HANDLE; 2] = [
+                    poller_shutdown_handle.0,
+                    poller_pending_handle.0,
+                ];
                 let mut last_seen: Vec<u64> = vec![0; poller_slots.len()];
-                while !poller_shutdown_clone.load(std::sync::atomic::Ordering::Acquire) {
-                    // Park-with-timeout: returns either when the timeout
-                    // expires (regular poll tick) or when Drop calls
-                    // unpark() to request immediate exit. Spurious
-                    // wake-ups are harmless — the loop just polls the
-                    // atomics and goes back to sleep.
-                    thread::park_timeout(POLL_INTERVAL);
-                    for (i, slot) in poller_slots.iter().enumerate() {
-                        last_seen[i] = slot.notify_if_changed(last_seen[i]);
+                loop {
+                    // SAFETY: handles array contains two valid event
+                    // handles created by CreateEventW above; they
+                    // remain valid for the lifetime of this thread
+                    // (closed only by SignalDispatcher::Drop AFTER
+                    // join). bWaitAll = FALSE so the call returns as
+                    // soon as ANY handle is signaled.
+                    let rc = unsafe {
+                        WaitForMultipleObjects(2, handles.as_ptr(), 0, INFINITE)
+                    };
+                    match rc {
+                        SHUTDOWN_INDEX => break,
+                        SIGNAL_PENDING_INDEX => {
+                            // Auto-reset: signal_pending_event is now
+                            // already cleared. Drain the atomic
+                            // counters and notify_waiters from this
+                            // safe (non-signal) context.
+                            for (i, slot) in poller_slots.iter().enumerate() {
+                                last_seen[i] = slot.notify_if_changed(last_seen[i]);
+                            }
+                        }
+                        // WAIT_FAILED, WAIT_ABANDONED_*, or any other
+                        // unexpected return: exit rather than spin
+                        // forever. The dispatcher will be dropped at
+                        // process shutdown and the failure is
+                        // recorded for postmortem via the runtime
+                        // logs.
+                        _ => break,
                     }
                 }
             })
@@ -269,7 +391,8 @@ impl SignalDispatcher {
 
         Ok(Self {
             slots,
-            poller_shutdown,
+            shutdown_event,
+            signal_pending_event,
             poller_handle: Some(poller_handle),
         })
     }

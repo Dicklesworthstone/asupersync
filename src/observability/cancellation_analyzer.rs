@@ -269,7 +269,7 @@ impl CancellationAnalyzer {
             return self.create_insufficient_data_analysis(traces.len());
         }
 
-        let analysis_start = SystemTime::now();
+        let analysis_start = super::replayable_system_time();
 
         // Calculate distributions
         let propagation_times: Vec<f64> = traces
@@ -692,7 +692,7 @@ impl CancellationAnalyzer {
         }
 
         let mut regressions = Vec::new();
-        let now = SystemTime::now();
+        let now = super::replayable_system_time();
 
         // Sort traces by start time for temporal analysis
         let mut ordered_traces = traces.to_vec();

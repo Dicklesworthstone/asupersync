@@ -227,6 +227,17 @@ prost = "0.14"
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = { version = "0.7", optional = true }
 
+# Win32 primitives for the signal-poller shutdown event
+# (br-asupersync-rsq3qj). CreateEventW + WaitForMultipleObjects + SetEvent
+# replace the previous park_timeout-based shutdown of
+# `asupersync-signal-poll-win` with sub-ms latency on signal delivery
+# and proper kernel-event-driven wakeup on runtime drop.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+] }
+
 # wasm32 browser builds require JS-backed entropy wiring for getrandom.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.4", features = ["wasm_js"] }

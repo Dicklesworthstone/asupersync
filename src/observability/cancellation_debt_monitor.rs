@@ -162,7 +162,7 @@ impl ProcessingStats {
             items_processed: VecDeque::new(),
             total_processed: AtomicU64::new(0),
             last_rate: 0.0,
-            last_rate_time: SystemTime::now(),
+            last_rate_time: super::replayable_system_time(),
         }
     }
 
@@ -262,7 +262,7 @@ impl CancellationDebtMonitor {
         dependencies: Vec<u64>,
     ) -> u64 {
         let work_id = self.next_work_id.fetch_add(1, Ordering::Relaxed);
-        let now = SystemTime::now();
+        let now = super::replayable_system_time();
 
         let work = PendingWork {
             work_id,
@@ -298,7 +298,7 @@ impl CancellationDebtMonitor {
 
     /// Mark work as completed and remove from pending.
     pub fn complete_work(&self, work_id: u64) -> bool {
-        let now = SystemTime::now();
+        let now = super::replayable_system_time();
         let mut found_work = None;
 
         // Find and remove the work
@@ -338,7 +338,7 @@ impl CancellationDebtMonitor {
 
     /// Complete multiple work items at once (batch completion).
     pub fn complete_work_batch(&self, work_ids: &[u64]) -> usize {
-        let now = SystemTime::now();
+        let now = super::replayable_system_time();
         let mut completed_count = 0;
         let mut completed_by_type: HashMap<WorkType, usize> = HashMap::new();
 
@@ -380,7 +380,7 @@ impl CancellationDebtMonitor {
 
     /// Get current debt snapshot.
     pub fn get_debt_snapshot(&self) -> DebtSnapshot {
-        let now = SystemTime::now();
+        let now = super::replayable_system_time();
         let pending = self.pending_work.lock().unwrap();
 
         // Calculate totals
@@ -492,14 +492,14 @@ impl CancellationDebtMonitor {
 
     /// Clear old alerts beyond a certain age.
     pub fn clear_old_alerts(&self, max_age: Duration) {
-        let cutoff = SystemTime::now() - max_age;
+        let cutoff = super::replayable_system_time() - max_age;
         let mut alerts = self.recent_alerts.lock().unwrap();
         alerts.retain(|alert| alert.generated_at > cutoff);
     }
 
     /// Force cleanup of old pending work (emergency debt relief).
     pub fn emergency_cleanup(&self, max_age: Duration) -> usize {
-        let cutoff = SystemTime::now() - max_age;
+        let cutoff = super::replayable_system_time() - max_age;
         let mut cleaned_count = 0;
 
         {
@@ -519,7 +519,7 @@ impl CancellationDebtMonitor {
                 entity_id: None,
                 metric_value: cleaned_count as f64,
                 threshold: 0.0,
-                generated_at: SystemTime::now(),
+                generated_at: super::replayable_system_time(),
                 remediation_suggestions: vec![
                     "Investigate why work items are not being processed".to_string(),
                     "Check for deadlocks or blocked entities".to_string(),

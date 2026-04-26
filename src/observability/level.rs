@@ -115,7 +115,7 @@ mod tests {
     )]
     use super::*;
     use std::process;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::UNIX_EPOCH;
 
     fn level_table() -> String {
         [
@@ -132,7 +132,7 @@ mod tests {
     }
 
     fn structured_filter_snapshot() -> (String, u32, u128) {
-        let timestamp_nanos = SystemTime::now()
+        let timestamp_nanos = super::replayable_system_time()
             .duration_since(UNIX_EPOCH)
             .expect("system time after unix epoch")
             .as_nanos();

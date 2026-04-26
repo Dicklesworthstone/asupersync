@@ -1594,6 +1594,19 @@ impl<Caps> Cx<Caps> {
             .map_or_else(wall_clock_now, TimerDriverHandle::now)
     }
 
+    /// Returns the current time from the configured timer driver, falling back
+    /// to wall-clock when no driver is installed.
+    ///
+    /// Unlike [`now`], this method does not require the `HasTime` capability.
+    /// It is intended for observability/diagnostic code that wants replayable
+    /// timestamps in lab mode without threading a `HasTime`-capable `Cx`
+    /// through. Production behavior is identical to `now`.
+    #[must_use]
+    #[inline]
+    pub fn now_for_observability(&self) -> Time {
+        self.current_checkpoint_time()
+    }
+
     #[inline]
     fn checkpoint_budget_exhaustion(
         region: RegionId,

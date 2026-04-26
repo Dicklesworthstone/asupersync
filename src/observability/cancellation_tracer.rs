@@ -311,7 +311,7 @@ impl CancellationTracer {
         }
 
         let trace_id = CancellationTraceId::new();
-        let now = SystemTime::now();
+        let now = super::replayable_system_time();
 
         let trace = CancellationTrace {
             trace_id,
@@ -372,7 +372,7 @@ impl CancellationTracer {
             return;
         }
 
-        let now = SystemTime::now();
+        let now = super::replayable_system_time();
 
         if let Ok(mut in_progress) = self.in_progress.lock() {
             if let Some(in_progress_trace) = in_progress.get_mut(&trace_id) {
@@ -448,7 +448,7 @@ impl CancellationTracer {
 
         if let Ok(mut in_progress) = self.in_progress.lock() {
             if let Some(mut in_progress_trace) = in_progress.remove(&trace_id) {
-                let completion_time = SystemTime::now();
+                let completion_time = super::replayable_system_time();
                 let total_time = completion_time
                     .duration_since(in_progress_trace.trace.start_time)
                     .unwrap_or(Duration::ZERO);
@@ -1235,7 +1235,7 @@ mod tests {
                 root_cancel_kind: "User".to_string(),
                 root_entity: "task-1".to_string(),
                 root_entity_type: EntityType::Task,
-                start_time: SystemTime::now(),
+                start_time: super::replayable_system_time(),
                 steps: vec![],
                 is_complete: true,
                 total_propagation_time: Some(Duration::from_millis(10)),
@@ -1249,7 +1249,7 @@ mod tests {
                 root_cancel_kind: "Timeout".to_string(),
                 root_entity: "task-2".to_string(),
                 root_entity_type: EntityType::Task,
-                start_time: SystemTime::now(),
+                start_time: super::replayable_system_time(),
                 steps: vec![],
                 is_complete: true,
                 total_propagation_time: Some(Duration::from_millis(5)),
@@ -1274,7 +1274,7 @@ mod tests {
                 root_cancel_kind: "User".to_string(),
                 root_entity: "task-1".to_string(),
                 root_entity_type: EntityType::Task,
-                start_time: SystemTime::now(),
+                start_time: super::replayable_system_time(),
                 steps: vec![],
                 is_complete: true,
                 total_propagation_time: Some(Duration::from_millis(10)),
@@ -1288,7 +1288,7 @@ mod tests {
                 root_cancel_kind: "User".to_string(),
                 root_entity: "task-2".to_string(),
                 root_entity_type: EntityType::Task,
-                start_time: SystemTime::now(),
+                start_time: super::replayable_system_time(),
                 steps: vec![],
                 is_complete: false,
                 total_propagation_time: None,
@@ -1314,7 +1314,7 @@ mod tests {
                 root_cancel_kind: "User".to_string(),
                 root_entity: "bottleneck-entity".to_string(),
                 root_entity_type: EntityType::Task,
-                start_time: SystemTime::now(),
+                start_time: super::replayable_system_time(),
                 steps: vec![CancellationTraceStep {
                     step_id: 0,
                     entity_id: "bottleneck-entity".to_string(),
@@ -1322,7 +1322,7 @@ mod tests {
                     cancel_reason: "high frequency".to_string(),
                     cancel_kind: "User".to_string(),
                     parent_entity: None,
-                    timestamp: SystemTime::now(),
+                    timestamp: super::replayable_system_time(),
                     elapsed_since_start: Duration::from_millis(1),
                     elapsed_since_prev: Duration::from_millis(1),
                     depth: 0,
@@ -1353,7 +1353,7 @@ mod tests {
                 root_cancel_kind: "User".to_string(),
                 root_entity: "bottleneck-entity".to_string(),
                 root_entity_type: EntityType::Task,
-                start_time: SystemTime::now(),
+                start_time: super::replayable_system_time(),
                 steps: vec![CancellationTraceStep {
                     step_id: 0,
                     entity_id: "bottleneck-entity".to_string(),
@@ -1361,7 +1361,7 @@ mod tests {
                     cancel_reason: "high frequency".to_string(),
                     cancel_kind: "User".to_string(),
                     parent_entity: None,
-                    timestamp: SystemTime::now(),
+                    timestamp: super::replayable_system_time(),
                     elapsed_since_start: Duration::from_millis(1),
                     elapsed_since_prev: Duration::from_millis(1),
                     depth: 0,
@@ -1380,7 +1380,7 @@ mod tests {
                 root_cancel_kind: "User".to_string(),
                 root_entity: "other-entity".to_string(),
                 root_entity_type: EntityType::Task,
-                start_time: SystemTime::now(),
+                start_time: super::replayable_system_time(),
                 steps: vec![CancellationTraceStep {
                     step_id: 0,
                     entity_id: "other-entity".to_string(),
@@ -1388,7 +1388,7 @@ mod tests {
                     cancel_reason: "normal".to_string(),
                     cancel_kind: "User".to_string(),
                     parent_entity: None,
-                    timestamp: SystemTime::now(),
+                    timestamp: super::replayable_system_time(),
                     elapsed_since_start: Duration::from_millis(1),
                     elapsed_since_prev: Duration::from_millis(1),
                     depth: 0,

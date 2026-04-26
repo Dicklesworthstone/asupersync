@@ -1218,7 +1218,7 @@ mod tests {
         /// Builds OTLP request from metrics registry.
         fn build_request(&self, metrics: &Metrics) -> Result<OtelMetricsRequest, OtelExportError> {
             let mut otel_metrics = Vec::new();
-            let timestamp = std::time::SystemTime::now()
+            let timestamp = super::replayable_system_time()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_err(|_| OtelExportError::TimestampError)?
                 .as_nanos() as u64;

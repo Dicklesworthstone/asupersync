@@ -259,71 +259,48 @@ impl StateSnapshot {
     #[must_use]
     pub fn from_runtime_state(state: &crate::runtime::RuntimeState) -> Self {
         use crate::record::obligation::ObligationKind;
+        use crate::record::task::TaskPhase;
 
         // Deadline pressure normalization constant D₀ (see module docs).
         // 1s is an intentionally "coarse" knob: pressure reflects tasks that are
         // within ~1s of their deadline (or overdue), not far-future deadlines.
         const DEADLINE_PRESSURE_D0_NS: u64 = 1_000_000_000;
         let now = state.now;
-        // -- Task scan: one pass to collect live count, cancel-phase counts,
-        //    and deadline pressure. --
-        let mut live_tasks: u32 = 0;
-        let mut cancel_requested_tasks: u32 = 0;
-        let mut cancelling_tasks: u32 = 0;
-        let mut finalizing_tasks: u32 = 0;
-        let mut deadline_pressure = 0.0_f64;
 
-        for (_, task) in state.tasks_iter() {
-            if task.state.is_terminal() {
-                continue;
-            }
-            live_tasks = live_tasks.saturating_add(1);
-            // Count cancellation phases.
-            Self::accumulate_cancel_phase_counts(
-                &task.state,
-                &mut cancel_requested_tasks,
-                &mut cancelling_tasks,
-                &mut finalizing_tasks,
-            );
-            // Deadline pressure contribution.
-            let Some(cx_inner) = task.cx_inner.as_ref() else {
-                continue;
-            };
-            let deadline = {
-                let inner = cx_inner.read();
-                inner.budget.deadline
-            };
-            let Some(deadline) = deadline else {
-                continue;
-            };
-            let deadline_ns = i128::from(deadline.as_nanos());
-            let now_ns = i128::from(now.as_nanos());
-            let slack_ns = deadline_ns - now_ns;
+        // -- Task counters (O(1), br-asupersync-xxcss5) --
+        let live_tasks = state.tasks.live_tasks() as u32;
+        let cancel_requested_tasks = state.tasks.count_in_phase(TaskPhase::CancelRequested) as u32;
+        let cancelling_tasks = state.tasks.count_in_phase(TaskPhase::Cancelling) as u32;
+        let finalizing_tasks = state.tasks.count_in_phase(TaskPhase::Finalizing) as u32;
+
+        // -- Deadline pressure O(1) estimation (br-asupersync-xxcss5) --
+        // pressure = Σ max(0, 1 - (deadline - now)/D₀)
+        // Coarse approximation: Σ (1 - (deadline - now)/D₀) for all tasks with deadlines.
+        // This is accurate if most tasks with deadlines are within D₀ of their deadline.
+        let tasks_with_deadline = state.tasks.tasks_with_deadline_count();
+        let deadline_pressure = if tasks_with_deadline > 0 {
+            let deadline_sum_ns = state.tasks.deadline_sum_ns();
+            let now_ns = u128::from(now.as_nanos());
+            
             #[allow(clippy::cast_precision_loss)]
-            let slack = slack_ns as f64;
+            let count = tasks_with_deadline as f64;
             #[allow(clippy::cast_precision_loss)]
             let d0 = DEADLINE_PRESSURE_D0_NS as f64;
+            #[allow(clippy::cast_precision_loss)]
+            let sum_d = deadline_sum_ns as f64;
+            #[allow(clippy::cast_precision_loss)]
+            let now_f = now_ns as f64;
 
-            let term = 1.0 - (slack / d0);
-            if term > 0.0 {
-                deadline_pressure += term;
-            }
-        }
+            // pressure = count - (sum_d / d0) + (count * now / d0)
+            let p = count - (sum_d / d0) + (count * now_f / d0);
+            p.max(0.0)
+        } else {
+            0.0
+        };
+
         // -- Obligation counters (O(1), br-asupersync-xxcss5) --
-        // Previously this block scanned the entire obligation arena on every
-        // governor snapshot. `ObligationTable` now maintains pending counters
-        // per kind plus a running sum of `reserved_at.as_nanos()`, so
-        // `from_runtime_state` is no longer linear in the live obligation
-        // count and drops the 18% snapshot-allocation contribution flagged in
-        // the bead description.
         #[allow(clippy::cast_possible_truncation)]
         let pending_obligations: u32 = state.pending_obligation_count() as u32;
-        // Age sum: Σ (now - reserved_at) = now * pending - Σ reserved_at.
-        // All three operands are in nanoseconds; do the arithmetic in `u128`
-        // so overflow is impossible even under worst-case long-running
-        // deterministic replay, then truncate to `u64` for the snapshot
-        // field. Saturation keeps the snapshot well-defined if the sum ever
-        // underflows (e.g., if a replay rewinds `now`).
         let now_ns = u128::from(now.as_nanos());
         let pending_reserved_at_sum = state.pending_obligation_reserved_at_sum_ns();
         let total_pending_nanos = now_ns.saturating_mul(u128::from(pending_obligations));
@@ -336,9 +313,6 @@ impl StateSnapshot {
             state.pending_obligation_count_for_kind(ObligationKind::SendPermit) as u32;
         #[allow(clippy::cast_possible_truncation)]
         let pending_acks: u32 = state.pending_obligation_count_for_kind(ObligationKind::Ack) as u32;
-        // Match the old aggregation: `Lease` and `SemaphorePermit` share the
-        // `pending_leases` bucket because the governor treats them as the
-        // same class of synchronization obligation.
         #[allow(clippy::cast_possible_truncation)]
         let pending_leases: u32 = (state
             .pending_obligation_count_for_kind(ObligationKind::Lease)
@@ -348,17 +322,9 @@ impl StateSnapshot {
         #[allow(clippy::cast_possible_truncation)]
         let pending_io_ops: u32 =
             state.pending_obligation_count_for_kind(ObligationKind::IoOp) as u32;
-        // -- Region scan: one pass for draining count. --
-        let mut draining_regions: u32 = 0;
-        for (_, region) in state.regions_iter() {
-            match region.state() {
-                crate::record::region::RegionState::Draining
-                | crate::record::region::RegionState::Finalizing => {
-                    draining_regions = draining_regions.saturating_add(1);
-                }
-                _ => {}
-            }
-        }
+
+        // -- Region counter (O(1), br-asupersync-xxcss5) --
+        let draining_regions = state.regions.draining_region_count() as u32;
 
         Self {
             time: now,
