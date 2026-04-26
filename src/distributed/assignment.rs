@@ -157,8 +157,8 @@ impl SymbolAssigner {
                 let symbol_len = symbols.len();
                 if symbol_len > 0 {
                     for j in 0..std::cmp::min(k_usize, symbol_len) {
-                        let idx = (replica_idx * symbol_len / replicas.len().max(1) + j)
-                            % symbol_len;
+                        let idx =
+                            (replica_idx * symbol_len / replicas.len().max(1) + j) % symbol_len;
                         indices.insert(idx);
                     }
 
@@ -234,7 +234,7 @@ impl SymbolAssigner {
 // ---------------------------------------------------------------------------
 
 /// Assignment of symbols to a specific replica.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplicaAssignment {
     /// Target replica identifier.
     pub replica_id: String,
