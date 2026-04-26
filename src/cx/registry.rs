@@ -115,12 +115,22 @@ pub struct NameLease {
 }
 
 impl NameLease {
-    /// Creates a new name lease.
+    /// Creates a new name lease (registry-internal mint).
     ///
-    /// The obligation token is armed; the caller must eventually call
-    /// [`release`](Self::release) or [`abort`](Self::abort).
+    /// br-asupersync-td50ls: this constructor is module-private so
+    /// external callers cannot forge a NameLease with arbitrary
+    /// holder/region/acquired_at and pass it to
+    /// [`NameRegistry::unregister_owned_and_grant`] — whose identity
+    /// check would otherwise compare the FORGED values against the
+    /// real entry, allowing the attacker to drop a victim's lease
+    /// without holding the obligation token. Public callers obtain
+    /// a [`NameLease`] only via [`NameRegistry::register`],
+    /// [`NameRegistry::register_with_policy`], or
+    /// [`NameRegistry::commit_permit`]. (Mirrors
+    /// [`NamePermit::new`] which is correctly private for the same
+    /// reason.)
     #[must_use]
-    pub fn new(
+    fn new(
         name: impl Into<String>,
         holder: TaskId,
         region: RegionId,
@@ -839,6 +849,14 @@ impl NameRegistry {
         }
         let holder = entry.holder;
         let region = entry.region;
+        // br-asupersync-ziwcq4: NameEntry's documented invariant is
+        // "Active leases store 0" in identity_nonce (see field doc
+        // at line ~498). The pending entry we're about to promote
+        // carries the permit_id in that field — reset it so the
+        // promoted lease respects the contract and the pending
+        // permit_id never leaks into the active map.
+        let mut entry = entry;
+        entry.identity_nonce = 0;
         self.leases.insert(name, entry);
         self.emit_name_change(permit.name(), holder, region, NameOwnershipKind::Acquired);
         Ok(permit.commit())
@@ -3739,5 +3757,133 @@ mod tests {
         granted_lease.release().unwrap();
 
         crate::test_complete!("cleanup_task_grants_waiter_for_pending_permit");
+    }
+
+    // ---------------------------------------------------------------
+    // br-asupersync-td50ls: NameLease::new is private (forgery guard)
+    // ---------------------------------------------------------------
+
+    /// Compile-time witness via doctest in the source file would be
+    /// the cleanest demonstration that NameLease::new is private. We
+    /// can't easily express "this should fail to compile from outside
+    /// the module" inside this same module's tests. Instead we
+    /// document the expected behaviour and verify the registry-issued
+    /// path still produces leases that match unregister_owned_and_grant.
+    #[test]
+    fn td50ls_registry_issued_lease_satisfies_identity_check() {
+        init_test("td50ls_registry_issued_lease_satisfies_identity_check");
+        let mut reg = NameRegistry::new();
+        let lease = reg
+            .register("svc", tid(1), rid(0), Time::from_secs(5))
+            .unwrap();
+
+        // Genuine lease passes the identity check on the unregister
+        // path — this is the post-fix happy case.
+        reg.unregister_owned_and_grant(&lease, Time::from_secs(6))
+            .expect("registry-issued lease must satisfy identity check");
+
+        // After successful unregister the entry is gone and the
+        // lease's obligation must be resolved by the caller.
+        let mut lease = lease;
+        lease.abort().unwrap();
+        crate::test_complete!("td50ls_registry_issued_lease_satisfies_identity_check");
+    }
+
+    // ---------------------------------------------------------------
+    // br-asupersync-ziwcq4: identity_nonce hygiene on permit promotion
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn ziwcq4_committed_permit_resets_identity_nonce_to_zero() {
+        // After commit_permit promotes a pending entry to an active
+        // lease, the active-leases map must store identity_nonce = 0
+        // (the documented invariant). Pre-fix the permit_id leaked
+        // into the active map and stayed there.
+        init_test("ziwcq4_committed_permit_resets_identity_nonce_to_zero");
+        let mut reg = NameRegistry::new();
+        let permit = reg
+            .reserve("svc", tid(1), rid(0), Time::from_secs(0))
+            .unwrap();
+        let permit_id = permit.permit_id();
+        assert!(
+            permit_id != 0,
+            "test precondition: pending permits get non-zero ids"
+        );
+
+        let mut lease = reg.commit_permit(permit).unwrap();
+        let entry = reg
+            .leases
+            .get("svc")
+            .expect("active entry exists after commit");
+        assert_eq!(
+            entry.identity_nonce, 0,
+            "active lease entry must store identity_nonce=0 per the \
+             documented invariant — pre-fix it carried the permit_id"
+        );
+
+        lease.release().unwrap();
+        crate::test_complete!("ziwcq4_committed_permit_resets_identity_nonce_to_zero");
+    }
+
+    #[test]
+    fn ziwcq4_all_register_paths_produce_zero_nonce_active_entries() {
+        // Defense in depth: register, register_with_policy(Fail),
+        // register_with_policy(Replace), and waiter-grant paths must
+        // ALL produce active entries with identity_nonce = 0.
+        init_test("ziwcq4_all_register_paths_produce_zero_nonce_active_entries");
+        let mut reg = NameRegistry::new();
+
+        let mut l1 = reg.register("a", tid(1), rid(0), Time::ZERO).unwrap();
+        assert_eq!(reg.leases.get("a").unwrap().identity_nonce, 0);
+
+        let outcome = reg
+            .register_with_policy("b", tid(1), rid(0), Time::ZERO, NameCollisionPolicy::Fail)
+            .unwrap();
+        let mut l2 = match outcome {
+            NameCollisionOutcome::Registered { lease } => lease,
+            _ => panic!("expected Registered"),
+        };
+        assert_eq!(reg.leases.get("b").unwrap().identity_nonce, 0);
+
+        // Replace path: register c, then replace.
+        let mut l3 = reg.register("c", tid(2), rid(0), Time::ZERO).unwrap();
+        let outcome = reg
+            .register_with_policy(
+                "c",
+                tid(3),
+                rid(0),
+                Time::from_secs(1),
+                NameCollisionPolicy::Replace,
+            )
+            .unwrap();
+        let mut l3_new = match outcome {
+            NameCollisionOutcome::Replaced { lease, .. } => lease,
+            _ => panic!("expected Replaced"),
+        };
+        assert_eq!(reg.leases.get("c").unwrap().identity_nonce, 0);
+
+        // Waiter-grant path: enqueue, free, drain.
+        let outcome = reg
+            .register_with_policy(
+                "c",
+                tid(4),
+                rid(0),
+                Time::from_secs(1),
+                NameCollisionPolicy::Wait {
+                    deadline: Time::from_secs(10),
+                },
+            )
+            .unwrap();
+        assert!(matches!(outcome, NameCollisionOutcome::Enqueued));
+        l3_new.release().unwrap();
+        reg.unregister_and_grant("c", Time::from_secs(2)).unwrap();
+        assert_eq!(reg.leases.get("c").unwrap().identity_nonce, 0);
+        let mut granted = reg.take_granted();
+        granted[0].lease.release().unwrap();
+
+        l1.release().unwrap();
+        l2.release().unwrap();
+        l3.abort().unwrap(); // displaced
+        crate::test_complete!("ziwcq4_all_register_paths_produce_zero_nonce_active_entries");
     }
 }
