@@ -3,7 +3,18 @@
 use crate::util::DetRng;
 use core::fmt;
 
-/// A 128-bit trace identifier.
+/// A 128-bit trace identifier in W3C Trace Context wire format.
+///
+/// **Not** the canonical [`crate::types::TraceId`] (the timestamped
+/// 128-bit identifier re-exported from `franken_kernel`). This type is
+/// purpose-specific to the distributed tracing subsystem: its serialization
+/// is locked by a golden snapshot (`canonical_trace_id_serialization`)
+/// because the W3C 32-hex-character format is part of the on-the-wire
+/// contract with downstream collectors and cannot drift. New code that
+/// needs a "TraceId" for EvidenceLedger linkage should use the canonical
+/// franken_kernel one. (br-asupersync-dwtjto: rename to `DistTraceId` is
+/// tracked as a follow-up so the name collision goes away without altering
+/// the wire format.)
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TraceId {
     high: u64,

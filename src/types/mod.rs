@@ -33,6 +33,33 @@ pub use cancel::{
     CancelWitnessError,
 };
 pub use id::{ObligationId, RegionId, TaskId, Time};
+
+// Canonical FrankenSuite identifiers.
+//
+// `TraceId` here is the 128-bit timestamped identifier defined in
+// `franken_kernel` (timestamp_ms in the high 48 bits + 80 bits of randomness,
+// hex-serialized). It is the canonical "TraceId" for EvidenceLedger linkage
+// and any new code that needs to correlate runtime decisions with persistent
+// audit records.
+//
+// Two narrower internal trace identifiers exist with the *same name* in
+// different modules and serve distinct purposes — they are NOT
+// interchangeable with this one (br-asupersync-dwtjto):
+//
+//   * `crate::observability::cancellation_tracer::TraceId` — `u64`
+//     auto-counter used purely for in-process cancellation propagation
+//     traces. No timestamp, no cross-process meaning.
+//
+//   * `crate::trace::distributed::id::TraceId` — `{high: u64, low: u64}`
+//     W3C-formatted (32 hex chars) distributed trace context. Locked by
+//     a golden snapshot (`canonical_trace_id_serialization`) so the
+//     wire format cannot drift.
+//
+// New code that wants a "TraceId" should reach for this one. Migration
+// of the two purpose-specific types is tracked under follow-up beads
+// rather than a single sweeping rename, because their field shapes and
+// serialization semantics differ in ways that golden tests pin in place.
+pub use franken_kernel::{DecisionId, PolicyId, SchemaVersion, TraceId};
 pub use outcome::{Outcome, OutcomeError, PanicPayload, Severity, join_outcomes};
 pub use policy::Policy;
 pub use pressure::SystemPressure;

@@ -49,6 +49,14 @@ impl Default for CancellationTracerConfig {
 }
 
 /// Unique identifier for a cancellation trace.
+///
+/// **Not** the canonical [`crate::types::TraceId`] (the 128-bit
+/// timestamped identifier re-exported from `franken_kernel`). This is a
+/// purpose-specific in-process counter used only by the cancellation
+/// propagation tracer; it has no timestamp, no cross-process meaning, and
+/// is not suitable for EvidenceLedger linkage. New code that needs a
+/// "TraceId" should use the canonical one. (br-asupersync-dwtjto: rename
+/// to `CancellationTraceId` is tracked as a follow-up.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct TraceId(u64);
 
@@ -252,6 +260,7 @@ struct InProgressTrace {
     last_step_time: SystemTime,
     entity_to_step: HashMap<String, u32>,
     depth_by_entity: HashMap<String, u32>,
+    pending_children_by_parent: HashMap<String, Vec<(String, u32)>>,
 }
 
 /// Structured cancellation trace analyzer.
@@ -318,11 +327,18 @@ impl CancellationTracer {
             anomalies: Vec::new(),
         };
 
+        let mut entity_to_step = HashMap::new();
+        entity_to_step.insert(root_entity.clone(), 0);
+
+        let mut depth_by_entity = HashMap::new();
+        depth_by_entity.insert(root_entity.clone(), 0);
+
         let in_progress_trace = InProgressTrace {
             trace,
             last_step_time: now,
-            entity_to_step: HashMap::new(),
-            depth_by_entity: HashMap::new(),
+            entity_to_step,
+            depth_by_entity,
+            pending_children_by_parent: HashMap::new(),
         };
 
         // Store the in-progress trace
@@ -395,7 +411,18 @@ impl CancellationTracer {
                 };
 
                 // Check for anomalies
+                let anomaly_count_before = in_progress_trace.trace.anomalies.len();
                 self.check_for_anomalies(&step, in_progress_trace);
+                let new_anomalies = in_progress_trace
+                    .trace
+                    .anomalies
+                    .len()
+                    .saturating_sub(anomaly_count_before);
+                if new_anomalies > 0 {
+                    self.stats
+                        .anomalies_detected
+                        .fetch_add(new_anomalies as u64, Ordering::Relaxed);
+                }
 
                 // Update trace state
                 in_progress_trace.trace.steps.push(step);
@@ -427,6 +454,13 @@ impl CancellationTracer {
 
                 in_progress_trace.trace.is_complete = true;
                 in_progress_trace.trace.total_propagation_time = Some(total_time);
+
+                let completion_anomalies = self.check_completion_anomalies(&mut in_progress_trace);
+                if completion_anomalies > 0 {
+                    self.stats
+                        .anomalies_detected
+                        .fetch_add(completion_anomalies as u64, Ordering::Relaxed);
+                }
 
                 // Update statistics
                 self.update_completion_stats(&in_progress_trace.trace);
@@ -511,6 +545,23 @@ impl CancellationTracer {
             trace.trace.anomalies.push(anomaly);
         }
 
+        if let Some(waiting_children) = trace.pending_children_by_parent.remove(&step.entity_id) {
+            for (child_entity, child_step) in waiting_children {
+                if child_step < step.step_id {
+                    trace
+                        .trace
+                        .anomalies
+                        .push(PropagationAnomaly::IncorrectPropagationOrder {
+                            parent_entity: step.entity_id.clone(),
+                            child_entity,
+                            parent_step: step.step_id,
+                            child_step,
+                        });
+                    self.stats.incorrect_orders.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+
         // Check for incorrect propagation order (simplified check)
         if let Some(parent) = &step.parent_entity {
             if let Some(&parent_step_id) = trace.entity_to_step.get(parent) {
@@ -524,14 +575,93 @@ impl CancellationTracer {
                     trace.trace.anomalies.push(anomaly);
                     self.stats.incorrect_orders.fetch_add(1, Ordering::Relaxed);
                 }
+            } else {
+                trace
+                    .pending_children_by_parent
+                    .entry(parent.clone())
+                    .or_default()
+                    .push((step.entity_id.clone(), step.step_id));
+            }
+        }
+    }
+
+    fn check_completion_anomalies(&self, trace: &mut InProgressTrace) -> usize {
+        let anomaly_count_before = trace.trace.anomalies.len();
+
+        if let Some(total_time) = trace.trace.total_propagation_time {
+            let mut latest_state_by_entity: HashMap<String, (bool, Duration)> = HashMap::new();
+            for step in &trace.trace.steps {
+                latest_state_by_entity.insert(
+                    step.entity_id.clone(),
+                    (
+                        step.propagation_completed,
+                        total_time.saturating_sub(step.elapsed_since_start),
+                    ),
+                );
+            }
+
+            for (entity_id, (propagation_completed, stuck_duration)) in latest_state_by_entity {
+                if !propagation_completed {
+                    self.push_stuck_anomaly_if_threshold_exceeded(
+                        &mut trace.trace,
+                        &entity_id,
+                        stuck_duration,
+                    );
+                }
             }
         }
 
-        if !trace.trace.anomalies.is_empty() {
-            self.stats
-                .anomalies_detected
-                .fetch_add(1, Ordering::Relaxed);
+        for (parent_entity, waiting_children) in trace.pending_children_by_parent.drain() {
+            for (child_entity, _) in waiting_children {
+                trace
+                    .trace
+                    .anomalies
+                    .push(PropagationAnomaly::UnexpectedPropagation {
+                        description: format!(
+                            "parent entity {parent_entity} was not observed before trace completion"
+                        ),
+                        affected_entities: vec![parent_entity.clone(), child_entity],
+                    });
+            }
         }
+
+        trace
+            .trace
+            .anomalies
+            .len()
+            .saturating_sub(anomaly_count_before)
+    }
+
+    fn push_stuck_anomaly_if_threshold_exceeded(
+        &self,
+        trace: &mut CancellationTrace,
+        entity_id: &str,
+        stuck_duration: Duration,
+    ) {
+        if stuck_duration.as_millis() < u128::from(self.config.stuck_cancellation_timeout_ms) {
+            return;
+        }
+
+        let already_recorded = trace.anomalies.iter().any(|anomaly| {
+            matches!(
+                anomaly,
+                PropagationAnomaly::StuckCancellation {
+                    entity_id: stuck_entity,
+                    ..
+                } if stuck_entity == entity_id
+            )
+        });
+        if already_recorded {
+            return;
+        }
+
+        trace.anomalies.push(PropagationAnomaly::StuckCancellation {
+            entity_id: entity_id.to_string(),
+            stuck_duration,
+        });
+        self.stats
+            .stuck_cancellations
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Updates statistics when a trace completes.
@@ -611,12 +741,11 @@ pub fn analyze_cancellation_patterns(traces: &[CancellationTrace]) -> Cancellati
     let avg_depth: f64 =
         traces.iter().map(|t| f64::from(t.max_depth)).sum::<f64>() / traces.len() as f64;
 
-    let avg_propagation_time = traces
+    let completed_propagation_times: Vec<Duration> = traces
         .iter()
         .filter_map(|t| t.total_propagation_time)
-        .map(|d| d.as_nanos() as f64)
-        .sum::<f64>()
-        / traces.len() as f64;
+        .collect();
+    let avg_propagation_time = average_duration(&completed_propagation_times);
 
     // Analyze common cancellation kinds
     let mut cancel_kind_counts: HashMap<String, usize> = HashMap::new();
@@ -737,7 +866,7 @@ pub fn analyze_cancellation_patterns(traces: &[CancellationTrace]) -> Cancellati
 
     // Generate recommendations
     let mut recommendations = Vec::new();
-    if avg_propagation_time > 10_000_000.0 {
+    if avg_propagation_time > Duration::from_millis(10) {
         // 10ms
         recommendations.push(
             "Consider optimizing cancellation propagation - average time is high".to_string(),
@@ -763,17 +892,27 @@ pub fn analyze_cancellation_patterns(traces: &[CancellationTrace]) -> Cancellati
     }
 
     CancellationAnalysis {
-        analysis_period: Duration::from_nanos(avg_propagation_time as u64),
+        analysis_period: avg_propagation_time,
         traces_analyzed: traces.len(),
         total_steps,
         avg_depth,
-        avg_propagation_time: Duration::from_nanos(avg_propagation_time as u64),
+        avg_propagation_time,
         common_cancel_kinds,
         high_cancellation_entities,
         anomaly_summary,
         bottlenecks,
         recommendations,
     }
+}
+
+fn average_duration(durations: &[Duration]) -> Duration {
+    if durations.is_empty() {
+        return Duration::ZERO;
+    }
+
+    let total_nanos: u128 = durations.iter().map(Duration::as_nanos).sum();
+    let avg_nanos = total_nanos / durations.len() as u128;
+    Duration::from_nanos(u64::try_from(avg_nanos).unwrap_or(u64::MAX))
 }
 
 #[cfg(test)]
@@ -875,6 +1014,218 @@ mod tests {
     }
 
     #[test]
+    fn test_anomaly_counter_counts_only_new_anomalies() {
+        let mut config = CancellationTracerConfig::default();
+        config.max_trace_depth = 0;
+        let tracer = CancellationTracer::new(config);
+
+        let trace_id = tracer.start_trace(
+            "root-task".to_string(),
+            EntityType::Task,
+            &CancelReason::user("test"),
+            CancelKind::User,
+        );
+
+        tracer.record_step(
+            trace_id,
+            "child-task".to_string(),
+            EntityType::Task,
+            &CancelReason::user("too deep"),
+            CancelKind::User,
+            "Cancelling".to_string(),
+            Some("root-task".to_string()),
+            true,
+        );
+        tracer.record_step(
+            trace_id,
+            "root-task".to_string(),
+            EntityType::Task,
+            &CancelReason::user("root observed"),
+            CancelKind::User,
+            "Cancelling".to_string(),
+            None,
+            true,
+        );
+
+        tracer.complete_trace(trace_id);
+
+        let stats = tracer.stats();
+        assert_eq!(stats.anomalies_detected, 1);
+
+        let completed = tracer.completed_traces();
+        assert_eq!(completed[0].anomalies.len(), 1);
+        assert!(matches!(
+            completed[0].anomalies[0],
+            PropagationAnomaly::ExcessiveDepth { .. }
+        ));
+    }
+
+    #[test]
+    fn test_child_before_parent_ordering_detected_when_parent_arrives() {
+        let tracer = CancellationTracer::new(CancellationTracerConfig::default());
+
+        let trace_id = tracer.start_trace(
+            "root-task".to_string(),
+            EntityType::Task,
+            &CancelReason::user("test"),
+            CancelKind::User,
+        );
+
+        tracer.record_step(
+            trace_id,
+            "child-task".to_string(),
+            EntityType::Task,
+            &CancelReason::user("child first"),
+            CancelKind::User,
+            "Cancelling".to_string(),
+            Some("parent-region".to_string()),
+            true,
+        );
+        tracer.record_step(
+            trace_id,
+            "parent-region".to_string(),
+            EntityType::Region,
+            &CancelReason::user("parent late"),
+            CancelKind::User,
+            "Cancelling".to_string(),
+            Some("root-task".to_string()),
+            true,
+        );
+
+        tracer.complete_trace(trace_id);
+
+        let completed = tracer.completed_traces();
+        assert!(completed[0].anomalies.iter().any(|anomaly| matches!(
+            anomaly,
+            PropagationAnomaly::IncorrectPropagationOrder {
+                parent_entity,
+                child_entity,
+                parent_step: 1,
+                child_step: 0,
+            } if parent_entity == "parent-region" && child_entity == "child-task"
+        )));
+        assert_eq!(tracer.stats().incorrect_orders, 1);
+    }
+
+    #[test]
+    fn test_stuck_cancellation_threshold_detects_incomplete_step() {
+        let mut config = CancellationTracerConfig::default();
+        config.stuck_cancellation_timeout_ms = 0;
+        let tracer = CancellationTracer::new(config);
+
+        let trace_id = tracer.start_trace(
+            "root-task".to_string(),
+            EntityType::Task,
+            &CancelReason::user("test"),
+            CancelKind::User,
+        );
+
+        tracer.record_step(
+            trace_id,
+            "child-task".to_string(),
+            EntityType::Task,
+            &CancelReason::user("not done"),
+            CancelKind::User,
+            "Cancelling".to_string(),
+            Some("root-task".to_string()),
+            false,
+        );
+
+        tracer.complete_trace(trace_id);
+
+        let completed = tracer.completed_traces();
+        assert!(completed[0].anomalies.iter().any(|anomaly| matches!(
+            anomaly,
+            PropagationAnomaly::StuckCancellation { entity_id, .. }
+                if entity_id == "child-task"
+        )));
+        assert_eq!(tracer.stats().stuck_cancellations, 1);
+    }
+
+    #[test]
+    fn test_completed_latest_state_is_not_reported_as_stuck() {
+        let mut config = CancellationTracerConfig::default();
+        config.stuck_cancellation_timeout_ms = 0;
+        let tracer = CancellationTracer::new(config);
+
+        let trace_id = tracer.start_trace(
+            "root-task".to_string(),
+            EntityType::Task,
+            &CancelReason::user("test"),
+            CancelKind::User,
+        );
+
+        tracer.record_step(
+            trace_id,
+            "child-task".to_string(),
+            EntityType::Task,
+            &CancelReason::user("requested"),
+            CancelKind::User,
+            "Cancelling".to_string(),
+            Some("root-task".to_string()),
+            false,
+        );
+        tracer.record_step(
+            trace_id,
+            "child-task".to_string(),
+            EntityType::Task,
+            &CancelReason::user("completed"),
+            CancelKind::User,
+            "Cancelled".to_string(),
+            None,
+            true,
+        );
+
+        tracer.complete_trace(trace_id);
+
+        let completed = tracer.completed_traces();
+        assert!(!completed[0].anomalies.iter().any(|anomaly| matches!(
+            anomaly,
+            PropagationAnomaly::StuckCancellation { entity_id, .. }
+                if entity_id == "child-task"
+        )));
+        assert_eq!(tracer.stats().stuck_cancellations, 0);
+    }
+
+    #[test]
+    fn test_missing_parent_is_reported_when_trace_completes() {
+        let tracer = CancellationTracer::new(CancellationTracerConfig::default());
+
+        let trace_id = tracer.start_trace(
+            "root-task".to_string(),
+            EntityType::Task,
+            &CancelReason::user("test"),
+            CancelKind::User,
+        );
+
+        tracer.record_step(
+            trace_id,
+            "child-task".to_string(),
+            EntityType::Task,
+            &CancelReason::user("orphan child"),
+            CancelKind::User,
+            "Cancelling".to_string(),
+            Some("missing-parent".to_string()),
+            true,
+        );
+
+        tracer.complete_trace(trace_id);
+
+        let completed = tracer.completed_traces();
+        assert!(completed[0].anomalies.iter().any(|anomaly| matches!(
+            anomaly,
+            PropagationAnomaly::UnexpectedPropagation {
+                description,
+                affected_entities,
+            } if description.contains("missing-parent")
+                && affected_entities == &vec![
+                    "missing-parent".to_string(),
+                    "child-task".to_string()
+                ]
+        )));
+    }
+
+    #[test]
     fn test_analysis_patterns() {
         let traces = vec![
             CancellationTrace {
@@ -911,6 +1262,45 @@ mod tests {
         assert_eq!(analysis.traces_analyzed, 2);
         assert_eq!(analysis.avg_depth, 2.5);
         assert!(!analysis.common_cancel_kinds.is_empty());
+    }
+
+    #[test]
+    fn test_analysis_average_ignores_incomplete_traces() {
+        let traces = vec![
+            CancellationTrace {
+                trace_id: TraceId::new(),
+                root_cancel_reason: "complete".to_string(),
+                root_cancel_kind: "User".to_string(),
+                root_entity: "task-1".to_string(),
+                root_entity_type: EntityType::Task,
+                start_time: SystemTime::now(),
+                steps: vec![],
+                is_complete: true,
+                total_propagation_time: Some(Duration::from_millis(10)),
+                max_depth: 1,
+                entities_cancelled: 1,
+                anomalies: vec![],
+            },
+            CancellationTrace {
+                trace_id: TraceId::new(),
+                root_cancel_reason: "incomplete".to_string(),
+                root_cancel_kind: "User".to_string(),
+                root_entity: "task-2".to_string(),
+                root_entity_type: EntityType::Task,
+                start_time: SystemTime::now(),
+                steps: vec![],
+                is_complete: false,
+                total_propagation_time: None,
+                max_depth: 1,
+                entities_cancelled: 1,
+                anomalies: vec![],
+            },
+        ];
+
+        let analysis = analyze_cancellation_patterns(&traces);
+
+        assert_eq!(analysis.avg_propagation_time, Duration::from_millis(10));
+        assert_eq!(analysis.analysis_period, Duration::from_millis(10));
     }
 
     #[test]
