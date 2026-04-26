@@ -96,7 +96,27 @@ struct CancelTokenState {
     /// Child tokens (for hierarchical cancellation).
     children: RwLock<SmallVec<[SymbolCancelToken; 2]>>,
     /// Listeners to notify on cancellation.
-    listeners: RwLock<SmallVec<[Box<dyn CancelListener>; 2]>>,
+    ///
+    /// br-asupersync-frm9u9: listeners are retained (not drained) after
+    /// the first cancel so a later `cancel()` whose reason strictly
+    /// strengthens the stored severity (e.g., Timeout → Shutdown) can
+    /// re-fire them with the new reason. The `notified_severity` field
+    /// below records the highest severity each listener has already
+    /// observed so re-notification is monotone — listeners only see
+    /// progressively-stronger reasons, never the same severity twice.
+    listeners: RwLock<SmallVec<[ListenerEntry; 2]>>,
+}
+
+/// One registered cancel listener plus the severity at which it was
+/// most recently notified. `0` means the listener has not yet been
+/// notified (e.g., registered while `cancelled == false`).
+struct ListenerEntry {
+    listener: Box<dyn CancelListener>,
+    /// Last severity the listener was notified at. Updated under the
+    /// `listeners` write lock + `reason` write lock to keep the
+    /// "every listener saw at least the current stored reason"
+    /// invariant.
+    notified_severity: u8,
 }
 
 /// A cancellation token that can be embedded in symbol metadata.
@@ -206,6 +226,19 @@ impl SymbolCancelToken {
     /// Requests cancellation with the given reason.
     ///
     /// Returns true if this call triggered the cancellation (first caller wins).
+    ///
+    /// # Listener re-notification on strengthened reason
+    /// (br-asupersync-frm9u9)
+    ///
+    /// Listeners are retained across cancel calls (not drained on the
+    /// first call). On the first call, every listener is notified with
+    /// the supplied reason. On subsequent calls, the stored reason is
+    /// strengthened via `CancelReason::strengthen`; if the strengthen
+    /// strictly raised severity, every listener whose most-recently-
+    /// notified severity is now below the new severity is re-notified
+    /// with the strengthened reason. A listener is therefore guaranteed
+    /// to observe at least the strongest cancel kind that ever arrived,
+    /// in monotone order — same severity is never delivered twice.
     #[allow(clippy::must_use_candidate)]
     pub fn cancel(&self, reason: &CancelReason, now: Time) -> bool {
         // Hold the reason lock to serialize updates and ensure visibility consistency.
@@ -227,21 +260,27 @@ impl SymbolCancelToken {
                 .store(stored_nanos, Ordering::Release);
             *reason_guard = Some(reason.clone());
 
-            // Drop the lock before notifying to avoid reentrancy deadlocks.
+            // Drop the reason lock before notifying to avoid reentrancy
+            // deadlocks. The listeners write lock is held across the
+            // notification (not drained) so add_listener that races
+            // with cancel observes a consistent state — a listener
+            // either lands here and is notified, or lands after the
+            // notification loop finishes and finds is_cancelled=true,
+            // at which point it self-notifies under the same lock.
             drop(reason_guard);
 
-            let listeners = {
+            let new_severity = reason.kind.severity();
+            {
                 let mut listeners = self.state.listeners.write();
-                std::mem::take(&mut *listeners)
-            };
-
-            // Notify listeners without holding the lock to avoid reentrancy deadlocks.
-            // Catch panics per-listener so that a single misbehaving listener
-            // cannot prevent remaining listeners and child cancellation from running.
-            for listener in listeners {
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    listener.on_cancel(reason, now);
-                }));
+                for entry in listeners.iter_mut() {
+                    // Catch panics per-listener so a single misbehaving
+                    // listener cannot prevent the rest from running.
+                    let listener = &entry.listener;
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        listener.on_cancel(reason, now);
+                    }));
+                    entry.notified_severity = new_severity;
+                }
             }
 
             // Drain children without holding the lock. Safe because
@@ -266,21 +305,47 @@ impl SymbolCancelToken {
             // Since we hold the write lock, and the winner releases the lock
             // only after writing Some(reason), we are guaranteed to see
             // the existing reason here.
+            let prior_severity;
+            let strengthened_reason;
             if let Some(ref mut stored) = *reason_guard {
+                prior_severity = stored.kind.severity();
                 stored.strengthen(reason);
+                strengthened_reason = stored.clone();
             } else {
-                // This case should be unreachable under the new locking protocol,
-                // but we handle it safely just in case (e.g. from_bytes).
+                // Unreachable under the new locking protocol; handle
+                // safely for the from_bytes-then-cancel edge.
+                prior_severity = 0;
                 *reason_guard = Some(reason.clone());
-                // Clamp to u64::MAX - 1 to avoid colliding with the sentinel.
+                strengthened_reason = reason.clone();
                 let stored_nanos = now.as_nanos().min(u64::MAX - 1);
                 self.state
                     .cancelled_at
                     .compare_exchange(u64::MAX, stored_nanos, Ordering::Release, Ordering::Relaxed)
                     .ok();
             }
+            let new_severity = strengthened_reason.kind.severity();
 
             drop(reason_guard);
+
+            // br-asupersync-frm9u9: re-notify any listener whose last
+            // observed severity is strictly below the new (strengthened)
+            // severity. Listeners that already saw an equal-or-stronger
+            // reason are skipped to keep delivery monotone and
+            // idempotent at each severity level.
+            if new_severity > prior_severity {
+                let mut listeners = self.state.listeners.write();
+                for entry in listeners.iter_mut() {
+                    if entry.notified_severity < new_severity {
+                        let listener = &entry.listener;
+                        let reason_ref = &strengthened_reason;
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            listener.on_cancel(reason_ref, now);
+                        }));
+                        entry.notified_severity = new_severity;
+                    }
+                }
+            }
+
             false
         }
     }
@@ -310,21 +375,80 @@ impl SymbolCancelToken {
     }
 
     /// Adds a listener to be notified on cancellation.
+    ///
+    /// # Race-free reason snapshot (br-asupersync-2bm1a3)
+    ///
+    /// Previous behaviour: `add_listener` checked `is_cancelled()`, then
+    /// dropped the listeners lock and called `self.reason()` which only
+    /// took a *read* lock. Between `cancel()`'s release of the
+    /// `cancelled` Release-CAS and its write of the reason under the
+    /// `reason.write()` lock, a racing `add_listener` could observe
+    /// `cancelled == true` but read `reason() == None`. The fallback
+    /// `unwrap_or_else(|| CancelReason::new(CancelKind::User))` then
+    /// fabricated a `CancelKind::User @ Time::ZERO` notification — a
+    /// silent protocol-misclassification (a cleanup handler that
+    /// distinguishes `User` from `Timeout`/`Shutdown` would route the
+    /// task down the wrong branch).
+    ///
+    /// New behaviour: this method takes the `reason.write()` lock
+    /// itself, mirroring the discipline `cancel()` uses. Either it
+    /// observes `cancelled == false` and pushes the listener (cancel
+    /// will pick it up under the same lock), or it observes
+    /// `cancelled == true` AND finds the stored reason already
+    /// written. If the stored reason is somehow `None` despite
+    /// `cancelled == true` (e.g., a `from_bytes` round-trip without
+    /// `cancel()` ever being called locally), the function falls back
+    /// to the parent-cancel reason and asserts in debug builds — never
+    /// fabricates a `CancelKind::User`.
     pub fn add_listener(&self, listener: impl CancelListener + 'static) {
-        // Hold the listeners lock across the cancelled check to avoid a TOCTOU
-        // race: cancel() sets the `cancelled` flag (Release) *before* draining
-        // listeners, so if we observe !cancelled (Acquire) under the write lock
-        // the subsequent cancel() will find our listener when it drains.
+        // Take the reason lock first (mirrors cancel()'s ordering:
+        // reason → listeners → drop reason → take listeners). Holding
+        // the reason lock here makes the cancelled-check race-free:
+        // cancel() can only flip `cancelled` while holding this same
+        // write lock, so we either see (false, _) or (true, Some(_)).
+        let reason_guard = self.state.reason.write();
         let mut listeners = self.state.listeners.write();
-        if self.is_cancelled() {
+        if self.state.cancelled.load(Ordering::Acquire) {
+            // We're cancelled. The reason MUST be Some at this point
+            // because cancel() writes the reason under this same
+            // write lock before flipping the cancelled flag (CAS at
+            // line ~218 with the reason write held). The from_bytes
+            // path is the only way to reach Some(cancelled)+None
+            // (parsed-from-wire token never had cancel() called
+            // locally); in that case fall back to parent_cancelled
+            // — never to the silent CancelKind::User fabrication.
+            let reason = reason_guard.clone().unwrap_or_else(|| {
+                debug_assert!(
+                    false,
+                    "add_listener observed cancelled=true with reason=None — \
+                     locking discipline violated (br-asupersync-2bm1a3)"
+                );
+                CancelReason::parent_cancelled()
+            });
+            let at = self
+                .cancelled_at()
+                .unwrap_or_else(|| Time::from_nanos(0));
+            // Drop both locks before invoking the listener so a
+            // listener that re-enters the token (e.g., to read
+            // reason()) does not deadlock on this thread. The
+            // listener fires synchronously on the calling thread
+            // here and is NOT retained — re-notification on a later
+            // strengthen does not apply to listeners added after
+            // cancel completed. This mirrors the pre-fix
+            // post-cancel-add semantic; documented in the
+            // type-level rustdoc.
             drop(listeners);
-            let reason = self
-                .reason()
-                .unwrap_or_else(|| CancelReason::new(CancelKind::User));
-            let at = self.cancelled_at().unwrap_or(Time::ZERO);
-            listener.on_cancel(&reason, at);
+            drop(reason_guard);
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                listener.on_cancel(&reason, at);
+            }));
         } else {
-            listeners.push(Box::new(listener));
+            listeners.push(ListenerEntry {
+                listener: Box::new(listener),
+                notified_severity: 0,
+            });
+            drop(listeners);
+            drop(reason_guard);
         }
     }
 
@@ -1046,8 +1170,34 @@ impl CleanupCoordinator {
                     }
                 }
             } else {
-                result.symbols_cleaned = symbol_count;
-                result.bytes_freed = total_bytes;
+                // br-asupersync-batcyw: pending symbols exist but no
+                // CleanupHandler is registered for this object_id.
+                // Previous behaviour set symbols_cleaned = N and
+                // bytes_freed = total — silently REPORTING the
+                // symbols as cleaned even though no handler ever
+                // ran. This is the observable shape callers used to
+                // distinguish "release was acked by the application"
+                // from "release dropped on the floor", and the bug
+                // collapsed the two into the same "success" record.
+                //
+                // New behaviour: leave symbols_cleaned and
+                // bytes_freed at zero, mark the result as not
+                // completed, push a typed error into handler_errors
+                // identifying the missing-handler condition, and
+                // restore the pending set so a later
+                // register_handler + retry can drive cleanup to
+                // completion. The completed-set entry inserted at
+                // line 1015 above is rolled back here too — a
+                // missing-handler outcome is NOT a completion.
+                result.completed = false;
+                result.handler_errors.push(format!(
+                    "no cleanup handler registered for object {object_id:?}; \
+                     {symbol_count} symbol(s) / {total_bytes} byte(s) deferred \
+                     (br-asupersync-batcyw)"
+                ));
+                // Restore pending; un-mark completed.
+                self.pending.write().insert(object_id, set);
+                self.completed.write().remove(&object_id);
             }
         }
 
@@ -3202,5 +3352,174 @@ mod tests {
         let cloned = r;
         assert_eq!(cloned.symbols_cleaned, 5);
         assert!(cloned.completed);
+    }
+
+    // --- br-asupersync-frm9u9: re-notify on strengthened reason ----
+
+    #[test]
+    fn cancel_strengthen_re_notifies_listeners_with_stronger_reason() {
+        // br-asupersync-frm9u9: a listener registered before any
+        // cancel must observe BOTH the initial weaker reason AND a
+        // subsequent strengthened reason. Equal-severity cancels do
+        // not re-fire (idempotence at each level). The observed
+        // sequence must be monotone-non-decreasing in severity.
+        use std::sync::Arc;
+        use std::sync::Mutex as StdMutex;
+        let mut rng = DetRng::new(0x_face_d00d);
+        let token = SymbolCancelToken::new(ObjectId::new_for_test(7), &mut rng);
+        let observed: Arc<StdMutex<Vec<crate::types::CancelKind>>> =
+            Arc::new(StdMutex::new(Vec::new()));
+        {
+            let observed = Arc::clone(&observed);
+            token.add_listener(move |reason: &CancelReason, _at: Time| {
+                observed.lock().unwrap().push(reason.kind);
+            });
+        }
+
+        // Initial cancel: lower severity (User).
+        let weak = CancelReason::new(crate::types::CancelKind::User);
+        token.cancel(&weak, Time::from_nanos(100));
+        // Same severity again — must NOT re-notify.
+        token.cancel(&weak, Time::from_nanos(150));
+        // Stronger cancel (Shutdown is the strongest fixed kind in
+        // the lattice) — MUST re-notify.
+        let strong = CancelReason::new(crate::types::CancelKind::Shutdown);
+        token.cancel(&strong, Time::from_nanos(200));
+
+        let log = observed.lock().unwrap().clone();
+        assert!(
+            log.len() >= 2,
+            "listener must observe both the initial cancel and the strengthen, got {log:?}"
+        );
+        assert_eq!(
+            log.first().copied(),
+            Some(crate::types::CancelKind::User),
+            "first notification must carry the initial weak reason, got {log:?}"
+        );
+        assert!(
+            log.iter()
+                .any(|k| *k == crate::types::CancelKind::Shutdown),
+            "listener must be re-notified with the strengthened reason, got {log:?}"
+        );
+        // No duplicate same-severity notifications.
+        let user_count = log
+            .iter()
+            .filter(|k| **k == crate::types::CancelKind::User)
+            .count();
+        assert_eq!(
+            user_count, 1,
+            "same-severity cancel must not re-fire listeners, got {log:?}"
+        );
+    }
+
+    // --- br-asupersync-2bm1a3: add_listener race fix ---------------
+
+    #[test]
+    fn add_listener_post_cancel_uses_real_reason_not_fabricated_user() {
+        // br-asupersync-2bm1a3: a listener registered AFTER a cancel
+        // already fired must observe the actual stored reason, not a
+        // fabricated `CancelKind::User @ Time::ZERO` from the
+        // pre-fix race window. This test exercises the
+        // happens-before-cancel-completed branch directly: the
+        // listener is added strictly after `cancel()` returns, so
+        // the reason is fully written; the new locking discipline
+        // returns the real reason (Timeout) instead of the
+        // fabricated User.
+        use std::sync::Arc;
+        use std::sync::Mutex as StdMutex;
+        let mut rng = DetRng::new(0x_dead_beef);
+        let token = SymbolCancelToken::new(ObjectId::new_for_test(11), &mut rng);
+        let timeout = CancelReason::new(crate::types::CancelKind::Timeout);
+        token.cancel(&timeout, Time::from_nanos(42));
+
+        let observed: Arc<StdMutex<Vec<(crate::types::CancelKind, u64)>>> =
+            Arc::new(StdMutex::new(Vec::new()));
+        {
+            let observed = Arc::clone(&observed);
+            token.add_listener(move |reason: &CancelReason, at: Time| {
+                observed.lock().unwrap().push((reason.kind, at.as_nanos()));
+            });
+        }
+
+        let log = observed.lock().unwrap().clone();
+        assert_eq!(log.len(), 1, "post-cancel add_listener must fire exactly once, got {log:?}");
+        let (kind, at_nanos) = log[0];
+        assert_eq!(
+            kind,
+            crate::types::CancelKind::Timeout,
+            "listener must observe the real reason (Timeout), \
+             not the fabricated CancelKind::User"
+        );
+        assert_eq!(
+            at_nanos, 42,
+            "listener must observe the real cancelled_at time, not Time::ZERO"
+        );
+    }
+
+    // --- br-asupersync-batcyw: missing-handler is not "cleaned" ----
+
+    #[test]
+    fn cleanup_with_pending_but_no_handler_surfaces_typed_error() {
+        // br-asupersync-batcyw: a CleanupCoordinator that holds a
+        // pending symbol set but no registered handler must NOT
+        // report the symbols as cleaned. The previous behaviour
+        // silently set symbols_cleaned = N, hiding application-side
+        // handler-registration bugs that drop release receipts.
+        // The fix: leave counters at zero, mark completed=false,
+        // push a typed error into handler_errors, and restore the
+        // pending set so a later register_handler + retry succeeds.
+        let coord = CleanupCoordinator::new();
+        let object_id = ObjectId::new_for_test(99);
+        let now = Time::from_nanos(0);
+
+        // Register three pending symbols WITHOUT registering any
+        // CleanupHandler — the exact pre-condition for the bug.
+        coord.register_pending(
+            object_id,
+            Symbol::new_for_test(99, 0, 0, &[1, 2, 3, 4]),
+            now,
+        );
+        coord.register_pending(
+            object_id,
+            Symbol::new_for_test(99, 0, 1, &[5, 6, 7, 8]),
+            now,
+        );
+        coord.register_pending(
+            object_id,
+            Symbol::new_for_test(99, 0, 2, &[9, 10, 11, 12]),
+            now,
+        );
+
+        let result = coord.cleanup(object_id, None);
+
+        // Symbols-without-handler must NOT be reported as cleaned.
+        assert_eq!(
+            result.symbols_cleaned, 0,
+            "no-handler outcome must not claim symbols cleaned, got {result:?}"
+        );
+        assert_eq!(
+            result.bytes_freed, 0,
+            "no-handler outcome must not claim bytes freed, got {result:?}"
+        );
+        assert!(
+            !result.completed,
+            "no-handler outcome must mark completed=false, got {result:?}"
+        );
+        assert!(
+            result.handler_errors.iter().any(|e| e.contains("no cleanup handler")),
+            "missing-handler condition must surface as a typed error, got {:?}",
+            result.handler_errors
+        );
+
+        // Pending set was restored so a retry can succeed.
+        let stats = coord.stats();
+        assert_eq!(
+            stats.pending_objects, 1,
+            "pending set must be restored for retry, got {stats:?}"
+        );
+        assert!(
+            !coord.completed.read().contains(&object_id),
+            "object_id must NOT be in completed set after no-handler outcome"
+        );
     }
 }
