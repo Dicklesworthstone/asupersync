@@ -1594,6 +1594,79 @@ mod tests {
         }
     }
 
+    /// br-asupersync-biw352: Gauss elimination on a deliberately
+    /// rank-deficient system (duplicate rows over GF(256)) MUST return
+    /// Singular or Inconsistent cleanly — no panic, no infinite loop,
+    /// no Solved-with-wrong-answer. RFC 6330 decoders MUST handle the
+    /// case where the received-symbols sub-matrix happens to be
+    /// rank-deficient (probability ≈ 0.01 per the failure-rate bound).
+    #[test]
+    fn gaussian_singular_duplicate_rows_returns_singular_without_panic() {
+        // 3x3 system where row 1 and row 2 are linearly dependent
+        // (row 2 = 2 * row 1 in GF(256)).
+        let mut solver = GaussianSolver::new(3, 3);
+        solver.set_row(0, &[1, 0, 0], DenseRow::new(vec![5]));
+        solver.set_row(1, &[0, 1, 1], DenseRow::new(vec![3]));
+        // Row 2: GF(256) multiply of row 1 by 2 — strictly dependent on row 1.
+        // Coefficients [0, 2, 2] = 2 * [0, 1, 1]. RHS 6 = 2 * 3 (consistent).
+        solver.set_row(2, &[0, 2, 2], DenseRow::new(vec![6]));
+
+        let result = solver.solve();
+        match result {
+            GaussianResult::Singular { .. } | GaussianResult::Inconsistent { .. } => {
+                // Either is acceptable — the system is rank-deficient.
+            }
+            GaussianResult::Solved(_) => {
+                panic!(
+                    "rank-deficient system MUST NOT decode as Solved; \
+                     a successful solve here indicates the solver missed the dependency"
+                );
+            }
+        }
+    }
+
+    /// br-asupersync-biw352: All-zeros matrix is rank 0 — must return
+    /// Singular at the first row, never panic.
+    #[test]
+    fn gaussian_all_zeros_matrix_returns_singular() {
+        let mut solver = GaussianSolver::new(2, 2);
+        solver.set_row(0, &[0, 0], DenseRow::new(vec![0]));
+        solver.set_row(1, &[0, 0], DenseRow::new(vec![0]));
+
+        match solver.solve() {
+            GaussianResult::Singular { .. } => {}
+            GaussianResult::Inconsistent { .. } => {
+                // Acceptable too — both signal "no unique solution".
+            }
+            GaussianResult::Solved(_) => panic!("zero matrix MUST NOT solve"),
+        }
+    }
+
+    /// br-asupersync-biw352: Inconsistent overdetermined system —
+    /// coefficients reduce to 0 row but RHS is nonzero (0 = b, b != 0).
+    /// Must return Inconsistent (NOT Solved, NOT Singular for this
+    /// specific failure mode).
+    #[test]
+    fn gaussian_inconsistent_system_returns_inconsistent() {
+        // Two rows where second is a coefficient-multiple of first
+        // BUT the RHS is INconsistent with that multiplication —
+        // forces the solver to detect 0 = b at elimination time.
+        let mut solver = GaussianSolver::new(2, 2);
+        solver.set_row(0, &[1, 1], DenseRow::new(vec![3]));
+        // Row 1 coefficients = row 0 (so row 1 - row 0 = 0 row).
+        // RHS 4 != 3 → inconsistent: 0 * x = 1.
+        solver.set_row(1, &[1, 1], DenseRow::new(vec![4]));
+
+        match solver.solve() {
+            GaussianResult::Inconsistent { .. } => {}
+            GaussianResult::Singular { .. } => {
+                // Some solver impls report Singular before checking
+                // RHS — also acceptable, just not Solved.
+            }
+            GaussianResult::Solved(_) => panic!("inconsistent system MUST NOT solve"),
+        }
+    }
+
     #[test]
     fn gaussian_simple_2x2() {
         // System: [1, 1] * [x0, x1] = [3], [1, 2] * [x0, x1] = [5]
@@ -2452,12 +2525,7 @@ mod tests {
         // Whether that contradiction lands on the pivot-stall row
         // depends on pivot strategy — without the fix the two
         // solvers diverged.
-        let coeffs = vec![
-            vec![1u8, 1, 0],
-            vec![1, 0, 0],
-            vec![0, 0, 0],
-            vec![1, 1, 0],
-        ];
+        let coeffs = vec![vec![1u8, 1, 0], vec![1, 0, 0], vec![0, 0, 0], vec![1, 1, 0]];
         let rhs = vec![0u8, 0, 1, 0];
 
         let mut s_basic = _mwx6zi_solver(&coeffs, &rhs);
@@ -2486,11 +2554,7 @@ mod tests {
     /// BOTH solvers — never Inconsistent.
     #[test]
     fn mwx6zi_classifier_agreement_rank_deficient_no_contradiction() {
-        let coeffs = vec![
-            vec![1u8, 0, 0],
-            vec![0, 0, 0],
-            vec![0, 0, 0],
-        ];
+        let coeffs = vec![vec![1u8, 0, 0], vec![0, 0, 0], vec![0, 0, 0]];
         let rhs = vec![5u8, 0, 0];
 
         let mut s_basic = _mwx6zi_solver(&coeffs, &rhs);

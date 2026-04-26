@@ -1276,12 +1276,9 @@ mod tests {
         // the K' table (K=4..=56403 is the supported range).
         let sample_k_values: &[usize] = &[
             // Smallest valid K — exercises K < smallest K' (K' = 10).
-            4, 5, 8, 10,
-            // Boundary at K' = 12 (covers K=11,12).
-            11, 12,
-            // Boundary at K' = 18 (covers K=13..18).
-            13, 18,
-            // Mid-range representative samples.
+            4, 5, 8, 10, // Boundary at K' = 12 (covers K=11,12).
+            11, 12, // Boundary at K' = 18 (covers K=13..18).
+            13, 18, // Mid-range representative samples.
             50, 100, 250, 500, 1000, 2500, 5000,
             // Boundary near max — last row in table is K' = 56403.
             56_000, 56_403,
@@ -1330,6 +1327,58 @@ mod tests {
                 assert_eq!(encoder.params().k, k);
                 assert_eq!(encoder.params().k_prime, params.k_prime);
             }
+        }
+    }
+
+    /// br-asupersync-yv0kza + jcl8bo: constraint-matrix structural
+    /// conformance per RFC 6330 §5.3.3 / §5.3.3.4.2. For representative
+    /// (K, K') pairs assert dimensions: rows = S+H+K' (LDPC + HDPC + LT
+    /// bands), cols = L = K'+S+H (intermediate-symbol vector width).
+    /// Also assert PI sub-matrix invariants: P = L - W > 0, B = W - S.
+    /// A wrong row/col count or P/W/B inconsistency would silently
+    /// emit non-RFC-conformant constraint matrices that decode self-
+    /// encoded inputs (round-trip works) but emit symbols invisible
+    /// to other RFC-conformant implementations.
+    #[test]
+    fn rfc6330_constraint_matrix_structural_dimensions_per_band() {
+        for &k in &[10usize, 50, 100, 250, 1000] {
+            let params = SystematicParams::for_source_block(k, 4);
+            let matrix = ConstraintMatrix::build(&params, 0xC0FFEE);
+            let expected_rows = params.s + params.h + params.k_prime;
+            let expected_cols = params.l;
+            assert_eq!(
+                matrix.rows, expected_rows,
+                "K={k}: rows = S+H+K' = {}+{}+{} = {expected_rows}; got {}",
+                params.s, params.h, params.k_prime, matrix.rows
+            );
+            assert_eq!(
+                matrix.cols, expected_cols,
+                "K={k}: cols = L = K'+S+H = {}+{}+{} = {expected_cols}; got {}",
+                params.k_prime, params.s, params.h, matrix.cols
+            );
+            // br-asupersync-jcl8bo: PI sub-matrix layout invariants
+            // (RFC 6330 §5.3.3.4.2). PI columns sit at the END of the
+            // matrix [W..L); the W vs P split must satisfy these.
+            assert!(
+                params.w < params.l,
+                "K={k}: W ({}) must be < L ({}) so P > 0",
+                params.w,
+                params.l
+            );
+            assert_eq!(
+                params.p,
+                params.l - params.w,
+                "K={k}: P = L - W invariant violated; P={}, L-W={}",
+                params.p,
+                params.l - params.w
+            );
+            assert_eq!(
+                params.b,
+                params.w - params.s,
+                "K={k}: B = W - S invariant violated; B={}, W-S={}",
+                params.b,
+                params.w - params.s
+            );
         }
     }
 
