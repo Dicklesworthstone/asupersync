@@ -445,8 +445,7 @@ impl<T> RwLock<T> {
                     >= MAX_CONSECUTIVE_WRITERS_BEFORE_READER_BATCH
                     && !state.reader_waiters.is_empty();
 
-                let wake_writer =
-                    !force_reader_batch && Self::should_wake_writer(&state);
+                let wake_writer = !force_reader_batch && Self::should_wake_writer(&state);
                 if wake_writer {
                     let waker = Self::pop_writer_waiter(&mut state);
                     if waker.is_some() {
