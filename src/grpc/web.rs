@@ -28,6 +28,21 @@ use super::streaming::{
 /// Trailer frame flag — bit 7 set indicates trailers, not data.
 const TRAILER_FLAG: u8 = 0x80;
 
+/// Mask of flag-byte bits reserved by the gRPC-Web spec for future use
+/// (bits 1..=6, i.e. 0x7E). The spec defines:
+///
+///   bit 0 (0x01) — compression flag
+///   bit 7 (0x80) — trailer-frame indicator
+///   bits 1..=6   — reserved, MUST be sent as zero
+///
+/// Strict implementations reject frames with reserved bits set so a
+/// future protocol-version smuggling attempt cannot be silently
+/// accepted as a regular data frame. Legal flag values are exactly
+/// {0x00, 0x01, 0x80, 0x81}; anything that overlaps `RESERVED_FLAG_MASK`
+/// triggers a `GrpcError::protocol` rejection in `WebFrameCodec::decode`.
+/// (br-asupersync-ood365)
+const RESERVED_FLAG_MASK: u8 = 0x7E;
+
 /// gRPC-Web content type variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContentType {
@@ -266,6 +281,20 @@ impl WebFrameCodec {
 
         let flag = src[0];
         let length = u32::from_be_bytes([src[1], src[2], src[3], src[4]]) as usize;
+
+        // br-asupersync-ood365: strict reserved-bits check. Per the
+        // gRPC-Web spec, only bits 0 (compression) and 7 (trailer) are
+        // defined; bits 1..=6 are reserved and MUST be sent as zero.
+        // Reject frames that set any reserved bit so a future protocol
+        // extension can't be silently mis-handled as a data frame here.
+        // Done BEFORE the length / split_to consumption so the buffer
+        // stays untouched for the caller's diagnostic logging.
+        if flag & RESERVED_FLAG_MASK != 0 {
+            return Err(GrpcError::protocol(format!(
+                "gRPC-Web frame has reserved flag bits set: 0x{flag:02x} \
+                 (only bits 0x01 and 0x80 are defined; mask 0x7E is reserved)"
+            )));
+        }
 
         if length > self.max_frame_size {
             return Err(GrpcError::MessageTooLarge);
@@ -1111,5 +1140,109 @@ mod tests {
         let ok = matches!(result, Err(GrpcError::MessageTooLarge));
         crate::assert_with_log!(ok, "oversized trailer rejected", true, ok);
         crate::test_complete!("test_decode_oversized_trailer_rejected");
+    }
+
+    // ─── br-asupersync-ood365: reserved-flag-bits regression ─────────
+
+    /// Helper: build a minimal 5-byte gRPC-Web frame header with the
+    /// given flag and length, appending a zero payload.
+    fn build_frame(flag: u8, payload_len: u32) -> BytesMut {
+        let mut buf = BytesMut::new();
+        buf.put_u8(flag);
+        buf.put_u32(payload_len);
+        buf.extend_from_slice(&vec![0u8; payload_len as usize]);
+        buf
+    }
+
+    fn assert_protocol_error(result: Result<Option<WebFrame>, GrpcError>, label: &str) {
+        match result {
+            Err(GrpcError::Protocol(msg)) => {
+                assert!(
+                    msg.contains("reserved flag bits"),
+                    "{label}: protocol error must mention 'reserved flag bits'; got: {msg}"
+                );
+            }
+            other => panic!("{label}: expected Err(Protocol(...)), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ood365_legal_flag_values_decode_successfully() {
+        init_test("ood365_legal_flag_values_decode_successfully");
+        let codec = WebFrameCodec::new();
+        // The four legal flag values per spec: data, compressed-data,
+        // trailer, compressed-trailer.
+        for &flag in &[0x00u8, 0x01, 0x80, 0x81] {
+            let payload_len = if flag & TRAILER_FLAG != 0 {
+                // Trailer payloads must be a parseable header block; use
+                // an empty block (decoder treats missing grpc-status as
+                // INTERNAL — that's a non-protocol-error decode).
+                0
+            } else {
+                4
+            };
+            let mut buf = build_frame(flag, payload_len);
+            let result = codec.decode(&mut buf);
+            assert!(
+                result.is_ok(),
+                "legal flag 0x{flag:02x} must decode without protocol error; got {result:?}"
+            );
+        }
+        crate::test_complete!("ood365_legal_flag_values_decode_successfully");
+    }
+
+    #[test]
+    fn ood365_individual_reserved_bits_are_rejected() {
+        init_test("ood365_individual_reserved_bits_are_rejected");
+        let codec = WebFrameCodec::new();
+        // Every reserved bit, alone, MUST be rejected.
+        for shift in 1u8..=6 {
+            let flag = 1u8 << shift;
+            let mut buf = build_frame(flag, 0);
+            assert_protocol_error(codec.decode(&mut buf), &format!("flag 0x{flag:02x}"));
+        }
+        crate::test_complete!("ood365_individual_reserved_bits_are_rejected");
+    }
+
+    #[test]
+    fn ood365_full_reserved_mask_rejected() {
+        init_test("ood365_full_reserved_mask_rejected");
+        let codec = WebFrameCodec::new();
+        // All reserved bits at once.
+        let mut buf = build_frame(RESERVED_FLAG_MASK, 0);
+        assert_protocol_error(codec.decode(&mut buf), "RESERVED_FLAG_MASK");
+        crate::test_complete!("ood365_full_reserved_mask_rejected");
+    }
+
+    #[test]
+    fn ood365_reserved_bit_combined_with_trailer_or_compression_rejected() {
+        init_test("ood365_reserved_bit_combined_with_trailer_or_compression_rejected");
+        let codec = WebFrameCodec::new();
+        // 0x82 = TRAILER (0x80) | reserved bit 1 (0x02). Even though bit
+        // 7 alone would be legal, the reserved overlap MUST reject.
+        let mut buf = build_frame(0x82, 0);
+        assert_protocol_error(codec.decode(&mut buf), "0x82 (trailer + reserved)");
+        // 0x03 = compression (0x01) | reserved bit 1 (0x02).
+        let mut buf = build_frame(0x03, 0);
+        assert_protocol_error(codec.decode(&mut buf), "0x03 (compression + reserved)");
+        crate::test_complete!("ood365_reserved_bit_combined_with_trailer_or_compression_rejected");
+    }
+
+    #[test]
+    fn ood365_reject_does_not_consume_buffer() {
+        init_test("ood365_reject_does_not_consume_buffer");
+        let codec = WebFrameCodec::new();
+        // Reserved-bit rejection must happen BEFORE split_to(5) so the
+        // caller can still inspect the original 5-byte header for
+        // diagnostic logging.
+        let mut buf = build_frame(0x40, 4);
+        let len_before = buf.len();
+        let _ = codec.decode(&mut buf);
+        assert_eq!(
+            buf.len(),
+            len_before,
+            "reserved-bit rejection must NOT consume the frame header"
+        );
+        crate::test_complete!("ood365_reject_does_not_consume_buffer");
     }
 }
