@@ -131,7 +131,9 @@ impl TaskTable {
             self.phase_counts[idx] = self.phase_counts[idx].saturating_add(1);
         }
         if let Some(d) = deadline {
-            self.deadline_sum_ns = self.deadline_sum_ns.saturating_add(u128::from(d.as_nanos()));
+            self.deadline_sum_ns = self
+                .deadline_sum_ns
+                .saturating_add(u128::from(d.as_nanos()));
             self.tasks_with_deadline += 1;
         }
     }
@@ -144,7 +146,9 @@ impl TaskTable {
             self.phase_counts[idx] = self.phase_counts[idx].saturating_sub(1);
         }
         if let Some(d) = deadline {
-            self.deadline_sum_ns = self.deadline_sum_ns.saturating_sub(u128::from(d.as_nanos()));
+            self.deadline_sum_ns = self
+                .deadline_sum_ns
+                .saturating_sub(u128::from(d.as_nanos()));
             self.tasks_with_deadline = self.tasks_with_deadline.saturating_sub(1);
         }
     }
@@ -160,11 +164,15 @@ impl TaskTable {
             return;
         }
         if let Some(d) = old_deadline {
-            self.deadline_sum_ns = self.deadline_sum_ns.saturating_sub(u128::from(d.as_nanos()));
+            self.deadline_sum_ns = self
+                .deadline_sum_ns
+                .saturating_sub(u128::from(d.as_nanos()));
             self.tasks_with_deadline = self.tasks_with_deadline.saturating_sub(1);
         }
         if let Some(d) = new_deadline {
-            self.deadline_sum_ns = self.deadline_sum_ns.saturating_add(u128::from(d.as_nanos()));
+            self.deadline_sum_ns = self
+                .deadline_sum_ns
+                .saturating_add(u128::from(d.as_nanos()));
             self.tasks_with_deadline += 1;
         }
     }
@@ -199,7 +207,7 @@ impl TaskTable {
     #[inline]
     pub fn insert(&mut self, mut record: TaskRecord) -> ArenaIndex {
         let phase = record.phase.load();
-        let deadline = record.cx.as_ref().and_then(|cx| cx.budget().deadline);
+        let deadline = record.deadline;
         let idx = self.tasks.insert_with(|idx| {
             // Canonicalize record.id to its arena slot to keep table invariants intact.
             record.id = TaskId::from_arena(idx);
@@ -217,7 +225,7 @@ impl TaskTable {
         if slot < self.stored_futures.len() && self.stored_futures[slot].take().is_some() {
             self.stored_future_len -= 1;
         }
-        self.note_task_removed(record.phase.load(), record.cx.as_ref().and_then(|cx| cx.budget().deadline));
+        self.note_task_removed(record.phase.load(), record.deadline);
         Some(record)
     }
 
@@ -1079,5 +1087,62 @@ mod tests {
 
             assert_eq!(final_tasks.live_task_count(), 100);
         }
+    }
+
+    #[test]
+    fn incremental_counters_track_all_mutations() {
+        use crate::record::task::{TaskPhase, TaskRecord};
+        use crate::types::{Budget, RegionId, TaskId, Time};
+
+        let mut table = TaskTable::new();
+        let region = RegionId::new_for_test(1, 1);
+        let budget = crate::types::Budget::INFINITE.with_deadline(Time::from_nanos(1000));
+
+        // 1. Initial state
+        assert_eq!(table.live_task_count(), 0);
+        assert_eq!(table.deadline_sum_ns(), 0);
+
+        // 2. Add task
+        let dummy_id = TaskId::new_for_test(1, 1);
+        let task1 = TaskRecord::new_with_time(dummy_id, region, budget, Time::ZERO);
+        let idx1 = table.insert(task1);
+        let id1 = TaskId::from_arena(idx1);
+
+        assert_eq!(table.live_task_count(), 1);
+        assert_eq!(table.count_in_phase(TaskPhase::Created), 1);
+        assert_eq!(table.deadline_sum_ns(), 1000);
+
+        // 3. Transition phase
+        table.update_task(id1, |t| {
+            t.start_running();
+        });
+        assert_eq!(table.count_in_phase(TaskPhase::Created), 0);
+        assert_eq!(table.count_in_phase(TaskPhase::Running), 1);
+        assert_eq!(table.live_task_count(), 1);
+
+        // 4. Change deadline
+        table.update_task(id1, |t| {
+            t.deadline = Some(Time::from_nanos(2000));
+        });
+        assert_eq!(table.deadline_sum_ns(), 2000);
+
+        // 5. Add second task
+        let id2 = TaskId::new_for_test(2, 2);
+        let task2 = TaskRecord::new_with_time(id2, region, Budget::INFINITE, Time::ZERO);
+        table.insert(task2);
+        assert_eq!(table.live_task_count(), 2);
+        assert_eq!(table.deadline_sum_ns(), 2000); // Infinite budget doesn't add to sum
+
+        // 6. Complete task
+        table.update_task(id1, |t| {
+            t.complete(crate::record::task::TaskOutcome::Ok(()));
+        });
+        assert_eq!(table.live_task_count(), 1);
+        assert_eq!(table.count_in_phase(TaskPhase::Running), 0);
+        assert_eq!(table.deadline_sum_ns(), 0); // Task1 removed from sum on completion
+
+        // 7. Remove task
+        table.remove(id2.arena_index());
+        assert_eq!(table.live_task_count(), 0);
     }
 }
