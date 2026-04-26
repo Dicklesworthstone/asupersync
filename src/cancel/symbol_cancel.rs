@@ -1720,6 +1720,97 @@ mod tests {
         assert_eq!(parsed.reason().unwrap().kind, CancelKind::Timeout);
     }
 
+    /// br-asupersync-64ijds — Conformance: a panic inside a registered
+    /// `CancelListener::on_cancel` MUST NOT propagate to the caller of
+    /// `SymbolCancelToken::cancel`. The implementation wraps each
+    /// listener invocation in `std::panic::catch_unwind` (3 sites:
+    /// the cancel hot path, the strengthen-and-renotify path, and the
+    /// late-add notification path) — this test pins that contract so
+    /// a future refactor can't accidentally remove the catch_unwind
+    /// and propagate a malicious-listener panic up to the caller, who
+    /// would then have its own protocol state corrupted by an
+    /// unwinding stack.
+    #[test]
+    fn listener_panic_does_not_propagate_to_cancel_caller() {
+        struct PanickingListener;
+        impl CancelListener for PanickingListener {
+            fn on_cancel(&self, _reason: &CancelReason, _at: Time) {
+                panic!("br-asupersync-64ijds: listener intentionally panics");
+            }
+        }
+
+        struct CountingListener {
+            calls: Arc<std::sync::atomic::AtomicU64>,
+        }
+        impl CancelListener for CountingListener {
+            fn on_cancel(&self, _reason: &CancelReason, _at: Time) {
+                self.calls
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+
+        let mut rng = DetRng::new(64);
+        let token = SymbolCancelToken::new(ObjectId::new_for_test(1), &mut rng);
+
+        // Attach panicking listener FIRST, then counting listener
+        // SECOND. If catch_unwind ever regressed, the panicking
+        // listener would short-circuit notification of subsequent
+        // listeners — testing this proves the isolation extends past
+        // the panic and reaches the next listener in the slot list.
+        token.add_listener(PanickingListener);
+        let calls = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        token.add_listener(CountingListener {
+            calls: Arc::clone(&calls),
+        });
+
+        // Path 1: initial cancel. The panicking listener fires first;
+        // catch_unwind absorbs the panic; the counting listener still
+        // fires; cancel() returns true to the caller without unwinding.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            token.cancel(&CancelReason::user("initial"), Time::from_millis(100))
+        }));
+        assert!(
+            result.is_ok(),
+            "br-asupersync-64ijds: cancel must not propagate listener panic"
+        );
+        assert_eq!(result.unwrap(), true, "first cancel should return true");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "br-asupersync-64ijds: counting listener must fire even when prior listener panicked"
+        );
+        assert!(token.is_cancelled());
+
+        // Path 2: strengthen-and-renotify. A higher-severity reason
+        // hits the renotification path which has its own catch_unwind;
+        // verify the same isolation invariant.
+        let result2 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            token.cancel(&CancelReason::timeout(), Time::from_millis(200))
+        }));
+        assert!(
+            result2.is_ok(),
+            "br-asupersync-64ijds: renotification must not propagate listener panic"
+        );
+        // Both listeners fire on renotify; counting listener should
+        // see at least one more call.
+        assert!(
+            calls.load(std::sync::atomic::Ordering::Relaxed) >= 2,
+            "counting listener must fire on renotification"
+        );
+
+        // Path 3: late-attach replay. Adding a listener AFTER the
+        // token is already cancelled triggers the catch_unwind'd
+        // late-add notification path. A panicking listener attached
+        // post-cancel must not propagate either.
+        let result3 = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            token.add_listener(PanickingListener);
+        }));
+        assert!(
+            result3.is_ok(),
+            "br-asupersync-64ijds: late-add must not propagate listener panic"
+        );
+    }
+
     #[test]
     fn test_deserialized_cancelled_token_notifies_listener() {
         use std::sync::atomic::{AtomicBool, Ordering};

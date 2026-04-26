@@ -763,10 +763,132 @@ impl FalsePositiveTestHarness {
             self.test_concurrent_task_completion(),
             self.test_obligation_lifecycle(),
             self.test_cancel_propagation(),
+            // br-asupersync-tsmuyq — nested-region cancel witness chain
+            // (parent → child → grandchild) extends the prior
+            // single-region coverage of `test_cancel_propagation`. The
+            // structured-concurrency invariant under test: when the
+            // root region cancels, each descendant must validly
+            // observe Cancel → TaskDrained transitions; each
+            // descendant region's tasks must reach DrainComplete
+            // before the descendant itself can be drained.
+            self.test_cancel_propagation_nested(),
         ];
 
         for (i, result) in test_sequences.into_iter().enumerate() {
             result.map_err(|e| format!("Valid sequence {} failed validation: {}", i, e))?;
+        }
+
+        Ok(())
+    }
+
+    /// br-asupersync-tsmuyq — Test cancel propagation across a nested
+    /// 3-level region tree (parent → child → grandchild), each
+    /// holding one task. Asserts that:
+    ///   1. Cancel originating at the parent validly transitions
+    ///      every descendant region through `Cancel`.
+    ///   2. Each region's task validly transitions through
+    ///      `RequestCancel → DrainComplete`.
+    ///   3. Each region observes `TaskDrained` after its task drains;
+    ///      the validator must NOT raise a false-positive on any of
+    ///      these transitions even though the cancel signal arrived
+    ///      on a parent.
+    fn test_cancel_propagation_nested(&mut self) -> Result<(), String> {
+        let parent = RegionId::new_for_test(305, 0);
+        let child = RegionId::new_for_test(305, 1);
+        let grandchild = RegionId::new_for_test(305, 2);
+        let parent_task = TaskId::new_for_test(305, 0);
+        let child_task = TaskId::new_for_test(305, 1);
+        let grandchild_task = TaskId::new_for_test(305, 2);
+
+        let region_ctx = |region_id: RegionId, parent_id: Option<RegionId>| RegionContext {
+            region_id,
+            parent_region: parent_id,
+            created_at: Time::ZERO,
+            validation_level: ValidationLevel::Full,
+        };
+        let task_ctx = |task_id: TaskId, region_id: RegionId| TaskContext {
+            task_id,
+            region_id,
+            spawned_at: Time::ZERO,
+            validation_level: ValidationLevel::Full,
+        };
+
+        // Register the region tree top-down.
+        self.validator.register_region(parent);
+        self.validator.register_region(child);
+        self.validator.register_region(grandchild);
+        self.validator.register_task(parent_task, parent);
+        self.validator.register_task(child_task, child);
+        self.validator.register_task(grandchild_task, grandchild);
+
+        // Activate + spawn each region's task.
+        for (rid, parent_of_rid) in [(parent, None), (child, Some(parent)), (grandchild, Some(child))] {
+            PerformanceTestHarness::ensure_valid(self.validator.validate_region_transition(
+                rid,
+                RegionEvent::Activate,
+                &region_ctx(rid, parent_of_rid),
+            ))?;
+            PerformanceTestHarness::ensure_valid(self.validator.validate_region_transition(
+                rid,
+                RegionEvent::TaskSpawned,
+                &region_ctx(rid, parent_of_rid),
+            ))?;
+        }
+        for (tid, rid) in [
+            (parent_task, parent),
+            (child_task, child),
+            (grandchild_task, grandchild),
+        ] {
+            PerformanceTestHarness::ensure_valid(self.validator.validate_task_transition(
+                tid,
+                TaskEvent::Start,
+                &task_ctx(tid, rid),
+            ))?;
+        }
+
+        // Cancel propagates parent → child → grandchild. Each region
+        // observes its own Cancel transition.
+        for (rid, parent_of_rid) in [(parent, None), (child, Some(parent)), (grandchild, Some(child))] {
+            PerformanceTestHarness::ensure_valid(self.validator.validate_region_transition(
+                rid,
+                RegionEvent::Cancel {
+                    reason: format!("nested cancel from {parent:?}"),
+                },
+                &region_ctx(rid, parent_of_rid),
+            ))?;
+        }
+
+        // Each task drains in deepest-first order (grandchild → child
+        // → parent), mirroring the structured-concurrency invariant
+        // that a parent cannot drain until its children are quiescent.
+        for (tid, rid) in [
+            (grandchild_task, grandchild),
+            (child_task, child),
+            (parent_task, parent),
+        ] {
+            PerformanceTestHarness::ensure_valid(self.validator.validate_task_transition(
+                tid,
+                TaskEvent::RequestCancel,
+                &task_ctx(tid, rid),
+            ))?;
+            PerformanceTestHarness::ensure_valid(self.validator.validate_task_transition(
+                tid,
+                TaskEvent::DrainComplete,
+                &task_ctx(tid, rid),
+            ))?;
+        }
+
+        // Each region observes TaskDrained after its task drains.
+        for (rid, parent_of_rid) in [
+            (grandchild, Some(child)),
+            (child, Some(parent)),
+            (parent, None),
+        ] {
+            PerformanceTestHarness::ensure_valid(self.validator.validate_region_transition(
+                rid,
+                RegionEvent::TaskDrained,
+                &region_ctx(rid, parent_of_rid),
+            ))?;
         }
 
         Ok(())
