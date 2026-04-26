@@ -856,8 +856,38 @@ impl ThreeLaneScheduler {
     }
 
     /// Creates a new 3-lane scheduler with the given number of workers.
+    ///
+    /// br-asupersync-niczb3: `worker_count` MUST be `>= 1`. The
+    /// infallible constructors clamp `0` to `1` internally — see
+    /// the underlying `new_with_options_and_task_table` — but
+    /// callers that want explicit failure on a misconfigured
+    /// zero-worker count should prefer
+    /// [`try_new_with_options_and_task_table`](Self::try_new_with_options_and_task_table)
+    /// or [`try_new`](Self::try_new) which return
+    /// `Err(ErrorKind::ConfigError)` instead of clamping. A
+    /// zero-worker scheduler can never dispatch any task; pre-fix
+    /// the silent clamp existed only to clamp `cancel_streak_limit`,
+    /// and `worker_count == 0` produced an empty `workers` Vec that
+    /// silently hung `block_on` forever.
     pub fn new(worker_count: usize, state: &Arc<ContendedMutex<RuntimeState>>) -> Self {
         Self::new_with_options(worker_count, state, DEFAULT_CANCEL_STREAK_LIMIT, false, 32)
+    }
+
+    /// br-asupersync-niczb3: fallible variant of [`Self::new`] that
+    /// rejects `worker_count == 0` with `ErrorKind::ConfigError`
+    /// instead of silently clamping.
+    pub fn try_new(
+        worker_count: usize,
+        state: &Arc<ContendedMutex<RuntimeState>>,
+    ) -> Result<Self, crate::error::Error> {
+        Self::try_new_with_options_and_task_table(
+            worker_count,
+            state,
+            None,
+            DEFAULT_CANCEL_STREAK_LIMIT,
+            false,
+            32,
+        )
     }
 
     /// Creates a new 3-lane scheduler with a configurable cancel streak limit.
@@ -898,6 +928,13 @@ impl ThreeLaneScheduler {
     /// future storage/retrieval, LocalQueue push/pop) lock only the task table
     /// instead of the full RuntimeState. Cross-cutting operations
     /// (`task_completed`, `drain_ready_async_finalizers`) still use RuntimeState.
+    ///
+    /// br-asupersync-niczb3: `worker_count == 0` is silently clamped
+    /// to `1` here so existing infallible callers do not regress.
+    /// New callers that want strict validation should use
+    /// [`try_new_with_options_and_task_table`](Self::try_new_with_options_and_task_table)
+    /// which returns `Err(ErrorKind::ConfigError)` for the same
+    /// input.
     #[allow(clippy::too_many_lines)]
     pub fn new_with_options_and_task_table(
         worker_count: usize,
@@ -907,6 +944,11 @@ impl ThreeLaneScheduler {
         enable_governor: bool,
         governor_interval: u32,
     ) -> Self {
+        // br-asupersync-niczb3: clamp worker_count >= 1 so the
+        // infallible path can never silently produce a zero-worker
+        // scheduler that hangs block_on. Callers that want strict
+        // rejection of zero use try_new_with_options_and_task_table.
+        let worker_count = worker_count.max(1);
         let cancel_streak_limit = cancel_streak_limit.max(1);
         let browser_ready_handoff_limit = DEFAULT_BROWSER_READY_HANDOFF_LIMIT;
         let governor_interval = governor_interval.max(1);
@@ -1063,6 +1105,57 @@ impl ThreeLaneScheduler {
             enable_parking,
             global_queue_limit: 0,
         }
+    }
+
+    /// br-asupersync-niczb3: fallible variant of
+    /// [`new_with_options_and_task_table`](Self::new_with_options_and_task_table)
+    /// that rejects `worker_count == 0` with
+    /// `ErrorKind::ConfigError` instead of silently clamping to
+    /// `1`. Returns `Ok(Self)` for any valid `worker_count >= 1`,
+    /// and propagates the same clamp-to-`>=1` rule for
+    /// `cancel_streak_limit` and `governor_interval` (those clamps
+    /// stay infallible because their default values fall in the
+    /// valid range — only an EXPLICITLY-supplied `0` for
+    /// `cancel_streak_limit` could be questionable, and the existing
+    /// behaviour treats `0` as "fall back to `1`" which is sane).
+    ///
+    /// New callers that want strict validation against
+    /// misconfigured worker counts should prefer this constructor
+    /// over the infallible variants. RuntimeBuilder's eventual
+    /// migration target is to surface ConfigError through its own
+    /// build error path so a typo in `workers = 0` (config file)
+    /// produces a clear builder error rather than a silent clamp.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ErrorKind::ConfigError` when `worker_count == 0`.
+    pub fn try_new_with_options_and_task_table(
+        worker_count: usize,
+        state: &Arc<ContendedMutex<RuntimeState>>,
+        task_table: Option<Arc<ContendedMutex<TaskTable>>>,
+        cancel_streak_limit: usize,
+        enable_governor: bool,
+        governor_interval: u32,
+    ) -> Result<Self, crate::error::Error> {
+        if worker_count == 0 {
+            return Err(
+                crate::error::Error::new(crate::error::ErrorKind::ConfigError).with_message(
+                    "ThreeLaneScheduler requires worker_count >= 1; \
+                 a zero-worker scheduler cannot dispatch any task and \
+                 silently hangs block_on. Use try_new_with_options_and_task_table \
+                 to surface this as ConfigError; the infallible \
+                 constructors clamp to 1 instead.",
+                ),
+            );
+        }
+        Ok(Self::new_with_options_and_task_table(
+            worker_count,
+            state,
+            task_table,
+            cancel_streak_limit,
+            enable_governor,
+            governor_interval,
+        ))
     }
 
     /// Sets the maximum number of ready tasks to steal in one batch.
@@ -4810,6 +4903,54 @@ mod tests {
 
         assert!(!scheduler.is_shutdown());
         assert_eq!(scheduler.workers.len(), 2);
+    }
+
+    // br-asupersync-niczb3: try_new and try_new_with_options_and_task_table
+    // MUST reject worker_count=0 with ConfigError so a misconfigured
+    // typo (e.g., `workers = 0` in a config file) cannot silently
+    // produce a zero-worker scheduler that hangs block_on. The
+    // infallible variants clamp to 1 for backward compatibility.
+    #[test]
+    fn test_try_new_rejects_zero_worker_count_niczb3() {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let err = ThreeLaneScheduler::try_new(0, &state)
+            .expect_err("try_new(0, ...) must reject zero workers");
+        assert_eq!(err.kind(), crate::error::ErrorKind::ConfigError);
+    }
+
+    #[test]
+    fn test_try_new_with_options_rejects_zero_worker_count_niczb3() {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let err = ThreeLaneScheduler::try_new_with_options_and_task_table(
+            0, &state, None, 4, false, 32,
+        )
+        .expect_err("try_new_with_options_and_task_table(0, ...) must reject");
+        assert_eq!(err.kind(), crate::error::ErrorKind::ConfigError);
+    }
+
+    #[test]
+    fn test_try_new_accepts_positive_worker_count_niczb3() {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let scheduler = ThreeLaneScheduler::try_new(2, &state)
+            .expect("try_new(2, ...) must succeed for valid worker_count");
+        assert_eq!(scheduler.workers.len(), 2);
+    }
+
+    #[test]
+    fn test_infallible_new_clamps_zero_to_one_niczb3() {
+        // The infallible new() preserves backward compatibility by
+        // clamping worker_count=0 to 1 instead of returning Err.
+        // This prevents the silent-hang failure mode (zero workers
+        // means block_on never completes) while keeping existing
+        // call sites working.
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let scheduler = ThreeLaneScheduler::new(0, &state);
+        assert_eq!(
+            scheduler.workers.len(),
+            1,
+            "new(0) must clamp to 1 worker; got {}",
+            scheduler.workers.len()
+        );
     }
 
     #[test]
