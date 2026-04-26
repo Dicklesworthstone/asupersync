@@ -18,6 +18,60 @@ use std::task::{Context, Poll};
 /// Default buffer size for copy operations.
 const DEFAULT_BUF_SIZE: usize = 8192;
 
+/// Maximum number of best-effort `poll_write` attempts when draining a
+/// buffered prefix on cancellation. Bounded so a destination that's
+/// permanently `Pending` cannot stall the cancel path. A typical
+/// kernel socket buffer drain takes one or two non-blocking writes;
+/// four attempts is comfortable headroom. (br-asupersync-8ww5b0)
+const MAX_DRAIN_ATTEMPTS_ON_CANCEL: u8 = 4;
+
+/// Best-effort drain of `buf[*pos..cap]` to `writer` when the surrounding
+/// future has been cancelled.
+///
+/// Returns the number of bytes successfully drained. The caller advances
+/// its `total` counter by this amount before returning `Err(Interrupted)`,
+/// so the post-cancel `total` accurately reflects everything that
+/// reached the destination — not just the bytes already written before
+/// the cancel-check fired.
+///
+/// Per AGENTS.md cancellation protocol (request → drain → finalize),
+/// the buffered prefix must be flushed BEFORE the future returns an
+/// error. We can't `.await`, so the drain is bounded:
+///
+///   * Up to `MAX_DRAIN_ATTEMPTS_ON_CANCEL` non-blocking `poll_write`
+///     calls per drain. A single call may write less than the full
+///     remaining window, so a small loop is necessary.
+///   * `Poll::Pending`, `Ok(0)`, or `Err(_)` from `poll_write`
+///     terminates the loop. Any unwritten bytes are dropped — by
+///     design: the future is cancelled, we cannot honor further
+///     async progress. The cancel error supersedes the write error.
+///
+/// (br-asupersync-8ww5b0)
+fn drain_on_cancel<W>(
+    writer: &mut W,
+    buf: &[u8],
+    pos: &mut usize,
+    cap: usize,
+    cx: &mut Context<'_>,
+) -> u64
+where
+    W: AsyncWrite + Unpin + ?Sized,
+{
+    let mut drained = 0u64;
+    let mut attempts = 0u8;
+    while *pos < cap && attempts < MAX_DRAIN_ATTEMPTS_ON_CANCEL {
+        attempts += 1;
+        match Pin::new(&mut *writer).poll_write(cx, &buf[*pos..cap]) {
+            Poll::Pending | Poll::Ready(Err(_)) | Poll::Ready(Ok(0)) => break,
+            Poll::Ready(Ok(n)) => {
+                *pos += n;
+                drained += n as u64;
+            }
+        }
+    }
+    drained
+}
+
 /// Copy all data from a reader to a writer.
 ///
 /// Returns the total number of bytes copied.
@@ -87,6 +141,20 @@ where
 
         loop {
             if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                // br-asupersync-8ww5b0: best-effort drain of the buffered
+                // prefix BEFORE returning Err. Without this, bytes already
+                // pulled from `reader` but not yet pushed to `writer` are
+                // silently dropped on cancel.
+                if this.pos < this.cap {
+                    let drained = drain_on_cancel(
+                        &mut *this.writer,
+                        &this.buf,
+                        &mut this.pos,
+                        this.cap,
+                        cx,
+                    );
+                    this.total += drained;
+                }
                 this.completed = true;
                 return Poll::Ready(Err(std::io::Error::new(
                     std::io::ErrorKind::Interrupted,
@@ -422,6 +490,22 @@ where
 
         loop {
             if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                // br-asupersync-8ww5b0: best-effort drain of the buffered
+                // prefix on cancel. Progress callback fires for the drained
+                // bytes so the caller's progress accounting matches `total`.
+                if this.pos < this.cap {
+                    let drained = drain_on_cancel(
+                        &mut *this.writer,
+                        &this.buf,
+                        &mut this.pos,
+                        this.cap,
+                        cx,
+                    );
+                    if drained > 0 {
+                        this.total += drained;
+                        (this.on_progress)(this.total);
+                    }
+                }
                 this.completed = true;
                 return Poll::Ready(Err(std::io::Error::new(
                     std::io::ErrorKind::Interrupted,
@@ -771,6 +855,30 @@ where
         // Poll both directions, interleaved, until both block or are done
         loop {
             if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                // br-asupersync-8ww5b0: drain both per-direction buffered
+                // prefixes BEFORE returning Err. A->B drains to writer `b`,
+                // B->A drains to writer `a`. Each direction is independent
+                // and best-effort.
+                if this.a_to_b.pos < this.a_to_b.cap {
+                    let drained = drain_on_cancel(
+                        &mut *this.b,
+                        &this.a_to_b_buf,
+                        &mut this.a_to_b.pos,
+                        this.a_to_b.cap,
+                        cx,
+                    );
+                    this.a_to_b_total += drained;
+                }
+                if this.b_to_a.pos < this.b_to_a.cap {
+                    let drained = drain_on_cancel(
+                        &mut *this.a,
+                        &this.b_to_a_buf,
+                        &mut this.b_to_a.pos,
+                        this.b_to_a.cap,
+                        cx,
+                    );
+                    this.b_to_a_total += drained;
+                }
                 this.completed = true;
                 return Poll::Ready(Err(std::io::Error::new(
                     std::io::ErrorKind::Interrupted,
