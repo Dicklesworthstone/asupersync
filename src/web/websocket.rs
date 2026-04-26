@@ -57,6 +57,33 @@ pub use crate::net::websocket::{CloseReason, Message, ServerWebSocket};
 /// # Rejection
 ///
 /// Returns 400 Bad Request if any validation check fails.
+/// Origin-validation policy applied during the WebSocket upgrade response.
+///
+/// Defends against Cross-Site WebSocket Hijacking (CSWSH): browsers
+/// initiate WebSocket handshakes under the same-origin policy of HTTP
+/// (i.e. they don't enforce one), so without server-side `Origin`
+/// validation an attacker page at `evil.example` can open a WebSocket
+/// to `legit.example` from a victim's browser session.
+/// (br-asupersync-o2t5gz)
+#[derive(Debug, Clone, Default)]
+pub enum OriginPolicy {
+    /// Default. Reject the upgrade unless the request's `Origin` host:port
+    /// matches its `Host` header (case-insensitive). Requests with NO
+    /// `Origin` header are accepted on the assumption that they come
+    /// from a non-browser client (browsers always emit `Origin` for
+    /// WebSocket handshakes per RFC 6455 §10.2).
+    #[default]
+    SameOrigin,
+    /// Accept the upgrade if the request's `Origin` value (full URL,
+    /// case-insensitive) appears in the allowlist. An empty allowlist
+    /// rejects every request that has an `Origin` header. Requests with
+    /// no `Origin` header are accepted (non-browser clients).
+    AllowList(Vec<String>),
+    /// No `Origin` validation. Opt-in for tests and non-browser
+    /// integrations that don't need CSWSH defense.
+    Disabled,
+}
+
 #[derive(Debug, Clone)]
 pub struct WebSocketUpgrade {
     /// Computed Sec-WebSocket-Accept value.
@@ -69,6 +96,17 @@ pub struct WebSocketUpgrade {
     selected_protocol: Option<String>,
     /// Selected extensions (set via `.extensions()`).
     selected_extensions: Vec<String>,
+    /// `Origin` header from the upgrade request (br-asupersync-o2t5gz).
+    /// `None` if the client didn't send one (typically a non-browser
+    /// client; browsers always send `Origin` per RFC 6455 §10.2).
+    origin: Option<String>,
+    /// `Host` header from the upgrade request, used to evaluate
+    /// `OriginPolicy::SameOrigin`.
+    host: Option<String>,
+    /// Origin-validation policy applied at response time. Defaults to
+    /// `SameOrigin` so any caller that forgets to call `.allow_origins()`
+    /// or `.skip_origin_check()` still gets CSWSH defense.
+    origin_policy: OriginPolicy,
 }
 
 impl FromRequest for WebSocketUpgrade {
@@ -152,12 +190,22 @@ impl FromRequest for WebSocketUpgrade {
             })
             .unwrap_or_default();
 
+        // Capture Origin + Host for CSWSH defense (br-asupersync-o2t5gz).
+        // The actual policy decision happens in `IntoResponse` so a caller
+        // can override the default via `.allow_origins()` or
+        // `.skip_origin_check()` before returning the upgrade.
+        let origin = req.header("origin").map(ToOwned::to_owned);
+        let host = req.header("host").map(ToOwned::to_owned);
+
         Ok(Self {
             accept_key,
             requested_protocols,
             requested_extensions,
             selected_protocol: None,
             selected_extensions: Vec::new(),
+            origin,
+            host,
+            origin_policy: OriginPolicy::default(),
         })
     }
 }
@@ -169,6 +217,27 @@ fn header_has_token(value: &str, token: &str) -> bool {
         .split(',')
         .map(str::trim)
         .any(|part| part.eq_ignore_ascii_case(token))
+}
+
+/// Strip the `scheme://` prefix from an `Origin` value, returning the
+/// authority component (`host[:port]`) for same-origin comparison against
+/// the `Host` header. Falls back to the raw value if no scheme is found
+/// (an invalid Origin would then fail the comparison, which is the
+/// fail-closed behavior we want). (br-asupersync-o2t5gz)
+fn strip_origin_scheme(origin: &str) -> &str {
+    if let Some(idx) = origin.find("://") {
+        // RFC 6454 origins must not have a path; if one is present we
+        // truncate at the first '/' so a malformed Origin like
+        // `https://victim.com/../attacker.com:443` cannot smuggle an
+        // attacker host past the comparison.
+        let after_scheme = &origin[idx + 3..];
+        match after_scheme.find('/') {
+            Some(slash) => &after_scheme[..slash],
+            None => after_scheme,
+        }
+    } else {
+        origin
+    }
 }
 
 impl WebSocketUpgrade {
@@ -228,6 +297,67 @@ impl WebSocketUpgrade {
         &self.accept_key
     }
 
+    /// Get the request's `Origin` header value, if present.
+    /// (br-asupersync-o2t5gz)
+    #[must_use]
+    pub fn origin(&self) -> Option<&str> {
+        self.origin.as_deref()
+    }
+
+    /// Override the origin-validation policy with an explicit allowlist.
+    /// Origins are matched case-insensitively against the request's full
+    /// `Origin` value. (br-asupersync-o2t5gz)
+    #[must_use]
+    pub fn allow_origins<I, S>(mut self, origins: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.origin_policy =
+            OriginPolicy::AllowList(origins.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Disable origin validation entirely. Opt-in for tests and
+    /// non-browser integrations that do not need CSWSH defense.
+    /// (br-asupersync-o2t5gz)
+    #[must_use]
+    pub fn skip_origin_check(mut self) -> Self {
+        self.origin_policy = OriginPolicy::Disabled;
+        self
+    }
+
+    /// Evaluate the configured `OriginPolicy` against the captured
+    /// `Origin` / `Host` headers. `Ok(())` means the upgrade may proceed;
+    /// `Err(reason)` means the response must be a 403. Browsers always
+    /// emit `Origin` for WebSocket handshakes per RFC 6455 §10.2, so a
+    /// missing `Origin` is treated as a non-browser client and accepted.
+    /// (br-asupersync-o2t5gz)
+    fn evaluate_origin(&self) -> Result<(), &'static str> {
+        match (&self.origin_policy, self.origin.as_deref()) {
+            (OriginPolicy::Disabled, _) => Ok(()),
+            (_, None) => Ok(()),
+            (OriginPolicy::AllowList(list), Some(origin)) => {
+                if list.iter().any(|allowed| allowed.eq_ignore_ascii_case(origin)) {
+                    Ok(())
+                } else {
+                    Err("Origin not in allowlist")
+                }
+            }
+            (OriginPolicy::SameOrigin, Some(origin)) => {
+                let Some(host) = self.host.as_deref() else {
+                    return Err("Origin present but no Host header to compare");
+                };
+                let origin_authority = strip_origin_scheme(origin);
+                if origin_authority.eq_ignore_ascii_case(host) {
+                    Ok(())
+                } else {
+                    Err("Origin does not match Host (cross-origin request rejected)")
+                }
+            }
+        }
+    }
+
     /// Get the client's requested protocols.
     #[must_use]
     pub fn requested_protocols(&self) -> &[String] {
@@ -263,6 +393,18 @@ impl WebSocketUpgrade {
 
 impl IntoResponse for WebSocketUpgrade {
     fn into_response(self) -> Response {
+        // Default-deny CSWSH defense (br-asupersync-o2t5gz). Rejected
+        // origins get a 403 Forbidden instead of the 101 switch. Body is
+        // a fixed string and the rejected Origin is NOT echoed back, so
+        // the response is not itself a per-request oracle.
+        if let Err(reason) = self.evaluate_origin() {
+            return Response::new(
+                StatusCode::FORBIDDEN,
+                crate::bytes::Bytes::from_static(reason.as_bytes()),
+            )
+            .header("content-type", "text/plain; charset=utf-8");
+        }
+
         let mut resp = Response::empty(StatusCode::SWITCHING_PROTOCOLS)
             .header("upgrade", "websocket")
             .header("connection", "Upgrade")
@@ -316,6 +458,117 @@ mod tests {
         let upgrade = WebSocketUpgrade::from_request(req).unwrap();
         // RFC 6455 example: dGhlIHNhbXBsZSBub25jZQ== → s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
         assert_eq!(upgrade.accept_key(), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+    }
+
+    // ─── CSWSH origin-validation tests (br-asupersync-o2t5gz) ─────────
+
+    #[test]
+    fn cswsh_default_same_origin_accepts_matching_origin() {
+        let req = ws_request()
+            .with_header("host", "api.example.com")
+            .with_header("origin", "https://api.example.com");
+        let upgrade = WebSocketUpgrade::from_request(req).unwrap();
+        let resp = upgrade.into_response();
+        assert_eq!(resp.status, StatusCode::SWITCHING_PROTOCOLS);
+    }
+
+    #[test]
+    fn cswsh_default_same_origin_rejects_cross_origin() {
+        let req = ws_request()
+            .with_header("host", "api.example.com")
+            .with_header("origin", "https://evil.example");
+        let upgrade = WebSocketUpgrade::from_request(req).unwrap();
+        let resp = upgrade.into_response();
+        assert_eq!(
+            resp.status,
+            StatusCode::FORBIDDEN,
+            "cross-origin browser request must be rejected by the default policy"
+        );
+    }
+
+    #[test]
+    fn cswsh_origin_header_strips_path_to_prevent_smuggling() {
+        // A malformed Origin like https://victim.com/../api.example.com:443
+        // must NOT compare equal to api.example.com:443 — strip at first '/'.
+        let req = ws_request()
+            .with_header("host", "api.example.com")
+            .with_header("origin", "https://victim.com/../api.example.com");
+        let upgrade = WebSocketUpgrade::from_request(req).unwrap();
+        let resp = upgrade.into_response();
+        assert_eq!(resp.status, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn cswsh_no_origin_header_is_accepted_as_non_browser_client() {
+        // Non-browser clients (curl, native apps, server-to-server) don't
+        // send Origin. Default policy must not lock them out.
+        let req = ws_request().with_header("host", "api.example.com");
+        let upgrade = WebSocketUpgrade::from_request(req).unwrap();
+        let resp = upgrade.into_response();
+        assert_eq!(resp.status, StatusCode::SWITCHING_PROTOCOLS);
+    }
+
+    #[test]
+    fn cswsh_allow_origins_accepts_listed_origin() {
+        let req = ws_request()
+            .with_header("host", "api.example.com")
+            .with_header("origin", "https://app.example.com");
+        let upgrade = WebSocketUpgrade::from_request(req)
+            .unwrap()
+            .allow_origins(["https://app.example.com", "https://other.example.com"]);
+        let resp = upgrade.into_response();
+        assert_eq!(resp.status, StatusCode::SWITCHING_PROTOCOLS);
+    }
+
+    #[test]
+    fn cswsh_allow_origins_rejects_unlisted_origin() {
+        let req = ws_request()
+            .with_header("host", "api.example.com")
+            .with_header("origin", "https://attacker.example");
+        let upgrade = WebSocketUpgrade::from_request(req)
+            .unwrap()
+            .allow_origins(["https://app.example.com"]);
+        let resp = upgrade.into_response();
+        assert_eq!(resp.status, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn cswsh_skip_origin_check_lets_anything_through() {
+        let req = ws_request()
+            .with_header("host", "api.example.com")
+            .with_header("origin", "https://anything-goes.example");
+        let upgrade = WebSocketUpgrade::from_request(req)
+            .unwrap()
+            .skip_origin_check();
+        let resp = upgrade.into_response();
+        assert_eq!(resp.status, StatusCode::SWITCHING_PROTOCOLS);
+    }
+
+    #[test]
+    fn cswsh_403_body_does_not_echo_origin() {
+        // The 403 response must not echo the rejected Origin back to the
+        // requester — that would leak the attacker's URL into logs and
+        // make the response a per-request oracle.
+        let req = ws_request()
+            .with_header("host", "api.example.com")
+            .with_header("origin", "https://leak-me.example");
+        let upgrade = WebSocketUpgrade::from_request(req).unwrap();
+        let resp = upgrade.into_response();
+        assert_eq!(resp.status, StatusCode::FORBIDDEN);
+        assert!(
+            !resp.body.iter().any(|b| {
+                std::str::from_utf8(&[*b])
+                    .map(|s| s.contains("leak-me"))
+                    .unwrap_or(false)
+            }),
+            "403 body must not contain the rejected origin"
+        );
+        // Stronger check: the body is a fixed string we control.
+        let body_text = std::str::from_utf8(&resp.body).unwrap_or("");
+        assert!(
+            !body_text.contains("leak-me"),
+            "403 body must not echo origin: {body_text}"
+        );
     }
 
     #[test]
