@@ -246,7 +246,10 @@ impl StructuredCancellationAnalyzer {
     }
 
     /// Visualize a specific trace as a tree.
-    pub fn visualize_trace(&self, trace_id: crate::observability::CancellationTraceId) -> Option<String> {
+    pub fn visualize_trace(
+        &self,
+        trace_id: crate::observability::CancellationTraceId,
+    ) -> Option<String> {
         let traces = self.tracer.completed_traces();
         traces
             .iter()
@@ -255,7 +258,10 @@ impl StructuredCancellationAnalyzer {
     }
 
     /// Generate timeline visualization for a trace.
-    pub fn visualize_timeline(&self, trace_id: crate::observability::CancellationTraceId) -> Option<String> {
+    pub fn visualize_timeline(
+        &self,
+        trace_id: crate::observability::CancellationTraceId,
+    ) -> Option<String> {
         let traces = self.tracer.completed_traces();
         traces
             .iter()

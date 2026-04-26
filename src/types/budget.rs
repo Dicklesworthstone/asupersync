@@ -368,8 +368,7 @@ impl Budget {
             poll_quota: self.poll_quota.min(other.poll_quota),
             cost_quota: match (self.cost_quota, other.cost_quota) {
                 (Some(a), Some(b)) => Some(a.min(b)),
-                (Some(a), None) => Some(a),
-                (None, Some(b)) => Some(b),
+                (quota @ Some(_), None) | (None, quota @ Some(_)) => quota,
                 (None, None) => None,
             },
             priority: self.priority.max(other.priority),

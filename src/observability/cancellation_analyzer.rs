@@ -1237,7 +1237,7 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
-    use crate::observability::cancellation_tracer::{CancellationTraceStep, CancellationTraceId};
+    use crate::observability::cancellation_tracer::{CancellationTraceId, CancellationTraceStep};
 
     fn test_step(entity_id: String, elapsed_since_prev: Duration) -> CancellationTraceStep {
         CancellationTraceStep {

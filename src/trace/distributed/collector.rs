@@ -326,7 +326,7 @@ mod tests {
     )]
     use super::*;
     use crate::trace::distributed::context::{RegionTag, SymbolTraceContext};
-    use crate::trace::distributed::id::{SymbolSpanId, DistTraceId};
+    use crate::trace::distributed::id::{DistTraceId, SymbolSpanId};
     use crate::trace::distributed::span::SymbolSpan;
     use crate::types::symbol::SymbolId;
     use crate::util::DetRng;
@@ -472,7 +472,15 @@ mod tests {
     #[test]
     fn collector_get_nonexistent_trace() {
         let collector = SymbolTraceCollector::new(RegionTag::new("test"));
-        assert!(collector.get_trace(DistTraceId::new_for_test(999)).is_none());
-        assert!(collector.get_summary(DistTraceId::new_for_test(999)).is_none());
+        assert!(
+            collector
+                .get_trace(DistTraceId::new_for_test(999))
+                .is_none()
+        );
+        assert!(
+            collector
+                .get_summary(DistTraceId::new_for_test(999))
+                .is_none()
+        );
     }
 }

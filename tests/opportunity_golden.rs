@@ -1,4 +1,4 @@
-use asupersync::lab::opportunity::{OpportunityScore, GateDecision, SCORE_THRESHOLD};
+use asupersync::lab::opportunity::{GateDecision, OpportunityScore, SCORE_THRESHOLD};
 
 #[test]
 fn opportunity_score_display_golden() {

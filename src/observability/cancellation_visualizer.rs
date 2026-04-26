@@ -4,7 +4,7 @@
 //! Provides multiple output formats for different debugging scenarios.
 
 use crate::observability::cancellation_tracer::{
-    CancellationTrace, CancellationTraceStep, EntityType, PropagationAnomaly, CancellationTraceId,
+    CancellationTrace, CancellationTraceId, CancellationTraceStep, EntityType, PropagationAnomaly,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};

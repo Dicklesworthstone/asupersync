@@ -633,7 +633,9 @@ mod tests {
 
         // Parent (less restricted) still accepts the same context.
         assert!(
-            parent.verify_capability(&key, "io:write", &ctx_late).is_ok(),
+            parent
+                .verify_capability(&key, "io:write", &ctx_late)
+                .is_ok(),
             "parent must remain authoritative for the broader window"
         );
     }
@@ -646,12 +648,8 @@ mod tests {
         let key = test_auth_key(2300);
         let token = MacaroonToken::mint(&key, "data:read", "boundary-test");
         let l0 = boundary_cx().with_macaroon(token);
-        let l1 = l0
-            .attenuate(CaveatPredicate::TimeBefore(5000))
-            .expect("l1");
-        let l2 = l1
-            .attenuate(CaveatPredicate::RegionScope(7))
-            .expect("l2");
+        let l1 = l0.attenuate(CaveatPredicate::TimeBefore(5000)).expect("l1");
+        let l2 = l1.attenuate(CaveatPredicate::RegionScope(7)).expect("l2");
         let l3 = l2.attenuate(CaveatPredicate::MaxUses(3)).expect("l3");
 
         assert_eq!(l3.macaroon().unwrap().caveat_count(), 3);
@@ -750,7 +748,8 @@ mod tests {
 
         // The legitimate verifier still succeeds.
         assert!(
-            cx.verify_capability(&real_key, "admin:rotate", &ctx).is_ok()
+            cx.verify_capability(&real_key, "admin:rotate", &ctx)
+                .is_ok()
         );
     }
 
@@ -770,7 +769,10 @@ mod tests {
         let bytes = token.to_binary();
         assert!(bytes.len() > 32);
 
-        for cut in (1..bytes.len()).step_by(7).chain(std::iter::once(bytes.len() - 1)) {
+        for cut in (1..bytes.len())
+            .step_by(7)
+            .chain(std::iter::once(bytes.len() - 1))
+        {
             let truncated = &bytes[..cut];
             match MacaroonToken::from_binary(truncated) {
                 None => { /* expected: malformed input refused */ }

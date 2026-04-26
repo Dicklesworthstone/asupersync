@@ -12,10 +12,10 @@
 //! Uses metamorphic testing to verify conformance relationships that must hold
 //! for a correct RFC 9112 Section 3.2 implementation.
 
-use asupersync::http::h1::codec::{Http1Codec, HttpError};
-use asupersync::http::h1::types::{Method, Request, Version};
 use asupersync::bytes::BytesMut;
 use asupersync::codec::Decoder;
+use asupersync::http::h1::codec::{Http1Codec, HttpError};
+use asupersync::http::h1::types::{Method, Request, Version};
 use proptest::prelude::*;
 use std::collections::HashSet;
 
@@ -43,8 +43,13 @@ fn is_valid_request_target_for_method(method: &Method, uri: &str) -> bool {
             // asterisk-form for server-wide OPTIONS
             true
         }
-        Method::Get | Method::Post | Method::Put | Method::Delete
-        | Method::Head | Method::Patch | Method::Options => {
+        Method::Get
+        | Method::Post
+        | Method::Put
+        | Method::Delete
+        | Method::Head
+        | Method::Patch
+        | Method::Options => {
             // origin-form or absolute-form
             origin_form_valid(uri) || absolute_form_valid(uri)
         }
@@ -70,12 +75,12 @@ fn absolute_form_valid(uri: &str) -> bool {
 /// Check if URI is valid authority-form: host:port
 #[allow(dead_code)]
 fn authority_form_valid(uri: &str) -> bool {
-    !uri.starts_with('/') &&
-    !uri.contains("://") &&
-    uri != "*" &&
-    uri.contains(':') &&
-    !uri.starts_with(':') &&
-    !uri.ends_with(':')
+    !uri.starts_with('/')
+        && !uri.contains("://")
+        && uri != "*"
+        && uri.contains(':')
+        && !uri.starts_with(':')
+        && !uri.ends_with(':')
 }
 
 /// Generate a valid origin-form request-target
@@ -89,22 +94,21 @@ fn origin_form_strategy() -> impl Strategy<Value = String> {
             Just('-'),
             Just('_'),
         ],
-        1..20
-    ).prop_flat_map(|chars| {
+        1..20,
+    )
+    .prop_flat_map(|chars| {
         let path: String = chars.into_iter().collect();
-        let query = prop::option::of(prop::collection::vec(
-            prop_oneof![
-                prop::char::range('a', 'z'),
-                prop::char::range('0', '9'),
-            ],
-            1..10
-        ).prop_map(|chars| chars.into_iter().collect::<String>()));
+        let query = prop::option::of(
+            prop::collection::vec(
+                prop_oneof![prop::char::range('a', 'z'), prop::char::range('0', '9'),],
+                1..10,
+            )
+            .prop_map(|chars| chars.into_iter().collect::<String>()),
+        );
 
-        (Just(path), query).prop_map(|(path, query)| {
-            match query {
-                Some(q) => format!("/{}?{}", path, q),
-                None => format!("/{}", path),
-            }
+        (Just(path), query).prop_map(|(path, query)| match query {
+            Some(q) => format!("/{}?{}", path, q),
+            None => format!("/{}", path),
         })
     })
 }
@@ -113,32 +117,26 @@ fn origin_form_strategy() -> impl Strategy<Value = String> {
 #[allow(dead_code)]
 fn absolute_form_strategy() -> impl Strategy<Value = String> {
     let scheme = prop::sample::select(vec!["http", "https"]);
-    let host = prop::collection::vec(
-        prop::char::range('a', 'z'),
-        3..15
-    ).prop_map(|chars| chars.into_iter().collect::<String>());
+    let host = prop::collection::vec(prop::char::range('a', 'z'), 3..15)
+        .prop_map(|chars| chars.into_iter().collect::<String>());
     let path = prop::collection::vec(
         prop::char::range('a', 'z').prop_union(prop::char::range('0', '9')),
-        1..20
-    ).prop_map(|chars| chars.into_iter().collect::<String>());
+        1..20,
+    )
+    .prop_map(|chars| chars.into_iter().collect::<String>());
 
-    (scheme, host, path).prop_map(|(scheme, host, path)| {
-        format!("{}://{}.com/{}", scheme, host, path)
-    })
+    (scheme, host, path)
+        .prop_map(|(scheme, host, path)| format!("{}://{}.com/{}", scheme, host, path))
 }
 
 /// Generate a valid authority-form request-target
 #[allow(dead_code)]
 fn authority_form_strategy() -> impl Strategy<Value = String> {
-    let host = prop::collection::vec(
-        prop::char::range('a', 'z'),
-        3..15
-    ).prop_map(|chars| chars.into_iter().collect::<String>());
+    let host = prop::collection::vec(prop::char::range('a', 'z'), 3..15)
+        .prop_map(|chars| chars.into_iter().collect::<String>());
     let port = 1024u16..65535u16;
 
-    (host, port).prop_map(|(host, port)| {
-        format!("{}.com:{}", host, port)
-    })
+    (host, port).prop_map(|(host, port)| format!("{}.com:{}", host, port))
 }
 
 /// Generate invalid request-target forms
@@ -280,8 +278,11 @@ fn mr4_options_asterisk_form() {
     // MR4.1: OPTIONS * should be valid
     let asterisk_request = "OPTIONS * HTTP/1.1\r\nHost: example.com\r\n\r\n";
     let result = decode_request(asterisk_request);
-    assert!(result.is_ok(),
-        "OPTIONS * should be accepted, got: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "OPTIONS * should be accepted, got: {:?}",
+        result.err()
+    );
 
     if let Ok(req) = result {
         assert_eq!(req.method, Method::Options);
@@ -291,8 +292,11 @@ fn mr4_options_asterisk_form() {
     // MR4.2: OPTIONS with regular origin-form should also be valid
     let origin_request = "OPTIONS /api HTTP/1.1\r\nHost: example.com\r\n\r\n";
     let result = decode_request(origin_request);
-    assert!(result.is_ok(),
-        "OPTIONS /api should be accepted, got: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "OPTIONS /api should be accepted, got: {:?}",
+        result.err()
+    );
 
     if let Ok(req) = result {
         assert_eq!(req.method, Method::Options);
@@ -371,34 +375,43 @@ fn comprehensive_request_target_validation() {
         (Method::Options, "/api", true),
         (Method::Connect, "example.com:443", true),
         (Method::Connect, "proxy.example.com:8080", true),
-
         // Invalid combinations per RFC 9112 Section 3.2
-        (Method::Get, "*", false), // asterisk only for OPTIONS
-        (Method::Post, "*", false), // asterisk only for OPTIONS
+        (Method::Get, "*", false),         // asterisk only for OPTIONS
+        (Method::Post, "*", false),        // asterisk only for OPTIONS
         (Method::Connect, "/path", false), // CONNECT needs authority-form
         (Method::Connect, "http://example.com/", false), // CONNECT needs authority-form
-        (Method::Get, "", false), // empty request-target
+        (Method::Get, "", false),          // empty request-target
         (Method::Post, "example.com:80", false), // authority-form only for CONNECT
     ];
 
     for (method, uri, should_be_valid) in test_cases {
-        let request = format!("{} {} HTTP/1.1\r\nHost: example.com\r\n\r\n",
-            method.as_str(), uri);
+        let request = format!(
+            "{} {} HTTP/1.1\r\nHost: example.com\r\n\r\n",
+            method.as_str(),
+            uri
+        );
         let result = decode_request(&request);
 
         if should_be_valid {
-            assert!(result.is_ok(),
+            assert!(
+                result.is_ok(),
                 "Valid combination {}:{} should be accepted, got: {:?}",
-                method.as_str(), uri, result.err());
+                method.as_str(),
+                uri,
+                result.err()
+            );
 
             if let Ok(req) = result {
-                assert_eq!(&req.uri, uri,
-                    "Request-target should be preserved");
-                assert_eq!(req.method, method,
-                    "Method should be preserved");
+                assert_eq!(&req.uri, uri, "Request-target should be preserved");
+                assert_eq!(req.method, method, "Method should be preserved");
             }
         } else {
-            assert!(result.is_err(), "Invalid combination '{}' '{}' should be rejected with 400 Bad Request", method, uri);
+            assert!(
+                result.is_err(),
+                "Invalid combination '{}' '{}' should be rejected with 400 Bad Request",
+                method,
+                uri
+            );
         }
     }
 }
@@ -411,22 +424,19 @@ fn comprehensive_request_target_validation() {
 fn edge_cases_and_security() {
     let dangerous_cases = vec![
         // Request smuggling vectors
-        "GET /path\r\nHack HTTP/1.1", // CRLF injection in URI
+        "GET /path\r\nHack HTTP/1.1",         // CRLF injection in URI
         "GET /path HTTP/1.1\r\nEvil: header", // Extra data after version
-        "GET  /path  HTTP/1.1", // Extra spaces
-        "GET\t/path\tHTTP/1.1", // Tabs instead of spaces
-
+        "GET  /path  HTTP/1.1",               // Extra spaces
+        "GET\t/path\tHTTP/1.1",               // Tabs instead of spaces
         // Authority-form edge cases
-        "CONNECT :443 HTTP/1.1", // Empty host
+        "CONNECT :443 HTTP/1.1",         // Empty host
         "CONNECT example.com: HTTP/1.1", // Empty port
-        "CONNECT example.com HTTP/1.1", // Missing port
-
+        "CONNECT example.com HTTP/1.1",  // Missing port
         // Absolute-form edge cases
-        "GET http:// HTTP/1.1", // Incomplete URL
+        "GET http:// HTTP/1.1",                  // Incomplete URL
         "GET http://example.com:80:80 HTTP/1.1", // Double port
-
         // Unicode and encoding edge cases
-        "GET /caf%C3%A9 HTTP/1.1", // URL-encoded UTF-8
+        "GET /caf%C3%A9 HTTP/1.1",   // URL-encoded UTF-8
         "GET /test%00null HTTP/1.1", // Null byte injection
     ];
 
@@ -437,10 +447,16 @@ fn edge_cases_and_security() {
         // These should either be rejected or handled safely
         if let Ok(req) = result {
             // If accepted, verify no injection occurred
-            assert!(!req.uri.contains('\r'),
-                "CRLF should not appear in parsed URI: '{}'", req.uri);
-            assert!(!req.uri.contains('\n'),
-                "LF should not appear in parsed URI: '{}'", req.uri);
+            assert!(
+                !req.uri.contains('\r'),
+                "CRLF should not appear in parsed URI: '{}'",
+                req.uri
+            );
+            assert!(
+                !req.uri.contains('\n'),
+                "LF should not appear in parsed URI: '{}'",
+                req.uri
+            );
         }
         // If rejected, that's also acceptable security behavior
     }

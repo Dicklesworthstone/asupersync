@@ -1320,9 +1320,7 @@ impl<Caps> Cx<Caps> {
         // exhaustion") are preserved without going through deadline_monitor.
         {
             let guard = self.inner.read();
-            let cancelled = guard
-                .fast_cancel
-                .load(std::sync::atomic::Ordering::Acquire);
+            let cancelled = guard.fast_cancel.load(std::sync::atomic::Ordering::Acquire);
             let exhausted = !cancelled
                 && Self::checkpoint_budget_exhaustion(
                     guard.region,

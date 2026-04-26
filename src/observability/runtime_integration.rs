@@ -8,7 +8,7 @@
 //! asupersync-6r9mk9 (Cancel-Correctness Property Oracle) is completed.
 
 use crate::observability::cancellation_tracer::{
-    CancellationTracer, CancellationTracerConfig, EntityType, CancellationTraceId,
+    CancellationTraceId, CancellationTracer, CancellationTracerConfig, EntityType,
 };
 use crate::record::region::RegionState;
 use crate::types::{CancelKind, CancelReason, RegionId, TaskId};

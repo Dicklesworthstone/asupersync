@@ -1,6 +1,6 @@
 //! Trace context that propagates with symbols.
 
-use super::id::{SymbolSpanId, DistTraceId};
+use super::id::{DistTraceId, SymbolSpanId};
 use crate::types::Time;
 use crate::util::DetRng;
 use core::fmt;

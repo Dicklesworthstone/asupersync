@@ -73,11 +73,9 @@ fn inv1_adversarial_no_orphan_task_constructor_exists() {
     // test would still pass (it can't catch a new API), but the new
     // constructor would have to bypass Cx::region_id()'s field access —
     // which is structurally impossible because region_id() is `&self`.
-    let constructors: [fn() -> Cx; 3] = [
-        Cx::for_testing,
-        Cx::for_request,
-        || Cx::for_testing_with_budget(Budget::INFINITE),
-    ];
+    let constructors: [fn() -> Cx; 3] = [Cx::for_testing, Cx::for_request, || {
+        Cx::for_testing_with_budget(Budget::INFINITE)
+    }];
     for ctor in constructors {
         let cx = ctor();
         let _ = cx.region_id();
@@ -208,7 +206,9 @@ fn inv4_positive_dropped_loser_future_runs_destructor() {
     let dropped_clone = Arc::clone(&dropped);
 
     let _ = block_on(async move {
-        let _witness = DropWitness { flag: dropped_clone };
+        let _witness = DropWitness {
+            flag: dropped_clone,
+        };
         // Simulate a race-loser: the future is never awaited to completion,
         // it is dropped as the surrounding async block finishes.
         let _result: Result<(), ()> = Ok(());
@@ -233,8 +233,7 @@ fn inv4_adversarial_canonical_loser_outcome_is_cancelled_with_race_loser_reason(
     use asupersync::types::{CancelReason, Outcome};
 
     let winner_outcome: Outcome<i32, &'static str> = Outcome::Ok(42);
-    let loser_outcome: Outcome<i32, &'static str> =
-        Outcome::Cancelled(CancelReason::race_loser());
+    let loser_outcome: Outcome<i32, &'static str> = Outcome::Cancelled(CancelReason::race_loser());
 
     let (final_winner, which, final_loser) =
         race2_outcomes(RaceWinner::First, winner_outcome, loser_outcome);
@@ -269,8 +268,8 @@ fn inv5_positive_committed_permit_does_not_panic_on_drop() {
     let _proof = permit
         .send(123)
         .expect("INV5 violation: commit failed on a fresh session");
-    let value = block_on(rx.recv(&cx))
-        .expect("INV5 violation: receiver did not observe committed value");
+    let value =
+        block_on(rx.recv(&cx)).expect("INV5 violation: receiver did not observe committed value");
     assert_eq!(value, 123);
 }
 
@@ -328,10 +327,7 @@ fn inv6_adversarial_default_cx_has_no_remote_or_fabric_capabilities() {
     // ambient grants. A future API change that flipped any of these to
     // true-by-default would silently widen the runtime's authority.
     let cx = Cx::for_testing();
-    assert!(
-        !cx.has_io(),
-        "INV6 violation: ambient I/O on default Cx"
-    );
+    assert!(!cx.has_io(), "INV6 violation: ambient I/O on default Cx");
     assert!(
         !cx.has_remote(),
         "INV6 violation: ambient Remote capability on default Cx"

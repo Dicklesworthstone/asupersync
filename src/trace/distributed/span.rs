@@ -255,7 +255,7 @@ mod tests {
     )]
     use super::*;
     use crate::trace::distributed::context::{RegionTag, SymbolTraceContext};
-    use crate::trace::distributed::id::{SymbolSpanId, DistTraceId};
+    use crate::trace::distributed::id::{DistTraceId, SymbolSpanId};
     use crate::util::DetRng;
 
     #[test]
