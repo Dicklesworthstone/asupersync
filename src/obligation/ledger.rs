@@ -313,6 +313,15 @@ impl ObligationLedger {
     ///
     /// The token must be passed to [`commit`](Self::commit) or
     /// [`abort`](Self::abort) to resolve the obligation.
+    ///
+    /// br-asupersync-12cqs2: PANICS if the owning region was already
+    /// marked finalized via [`Self::mark_region_finalized`]. Minting
+    /// a fresh obligation against a finalized region is a
+    /// programming error (the structured-concurrency contract
+    /// forbids post-close mutation). Callers that legitimately race
+    /// with region finalize (Drop impls, late-arrival handlers) MUST
+    /// use [`Self::try_acquire`] / [`Self::try_acquire_with_context`]
+    /// which return [`LedgerError::RegionFinalized`] on the late path.
     pub fn acquire(
         &mut self,
         kind: ObligationKind,
@@ -332,6 +341,12 @@ impl ObligationLedger {
     }
 
     /// Acquires a new obligation with full context.
+    ///
+    /// br-asupersync-12cqs2: PANICS if the owning region was already
+    /// marked finalized. See [`Self::acquire`] for the rationale.
+    /// Use [`Self::try_acquire_with_context`] for the fallible
+    /// variant that returns [`LedgerError::RegionFinalized`] when the
+    /// late-arrival path is intentional.
     #[allow(clippy::too_many_arguments)]
     pub fn acquire_with_context(
         &mut self,
@@ -343,6 +358,16 @@ impl ObligationLedger {
         backtrace: Option<Arc<std::backtrace::Backtrace>>,
         description: Option<String>,
     ) -> ObligationToken {
+        // br-asupersync-12cqs2: fence check FIRST. Acquire-on-
+        // finalized-region is a programming error in the infallible
+        // path; surface it as a panic with a clear message rather
+        // than silently mutating the ledger.
+        assert!(
+            !self.finalized_regions.contains(&region),
+            "br-asupersync-12cqs2: cannot acquire obligation against finalized region {region:?} \
+             (kind={kind:?}, holder={holder:?}); use try_acquire_with_context for late-arrival paths"
+        );
+
         let idx = ArenaIndex::new(self.next_index, self.generation);
         self.next_index = self
             .next_index
@@ -370,15 +395,80 @@ impl ObligationLedger {
         }
     }
 
+    /// br-asupersync-12cqs2: fallible variant of [`Self::acquire`].
+    /// Returns [`LedgerError::RegionFinalized`] (with a sentinel
+    /// `obligation` ID since no token is minted) when the owning
+    /// region was already finalized. Use this from Drop impls,
+    /// detached cleanup tasks, or anywhere a late-arrival race with
+    /// region finalize is part of the contract.
+    pub fn try_acquire(
+        &mut self,
+        kind: ObligationKind,
+        holder: TaskId,
+        region: RegionId,
+        now: Time,
+    ) -> Result<ObligationToken, LedgerError> {
+        self.try_acquire_with_context(
+            kind,
+            holder,
+            region,
+            now,
+            SourceLocation::unknown(),
+            None,
+            None,
+        )
+    }
+
+    /// br-asupersync-12cqs2: fallible variant of
+    /// [`Self::acquire_with_context`]. See [`Self::try_acquire`] for
+    /// the contract.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_acquire_with_context(
+        &mut self,
+        kind: ObligationKind,
+        holder: TaskId,
+        region: RegionId,
+        now: Time,
+        location: SourceLocation,
+        backtrace: Option<Arc<std::backtrace::Backtrace>>,
+        description: Option<String>,
+    ) -> Result<ObligationToken, LedgerError> {
+        if self.finalized_regions.contains(&region) {
+            return Err(LedgerError::RegionFinalized {
+                region,
+                // No token minted yet; sentinel ID for pattern-match.
+                obligation: ObligationId::from_arena(ArenaIndex::new(0, u32::MAX)),
+            });
+        }
+        Ok(self.acquire_with_context(kind, holder, region, now, location, backtrace, description))
+    }
+
     /// Commits an obligation, consuming the token.
     ///
     /// Returns the duration the obligation was held (in nanoseconds).
     ///
+    /// br-asupersync-u1gcfp: if the token's owning region was already
+    /// marked finalized, the call BAILS — no mutation, returns 0.
+    /// This makes Drop impls and other infallible late-arrival paths
+    /// fail-closed rather than mutating ledger state past the
+    /// region's lifetime. Callers that need to OBSERVE the late
+    /// arrival should use [`Self::try_commit`] instead.
+    ///
     /// # Panics
     ///
-    /// Panics if the obligation was already resolved or does not exist.
+    /// Panics if the obligation was already resolved or does not
+    /// exist (and the region is NOT finalized — finalized regions
+    /// silently bail per the fence check above).
     #[allow(clippy::needless_pass_by_value)] // Token consumed intentionally to prevent reuse
     pub fn commit(&mut self, token: ObligationToken, now: Time) -> u64 {
+        // br-asupersync-u1gcfp: fence check FIRST. Drop impls in
+        // messaging/fabric.rs and elsewhere call ledger.commit/abort
+        // unconditionally; without this fence they would mutate the
+        // ledger after the region has finalized, producing phantom
+        // transitions that violate temporal ordering.
+        if self.finalized_regions.contains(&token.region) {
+            return 0;
+        }
         let record = self.record_for_token_mut(&token);
         let duration = record.commit(now);
         self.stats.total_committed += 1;
@@ -390,9 +480,14 @@ impl ObligationLedger {
     ///
     /// Returns the duration the obligation was held (in nanoseconds).
     ///
+    /// br-asupersync-u1gcfp: same fail-closed-on-finalized contract
+    /// as [`Self::commit`]. If the token's owning region was already
+    /// marked finalized, the call BAILS — no mutation, returns 0.
+    ///
     /// # Panics
     ///
-    /// Panics if the obligation was already resolved or does not exist.
+    /// Panics if the obligation was already resolved or does not
+    /// exist (and the region is NOT finalized).
     #[allow(clippy::needless_pass_by_value)] // Token consumed intentionally to prevent reuse
     pub fn abort(
         &mut self,
@@ -400,6 +495,10 @@ impl ObligationLedger {
         now: Time,
         reason: ObligationAbortReason,
     ) -> u64 {
+        // br-asupersync-u1gcfp: fence check FIRST.
+        if self.finalized_regions.contains(&token.region) {
+            return 0;
+        }
         let record = self.record_for_token_mut(&token);
         let duration = record.abort(now, reason);
         self.stats.total_aborted += 1;
@@ -413,15 +512,35 @@ impl ObligationLedger {
     /// pending obligations by ID after the original linear token is no longer
     /// available to the caller.
     ///
+    /// br-asupersync-u1gcfp: same fail-closed contract as
+    /// [`Self::abort`]. If the obligation's owning region was already
+    /// marked finalized, the call BAILS — no mutation, returns 0.
+    /// This protects external drain paths from being a back-door
+    /// around the finalized fence.
+    ///
     /// # Panics
     ///
-    /// Panics if the obligation was already resolved or does not exist.
+    /// Panics if the obligation was already resolved or does not
+    /// exist (and the region is NOT finalized).
     pub fn abort_by_id(
         &mut self,
         id: ObligationId,
         now: Time,
         reason: ObligationAbortReason,
     ) -> u64 {
+        // br-asupersync-u1gcfp: fence check FIRST. We have to look up
+        // the record's region before we can check the fence (the
+        // caller passed only an ID), but the lookup is lightweight
+        // and the alternative — letting a drain path mutate
+        // post-finalize — is precisely what this fix exists to
+        // prevent. If the obligation doesn't exist, fall through to
+        // the existing pending_record_for_id_mut path which will
+        // panic with the established diagnostic.
+        if let Some(region) = self.obligations.get(&id).map(|r| r.region) {
+            if self.finalized_regions.contains(&region) {
+                return 0;
+            }
+        }
         let record = self.pending_record_for_id_mut(id, "abort_by_id");
         let duration = record.abort(now, reason);
         self.stats.total_aborted += 1;
@@ -2744,5 +2863,142 @@ mod tests {
         assert_eq!(duration, 100);
         assert_eq!(ledger.stats().total_committed, 1);
         assert_eq!(ledger.stats().pending, 0);
+    }
+
+    // ================================================================
+    // br-asupersync-12cqs2 — acquire_with_context fence
+    // ================================================================
+
+    /// br-asupersync-12cqs2: try_acquire on a finalized region must
+    /// return Err(LedgerError::RegionFinalized) WITHOUT minting a
+    /// token, incrementing stats, or otherwise mutating the ledger.
+    #[test]
+    fn b12cqs2_try_acquire_after_region_finalized_returns_err() {
+        let mut ledger = ObligationLedger::new();
+        let region = make_region();
+        let task = TaskId::from_arena(ArenaIndex::new(1, 0));
+
+        ledger.mark_region_finalized(region);
+        assert!(ledger.is_region_finalized(region));
+
+        let stats_before = *ledger.stats();
+        let err = ledger
+            .try_acquire(
+                ObligationKind::SendPermit,
+                task,
+                region,
+                Time::from_nanos(0),
+            )
+            .expect_err("acquire on finalized region must be rejected");
+
+        match err {
+            LedgerError::RegionFinalized { region: r, .. } => assert_eq!(r, region),
+        }
+
+        // No mutation: stats unchanged.
+        let stats_after = ledger.stats();
+        assert_eq!(stats_after.total_acquired, stats_before.total_acquired);
+        assert_eq!(stats_after.pending, stats_before.pending);
+    }
+
+    /// br-asupersync-12cqs2: try_acquire on a NOT-finalized region
+    /// behaves like the infallible acquire (mints a token).
+    #[test]
+    fn b12cqs2_try_acquire_before_finalize_succeeds() {
+        let mut ledger = ObligationLedger::new();
+        let region = make_region();
+        let task = TaskId::from_arena(ArenaIndex::new(1, 0));
+
+        let token = ledger
+            .try_acquire(ObligationKind::Lease, task, region, Time::from_nanos(0))
+            .expect("acquire before finalize must succeed");
+        assert_eq!(token.kind(), ObligationKind::Lease);
+        assert_eq!(ledger.stats().pending, 1);
+    }
+
+    /// br-asupersync-12cqs2: the infallible `acquire` PANICS when
+    /// called on a finalized region. This pins the contract that
+    /// late-arrival callers MUST use try_acquire instead.
+    #[test]
+    #[should_panic(expected = "br-asupersync-12cqs2")]
+    fn b12cqs2_infallible_acquire_after_finalize_panics() {
+        let mut ledger = ObligationLedger::new();
+        let region = make_region();
+        let task = TaskId::from_arena(ArenaIndex::new(1, 0));
+        ledger.mark_region_finalized(region);
+        let _ = ledger.acquire(
+            ObligationKind::SendPermit,
+            task,
+            region,
+            Time::from_nanos(0),
+        );
+    }
+
+    // ================================================================
+    // br-asupersync-u1gcfp — commit/abort fence (silent bail)
+    // ================================================================
+
+    /// br-asupersync-u1gcfp: infallible `commit` on a token whose
+    /// region was finalized after token mint MUST bail silently
+    /// (return 0, no mutation). This protects Drop impls that call
+    /// `ledger.commit` unconditionally from mutating the ledger past
+    /// region finalize.
+    #[test]
+    fn b_u1gcfp_commit_after_finalize_bails_silently() {
+        let mut ledger = ObligationLedger::new();
+        let region = make_region();
+        let task = TaskId::from_arena(ArenaIndex::new(1, 0));
+        let token = ledger.acquire(
+            ObligationKind::SendPermit,
+            task,
+            region,
+            Time::from_nanos(0),
+        );
+        let stats_after_acquire = *ledger.stats();
+        assert_eq!(stats_after_acquire.pending, 1);
+
+        ledger.mark_region_finalized(region);
+
+        let duration = ledger.commit(token, Time::from_nanos(100));
+        assert_eq!(duration, 0, "commit on finalized region must return 0");
+
+        // No mutation: stats are unchanged from the post-acquire snapshot.
+        let stats_after_commit = ledger.stats();
+        assert_eq!(stats_after_commit.total_committed, 0);
+        assert_eq!(stats_after_commit.pending, stats_after_acquire.pending);
+    }
+
+    /// br-asupersync-u1gcfp: same fail-closed contract for abort.
+    #[test]
+    fn b_u1gcfp_abort_after_finalize_bails_silently() {
+        let mut ledger = ObligationLedger::new();
+        let region = make_region();
+        let task = TaskId::from_arena(ArenaIndex::new(1, 0));
+        let token = ledger.acquire(ObligationKind::Lease, task, region, Time::from_nanos(0));
+        ledger.mark_region_finalized(region);
+
+        let duration = ledger.abort(token, Time::from_nanos(50), ObligationAbortReason::Cancel);
+        assert_eq!(duration, 0, "abort on finalized region must return 0");
+
+        let stats = ledger.stats();
+        assert_eq!(stats.total_aborted, 0);
+        assert_eq!(stats.pending, 1);
+    }
+
+    /// br-asupersync-u1gcfp: same fail-closed contract for abort_by_id.
+    #[test]
+    fn b_u1gcfp_abort_by_id_after_finalize_bails_silently() {
+        let mut ledger = ObligationLedger::new();
+        let region = make_region();
+        let task = TaskId::from_arena(ArenaIndex::new(1, 0));
+        let token = ledger.acquire(ObligationKind::IoOp, task, region, Time::from_nanos(0));
+        let id = token.id();
+        ledger.mark_region_finalized(region);
+
+        let duration = ledger.abort_by_id(id, Time::from_nanos(50), ObligationAbortReason::Cancel);
+        assert_eq!(duration, 0, "abort_by_id on finalized region must return 0");
+
+        assert_eq!(ledger.stats().total_aborted, 0);
+        assert_eq!(ledger.stats().pending, 1);
     }
 }
