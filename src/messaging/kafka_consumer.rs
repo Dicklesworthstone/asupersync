@@ -855,13 +855,47 @@ impl KafkaConsumer {
                     if let Some(res) = buffered_res {
                         match res {
                             Ok(outcome) => {
-                                let mut state = self.state.lock();
-                                apply_broker_snapshot(&mut state, outcome.snapshot);
-                                drop(state);
+                                // br-asupersync-yis4hl: apply the broker snapshot
+                                // (which may reflect a rebalance that occurred
+                                // between consumer.poll() and now) and check
+                                // ATOMICALLY under the state lock that the
+                                // record's (topic, partition) is still in our
+                                // assignment. If revoked, DROP the record —
+                                // delivering it would let the application
+                                // process records for a partition we no longer
+                                // own (Kafka protocol violation; offset
+                                // clobber on the successor consumer in the
+                                // adversarial case).
+                                //
+                                // The auto-commit at line ~892 has already
+                                // written to rdkafka's local offset store, but
+                                // the broker rejects offset commits with a
+                                // stale generation id (standard Kafka
+                                // ConsumerGroupGeneration fence), so the
+                                // server-side state is naturally protected.
+                                // The remaining defense is to not let the
+                                // application observe the revoked record.
+                                let dropped_record_for_revoked: bool = {
+                                    let mut state = self.state.lock();
+                                    apply_broker_snapshot(&mut state, outcome.snapshot);
+                                    if let Some(ref rec) = outcome.record {
+                                        let owned = state
+                                            .assigned_partitions
+                                            .contains(&(rec.topic.clone(), rec.partition));
+                                        !owned
+                                    } else {
+                                        false
+                                    }
+                                };
 
-                                if let Some(record) = outcome.record {
-                                    return Ok(Some(record));
+                                if !dropped_record_for_revoked {
+                                    if let Some(record) = outcome.record {
+                                        return Ok(Some(record));
+                                    }
                                 }
+                                // Revoked record dropped silently. The next
+                                // poll iteration will fetch a fresh record
+                                // for an actually-owned partition.
                             }
                             Err(e) => return Err(e),
                         }
@@ -2205,4 +2239,105 @@ mod tests {
             );
         });
     }
+
+    // ─── br-asupersync-yis4hl: rebalance TOCTOU regression ────────────
+
+    /// Test the EXACT logic the poll() arm uses to drop records for
+    /// revoked partitions. Simulates the sequence:
+    ///   1. Consumer owns (topic_a, 0) and (topic_a, 1).
+    ///   2. Blocking thread fetches a record for (topic_a, 1) +
+    ///      auto-commits it (broker write — outside this test scope) +
+    ///      captures a fresh BrokerSnapshot reflecting a rebalance
+    ///      that just revoked (topic_a, 1).
+    ///   3. poll() arm acquires state lock, applies the snapshot
+    ///      (which removes (topic_a, 1) from assigned_partitions and
+    ///      bumps rebalance_generation), then checks if the buffered
+    ///      record's (topic, partition) is still owned.
+    ///   4. Asserts: NOT owned → record MUST be dropped; the
+    ///      application never sees a record for a revoked partition.
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn rebalance_toctou_drops_record_for_revoked_partition() {
+        let mut state = ConsumerState::default();
+        // Pre-rebalance assignment.
+        apply_broker_snapshot(
+            &mut state,
+            broker_snapshot_from_topic_maps(
+                BTreeSet::from([("topic_a".to_string(), 0), ("topic_a".to_string(), 1)]),
+                BTreeMap::new(),
+            ),
+        );
+        assert!(state.assigned_partitions.contains(&("topic_a".to_string(), 1)));
+        let pre_gen = state.rebalance_generation;
+
+        // Simulate: blocking thread captured a record for ("topic_a", 1)
+        // BEFORE the rebalance, then a rebalance fired that revoked
+        // ("topic_a", 1). Apply the post-rebalance snapshot.
+        apply_broker_snapshot(
+            &mut state,
+            broker_snapshot_from_topic_maps(
+                BTreeSet::from([("topic_a".to_string(), 0)]), // 1 revoked
+                BTreeMap::new(),
+            ),
+        );
+        assert!(state.rebalance_generation > pre_gen, "generation must bump");
+        assert!(
+            state
+                .last_revoked_partitions
+                .contains(&("topic_a".to_string(), 1))
+        );
+
+        // Now the buffered record from the pre-rebalance fetch carries
+        // (topic_a, 1). The fix in poll() does this check:
+        let record_topic = "topic_a".to_string();
+        let record_partition: i32 = 1;
+        let owned = state
+            .assigned_partitions
+            .contains(&(record_topic.clone(), record_partition));
+        assert!(
+            !owned,
+            "post-rebalance check MUST report (topic_a, 1) as NOT owned — \
+             record must be dropped to avoid delivering for revoked partition"
+        );
+
+        // Inverse: a record for (topic_a, 0) is still owned and would be
+        // delivered.
+        let owned_unrevoked = state
+            .assigned_partitions
+            .contains(&("topic_a".to_string(), 0));
+        assert!(
+            owned_unrevoked,
+            "(topic_a, 0) is still in the assignment — its record MUST be delivered"
+        );
+    }
+
+    /// No-op control: when no rebalance occurred, the record's partition
+    /// is still owned and the check returns true (deliver normally).
+    #[cfg(feature = "kafka")]
+    #[test]
+    fn rebalance_toctou_keeps_record_when_no_revocation() {
+        let mut state = ConsumerState::default();
+        apply_broker_snapshot(
+            &mut state,
+            broker_snapshot_from_topic_maps(
+                BTreeSet::from([("topic_a".to_string(), 0)]),
+                BTreeMap::new(),
+            ),
+        );
+        // Same snapshot replayed (no rebalance) — assignment unchanged.
+        apply_broker_snapshot(
+            &mut state,
+            broker_snapshot_from_topic_maps(
+                BTreeSet::from([("topic_a".to_string(), 0)]),
+                BTreeMap::new(),
+            ),
+        );
+        let owned = state
+            .assigned_partitions
+            .contains(&("topic_a".to_string(), 0));
+        assert!(owned, "no rebalance → (topic_a, 0) still owned");
+    }
+
+    // (broker_snapshot_from_topic_maps already exists at line 501 in
+    // module scope — reused here without re-definition.)
 }
