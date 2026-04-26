@@ -183,9 +183,71 @@ fn test_division() {
     }
 }
 
-/// Test exponentiation properties
+/// Test exponentiation against a known-answer table cited from a
+/// reference implementation, plus the repeated-multiplication
+/// definition.
+///
+/// br-asupersync-g9razo: pre-fix, the only oracle for `pow` was a
+/// manual loop that itself called `mul_field` — both sides of the
+/// `assert_eq!` ran through the SAME GF(256) multiplication
+/// implementation, so a bug in `mul_field` would silently false-pass
+/// the test ("pow is implemented as repeated mul" is the
+/// definition, not a correctness check). The fix adds an
+/// independent oracle: a hardcoded set of (base, exp, expected)
+/// triples that any correct implementation of GF(256) over the
+/// RFC 6330 §5.7 primitive polynomial 0x11D MUST satisfy. The
+/// repeated-multiplication loop is kept as a secondary
+/// consistency check.
 #[test]
 fn test_exponentiation() {
+    // br-asupersync-g9razo: independent known-answer oracle.
+    // Each row is (base, exp, expected) computed offline against
+    // the standard GF(256) polynomial 0x11D using the log/antilog
+    // identity `pow(g, k) == antilog((log(g) * k) mod 255)` for
+    // primitive root g=2. The first few rows hand-verify the
+    // primitive-root definition (g=2): 2^0=1, 2^1=2, 2^2=4,
+    // 2^3=8, ..., 2^7=128, 2^8 = 0x11D mod x^8 = 0x1D = 29.
+    // Subsequent rows exercise non-primitive bases.
+    const KNOWN_ANSWERS: &[(u8, u8, u8)] = &[
+        // Powers of the primitive root g=2
+        (2, 0, 1),
+        (2, 1, 2),
+        (2, 2, 4),
+        (2, 3, 8),
+        (2, 4, 16),
+        (2, 5, 32),
+        (2, 6, 64),
+        (2, 7, 128),
+        (2, 8, 29),
+        (2, 9, 58),
+        (2, 254, 142),
+        (2, 255, 1), // Wraparound: g^255 == 1 (Fermat's little theorem)
+        // Non-primitive base: 1^anything == 1
+        (1, 0, 1),
+        (1, 1, 1),
+        (1, 255, 1),
+        // Identity: x^0 == 1 for any non-zero x
+        (3, 0, 1),
+        (170, 0, 1),
+        (255, 0, 1),
+    ];
+    for &(base, exp, expected) in KNOWN_ANSWERS {
+        let actual = Gf256::new(base).pow(exp);
+        assert_eq!(
+            actual.raw(),
+            expected,
+            "br-asupersync-g9razo: known-answer mismatch \
+             for {base}^{exp}: got {} expected {expected}",
+            actual.raw(),
+        );
+    }
+
+    // Secondary consistency check: pow MUST agree with repeated
+    // multiplication for the bases/exps in the original test.
+    // This is a CONSISTENCY (not correctness) check; the
+    // known-answer table above is the actual oracle. Kept here so
+    // any future divergence between pow's fast-path and the
+    // canonical definition surfaces.
     let test_bases = [1, 2, 3, 17, 42, 85, 170];
     let test_exps = [0, 1, 2, 3, 7, 15, 31, 63, 127, 255];
 
@@ -195,7 +257,10 @@ fn test_exponentiation() {
         for &exp in &test_exps {
             let pow_result = gf_base.pow(exp);
 
-            // Manual calculation for verification
+            // Manual repeated-mul reference. NOTE: this is NOT an
+            // independent oracle (both paths route through
+            // mul_field) — see the KNOWN_ANSWERS table above for
+            // the actual correctness check.
             let mut manual_result = Gf256::ONE;
             for _ in 0..exp {
                 manual_result = manual_result.mul_field(gf_base);
@@ -203,18 +268,28 @@ fn test_exponentiation() {
 
             assert_eq!(
                 pow_result, manual_result,
-                "Exponentiation mismatch: {}^{}",
-                base, exp
+                "Exponentiation pow/repeated-mul consistency mismatch: {base}^{exp}",
             );
         }
 
         // Special cases
-        assert_eq!(gf_base.pow(0), Gf256::ONE, "{}^0 should be 1", base);
-        assert_eq!(gf_base.pow(1), gf_base, "{}^1 should be {}", base, base);
+        assert_eq!(gf_base.pow(0), Gf256::ONE, "{base}^0 should be 1");
+        assert_eq!(gf_base.pow(1), gf_base, "{base}^1 should be {base}");
     }
 }
 
 /// Test that all non-zero elements are invertible (field property)
+/// AND that the image of `inv` over `1..=255` is exactly the set
+/// `{1, 2, ..., 255}` — i.e. inv is a permutation of GF(256)\{0}
+/// onto itself.
+///
+/// br-asupersync-g0xpcr: pre-fix, the test only checked uniqueness +
+/// final cardinality (255) — it did NOT verify the IMAGE of the
+/// inverse map. A buggy `inv()` that returned, say, 0xAA for one
+/// input + 254 unique non-zero values for the rest would still pass
+/// (255 unique u8 values, no duplicates, set size 255) without ever
+/// covering the full {1..=255} set. The fix asserts the image
+/// equals `{1..=255}` explicitly.
 #[test]
 fn test_field_completeness() {
     let mut inverses_seen = HashSet::new();
@@ -224,18 +299,26 @@ fn test_field_completeness() {
         let inv_val = gf_i.inv().raw();
 
         // Every non-zero element should have a unique inverse
-        assert!(inv_val != 0, "Element {} has zero inverse", i);
+        assert!(inv_val != 0, "Element {i} has zero inverse");
         assert!(
             !inverses_seen.contains(&inv_val),
-            "Duplicate inverse {} for element {}",
-            inv_val,
-            i
+            "Duplicate inverse {inv_val} for element {i}",
         );
         inverses_seen.insert(inv_val);
     }
 
     // We should have seen exactly 255 unique inverses
     assert_eq!(inverses_seen.len(), 255, "Should have 255 unique inverses");
+
+    // br-asupersync-g0xpcr: the image MUST be the full set
+    // {1..=255}. Cardinality alone is insufficient — see the
+    // function-level docstring.
+    let expected: HashSet<u8> = (1..=255u8).collect();
+    assert_eq!(
+        inverses_seen, expected,
+        "br-asupersync-g0xpcr: inv is not a permutation of {{1..=255}} \
+         — image differs from the expected set"
+    );
 }
 
 /// Test slice operations match element-wise operations
