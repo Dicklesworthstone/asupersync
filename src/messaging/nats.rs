@@ -2020,10 +2020,8 @@ mod tests {
     // without updating the manual impl) is caught immediately.
     #[test]
     fn test_natsconfig_debug_redacts_credentials_5in552() {
-        let config = NatsConfig::from_url(
-            "nats://alice:supersecret123@nats.internal:4222",
-        )
-        .unwrap();
+        let config =
+            NatsConfig::from_url("nats://alice:supersecret123@nats.internal:4222").unwrap();
         let debug_output = format!("{config:?}");
 
         // Cleartext credential strings MUST NOT appear anywhere in
