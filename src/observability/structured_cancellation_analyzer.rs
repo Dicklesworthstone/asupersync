@@ -167,7 +167,7 @@ impl StructuredCancellationAnalyzer {
         entity_type: crate::observability::EntityType,
         cancel_reason: &CancelReason,
         cancel_kind: CancelKind,
-    ) -> crate::observability::TraceId {
+    ) -> crate::observability::CancellationTraceId {
         let trace_id = self
             .tracer
             .start_trace(entity_id, entity_type, cancel_reason, cancel_kind);
@@ -186,7 +186,7 @@ impl StructuredCancellationAnalyzer {
     /// Record a cancellation propagation step.
     pub fn record_step(
         &self,
-        trace_id: crate::observability::TraceId,
+        trace_id: crate::observability::CancellationTraceId,
         entity_id: String,
         entity_type: crate::observability::EntityType,
         cancel_reason: &CancelReason,
@@ -218,7 +218,7 @@ impl StructuredCancellationAnalyzer {
     }
 
     /// Complete a cancellation trace.
-    pub fn complete_trace(&self, trace_id: crate::observability::TraceId) {
+    pub fn complete_trace(&self, trace_id: crate::observability::CancellationTraceId) {
         self.tracer.complete_trace(trace_id);
 
         // Update real-time stats
@@ -246,7 +246,7 @@ impl StructuredCancellationAnalyzer {
     }
 
     /// Visualize a specific trace as a tree.
-    pub fn visualize_trace(&self, trace_id: crate::observability::TraceId) -> Option<String> {
+    pub fn visualize_trace(&self, trace_id: crate::observability::CancellationTraceId) -> Option<String> {
         let traces = self.tracer.completed_traces();
         traces
             .iter()
@@ -255,7 +255,7 @@ impl StructuredCancellationAnalyzer {
     }
 
     /// Generate timeline visualization for a trace.
-    pub fn visualize_timeline(&self, trace_id: crate::observability::TraceId) -> Option<String> {
+    pub fn visualize_timeline(&self, trace_id: crate::observability::CancellationTraceId) -> Option<String> {
         let traces = self.tracer.completed_traces();
         traces
             .iter()
@@ -432,7 +432,7 @@ impl StructuredCancellationAnalyzer {
     #[allow(unused_variables)]
     fn log_trace_event(
         event_type: &str,
-        trace_id: crate::observability::TraceId,
+        trace_id: crate::observability::CancellationTraceId,
         entity_id: Option<&str>,
     ) {
         crate::tracing_compat::debug!(

@@ -1237,7 +1237,7 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
-    use crate::observability::cancellation_tracer::{CancellationTraceStep, TraceId};
+    use crate::observability::cancellation_tracer::{CancellationTraceStep, CancellationTraceId};
 
     fn test_step(entity_id: String, elapsed_since_prev: Duration) -> CancellationTraceStep {
         CancellationTraceStep {
@@ -1265,7 +1265,7 @@ mod tests {
         anomalies: Vec<PropagationAnomaly>,
     ) -> CancellationTrace {
         CancellationTrace {
-            trace_id: TraceId::new(),
+            trace_id: CancellationTraceId::new(),
             root_cancel_reason: format!("test-{trace_index}"),
             root_cancel_kind: "User".to_string(),
             root_entity: "root".to_string(),

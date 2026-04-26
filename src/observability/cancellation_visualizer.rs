@@ -4,7 +4,7 @@
 //! Provides multiple output formats for different debugging scenarios.
 
 use crate::observability::cancellation_tracer::{
-    CancellationTrace, CancellationTraceStep, EntityType, PropagationAnomaly, TraceId,
+    CancellationTrace, CancellationTraceStep, EntityType, PropagationAnomaly, CancellationTraceId,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -113,7 +113,7 @@ pub struct BottleneckInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AnomalyInfo {
     /// Trace ID associated with the anomaly.
-    pub trace_id: TraceId,
+    pub trace_id: CancellationTraceId,
     /// Type or category of the anomaly.
     pub anomaly_type: String,
     /// Severity level of the anomaly.
@@ -761,7 +761,7 @@ impl CancellationVisualizer {
         Duration::from_nanos(u64::try_from(avg_nanos).unwrap_or(u64::MAX))
     }
 
-    fn dot_node_id(trace_id: TraceId, entity_id: &str) -> String {
+    fn dot_node_id(trace_id: CancellationTraceId, entity_id: &str) -> String {
         Self::escape_dot_text(&format!("trace:{}:{entity_id}", trace_id.as_u64()))
     }
 
@@ -821,7 +821,7 @@ mod tests {
     fn test_trace(steps: Vec<CancellationTraceStep>) -> CancellationTrace {
         let max_depth = steps.iter().map(|step| step.depth).max().unwrap_or(0);
         CancellationTrace {
-            trace_id: TraceId::new(),
+            trace_id: CancellationTraceId::new(),
             root_cancel_reason: "User(test)".to_string(),
             root_cancel_kind: "User".to_string(),
             root_entity: "root-task".to_string(),

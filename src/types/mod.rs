@@ -42,20 +42,20 @@ pub use id::{ObligationId, RegionId, TaskId, Time};
 // and any new code that needs to correlate runtime decisions with persistent
 // audit records.
 //
-// Two narrower internal trace identifiers exist with the *same name* in
-// different modules and serve distinct purposes — they are NOT
-// interchangeable with this one (br-asupersync-dwtjto):
+// Two narrower internal trace identifiers exist in different modules and
+// serve distinct purposes — they are NOT interchangeable with this one
+// (br-asupersync-dwtjto). Both have been renamed away from the bare
+// `TraceId` symbol so the canonical one re-exported below owns it:
 //
-//   * `crate::observability::cancellation_tracer::TraceId` — `u64`
-//     auto-counter used purely for in-process cancellation propagation
-//     traces. No timestamp, no cross-process meaning.
+//   * `crate::observability::cancellation_tracer::CancellationTraceId` —
+//     `u64` auto-counter used purely for in-process cancellation
+//     propagation traces. No timestamp, no cross-process meaning.
+//     Renamed from `TraceId` in br-asupersync-z2m22w.
 //
 //   * `crate::trace::distributed::id::DistTraceId` — `{high: u64, low: u64}`
 //     W3C-formatted (32 hex chars) distributed trace context. Locked by
 //     a golden snapshot (`canonical_trace_id_serialization`) so the
-//     wire format cannot drift. Renamed from `TraceId` in br-asupersync-v4az2y
-//     to remove the name collision with the canonical `franken_kernel::TraceId`
-//     re-exported just below.
+//     wire format cannot drift. Renamed from `TraceId` in br-asupersync-v4az2y.
 //
 // New code that wants a "TraceId" should reach for this one. Migration
 // of the two purpose-specific types is tracked under follow-up beads

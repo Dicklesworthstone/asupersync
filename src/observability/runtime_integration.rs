@@ -8,7 +8,7 @@
 //! asupersync-6r9mk9 (Cancel-Correctness Property Oracle) is completed.
 
 use crate::observability::cancellation_tracer::{
-    CancellationTracer, CancellationTracerConfig, EntityType, TraceId,
+    CancellationTracer, CancellationTracerConfig, EntityType, CancellationTraceId,
 };
 use crate::record::region::RegionState;
 use crate::types::{CancelKind, CancelReason, RegionId, TaskId};
@@ -21,9 +21,9 @@ use std::sync::Arc;
 pub struct CancellationTracerIntegration {
     tracer: Arc<CancellationTracer>,
     /// Active traces by task ID.
-    task_traces: Arc<RwLock<HashMap<TaskId, TraceId>>>,
+    task_traces: Arc<RwLock<HashMap<TaskId, CancellationTraceId>>>,
     /// Active traces by region ID.
-    region_traces: Arc<RwLock<HashMap<RegionId, TraceId>>>,
+    region_traces: Arc<RwLock<HashMap<RegionId, CancellationTraceId>>>,
 }
 
 impl CancellationTracerIntegration {
@@ -282,13 +282,13 @@ impl CancellationTracerIntegration {
 
     /// Gets traces currently being tracked for tasks.
     #[must_use]
-    pub fn active_task_traces(&self) -> HashMap<TaskId, TraceId> {
+    pub fn active_task_traces(&self) -> HashMap<TaskId, CancellationTraceId> {
         self.task_traces.read().clone()
     }
 
     /// Gets traces currently being tracked for regions.
     #[must_use]
-    pub fn active_region_traces(&self) -> HashMap<RegionId, TraceId> {
+    pub fn active_region_traces(&self) -> HashMap<RegionId, CancellationTraceId> {
         self.region_traces.read().clone()
     }
 

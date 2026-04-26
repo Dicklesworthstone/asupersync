@@ -82,7 +82,7 @@ pub use cancellation_debt_monitor::{
 pub use cancellation_tracer::{
     CancellationAnalysis, CancellationTrace, CancellationTraceStep, CancellationTracer,
     CancellationTracerConfig, CancellationTracerStats, CancellationTracerStatsSnapshot, EntityType,
-    PropagationAnomaly, TraceId, analyze_cancellation_patterns,
+    PropagationAnomaly, CancellationTraceId, analyze_cancellation_patterns,
 };
 pub use cancellation_visualizer::{
     AnomalyInfo, AnomalySeverity, BottleneckInfo, CancellationDashboard, CancellationTreeNode,

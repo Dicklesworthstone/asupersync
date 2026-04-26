@@ -48,19 +48,20 @@ impl Default for CancellationTracerConfig {
     }
 }
 
-/// Unique identifier for a cancellation trace.
+/// Unique identifier for a cancellation propagation trace.
 ///
-/// **Not** the canonical [`crate::types::TraceId`] (the 128-bit
+/// Distinct from the canonical [`crate::types::TraceId`] (the 128-bit
 /// timestamped identifier re-exported from `franken_kernel`). This is a
-/// purpose-specific in-process counter used only by the cancellation
+/// purpose-specific in-process `u64` counter used only by the cancellation
 /// propagation tracer; it has no timestamp, no cross-process meaning, and
 /// is not suitable for EvidenceLedger linkage. New code that needs a
-/// "TraceId" should use the canonical one. (br-asupersync-dwtjto: rename
-/// to `CancellationTraceId` is tracked as a follow-up.)
+/// "TraceId" for cross-process correlation should use the canonical one.
+/// (Renamed from `TraceId` under br-asupersync-z2m22w to drop the name
+/// collision called out in br-asupersync-dwtjto.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct TraceId(u64);
+pub struct CancellationTraceId(u64);
 
-impl TraceId {
+impl CancellationTraceId {
     /// Creates a new trace ID.
     pub fn new() -> Self {
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -74,7 +75,7 @@ impl TraceId {
     }
 }
 
-impl Default for TraceId {
+impl Default for CancellationTraceId {
     fn default() -> Self {
         Self::new()
     }
@@ -122,7 +123,7 @@ pub enum EntityType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CancellationTrace {
     /// Unique identifier for this trace.
-    pub trace_id: TraceId,
+    pub trace_id: CancellationTraceId,
     /// Root cancellation that started the trace.
     pub root_cancel_reason: String,
     /// Initial cancellation kind.
@@ -269,11 +270,11 @@ pub struct CancellationTracer {
     config: CancellationTracerConfig,
     stats: CancellationTracerStats,
     /// In-progress traces being built.
-    in_progress: Arc<Mutex<HashMap<TraceId, InProgressTrace>>>,
+    in_progress: Arc<Mutex<HashMap<CancellationTraceId, InProgressTrace>>>,
     /// Completed traces.
     completed_traces: Arc<Mutex<VecDeque<CancellationTrace>>>,
     /// Mapping from entity to active trace IDs.
-    entity_traces: Arc<Mutex<HashMap<String, Vec<TraceId>>>>,
+    entity_traces: Arc<Mutex<HashMap<String, Vec<CancellationTraceId>>>>,
 }
 
 impl CancellationTracer {
@@ -296,20 +297,20 @@ impl CancellationTracer {
         entity_type: EntityType,
         cancel_reason: &CancelReason,
         cancel_kind: CancelKind,
-    ) -> TraceId {
+    ) -> CancellationTraceId {
         if !self.config.enable_tracing {
-            return TraceId::new(); // Return dummy ID
+            return CancellationTraceId::new(); // Return dummy ID
         }
 
         // Sample based on configured rate
         if self.config.sample_rate < 1.0 {
             let hash = self.hash_entity(&root_entity);
             if self.sample_unit_interval(hash) > self.config.sample_rate {
-                return TraceId::new(); // Skip this trace
+                return CancellationTraceId::new(); // Skip this trace
             }
         }
 
-        let trace_id = TraceId::new();
+        let trace_id = CancellationTraceId::new();
         let now = SystemTime::now();
 
         let trace = CancellationTrace {
@@ -358,7 +359,7 @@ impl CancellationTracer {
     /// Records a cancellation propagation step.
     pub fn record_step(
         &self,
-        trace_id: TraceId,
+        trace_id: CancellationTraceId,
         entity_id: String,
         entity_type: EntityType,
         cancel_reason: &CancelReason,
@@ -440,7 +441,7 @@ impl CancellationTracer {
     }
 
     /// Completes a cancellation trace.
-    pub fn complete_trace(&self, trace_id: TraceId) {
+    pub fn complete_trace(&self, trace_id: CancellationTraceId) {
         if !self.config.enable_tracing {
             return;
         }
@@ -501,7 +502,7 @@ impl CancellationTracer {
     }
 
     /// Gets traces that are currently in progress.
-    pub fn in_progress_traces(&self) -> Vec<TraceId> {
+    pub fn in_progress_traces(&self) -> Vec<CancellationTraceId> {
         self.in_progress
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -511,7 +512,7 @@ impl CancellationTracer {
     }
 
     /// Gets traces related to a specific entity.
-    pub fn traces_for_entity(&self, entity_id: &str) -> Vec<TraceId> {
+    pub fn traces_for_entity(&self, entity_id: &str) -> Vec<CancellationTraceId> {
         self.entity_traces
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1229,7 +1230,7 @@ mod tests {
     fn test_analysis_patterns() {
         let traces = vec![
             CancellationTrace {
-                trace_id: TraceId::new(),
+                trace_id: CancellationTraceId::new(),
                 root_cancel_reason: "test1".to_string(),
                 root_cancel_kind: "User".to_string(),
                 root_entity: "task-1".to_string(),
@@ -1243,7 +1244,7 @@ mod tests {
                 anomalies: vec![],
             },
             CancellationTrace {
-                trace_id: TraceId::new(),
+                trace_id: CancellationTraceId::new(),
                 root_cancel_reason: "test2".to_string(),
                 root_cancel_kind: "Timeout".to_string(),
                 root_entity: "task-2".to_string(),
@@ -1268,7 +1269,7 @@ mod tests {
     fn test_analysis_average_ignores_incomplete_traces() {
         let traces = vec![
             CancellationTrace {
-                trace_id: TraceId::new(),
+                trace_id: CancellationTraceId::new(),
                 root_cancel_reason: "complete".to_string(),
                 root_cancel_kind: "User".to_string(),
                 root_entity: "task-1".to_string(),
@@ -1282,7 +1283,7 @@ mod tests {
                 anomalies: vec![],
             },
             CancellationTrace {
-                trace_id: TraceId::new(),
+                trace_id: CancellationTraceId::new(),
                 root_cancel_reason: "incomplete".to_string(),
                 root_cancel_kind: "User".to_string(),
                 root_entity: "task-2".to_string(),
@@ -1308,7 +1309,7 @@ mod tests {
         // Create traces with various bottleneck patterns
         let traces = vec![
             CancellationTrace {
-                trace_id: TraceId::new(),
+                trace_id: CancellationTraceId::new(),
                 root_cancel_reason: "test".to_string(),
                 root_cancel_kind: "User".to_string(),
                 root_entity: "bottleneck-entity".to_string(),
@@ -1347,7 +1348,7 @@ mod tests {
             },
             // Create multiple traces to make "bottleneck-entity" high frequency
             CancellationTrace {
-                trace_id: TraceId::new(),
+                trace_id: CancellationTraceId::new(),
                 root_cancel_reason: "test".to_string(),
                 root_cancel_kind: "User".to_string(),
                 root_entity: "bottleneck-entity".to_string(),
@@ -1374,7 +1375,7 @@ mod tests {
                 anomalies: vec![],
             },
             CancellationTrace {
-                trace_id: TraceId::new(),
+                trace_id: CancellationTraceId::new(),
                 root_cancel_reason: "test".to_string(),
                 root_cancel_kind: "User".to_string(),
                 root_entity: "other-entity".to_string(),
