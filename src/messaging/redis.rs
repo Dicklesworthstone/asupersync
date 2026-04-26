@@ -229,6 +229,11 @@ fn find_crlf(buf: &[u8], start: usize) -> Option<usize> {
 }
 
 /// RESP (REdis Serialization Protocol) value.
+///
+/// Covers RESP2 and the RESP3 type extensions negotiated via `HELLO 3`
+/// (br-asupersync-xlh4nx). The decoder handles the full RESP3 surface so a
+/// server that is upgraded mid-deployment can return RESP3-only types without
+/// crashing the client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RespValue {
     /// Simple string (prefixed with +).
@@ -241,6 +246,31 @@ pub enum RespValue {
     BulkString(Option<Vec<u8>>),
     /// Array of RESP values (prefixed with *, can be null).
     Array(Option<Vec<Self>>),
+    /// RESP3 null value (`_\r\n`).
+    Null,
+    /// RESP3 boolean (`#t\r\n` / `#f\r\n`).
+    Boolean(bool),
+    /// RESP3 double-precision float as the original ASCII decimal payload
+    /// (`,3.14\r\n`). Stored as a string to preserve the exact wire form,
+    /// including `inf`, `-inf`, and `nan`.
+    Double(String),
+    /// RESP3 arbitrary-precision number, kept as ASCII (`(123456789...\r\n`).
+    BigNumber(String),
+    /// RESP3 verbatim string with a 3-byte format prefix and ':' separator
+    /// (`=15\r\ntxt:Some text\r\n`). The tuple is `(format, payload)`.
+    Verbatim { format: String, payload: Vec<u8> },
+    /// RESP3 binary error (`!21\r\nSYNTAX invalid syntax\r\n`).
+    BlobError(Vec<u8>),
+    /// RESP3 map (`%N\r\n` followed by N key-value pairs).
+    Map(Vec<(Self, Self)>),
+    /// RESP3 set (`~N\r\n` followed by N items).
+    Set(Vec<Self>),
+    /// RESP3 server-pushed message (`>N\r\n` followed by N items).
+    Push(Vec<Self>),
+    /// RESP3 attribute payload (`|N\r\n` followed by N key-value pairs).
+    /// Auxiliary metadata that the server attaches to a following value;
+    /// the client is free to ignore it.
+    Attribute(Vec<(Self, Self)>),
 }
 
 impl RespValue {
@@ -301,6 +331,83 @@ impl RespValue {
             Self::Array(None) => {
                 buf.extend_from_slice(b"*-1\r\n");
             }
+            // RESP3 wire formats — used by tests and round-trip helpers.
+            Self::Null => {
+                buf.extend_from_slice(b"_\r\n");
+            }
+            Self::Boolean(b) => {
+                buf.extend_from_slice(if *b { b"#t\r\n" } else { b"#f\r\n" });
+            }
+            Self::Double(s) => {
+                buf.push(b',');
+                for &c in s.as_bytes() {
+                    if c != b'\r' && c != b'\n' {
+                        buf.push(c);
+                    }
+                }
+                buf.extend_from_slice(b"\r\n");
+            }
+            Self::BigNumber(s) => {
+                buf.push(b'(');
+                for &c in s.as_bytes() {
+                    if c != b'\r' && c != b'\n' {
+                        buf.push(c);
+                    }
+                }
+                buf.extend_from_slice(b"\r\n");
+            }
+            Self::Verbatim { format, payload } => {
+                // <format>:<payload> — total length is 4 + payload.len()
+                let total = format.len().saturating_add(1).saturating_add(payload.len());
+                buf.push(b'=');
+                push_u64_decimal(buf, total as u64);
+                buf.extend_from_slice(b"\r\n");
+                buf.extend_from_slice(format.as_bytes());
+                buf.push(b':');
+                buf.extend_from_slice(payload);
+                buf.extend_from_slice(b"\r\n");
+            }
+            Self::BlobError(data) => {
+                buf.push(b'!');
+                push_u64_decimal(buf, data.len() as u64);
+                buf.extend_from_slice(b"\r\n");
+                buf.extend_from_slice(data);
+                buf.extend_from_slice(b"\r\n");
+            }
+            Self::Map(pairs) => {
+                buf.push(b'%');
+                push_u64_decimal(buf, pairs.len() as u64);
+                buf.extend_from_slice(b"\r\n");
+                for (k, v) in pairs {
+                    k.encode_into(buf);
+                    v.encode_into(buf);
+                }
+            }
+            Self::Set(items) => {
+                buf.push(b'~');
+                push_u64_decimal(buf, items.len() as u64);
+                buf.extend_from_slice(b"\r\n");
+                for item in items {
+                    item.encode_into(buf);
+                }
+            }
+            Self::Push(items) => {
+                buf.push(b'>');
+                push_u64_decimal(buf, items.len() as u64);
+                buf.extend_from_slice(b"\r\n");
+                for item in items {
+                    item.encode_into(buf);
+                }
+            }
+            Self::Attribute(pairs) => {
+                buf.push(b'|');
+                push_u64_decimal(buf, pairs.len() as u64);
+                buf.extend_from_slice(b"\r\n");
+                for (k, v) in pairs {
+                    k.encode_into(buf);
+                    v.encode_into(buf);
+                }
+            }
         }
     }
 
@@ -338,31 +445,52 @@ impl RespValue {
             }
 
             match buf[i] {
-                b'+' | b'-' | b':' => {
+                // Single-line types: SimpleString, Error, Integer (RESP2)
+                // and Double, BigNumber (RESP3) all read up to the next CRLF.
+                b'+' | b'-' | b':' | b',' | b'(' => {
                     let Some(end) = find_crlf(buf, i + 1) else {
                         return Ok(None);
                     };
                     Ok(Some(end + 2))
                 }
-                b'$' => {
+                // Null (RESP3) — `_\r\n`, no payload.
+                b'_' => {
+                    let Some(end) = find_crlf(buf, i + 1) else {
+                        return Ok(None);
+                    };
+                    Ok(Some(end + 2))
+                }
+                // Boolean (RESP3) — `#t\r\n` or `#f\r\n`. Treat like a
+                // single-line type; the actual value parses in decode_at.
+                b'#' => {
+                    let Some(end) = find_crlf(buf, i + 1) else {
+                        return Ok(None);
+                    };
+                    Ok(Some(end + 2))
+                }
+                // Length-prefixed binary types: BulkString (RESP2), Verbatim
+                // and BlobError (RESP3) all share the same wire shape:
+                //   <prefix><len>\r\n<payload>\r\n
+                b'$' | b'=' | b'!' => {
                     let Some(end) = find_crlf(buf, i + 1) else {
                         return Ok(None);
                     };
                     let len = parse_i64_ascii(&buf[i + 1..end])?;
-                    if len == -1 {
+                    if len == -1 && buf[i] == b'$' {
                         return Ok(Some(end + 2));
                     }
-                    if len < -1 {
+                    if len < 0 {
                         return Err(RedisError::Protocol(format!(
-                            "invalid bulk string length: {len}"
+                            "invalid bulk-shape length for byte 0x{:02x}: {len}",
+                            buf[i]
                         )));
                     }
                     let len = usize::try_from(len).map_err(|_| {
-                        RedisError::Protocol(format!("invalid bulk string length: {len}"))
+                        RedisError::Protocol(format!("invalid bulk-shape length: {len}"))
                     })?;
                     if len > limits.max_bulk_string_len {
                         return Err(RedisError::Protocol(format!(
-                            "bulk string length {len} exceeds maximum {}",
+                            "bulk-shape length {len} exceeds maximum {}",
                             limits.max_bulk_string_len
                         )));
                     }
@@ -372,27 +500,32 @@ impl RespValue {
                     }
                     Ok(Some(end_crlf))
                 }
-                b'*' => {
+                // Aggregate types whose payload is N child values: Array
+                // (RESP2) plus Set, Push (RESP3 — N items) and Map,
+                // Attribute (RESP3 — N pairs = 2N children).
+                b'*' | b'~' | b'>' | b'%' | b'|' => {
                     let Some(end) = find_crlf(buf, i + 1) else {
                         return Ok(None);
                     };
                     let n = parse_i64_ascii(&buf[i + 1..end])?;
-                    if n == -1 {
+                    if n == -1 && buf[i] == b'*' {
                         return Ok(Some(end + 2));
                     }
-                    if n < -1 {
-                        return Err(RedisError::Protocol(format!("invalid array length: {n}")));
+                    if n < 0 {
+                        return Err(RedisError::Protocol(format!("invalid aggregate length: {n}")));
                     }
-                    let n = usize::try_from(n)
-                        .map_err(|_| RedisError::Protocol(format!("invalid array length: {n}")))?;
+                    let n = usize::try_from(n).map_err(|_| {
+                        RedisError::Protocol(format!("invalid aggregate length: {n}"))
+                    })?;
                     if n > limits.max_array_len {
                         return Err(RedisError::Protocol(format!(
-                            "array length {n} exceeds maximum {}",
+                            "aggregate length {n} exceeds maximum {}",
                             limits.max_array_len
                         )));
                     }
+                    let children = if matches!(buf[i], b'%' | b'|') { n * 2 } else { n };
                     i = end + 2;
-                    for _ in 0..n {
+                    for _ in 0..children {
                         match check_complete(buf, i, depth + 1, limits)? {
                             None => return Ok(None),
                             Some(next) => i = next,
@@ -504,25 +637,27 @@ impl RespValue {
                         next: end_crlf,
                     })
                 }
-                b'*' => {
+                b'*' | b'~' | b'>' => {
+                    let tag = buf[i];
                     let Some(end) = find_crlf(buf, i + 1) else {
                         return Ok(Decoded::NeedMore);
                     };
                     let n = parse_i64_ascii(&buf[i + 1..end])?;
-                    if n == -1 {
+                    if n == -1 && tag == b'*' {
                         return Ok(Decoded::Ok {
                             value: RespValue::Array(None),
                             next: end + 2,
                         });
                     }
-                    if n < -1 {
-                        return Err(RedisError::Protocol(format!("invalid array length: {n}")));
+                    if n < 0 {
+                        return Err(RedisError::Protocol(format!("invalid aggregate length: {n}")));
                     }
-                    let n = usize::try_from(n)
-                        .map_err(|_| RedisError::Protocol(format!("invalid array length: {n}")))?;
+                    let n = usize::try_from(n).map_err(|_| {
+                        RedisError::Protocol(format!("invalid aggregate length: {n}"))
+                    })?;
                     if n > limits.max_array_len {
                         return Err(RedisError::Protocol(format!(
-                            "array length {n} exceeds maximum {}",
+                            "aggregate length {n} exceeds maximum {}",
                             limits.max_array_len
                         )));
                     }
@@ -539,9 +674,203 @@ impl RespValue {
                             }
                         }
                     }
+                    let value = match tag {
+                        b'*' => RespValue::Array(Some(items)),
+                        b'~' => RespValue::Set(items),
+                        b'>' => RespValue::Push(items),
+                        _ => unreachable!(),
+                    };
+                    Ok(Decoded::Ok { value, next: pos })
+                }
+                // RESP3 map (%) and attribute (|) — N key-value pairs.
+                b'%' | b'|' => {
+                    let tag = buf[i];
+                    let Some(end) = find_crlf(buf, i + 1) else {
+                        return Ok(Decoded::NeedMore);
+                    };
+                    let n = parse_i64_ascii(&buf[i + 1..end])?;
+                    if n < 0 {
+                        return Err(RedisError::Protocol(format!("invalid aggregate length: {n}")));
+                    }
+                    let n = usize::try_from(n).map_err(|_| {
+                        RedisError::Protocol(format!("invalid aggregate length: {n}"))
+                    })?;
+                    if n > limits.max_array_len {
+                        return Err(RedisError::Protocol(format!(
+                            "aggregate length {n} exceeds maximum {}",
+                            limits.max_array_len
+                        )));
+                    }
+                    let mut pairs = Vec::with_capacity(n.min(1024));
+                    let mut pos = end + 2;
+                    for _ in 0..n {
+                        let key = match decode_at(buf, pos, depth + 1, limits)? {
+                            Decoded::NeedMore => return Ok(Decoded::NeedMore),
+                            Decoded::Ok { value, next } => {
+                                pos = next;
+                                value
+                            }
+                        };
+                        let val = match decode_at(buf, pos, depth + 1, limits)? {
+                            Decoded::NeedMore => return Ok(Decoded::NeedMore),
+                            Decoded::Ok { value, next } => {
+                                pos = next;
+                                value
+                            }
+                        };
+                        pairs.push((key, val));
+                    }
+                    let value = match tag {
+                        b'%' => RespValue::Map(pairs),
+                        b'|' => RespValue::Attribute(pairs),
+                        _ => unreachable!(),
+                    };
+                    Ok(Decoded::Ok { value, next: pos })
+                }
+                // RESP3 null — `_\r\n`.
+                b'_' => {
+                    let Some(end) = find_crlf(buf, i + 1) else {
+                        return Ok(Decoded::NeedMore);
+                    };
+                    if end != i + 1 {
+                        return Err(RedisError::Protocol(
+                            "RESP3 null must have empty payload".into(),
+                        ));
+                    }
                     Ok(Decoded::Ok {
-                        value: RespValue::Array(Some(items)),
-                        next: pos,
+                        value: RespValue::Null,
+                        next: end + 2,
+                    })
+                }
+                // RESP3 boolean — `#t\r\n` or `#f\r\n`.
+                b'#' => {
+                    let Some(end) = find_crlf(buf, i + 1) else {
+                        return Ok(Decoded::NeedMore);
+                    };
+                    let payload = &buf[i + 1..end];
+                    let value = match payload {
+                        b"t" => RespValue::Boolean(true),
+                        b"f" => RespValue::Boolean(false),
+                        _ => {
+                            return Err(RedisError::Protocol(format!(
+                                "invalid RESP3 boolean payload: {:?}",
+                                payload
+                            )));
+                        }
+                    };
+                    Ok(Decoded::Ok {
+                        value,
+                        next: end + 2,
+                    })
+                }
+                // RESP3 double — `,<decimal-text>\r\n`. Preserve the exact
+                // ASCII representation including `inf`, `-inf`, `nan`.
+                b',' => {
+                    let Some(end) = find_crlf(buf, i + 1) else {
+                        return Ok(Decoded::NeedMore);
+                    };
+                    let s = std::str::from_utf8(&buf[i + 1..end])
+                        .map_err(|_| RedisError::Protocol("invalid UTF-8 in double".into()))?
+                        .to_string();
+                    Ok(Decoded::Ok {
+                        value: RespValue::Double(s),
+                        next: end + 2,
+                    })
+                }
+                // RESP3 big number — `(<digits>\r\n`.
+                b'(' => {
+                    let Some(end) = find_crlf(buf, i + 1) else {
+                        return Ok(Decoded::NeedMore);
+                    };
+                    let s = std::str::from_utf8(&buf[i + 1..end])
+                        .map_err(|_| RedisError::Protocol("invalid UTF-8 in big number".into()))?
+                        .to_string();
+                    Ok(Decoded::Ok {
+                        value: RespValue::BigNumber(s),
+                        next: end + 2,
+                    })
+                }
+                // RESP3 verbatim string — `=N\r\n<3-byte-format>:<payload>\r\n`.
+                b'=' => {
+                    let Some(end) = find_crlf(buf, i + 1) else {
+                        return Ok(Decoded::NeedMore);
+                    };
+                    let len = parse_i64_ascii(&buf[i + 1..end])?;
+                    if len < 4 {
+                        return Err(RedisError::Protocol(format!(
+                            "verbatim string length {len} is below minimum 4 (format prefix)"
+                        )));
+                    }
+                    let len = usize::try_from(len).map_err(|_| {
+                        RedisError::Protocol(format!("invalid verbatim length: {len}"))
+                    })?;
+                    if len > limits.max_bulk_string_len {
+                        return Err(RedisError::Protocol(format!(
+                            "verbatim length {len} exceeds maximum {}",
+                            limits.max_bulk_string_len
+                        )));
+                    }
+                    let start_data = end + 2;
+                    let end_data = start_data.saturating_add(len);
+                    let end_crlf = end_data.saturating_add(2);
+                    if buf.len() < end_crlf {
+                        return Ok(Decoded::NeedMore);
+                    }
+                    if buf.get(end_data) != Some(&b'\r') || buf.get(end_data + 1) != Some(&b'\n') {
+                        return Err(RedisError::Protocol(
+                            "verbatim string missing trailing CRLF".into(),
+                        ));
+                    }
+                    let body = &buf[start_data..end_data];
+                    if body.get(3) != Some(&b':') {
+                        return Err(RedisError::Protocol(
+                            "verbatim string missing 3-byte format separator (':' at offset 3)"
+                                .into(),
+                        ));
+                    }
+                    let format = std::str::from_utf8(&body[..3])
+                        .map_err(|_| RedisError::Protocol("invalid UTF-8 in verbatim format".into()))?
+                        .to_string();
+                    let payload = body[4..].to_vec();
+                    Ok(Decoded::Ok {
+                        value: RespValue::Verbatim { format, payload },
+                        next: end_crlf,
+                    })
+                }
+                // RESP3 blob error — `!N\r\n<bytes>\r\n`.
+                b'!' => {
+                    let Some(end) = find_crlf(buf, i + 1) else {
+                        return Ok(Decoded::NeedMore);
+                    };
+                    let len = parse_i64_ascii(&buf[i + 1..end])?;
+                    if len < 0 {
+                        return Err(RedisError::Protocol(format!(
+                            "invalid blob error length: {len}"
+                        )));
+                    }
+                    let len = usize::try_from(len).map_err(|_| {
+                        RedisError::Protocol(format!("invalid blob error length: {len}"))
+                    })?;
+                    if len > limits.max_bulk_string_len {
+                        return Err(RedisError::Protocol(format!(
+                            "blob error length {len} exceeds maximum {}",
+                            limits.max_bulk_string_len
+                        )));
+                    }
+                    let start_data = end + 2;
+                    let end_data = start_data.saturating_add(len);
+                    let end_crlf = end_data.saturating_add(2);
+                    if buf.len() < end_crlf {
+                        return Ok(Decoded::NeedMore);
+                    }
+                    if buf.get(end_data) != Some(&b'\r') || buf.get(end_data + 1) != Some(&b'\n') {
+                        return Err(RedisError::Protocol(
+                            "blob error missing trailing CRLF".into(),
+                        ));
+                    }
+                    Ok(Decoded::Ok {
+                        value: RespValue::BlobError(buf[start_data..end_data].to_vec()),
+                        next: end_crlf,
                     })
                 }
                 other => Err(RedisError::Protocol(format!(
@@ -904,18 +1233,64 @@ impl RedisConnection {
             return Ok(());
         }
 
-        cx.trace("redis: initializing connection (AUTH/SELECT)");
+        cx.trace("redis: initializing connection (HELLO/AUTH/SELECT)");
 
         let password = self.config.password.clone();
         let username = self.config.username.clone();
-        if let Some(password) = password {
+
+        // br-asupersync-xlh4nx: try RESP3 negotiation first via HELLO 3.
+        // HELLO accepts an optional AUTH clause that authenticates atomically
+        // with the protocol upgrade — saves a round trip when credentials are
+        // configured. On a server that predates HELLO (Redis < 6.0) the
+        // command returns `-ERR unknown command 'HELLO' ...`, in which case
+        // we fall back to the legacy AUTH path. Any other error is fatal.
+        let mut hello_args: Vec<&[u8]> = vec![b"HELLO", b"3"];
+        if let (Some(ref u), Some(ref p)) = (username.as_ref(), password.as_ref()) {
+            hello_args.push(b"AUTH");
+            hello_args.push(u.as_bytes());
+            hello_args.push(p.as_bytes());
+        } else if let Some(ref p) = password {
+            // Pre-ACL servers — synthesise the default user.
+            hello_args.push(b"AUTH");
+            hello_args.push(b"default");
+            hello_args.push(p.as_bytes());
+        }
+        let mut hello_handled_auth = false;
+        match self.exec_no_init(cx, &hello_args).await? {
+            RespValue::Map(_) | RespValue::Array(Some(_)) => {
+                // RESP3 reply is a Map; some Redis builds (notably KeyDB)
+                // still answer in RESP2 with an Array even after HELLO 3.
+                // Both responses confirm the server accepted the command and
+                // applied any AUTH clause we sent.
+                hello_handled_auth = password.is_some();
+            }
+            RespValue::Error(msg) => {
+                // The only case we keep the connection for is "unknown
+                // command HELLO" on legacy servers. Anything else (auth
+                // failure, NOAUTH, syntax) propagates.
+                let lower = msg.to_ascii_lowercase();
+                let is_unknown_command =
+                    lower.contains("unknown command") && lower.contains("hello");
+                if !is_unknown_command {
+                    return Err(RedisError::Protocol(format!("HELLO 3 rejected: {msg}")));
+                }
+                cx.trace("redis: HELLO 3 unsupported, falling back to RESP2");
+            }
+            other => {
+                return Err(RedisError::Protocol(format!(
+                    "HELLO 3 expected Map/Array/Error, got {other:?}"
+                )));
+            }
+        }
+
+        if !hello_handled_auth && password.is_some() {
+            let p = password.expect("password.is_some() checked above");
             // Redis 6+ ACL: AUTH username password; pre-6: AUTH password.
-            let resp = if let Some(ref username) = username {
-                self.exec_no_init(cx, &[b"AUTH", username.as_bytes(), password.as_bytes()])
+            let resp = if let Some(ref u) = username {
+                self.exec_no_init(cx, &[b"AUTH", u.as_bytes(), p.as_bytes()])
                     .await?
             } else {
-                self.exec_no_init(cx, &[b"AUTH", password.as_bytes()])
-                    .await?
+                self.exec_no_init(cx, &[b"AUTH", p.as_bytes()]).await?
             };
             if !resp.is_ok() {
                 return Err(RedisError::Protocol(format!(
