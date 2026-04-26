@@ -200,12 +200,32 @@ impl MaskedFinalizer {
              Reduce nesting of masked sections.",
         );
         if guard.mask_depth >= MAX_MASK_DEPTH {
+            // br-asupersync-masked-finalizer-fail-open: in release
+            // builds the prior code logged + returned with
+            // entered=false, after which poll() called inner.poll(cx)
+            // WITHOUT mask protection — finalizer could be cancelled
+            // mid-cleanup, leaving resources orphaned and silently
+            // violating the "MaskedFinalizer protects cleanup from
+            // cancel" contract. Debug builds already panic via the
+            // debug_assert above; match that posture in release. The
+            // depth saturation indicates a programmer bug
+            // (unboundedly nested masked sections); failing fast
+            // surfaces it instead of silently dropping cleanup
+            // (consistent with Plan v4 §I2 + br-asupersync-gi61n1
+            // which made obligation-leak default Panic).
+            let depth = guard.mask_depth;
+            drop(guard);
             crate::tracing_compat::error!(
-                depth = guard.mask_depth,
+                depth = depth,
                 max = MAX_MASK_DEPTH,
-                "INV-MASK-BOUNDED violated: mask depth saturated, cancellation may be unobservable"
+                "INV-MASK-BOUNDED violated: mask depth saturated, cannot mask finalizer; aborting"
             );
-            return;
+            panic!(
+                "MaskedFinalizer: INV-MASK-BOUNDED violated — mask depth {depth} >= \
+                 MAX_MASK_DEPTH {MAX_MASK_DEPTH}. Refusing to run finalizer unprotected; \
+                 the runtime cannot guarantee cleanup integrity past this point. \
+                 Reduce nesting of masked sections."
+            );
         }
         guard.mask_depth += 1;
         drop(guard);
@@ -1311,10 +1331,10 @@ impl RuntimeState {
         let cx_weak = std::sync::Arc::downgrade(&cx.inner);
 
         // Link the shared state to the TaskRecord
-        if let Some(record) = self.task_mut(task_id) {
+        self.update_task(task_id, |record| {
             record.set_cx_inner(cx.inner.clone());
             record.set_cx(cx.clone());
-        }
+        });
 
         self.record_task_spawn(task_id, region);
 
@@ -2143,15 +2163,16 @@ impl RuntimeState {
                 continue;
             }
             let budget = reason.cleanup_budget();
-            let (newly_cancelled, is_cancelling) = {
-                let Some(task_record) = self.task_mut(task_id) else {
-                    continue;
-                };
-                let newly_cancelled =
+            let mut newly_cancelled = false;
+            let mut is_cancelling = false;
+            let res = self.update_task(task_id, |task_record| {
+                newly_cancelled =
                     task_record.request_cancel_with_budget(reason.clone(), budget);
-                let is_cancelling = task_record.state.is_cancelling();
-                (newly_cancelled, is_cancelling)
-            };
+                is_cancelling = task_record.state.is_cancelling();
+            });
+            if res.is_none() {
+                continue;
+            }
             if newly_cancelled {
                 self.record_task_trace_event(task_id, |seq| {
                     TraceEvent::cancel_request(seq, now, task_id, region, reason.clone())
@@ -2345,7 +2366,8 @@ impl RuntimeState {
                 .unwrap_or_else(|| reason.clone());
 
             for &task_id in &task_id_buf {
-                if let Some(task) = self.task_mut(task_id) {
+                let mut tasks_to_cancel_result = None;
+                self.update_task(task_id, |task| {
                     let task_budget = task_reason.cleanup_budget();
                     let newly_cancelled =
                         task.request_cancel_with_budget(task_reason.clone(), task_budget);
@@ -2383,11 +2405,15 @@ impl RuntimeState {
 
                     if newly_cancelled {
                         // Task was newly cancelled, add to list
-                        tasks_to_cancel.push((task_id, task_budget.priority));
+                        tasks_to_cancel_result = Some((task_id, task_budget.priority));
                     } else if already_cancelling {
                         // Task already cancelling, but still needs scheduling priority
-                        tasks_to_cancel.push((task_id, task_budget.priority));
+                        tasks_to_cancel_result = Some((task_id, task_budget.priority));
                     }
+                });
+
+                if let Some(t) = tasks_to_cancel_result {
+                    tasks_to_cancel.push(t);
                 }
             }
         }
@@ -3024,7 +3050,14 @@ impl RuntimeState {
                                 // Continue with transition but log violation
                             }
 
-                            region.begin_finalize()
+                            let old_state = region.state();
+                            if region.begin_finalize() {
+                                let new_state = region.state();
+                                let _ = (old_state, new_state); // br-yj9czm: counter recomputed authoritatively, no-op transition note
+                                true
+                            } else {
+                                false
+                            }
                         } else {
                             if !no_children
                                 && region.state() == crate::record::region::RegionState::Closing
@@ -3051,14 +3084,19 @@ impl RuntimeState {
                                     log_cancel_protocol_violation(
                                         "region drain transition",
                                         &validation_result,
-                                    );
-                                    // Continue with transition but log violation
-                                }
+                                        );
+                                        // Continue with transition but log violation
+                                        }
 
-                                region.begin_drain();
-                                self.notify_runtime_epoch_advance(
-                                    super::epoch_tracker::ModuleId::RegionTable,
-                                );
+                                        let old_state = region.state();
+                                        region.begin_drain();
+                                        let new_state = region.state();
+                                        let _ = (old_state, new_state); // br-yj9czm: counter recomputed authoritatively, no-op transition note
+
+                                        self.notify_runtime_epoch_advance(
+                                        super::epoch_tracker::ModuleId::RegionTable,
+                                        );
+
                             }
                             false
                         }
@@ -8001,10 +8039,9 @@ mod tests {
     /// Helper: complete a task with Ok outcome (triggers leak detection for
     /// pending obligations, unlike Cancelled which auto-aborts them).
     fn complete_task_ok(state: &mut RuntimeState, task: TaskId) {
-        state
-            .task_mut(task)
-            .expect("task")
-            .complete(Outcome::Ok(()));
+        state.update_task(task, |record| {
+            record.complete(Outcome::Ok(()));
+        });
         let _ = state.task_completed(task);
     }
 
