@@ -501,7 +501,11 @@ impl SqliteConnection {
                 drop(guard);
                 result
             })();
-            let _ = permit.send(result);
+            // oneshot::Sender::reserve now returns Result<SendPermit, SendError>;
+            // see open path above for rationale.
+            if let Ok(p) = permit {
+                let _ = p.send(result);
+            }
         });
 
         match rx.recv(cx).await {
@@ -564,7 +568,12 @@ impl SqliteConnection {
                 configure_connection_defaults(&conn, true)?;
                 Ok(conn)
             })();
-            let _ = permit.send(result);
+            // oneshot::Sender::reserve now returns Result<SendPermit, SendError>;
+            // if reservation failed (Cx cancelled before reserve), drop the
+            // result silently — the receiver path will surface the cancel.
+            if let Ok(p) = permit {
+                let _ = p.send(result);
+            }
         });
 
         match rx.recv(cx).await {
@@ -617,7 +626,11 @@ impl SqliteConnection {
                 configure_connection_defaults(&conn, false)?;
                 Ok(conn)
             })();
-            let _ = permit.send(result);
+            // oneshot::Sender::reserve now returns Result<SendPermit, SendError>;
+            // see the on-disk open path above for the full rationale.
+            if let Ok(p) = permit {
+                let _ = p.send(result);
+            }
         });
 
         match rx.recv(cx).await {

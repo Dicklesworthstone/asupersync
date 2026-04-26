@@ -1809,3 +1809,17 @@ path = "fuzz_targets/codec_raptorq_roundtrip.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "grpc_codec_decode"
+path = "fuzz_targets/grpc_codec_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raptorq_gauss_solver"
+path = "fuzz_targets/raptorq_gauss_solver.rs"
+test = false
+doc = false
+bench = false
