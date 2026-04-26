@@ -92,6 +92,7 @@ use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
+#[cfg(unix)]
 use std::task::Waker;
 use std::time::Duration;
 
@@ -103,6 +104,7 @@ fn wall_clock_now() -> Time {
     crate::time::wall_now()
 }
 
+#[cfg(unix)]
 fn noop_waker() -> Waker {
     Waker::noop().clone()
 }
@@ -1300,7 +1302,50 @@ impl<Caps> Cx<Caps> {
     #[allow(clippy::result_large_err)]
     pub fn checkpoint(&self) -> Result<(), crate::error::Error> {
         let checkpoint_time = self.current_checkpoint_time();
-        // Record progress checkpoint and check cancellation under a single lock
+
+        // ── Fast path (br-asupersync-is2xg0) ──────────────────────────────
+        // The vast majority of checkpoint() calls fire on healthy tasks
+        // with no cancellation pending and no budget exhaustion. Take a
+        // read lock, atomically check `fast_cancel`, snapshot the (Copy)
+        // budget to detect deadline / poll / cost exhaustion inline, and
+        // record progress via two atomic ops — without acquiring the
+        // write lock or cloning `cancel_reason`.
+        //
+        // Correctness: `fast_cancel` is set with `Release` ordering by
+        // every cancellation source (TaskHandle::cancel, deadline_monitor,
+        // and the slow path below when it newly observes exhaustion). An
+        // `Acquire` load here therefore observes any prior cancellation.
+        // Budget exhaustion is checked inline so unit-test invariants
+        // ("checkpoint detects deadline / poll-quota / cost-budget
+        // exhaustion") are preserved without going through deadline_monitor.
+        {
+            let guard = self.inner.read();
+            let cancelled = guard
+                .fast_cancel
+                .load(std::sync::atomic::Ordering::Acquire);
+            let exhausted = !cancelled
+                && Self::checkpoint_budget_exhaustion(
+                    guard.region,
+                    guard.task,
+                    guard.budget,
+                    checkpoint_time,
+                )
+                .is_some();
+            if !cancelled && !exhausted {
+                guard.fast_path_last_checkpoint_ns.store(
+                    checkpoint_time.as_nanos(),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                guard
+                    .fast_path_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return Ok(());
+            }
+        }
+        // ── Slow path ─────────────────────────────────────────────────────
+        // Cancellation is pending. Acquire the write lock, drain any
+        // fast-path checkpoint accounting into the authoritative
+        // CheckpointState, then run the existing logic unchanged.
         let (
             cancel_requested,
             mask_depth,
@@ -1312,6 +1357,7 @@ impl<Caps> Cx<Caps> {
             budget_exhaustion,
         ) = {
             let mut inner = self.inner.write();
+            inner.drain_fast_path_checkpoint();
             inner.checkpoint_state.record_at(checkpoint_time);
             let budget_exhaustion = Self::checkpoint_budget_exhaustion(
                 inner.region,
@@ -1411,7 +1457,11 @@ impl<Caps> Cx<Caps> {
     #[allow(clippy::result_large_err)]
     pub fn checkpoint_with(&self, msg: impl Into<String>) -> Result<(), crate::error::Error> {
         let checkpoint_time = self.current_checkpoint_time();
-        // Record progress checkpoint and check cancellation under a single lock
+        // checkpoint_with always takes the write lock because the message
+        // must be stored in CheckpointState under the lock, but we still
+        // drain any pending fast-path accounting first so checkpoint_count
+        // and last_checkpoint stay monotonic relative to fast checkpoints.
+        // (br-asupersync-is2xg0)
         let (
             cancel_requested,
             mask_depth,
@@ -1423,6 +1473,7 @@ impl<Caps> Cx<Caps> {
             budget_exhaustion,
         ) = {
             let mut inner = self.inner.write();
+            inner.drain_fast_path_checkpoint();
             inner
                 .checkpoint_state
                 .record_with_message_at(msg.into(), checkpoint_time);
@@ -1517,7 +1568,10 @@ impl<Caps> Cx<Caps> {
     /// ```
     #[must_use]
     pub fn checkpoint_state(&self) -> crate::types::CheckpointState {
-        self.inner.read().checkpoint_state.clone()
+        // Materialise: clone the authoritative state PLUS merge any pending
+        // fast-path checkpoint accounting that hasn't been drained yet
+        // (br-asupersync-is2xg0).
+        self.inner.read().materialised_checkpoint_state()
     }
 
     /// Returns the current physical time according to the configured timer driver,

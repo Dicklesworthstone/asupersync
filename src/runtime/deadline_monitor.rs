@@ -180,11 +180,16 @@ impl DeadlineTaskSnapshot {
                 .as_ref()
                 .map_or((None, None, None, 0, None), |inner| {
                     let guard = inner.read();
+                    // Materialise: include any pending fast-path checkpoint
+                    // accounting so stuck-task detection is not fooled by
+                    // tasks that took the no-cancellation fast path in
+                    // Cx::checkpoint (br-asupersync-is2xg0).
+                    let materialised = guard.materialised_checkpoint_state();
                     (
                         guard.budget.deadline,
-                        guard.checkpoint_state.last_checkpoint,
-                        guard.checkpoint_state.last_message.clone(),
-                        guard.checkpoint_state.checkpoint_count,
+                        materialised.last_checkpoint,
+                        materialised.last_message,
+                        materialised.checkpoint_count,
                         guard.task_type.clone(),
                     )
                 });

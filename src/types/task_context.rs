@@ -98,6 +98,17 @@ pub struct CxInner {
     pub checkpoint_state: CheckpointState,
     /// Fast atomic flag for cancellation (avoids RwLock on wake hot path).
     pub fast_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Fast-path checkpoint count: incremented when [`Cx::checkpoint`] takes
+    /// the no-cancellation fast path (br-asupersync-is2xg0). Drained into
+    /// [`CheckpointState::checkpoint_count`] on the next slow-path call or
+    /// when the materialised view is requested.
+    pub fast_path_count: std::sync::atomic::AtomicU64,
+    /// Fast-path last checkpoint time (ns since [`Time::ZERO`]). 0 means no
+    /// fast-path checkpoint has been recorded since the last drain. Drained
+    /// into [`CheckpointState::last_checkpoint`] on the next slow-path call
+    /// or when the materialised view is requested. Stored as a plain
+    /// `AtomicU64` because [`Time`] is just a `u64` nanos counter.
+    pub fast_path_last_checkpoint_ns: std::sync::atomic::AtomicU64,
 }
 
 impl CxInner {
@@ -117,7 +128,54 @@ impl CxInner {
             mask_depth: 0,
             checkpoint_state: CheckpointState::new(),
             fast_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            fast_path_count: std::sync::atomic::AtomicU64::new(0),
+            fast_path_last_checkpoint_ns: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// Drains pending fast-path checkpoint accounting into the authoritative
+    /// [`CheckpointState`]. Called at the top of every slow-path checkpoint
+    /// and from any reader of the materialised checkpoint view. Idempotent
+    /// when there is nothing to drain. (br-asupersync-is2xg0)
+    pub fn drain_fast_path_checkpoint(&mut self) {
+        use std::sync::atomic::Ordering;
+        let count = self.fast_path_count.swap(0, Ordering::Relaxed);
+        let ns = self.fast_path_last_checkpoint_ns.swap(0, Ordering::Relaxed);
+        if count > 0 {
+            self.checkpoint_state.checkpoint_count =
+                self.checkpoint_state.checkpoint_count.saturating_add(count);
+        }
+        if ns != 0 {
+            let drained = crate::types::Time::from_nanos(ns);
+            if self
+                .checkpoint_state
+                .last_checkpoint
+                .map_or(true, |t| drained > t)
+            {
+                self.checkpoint_state.last_checkpoint = Some(drained);
+            }
+        }
+    }
+
+    /// Returns the materialised [`CheckpointState`] (clones plus a snapshot
+    /// merge of the pending fast-path atomics). Read-only — does not drain.
+    /// (br-asupersync-is2xg0)
+    #[must_use]
+    pub fn materialised_checkpoint_state(&self) -> CheckpointState {
+        use std::sync::atomic::Ordering;
+        let mut state = self.checkpoint_state.clone();
+        let count = self.fast_path_count.load(Ordering::Relaxed);
+        if count > 0 {
+            state.checkpoint_count = state.checkpoint_count.saturating_add(count);
+        }
+        let ns = self.fast_path_last_checkpoint_ns.load(Ordering::Relaxed);
+        if ns != 0 {
+            let snap = crate::types::Time::from_nanos(ns);
+            if state.last_checkpoint.map_or(true, |t| snap > t) {
+                state.last_checkpoint = Some(snap);
+            }
+        }
+        state
     }
 }
 
