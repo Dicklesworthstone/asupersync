@@ -274,8 +274,10 @@ impl PerformanceBudgetMonitor {
                 .then_with(|| left.budget_id.cmp(&right.budget_id))
         });
 
-        if let Some(pressure) = &self.pressure {
-            pressure.set_headroom(worst_headroom);
+        if !evaluations.is_empty() {
+            if let Some(pressure) = &self.pressure {
+                pressure.set_headroom(worst_headroom);
+            }
         }
 
         PerformanceBudgetSnapshot {
@@ -452,5 +454,47 @@ mod tests {
         assert!(snapshot.alerts.is_empty());
         assert_eq!(snapshot.worst_severity, BudgetSeverity::Healthy);
         assert!((snapshot.worst_headroom - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn unknown_budget_samples_do_not_clear_shared_pressure() {
+        let pressure = Arc::new(SystemPressure::with_headroom(0.25));
+        let mut monitor = PerformanceBudgetMonitor::new().with_pressure(Arc::clone(&pressure));
+        monitor.register_budget(PerformanceBudget::new(
+            "runtime.queue_depth",
+            "runtime",
+            "queue_depth",
+            BudgetDirection::UpperBound,
+            1_000.0,
+        ));
+
+        let snapshot = monitor.evaluate(21, &[BudgetSample::new("other.metric", 123.0)]);
+        assert!(snapshot.evaluations.is_empty());
+        assert!(snapshot.alerts.is_empty());
+        assert!(
+            (pressure.headroom() - 0.25).abs() < f32::EPSILON,
+            "a pass with no matching samples must preserve the previously published pressure"
+        );
+    }
+
+    #[test]
+    fn empty_pass_does_not_clear_shared_pressure() {
+        let pressure = Arc::new(SystemPressure::with_headroom(0.5));
+        let mut monitor = PerformanceBudgetMonitor::new().with_pressure(Arc::clone(&pressure));
+        monitor.register_budget(PerformanceBudget::new(
+            "scheduler.p99_latency_ms",
+            "scheduler",
+            "p99_latency_ms",
+            BudgetDirection::UpperBound,
+            10.0,
+        ));
+
+        let snapshot = monitor.evaluate(22, &[]);
+        assert!(snapshot.evaluations.is_empty());
+        assert!(snapshot.alerts.is_empty());
+        assert!(
+            (pressure.headroom() - 0.5).abs() < f32::EPSILON,
+            "an empty evaluation pass must not publish synthetic full headroom"
+        );
     }
 }
