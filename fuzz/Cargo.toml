@@ -1879,3 +1879,13 @@ path = "fuzz_targets/web_router_match.rs"
 test = false
 doc = false
 bench = false
+
+# br-asupersync — SymbolCancelToken protocol fuzzer for src/cancel/symbol_cancel.rs.
+# Properties: idempotent cancel, wire round-trip, child propagation,
+# multi-thread CAS-winner invariant.
+[[bin]]
+name = "symbol_cancel_protocol"
+path = "fuzz_targets/symbol_cancel_protocol.rs"
+test = false
+doc = false
+bench = false
