@@ -1052,6 +1052,68 @@ mod tests {
             ViolationType::OrphanedTasks
         ));
     }
+
+    /// br-asupersync-rw5m1a: `RegionViolation` must implement
+    /// `std::error::Error` so it composes with the `?` operator and
+    /// other `dyn Error`-keyed plumbing.
+    #[test]
+    fn region_violation_implements_std_error() {
+        // Compile-time bound: a function that requires `dyn Error +
+        // Send + Sync + 'static` accepts our type. If `RegionViolation`
+        // does not impl `Error`, this fails to compile.
+        fn assert_impls_error<E: std::error::Error + Send + Sync + 'static>(_: &E) {}
+
+        let violation = RegionViolation {
+            violation_type: ViolationType::IdleRegion,
+            region_id: RegionId::new_for_test(1, 0),
+            detected_at: SystemTime::now(),
+            duration: Duration::from_secs(0),
+            description: "test".to_string(),
+            context: ViolationContext::empty(),
+            suggested_fix: String::new(),
+        };
+        assert_impls_error(&violation);
+
+        // The default `source()` returns None for our aggregate type.
+        let as_error: &dyn std::error::Error = &violation;
+        assert!(as_error.source().is_none());
+    }
+
+    /// br-asupersync-rw5m1a: `?` operator works on a function that
+    /// returns `Result<_, RegionViolation>` and converts via
+    /// `Box<dyn Error>`. This locks in the practical use-case the
+    /// Error impl exists to enable.
+    #[test]
+    fn region_violation_works_with_question_mark_operator() {
+        fn make_failing() -> Result<(), RegionViolation> {
+            Err(RegionViolation {
+                violation_type: ViolationType::ResourceLeak,
+                region_id: RegionId::new_for_test(2, 0),
+                detected_at: SystemTime::now(),
+                duration: Duration::from_secs(0),
+                description: "synthetic".to_string(),
+                context: ViolationContext::empty(),
+                suggested_fix: String::new(),
+            })
+        }
+
+        // The body uses `?` to convert RegionViolation into
+        // `Box<dyn Error>` via the `From<E: Error> for Box<dyn Error>`
+        // blanket impl. If `RegionViolation` did not impl `Error`,
+        // this function would fail to compile.
+        fn boxed_error_caller() -> Result<(), Box<dyn std::error::Error>> {
+            make_failing()?;
+            Ok(())
+        }
+
+        let result = boxed_error_caller();
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        // The Display impl renders "<violation_type>: <description>".
+        let rendered = format!("{err}");
+        assert!(rendered.contains("Resource Leak"));
+        assert!(rendered.contains("synthetic"));
+    }
 }
 
 impl Default for RegionLeakOracle {
@@ -1085,6 +1147,19 @@ impl std::fmt::Display for RegionViolation {
         write!(f, "{}: {}", self.violation_type, self.description)
     }
 }
+
+/// br-asupersync-rw5m1a: implement `std::error::Error` so
+/// `RegionViolation` composes with the `?` operator and any other
+/// `dyn Error`-keyed plumbing (anyhow, miette, downstream
+/// match-on-source). Every other Violation type in the oracle
+/// system already implements `Error`; this brings `RegionViolation`
+/// in line.
+///
+/// The default `source()` implementation returns `None` because
+/// `RegionViolation` aggregates structural diagnostic fields rather
+/// than wrapping an underlying error — there is no upstream cause to
+/// chain to.
+impl std::error::Error for RegionViolation {}
 
 impl std::fmt::Display for ViolationType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
