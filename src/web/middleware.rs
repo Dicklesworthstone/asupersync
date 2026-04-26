@@ -87,6 +87,35 @@ pub struct CorsPolicy {
     pub allow_credentials: bool,
 }
 
+/// br-asupersync-0qb0bf: safe-by-default CORS preflight
+/// `Access-Control-Allow-Headers` allowlist. Pre-fix the default
+/// was `["*"]` which per Fetch §3.2.4 grants access to ALL request
+/// headers — equivalent to no client-side header filtering. That
+/// is especially dangerous in combination with
+/// `allow_credentials = true` (where `*` is forbidden by Fetch
+/// §3.2.5 for the origin axis but the headers axis still leaks
+/// any custom header the caller chose to send). The conservative
+/// default below is the union of:
+///   - the CORS-safelisted request headers (Fetch §4.6) that
+///     browsers permit without preflight already: `Accept`,
+///     `Accept-Language`, `Content-Type`,
+///   - `Authorization` (the canonical credentialed header — most
+///     APIs require it),
+///   - `X-Requested-With` (the de-facto AJAX marker that XHR-style
+///     libraries rely on for CSRF defenses).
+/// Callers needing a different allowlist should set
+/// `allow_headers` explicitly. For the rare legacy use case that
+/// truly needs wildcard, use [`CorsPolicy::with_any_headers`] —
+/// the explicit constructor name makes the loosened security
+/// posture visible at the call site.
+const DEFAULT_ALLOW_HEADERS: &[&str] = &[
+    "Accept",
+    "Accept-Language",
+    "Content-Type",
+    "Authorization",
+    "X-Requested-With",
+];
+
 impl Default for CorsPolicy {
     fn default() -> Self {
         Self {
@@ -100,7 +129,13 @@ impl Default for CorsPolicy {
                 "HEAD".to_string(),
                 "OPTIONS".to_string(),
             ],
-            allow_headers: vec!["*".to_string()],
+            // br-asupersync-0qb0bf: narrow safe-by-default allowlist
+            // instead of the previous wildcard. See
+            // `DEFAULT_ALLOW_HEADERS` for the rationale of each entry.
+            allow_headers: DEFAULT_ALLOW_HEADERS
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
             expose_headers: Vec::new(),
             max_age: Some(Duration::from_mins(10)),
             allow_credentials: false,
@@ -114,6 +149,27 @@ impl CorsPolicy {
     pub fn with_exact_origins(origins: impl IntoIterator<Item = String>) -> Self {
         Self {
             allow_origin: CorsAllowOrigin::Exact(origins.into_iter().collect()),
+            ..Self::default()
+        }
+    }
+
+    /// Construct a policy that echoes ALL request headers via the
+    /// preflight `Access-Control-Allow-Headers: *` wildcard.
+    ///
+    /// br-asupersync-0qb0bf: this is the explicit opt-in for the
+    /// loosened header policy that used to be the silent default.
+    /// Callers that genuinely accept arbitrary client headers
+    /// (e.g. proxies passing through unknown trace/correlation
+    /// headers) should call this constructor so the security
+    /// posture is visible at the call site. Note that combining
+    /// `with_any_headers()` with `allow_credentials = true` is
+    /// almost certainly a misconfiguration — Fetch §3.2.5 forbids
+    /// the wildcard when credentials are allowed, and the
+    /// browser will reject preflight responses that try this.
+    #[must_use]
+    pub fn with_any_headers() -> Self {
+        Self {
+            allow_headers: vec!["*".to_string()],
             ..Self::default()
         }
     }
@@ -2525,6 +2581,106 @@ mod tests {
         );
         assert!(resp.headers.contains_key("access-control-allow-methods"));
         assert!(resp.headers.contains_key("access-control-allow-headers"));
+    }
+
+    // ─── br-asupersync-0qb0bf: safe-by-default allow_headers ─────────
+
+    #[test]
+    fn _0qb0bf_default_allow_headers_is_narrow_safe_list_not_wildcard() {
+        // Pre-fix CorsPolicy::default set allow_headers = ["*"]; per
+        // Fetch §3.2.4 wildcard grants access to ALL request headers.
+        // Post-fix the default is the conservative allowlist of
+        // CORS-safelisted headers + Authorization + X-Requested-With.
+        let policy = CorsPolicy::default();
+        assert!(
+            !policy.allow_headers.iter().any(|h| h == "*"),
+            "default must NOT contain wildcard; got {:?}",
+            policy.allow_headers
+        );
+
+        // Each safe header MUST be present (sanity check the
+        // documented allowlist composition stays stable).
+        for expected in [
+            "Accept",
+            "Accept-Language",
+            "Content-Type",
+            "Authorization",
+            "X-Requested-With",
+        ] {
+            assert!(
+                policy.allow_headers.iter().any(|h| h == expected),
+                "default allowlist missing {expected:?}; got {:?}",
+                policy.allow_headers
+            );
+        }
+    }
+
+    #[test]
+    fn _0qb0bf_default_preflight_does_not_echo_arbitrary_requested_headers() {
+        // The CRITICAL behavior: a client requesting an obscure
+        // header (e.g. X-Evil-Internal) via
+        // Access-Control-Request-Headers MUST NOT see that header
+        // echoed back in Access-Control-Allow-Headers under the
+        // default policy. The static allowlist is what the response
+        // returns; the requested-headers list is intentionally
+        // ignored.
+        let mw = CorsMiddleware::new(FailingIfCalled, CorsPolicy::default());
+        let req = Request::new("OPTIONS", "/cors")
+            .with_header("Origin", "https://example.com")
+            .with_header("Access-Control-Request-Method", "POST")
+            .with_header(
+                "Access-Control-Request-Headers",
+                "X-Evil-Internal, X-Internal-Auth, X-Backend-Token",
+            );
+        let resp = mw.call(req);
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+
+        let allow = resp
+            .headers
+            .get("access-control-allow-headers")
+            .expect("preflight must set Access-Control-Allow-Headers");
+        for forbidden in ["X-Evil-Internal", "X-Internal-Auth", "X-Backend-Token"] {
+            assert!(
+                !allow.contains(forbidden),
+                "default preflight must NOT echo arbitrary requested header \
+                 {forbidden:?}; Allow-Headers was {allow:?}"
+            );
+        }
+        // The static allowlist IS in the response.
+        for expected in ["Authorization", "Content-Type", "X-Requested-With"] {
+            assert!(
+                allow.contains(expected),
+                "static allowlist entry {expected:?} must be in Allow-Headers; \
+                 got {allow:?}"
+            );
+        }
+        assert!(
+            !allow.contains('*'),
+            "default preflight must NOT advertise wildcard; got {allow:?}"
+        );
+    }
+
+    #[test]
+    fn _0qb0bf_with_any_headers_opt_in_restores_wildcard() {
+        // The escape hatch: callers that genuinely accept arbitrary
+        // headers (e.g. transparent proxies) get the wildcard back
+        // through the explicit constructor. The constructor name is
+        // the documentation that the security posture is loosened
+        // intentionally.
+        let policy = CorsPolicy::with_any_headers();
+        assert_eq!(policy.allow_headers, vec!["*".to_string()]);
+
+        let mw = CorsMiddleware::new(FailingIfCalled, policy);
+        let req = Request::new("OPTIONS", "/cors")
+            .with_header("Origin", "https://example.com")
+            .with_header("Access-Control-Request-Method", "POST")
+            .with_header("Access-Control-Request-Headers", "X-Any-Header");
+        let resp = mw.call(req);
+        assert_eq!(
+            resp.headers.get("access-control-allow-headers"),
+            Some(&"*".to_string()),
+            "with_any_headers must produce wildcard on the wire"
+        );
     }
 
     #[test]
