@@ -591,31 +591,11 @@ impl<T> Default for ClientStreaming<T> {
     }
 }
 
-/// Bidirectional streaming.
-#[derive(Debug)]
-pub struct Bidirectional<Req, Resp> {
-    /// Phantom data for request type.
-    _req: PhantomData<Req>,
-    /// Phantom data for response type.
-    _resp: PhantomData<Resp>,
-}
-
-impl<Req, Resp> Bidirectional<Req, Resp> {
-    /// Create a new bidirectional stream.
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            _req: PhantomData,
-            _resp: PhantomData,
-        }
-    }
-}
-
-impl<Req, Resp> Default for Bidirectional<Req, Resp> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// br-asupersync-iuoayq: deleted the `Bidirectional<Req, Resp>` PhantomData
+// stub. It carried no state, did no I/O, and had zero internal users
+// other than a Debug-print test. The real bidirectional surface is
+// reached via `crate::grpc::client::Channel::client_bidirectional` →
+// `(RequestSink, ResponseStream)` (both from `crate::grpc::client`).
 
 /// Streaming result type.
 pub type StreamingResult<T> = Result<Response<T>, Status>;
@@ -634,7 +614,18 @@ where
     type Response = T;
 }
 
-/// A stream of responses from the server.
+/// In-file buffer-only stream used by this module's unit tests.
+///
+/// **Not a production type.** This `ResponseStream` is shadowed at the
+/// `crate::grpc` namespace by [`crate::grpc::client::ResponseStream`],
+/// which is the network-backed implementation re-exported from
+/// `crate::grpc::*`. New code reaching for "the gRPC response stream"
+/// should use `crate::grpc::ResponseStream` (the client version) — the
+/// only path to *this* type is the fully qualified
+/// `crate::grpc::streaming::ResponseStream`, which exists solely so the
+/// adjacent `Streaming` trait + `ServerStreaming` adapter have an
+/// in-file driver to exercise their poll loop without spinning up a
+/// real connection (br-asupersync-iuoayq).
 #[derive(Debug)]
 pub struct ResponseStream<T> {
     /// Buffered stream items.
@@ -720,7 +711,18 @@ impl<T: Send + std::marker::Unpin> Streaming for ResponseStream<T> {
     }
 }
 
-/// A sink for sending requests to the server.
+/// In-file no-op sink used by this module's unit tests.
+///
+/// **Not a production type.** `send` and `close` only update an internal
+/// counter — no bytes ever leave the process. The production
+/// `RequestSink` lives in [`crate::grpc::client`] (network-backed,
+/// codec-aware, integrates with `Channel::client_streaming` /
+/// `Channel::client_bidirectional`). It is **not** re-exported from
+/// `crate::grpc`, so callers that mistakenly type
+/// `use crate::grpc::streaming::RequestSink` and reach this stub will
+/// observe silently dropped sends; importing
+/// `crate::grpc::client::RequestSink` is the only correct production
+/// path (br-asupersync-iuoayq).
 #[derive(Debug)]
 pub struct RequestSink<T> {
     /// Whether the sink has been closed.
@@ -2031,11 +2033,10 @@ mod tests {
         let client_streaming = ClientStreaming::<u32>::new();
         outputs.push(format!("=== Client Streaming ===\n{client_streaming:?}\n"));
 
-        // Bidirectional streaming
-        let bidirectional = Bidirectional::<String, i32>::new();
-        outputs.push(format!(
-            "=== Bidirectional Streaming ===\n{bidirectional:?}\n"
-        ));
+        // Bidirectional streaming: the in-file stub was removed
+        // (br-asupersync-iuoayq); the real bidirectional surface lives
+        // in `crate::grpc::client`. The previous Debug-print line is
+        // intentionally omitted from the snapshot.
 
         // Request sink
         let request_sink = RequestSink::<bool>::new();
