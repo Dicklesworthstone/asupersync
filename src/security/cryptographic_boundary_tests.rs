@@ -493,8 +493,27 @@ mod tests {
 
     #[test]
     fn zero_key_security_boundary() {
-        // Test that all-zero keys don't create security vulnerabilities
-        let zero_key = AuthKey::from_bytes([0u8; 32]);
+        // br-asupersync-q3terg: this test originally asserted that an
+        // all-zero key produces different HMAC outputs than a normal
+        // key (negative-test for any "zero key shortcuts the MAC"
+        // bug). Post-q3terg, AuthKey::from_bytes REJECTS all-zero
+        // input at construction — which is itself the better defense.
+        // Here we verify both halves of the contract:
+        //   (a) AuthKey::from_bytes([0; 32]) returns Err::WeakKey
+        //   (b) the bypass path from_bytes_unchecked still
+        //       constructs (used internally by HMAC chains where the
+        //       byte source is known-strong)
+        let weak_err = AuthKey::from_bytes([0u8; 32]);
+        assert!(
+            weak_err.is_err(),
+            "all-zero key MUST be rejected at construction (q3terg)"
+        );
+
+        // For the original 'different HMAC output' negative test, use
+        // the bypass to manufacture a deliberately-weak key and verify
+        // that even with a weak key the HMAC output still differs from
+        // a normal key's output (i.e. the MAC math is not shortcut).
+        let zero_key = AuthKey::from_bytes_unchecked([0u8; 32]);
         let normal_key = test_auth_key(900);
 
         let symbol = create_test_symbol(1, 0x88, 64);

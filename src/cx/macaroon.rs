@@ -428,10 +428,12 @@ impl fmt::Debug for MacaroonSignature {
 // ---------------------------------------------------------------------------
 
 /// Two-slot [`MacaroonSignature`] holder enabling zero-downtime signature
-/// rotation. Mirror of [`crate::security::KeyRing`] for the macaroon-binding
-/// path: when a token's binding signature is rotated (e.g., after a discharge
-/// re-issuance) the prior signature stays acceptable for an operator-defined
-/// overlap window so in-flight tokens carrying the old binding still verify.
+/// rotation.
+///
+/// Mirror of [`crate::security::KeyRing`] for the macaroon-binding path: when a
+/// token's binding signature is rotated (e.g., after a discharge re-issuance)
+/// the prior signature stays acceptable for an operator-defined overlap window
+/// so in-flight tokens carrying the old binding still verify.
 ///
 /// Operational lifecycle:
 ///
@@ -600,7 +602,7 @@ impl MacaroonToken {
     #[must_use]
     pub fn add_caveat(mut self, predicate: CaveatPredicate) -> Self {
         let pred_bytes = predicate.to_bytes();
-        let current_key = AuthKey::from_bytes(*self.signature.as_bytes());
+        let current_key = AuthKey::from_bytes_unchecked(*self.signature.as_bytes());
         let new_sig = hmac_compute(&current_key, &pred_bytes);
         self.signature = MacaroonSignature::from_bytes(*new_sig.as_bytes());
         self.caveats.push(Caveat::first_party(predicate));
@@ -623,7 +625,7 @@ impl MacaroonToken {
         caveat_key: &AuthKey,
     ) -> Self {
         let vid = xor_pad(self.signature.as_bytes(), caveat_key.as_bytes());
-        let current_key = AuthKey::from_bytes(*self.signature.as_bytes());
+        let current_key = AuthKey::from_bytes_unchecked(*self.signature.as_bytes());
         let mut chain_bytes = Vec::with_capacity(vid.len() + tp_identifier.len());
         chain_bytes.extend_from_slice(&vid);
         chain_bytes.extend_from_slice(tp_identifier.as_bytes());
@@ -655,7 +657,7 @@ impl MacaroonToken {
         if discharge.bound {
             return Err(BindError::AlreadyBound);
         }
-        let binding_key = AuthKey::from_bytes(*self.signature.as_bytes());
+        let binding_key = AuthKey::from_bytes_unchecked(*self.signature.as_bytes());
         let bound_sig = hmac_compute(&binding_key, discharge.signature.as_bytes());
         Ok(Self {
             identifier: discharge.identifier.clone(),
@@ -836,7 +838,7 @@ impl MacaroonToken {
         let unbound_signature = self.recompute_signature(root_key);
         if let Some(binding_signature) = binding_signature {
             let expected_bound = hmac_compute(
-                &AuthKey::from_bytes(*binding_signature.as_bytes()),
+                &AuthKey::from_bytes_unchecked(*binding_signature.as_bytes()),
                 unbound_signature.as_bytes(),
             );
             let expected_bound_sig = MacaroonSignature::from_bytes(*expected_bound.as_bytes());
@@ -911,7 +913,11 @@ impl MacaroonToken {
         }
 
         let caveat_key_bytes = xor_pad(sig.as_bytes(), vid);
-        let caveat_key = AuthKey::from_bytes(
+        // br-asupersync-q3terg: bytes are XOR of two HMAC-derived values
+        // (sig: HMAC chain output; vid: encrypted caveat key, also
+        // HMAC-derived). XOR of uniformly-random bytes is uniformly
+        // random. Bypassing the entropy validator is correct.
+        let caveat_key = AuthKey::from_bytes_unchecked(
             caveat_key_bytes
                 .try_into()
                 .map_err(|_| VerificationError::InvalidSignature)?,
@@ -1397,7 +1403,10 @@ fn hmac_compute(key: &AuthKey, message: &[u8]) -> AuthKey {
     let mut mac = HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC accepts any key length");
     mac.update(message);
     let result = mac.finalize().into_bytes();
-    AuthKey::from_bytes(result.into())
+    // br-asupersync-q3terg: HMAC-SHA256 output is uniformly random by
+    // construction. Bypassing the entropy validator avoids a ~1/2^200
+    // false-positive rejection rate.
+    AuthKey::from_bytes_unchecked(result.into())
 }
 
 /// XOR-pad two byte slices of equal length. Used for encrypting/decrypting

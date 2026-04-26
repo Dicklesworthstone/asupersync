@@ -12,6 +12,18 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Authentication mode for the security context.
+///
+/// Modes form a strict total order on enforcement:
+///   Strict (most restrictive) > Permissive > Disabled (least restrictive)
+///
+/// br-asupersync-jgpcvp: [`SecurityContext::with_mode`] only allows
+/// transitions to a STRICTER mode (an upgrade). Downgrades (Strict →
+/// Permissive, Strict → Disabled, Permissive → Disabled) are
+/// rejected by panicking — silent ignore is worse, since a caller
+/// believing they downgraded would assume looser semantics that
+/// don't apply. Tests that need to construct a context in a specific
+/// mode should use [`SecurityContext::for_testing_with_mode`] which
+/// sets the mode at CONSTRUCTION time (no transition needed).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthMode {
     /// Verification failures are treated as errors (default).
@@ -20,6 +32,31 @@ pub enum AuthMode {
     Permissive,
     /// Verification is skipped entirely.
     Disabled,
+}
+
+impl AuthMode {
+    /// br-asupersync-jgpcvp: returns `true` if `self` is at least as
+    /// strict as `other`. Used to gate `with_mode` transitions —
+    /// only equal-or-stricter target modes are allowed.
+    ///
+    /// Strictness order: Strict > Permissive > Disabled.
+    #[inline]
+    #[must_use]
+    pub const fn is_at_least_as_strict_as(self, other: Self) -> bool {
+        let lhs = self.strictness_rank();
+        let rhs = other.strictness_rank();
+        lhs >= rhs
+    }
+
+    /// Numeric rank used by [`Self::is_at_least_as_strict_as`].
+    /// Higher = stricter. Internal helper.
+    const fn strictness_rank(self) -> u8 {
+        match self {
+            Self::Strict => 2,
+            Self::Permissive => 1,
+            Self::Disabled => 0,
+        }
+    }
 }
 
 /// Statistics for authentication operations.
@@ -62,9 +99,62 @@ impl SecurityContext {
         Self::new(AuthKey::from_seed(seed))
     }
 
+    /// br-asupersync-jgpcvp: test-only constructor that sets the
+    /// initial mode at construction time, bypassing the no-downgrade
+    /// rule on [`Self::with_mode`]. Tests that need to verify
+    /// Permissive-mode or Disabled-mode behavior must use this
+    /// constructor — they cannot start Strict and downgrade.
+    ///
+    /// Production code should NEVER need to construct a non-Strict
+    /// context except via the regular Builder path which makes the
+    /// mode choice an explicit deployment decision.
+    #[cfg(any(test, feature = "test-internals"))]
+    #[must_use]
+    pub fn for_testing_with_mode(seed: u64, mode: AuthMode) -> Self {
+        let mut ctx = Self::new(AuthKey::from_seed(seed));
+        ctx.mode = mode;
+        ctx
+    }
+
     /// Sets the authentication mode.
+    ///
+    /// # br-asupersync-jgpcvp: NO-DOWNGRADE policy
+    ///
+    /// `with_mode` only allows transitions to a mode that is **at
+    /// least as strict** as the current mode. Strictness order is
+    /// `Strict > Permissive > Disabled`, so the allowed transitions
+    /// are:
+    ///   * Strict → Strict    (no-op)
+    ///   * Permissive → Strict / Permissive
+    ///   * Disabled → Strict / Permissive / Disabled
+    ///
+    /// Downgrades (Strict → Permissive, Strict → Disabled,
+    /// Permissive → Disabled) are REJECTED by panicking with a
+    /// security-sensitive message. Pre-fix, any caller could flip a
+    /// strict context to Permissive at any time, silently bypassing
+    /// authentication for every subsequent symbol verification.
+    ///
+    /// Tests that need to verify Permissive / Disabled behavior must
+    /// construct via [`Self::for_testing_with_mode`] instead.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `mode` is less strict than the current mode. The
+    /// panic message identifies the attempted downgrade for diagnosis.
+    /// This is a security-sensitive operation; silent-ignore would
+    /// leave the caller believing the downgrade succeeded.
     #[must_use]
     pub fn with_mode(mut self, mode: AuthMode) -> Self {
+        assert!(
+            mode.is_at_least_as_strict_as(self.mode),
+            "br-asupersync-jgpcvp: SecurityContext::with_mode rejects downgrade from {:?} to {:?}. \
+             Mode transitions may only INCREASE strictness (Disabled < Permissive < Strict). \
+             If this is a test that needs to start in {:?} mode, use \
+             SecurityContext::for_testing_with_mode instead.",
+            self.mode,
+            mode,
+            mode,
+        );
         self.mode = mode;
         self
     }
@@ -176,7 +266,10 @@ mod tests {
 
     #[test]
     fn disabled_mode_skips_verification() {
-        let ctx = SecurityContext::for_testing(123).with_mode(AuthMode::Disabled);
+        // br-asupersync-jgpcvp: with_mode now rejects downgrades, so
+        // a Disabled-mode context must be constructed via the test
+        // ctor rather than via Strict→Disabled transition.
+        let ctx = SecurityContext::for_testing_with_mode(123, AuthMode::Disabled);
         let id = SymbolId::new_for_test(1, 0, 0);
         let symbol = Symbol::new(id, vec![1, 2, 3], SymbolKind::Source);
         let tag = AuthenticationTag::zero(); // Invalid tag
@@ -191,7 +284,9 @@ mod tests {
 
     #[test]
     fn strict_mode_fails_verification() {
-        let ctx = SecurityContext::for_testing(123).with_mode(AuthMode::Strict);
+        // jgpcvp: Strict→Strict is a no-op transition; just use the
+        // default-Strict for_testing constructor directly.
+        let ctx = SecurityContext::for_testing(123);
         let id = SymbolId::new_for_test(1, 0, 0);
         let symbol = Symbol::new(id, vec![1, 2, 3], SymbolKind::Source);
         let tag = AuthenticationTag::zero(); // Invalid tag
@@ -207,7 +302,9 @@ mod tests {
 
     #[test]
     fn permissive_mode_allows_failures() {
-        let ctx = SecurityContext::for_testing(123).with_mode(AuthMode::Permissive);
+        // jgpcvp: Strict→Permissive is a downgrade (rejected post-fix);
+        // construct directly in Permissive via for_testing_with_mode.
+        let ctx = SecurityContext::for_testing_with_mode(123, AuthMode::Permissive);
         let id = SymbolId::new_for_test(1, 0, 0);
         let symbol = Symbol::new(id, vec![1, 2, 3], SymbolKind::Source);
         let tag = AuthenticationTag::zero(); // Invalid tag
@@ -224,7 +321,8 @@ mod tests {
     #[test]
     fn strict_mode_clears_preverified_flag_on_failure() {
         let signing_ctx = SecurityContext::for_testing(123);
-        let verifying_ctx = SecurityContext::for_testing(456).with_mode(AuthMode::Strict);
+        // jgpcvp: Strict→Strict no-op — use default for_testing.
+        let verifying_ctx = SecurityContext::for_testing(456);
         let id = SymbolId::new_for_test(1, 0, 0);
         let symbol = Symbol::new(id, vec![1, 2, 3], SymbolKind::Source);
 
@@ -248,7 +346,8 @@ mod tests {
     #[test]
     fn permissive_mode_clears_preverified_flag_on_failure() {
         let signing_ctx = SecurityContext::for_testing(123);
-        let verifying_ctx = SecurityContext::for_testing(456).with_mode(AuthMode::Permissive);
+        // jgpcvp: construct directly in Permissive — no downgrade.
+        let verifying_ctx = SecurityContext::for_testing_with_mode(456, AuthMode::Permissive);
         let id = SymbolId::new_for_test(1, 0, 0);
         let symbol = Symbol::new(id, vec![1, 2, 3], SymbolKind::Source);
 
@@ -323,7 +422,8 @@ mod tests {
     /// Invariant: permissive mode with a valid tag marks the symbol as verified.
     #[test]
     fn permissive_mode_with_valid_tag_marks_verified() {
-        let ctx = SecurityContext::for_testing(42).with_mode(AuthMode::Permissive);
+        // jgpcvp: construct directly in Permissive — no downgrade.
+        let ctx = SecurityContext::for_testing_with_mode(42, AuthMode::Permissive);
         let id = SymbolId::new_for_test(1, 0, 0);
         let symbol = Symbol::new(id, vec![5, 6, 7], SymbolKind::Source);
 
@@ -344,7 +444,8 @@ mod tests {
     #[test]
     fn disabled_mode_preserves_pre_verified_flag() {
         let signing_ctx = SecurityContext::for_testing(42);
-        let disabled_ctx = SecurityContext::for_testing(42).with_mode(AuthMode::Disabled);
+        // jgpcvp: construct directly in Disabled — no downgrade.
+        let disabled_ctx = SecurityContext::for_testing_with_mode(42, AuthMode::Disabled);
 
         let id = SymbolId::new_for_test(1, 0, 0);
         let symbol = Symbol::new(id, vec![1, 2], SymbolKind::Source);
@@ -377,6 +478,80 @@ mod tests {
         // Both increments must be visible from either context's stats
         assert_eq!(ctx1.stats().signed.load(Ordering::Relaxed), 2);
         assert_eq!(ctx2.stats().signed.load(Ordering::Relaxed), 2);
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // br-asupersync-jgpcvp — with_mode no-downgrade regression tests
+    // ─────────────────────────────────────────────────────────────
+
+    /// jgpcvp: Strict→Permissive is a downgrade — MUST panic.
+    #[test]
+    #[should_panic(expected = "br-asupersync-jgpcvp")]
+    fn with_mode_panics_on_strict_to_permissive_downgrade() {
+        // for_testing returns a Strict context.
+        let _ = SecurityContext::for_testing(1).with_mode(AuthMode::Permissive);
+    }
+
+    /// jgpcvp: Strict→Disabled is a downgrade — MUST panic.
+    #[test]
+    #[should_panic(expected = "br-asupersync-jgpcvp")]
+    fn with_mode_panics_on_strict_to_disabled_downgrade() {
+        let _ = SecurityContext::for_testing(2).with_mode(AuthMode::Disabled);
+    }
+
+    /// jgpcvp: Permissive→Disabled is a downgrade — MUST panic.
+    /// Construct directly in Permissive via for_testing_with_mode,
+    /// then attempt downgrade.
+    #[test]
+    #[should_panic(expected = "br-asupersync-jgpcvp")]
+    fn with_mode_panics_on_permissive_to_disabled_downgrade() {
+        let ctx = SecurityContext::for_testing_with_mode(3, AuthMode::Permissive);
+        let _ = ctx.with_mode(AuthMode::Disabled);
+    }
+
+    /// jgpcvp: Strict→Strict is a no-op (allowed).
+    #[test]
+    fn with_mode_allows_strict_to_strict_no_op() {
+        let ctx = SecurityContext::for_testing(4).with_mode(AuthMode::Strict);
+        assert!(matches!(ctx.mode, AuthMode::Strict));
+    }
+
+    /// jgpcvp: Permissive→Strict is an upgrade — allowed.
+    #[test]
+    fn with_mode_allows_permissive_to_strict_upgrade() {
+        let ctx = SecurityContext::for_testing_with_mode(5, AuthMode::Permissive);
+        let upgraded = ctx.with_mode(AuthMode::Strict);
+        assert!(matches!(upgraded.mode, AuthMode::Strict));
+    }
+
+    /// jgpcvp: Disabled→Permissive is an upgrade — allowed.
+    #[test]
+    fn with_mode_allows_disabled_to_permissive_upgrade() {
+        let ctx = SecurityContext::for_testing_with_mode(6, AuthMode::Disabled);
+        let upgraded = ctx.with_mode(AuthMode::Permissive);
+        assert!(matches!(upgraded.mode, AuthMode::Permissive));
+    }
+
+    /// jgpcvp: Disabled→Strict is an upgrade — allowed.
+    #[test]
+    fn with_mode_allows_disabled_to_strict_upgrade() {
+        let ctx = SecurityContext::for_testing_with_mode(7, AuthMode::Disabled);
+        let upgraded = ctx.with_mode(AuthMode::Strict);
+        assert!(matches!(upgraded.mode, AuthMode::Strict));
+    }
+
+    /// jgpcvp: AuthMode::is_at_least_as_strict_as ranking sanity.
+    #[test]
+    fn auth_mode_strictness_ordering() {
+        assert!(AuthMode::Strict.is_at_least_as_strict_as(AuthMode::Strict));
+        assert!(AuthMode::Strict.is_at_least_as_strict_as(AuthMode::Permissive));
+        assert!(AuthMode::Strict.is_at_least_as_strict_as(AuthMode::Disabled));
+        assert!(AuthMode::Permissive.is_at_least_as_strict_as(AuthMode::Permissive));
+        assert!(AuthMode::Permissive.is_at_least_as_strict_as(AuthMode::Disabled));
+        assert!(AuthMode::Disabled.is_at_least_as_strict_as(AuthMode::Disabled));
+        assert!(!AuthMode::Permissive.is_at_least_as_strict_as(AuthMode::Strict));
+        assert!(!AuthMode::Disabled.is_at_least_as_strict_as(AuthMode::Permissive));
+        assert!(!AuthMode::Disabled.is_at_least_as_strict_as(AuthMode::Strict));
     }
 
     /// Invariant: derived contexts get fresh stats (not shared with parent).
