@@ -135,6 +135,18 @@ impl TlsConnection {
         }
     }
 
+    /// Leaf peer certificate (DER bytes), if the handshake produced one.
+    /// Used by PostgreSQL SCRAM-SHA-256-PLUS channel binding
+    /// (br-asupersync-7n2xsi).
+    fn peer_leaf_certificate_der(&self) -> Option<Vec<u8>> {
+        let certs = match self {
+            Self::Client(c) => c.peer_certificates(),
+            Self::Server(s) => s.peer_certificates(),
+        }?;
+        let leaf = certs.first()?;
+        Some(leaf.as_ref().to_vec())
+    }
+
     fn alpn_protocol(&self) -> Option<&[u8]> {
         match self {
             Self::Client(c) => c.alpn_protocol(),
@@ -185,6 +197,15 @@ impl<IO> TlsStream<IO> {
     /// Get the SNI hostname (server-side only).
     pub fn sni_hostname(&self) -> Option<&str> {
         self.conn.sni_hostname()
+    }
+
+    /// Returns the DER-encoded leaf peer certificate, if the handshake
+    /// produced one. Required by PostgreSQL SCRAM-SHA-256-PLUS channel
+    /// binding (RFC 5929 `tls-server-end-point`). Returns `None` before
+    /// the handshake is complete or when the peer presented no
+    /// certificate. (br-asupersync-7n2xsi)
+    pub fn peer_leaf_certificate_der(&self) -> Option<Vec<u8>> {
+        self.conn.peer_leaf_certificate_der()
     }
 
     /// Get a reference to the underlying IO.

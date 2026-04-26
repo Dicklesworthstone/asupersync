@@ -1317,6 +1317,74 @@ impl<'a> MessageReader<'a> {
 // SCRAM-SHA-256 Authentication
 // ============================================================================
 
+/// SCRAM channel-binding mode. Drives the GS2 header and the `c=` value.
+/// (br-asupersync-7n2xsi)
+#[derive(Debug, Clone)]
+enum ScramChannelBinding {
+    /// No TLS — `n,,` GS2 header. Used with `SCRAM-SHA-256` over plain TCP.
+    None,
+    /// TLS in use, but server did NOT advertise `SCRAM-SHA-256-PLUS`.
+    /// Send `y,,` GS2 to signal client supports channel binding even though
+    /// the server didn't offer it. If a MITM stripped `-PLUS` from the
+    /// mechanism advertisement, the real server will detect the mismatch
+    /// (it would have advertised `-PLUS`) and abort the handshake — this
+    /// is the RFC 5802 §6 channel-binding-downgrade detection.
+    SupportedNotUsed,
+    /// TLS in use AND `SCRAM-SHA-256-PLUS` selected. `cbind_data` is the
+    /// `tls-server-end-point` channel-binding bytes (RFC 5929):
+    /// SHA-256(leaf-cert-DER). The GS2 header is
+    /// `p=tls-server-end-point,,` and the `c=` value carries the
+    /// base64-encoded GS2-header || cbind_data.
+    TlsServerEndPoint { cbind_data: Vec<u8> },
+}
+
+impl ScramChannelBinding {
+    /// SASL mechanism name to send in SASLInitialResponse.
+    fn mechanism(&self) -> &'static str {
+        match self {
+            Self::TlsServerEndPoint { .. } => "SCRAM-SHA-256-PLUS",
+            Self::None | Self::SupportedNotUsed => "SCRAM-SHA-256",
+        }
+    }
+
+    /// GS2 header prefix that goes both into client-first and (base64-encoded
+    /// alongside any cbind data) into the `c=` value of client-final.
+    fn gs2_header(&self) -> &'static str {
+        match self {
+            Self::None => "n,,",
+            Self::SupportedNotUsed => "y,,",
+            Self::TlsServerEndPoint { .. } => "p=tls-server-end-point,,",
+        }
+    }
+
+    /// Bytes to base64-encode for the `c=` field: GS2 header || cbind_data.
+    fn c_field_bytes(&self) -> Vec<u8> {
+        let mut out = self.gs2_header().as_bytes().to_vec();
+        if let Self::TlsServerEndPoint { cbind_data } = self {
+            out.extend_from_slice(cbind_data);
+        }
+        out
+    }
+}
+
+/// Compute the `tls-server-end-point` channel-binding data per RFC 5929.
+///
+/// Implementation note (br-asupersync-7n2xsi): RFC 5929 specifies that the
+/// hash function matches the cert's signature algorithm hash, normalised to
+/// SHA-256 if the signature uses MD5 or SHA-1. This implementation always
+/// uses SHA-256, which is correct for the dominant case (modern PostgreSQL
+/// servers with SHA-256-signed certs) and for the legacy MD5/SHA-1 cases.
+/// Certificates signed with SHA-384 or SHA-512 would require this hash to
+/// match the signature algorithm; that's a follow-up if production deployment
+/// hits non-SHA-256 cert chains.
+#[cfg(feature = "tls")]
+fn tls_server_end_point_cbind(cert_der: &[u8]) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(cert_der);
+    h.finalize().to_vec()
+}
+
 /// SCRAM-SHA-256 authentication state machine.
 struct ScramAuth {
     /// Password.
@@ -1333,10 +1401,12 @@ struct ScramAuth {
     auth_message: Option<String>,
     /// Client first message bare.
     client_first_bare: String,
+    /// Channel-binding mode (br-asupersync-7n2xsi).
+    cb: ScramChannelBinding,
 }
 
 impl ScramAuth {
-    fn new(cx: &Cx, username: &str, password: &str) -> Self {
+    fn new(cx: &Cx, username: &str, password: &str, cb: ScramChannelBinding) -> Self {
         // Generate client nonce (24 random bytes, base64 encoded)
         let mut nonce_bytes = [0u8; 24];
         cx.random_bytes(&mut nonce_bytes);
@@ -1355,13 +1425,17 @@ impl ScramAuth {
             iterations: None,
             auth_message: None,
             client_first_bare,
+            cb,
         }
     }
 
     /// Generate the client-first message.
+    /// gs2-header carries the channel-binding mode (br-asupersync-7n2xsi):
+    ///   `n,,`                       no TLS / no CB support
+    ///   `y,,`                       TLS but server didn't advertise -PLUS
+    ///   `p=tls-server-end-point,,`  TLS + -PLUS selected
     fn client_first_message(&self) -> Vec<u8> {
-        // gs2-header is "n,," for no channel binding
-        format!("n,,{}", self.client_first_bare).into_bytes()
+        format!("{}{}", self.cb.gs2_header(), self.client_first_bare).into_bytes()
     }
 
     /// Process server-first message and generate client-final message.
@@ -1419,9 +1493,16 @@ impl ScramAuth {
         let client_key = Self::hmac_sha256(&salted_password, b"Client Key");
         let stored_key = Self::sha256(&client_key);
 
-        // Build client-final-message-without-proof
-        let channel_binding =
-            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"n,,");
+        // Build client-final-message-without-proof. The `c=` field is the
+        // base64 encoding of GS2-header || cbind_data, where the GS2 header
+        // matches the one we sent in client-first. For -PLUS this carries the
+        // tls-server-end-point hash so the server can verify channel binding;
+        // for `y,,` (TLS but no -PLUS advertised) this signals the
+        // downgrade-detection request to the server. (br-asupersync-7n2xsi)
+        let channel_binding = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            self.cb.c_field_bytes(),
+        );
         let client_final_without_proof = format!("c={channel_binding},r={full_nonce}");
 
         // Build auth message
@@ -1778,6 +1859,34 @@ impl PgStream {
             Self::Plain(s) => s.shutdown(how),
             #[cfg(feature = "tls")]
             Self::Tls(_) => Ok(()), // TLS stream dropped on connection close
+        }
+    }
+
+    /// Whether this stream is TLS-encrypted. Used by SCRAM channel-binding
+    /// selection (br-asupersync-7n2xsi).
+    #[cfg(feature = "tls")]
+    fn is_tls(&self) -> bool {
+        matches!(self, Self::Tls(_))
+    }
+
+    /// Stub for builds without the `tls` feature — there is no TLS path,
+    /// so SCRAM channel binding is always disabled.
+    #[cfg(not(feature = "tls"))]
+    #[allow(dead_code)]
+    fn is_tls(&self) -> bool {
+        false
+    }
+
+    /// DER bytes of the TLS peer leaf certificate, when the stream is
+    /// TLS-encrypted and the handshake produced a server cert.
+    /// Returns `None` for plain TCP streams. Used to compute the
+    /// `tls-server-end-point` channel-binding data for SCRAM-SHA-256-PLUS.
+    /// (br-asupersync-7n2xsi)
+    #[cfg(feature = "tls")]
+    fn peer_leaf_certificate_der(&self) -> Option<Vec<u8>> {
+        match self {
+            Self::Plain(_) => None,
+            Self::Tls(s) => s.peer_leaf_certificate_der(),
         }
     }
 }
@@ -2420,11 +2529,42 @@ impl PgConnection {
                         10 => {
                             // AuthenticationSASL
                             let mechanisms = Self::read_sasl_mechanisms(&mut reader)?;
-                            if mechanisms.contains(&"SCRAM-SHA-256".to_string()) {
+                            // Channel-binding selection (br-asupersync-7n2xsi):
+                            //   * If TLS is in use AND the server advertised
+                            //     SCRAM-SHA-256-PLUS, use -PLUS with
+                            //     tls-server-end-point cbind data computed
+                            //     from the leaf cert. This is the strongest
+                            //     posture and binds auth to the TLS channel.
+                            //   * If TLS is in use but the server did NOT
+                            //     advertise -PLUS, use SCRAM-SHA-256 with
+                            //     `y,,` GS2 to signal "I support CB but you
+                            //     didn't offer it". A real server that
+                            //     supports CB would have advertised -PLUS;
+                            //     if a MITM stripped -PLUS, the server's
+                            //     verification of `y` will fail. This is the
+                            //     RFC 5802 §6 downgrade-detection contract.
+                            //   * Otherwise (plain TCP), use SCRAM-SHA-256
+                            //     with `n,,` GS2 (no CB).
+                            let cb = Self::pick_scram_channel_binding(
+                                &mechanisms,
+                                #[cfg(feature = "tls")]
+                                {
+                                    self.inner.stream.is_tls().then(|| {
+                                        self.inner.stream.peer_leaf_certificate_der()
+                                    }).flatten()
+                                },
+                                #[cfg(not(feature = "tls"))]
+                                {
+                                    None::<Vec<u8>>
+                                },
+                            );
+                            let chosen = cb.mechanism();
+                            if mechanisms.iter().any(|m| m == chosen) {
                                 let password = options.password.as_ref().ok_or_else(|| {
                                     PgError::AuthenticationFailed("password required".to_string())
                                 })?;
-                                self.authenticate_scram(cx, &options.user, password).await?;
+                                self.authenticate_scram(cx, &options.user, password, cb)
+                                    .await?;
                                 return Ok(());
                             }
                             return Err(PgError::UnsupportedAuth(format!(
@@ -2458,6 +2598,37 @@ impl PgConnection {
         }
     }
 
+    /// Choose a `ScramChannelBinding` based on advertised mechanisms and the
+    /// presence of a TLS leaf certificate. See the call site in the SASL
+    /// handler for the policy tree. (br-asupersync-7n2xsi)
+    fn pick_scram_channel_binding(
+        mechanisms: &[String],
+        tls_leaf_cert: Option<Vec<u8>>,
+    ) -> ScramChannelBinding {
+        let server_offers_plus = mechanisms.iter().any(|m| m == "SCRAM-SHA-256-PLUS");
+        match (tls_leaf_cert, server_offers_plus) {
+            #[cfg(feature = "tls")]
+            (Some(cert), true) => ScramChannelBinding::TlsServerEndPoint {
+                cbind_data: tls_server_end_point_cbind(&cert),
+            },
+            // TLS is in use but server didn't advertise -PLUS, OR we have TLS
+            // but no leaf cert. The `y` GS2 signal still defends against the
+            // downgrade attack.
+            #[cfg(feature = "tls")]
+            (Some(_), false) | (None, true) => {
+                // (None, true) shouldn't happen in practice (server can only
+                // offer -PLUS if the connection is TLS), but if it does, we
+                // can't compute cbind_data without a cert — fall back to the
+                // safe non-CB path with the supported-not-used signal.
+                ScramChannelBinding::SupportedNotUsed
+            }
+            #[cfg(not(feature = "tls"))]
+            (_, _) => ScramChannelBinding::None,
+            #[cfg(feature = "tls")]
+            (None, false) => ScramChannelBinding::None,
+        }
+    }
+
     /// Read SASL mechanism list.
     fn read_sasl_mechanisms(reader: &mut MessageReader<'_>) -> Result<Vec<String>, PgError> {
         let mut mechanisms = Vec::new();
@@ -2471,19 +2642,23 @@ impl PgConnection {
         Ok(mechanisms)
     }
 
-    /// Perform SCRAM-SHA-256 authentication.
+    /// Perform SCRAM authentication. The `cb` parameter chooses between
+    /// `SCRAM-SHA-256` and `SCRAM-SHA-256-PLUS` and carries any
+    /// `tls-server-end-point` channel-binding data. (br-asupersync-7n2xsi)
     async fn authenticate_scram(
         &mut self,
         cx: &Cx,
         username: &str,
         password: &str,
+        cb: ScramChannelBinding,
     ) -> Result<(), PgError> {
-        let mut scram = ScramAuth::new(cx, username, password);
+        let mechanism = cb.mechanism();
+        let mut scram = ScramAuth::new(cx, username, password, cb);
 
         // Send SASLInitialResponse
         let client_first = scram.client_first_message();
         let mut buf = MessageBuffer::new();
-        buf.write_cstring("SCRAM-SHA-256");
+        buf.write_cstring(mechanism);
         let client_first_len = i32::try_from(client_first.len()).map_err(|_| {
             PgError::Protocol(format!(
                 "SCRAM client-first message too large: {} bytes",
