@@ -9,10 +9,21 @@ use crate::types::Time;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::future::poll_fn;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
+
+/// br-asupersync-368gxk: default idle-connection timeout (60 seconds).
+/// Connections that have not seen any application-level activity for
+/// this duration are eligible for `drop_idle_connections()`.
+pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// br-asupersync-368gxk: minimum grace period that legitimate slow
+/// clients are guaranteed before they can be flagged idle, even when
+/// `idle_timeout` is configured below this value. Protects against
+/// misconfiguration that would close TCP handshakes mid-flight.
+pub const MIN_IDLE_GRACE: Duration = Duration::from_secs(5);
 
 fn wall_clock_now() -> Time {
     crate::time::wall_now()
@@ -39,12 +50,20 @@ impl std::fmt::Display for ConnectionId {
 }
 
 /// Metadata for a tracked connection.
+///
+/// br-asupersync-368gxk: `last_activity_nanos` is shared with the
+/// returned [`ConnectionGuard`] via `Arc<AtomicU64>` so the guard's
+/// `touch()` call updates the manager-visible activity timestamp
+/// without re-acquiring the registry lock on every byte of I/O.
 #[derive(Debug, Clone)]
 pub struct ConnectionInfo {
     /// Remote peer address.
     pub addr: SocketAddr,
     /// When the connection was accepted.
     pub connected_at: Time,
+    /// Last application-activity timestamp in nanoseconds since the
+    /// epoch the manager's `time_getter` reports.
+    pub last_activity_nanos: Arc<AtomicU64>,
 }
 
 /// Tracks active connections and enforces capacity limits.
@@ -77,6 +96,21 @@ pub struct ConnectionManager {
     next_id: Arc<AtomicU64>,
     accepting: Arc<AtomicBool>,
     max_connections: Option<usize>,
+    /// br-asupersync-f46twu: per-IP connection cap. `None` means
+    /// unbounded per-IP (legacy behaviour). When `Some(n)`, a single
+    /// remote IP may not occupy more than `n` of the global pool.
+    per_ip_max: Option<u32>,
+    /// br-asupersync-f46twu: live count of registered connections per
+    /// IP. Stored under its own `Mutex` so the per-IP check inside
+    /// `register()` can run while holding the main registry lock —
+    /// lock order is always `state` → `per_ip_counts`. Drop releases
+    /// in reverse order to match.
+    per_ip_counts: Arc<Mutex<HashMap<IpAddr, u32>>>,
+    /// br-asupersync-368gxk: idle-connection timeout. `None` disables
+    /// idle eviction (legacy behaviour); `Some(d)` makes
+    /// `drop_idle_connections()` flag every connection whose
+    /// `last_activity` is older than `d` minus the grace window.
+    idle_timeout: Option<Duration>,
     time_getter: fn() -> Time,
     shutdown_signal: ShutdownSignal,
     all_closed: Arc<Notify>,
@@ -109,6 +143,9 @@ impl ConnectionManager {
             next_id: Arc::new(AtomicU64::new(1)),
             accepting: Arc::new(AtomicBool::new(true)),
             max_connections,
+            per_ip_max: None,
+            per_ip_counts: Arc::new(Mutex::new(HashMap::new())),
+            idle_timeout: None,
             time_getter,
             shutdown_signal,
             all_closed: Arc::new(Notify::new()),
@@ -116,10 +153,73 @@ impl ConnectionManager {
         }
     }
 
+    /// br-asupersync-f46twu: configure the per-IP connection cap.
+    ///
+    /// `None` (default) leaves the per-IP dimension unbounded — the
+    /// legacy behaviour where a single hostile IP can occupy the
+    /// entire global pool. `Some(n)` rejects any registration that
+    /// would push the IP's live count above `n`. The cap is enforced
+    /// inside `register()` while the registry lock is held, so it
+    /// cannot be raced past.
+    ///
+    /// Suggested production value: 64–256, balancing legitimate
+    /// browser connection-coalescing (HTTP/1.1 typically opens 6–8
+    /// per origin; HTTP/2 multiplexes a single one but proxies and
+    /// CDNs may fan out many) against the slowloris-class DoS shape
+    /// the cap defends against.
+    #[must_use]
+    pub fn with_per_ip_max(mut self, per_ip_max: Option<u32>) -> Self {
+        self.per_ip_max = per_ip_max;
+        self
+    }
+
+    /// br-asupersync-368gxk: configure the idle-connection timeout.
+    ///
+    /// `None` (default) disables idle eviction. `Some(d)` enables
+    /// `drop_idle_connections()` to flag connections whose last
+    /// `touch()` was more than `d` ago. A grace window of
+    /// [`MIN_IDLE_GRACE`] is applied as the floor so legitimate slow
+    /// clients (TLS handshakes, mobile networks, CDN cold paths)
+    /// always get at least 5 seconds before they can be classified
+    /// idle — that floor preserves correctness when the configured
+    /// timeout is shorter than handshake reality.
+    ///
+    /// Suggested production value: 60s (the default constant
+    /// [`DEFAULT_IDLE_TIMEOUT`]) for HTTP request/response servers;
+    /// shorter for chatty WebSocket bridges that send heartbeats; do
+    /// NOT enable for long-poll endpoints where the protocol legally
+    /// holds the connection idle.
+    #[must_use]
+    pub fn with_idle_timeout(mut self, idle_timeout: Option<Duration>) -> Self {
+        self.idle_timeout = idle_timeout;
+        self
+    }
+
+    /// Returns the configured per-IP connection cap (br-asupersync-f46twu).
+    #[must_use]
+    pub const fn per_ip_max(&self) -> Option<u32> {
+        self.per_ip_max
+    }
+
+    /// Returns the configured idle-connection timeout (br-asupersync-368gxk).
+    #[must_use]
+    pub const fn idle_timeout(&self) -> Option<Duration> {
+        self.idle_timeout
+    }
+
     /// Registers a new connection.
     ///
     /// Returns a [`ConnectionGuard`] that automatically deregisters the connection
-    /// when dropped. Returns `None` if the server is at capacity or shutting down.
+    /// when dropped. Returns `None` if the server is at capacity, the per-IP cap
+    /// is exhausted, or shutdown is in progress.
+    ///
+    /// br-asupersync-f46twu: per-IP capacity is checked while the
+    /// registry lock is held, so concurrent registrations from the
+    /// same hostile IP cannot race past the cap.
+    /// br-asupersync-368gxk: the new connection's `last_activity` is
+    /// stamped at the current time so `drop_idle_connections()` does
+    /// not flag a freshly-accepted connection that has not yet had a
+    /// chance to send any bytes.
     #[must_use]
     pub fn register(&self, addr: SocketAddr) -> Option<ConnectionGuard> {
         // Reject new connections during shutdown or after the drain gate closes.
@@ -135,26 +235,103 @@ impl ConnectionManager {
             return None;
         }
 
-        // Check capacity
+        // Global capacity.
         if let Some(max) = self.max_connections {
             if connections.len() >= max {
                 return None;
             }
         }
 
+        // br-asupersync-f46twu: per-IP capacity. Lock order: state → per_ip_counts.
+        // Both Drop and drop_idle_connections take state first, then per_ip_counts,
+        // matching this order to keep the deadlock graph acyclic.
+        let ip = addr.ip();
+        if let Some(per_ip_max) = self.per_ip_max {
+            let mut per_ip = self.per_ip_counts.lock();
+            let current = per_ip.get(&ip).copied().unwrap_or(0);
+            if current >= per_ip_max {
+                return None;
+            }
+            per_ip
+                .entry(ip)
+                .and_modify(|c| *c = c.saturating_add(1))
+                .or_insert(1);
+        }
+
         let id = ConnectionId(self.next_id.fetch_add(1, Ordering::Relaxed));
+        let now = (self.time_getter)();
+        let last_activity = Arc::new(AtomicU64::new(time_to_nanos(now)));
         let info = ConnectionInfo {
             addr,
-            connected_at: (self.time_getter)(),
+            connected_at: now,
+            last_activity_nanos: Arc::clone(&last_activity),
         };
         connections.insert(id, info);
         drop(connections);
 
         Some(ConnectionGuard {
             id,
+            addr,
             state: Arc::clone(&self.state),
+            per_ip_counts: Arc::clone(&self.per_ip_counts),
+            track_per_ip: self.per_ip_max.is_some(),
+            last_activity_nanos: last_activity,
+            time_getter: self.time_getter,
             all_closed: Arc::clone(&self.all_closed),
         })
+    }
+
+    /// br-asupersync-368gxk: scan the registry and return the
+    /// `ConnectionId` of every connection whose `last_activity` is
+    /// older than `idle_timeout - MIN_IDLE_GRACE`. Returns an empty
+    /// vec when `idle_timeout` is `None` or every connection is
+    /// active.
+    ///
+    /// This method does NOT remove the connections from the registry
+    /// — that is the [`ConnectionGuard::drop`] path's responsibility,
+    /// which keeps the per-IP counters and the `all_closed`
+    /// notification consistent. The caller (typically the per-server
+    /// I/O dispatch loop) is expected to:
+    ///   1. Call `drop_idle_connections()` periodically (e.g., once
+    ///      per `idle_timeout / 4`).
+    ///   2. For each returned id, force-close the underlying socket
+    ///      so the worker future returns and drops its guard.
+    /// Connections that legitimately need to remain idle (long-poll
+    /// endpoints, server-sent events, websocket idle frames) should
+    /// either set `idle_timeout = None` for that listener or call
+    /// `ConnectionGuard::touch()` on every keepalive.
+    #[must_use]
+    pub fn drop_idle_connections(&self) -> Vec<ConnectionId> {
+        let Some(timeout) = self.idle_timeout else {
+            return Vec::new();
+        };
+        let effective = timeout.max(MIN_IDLE_GRACE);
+        let now_nanos = time_to_nanos((self.time_getter)());
+        let threshold_nanos = effective.as_nanos() as u64;
+
+        let connections = self.state.lock();
+        let mut idle = Vec::new();
+        for (id, info) in connections.iter() {
+            let last = info.last_activity_nanos.load(Ordering::Relaxed);
+            // Saturating_sub: guarantees zero (i.e. not-idle) when the
+            // clock has gone backwards (NTP step) instead of producing
+            // a wraparound that would flag the world.
+            if now_nanos.saturating_sub(last) >= threshold_nanos {
+                idle.push(*id);
+            }
+        }
+        idle.sort();
+        idle
+    }
+
+    /// br-asupersync-368gxk: per-IP active-count snapshot, suitable
+    /// for diagnostics and metrics.
+    #[must_use]
+    pub fn per_ip_snapshot(&self) -> Vec<(IpAddr, u32)> {
+        let per_ip = self.per_ip_counts.lock();
+        let mut entries: Vec<_> = per_ip.iter().map(|(ip, c)| (*ip, *c)).collect();
+        entries.sort();
+        entries
     }
 
     /// Begins graceful drain in a way that races correctly with registration.
@@ -374,9 +551,25 @@ impl std::fmt::Debug for ConnectionManager {
 /// is automatically removed from the registry when this guard is dropped,
 /// which enables drain-phase tracking — the server knows when all in-flight
 /// connections have completed.
+///
+/// br-asupersync-f46twu: the guard remembers the peer's `IpAddr` so
+/// `Drop` can decrement the manager's per-IP counter.
+/// br-asupersync-368gxk: the guard exposes [`ConnectionGuard::touch`]
+/// to bump the manager's view of the connection's last activity, used
+/// by [`ConnectionManager::drop_idle_connections`] to identify
+/// slowloris-class connections that hold a slot without making
+/// progress.
 pub struct ConnectionGuard {
     id: ConnectionId,
+    addr: SocketAddr,
     state: Arc<Mutex<HashMap<ConnectionId, ConnectionInfo>>>,
+    per_ip_counts: Arc<Mutex<HashMap<IpAddr, u32>>>,
+    /// Whether the manager has a per-IP cap configured; the guard's
+    /// Drop only decrements the per-IP counter when this is true so
+    /// the unbounded-per-IP legacy mode incurs no map activity at all.
+    track_per_ip: bool,
+    last_activity_nanos: Arc<AtomicU64>,
+    time_getter: fn() -> Time,
     all_closed: Arc<Notify>,
 }
 
@@ -386,17 +579,52 @@ impl ConnectionGuard {
     pub const fn id(&self) -> ConnectionId {
         self.id
     }
+
+    /// br-asupersync-368gxk: bump the connection's last-activity
+    /// timestamp to "now" as reported by the manager's time source.
+    /// Callers should invoke this on every meaningful application
+    /// event (request line read, response head written, websocket
+    /// frame received, etc.) — a connection that never calls touch()
+    /// becomes eligible for `drop_idle_connections()` after the
+    /// configured timeout.
+    pub fn touch(&self) {
+        let now = (self.time_getter)();
+        self.last_activity_nanos
+            .store(time_to_nanos(now), Ordering::Relaxed);
+    }
 }
 
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
+        // Lock order: state → per_ip_counts (matches register()).
         let mut connections = self.state.lock();
         connections.remove(&self.id);
+        if self.track_per_ip {
+            let mut per_ip = self.per_ip_counts.lock();
+            let ip = self.addr.ip();
+            if let Some(count) = per_ip.get_mut(&ip) {
+                *count = count.saturating_sub(1);
+                if *count == 0 {
+                    per_ip.remove(&ip);
+                }
+            }
+            drop(per_ip);
+        }
         // Notify on every removal so drain_with_stats can re-check deadlines.
         // wait_all_closed loops on is_empty(), so extra wakeups are harmless.
         drop(connections);
         self.all_closed.notify_waiters();
     }
+}
+
+/// br-asupersync-368gxk: convert a `Time` into a u64 nanosecond
+/// representation suitable for atomic compare-and-swap. The runtime's
+/// `Time` type is monotonic-domain agnostic; we squash to nanos for
+/// the `AtomicU64` storage and compare via saturating subtraction so
+/// non-monotonic clock steps (NTP) cannot flag the world idle.
+#[inline]
+fn time_to_nanos(t: Time) -> u64 {
+    t.as_nanos()
 }
 
 impl std::fmt::Debug for ConnectionGuard {
@@ -1221,6 +1449,7 @@ mod tests {
         let info = ConnectionInfo {
             addr: test_addr(9090),
             connected_at: Time::from_nanos(42),
+            last_activity_nanos: Arc::new(AtomicU64::new(42)),
         };
         let info2 = info.clone();
         assert_eq!(info.addr, info2.addr);
@@ -1248,5 +1477,184 @@ mod tests {
         assert_eq!(active[0].1.connected_at, Time::from_nanos(7));
         assert_eq!(active[1].1.connected_at, Time::from_nanos(42));
         crate::test_complete!("connection_manager_time_getter_controls_connected_at");
+    }
+
+    // ====================================================================
+    // br-asupersync-f46twu + br-asupersync-368gxk: per-IP cap + idle
+    // timeout regression tests. Both verify the rejection-of-attacker
+    // surface plus the legitimate-slow-client preservation surface.
+    // ====================================================================
+
+    fn ipv4(a: u8, b: u8, c: u8, d: u8, port: u16) -> SocketAddr {
+        SocketAddr::from(([a, b, c, d], port))
+    }
+
+    #[test]
+    fn f46twu_per_ip_cap_rejects_third_connection_from_same_ip() {
+        init_test("f46twu_per_ip_cap_rejects_third_connection_from_same_ip");
+        let signal = ShutdownSignal::new();
+        let manager = ConnectionManager::new(Some(100), signal).with_per_ip_max(Some(2));
+
+        let attacker = ipv4(10, 0, 0, 1, 0);
+        let _g1 = manager
+            .register(ipv4(10, 0, 0, 1, 12345))
+            .expect("first ok");
+        let _g2 = manager
+            .register(ipv4(10, 0, 0, 1, 12346))
+            .expect("second ok");
+        // Third from the same IP rejected by per-IP cap, even though
+        // the global pool has 98 slots free.
+        assert!(manager.register(attacker).is_none());
+        assert_eq!(manager.active_count(), 2);
+    }
+
+    #[test]
+    fn f46twu_per_ip_cap_does_not_punish_distinct_ips() {
+        init_test("f46twu_per_ip_cap_does_not_punish_distinct_ips");
+        let signal = ShutdownSignal::new();
+        let manager = ConnectionManager::new(Some(100), signal).with_per_ip_max(Some(2));
+
+        // Cap is per-IP, so each of these distinct IPs should get
+        // their own quota independently.
+        let _g1 = manager.register(ipv4(10, 0, 0, 1, 1)).expect("ip1 a");
+        let _g2 = manager.register(ipv4(10, 0, 0, 1, 2)).expect("ip1 b");
+        let _g3 = manager.register(ipv4(10, 0, 0, 2, 1)).expect("ip2 a");
+        let _g4 = manager.register(ipv4(10, 0, 0, 2, 2)).expect("ip2 b");
+        let _g5 = manager.register(ipv4(10, 0, 0, 3, 1)).expect("ip3 a");
+        assert_eq!(manager.active_count(), 5);
+    }
+
+    #[test]
+    fn f46twu_per_ip_cap_decrements_on_drop() {
+        init_test("f46twu_per_ip_cap_decrements_on_drop");
+        let signal = ShutdownSignal::new();
+        let manager = ConnectionManager::new(None, signal).with_per_ip_max(Some(2));
+
+        let g1 = manager.register(ipv4(10, 0, 0, 1, 1)).expect("first");
+        let g2 = manager.register(ipv4(10, 0, 0, 1, 2)).expect("second");
+        assert!(manager.register(ipv4(10, 0, 0, 1, 3)).is_none());
+        drop(g1);
+        // After one drops, a new registration succeeds — the per-IP
+        // counter decremented and the slot is reusable.
+        let _g4 = manager.register(ipv4(10, 0, 0, 1, 4)).expect("post-drop");
+        drop(g2);
+        // After both drop, the per_ip map removes the entry entirely
+        // (zero-value cleanup).
+        let snap = manager.per_ip_snapshot();
+        assert_eq!(snap.len(), 1, "only one IP remaining: {snap:?}");
+    }
+
+    #[test]
+    fn f46twu_unbounded_per_ip_default_preserves_legacy_behaviour() {
+        init_test("f46twu_unbounded_per_ip_default_preserves_legacy_behaviour");
+        let signal = ShutdownSignal::new();
+        let manager = ConnectionManager::new(Some(100), signal); // no with_per_ip_max
+
+        // Without a per-IP cap, a single IP can take the whole pool.
+        let mut guards = Vec::new();
+        for port in 1..=50 {
+            guards.push(manager.register(ipv4(10, 0, 0, 1, port)).expect("ok"));
+        }
+        assert_eq!(manager.active_count(), 50);
+    }
+
+    #[test]
+    fn _368gxk_drop_idle_lists_connections_past_timeout() {
+        init_test("368gxk_drop_idle_lists_connections_past_timeout");
+        let signal = ShutdownSignal::new();
+        set_test_time(0);
+        let manager = ConnectionManager::with_time_getter(None, signal, test_time)
+            .with_idle_timeout(Some(Duration::from_secs(60)));
+
+        let g1 = manager.register(test_addr(1)).expect("g1");
+        let _g2 = manager.register(test_addr(2)).expect("g2");
+        let _g3 = manager.register(test_addr(3)).expect("g3");
+
+        // Advance virtual time past the timeout for all three. None
+        // of them have called touch(), so all should be flagged.
+        set_test_time(120 * 1_000_000_000); // 120s in nanos
+        let idle = manager.drop_idle_connections();
+        assert_eq!(idle.len(), 3, "all three idle past 60s: {idle:?}");
+
+        // touch() the first guard at t=120s and re-scan — it should
+        // no longer be idle.
+        g1.touch();
+        let idle = manager.drop_idle_connections();
+        assert_eq!(idle.len(), 2, "after touch g1 is fresh: {idle:?}");
+        assert!(!idle.contains(&g1.id()));
+    }
+
+    #[test]
+    fn _368gxk_drop_idle_returns_empty_when_disabled() {
+        init_test("368gxk_drop_idle_returns_empty_when_disabled");
+        let signal = ShutdownSignal::new();
+        set_test_time(0);
+        let manager = ConnectionManager::with_time_getter(None, signal, test_time);
+        // No idle_timeout configured → drop_idle is a no-op even
+        // after a long elapsed virtual time.
+        let _g1 = manager.register(test_addr(1)).expect("g1");
+        set_test_time(3600 * 1_000_000_000);
+        assert!(manager.drop_idle_connections().is_empty());
+    }
+
+    #[test]
+    fn _368gxk_min_grace_floors_aggressive_timeout() {
+        init_test("368gxk_min_grace_floors_aggressive_timeout");
+        let signal = ShutdownSignal::new();
+        set_test_time(0);
+        // Misconfigured: 1ms idle timeout would close every TCP
+        // handshake mid-flight in the real world. The MIN_IDLE_GRACE
+        // floor protects against that — connections get at least 5s
+        // before the manager can flag them idle.
+        let manager = ConnectionManager::with_time_getter(None, signal, test_time)
+            .with_idle_timeout(Some(Duration::from_millis(1)));
+        let _g1 = manager.register(test_addr(1)).expect("g1");
+
+        // 1 second elapsed: NOT yet idle because grace floor is 5s.
+        set_test_time(1_000_000_000);
+        assert!(manager.drop_idle_connections().is_empty(), "1s < 5s floor");
+
+        // 6 seconds elapsed: now past the floor.
+        set_test_time(6_000_000_000);
+        let idle = manager.drop_idle_connections();
+        assert_eq!(idle.len(), 1, "past 5s floor: {idle:?}");
+    }
+
+    #[test]
+    fn _368gxk_clock_step_backwards_does_not_flag_world_idle() {
+        init_test("368gxk_clock_step_backwards_does_not_flag_world_idle");
+        let signal = ShutdownSignal::new();
+        set_test_time(1_000_000_000_000); // 1000s
+        let manager = ConnectionManager::with_time_getter(None, signal, test_time)
+            .with_idle_timeout(Some(Duration::from_secs(60)));
+        let _g1 = manager.register(test_addr(1)).expect("g1");
+        // Clock steps backwards (NTP). Saturating subtraction means
+        // the elapsed time is 0, so nothing is flagged idle.
+        set_test_time(500_000_000_000);
+        assert!(manager.drop_idle_connections().is_empty());
+    }
+
+    #[test]
+    fn batch_per_ip_and_idle_compose_cleanly() {
+        init_test("batch_per_ip_and_idle_compose_cleanly");
+        let signal = ShutdownSignal::new();
+        set_test_time(0);
+        let manager = ConnectionManager::with_time_getter(Some(64), signal, test_time)
+            .with_per_ip_max(Some(2))
+            .with_idle_timeout(Some(Duration::from_secs(30)));
+
+        let attacker_ip = ipv4(10, 0, 0, 1, 1);
+        let _g1 = manager.register(attacker_ip).expect("g1");
+        let _g2 = manager.register(ipv4(10, 0, 0, 1, 2)).expect("g2");
+        // Per-IP cap kicks in.
+        assert!(manager.register(ipv4(10, 0, 0, 1, 3)).is_none());
+
+        // Distinct IP still admitted.
+        let _g4 = manager.register(ipv4(10, 0, 0, 2, 1)).expect("g4");
+
+        // Time advances past idle threshold for all.
+        set_test_time(31 * 1_000_000_000);
+        let idle = manager.drop_idle_connections();
+        assert_eq!(idle.len(), 3);
     }
 }
