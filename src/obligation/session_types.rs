@@ -161,6 +161,25 @@ use crate::cx::Cx;
 use crate::record::ObligationKind;
 use std::future::Future;
 use std::marker::PhantomData;
+use std::sync::atomic::AtomicU64;
+
+/// br-asupersync-wue53y: process-global counter of async session
+/// transitions that consumed the linear channel via an Err arm
+/// (cancel / peer-close / NoTransport / ProtocolViolation /
+/// downcast-failure). Operators can scrape this counter to detect
+/// silent-consume regressions; lab tests assert it increments to
+/// pin the audit-trail contract. See [`Chan::audit_silent_consume`]
+/// for the per-event log shape.
+static SILENT_SESSION_CONSUME_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// br-asupersync-wue53y: read the current value of the silent-
+/// consume counter. Lab tests use this to assert the audit-trail
+/// fires on each Err arm; production observability scrapes it via
+/// the metrics provider.
+#[must_use]
+pub fn silent_session_consume_count() -> u64 {
+    SILENT_SESSION_CONSUME_COUNT.load(std::sync::atomic::Ordering::Relaxed)
+}
 
 // ============================================================================
 // Session type primitives
@@ -327,6 +346,51 @@ impl<R, S> Chan<R, S> {
         self.transport.take().ok_or(SessionError::NoTransport)
     }
 
+    /// br-asupersync-wue53y: emit a structured audit-trail event when
+    /// an async session transition consumes the linear channel
+    /// without producing a successful next-state Chan. Pre-fix the
+    /// Err arms of `send_async` / `recv_async` / `select_*_async` /
+    /// `offer_async` set `self.closed = true` (to keep
+    /// drop-an-unpolled-future panic-free) and then returned the
+    /// SessionError silently — the channel was consumed, no
+    /// `Chan<R, S>` came back, and Drop did NOT fire the linear
+    /// completion bomb because `closed` was already true. That
+    /// silently broke the documented drop-based linearity surface
+    /// under cancel / peer-close / NoTransport / ProtocolViolation
+    /// paths.
+    ///
+    /// The fix preserves the existing public API (no signature
+    /// change, no breaking caller contracts) but routes every Err
+    /// arm through this helper so:
+    ///   * an `error!` log line records `channel_id`,
+    ///     `obligation_kind`, `op` (the async fn name), and the
+    ///     SessionError variant — operators can grep this surface
+    ///     and alert on it.
+    ///   * a process-global counter increments
+    ///     ([`silent_session_consume_count`]), giving a Prometheus-
+    ///     scrapable signal that's missing-data-tolerant.
+    ///
+    /// The audit trail is observable; the abort proof is the
+    /// log+counter pair (a per-call ledger entry would require
+    /// threading a Cx-rooted ObligationLedger reference into Chan,
+    /// which is a wider refactor — tracked as a follow-up).
+    fn audit_silent_consume(
+        channel_id: u64,
+        obligation_kind: ObligationKind,
+        op: &'static str,
+        error: &SessionError,
+    ) {
+        SILENT_SESSION_CONSUME_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        crate::tracing_compat::error!(
+            channel_id = channel_id,
+            obligation_kind = %obligation_kind,
+            op = op,
+            error = ?error,
+            "br-asupersync-wue53y: async session transition consumed linear channel via Err arm \
+             — drop bomb pre-disarmed; abort recorded in counter + log"
+        );
+    }
+
     /// Unsafe state transition (used by protocol methods).
     ///
     /// Consumes `self` in state `S`, returns a channel in state `S2`.
@@ -398,13 +462,23 @@ impl<R, T: std::marker::Send + 'static, S> Chan<R, Send<T, S>> {
         // Disarm before the future is returned so dropping an unpolled future
         // is just as safe as dropping one after it has yielded once.
         self.closed = true;
+        let channel_id = self.channel_id;
+        let obligation_kind = self.obligation_kind;
 
         async move {
-            let transport = self.take_transport_or_fail_closed()?;
+            let transport = match self.take_transport_or_fail_closed() {
+                Ok(t) => t,
+                Err(e) => {
+                    Self::audit_silent_consume(channel_id, obligation_kind, "send_async", &e);
+                    return Err(e);
+                }
+            };
 
             let boxed = Box::new(value) as Box<dyn std::any::Any + std::marker::Send>;
             if let Err(error) = transport.tx.send(cx, boxed).await {
-                return Err(map_transport_send_error(&error));
+                let e = map_transport_send_error(&error);
+                Self::audit_silent_consume(channel_id, obligation_kind, "send_async", &e);
+                return Err(e);
             }
 
             self.transport = Some(transport);
@@ -444,22 +518,34 @@ impl<R, T: std::marker::Send + 'static, S> Chan<R, Recv<T, S>> {
         // Disarm before the future is returned so dropping an unpolled future
         // is just as safe as dropping one after it has yielded once.
         self.closed = true;
+        let channel_id = self.channel_id;
+        let obligation_kind = self.obligation_kind;
 
         async move {
-            let mut transport = self.take_transport_or_fail_closed()?;
+            let mut transport = match self.take_transport_or_fail_closed() {
+                Ok(t) => t,
+                Err(e) => {
+                    Self::audit_silent_consume(channel_id, obligation_kind, "recv_async", &e);
+                    return Err(e);
+                }
+            };
 
             let boxed = match transport.rx.recv(cx).await {
                 Ok(boxed) => boxed,
                 Err(error) => {
-                    return Err(map_transport_recv_error(error));
+                    let e = map_transport_recv_error(error);
+                    Self::audit_silent_consume(channel_id, obligation_kind, "recv_async", &e);
+                    return Err(e);
                 }
             };
 
             let Ok(value) = boxed.downcast::<T>() else {
-                return Err(SessionError::ProtocolViolation {
+                let e = SessionError::ProtocolViolation {
                     expected: std::any::type_name::<T>(),
                     actual: "unknown (downcast failed)",
-                });
+                };
+                Self::audit_silent_consume(channel_id, obligation_kind, "recv_async", &e);
+                return Err(e);
             };
 
             self.transport = Some(transport);
@@ -520,13 +606,28 @@ impl<R, A, B> Chan<R, Select<A, B>> {
         // Disarm before the future is returned so dropping an unpolled future
         // is just as safe as dropping one after it has yielded once.
         self.closed = true;
+        let channel_id = self.channel_id;
+        let obligation_kind = self.obligation_kind;
 
         async move {
-            let transport = self.take_transport_or_fail_closed()?;
+            let transport = match self.take_transport_or_fail_closed() {
+                Ok(t) => t,
+                Err(e) => {
+                    Self::audit_silent_consume(
+                        channel_id,
+                        obligation_kind,
+                        "select_left_async",
+                        &e,
+                    );
+                    return Err(e);
+                }
+            };
 
             let branch = Box::new(Branch::Left) as Box<dyn std::any::Any + std::marker::Send>;
             if let Err(error) = transport.tx.send(cx, branch).await {
-                return Err(map_transport_send_error(&error));
+                let e = map_transport_send_error(&error);
+                Self::audit_silent_consume(channel_id, obligation_kind, "select_left_async", &e);
+                return Err(e);
             }
 
             self.transport = Some(transport);
@@ -551,13 +652,28 @@ impl<R, A, B> Chan<R, Select<A, B>> {
         // Disarm before the future is returned so dropping an unpolled future
         // is just as safe as dropping one after it has yielded once.
         self.closed = true;
+        let channel_id = self.channel_id;
+        let obligation_kind = self.obligation_kind;
 
         async move {
-            let transport = self.take_transport_or_fail_closed()?;
+            let transport = match self.take_transport_or_fail_closed() {
+                Ok(t) => t,
+                Err(e) => {
+                    Self::audit_silent_consume(
+                        channel_id,
+                        obligation_kind,
+                        "select_right_async",
+                        &e,
+                    );
+                    return Err(e);
+                }
+            };
 
             let branch = Box::new(Branch::Right) as Box<dyn std::any::Any + std::marker::Send>;
             if let Err(error) = transport.tx.send(cx, branch).await {
-                return Err(map_transport_send_error(&error));
+                let e = map_transport_send_error(&error);
+                Self::audit_silent_consume(channel_id, obligation_kind, "select_right_async", &e);
+                return Err(e);
             }
 
             self.transport = Some(transport);
@@ -596,22 +712,34 @@ impl<R, A, B> Chan<R, Offer<A, B>> {
         // Disarm before the future is returned so dropping an unpolled future
         // is just as safe as dropping one after it has yielded once.
         self.closed = true;
+        let channel_id = self.channel_id;
+        let obligation_kind = self.obligation_kind;
 
         async move {
-            let mut transport = self.take_transport_or_fail_closed()?;
+            let mut transport = match self.take_transport_or_fail_closed() {
+                Ok(t) => t,
+                Err(e) => {
+                    Self::audit_silent_consume(channel_id, obligation_kind, "offer_async", &e);
+                    return Err(e);
+                }
+            };
 
             let boxed = match transport.rx.recv(cx).await {
                 Ok(boxed) => boxed,
                 Err(error) => {
-                    return Err(map_transport_recv_error(error));
+                    let e = map_transport_recv_error(error);
+                    Self::audit_silent_consume(channel_id, obligation_kind, "offer_async", &e);
+                    return Err(e);
                 }
             };
 
             let Ok(branch) = boxed.downcast::<Branch>() else {
-                return Err(SessionError::ProtocolViolation {
+                let e = SessionError::ProtocolViolation {
                     expected: "Branch (Left/Right)",
                     actual: "unknown (downcast failed)",
-                });
+                };
+                Self::audit_silent_consume(channel_id, obligation_kind, "offer_async", &e);
+                return Err(e);
             };
 
             self.transport = Some(transport);
@@ -2474,6 +2602,49 @@ mod tests {
             }
             .to_string(),
             "protocol violation: expected u64, got String"
+        );
+    }
+
+    /// br-asupersync-wue53y: when an async session transition consumes
+    /// the linear channel via an Err arm (peer disconnect / cancel /
+    /// NoTransport / ProtocolViolation), the silent-consume audit
+    /// counter must increment so the abort is observable in
+    /// production logs/metrics. The pre-fix shape returned the Err
+    /// silently — the channel was consumed, no Chan came back, and
+    /// Drop did not fire because `closed` was already pre-disarmed.
+    /// This test pins the audit-trail contract.
+    #[test]
+    fn wue53y_err_arm_increments_silent_consume_counter() {
+        let before = silent_session_consume_count();
+
+        let (sender, receiver) = new_transport_pair::<
+            send_permit::InitiatorSession<u64>,
+            send_permit::ResponderSession<u64>,
+        >(900, ObligationKind::SendPermit, 4);
+
+        // Disarm the receiver so we don't take a stale-Chan panic;
+        // we're testing the sender-side Err arm in isolation.
+        receiver.disarm_for_test();
+
+        futures_lite::future::block_on(async {
+            let cx = Cx::for_testing();
+            // Drop the receiver's transport BEFORE the sender polls
+            // by completing its Drop (already happened — disarm_for_test
+            // dropped it). The sender's send_async will now observe
+            // peer-disconnect → SessionError::Closed.
+            let result = sender.send_async(&cx, send_permit::ReserveMsg).await;
+            let err = result.expect_err("peer disconnect must surface as Err");
+            assert!(
+                matches!(err, SessionError::Closed | SessionError::Cancelled),
+                "unexpected error variant: {err:?}"
+            );
+        });
+
+        let after = silent_session_consume_count();
+        assert!(
+            after > before,
+            "br-asupersync-wue53y: silent-consume counter must \
+             increment on Err arm (before={before}, after={after})"
         );
     }
 }
