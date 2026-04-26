@@ -232,19 +232,25 @@ fn redis_e2e_pipeline_executes_multiple() {
         let mut pipe = client.pipeline();
         pipe.cmd(&["PING"]);
         pipe.cmd(&["ECHO", "hi"]);
+        // Pipeline::exec now returns Vec<Result<RespValue, RedisError>> so
+        // per-command -ERR replies don't tear down the whole batch or
+        // connection (br-asupersync-pr32li). PING + ECHO are both expected
+        // to succeed here — unwrap each inner Result.
         let responses = pipe.exec(&cx).await.expect("pipeline");
         assert_with_log!(responses.len() == 2, "pipeline len", 2, responses.len());
+        let r0 = responses[0].as_ref().expect("PING ok");
         assert_with_log!(
-            responses[0] == RespValue::SimpleString("PONG".to_string()),
+            *r0 == RespValue::SimpleString("PONG".to_string()),
             "pipeline ping",
             RespValue::SimpleString("PONG".to_string()),
-            responses[0].clone()
+            r0.clone()
         );
+        let r1 = responses[1].as_ref().expect("ECHO ok");
         assert_with_log!(
-            responses[1] == RespValue::BulkString(Some(b"hi".to_vec())),
+            *r1 == RespValue::BulkString(Some(b"hi".to_vec())),
             "pipeline echo",
             RespValue::BulkString(Some(b"hi".to_vec())),
-            responses[1].clone()
+            r1.clone()
         );
     });
 

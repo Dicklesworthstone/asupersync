@@ -1514,10 +1514,18 @@ impl Drop for DiscardOnDropGuard {
 /// order.
 ///
 /// Notes:
-/// - If any command yields a RESP `-ERR ...` response, `exec()` returns
-///   `RedisError::Redis` and discards the underlying connection.
-/// - If an I/O error occurs mid-pipeline, the connection is discarded because
-///   its read/write state is no longer reliable.
+/// - Per RESP semantics, individual commands in a pipeline can fail
+///   independently. `exec()` returns
+///   `Result<Vec<Result<RespValue, RedisError>>, RedisError>`:
+///   * The outer `Result` carries IO / protocol errors that invalidate the
+///     entire pipeline (and force the connection to be discarded).
+///   * The inner `Result` is per-command: a RESP `-ERR ...` reply becomes
+///     `Err(RedisError::Redis(msg))`, every other reply (including nil)
+///     becomes `Ok(value)`. The connection stays healthy and is returned
+///     to the pool. (br-asupersync-pr32li)
+/// - If an I/O error occurs mid-pipeline (read/write fails, EOF, framing
+///   error), the connection is discarded because its read/write state is
+///   no longer reliable.
 #[derive(Debug)]
 pub struct Pipeline<'a> {
     client: &'a RedisClient,
@@ -1542,8 +1550,23 @@ impl Pipeline<'_> {
         self
     }
 
-    /// Execute the pipeline and return all responses.
-    pub async fn exec(self, cx: &Cx) -> Result<Vec<RespValue>, RedisError> {
+    /// Execute the pipeline and return per-command results.
+    ///
+    /// Returns `Vec<Result<RespValue, RedisError>>` where each element
+    /// corresponds positionally to a queued command. A RESP `-ERR` reply
+    /// becomes `Err(RedisError::Redis(msg))` for that single command; the
+    /// loop continues to drain remaining responses so the wire-protocol
+    /// framing stays in sync. The connection is returned to the pool
+    /// regardless of how many per-command errors occurred.
+    ///
+    /// The outer `Err(...)` is reserved for IO / protocol failures
+    /// (write, flush, framing read, EOF) which DO invalidate the
+    /// connection — those discard the pooled connection because its
+    /// protocol state is no longer reliable. (br-asupersync-pr32li)
+    pub async fn exec(
+        self,
+        cx: &Cx,
+    ) -> Result<Vec<Result<RespValue, RedisError>>, RedisError> {
         let mut conn = DiscardOnDropGuard::new(self.client.acquire(cx).await?);
 
         // Ensure AUTH/SELECT have been run on this connection.
@@ -1566,20 +1589,25 @@ impl Pipeline<'_> {
             return Err(RedisError::Io(e));
         }
 
+        // Drain ALL responses from the wire BEFORE returning. A protocol /
+        // IO error from `read_response` truly invalidates the connection
+        // (it can't be reused without re-syncing the framer), so we
+        // propagate via the outer Err and let the guard discard the
+        // connection. Application-level `-ERR` replies become per-command
+        // `Err`s in the inner Result so a failed command in a pipeline
+        // doesn't tear down the whole batch or the connection.
         let mut out = Vec::with_capacity(self.encoded.len());
         for _ in 0..self.encoded.len() {
-            let resp = match conn.read_response(cx).await {
-                Ok(resp) => resp,
-                Err(e) => return Err(e),
-            };
+            let resp = conn.read_response(cx).await?;
             match resp {
-                RespValue::Error(msg) => return Err(RedisError::Redis(msg)),
-                other => out.push(other),
+                RespValue::Error(msg) => out.push(Err(RedisError::Redis(msg))),
+                other => out.push(Ok(other)),
             }
         }
 
-        // Protocol exchange complete — defuse the guard to return the
-        // connection to the pool instead of discarding it.
+        // Protocol exchange complete — defuse the guard so the connection
+        // returns to the pool instead of being discarded. -ERR replies are
+        // application-level and do NOT invalidate the connection.
         conn.return_to_pool();
         Ok(out)
     }
@@ -2421,6 +2449,7 @@ mod tests {
         RedisClient {
             config: RedisConfig::default(),
             pool: GenericPool::new(factory, PoolConfig::with_max_size(1)),
+            slot_map: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         }
     }
 
