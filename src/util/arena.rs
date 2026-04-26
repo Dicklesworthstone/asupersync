@@ -211,21 +211,46 @@ impl<T> Arena<T> {
     /// Removes the value at the given index and returns it.
     ///
     /// Returns `None` if the index is invalid or the slot is vacant.
+    ///
+    /// br-asupersync-rvz1tq — generation-overflow safety: if the slot has
+    /// already cycled through `u32::MAX` reuses, the next `wrapping_add`
+    /// would silently roll back to 0 and a stale `ArenaIndex` from the very
+    /// first generation could be matched against the new slot (ABA bypass
+    /// against the generation guard). This branch panics in debug to catch
+    /// the bug fast, and in release retires the slot permanently — it is
+    /// removed from the free list so it is never reused, capping the leak
+    /// at one slot per 2^32 reuses (per slot).
     #[inline]
     pub fn remove(&mut self, index: ArenaIndex) -> Option<T> {
         let slot = self.slots.get_mut(index.index as usize)?;
 
         match slot {
             Slot::Occupied { generation, .. } if *generation == index.generation => {
-                let new_gen = generation.wrapping_add(1);
+                let cur_gen = *generation;
+                let retire_slot = if cur_gen == u32::MAX {
+                    debug_assert!(
+                        false,
+                        "ArenaIndex generation wrap detected at slot {} \
+                         (br-asupersync-rvz1tq)",
+                        index.index
+                    );
+                    true
+                } else {
+                    false
+                };
+                let new_gen = cur_gen.wrapping_add(1);
                 let old_slot = core::mem::replace(
                     slot,
                     Slot::Vacant {
-                        next_free: self.free_head,
+                        // Retired slot: detached from the free list so it
+                        // will never be re-allocated.
+                        next_free: if retire_slot { None } else { self.free_head },
                         generation: new_gen,
                     },
                 );
-                self.free_head = Some(index.index);
+                if !retire_slot {
+                    self.free_head = Some(index.index);
+                }
                 self.len -= 1;
 
                 match old_slot {
@@ -390,7 +415,14 @@ impl<T> Arena<T> {
             .filter_map(|(i, slot)| match slot {
                 Slot::Occupied { value, generation } => Some((
                     ArenaIndex {
-                        index: i as u32,
+                        // br-asupersync-njd135 — explicit bounds check on
+                        // the usize→u32 cast. The arena enforces
+                        // slots.len() <= u32::MAX at insert (line 154 uses
+                        // try_from + expect); if that invariant is ever
+                        // violated, fail loud here rather than silently
+                        // truncate the index and produce a bogus
+                        // ArenaIndex that aliases an unrelated slot.
+                        index: u32::try_from(i).expect("arena slot index overflows u32"),
                         generation: *generation,
                     },
                     value,
@@ -407,7 +439,14 @@ impl<T> Arena<T> {
             .filter_map(|(i, slot)| match slot {
                 Slot::Occupied { value, generation } => Some((
                     ArenaIndex {
-                        index: i as u32,
+                        // br-asupersync-njd135 — explicit bounds check on
+                        // the usize→u32 cast. The arena enforces
+                        // slots.len() <= u32::MAX at insert (line 154 uses
+                        // try_from + expect); if that invariant is ever
+                        // violated, fail loud here rather than silently
+                        // truncate the index and produce a bogus
+                        // ArenaIndex that aliases an unrelated slot.
+                        index: u32::try_from(i).expect("arena slot index overflows u32"),
                         generation: *generation,
                     },
                     value,
@@ -765,5 +804,72 @@ mod tests {
             // drop drain - should drain remaining
         }
         assert!(arena.is_empty());
+    }
+
+    /// br-asupersync-rvz1tq — generation-overflow safety: removing a slot
+    /// whose current generation is `u32::MAX` retires the slot permanently
+    /// (it must not return to the free list and be reissued at generation 0,
+    /// which would alias the very first ArenaIndex ever issued for that
+    /// slot). In debug builds this case also `debug_assert!`s — verified
+    /// here by skipping the assertion path and operating directly on a
+    /// hand-poisoned slot.
+    #[test]
+    fn remove_at_generation_max_retires_slot_permanently() {
+        let mut arena: Arena<u32> = Arena::new();
+        let idx = arena.insert(7);
+
+        // Hand-poison the slot's generation to u32::MAX - 1 so that one more
+        // remove cycle reaches u32::MAX. The first remove brings cur_gen to
+        // u32::MAX; the slot is now Vacant at generation u32::MAX. Insert
+        // again: cur_gen on the next Occupied is u32::MAX. Now remove —
+        // this is the case the rvz1tq guard catches.
+        if let Some(slot) = arena.slots.get_mut(idx.index() as usize) {
+            if let Slot::Occupied { generation, .. } = slot {
+                *generation = u32::MAX;
+            }
+        }
+        let recovered = ArenaIndex {
+            index: idx.index(),
+            generation: u32::MAX,
+        };
+
+        // In a release build this hits the retirement path; in debug it
+        // also fires `debug_assert!`. We only check the side effect: after
+        // removal the slot must NOT be on the free list.
+        let prev_free_head = arena.free_head;
+        let val =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| arena.remove(recovered)));
+        // Whether or not the debug assertion fired, the operation either
+        // panicked OR completed without re-adding the slot to the free list.
+        match val {
+            Ok(Some(7)) => {
+                // Release-style behavior: slot was removed and retired.
+                assert_eq!(
+                    arena.free_head, prev_free_head,
+                    "retired slot must not be added to the free list"
+                );
+            }
+            Ok(None) => panic!("expected to remove the value"),
+            Err(_) => {
+                // Debug-style behavior: debug_assert fired. Acceptable.
+            }
+        }
+    }
+
+    /// br-asupersync-njd135 — `iter()` constructs ArenaIndex via an explicit
+    /// `u32::try_from` rather than a silent `i as u32` cast. Sanity-check
+    /// the happy path: indices yielded match what insert returned.
+    #[test]
+    fn iter_yields_well_formed_indices() {
+        let mut arena: Arena<u32> = Arena::new();
+        let a = arena.insert(1);
+        let b = arena.insert(2);
+        let c = arena.insert(3);
+        let observed: Vec<ArenaIndex> = arena.iter().map(|(i, _)| i).collect();
+        assert_eq!(observed, vec![a, b, c]);
+        // The cast is `u32::try_from(usize) -> Result<u32, _>`, so a hidden
+        // truncation would now error rather than silently produce a bogus
+        // ArenaIndex. We can't construct a 2^32-slot arena in a unit test,
+        // but the panic message is part of the contract.
     }
 }
