@@ -1756,7 +1756,12 @@ impl KafkaClient {
         consumer_config.set("group.id", "asupersync-consumer");
         consumer_config.set("enable.partition.eof", "false");
         consumer_config.set("session.timeout.ms", "6000");
-        consumer_config.set("enable.auto.commit", "true");
+        // br-asupersync-2i2e21: default is manual-commit / at-least-once.
+        // The polling driver stores the offset at poll time when this is
+        // on, which silently turns at-least-once into at-most-once.
+        // Callers that want auto-commit must build a consumer through
+        // `ConsumerConfig::enable_auto_commit(true)` deliberately.
+        consumer_config.set("enable.auto.commit", "false");
 
         // Create BaseConsumer
         let rdkafka_consumer: BaseConsumer<KafkaContext> = consumer_config

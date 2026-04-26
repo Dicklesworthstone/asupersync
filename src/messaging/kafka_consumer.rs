@@ -84,6 +84,22 @@ pub struct ConsumerConfig {
     /// Auto offset reset behavior.
     pub auto_offset_reset: AutoOffsetReset,
     /// Enable auto-commit of offsets.
+    ///
+    /// **Defaults to `false` (manual-commit / at-least-once)** as of
+    /// br-asupersync-2i2e21. The implementation stores the offset at
+    /// **poll time** (`store_offset_from_message` immediately after
+    /// `consumer.poll`), so enabling auto-commit means the offset is
+    /// recorded *before* your application has acknowledged successful
+    /// processing of the message. Combined with `auto_commit_interval`
+    /// flushing in the background, this is silent **at-most-once**
+    /// delivery: a process crash between poll and commit is invisible,
+    /// but a crash between poll and your application's processing
+    /// completion drops the message.
+    ///
+    /// Set this to `true` only when the application explicitly accepts
+    /// at-most-once semantics. The asupersync default is at-least-once,
+    /// so the application is expected to call `commit_offset` after it
+    /// has finished processing each record.
     pub enable_auto_commit: bool,
     /// Auto-commit interval.
     pub auto_commit_interval: Duration,
@@ -112,7 +128,13 @@ impl Default for ConsumerConfig {
             session_timeout: Duration::from_secs(45),
             heartbeat_interval: Duration::from_secs(3),
             auto_offset_reset: AutoOffsetReset::Latest,
-            enable_auto_commit: true,
+            // br-asupersync-2i2e21: default is manual-commit (at-least-once).
+            // The driver stores the offset at poll time when auto-commit is
+            // on, so enabling it means the offset can be flushed to the
+            // broker before the application has finished processing — a
+            // silent at-most-once footgun that callers must opt into
+            // explicitly via `.enable_auto_commit(true)`.
+            enable_auto_commit: false,
             auto_commit_interval: Duration::from_secs(5),
             max_poll_records: 500,
             fetch_min_bytes: 1,
@@ -1421,7 +1443,14 @@ mod tests {
         let config = ConsumerConfig::default();
         assert_eq!(config.group_id, "asupersync-default");
         assert_eq!(config.max_poll_records, 500);
-        assert!(config.enable_auto_commit);
+        // br-asupersync-2i2e21: default is manual-commit (at-least-once).
+        // Flipping this assertion is a deliberate behavior change — see the
+        // docstring on `ConsumerConfig::enable_auto_commit` for the
+        // at-most-once footgun this default avoids.
+        assert!(
+            !config.enable_auto_commit,
+            "default must be manual-commit / at-least-once"
+        );
     }
 
     #[test]
@@ -1543,7 +1572,8 @@ mod tests {
         assert_eq!(cfg.group_id, "my-group");
         // Other fields still have defaults
         assert_eq!(cfg.max_poll_records, 500);
-        assert!(cfg.enable_auto_commit);
+        // br-asupersync-2i2e21: default is manual-commit / at-least-once.
+        assert!(!cfg.enable_auto_commit);
     }
 
     #[test]
