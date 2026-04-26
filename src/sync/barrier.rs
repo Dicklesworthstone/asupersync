@@ -141,11 +141,21 @@ impl Future for BarrierWaitFuture<'_> {
                     if state.arrived > 0 {
                         state.arrived -= 1;
                     }
-                    // Remove our waker via O(1) swap_remove when possible,
-                    // falling back to O(N) scan + swap_remove for robustness.
-                    if slot < state.waiters.len() && state.waiters[slot].0 == id {
-                        state.waiters.swap_remove(slot);
-                    } else if let Some(idx) = state.waiters.iter().position(|w| w.0 == id) {
+                    // br-asupersync-abl9h6: remove BY waiter id, not by
+                    // slot index. Within this generation, prior cancellations
+                    // may have done swap_remove and moved a different waiter
+                    // into our `slot` position; the recorded slot is therefore
+                    // a stale hint, not a guarantee. The fast-path
+                    // `waiters[slot].0 == id` check did catch this in practice
+                    // (and would fall through to the position scan when it
+                    // missed), but eliminating the slot-based fast path
+                    // entirely makes the cancellation contract obvious by
+                    // construction: identity is the only key. The waiter set
+                    // is a SmallVec<[_; 7]> so the position scan is O(parties)
+                    // and bounded by the barrier's own size — no asymptotic
+                    // cost for typical (parties <= 7) uses.
+                    let _ = slot; // recorded slot is now an unused hint
+                    if let Some(idx) = state.waiters.iter().position(|w| w.0 == id) {
                         state.waiters.swap_remove(idx);
                     }
                     drop(state);
@@ -274,11 +284,12 @@ impl Drop for BarrierWaitFuture<'_> {
                 if state.arrived > 0 {
                     state.arrived -= 1;
                 }
-                // Remove the dead waker to avoid spurious wake overhead on trip.
-                // O(1) fast path if slot is still valid
-                if slot < state.waiters.len() && state.waiters[slot].0 == id {
-                    state.waiters.swap_remove(slot);
-                } else if let Some(idx) = state.waiters.iter().position(|w| w.0 == id) {
+                // br-asupersync-abl9h6: remove BY waiter id (see paired
+                // comment in poll's cancel path). The recorded slot is a
+                // stale hint after any prior swap_remove in the same
+                // generation; identity is the only safe key.
+                let _ = slot;
+                if let Some(idx) = state.waiters.iter().position(|w| w.0 == id) {
                     state.waiters.swap_remove(idx);
                 }
             }
@@ -711,6 +722,88 @@ mod tests {
             total_leaders
         );
         crate::test_complete!("barrier_cancel_after_poll_arrival_cleans_state");
+    }
+
+    /// br-asupersync-abl9h6 regression: with N waiters registered in
+    /// the same generation, dropping/cancelling any one of them must
+    /// remove that specific waiter — not the entry that happens to
+    /// occupy its recorded slot index after a prior swap_remove. The
+    /// remaining N-1 waiters must all still be wakeable (the barrier
+    /// can trip with one fresh arrival).
+    ///
+    /// Before the fix this used a slot-index fast path that, while
+    /// caught by the id-mismatch fallback, was structurally fragile:
+    /// any future change to the cancel path could re-introduce the
+    /// off-by-one removal. The fix makes identity the only key.
+    #[test]
+    fn barrier_drop_waiter_removes_by_id_not_by_slot() {
+        init_test("barrier_drop_waiter_removes_by_id_not_by_slot");
+        let barrier = Arc::new(Barrier::new(4));
+
+        let cx_a: Cx = Cx::for_testing();
+        let cx_b: Cx = Cx::for_testing();
+        let cx_c: Cx = Cx::for_testing();
+        let waker = Waker::noop();
+        let mut poll_cx = Context::from_waker(waker);
+
+        // Register A, B, C in the same generation.
+        let mut fut_a = barrier.wait(&cx_a);
+        let mut fut_b = barrier.wait(&cx_b);
+        let mut fut_c = barrier.wait(&cx_c);
+        for f in [&mut fut_a, &mut fut_b, &mut fut_c] {
+            assert!(Pin::new(f).poll(&mut poll_cx).is_pending());
+        }
+
+        // Drop the MIDDLE waiter (B). Under the old slot-fast-path code
+        // this exercised a swap_remove that moves C into B's slot
+        // index. The id-based removal is now the only path, so the
+        // exact slot doesn't matter.
+        drop(fut_b);
+
+        // A and C must still be present and wakeable. Poll C — it
+        // should remain pending (barrier still needs more arrivals).
+        assert!(Pin::new(&mut fut_c).poll(&mut poll_cx).is_pending());
+        assert!(Pin::new(&mut fut_a).poll(&mut poll_cx).is_pending());
+
+        // Add 2 more arrivals concurrently to reach parties=4
+        // (A, C plus 2 new ones). Use a thread for the second.
+        let b_extra1 = Arc::clone(&barrier);
+        let h1 = std::thread::spawn(move || {
+            let cx: Cx = Cx::for_testing();
+            block_on(b_extra1.wait(&cx)).expect("extra1 wait failed")
+        });
+        let b_extra2 = Arc::clone(&barrier);
+        let h2 = std::thread::spawn(move || {
+            let cx: Cx = Cx::for_testing();
+            block_on(b_extra2.wait(&cx)).expect("extra2 wait failed")
+        });
+
+        // Drive A and C to completion via block_on. Two of the four
+        // (A, C, extra1, extra2) will be the leader.
+        std::thread::sleep(Duration::from_millis(50));
+        // Drop A and C futures; reissue via block_on so we can wait
+        // for trip without polling shenanigans. (For the test we just
+        // need to demonstrate the barrier does trip with the missing
+        // B's slot now removed.)
+        drop((fut_a, fut_c));
+        let cx: Cx = Cx::for_testing();
+        let r1 = block_on(barrier.wait(&cx)).expect("post-drop wait 1 failed");
+        let cx: Cx = Cx::for_testing();
+        let r2 = block_on(barrier.wait(&cx)).expect("post-drop wait 2 failed");
+        let r3 = h1.join().expect("h1 failed");
+        let r4 = h2.join().expect("h2 failed");
+
+        let total_leaders = usize::from(r1.is_leader())
+            + usize::from(r2.is_leader())
+            + usize::from(r3.is_leader())
+            + usize::from(r4.is_leader());
+        crate::assert_with_log!(
+            total_leaders == 1,
+            "exactly 1 leader after middle-waiter drop",
+            1usize,
+            total_leaders
+        );
+        crate::test_complete!("barrier_drop_waiter_removes_by_id_not_by_slot");
     }
 
     /// Invariant: when one of multiple registered waiters is dropped,

@@ -72,6 +72,16 @@ struct WaiterEntry {
     notified: bool,
     /// Generation at which this waiter was registered.
     generation: u64,
+    /// br-asupersync-bu4r7l: per-slot epoch incremented on every reuse
+    /// of this slot's index by `insert()`. A `Notified` future records
+    /// the epoch at registration time and re-verifies it on `Drop` so
+    /// it does not operate on a slot that was freed and reused by a
+    /// different waiter in the meantime. Without this, a reused slot
+    /// whose new occupant happens to be `notified=true` would be
+    /// misidentified as the original waiter's notification, leading
+    /// either to a duplicate baton-pass or, in the worst case, the
+    /// new occupant's wakeup being silently consumed.
+    slot_epoch: u64,
 }
 
 impl WaiterSlab {
@@ -86,21 +96,38 @@ impl WaiterSlab {
     }
 
     /// Insert a waiter entry, reusing a free slot if available.
+    ///
+    /// Returns `(slot_index, slot_epoch)`. The caller (a `Notified`
+    /// future) MUST store both halves and verify the epoch matches
+    /// before operating on the slot in its `Drop` impl
+    /// (br-asupersync-bu4r7l: protects against slot reuse race).
     #[inline]
-    fn insert(&mut self, entry: WaiterEntry) -> usize {
+    fn insert(&mut self, mut entry: WaiterEntry) -> (usize, u64) {
         let is_active = entry.waker.is_some();
-        let index = loop {
+        let (index, slot_epoch) = loop {
             if let Some(idx) = self.free_slots.pop() {
                 if idx < self.entries.len() {
+                    // br-asupersync-bu4r7l: bump the slot's epoch BEFORE
+                    // overwriting so any prior `Notified` that still
+                    // holds the old (idx, prev_epoch) tuple sees a
+                    // mismatch on its Drop and skips the now-foreign
+                    // entry. wrapping_add tolerates the (astronomically
+                    // unlikely) wrap-around without panic.
+                    let prev_epoch = self.entries[idx].slot_epoch;
+                    let new_epoch = prev_epoch.wrapping_add(1);
+                    entry.slot_epoch = new_epoch;
                     self.entries[idx] = entry;
-                    break idx;
+                    break (idx, new_epoch);
                 }
                 // idx >= len means this slot was truncated away during a previous shrink.
                 // Ignore it and keep popping.
             } else {
                 let idx = self.entries.len();
+                // Fresh slot starts at epoch 0; never reused before so
+                // no prior Notified can hold a tuple for this index.
+                entry.slot_epoch = 0;
                 self.entries.push(entry);
-                break idx;
+                break (idx, 0);
             }
         };
         if is_active {
@@ -110,7 +137,7 @@ impl WaiterSlab {
                 self.scan_start = index;
             }
         }
-        index
+        (index, slot_epoch)
     }
 
     /// Remove a waiter entry by index, returning its slot to the free list.
@@ -351,7 +378,13 @@ enum NotifiedState {
 pub struct Notified<'a> {
     notify: &'a Notify,
     state: NotifiedState,
-    waiter_index: Option<usize>,
+    /// br-asupersync-bu4r7l: stored as `(index, slot_epoch)` so `Drop`
+    /// can verify the slot has not been freed and reused by a different
+    /// waiter between registration and cleanup. `slot_epoch` matches
+    /// the value `WaiterSlab::insert` returned at registration time;
+    /// any divergence means the slot now belongs to someone else and
+    /// must NOT be touched.
+    waiter_index: Option<(usize, u64)>,
     initial_generation: u64,
 }
 
@@ -428,12 +461,13 @@ impl Notified<'_> {
             return self.mark_done();
         }
 
-        let index = waiters.insert(WaiterEntry {
+        let (index, slot_epoch) = waiters.insert(WaiterEntry {
             waker: Some(cx.waker().clone()),
             notified: false,
             generation: observed_generation,
+            slot_epoch: 0, // overwritten by insert()
         });
-        self.waiter_index = Some(index);
+        self.waiter_index = Some((index, slot_epoch));
         self.state = NotifiedState::Waiting;
         drop(waiters);
 
@@ -446,7 +480,7 @@ impl Notified<'_> {
         let current_gen = self.notify.generation.load(Ordering::Acquire);
         let gen_changed = current_gen != self.initial_generation;
 
-        if let Some(index) = self.waiter_index {
+        if let Some((index, slot_epoch)) = self.waiter_index {
             let mut waiters = self.notify.waiters.lock();
 
             // Re-check generation under lock if it wasn't already changed
@@ -455,7 +489,17 @@ impl Notified<'_> {
                 new_gen != self.initial_generation
             };
 
-            if index < waiters.entries.len() {
+            // br-asupersync-bu4r7l: verify the slot still belongs to us
+            // before reading or removing. If the slot was freed and
+            // reused by a different waiter, the epoch will not match
+            // and we must abandon our recorded index without touching
+            // the foreign entry. Such an abandonment is treated as
+            // "this future is done" — the caller will see no spurious
+            // wakeup and the new occupant is left intact.
+            let slot_owned_by_us =
+                index < waiters.entries.len() && waiters.entries[index].slot_epoch == slot_epoch;
+
+            if slot_owned_by_us {
                 let entry_notified = waiters.entries[index].notified;
 
                 if is_gen_changed {
@@ -483,7 +527,12 @@ impl Notified<'_> {
                     }
                 }
             } else {
-                unreachable!("waiter entry missing before removal");
+                // Slot was reused by a different waiter — our entry is
+                // gone. Treat as completed (we cannot prove our wakeup
+                // didn't fire and were processed by some other path).
+                self.waiter_index = None;
+                drop(waiters);
+                return self.mark_done();
             }
         } else if gen_changed {
             return self.mark_done();
@@ -509,17 +558,33 @@ impl Future for Notified<'_> {
 impl Drop for Notified<'_> {
     fn drop(&mut self) {
         if self.state == NotifiedState::Waiting {
-            if let Some(index) = self.waiter_index.take() {
+            if let Some((index, slot_epoch)) = self.waiter_index.take() {
                 let mut waiters = self.notify.waiters.lock();
                 let generation_advanced =
                     self.notify.generation.load(Ordering::Acquire) != self.initial_generation;
 
-                let (was_notified, notified_generation) = if index < waiters.entries.len() {
-                    let entry = &waiters.entries[index];
-                    (entry.notified, entry.generation)
-                } else {
-                    (false, self.initial_generation)
-                };
+                // br-asupersync-bu4r7l: verify the slot still belongs to
+                // us BEFORE reading or removing. Without this check, a
+                // slot that was freed and reused by a later waiter would
+                // be misidentified — at best we'd mis-pass a baton, at
+                // worst we'd remove() the foreign entry and silently
+                // consume the new waiter's wakeup.
+                let slot_owned_by_us = index < waiters.entries.len()
+                    && waiters.entries[index].slot_epoch == slot_epoch;
+
+                if !slot_owned_by_us {
+                    // The slot has been reclaimed by a later insert.
+                    // Our waiter entry no longer exists; there is
+                    // nothing for us to remove and no baton for us to
+                    // pass. Whatever notification was destined for our
+                    // original entry has already been processed (or
+                    // re-stored by the previous remover). Drop quietly.
+                    return;
+                }
+
+                let entry = &waiters.entries[index];
+                let was_notified = entry.notified;
+                let notified_generation = entry.generation;
 
                 waiters.remove(index);
 
@@ -1404,6 +1469,76 @@ mod tests {
         );
 
         crate::test_complete!("notify_one_baton_restored_when_no_post_broadcast_waiter_exists_yet");
+    }
+
+    /// br-asupersync-bu4r7l regression: when a slot is freed and reused
+    /// by a different waiter, an old `Notified::drop` that still holds
+    /// the recorded slot index must NOT operate on the slot. Without
+    /// the slot_epoch verification, the stale drop would either pass
+    /// a baton through someone else's entry or, worse, `remove()` the
+    /// new occupant — silently consuming their wakeup.
+    ///
+    /// We construct the race deterministically by registering W1 at
+    /// some slot, removing it, and then immediately re-registering W2
+    /// (which gets the same slot via free_slots). We then verify that
+    /// the slot_epoch differs and a hypothetical lingering reference
+    /// to W1's index would mismatch.
+    #[test]
+    fn notify_slot_epoch_protects_against_reuse_misidentification() {
+        init_test("notify_slot_epoch_protects_against_reuse_misidentification");
+        let notify = Notify::new();
+
+        // Register W1 — pin the future so its waiter index stays valid.
+        let mut fut_w1 = notify.notified();
+        assert!(poll_once(&mut fut_w1).is_pending());
+
+        // Capture W1's recorded (index, epoch) before drop.
+        let (w1_index, w1_epoch) = fut_w1
+            .waiter_index
+            .expect("W1 must have registered a slot index");
+
+        // Drop W1 — this frees the slot; insert may reuse it.
+        drop(fut_w1);
+
+        // Register W2 — its insert() should pop the same slot from
+        // free_slots and bump the epoch.
+        let mut fut_w2 = notify.notified();
+        assert!(poll_once(&mut fut_w2).is_pending());
+
+        let (w2_index, w2_epoch) = fut_w2
+            .waiter_index
+            .expect("W2 must have registered a slot index");
+
+        // Slot reuse confirmed.
+        crate::assert_with_log!(
+            w1_index == w2_index,
+            "slot index reused",
+            true,
+            w1_index == w2_index
+        );
+        // Epoch must have advanced. This is the key invariant: a stale
+        // drop holding (index=w1_index, slot_epoch=w1_epoch) would now
+        // mismatch against entries[w1_index].slot_epoch == w2_epoch
+        // and skip the foreign entry.
+        crate::assert_with_log!(
+            w1_epoch != w2_epoch,
+            "slot_epoch advanced on reuse",
+            true,
+            w1_epoch != w2_epoch
+        );
+
+        // Sanity: notify_one wakes W2 — verify W2 isn't disturbed by
+        // any latent W1 state.
+        notify.notify_one();
+        let ready = poll_once(&mut fut_w2).is_ready();
+        crate::assert_with_log!(
+            ready,
+            "W2 receives notification cleanly after slot reuse",
+            true,
+            ready
+        );
+
+        crate::test_complete!("notify_slot_epoch_protects_against_reuse_misidentification");
     }
 
     /// Invariant: `notify_waiters()` with no waiters must NOT create a
