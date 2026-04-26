@@ -2208,3 +2208,11 @@ path = "fuzz_targets/plan_latency_curves.rs"
 test = false
 doc = false
 bench = false
+
+# Fuzz coverage gap: plan/certificate.rs PlanHash determinism
+[[bin]]
+name = "plan_certificate_hash"
+path = "fuzz_targets/plan_certificate_hash.rs"
+test = false
+doc = false
+bench = false
