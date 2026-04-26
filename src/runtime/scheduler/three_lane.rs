@@ -806,6 +806,47 @@ pub struct ThreeLaneScheduler {
     global_queue_limit: usize,
 }
 
+/// Discriminator for [`ThreeLaneScheduler::schedule_internal`]
+/// (br-asupersync-unay5q).
+///
+/// `spawn` and `wake` share an identical scheduling body; the only
+/// caller-visible divergence is the diagnostic strings emitted when a
+/// `!Send` task fails to route. This enum carries those strings so a
+/// single hot-path implementation services both entry points.
+#[derive(Copy, Clone)]
+enum ScheduleIntent {
+    Spawn,
+    Wake,
+}
+
+impl ScheduleIntent {
+    /// Message for the `debug_assert!(false, ...)` panic in debug builds when
+    /// a `!Send` task cannot be routed. Matches the strings the original
+    /// split `spawn` / `wake` functions emitted byte-for-byte.
+    fn local_route_failure_assert(self, task: TaskId) -> String {
+        match self {
+            Self::Spawn => format!(
+                "Attempted to spawn local task {task:?} from non-owner thread or outside worker context"
+            ),
+            Self::Wake => format!(
+                "Attempted to wake local task {task:?} via scheduler from non-owner thread. Use Waker instead."
+            ),
+        }
+    }
+
+    /// Message for the `error!(...)` log line in release builds when a
+    /// `!Send` task cannot be routed. Matches the original `spawn` / `wake`
+    /// strings byte-for-byte.
+    fn local_route_failure_log(self) -> &'static str {
+        match self {
+            Self::Spawn => {
+                "spawn: local task cannot be scheduled from non-owner thread, spawn skipped"
+            }
+            Self::Wake => "wake: local task cannot be woken from non-owner thread, wake skipped",
+        }
+    }
+}
+
 impl ThreeLaneScheduler {
     #[inline]
     fn initial_local_scheduler_capacity(worker_count: usize) -> usize {
@@ -1274,7 +1315,38 @@ impl ThreeLaneScheduler {
     /// If the task is local (`!Send`), it attempts to schedule it on the current
     /// thread if it matches the owner. If called from a non-owner thread, it
     /// attempts to route the task to the pinned worker's `local_ready` queue.
+    #[inline]
     pub fn spawn(&self, task: TaskId, priority: u8) {
+        self.schedule_internal(task, priority, ScheduleIntent::Spawn);
+    }
+
+    /// Wakes a task by injecting it into the ready lane.
+    ///
+    /// Fast path: when called on a worker thread, pushes to the worker's
+    /// `LocalQueue` (O(1)) or `PriorityScheduler` instead of the global
+    /// injector. For cancel wakeups, use `inject_cancel` instead.
+    ///
+    /// # Local Tasks
+    ///
+    /// If the task is local (`!Send`), it attempts to schedule it on the current
+    /// thread if it matches the owner. If called from a non-owner thread, it
+    /// attempts to route the task to the pinned worker's `local_ready` queue.
+    #[inline]
+    pub fn wake(&self, task: TaskId, priority: u8) {
+        self.schedule_internal(task, priority, ScheduleIntent::Wake);
+    }
+
+    /// Common scheduling path for `spawn` and `wake` (br-asupersync-unay5q).
+    ///
+    /// Body is byte-identical between the two callers; the only divergence is
+    /// the diagnostic strings emitted when a `!Send` task cannot be routed
+    /// (different verbs, plus the wake-path's "use Waker instead" hint).
+    /// Those strings come from [`ScheduleIntent`] so a single body services
+    /// both entry points — keeping the hot scheduling path in one I-cache
+    /// line and removing the maintenance hazard that any future
+    /// cancel-vs-spawn divergence would otherwise have to be implemented
+    /// twice.
+    fn schedule_internal(&self, task: TaskId, priority: u8, intent: ScheduleIntent) {
         // Dedup: check wake_state before scheduling anywhere.
         let (should_schedule, is_local, pinned_worker) = self.with_task_table_ref(|tt| {
             tt.task(task).map_or((true, false, None), |record| {
@@ -1304,7 +1376,7 @@ impl ThreeLaneScheduler {
                 return;
             }
 
-            // 2. Try routing to pinned worker (cross-thread spawn)
+            // 2. Try routing to pinned worker (cross-thread spawn / wake).
             if let Some(worker_id) = pinned_worker {
                 if let Some(queue) = self.local_ready.get(worker_id) {
                     queue.lock().push_back(task);
@@ -1313,86 +1385,13 @@ impl ThreeLaneScheduler {
                 }
             }
 
-            // 3. Failure: Cannot route local task
-            debug_assert!(
-                false,
-                "Attempted to spawn local task {task:?} from non-owner thread or outside worker context"
-            );
-            error!(
-                ?task,
-                "spawn: local task cannot be scheduled from non-owner thread, spawn skipped"
-            );
-            return;
-        }
-
-        // Fast path 1 & 2: Try local queue (O(1)) then local scheduler (O(log n)) via TLS.
-        if schedule_on_current_local(task, priority) {
-            return;
-        }
-
-        // Slow path: global injector (off worker thread).
-        self.inject_global_ready_checked(task, priority);
-    }
-
-    /// Wakes a task by injecting it into the ready lane.
-    ///
-    /// Fast path: when called on a worker thread, pushes to the worker's
-    /// `LocalQueue` (O(1)) or `PriorityScheduler` instead of the global
-    /// injector. For cancel wakeups, use `inject_cancel` instead.
-    ///
-    /// # Local Tasks
-    ///
-    /// If the task is local (`!Send`), it attempts to schedule it on the current
-    /// thread if it matches the owner. If called from a non-owner thread, it
-    /// attempts to route the task to the pinned worker's `local_ready` queue.
-    pub fn wake(&self, task: TaskId, priority: u8) {
-        // Dedup check.
-        let (should_schedule, is_local, pinned_worker) = self.with_task_table_ref(|tt| {
-            tt.task(task).map_or((true, false, None), |record| {
-                (
-                    record.wake_state.notify(),
-                    record.is_local(),
-                    record.pinned_worker(),
-                )
-            })
-        });
-
-        if !should_schedule {
-            return;
-        }
-
-        if is_local {
-            let current_worker = current_worker_id();
-            let is_pinned_here = match (pinned_worker, current_worker) {
-                (Some(pw), Some(cw)) => pw == cw,
-                (None, Some(_)) => true,
-                _ => false,
-            };
-
-            // 1. Try scheduling on current thread (fastest, no locks if TLS setup)
-            // ONLY if this thread is the owner.
-            if is_pinned_here && schedule_local_task(task) {
-                return;
-            }
-
-            // 2. Try routing to pinned worker (cross-thread wake)
-            if let Some(worker_id) = pinned_worker {
-                if let Some(queue) = self.local_ready.get(worker_id) {
-                    queue.lock().push_back(task);
-                    self.coordinator.wake_worker(worker_id);
-                    return;
-                }
-            }
-
-            // 3. Failure: Cannot route local task
-            debug_assert!(
-                false,
-                "Attempted to wake local task {task:?} via scheduler from non-owner thread. Use Waker instead."
-            );
-            error!(
-                ?task,
-                "wake: local task cannot be woken from non-owner thread, wake skipped"
-            );
+            // 3. Failure: Cannot route local task. Diagnostic strings vary by
+            //    intent (spawn vs wake) — see `ScheduleIntent` for the exact
+            //    text the original split functions emitted.
+            let assert_msg = intent.local_route_failure_assert(task);
+            let error_msg = intent.local_route_failure_log();
+            debug_assert!(false, "{}", assert_msg);
+            error!(?task, "{}", error_msg);
             return;
         }
 
@@ -3296,29 +3295,35 @@ impl ThreeLaneWorker {
             }
         }
 
-        // Emit simple evidence when the scheduling suggestion changes.
-        if suggestion != self.cached_suggestion {
-            if let Some(ref sink) = self.evidence_sink {
-                let suggestion_str = match suggestion {
-                    SchedulingSuggestion::MeetDeadlines => "meet_deadlines",
-                    SchedulingSuggestion::DrainObligations => "drain_obligations",
-                    SchedulingSuggestion::DrainRegions => "drain_regions",
-                    SchedulingSuggestion::NoPreference => "no_preference",
-                };
-                let cancel_depth = snapshot.cancel_requested_tasks
-                    + snapshot.cancelling_tasks
-                    + snapshot.finalizing_tasks;
-                crate::evidence_sink::emit_scheduler_evidence(
-                    sink.as_ref(),
-                    suggestion_str,
-                    cancel_depth,
-                    snapshot.draining_regions,
-                    snapshot.ready_queue_depth,
-                    self.decision_contract
-                        .as_ref()
-                        .is_some_and(|_| self.decision_posterior.is_some()),
-                );
-            }
+        // Emit one evidence record per governor invocation per
+        // /reality-check-for-project (br-asupersync-c4r700). Every governor
+        // call IS a decision — including "keep the same suggestion" — so
+        // gating emission on `suggestion != self.cached_suggestion` masked
+        // a fraction of decisions and made evidence collection
+        // non-deterministic. The outer `if let Some(ref sink)` keeps the
+        // prod-default (sink unconfigured) at zero cost, and `cached_suggestion`
+        // is still consulted for the cache-hit fast-return at the top of
+        // `governor_suggest` — only the change-detection guard is removed.
+        if let Some(ref sink) = self.evidence_sink {
+            let suggestion_str = match suggestion {
+                SchedulingSuggestion::MeetDeadlines => "meet_deadlines",
+                SchedulingSuggestion::DrainObligations => "drain_obligations",
+                SchedulingSuggestion::DrainRegions => "drain_regions",
+                SchedulingSuggestion::NoPreference => "no_preference",
+            };
+            let cancel_depth = snapshot.cancel_requested_tasks
+                + snapshot.cancelling_tasks
+                + snapshot.finalizing_tasks;
+            crate::evidence_sink::emit_scheduler_evidence(
+                sink.as_ref(),
+                suggestion_str,
+                cancel_depth,
+                snapshot.draining_regions,
+                snapshot.ready_queue_depth,
+                self.decision_contract
+                    .as_ref()
+                    .is_some_and(|_| self.decision_posterior.is_some()),
+            );
         }
 
         self.cached_suggestion = suggestion;
