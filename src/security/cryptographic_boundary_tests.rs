@@ -366,7 +366,7 @@ mod tests {
             );
 
             // Also test via SecurityContext
-            let ctx = SecurityContext::new(key);
+            let ctx = SecurityContext::new(key.clone());
             let mut tampered_auth_symbol =
                 AuthenticatedSymbol::from_parts(symbol.clone(), tampered_tag);
 
