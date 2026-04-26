@@ -2567,14 +2567,41 @@ impl RuntimeState {
     ///
     /// This checks if the owning region can advance its state.
     /// Returns the task's waiters that should be woken.
+    ///
+    /// br-asupersync-ndhjfj: the task's `waiters` are taken in a SINGLE
+    /// `update_task` critical section as the very first operation. The
+    /// previous structure read task properties in one immutable-borrow
+    /// scope and then re-acquired a mutable borrow later to take the
+    /// waiters; while Rust's `&mut self` exclusion makes runtime
+    /// races impossible today, the multi-step pattern was fragile
+    /// against future refactors that might split `task_completed` into
+    /// re-entrant paths. Taking the waiters atomically with the
+    /// existence check forecloses that hazard. The remaining
+    /// validation, record_task_complete, and cleanup operations read
+    /// task properties (id, owner, state, created_at) that are NOT
+    /// mutated by the waiter-take, so the ordering change is
+    /// behaviour-preserving.
     pub fn task_completed(&mut self, task_id: TaskId) -> SmallVec<[TaskId; 4]> {
+        // br-asupersync-ndhjfj: atomic existence-check + waiter-take.
+        // If the task was already removed (or never existed), return
+        // an empty waiter set with the same early-return semantics
+        // the prior implementation provided.
+        let Some(waiters) =
+            self.update_task(task_id, |task| std::mem::take(&mut task.waiters))
+        else {
+            trace!(
+                task_id = ?task_id,
+                "task_completed called for unknown task"
+            );
+            return SmallVec::new();
+        };
+
         let (owner, completion, outcome_kind) = {
             let Some(task) = self.task(task_id) else {
-                trace!(
-                    task_id = ?task_id,
-                    "task_completed called for unknown task"
-                );
-                return SmallVec::new();
+                // Defensive: if the task vanished between the
+                // update_task above and here, return the waiters we
+                // already took rather than dropping them.
+                return waiters;
             };
 
             // Validate task completion protocol transition
@@ -2621,11 +2648,9 @@ impl RuntimeState {
             let completion = TaskCompletionKind::from_state(&task.state);
             (owner, completion, outcome_kind)
         };
-        // Take waiters by value (avoiding clone) since the task is about to be removed.
-        let waiters = self
-            .task_mut(task_id)
-            .map(|task| std::mem::take(&mut task.waiters))
-            .unwrap_or_default();
+        // br-asupersync-ndhjfj: `waiters` was already taken atomically
+        // at the top of the function under `update_task`. The previous
+        // separate `task_mut` re-acquisition has been removed.
         let waiter_count = waiters.len();
         #[cfg(not(feature = "tracing-integration"))]
         let _ = (outcome_kind, waiter_count);
@@ -3042,6 +3067,32 @@ impl RuntimeState {
 
         // All finalizers must be done
         if !region.finalizers_empty() {
+            return false;
+        }
+
+        // br-asupersync-1erlwe: also wait for any active async finalizer
+        // tasks to be fully cleared from `active_async_finalizers`. The
+        // queue check above (`finalizers_empty`) only verifies that no
+        // additional finalizers are pending; it does NOT cover the
+        // window between `task_completed` removing the running async
+        // finalizer task and the next `advance_region_state` cleanup
+        // pass. Without this check, a concurrent `advance_region_state`
+        // could observe `finalizers_empty == true` and transition the
+        // region to Closed BEFORE the async-finalizer barrier is
+        // observably released — producing a `region.closed` trace
+        // event that precedes the corresponding `finalizer.completed`
+        // event in the timeline. The `active_async_finalizers` map is
+        // the single authoritative source of truth for "is an async
+        // finalizer still in flight"; folding it into the close-
+        // readiness predicate keeps trace events causally ordered.
+        //
+        // The Finalizing branch in `advance_region_state` (around
+        // line 3190) already short-circuits on this same condition;
+        // mirroring it here keeps the two codepaths' invariants
+        // aligned so external `can_region_complete_close` consumers
+        // (oracles, debug introspection) see the same readiness
+        // verdict the state machine itself does.
+        if self.active_async_finalizers.contains_key(&region_id) {
             return false;
         }
 
@@ -5626,6 +5677,115 @@ mod tests {
         let can_close = state.can_region_complete_close(region);
         crate::assert_with_log!(can_close, "can close after task completes", true, can_close);
         crate::test_complete!("can_region_complete_close_checks_running_finalizer_tasks");
+    }
+
+    /// br-asupersync-1erlwe: `can_region_complete_close` must reject
+    /// when an async finalizer is still active in
+    /// `active_async_finalizers`, even if the region's finalizer
+    /// queue is otherwise empty. Prior to the fix the predicate
+    /// ignored the active-async map and could return `true` between
+    /// the moment the finalizer task was popped from the queue and
+    /// the moment its `task_completed` cleanup cleared the barrier —
+    /// permitting `region.closed` events to precede their
+    /// corresponding `finalizer.completed` in traces.
+    #[test]
+    fn can_region_complete_close_waits_for_active_async_finalizers() {
+        init_test("can_region_complete_close_waits_for_active_async_finalizers");
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+
+        let region_record = state.regions.get_mut(region.arena_index()).expect("region");
+        region_record.begin_close(None);
+        region_record.begin_finalize();
+
+        // The region has no queued finalizers and no tasks/obligations
+        // — without the active-async barrier, can_region_complete_close
+        // would now return true. Inject a synthetic active async
+        // finalizer entry to simulate the window between
+        // `run_sync_finalizers_tracked` returning an Async finalizer
+        // and `task_completed` clearing the barrier.
+        let finalizer_task = insert_task(&mut state, region);
+        state
+            .active_async_finalizers
+            .insert(region, finalizer_task);
+
+        let can_close = state.can_region_complete_close(region);
+        crate::assert_with_log!(
+            !can_close,
+            "must wait for active_async_finalizers to drain",
+            false,
+            can_close
+        );
+
+        // Clear the barrier (simulates task_completed cleanup), then
+        // also remove the synthetic task from the region (mirroring
+        // the existing close-readiness preconditions).
+        state.active_async_finalizers.remove(&region);
+        let region_record = state.regions.get(region.arena_index()).expect("region");
+        region_record.remove_task(finalizer_task);
+
+        let can_close = state.can_region_complete_close(region);
+        crate::assert_with_log!(
+            can_close,
+            "can close once active_async_finalizers drains",
+            true,
+            can_close
+        );
+
+        crate::test_complete!("can_region_complete_close_waits_for_active_async_finalizers");
+    }
+
+    /// br-asupersync-ndhjfj: a sequential second `task_completed` call
+    /// on the same TaskId must return an empty waiter set. The
+    /// consolidated atomic-take pattern preserves this idempotency
+    /// while removing the multi-step read-then-write structure that
+    /// would have been fragile under any future refactor introducing
+    /// shared-borrow re-entry.
+    #[test]
+    fn task_completed_is_idempotent_under_repeated_calls() {
+        init_test("task_completed_is_idempotent_under_repeated_calls");
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+        let task_id = insert_task(&mut state, region);
+
+        // Add a fake waiter so the first call has something to return.
+        let waiter_id = insert_task(&mut state, region);
+        state
+            .task_mut(task_id)
+            .expect("task")
+            .waiters
+            .push(waiter_id);
+        // Mark the task terminal so task_completed succeeds.
+        state
+            .task_mut(task_id)
+            .expect("task")
+            .complete(Outcome::Ok(()));
+
+        let waiters_first = state.task_completed(task_id);
+        crate::assert_with_log!(
+            !waiters_first.is_empty(),
+            "first task_completed returns the registered waiter",
+            true,
+            !waiters_first.is_empty()
+        );
+        crate::assert_with_log!(
+            waiters_first.len() == 1,
+            "first call returns exactly one waiter",
+            true,
+            waiters_first.len() == 1
+        );
+
+        // Second call on the same task_id: task is gone (removed by
+        // first call), early-return with empty waiters.
+        let waiters_second = state.task_completed(task_id);
+        crate::assert_with_log!(
+            waiters_second.is_empty(),
+            "second task_completed returns empty",
+            true,
+            waiters_second.is_empty()
+        );
+
+        crate::test_complete!("task_completed_is_idempotent_under_repeated_calls");
     }
 
     #[test]
