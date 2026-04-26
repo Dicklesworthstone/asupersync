@@ -24,7 +24,49 @@ use crate::record::{
 };
 use crate::types::{ObligationId, RegionId, TaskId, Time};
 use crate::util::ArenaIndex;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+/// Error returned when a fallible ledger transition arrives after region finalization.
+///
+/// br-asupersync-qyf37e: this powers the fallible
+/// [`ObligationLedger::try_commit`] / [`ObligationLedger::try_abort`]
+/// public surface when a token arrives AFTER the owning region has
+/// been marked finalized via
+/// [`ObligationLedger::mark_region_finalized`]. The infallible
+/// `commit` / `abort` methods retain their existing
+/// invariant-violation panic shape; the fallible variants exist for
+/// callsites (Drop impls, late-arrival handlers) that legitimately
+/// race with region finalization and prefer a `Result` return.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LedgerError {
+    /// The owning region was finalized before this commit/abort
+    /// arrived. The structured-concurrency contract forbids
+    /// obligation transitions after region close — auditors
+    /// observing an event with timestamp > region.closed_at
+    /// interpret it as a phantom transition. Operators should
+    /// route the late-arrival through Drop-time aborts before the
+    /// region closes.
+    RegionFinalized {
+        /// The owning region that was already finalized when the call arrived.
+        region: RegionId,
+        /// The obligation whose token was presented after finalize.
+        obligation: ObligationId,
+    },
+}
+
+impl std::fmt::Display for LedgerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RegionFinalized { region, obligation } => write!(
+                f,
+                "obligation {obligation:?} cannot transition: owning region {region:?} \
+                 was already finalized (br-asupersync-qyf37e)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for LedgerError {}
 use std::sync::Arc;
 
 /// A linear token representing a live obligation.
@@ -141,6 +183,14 @@ pub struct ObligationLedger {
     generation: u32,
     /// Running statistics.
     stats: LedgerStats,
+    /// br-asupersync-qyf37e: regions that have been marked
+    /// finalized via [`Self::mark_region_finalized`]. Tokens whose
+    /// owning region is in this set are rejected by the fallible
+    /// [`Self::try_commit`] / [`Self::try_abort`] surface — late
+    /// arrival from a Drop impl or detached handler.
+    /// `BTreeSet<RegionId>` keeps iteration deterministic for the
+    /// audit/snapshot paths.
+    finalized_regions: BTreeSet<RegionId>,
 }
 
 impl Default for ObligationLedger {
@@ -199,7 +249,64 @@ impl ObligationLedger {
             next_index: 0,
             generation: 0,
             stats: LedgerStats::default(),
+            finalized_regions: BTreeSet::new(),
         }
+    }
+
+    /// br-asupersync-qyf37e: marks `region` as finalized so that
+    /// subsequent calls to [`Self::try_commit`] / [`Self::try_abort`]
+    /// for tokens whose owning region matches return
+    /// [`LedgerError::RegionFinalized`] instead of mutating ledger
+    /// state. Idempotent.
+    ///
+    /// The region-close path (the runtime's structured-concurrency
+    /// finalize phase) calls this exactly once per region after
+    /// the region's drain has completed. Tokens captured across the
+    /// region boundary (e.g. in a Drop impl outside the scope) that
+    /// arrive after this point are rejected with a clear error
+    /// instead of silently mutating an already-finalized region's
+    /// audit trail.
+    pub fn mark_region_finalized(&mut self, region: RegionId) {
+        self.finalized_regions.insert(region);
+    }
+
+    /// Returns `true` if `region` has been marked finalized via
+    /// [`Self::mark_region_finalized`].
+    #[must_use]
+    pub fn is_region_finalized(&self, region: RegionId) -> bool {
+        self.finalized_regions.contains(&region)
+    }
+
+    /// br-asupersync-qyf37e: fallible variant of [`Self::commit`]
+    /// that returns [`LedgerError::RegionFinalized`] if the token's
+    /// owning region was already marked finalized via
+    /// [`Self::mark_region_finalized`]. Use this from Drop impls or
+    /// detached handlers that may race with region close.
+    pub fn try_commit(&mut self, token: ObligationToken, now: Time) -> Result<u64, LedgerError> {
+        if self.finalized_regions.contains(&token.region) {
+            return Err(LedgerError::RegionFinalized {
+                region: token.region,
+                obligation: token.id,
+            });
+        }
+        Ok(self.commit(token, now))
+    }
+
+    /// br-asupersync-qyf37e: fallible variant of [`Self::abort`].
+    /// See [`Self::try_commit`] for the contract.
+    pub fn try_abort(
+        &mut self,
+        token: ObligationToken,
+        now: Time,
+        reason: ObligationAbortReason,
+    ) -> Result<u64, LedgerError> {
+        if self.finalized_regions.contains(&token.region) {
+            return Err(LedgerError::RegionFinalized {
+                region: token.region,
+                obligation: token.id,
+            });
+        }
+        Ok(self.abort(token, now, reason))
     }
 
     /// Acquires a new obligation, returning a linear token.
@@ -2549,5 +2656,93 @@ mod tests {
         assert_eq!(ledger.stats().pending, 0);
 
         crate::test_complete!("metamorphic_conservation_acquired_equals_resolved_plus_pending");
+    }
+
+    /// br-asupersync-qyf37e: try_commit on a token whose region has
+    /// been marked finalized must return Err(LedgerError::RegionFinalized).
+    /// This pins the public surface that Drop impls / detached
+    /// handlers should use when racing region close.
+    #[test]
+    fn qyf37e_try_commit_after_region_finalized_returns_err() {
+        let mut ledger = ObligationLedger::new();
+        let region = make_region();
+        let task = TaskId::from_arena(ArenaIndex::new(1, 0));
+        let token = ledger.acquire(
+            ObligationKind::SendPermit,
+            task,
+            region,
+            Time::from_nanos(0),
+        );
+
+        // Mark the owning region finalized — the structured-concurrency
+        // finalize phase has completed and the obligation should not
+        // be allowed to transition.
+        ledger.mark_region_finalized(region);
+        assert!(ledger.is_region_finalized(region));
+
+        let obligation_id = token.id();
+        let err = ledger
+            .try_commit(token, Time::from_nanos(100))
+            .expect_err("late commit must be rejected after region finalize");
+
+        match err {
+            LedgerError::RegionFinalized {
+                region: r,
+                obligation: o,
+            } => {
+                assert_eq!(r, region);
+                assert_eq!(o, obligation_id);
+            }
+        }
+
+        // The obligation record is still pending (we did not mutate it).
+        assert_eq!(ledger.stats().pending, 1);
+        assert_eq!(ledger.stats().total_committed, 0);
+    }
+
+    /// br-asupersync-qyf37e: same shape for try_abort.
+    #[test]
+    fn qyf37e_try_abort_after_region_finalized_returns_err() {
+        let mut ledger = ObligationLedger::new();
+        let region = make_region();
+        let task = TaskId::from_arena(ArenaIndex::new(1, 0));
+        let token = ledger.acquire(
+            ObligationKind::SendPermit,
+            task,
+            region,
+            Time::from_nanos(0),
+        );
+        ledger.mark_region_finalized(region);
+
+        let err = ledger
+            .try_abort(token, Time::from_nanos(100), ObligationAbortReason::Cancel)
+            .expect_err("late abort must be rejected after region finalize");
+
+        match err {
+            LedgerError::RegionFinalized { .. } => {}
+        }
+        assert_eq!(ledger.stats().pending, 1);
+        assert_eq!(ledger.stats().total_aborted, 0);
+    }
+
+    /// br-asupersync-qyf37e: try_commit on a NOT-finalized region
+    /// passes through to commit and returns the duration.
+    #[test]
+    fn qyf37e_try_commit_before_region_finalized_succeeds() {
+        let mut ledger = ObligationLedger::new();
+        let region = make_region();
+        let task = TaskId::from_arena(ArenaIndex::new(1, 0));
+        let token = ledger.acquire(
+            ObligationKind::SendPermit,
+            task,
+            region,
+            Time::from_nanos(0),
+        );
+        let duration = ledger
+            .try_commit(token, Time::from_nanos(100))
+            .expect("commit before finalize must succeed");
+        assert_eq!(duration, 100);
+        assert_eq!(ledger.stats().total_committed, 1);
+        assert_eq!(ledger.stats().pending, 0);
     }
 }
