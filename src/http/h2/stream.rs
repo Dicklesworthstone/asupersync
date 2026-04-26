@@ -12,11 +12,42 @@ use crate::bytes::Bytes;
 
 use super::error::{ErrorCode, H2Error};
 use super::frame::PrioritySpec;
+use super::hpack::Header;
 use super::settings::DEFAULT_INITIAL_WINDOW_SIZE;
 
 /// Maximum accumulated header fragment size multiplier.
 /// Provides protection against DoS via unbounded CONTINUATION frames.
 const HEADER_FRAGMENT_MULTIPLIER: usize = 4;
+
+/// br-asupersync-of0l5f: validate that a TRAILER header block
+/// contains NO pseudo-header fields, per RFC 9113 §8.1
+/// ("Trailers MUST NOT include pseudo-header fields"). Callers
+/// dispatching a HEADERS frame must invoke this when
+/// [`Stream::would_be_trailer_block`] returns `true` — the pre-fix
+/// path accepted trailing HEADERS containing embedded `:status` /
+/// `:method` / `:path` etc., letting a malicious peer rewrite the
+/// request line AFTER the initial HEADERS already committed it
+/// (request-smuggling primitive when the gateway then forwards to
+/// an HTTP/1 backend that re-parses the trailer block as headers).
+///
+/// Pseudo-headers are HPACK fields whose name begins with `':'`.
+/// This validator is name-only — it does not inspect values, since
+/// the value is irrelevant once a `':'` prefix is observed.
+///
+/// Returns `Ok(())` if no pseudo-header is present, or
+/// `Err(&'static str)` with a stable error reason on first match.
+/// Callers should map the `Err` to a connection-level
+/// `H2Error::protocol(...)` (PROTOCOL_ERROR) and trigger GOAWAY,
+/// matching the `validate_h2_pseudo_headers` shape in
+/// `connection.rs`.
+pub fn reject_pseudo_headers_in_trailers(headers: &[Header]) -> Result<(), &'static str> {
+    for h in headers {
+        if h.name.starts_with(':') {
+            return Err("trailer block must not contain pseudo-header fields (RFC 9113 §8.1)");
+        }
+    }
+    Ok(())
+}
 
 /// Absolute maximum header fragment size (256 KB).
 /// caps the size even if max_header_list_size is very large (e.g. u32::MAX).
@@ -158,6 +189,15 @@ pub struct Stream {
     error_code: Option<ErrorCode>,
     /// Whether we've received END_HEADERS.
     headers_complete: bool,
+    /// br-asupersync-0eyf7t — Set to `true` AFTER the initial
+    /// HEADERS block for this stream has been successfully decoded
+    /// in `decode_headers`. Used to discriminate the trailers
+    /// section (any subsequent HEADERS-with-END_HEADERS for the
+    /// same stream) from the initial header block. Per RFC 9113
+    /// §8.1, trailers MUST NOT contain pseudo-header fields, so
+    /// the connection layer needs to surface this signal to the
+    /// pseudo-header validator.
+    initial_headers_decoded: bool,
     /// Accumulated header block fragments.
     header_fragments: Vec<Bytes>,
     /// Max header list size (used to bound fragment accumulation).
@@ -194,9 +234,28 @@ impl Stream {
             pending_data: VecDeque::new(),
             error_code: None,
             headers_complete: true,
+            initial_headers_decoded: false,
             header_fragments: Vec::new(),
             max_header_list_size,
         }
+    }
+
+    /// br-asupersync-0eyf7t — Returns `true` if the initial HEADERS
+    /// block for this stream has already been fully decoded. Used by
+    /// the connection layer to detect that a subsequent HEADERS
+    /// frame is the trailers section (which must not contain
+    /// pseudo-header fields per RFC 9113 §8.1).
+    #[must_use]
+    pub fn initial_headers_decoded(&self) -> bool {
+        self.initial_headers_decoded
+    }
+
+    /// br-asupersync-0eyf7t — Mark the initial HEADERS block as
+    /// fully decoded. Called from the connection layer's
+    /// `decode_headers` after a successful first-headers
+    /// validation. Idempotent.
+    pub fn mark_initial_headers_decoded(&mut self) {
+        self.initial_headers_decoded = true;
     }
 
     /// Create a new reserved (remote) stream.
@@ -303,12 +362,42 @@ impl Stream {
     }
 
     /// Consume from receive window (for receiving data).
-    pub fn consume_recv_window(&mut self, amount: u32) {
+    ///
+    /// br-asupersync-kaqld3: pre-fix the body did `clamp(MIN..MAX)`
+    /// and left the window stuck at `i32::MIN` whenever the peer
+    /// overshot the window total. Subsequent WINDOW_UPDATEs added to
+    /// a deeply-negative baseline and the window never recovered to
+    /// a positive value, **deadlocking the stream**. RFC 9113 §6.9.1
+    /// is unambiguous: "A receiver MUST treat the receipt of a
+    /// flow-controlled frame with length that would cause the
+    /// flow-control window to exceed the maximum size as a
+    /// connection error of type FLOW_CONTROL_ERROR."
+    ///
+    /// The fix returns `Result<(), H2Error>` so the caller (the
+    /// data-frame ingestion path at `process_data` ~line 590) can
+    /// propagate the error upward. Underflow below `i32::MIN` is
+    /// the surfaceable event because `recv_window` legitimately may
+    /// go negative after a `SETTINGS_INITIAL_WINDOW_SIZE` shrink
+    /// (RFC 9113 §6.9.2) — but only down to the representable bound,
+    /// not stuck-on-MIN. Anything that would underflow past `i32::MIN`
+    /// is a connection-level FLOW_CONTROL_ERROR.
+    pub fn consume_recv_window(&mut self, amount: u32) -> Result<(), H2Error> {
         let amount_i64 = i64::from(amount);
         let new_window = i64::from(self.recv_window) - amount_i64;
-        self.recv_window =
-            i32::try_from(new_window.clamp(i64::from(i32::MIN), i64::from(i32::MAX)))
-                .unwrap_or(i32::MIN);
+        if new_window < i64::from(i32::MIN) {
+            return Err(H2Error::connection(
+                ErrorCode::FlowControlError,
+                "receive flow-control window underflow \
+                 (peer overshot stream window total — RFC 9113 §6.9.1)",
+            ));
+        }
+        // Safe cast: bounds-checked above against i32::MIN, and
+        // amount is u32 so new_window cannot exceed i32::MAX.
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            self.recv_window = new_window as i32;
+        }
+        Ok(())
     }
 
     /// Check if the receive window is low enough to warrant an automatic WINDOW_UPDATE.
@@ -474,6 +563,27 @@ impl Stream {
         Ok(())
     }
 
+    /// br-asupersync-of0l5f: returns `true` if the next HEADERS
+    /// frame on this stream would be a TRAILER block per RFC 9113
+    /// §8.1 — i.e. the initial header block has already been fully
+    /// received (`headers_complete == true`) and the stream is in a
+    /// state that still admits HEADERS (Open / HalfClosedLocal).
+    ///
+    /// Callers (e.g. the `connection.rs` HEADERS dispatch) should
+    /// query this BEFORE invoking [`Self::recv_headers`] so the
+    /// decoded header block can be passed through
+    /// [`reject_pseudo_headers_in_trailers`] — RFC 9113 §8.1
+    /// requires that "Trailers MUST NOT include pseudo-header
+    /// fields". The pre-fix code path accepted trailing HEADERS
+    /// without rejecting embedded `:status` / `:method` / `:path`
+    /// pseudo-headers, letting an attacker rewrite the request line
+    /// AFTER the initial HEADERS already committed it.
+    #[must_use]
+    pub fn would_be_trailer_block(&self) -> bool {
+        self.headers_complete
+            && matches!(self.state, StreamState::Open | StreamState::HalfClosedLocal)
+    }
+
     /// Process CONTINUATION frame.
     pub fn recv_continuation(
         &mut self,
@@ -587,7 +697,13 @@ impl Stream {
             ));
         }
 
-        self.consume_recv_window(len);
+        // br-asupersync-kaqld3: propagate FLOW_CONTROL_ERROR if the
+        // window underflows below i32::MIN. The check at line 582
+        // guards against the common overshoot, but a SETTINGS shrink
+        // mid-flight could still drive the window very negative; the
+        // arithmetic-bound check inside consume_recv_window is the
+        // last line of defence.
+        self.consume_recv_window(len)?;
 
         if end_stream {
             match self.state {
@@ -2558,5 +2674,87 @@ mod tests {
         store.get_mut(id).unwrap().consume_send_window(100);
         let after = store.get(id).unwrap().send_window();
         assert_eq!(after, 65535 - 100);
+    }
+
+    /// br-asupersync-of0l5f: trailer block containing a `:status`
+    /// pseudo-header MUST be rejected per RFC 9113 §8.1
+    /// ("Trailers MUST NOT include pseudo-header fields"). Without
+    /// this rejection a malicious peer could rewrite the request
+    /// line in trailers after the initial HEADERS already committed
+    /// it — a request-smuggling primitive when the gateway forwards
+    /// to an HTTP/1 backend.
+    #[test]
+    fn of0l5f_trailer_with_status_pseudo_header_rejected() {
+        let trailer = vec![
+            Header::new("content-type", "text/plain"),
+            Header::new(":status", "200"),
+        ];
+        let err = reject_pseudo_headers_in_trailers(&trailer)
+            .expect_err("trailer with :status must be rejected");
+        assert!(err.contains("RFC 9113 §8.1"), "wrong reject reason: {err}");
+    }
+
+    /// br-asupersync-of0l5f: a trailer block with NO pseudo-headers
+    /// must pass — happy path regression guard.
+    #[test]
+    fn of0l5f_trailer_without_pseudo_headers_accepted() {
+        let trailer = vec![
+            Header::new("trailer-checksum", "abcd"),
+            Header::new("x-trace-id", "deadbeef"),
+        ];
+        assert!(reject_pseudo_headers_in_trailers(&trailer).is_ok());
+    }
+
+    /// br-asupersync-of0l5f: would_be_trailer_block returns true
+    /// after the initial header block has been received (Open or
+    /// HalfClosedLocal state, headers_complete=true). Callers query
+    /// this BEFORE recv_headers to know whether to invoke the
+    /// trailer-validator on the decoded block.
+    #[test]
+    fn of0l5f_would_be_trailer_block_after_initial_headers() {
+        let mut stream = Stream::new(1, DEFAULT_INITIAL_WINDOW_SIZE);
+        // Initially no headers received → not a trailer block.
+        assert!(!stream.would_be_trailer_block());
+
+        // Receive initial HEADERS with end_headers, no end_stream.
+        // server-side, is_client=false.
+        stream.recv_headers(false, true, false).unwrap();
+        assert!(stream.would_be_trailer_block());
+    }
+
+    /// br-asupersync-kaqld3: consume_recv_window must signal a
+    /// connection-level FLOW_CONTROL_ERROR when the peer overshoots
+    /// the window beyond the i32::MIN representable bound, instead
+    /// of clamping to MIN and stalling the stream.
+    #[test]
+    fn kaqld3_consume_recv_window_overshoot_returns_flow_control_error() {
+        let mut stream = Stream::new(1, DEFAULT_INITIAL_WINDOW_SIZE);
+        // Drive the window very negative via several SETTINGS-shrink
+        // simulations. We bypass the SETTINGS path here and just
+        // poke the field to a value close to i32::MIN, so the next
+        // legitimate consume drives the window past the bound.
+        stream.recv_window = i32::MIN + 100;
+        let err = stream
+            .consume_recv_window(200)
+            .expect_err("overshoot past i32::MIN must be FLOW_CONTROL_ERROR");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("FLOW_CONTROL") || msg.contains("flow-control"),
+            "wrong error kind: {msg}"
+        );
+    }
+
+    /// br-asupersync-kaqld3: consume_recv_window happy path — when
+    /// the deduction stays within i32 bounds it succeeds and updates
+    /// the window correctly. Confirms the new fallible signature
+    /// preserves the prior semantics for legitimate inputs.
+    #[test]
+    fn kaqld3_consume_recv_window_legitimate_succeeds() {
+        let mut stream = Stream::new(1, DEFAULT_INITIAL_WINDOW_SIZE);
+        let before = stream.recv_window;
+        stream
+            .consume_recv_window(1024)
+            .expect("legitimate consume must succeed");
+        assert_eq!(stream.recv_window, before - 1024);
     }
 }

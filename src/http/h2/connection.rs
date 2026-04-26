@@ -889,6 +889,20 @@ impl Connection {
         let stream = self.streams.get_mut(stream_id).ok_or_else(|| {
             H2Error::connection(ErrorCode::InternalError, "decode_headers missing stream")
         })?;
+        // br-asupersync-0eyf7t — RFC 9113 §8.1: trailers MUST NOT
+        // contain pseudo-header fields. A second HEADERS-with-
+        // END_HEADERS for the same stream is either trailers
+        // (server-side: always; client-side: when END_STREAM is
+        // set) or 1xx informational (client-side: when END_STREAM
+        // is not set). Capture the discrimination here, before any
+        // mutation, so the validator can reject pseudo-headers in
+        // the trailers section. is_request is unchanged from
+        // br-asupersync-vqpx88: server sees requests, client sees
+        // responses.
+        let is_subsequent_headers = stream.initial_headers_decoded();
+        let is_request = !self.is_client;
+        let is_trailers = is_subsequent_headers && (is_request || end_stream);
+
         let fragments = stream.take_header_fragments();
 
         // Concatenate all fragments
@@ -911,12 +925,25 @@ impl Connection {
         let mut src = combined.freeze();
         let headers = self.hpack_decoder.decode(&mut src)?;
 
-        // br-asupersync-vqpx88: RFC 9113 §8.3.1/§8.3.2 pseudo-header
-        // structural validation. Server-side (we are not a client)
-        // sees requests; client-side sees responses.
-        let is_request = !self.is_client;
-        if let Err(why) = validate_h2_pseudo_headers(&headers, is_request) {
+        // br-asupersync-vqpx88 + br-asupersync-0eyf7t: RFC 9113
+        // §8.3.1/§8.3.2 pseudo-header structural validation, plus
+        // the §8.1 trailers-have-no-pseudo-headers rule. The
+        // is_trailers flag short-circuits to a stricter
+        // no-pseudo-headers path inside the validator while still
+        // applying the regular-header validations
+        // (lowercase names, connection-specific header ban).
+        if let Err(why) = validate_h2_pseudo_headers(&headers, is_request, is_trailers) {
             return Err(H2Error::stream(stream_id, ErrorCode::ProtocolError, why));
+        }
+
+        // br-asupersync-0eyf7t — mark the initial-headers gate so a
+        // future HEADERS for the same stream is correctly classified
+        // as trailers. Skip the mark on the trailers path itself
+        // (the gate is monotone: once set, stays set).
+        if !is_trailers {
+            if let Some(stream) = self.streams.get_mut(stream_id) {
+                stream.mark_initial_headers_decoded();
+            }
         }
 
         Ok(Some(ReceivedFrame::Headers {
@@ -966,7 +993,11 @@ impl Connection {
         // receiving an invalid PUSH_PROMISE MUST treat it as a
         // stream error of type PROTOCOL_ERROR scoped to the
         // promised stream (not the associated stream).
-        if let Err(why) = validate_h2_pseudo_headers(&headers, /* is_request = */ true) {
+        // PUSH_PROMISE always carries a request header block (no
+        // trailers form); is_trailers=false.
+        if let Err(why) = validate_h2_pseudo_headers(
+            &headers, /* is_request = */ true, /* is_trailers = */ false,
+        ) {
             return Err(H2Error::stream(
                 promised_stream_id,
                 ErrorCode::ProtocolError,
@@ -1633,7 +1664,51 @@ pub enum ReceivedFrame {
 /// catch the entire class of confusion attacks where a peer smuggles
 /// a `:method`/`:authority`/`:status` *after* a regular header to bypass
 /// upstream filters that only inspect the first header pair.
-fn validate_h2_pseudo_headers(headers: &[Header], is_request: bool) -> Result<(), &'static str> {
+fn validate_h2_pseudo_headers(
+    headers: &[Header],
+    is_request: bool,
+    is_trailers: bool,
+) -> Result<(), &'static str> {
+    // br-asupersync-0eyf7t — RFC 9113 §8.1: "Trailer fields MUST NOT
+    // include pseudo-header fields (Section 8.3)". Reject any
+    // pseudo-header in a trailers block before the rest of the
+    // structural validation runs. Regular-header validations
+    // (lowercase names per §8.2.1, connection-specific header ban
+    // per §8.2.2) still apply and are run below.
+    if is_trailers {
+        for h in headers {
+            let name: &[u8] = h.name.as_bytes();
+            if name.is_empty() {
+                return Err("empty header name");
+            }
+            if name.first().copied() == Some(b':') {
+                return Err("trailers section MUST NOT contain pseudo-header fields \
+                     (RFC 9113 §8.1)");
+            }
+            if name.iter().any(|b| b.is_ascii_uppercase()) {
+                return Err(
+                    "regular header field name in trailers contains uppercase ASCII \
+                     (RFC 9113 §8.2.1 violation)",
+                );
+            }
+            match name {
+                b"connection" | b"keep-alive" | b"proxy-connection" | b"transfer-encoding"
+                | b"upgrade" => {
+                    return Err(
+                        "connection-specific header field forbidden in HTTP/2 trailers \
+                         (RFC 9113 §8.2.2)",
+                    );
+                }
+                b"te" if h.value.as_bytes() != b"trailers" => {
+                    return Err("te header field MUST have value \"trailers\" in HTTP/2 \
+                         (RFC 9113 §8.2.2)");
+                }
+                _ => {}
+            }
+        }
+        return Ok(());
+    }
+
     let mut seen_regular = false;
     let mut seen_method = false;
     let mut seen_scheme = false;
@@ -4136,13 +4211,13 @@ mod tests {
             h(":authority", "example.com"),
             h("user-agent", "asupersync"),
         ];
-        assert!(validate_h2_pseudo_headers(&headers, true).is_ok());
+        assert!(validate_h2_pseudo_headers(&headers, true, false).is_ok());
     }
 
     #[test]
     fn vqpx88_response_minimum_valid_200() {
         let headers = vec![h(":status", "200"), h("content-type", "text/plain")];
-        assert!(validate_h2_pseudo_headers(&headers, false).is_ok());
+        assert!(validate_h2_pseudo_headers(&headers, false, false).is_ok());
     }
 
     #[test]
@@ -4154,7 +4229,7 @@ mod tests {
             h(":path", "/"),
             h(":authority", "example.com"),
         ];
-        let err = validate_h2_pseudo_headers(&headers, true).unwrap_err();
+        let err = validate_h2_pseudo_headers(&headers, true, false).unwrap_err();
         assert!(err.contains("after a regular header"), "unexpected: {err}");
     }
 
@@ -4167,7 +4242,7 @@ mod tests {
             h(":path", "/"),
             h(":authority", "example.com"),
         ];
-        let err = validate_h2_pseudo_headers(&headers, true).unwrap_err();
+        let err = validate_h2_pseudo_headers(&headers, true, false).unwrap_err();
         assert!(err.contains("duplicate :method"), "unexpected: {err}");
     }
 
@@ -4180,14 +4255,14 @@ mod tests {
             h(":path", "/"),
             h(":authority", "example.com"),
         ];
-        let err = validate_h2_pseudo_headers(&headers, true).unwrap_err();
+        let err = validate_h2_pseudo_headers(&headers, true, false).unwrap_err();
         assert!(err.contains("duplicate :scheme"), "unexpected: {err}");
     }
 
     #[test]
     fn vqpx88_duplicate_status_rejected() {
         let headers = vec![h(":status", "200"), h(":status", "404")];
-        let err = validate_h2_pseudo_headers(&headers, false).unwrap_err();
+        let err = validate_h2_pseudo_headers(&headers, false, false).unwrap_err();
         assert!(err.contains("duplicate :status"), "unexpected: {err}");
     }
 
@@ -4200,14 +4275,14 @@ mod tests {
             h(":path", "/"),
             h(":authority", "example.com"),
         ];
-        let err = validate_h2_pseudo_headers(&headers, true).unwrap_err();
+        let err = validate_h2_pseudo_headers(&headers, true, false).unwrap_err();
         assert!(err.contains("unknown pseudo-header"), "unexpected: {err}");
     }
 
     #[test]
     fn vqpx88_response_with_method_rejected() {
         let headers = vec![h(":status", "200"), h(":method", "GET")];
-        let err = validate_h2_pseudo_headers(&headers, false).unwrap_err();
+        let err = validate_h2_pseudo_headers(&headers, false, false).unwrap_err();
         assert!(
             err.contains("must not include request pseudo-headers"),
             "unexpected: {err}"
@@ -4221,7 +4296,7 @@ mod tests {
             h(":path", "/"),
             h(":authority", "example.com"),
         ];
-        let err = validate_h2_pseudo_headers(&headers, true).unwrap_err();
+        let err = validate_h2_pseudo_headers(&headers, true, false).unwrap_err();
         assert!(
             err.contains("missing required :method"),
             "unexpected: {err}"
@@ -4235,7 +4310,7 @@ mod tests {
             h(":path", "/"),
             h(":authority", "example.com"),
         ];
-        let err = validate_h2_pseudo_headers(&headers, true).unwrap_err();
+        let err = validate_h2_pseudo_headers(&headers, true, false).unwrap_err();
         assert!(
             err.contains("missing required :scheme"),
             "unexpected: {err}"
@@ -4249,14 +4324,14 @@ mod tests {
             h(":scheme", "https"),
             h(":authority", "example.com"),
         ];
-        let err = validate_h2_pseudo_headers(&headers, true).unwrap_err();
+        let err = validate_h2_pseudo_headers(&headers, true, false).unwrap_err();
         assert!(err.contains("missing required :path"), "unexpected: {err}");
     }
 
     #[test]
     fn vqpx88_response_missing_status_rejected() {
         let headers = vec![h("content-type", "text/plain")];
-        let err = validate_h2_pseudo_headers(&headers, false).unwrap_err();
+        let err = validate_h2_pseudo_headers(&headers, false, false).unwrap_err();
         assert!(
             err.contains("missing required :status"),
             "unexpected: {err}"
@@ -4272,7 +4347,7 @@ mod tests {
             h(":path", "/"),
             h(":authority", "example.com"),
         ];
-        let err = validate_h2_pseudo_headers(&headers, true).unwrap_err();
+        let err = validate_h2_pseudo_headers(&headers, true, false).unwrap_err();
         assert!(
             err.contains("must not include :status"),
             "unexpected: {err}"
@@ -4286,7 +4361,7 @@ mod tests {
             h(":scheme", "https"),
             h(":authority", "example.com:443"),
         ];
-        let err = validate_h2_pseudo_headers(&headers, true).unwrap_err();
+        let err = validate_h2_pseudo_headers(&headers, true, false).unwrap_err();
         assert!(
             err.contains("CONNECT request must not include :scheme or :path"),
             "unexpected: {err}"
@@ -4300,7 +4375,7 @@ mod tests {
             h(":path", "/"),
             h(":authority", "example.com:443"),
         ];
-        let err = validate_h2_pseudo_headers(&headers, true).unwrap_err();
+        let err = validate_h2_pseudo_headers(&headers, true, false).unwrap_err();
         assert!(
             err.contains("CONNECT request must not include :scheme or :path"),
             "unexpected: {err}"
@@ -4310,7 +4385,7 @@ mod tests {
     #[test]
     fn vqpx88_connect_missing_authority_rejected() {
         let headers = vec![h(":method", "CONNECT")];
-        let err = validate_h2_pseudo_headers(&headers, true).unwrap_err();
+        let err = validate_h2_pseudo_headers(&headers, true, false).unwrap_err();
         assert!(
             err.contains("CONNECT request missing required :authority"),
             "unexpected: {err}"
@@ -4320,7 +4395,7 @@ mod tests {
     #[test]
     fn vqpx88_connect_valid_minimum() {
         let headers = vec![h(":method", "CONNECT"), h(":authority", "example.com:443")];
-        assert!(validate_h2_pseudo_headers(&headers, true).is_ok());
+        assert!(validate_h2_pseudo_headers(&headers, true, false).is_ok());
     }
 
     #[test]
@@ -4332,7 +4407,7 @@ mod tests {
             h(":authority", "example.com"),
             h("X-Custom", "v"),
         ];
-        let err = validate_h2_pseudo_headers(&headers, true).unwrap_err();
+        let err = validate_h2_pseudo_headers(&headers, true, false).unwrap_err();
         assert!(err.contains("uppercase ASCII"), "unexpected: {err}");
     }
 
@@ -4345,7 +4420,7 @@ mod tests {
             h(":authority", "example.com"),
             h(":protocol", "websocket"),
         ];
-        let err = validate_h2_pseudo_headers(&headers, true).unwrap_err();
+        let err = validate_h2_pseudo_headers(&headers, true, false).unwrap_err();
         assert!(
             err.contains(":protocol pseudo-header is only valid"),
             "unexpected: {err}"
@@ -4365,20 +4440,20 @@ mod tests {
             h(":path", "/chat"),
             h(":authority", "example.com"),
         ];
-        assert!(validate_h2_pseudo_headers(&headers, true).is_ok());
+        assert!(validate_h2_pseudo_headers(&headers, true, false).is_ok());
     }
 
     #[test]
     fn vqpx88_empty_header_name_rejected() {
         let headers = vec![Header::new("", "value")];
-        let err = validate_h2_pseudo_headers(&headers, true).unwrap_err();
+        let err = validate_h2_pseudo_headers(&headers, true, false).unwrap_err();
         assert!(err.contains("empty"), "unexpected: {err}");
     }
 
     #[test]
     fn vqpx88_response_with_authority_rejected() {
         let headers = vec![h(":status", "200"), h(":authority", "example.com")];
-        let err = validate_h2_pseudo_headers(&headers, false).unwrap_err();
+        let err = validate_h2_pseudo_headers(&headers, false, false).unwrap_err();
         assert!(
             err.contains("must not include request pseudo-headers"),
             "unexpected: {err}"
@@ -4407,7 +4482,7 @@ mod tests {
                 h(":authority", "example.com"),
                 h(forbidden, "close"),
             ];
-            let err = validate_h2_pseudo_headers(&headers, true).expect_err(forbidden);
+            let err = validate_h2_pseudo_headers(&headers, true, false).expect_err(forbidden);
             assert!(
                 err.contains("RFC 9113 §8.2.2"),
                 "wrong reject reason for {forbidden}: {err}"
@@ -4457,7 +4532,7 @@ mod tests {
             h("content-type", "application/json"),
             h("user-agent", "test"),
         ];
-        assert!(validate_h2_pseudo_headers(&headers, true).is_ok());
+        assert!(validate_h2_pseudo_headers(&headers, true, false).is_ok());
     }
 
     /// br-asupersync-lcvdj0 — RFC 9113 §3.4 / §3.5 require the first
