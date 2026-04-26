@@ -1144,12 +1144,17 @@ pub struct RedisConfig {
 }
 
 impl std::fmt::Debug for RedisConfig {
+    // br-asupersync-lru405 + br-asupersync-kytkta: redact both username and
+    // password. Username is a credential under Redis 6+ ACL — combined with
+    // host:port:database it can enable enumeration / unauthorized access.
+    // We preserve the Some/None distinction so log readers can still see
+    // whether a credential is configured without seeing its value.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RedisConfig")
             .field("host", &self.host)
             .field("port", &self.port)
             .field("database", &self.database)
-            .field("username", &self.username)
+            .field("username", &self.username.as_ref().map(|_| "[REDACTED]"))
             .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
             .field("protocol_limits", &self.protocol_limits)
             .finish()
@@ -3122,6 +3127,54 @@ mod tests {
     }
 
     #[test]
+    fn redis_config_debug_redacts_username_and_password() {
+        // br-asupersync-lru405 + br-asupersync-kytkta: username is a credential
+        // under Redis 6+ ACL — must be redacted alongside password.
+        let cfg = RedisConfig {
+            username: Some("admin_user".into()),
+            password: Some("hunter2".into()),
+            ..Default::default()
+        };
+        let dbg = format!("{cfg:?}");
+        assert!(
+            !dbg.contains("admin_user"),
+            "username leaked in Debug output: {dbg}"
+        );
+        assert!(
+            !dbg.contains("hunter2"),
+            "password leaked in Debug output: {dbg}"
+        );
+        // Some/None distinction preserved (operator can still see whether a
+        // credential is configured without seeing its value).
+        assert!(
+            dbg.contains("Some(\"[REDACTED]\")"),
+            "expected redacted Some marker: {dbg}"
+        );
+    }
+
+    #[test]
+    fn redis_config_debug_unset_username_renders_none() {
+        let cfg = RedisConfig {
+            username: None,
+            password: None,
+            ..Default::default()
+        };
+        let dbg = format!("{cfg:?}");
+        assert!(
+            dbg.contains("username: None"),
+            "expected 'username: None': {dbg}"
+        );
+        assert!(
+            dbg.contains("password: None"),
+            "expected 'password: None': {dbg}"
+        );
+        assert!(
+            !dbg.contains("REDACTED"),
+            "REDACTED should not appear when unset: {dbg}"
+        );
+    }
+
+    #[test]
     fn redis_config_clone() {
         let cfg = RedisConfig::default();
         let cloned = cfg;
@@ -3966,9 +4019,9 @@ mod tests {
     ///   2. Client writes the 3 pipelined commands as one combined buffer.
     ///      Server reads three RESP frames in succession.
     ///   3. Server writes back, in one buffer:
-    ///         $5\r\nfirst\r\n
-    ///         -ERR something went wrong\r\n
-    ///         $5\r\nthird\r\n
+    ///      $5\r\nfirst\r\n
+    ///      -ERR something went wrong\r\n
+    ///      $5\r\nthird\r\n
     ///   4. Client receives Vec<Result<RespValue, RedisError>> with three
     ///      entries; middle one is Err(RedisError::Redis(...)); first and
     ///      third are Ok(BulkString(...)).
