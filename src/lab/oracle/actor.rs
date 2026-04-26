@@ -428,9 +428,22 @@ impl SupervisionOracle {
                     continue; // Do not check sibling restarts if we correctly escalated/stopped
                 }
 
-                if escalated {
-                    continue; // Do not check sibling restarts if we escalated
-                }
+                // br-asupersync-l7ni1s: do NOT short-circuit the
+                // sibling-restart check just because *some* escalation
+                // happened in this window. A properly-implemented
+                // OneForAll/RestForOne supervisor must restart siblings
+                // on EVERY failure within max_restarts, AND escalate
+                // only after the restart-budget is exhausted (handled
+                // above). The previous logic — `if escalated { continue }`
+                // here — produced FALSE NEGATIVES: a supervisor that
+                // skipped the sibling-restart for failure F2 (after
+                // restarting siblings for F1 and then escalating once
+                // the joint budget exhausted, with F2 still inside the
+                // window) was incorrectly accepted by the oracle. By
+                // running the OneForAll/RestForOne check for every
+                // failure where the per-failure restart_count is still
+                // within budget, we catch supervisors that drop sibling
+                // restarts the moment ANY escalation hits the window.
 
                 // Check OneForAll policy
                 if config.restart_policy == RestartPolicy::OneForAll {
@@ -1077,6 +1090,130 @@ mod tests {
                 format!("{:?}", violation.kind)
             );
             crate::test_complete!("later_restart_does_not_mask_prior_rest_for_one_violation");
+        }
+
+        // br-asupersync-l7ni1s: regression for the
+        // `if escalated { continue }` short-circuit. Previously, *any*
+        // escalation that landed inside a failure's window made the
+        // oracle skip that failure's sibling-restart check entirely,
+        // even when the failure's own restart_count was still under
+        // budget and the sibling-restart obligation was unmet. This
+        // test wires up exactly that situation: F1 has 1 of 2 allowed
+        // restarts (under budget), siblings are never restarted, and
+        // an unrelated escalation lands inside F1's window. The fixed
+        // oracle must still surface OneForAllNotFollowed for F1.
+        #[test]
+        fn escalation_inside_window_does_not_mask_one_for_all_violation_l7ni1s() {
+            init_test("escalation_inside_window_does_not_mask_one_for_all_violation_l7ni1s");
+            let mut oracle = SupervisionOracle::new();
+
+            oracle.register_supervisor(
+                actor(0),
+                RestartPolicy::OneForAll,
+                2, // generous budget so restart_count <= max_restarts
+                EscalationPolicy::Escalate,
+            );
+            oracle.register_child(actor(0), actor(1));
+            oracle.register_child(actor(0), actor(2));
+            oracle.register_child(actor(0), actor(3));
+
+            // F1: child 2 fails at t=10. Window is [10, 20) because F2
+            // closes it. Restart child 2 alone (siblings 1 and 3
+            // never restart) — a OneForAll violation.
+            oracle.on_child_failed(actor(0), actor(2), t(10), "F1".into());
+            oracle.on_restart(actor(2), 1, t(12));
+
+            // Unrelated escalation lands inside F1's window. Under the
+            // pre-fix logic this caused the oracle to short-circuit the
+            // OneForAll check for F1 and silently accept the violation.
+            oracle.on_escalation(actor(0), actor(9), t(15), "unrelated".into());
+
+            // F2 closes F1's window. F2 is properly handled (just child
+            // 3 restarting itself; we don't care about F2's own
+            // OneForAll for this test — F1's violation must surface
+            // first because the loop iterates failures in order).
+            oracle.on_child_failed(actor(0), actor(3), t(20), "F2".into());
+            oracle.on_restart(actor(1), 1, t(22));
+            oracle.on_restart(actor(2), 2, t(22));
+            oracle.on_restart(actor(3), 1, t(22));
+
+            let violation = oracle
+                .check(t(100))
+                .expect_err("OneForAll violation for F1 must surface despite escalation in window");
+            let kind_matches = matches!(
+                violation.kind,
+                SupervisionViolationKind::OneForAllNotFollowed {
+                    failed_actor,
+                    ref unrestarted_siblings,
+                } if failed_actor == actor(2)
+                    && unrestarted_siblings == &vec![actor(1), actor(3)]
+            );
+            crate::assert_with_log!(
+                kind_matches,
+                "kind_matches",
+                true,
+                format!("{:?}", violation.kind)
+            );
+            crate::test_complete!(
+                "escalation_inside_window_does_not_mask_one_for_all_violation_l7ni1s"
+            );
+        }
+
+        // br-asupersync-l7ni1s: same regression for RestForOne. An
+        // escalation inside the window must not mask the missing
+        // successor-restart obligation when the failure itself is
+        // under restart-budget.
+        #[test]
+        fn escalation_inside_window_does_not_mask_rest_for_one_violation_l7ni1s() {
+            init_test("escalation_inside_window_does_not_mask_rest_for_one_violation_l7ni1s");
+            let mut oracle = SupervisionOracle::new();
+
+            oracle.register_supervisor(
+                actor(0),
+                RestartPolicy::RestForOne,
+                2, // generous budget
+                EscalationPolicy::Escalate,
+            );
+            oracle.register_child(actor(0), actor(1));
+            oracle.register_child(actor(0), actor(2));
+            oracle.register_child(actor(0), actor(3));
+            oracle.register_child(actor(0), actor(4));
+
+            // F1: child 2 fails at t=10. Window [10, 30). Successors of
+            // 2 are [3, 4]. Only child 2 itself is restarted; the
+            // RestForOne obligation for [3, 4] is unmet.
+            oracle.on_child_failed(actor(0), actor(2), t(10), "F1".into());
+            oracle.on_restart(actor(2), 1, t(12));
+
+            // Escalation inside F1's window. Pre-fix, this short-
+            // circuited the RestForOne check.
+            oracle.on_escalation(actor(0), actor(9), t(20), "unrelated".into());
+
+            // Close F1's window with a downstream failure that's
+            // properly handled (restart 4 + its successors — none).
+            oracle.on_child_failed(actor(0), actor(4), t(30), "F2".into());
+            oracle.on_restart(actor(4), 1, t(32));
+
+            let violation = oracle.check(t(100)).expect_err(
+                "RestForOne violation for F1 must surface despite escalation in window",
+            );
+            let kind_matches = matches!(
+                violation.kind,
+                SupervisionViolationKind::RestForOneNotFollowed {
+                    failed_actor,
+                    ref unrestarted_successors,
+                } if failed_actor == actor(2)
+                    && unrestarted_successors == &vec![actor(3), actor(4)]
+            );
+            crate::assert_with_log!(
+                kind_matches,
+                "kind_matches",
+                true,
+                format!("{:?}", violation.kind)
+            );
+            crate::test_complete!(
+                "escalation_inside_window_does_not_mask_rest_for_one_violation_l7ni1s"
+            );
         }
 
         #[test]
