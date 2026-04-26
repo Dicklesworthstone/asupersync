@@ -495,9 +495,22 @@ impl H3Frame {
             H3_FRAME_PUSH_PROMISE => {
                 let (push_id, n) = decode_varint(payload)
                     .map_err(|_| H3NativeError::InvalidFrame("push_promise push_id"))?;
+                let field_block = &payload[n..];
+                // br-asupersync-2gzkbh — RFC 9114 §7.2.5: a PUSH_PROMISE
+                // frame's "Encoded Field Section" is mandatory and
+                // non-empty. An empty field_block carries no headers and
+                // therefore cannot represent a valid promised request;
+                // reject as H3_FRAME_ERROR. The wire format leaves room
+                // for an empty payload after the push_id varint
+                // (n == payload.len()), so we must check explicitly.
+                if field_block.is_empty() {
+                    return Err(H3NativeError::InvalidFrame(
+                        "push_promise empty field_block (RFC 9114 §7.2.5)",
+                    ));
+                }
                 Self::PushPromise {
                     push_id,
-                    field_block: payload[n..].to_vec(),
+                    field_block: field_block.to_vec(),
                 }
             }
             H3_FRAME_GOAWAY => {
@@ -3938,6 +3951,60 @@ mod tests {
         );
     }
 
+    /// br-asupersync-2gzkbh — RFC 9114 §7.2.5 requires the PUSH_PROMISE
+    /// frame's Encoded Field Section to be non-empty. A frame whose
+    /// payload contains only the push_id varint and no field-block
+    /// bytes carries no headers and cannot describe a valid promised
+    /// request; the parser rejects with H3_FRAME_ERROR.
+    #[test]
+    fn frame_decode_push_promise_empty_field_block_rejected() {
+        // Payload = push_id varint (only); zero field_block bytes.
+        let mut payload = Vec::new();
+        encode_varint(7, &mut payload).expect("push_id varint");
+        // No field_block follows.
+
+        let mut buf = Vec::new();
+        encode_varint(H3_FRAME_PUSH_PROMISE, &mut buf).expect("frame type");
+        encode_varint(payload.len() as u64, &mut buf).expect("frame length");
+        buf.extend_from_slice(&payload);
+
+        let err = H3Frame::decode(&buf, &test_config()).expect_err("must fail");
+        assert_eq!(
+            err,
+            H3NativeError::InvalidFrame(
+                "push_promise empty field_block (RFC 9114 §7.2.5)"
+            )
+        );
+    }
+
+    /// br-asupersync-2gzkbh — Regression guard: a PUSH_PROMISE frame
+    /// with a non-empty field_block decodes cleanly. Without this, the
+    /// reject above could silently degrade legitimate frames.
+    #[test]
+    fn frame_decode_push_promise_with_field_block_ok() {
+        let mut payload = Vec::new();
+        encode_varint(42, &mut payload).expect("push_id varint");
+        payload.extend_from_slice(&[0x01, 0x02, 0x03]); // synthetic field block
+
+        let mut buf = Vec::new();
+        encode_varint(H3_FRAME_PUSH_PROMISE, &mut buf).expect("frame type");
+        encode_varint(payload.len() as u64, &mut buf).expect("frame length");
+        buf.extend_from_slice(&payload);
+
+        let (frame, _consumed) =
+            H3Frame::decode(&buf, &test_config()).expect("must decode");
+        match frame {
+            H3Frame::PushPromise {
+                push_id,
+                field_block,
+            } => {
+                assert_eq!(push_id, 42);
+                assert_eq!(field_block, vec![0x01, 0x02, 0x03]);
+            }
+            other => panic!("expected PushPromise, got {other:?}"),
+        }
+    }
+
     // --- 3. Request stream state gaps ---
 
     #[test]
@@ -6435,9 +6502,8 @@ mod tests {
             frame_type: 0xF00D,
             payload: Vec::new(),
         };
-        validate_bidirectional_frame(&unknown_empty).expect(
-            "RFC 9114 §7.2.8 violation: empty-payload unknown frame must be ignored",
-        );
+        validate_bidirectional_frame(&unknown_empty)
+            .expect("RFC 9114 §7.2.8 violation: empty-payload unknown frame must be ignored");
 
         // Canonical GREASE frame type per RFC 9114 §7.2.8 (0x1f * N + 0x21).
         // We exercise N = 0 (type 0x21) and N = 1 (type 0x40).
