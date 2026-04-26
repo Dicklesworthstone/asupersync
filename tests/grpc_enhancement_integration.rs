@@ -64,9 +64,9 @@ mod reflection {
         let (services, health_method_names, checkpoints) =
             LabRuntimeTarget::block_on(&mut runtime, async {
                 let cx = Cx::current().expect("lab root task should have a current Cx");
-                let reflection = ReflectionService::default();
+                let reflection = ReflectionService::default().allow_anonymous();
                 let health = HealthService::new();
-                let reflection_service = ReflectionService::new();
+                let reflection_service = ReflectionService::new().allow_anonymous();
 
                 reflection.register_handler(&health);
                 reflection.register_handler(&reflection_service);
@@ -161,7 +161,7 @@ mod reflection {
 
     #[test]
     fn test_reflection_describe_returns_methods() {
-        let reflection = ReflectionService::default();
+        let reflection = ReflectionService::default().allow_anonymous();
         let svc = MockEchoService;
         reflection.register_handler(&svc);
 
@@ -174,7 +174,7 @@ mod reflection {
 
     #[test]
     fn test_reflection_describe_unknown_returns_none() {
-        let reflection = ReflectionService::default();
+        let reflection = ReflectionService::default().allow_anonymous();
         let desc = reflection.describe_service("nonexistent.Service");
         assert!(desc.is_err(), "unknown service returns error");
     }

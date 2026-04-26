@@ -128,7 +128,7 @@ async fn main() -> Result<()> {
     // Add optional services
     if enable_reflection {
         info!("Adding gRPC reflection service");
-        let reflection_service = asupersync::grpc::ReflectionService::new();
+        let reflection_service = asupersync::grpc::ReflectionService::new().allow_anonymous();
         server_builder = server_builder.add_service(reflection_service);
     }
 

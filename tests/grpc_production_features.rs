@@ -535,7 +535,7 @@ fn health_watcher_multiple_watchers_independent() {
 
 #[test]
 fn reflection_list_services_async() {
-    let reflection = ReflectionService::new();
+    let reflection = ReflectionService::new().allow_anonymous();
     reflection.register_handler(&GreeterService);
     reflection.register_handler(&RouteGuideService);
 
@@ -550,7 +550,7 @@ fn reflection_list_services_async() {
 
 #[test]
 fn reflection_describe_service_async() {
-    let reflection = ReflectionService::new();
+    let reflection = ReflectionService::new().allow_anonymous();
     reflection.register_handler(&GreeterService);
 
     let request = Request::new(ReflectionDescribeServiceRequest::new("helloworld.Greeter"));
@@ -567,7 +567,7 @@ fn reflection_describe_service_async() {
 
 #[test]
 fn reflection_describe_missing_service_async() {
-    let reflection = ReflectionService::new();
+    let reflection = ReflectionService::new().allow_anonymous();
     let request = Request::new(ReflectionDescribeServiceRequest::new("missing.Service"));
     let result = futures_lite::future::block_on(reflection.describe_service_async(&request));
     assert!(result.is_err());
@@ -581,7 +581,9 @@ fn reflection_from_handlers() {
     let guide = RouteGuideService;
     let handlers: Vec<&dyn ServiceHandler> = vec![&greeter, &guide];
     let reflection = ReflectionService::from_handlers(handlers);
-    let services = reflection.list_services();
+    let services = reflection
+        .list_services()
+        .expect("list_services must succeed");
     assert_eq!(services.len(), 2);
 }
 
@@ -591,7 +593,7 @@ fn reflection_service_handler_traits() {
         ReflectionService::NAME,
         "grpc.reflection.v1alpha.ServerReflection"
     );
-    let svc = ReflectionService::new();
+    let svc = ReflectionService::new().allow_anonymous();
     let desc = svc.descriptor();
     assert_eq!(desc.full_name(), "grpc.reflection.v1alpha.ServerReflection");
     let methods = svc.method_names();
@@ -607,7 +609,7 @@ fn reflection_service_handler_traits() {
 
 #[test]
 fn reflection_method_streaming_flags() {
-    let reflection = ReflectionService::new();
+    let reflection = ReflectionService::new().allow_anonymous();
     reflection.register_handler(&RouteGuideService);
     let svc = reflection
         .describe_service("routeguide.RouteGuide")
@@ -635,9 +637,9 @@ fn reflection_method_streaming_flags() {
 
 #[test]
 fn reflection_descriptor_output_happy_path_snapshot() {
-    let reflection = ReflectionService::new();
+    let reflection = ReflectionService::new().allow_anonymous();
     let health = HealthService::new();
-    let builtin_reflection = ReflectionService::new();
+    let builtin_reflection = ReflectionService::new().allow_anonymous();
     reflection.register_handler(&health);
     reflection.register_handler(&builtin_reflection);
 
@@ -649,7 +651,7 @@ fn reflection_descriptor_output_happy_path_snapshot() {
 
 #[test]
 fn reflection_descriptor_output_missing_service_snapshot() {
-    let reflection = ReflectionService::new();
+    let reflection = ReflectionService::new().allow_anonymous();
     let status = futures_lite::future::block_on(reflection.describe_service_async(&Request::new(
         ReflectionDescribeServiceRequest::new("missing.Service"),
     )))

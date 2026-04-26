@@ -1480,7 +1480,7 @@ fn grpc_verify_046_reflection_service_traits() {
         ReflectionService::NAME,
         "grpc.reflection.v1alpha.ServerReflection"
     );
-    let reflection = ReflectionService::new();
+    let reflection = ReflectionService::new().allow_anonymous();
     let desc = reflection.descriptor();
     assert_eq!(desc.name, "ServerReflection");
     assert_eq!(desc.package, "grpc.reflection.v1alpha");
@@ -1505,13 +1505,15 @@ fn grpc_verify_047_reflection_registry_core_flow() {
     ];
     static DESC: ServiceDescriptor = ServiceDescriptor::new("Echo", "pkg", METHODS);
 
-    let reflection = ReflectionService::new();
+    let reflection = ReflectionService::new().allow_anonymous();
     reflection.register_descriptor(&DESC);
 
     // br-asupersync-3tzd9v: list_services now returns Result<...> so the
     // optional auth callback can reject. With no callback installed
     // (default), it always Oks.
-    let services = reflection.list_services().expect("default = no auth, no rejection");
+    let services = reflection
+        .list_services()
+        .expect("default = no auth, no rejection");
     assert_eq!(services, vec!["pkg.Echo".to_string()]);
 
     let service = reflection
@@ -1551,7 +1553,7 @@ fn grpc_verify_048_reflection_async_helpers() {
     static METHODS: &[MethodDescriptor] = &[MethodDescriptor::unary("Get", "/pkg.Api/Get")];
     static DESC: ServiceDescriptor = ServiceDescriptor::new("Api", "pkg", METHODS);
 
-    let reflection = ReflectionService::new();
+    let reflection = ReflectionService::new().allow_anonymous();
     reflection.register_descriptor(&DESC);
 
     let list = futures_lite::future::block_on(

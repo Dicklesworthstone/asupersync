@@ -24,8 +24,7 @@ use super::streaming::{Request, Response};
 /// returned status is propagated verbatim to the caller, so prefer
 /// [`Status::unauthenticated`] / [`Status::permission_denied`] for
 /// production-meaningful errors. (br-asupersync-3tzd9v)
-pub type ReflectionAuthCallback =
-    Arc<dyn Fn(&Cx, &str) -> Result<(), Status> + Send + Sync>;
+pub type ReflectionAuthCallback = Arc<dyn Fn(&Cx, &str) -> Result<(), Status> + Send + Sync>;
 
 /// Reflection metadata for a single gRPC method.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +83,34 @@ pub struct ReflectionDescribeServiceResponse {
     pub service: ReflectedService,
 }
 
+/// br-asupersync-mi4hzh: tri-state auth mode for `ReflectionService`.
+///
+/// Pre-fix the auth slot was `Option<ReflectionAuthCallback>` with `None`
+/// silently meaning "open to anyone", which made `ReflectionService::new()`
+/// expose the entire service catalog to unauthenticated callers in any
+/// production deployment that forgot to chain `.with_auth(...)`. The
+/// fix-side default is now `Locked` — every RPC rejects until the
+/// caller explicitly chooses either `.with_auth(...)` (production) or
+/// `.allow_anonymous()` (dev / test).
+#[derive(Clone)]
+enum ReflectionAuthMode {
+    /// Safe-by-default. Every reflection RPC returns
+    /// `PermissionDenied` until the caller picks a mode.
+    Locked,
+    /// Production: auth callback gates every RPC.
+    Required(ReflectionAuthCallback),
+    /// Dev / test: explicit opt-in to no-auth mode. Callers that want
+    /// the legacy "open" behaviour for grpcurl / BloomRPC must invoke
+    /// `.allow_anonymous()` so the choice is grep-able and auditable.
+    Anonymous,
+}
+
+impl Default for ReflectionAuthMode {
+    fn default() -> Self {
+        Self::Locked
+    }
+}
+
 /// Reflection registry and service facade.
 ///
 /// The registry stores a deterministic snapshot of service descriptors and can
@@ -92,39 +119,53 @@ pub struct ReflectionDescribeServiceResponse {
 #[derive(Clone, Default)]
 pub struct ReflectionService {
     services: Arc<RwLock<BTreeMap<String, ReflectedService>>>,
-    /// Optional auth callback. `None` means "no auth — open to anyone",
-    /// which is the dev-friendly default. Production deployments should
-    /// install a callback via [`Self::with_auth`]. (br-asupersync-3tzd9v)
-    auth: Option<ReflectionAuthCallback>,
+    /// br-asupersync-mi4hzh: see `ReflectionAuthMode` — defaults to
+    /// `Locked` so production deployments cannot accidentally expose
+    /// the schema by forgetting `.with_auth(...)`.
+    auth: ReflectionAuthMode,
 }
 
 impl fmt::Debug for ReflectionService {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Don't print the auth callback (it's a dyn Fn) — just whether one
-        // is installed, so logs distinguish the production-hardened
-        // configuration from the dev-default open one.
+        // Don't print the auth callback (it's a dyn Fn) — just the
+        // auth mode label, so logs distinguish the production-hardened
+        // configuration from the dev opt-in.
+        let auth_label = match &self.auth {
+            ReflectionAuthMode::Locked => "Locked (no auth opt-in)",
+            ReflectionAuthMode::Required(_) => "Required(<fn>)",
+            ReflectionAuthMode::Anonymous => "Anonymous (dev only)",
+        };
         f.debug_struct("ReflectionService")
             .field("services", &self.services)
-            .field("auth", &if self.auth.is_some() { "Some(<fn>)" } else { "None" })
+            .field("auth", &auth_label)
             .finish()
     }
 }
 
 impl ReflectionService {
-    /// Create an empty reflection registry.
+    /// Create an empty reflection registry in the SAFE-BY-DEFAULT
+    /// `Locked` mode (br-asupersync-mi4hzh).
     ///
-    /// **Default = no auth.** Reflection RPCs are open to any caller. This
-    /// is dev-friendly (curl, grpcurl, BloomRPC all work out of the box)
-    /// but exposes the entire service surface (names, methods, streaming
-    /// kinds) to the public, including unauthenticated peers. Production
-    /// deployments should chain `.with_auth(...)` to install a callback
-    /// that gates access — typically a macaroon-capability check or a
-    /// peer-identity allowlist. (br-asupersync-3tzd9v)
+    /// Every reflection RPC will return `PermissionDenied` until the
+    /// caller explicitly chooses one of:
+    ///
+    /// * [`Self::with_auth`] — production. Install a callback that
+    ///   gates every RPC against the ambient `Cx` (macaroon check,
+    ///   peer-identity allowlist, etc).
+    /// * [`Self::allow_anonymous`] — dev / test. Explicit opt-in to
+    ///   the legacy "open" mode for grpcurl / BloomRPC / debug
+    ///   tooling. The choice is grep-able and auditable.
+    ///
+    /// Pre-fix, `new()` defaulted to `auth = None`, silently
+    /// equivalent to `Anonymous`, which exposed the full service
+    /// catalog to any caller who could reach the gRPC port whenever
+    /// a developer forgot the `.with_auth(...)` chain. The default
+    /// is now fail-closed.
     #[must_use]
     pub fn new() -> Self {
         Self {
             services: Arc::new(RwLock::new(BTreeMap::new())),
-            auth: None,
+            auth: ReflectionAuthMode::Locked,
         }
     }
 
@@ -149,41 +190,71 @@ impl ReflectionService {
     ///             .map_err(|_| Status::permission_denied("reflection denied"))
     ///     });
     /// ```
-    /// (br-asupersync-3tzd9v)
+    /// (br-asupersync-3tzd9v / br-asupersync-mi4hzh)
     #[must_use]
     pub fn with_auth<F>(mut self, callback: F) -> Self
     where
         F: Fn(&Cx, &str) -> Result<(), Status> + Send + Sync + 'static,
     {
-        self.auth = Some(Arc::new(callback));
+        self.auth = ReflectionAuthMode::Required(Arc::new(callback));
+        self
+    }
+
+    /// Explicit opt-in to anonymous (no-auth) mode for development,
+    /// CI tooling, and debug consoles (br-asupersync-mi4hzh).
+    ///
+    /// **Do not use in production.** Reflection RPCs called against
+    /// an `allow_anonymous()` service expose the full service catalog
+    /// — every method name, streaming kind, descriptor file — to any
+    /// caller who can reach the gRPC port.
+    ///
+    /// Calling this method is the auditable, grep-able way to ship a
+    /// dev / test endpoint. CI deployments and security reviewers can
+    /// search for `.allow_anonymous()` to find every place the
+    /// fail-closed default was overridden.
+    #[must_use]
+    pub fn allow_anonymous(mut self) -> Self {
+        self.auth = ReflectionAuthMode::Anonymous;
         self
     }
 
     /// Returns whether an auth callback is currently installed.
     /// Useful in tests and operator dashboards to confirm production
-    /// hardening is in place. (br-asupersync-3tzd9v)
+    /// hardening is in place. Returns false for both `Locked` (which
+    /// rejects everything) and `Anonymous` (which allows everything)
+    /// — only `Required(_)` reports `true`. (br-asupersync-3tzd9v /
+    /// br-asupersync-mi4hzh)
     #[must_use]
     pub fn auth_installed(&self) -> bool {
-        self.auth.is_some()
+        matches!(self.auth, ReflectionAuthMode::Required(_))
     }
 
-    /// Run the auth gate for `method`. Returns the unauthenticated /
-    /// permission-denied status when the gate rejects, or
-    /// `Status::unauthenticated` when an auth callback is installed but no
-    /// ambient `Cx` is available (defensive; signals a misconfigured
-    /// runtime — auth-required service must run inside a Cx). With no
-    /// callback installed, returns `Ok(())` (dev-friendly default).
-    /// (br-asupersync-3tzd9v)
+    /// Run the auth gate for `method` (br-asupersync-mi4hzh).
+    ///
+    /// Returns:
+    /// * `Locked` → `Status::permission_denied` with a message that
+    ///   names both opt-ins so operators understand the fix.
+    /// * `Required(cb)` → run the callback. If `Cx::current()` is
+    ///   missing, fail-closed with `Status::unauthenticated`.
+    /// * `Anonymous` → `Ok(())`.
+    #[allow(dead_code)]
     fn check_auth(&self, method: &str) -> Result<(), Status> {
-        let Some(auth) = self.auth.as_ref() else {
-            return Ok(());
-        };
-        let Some(cx) = Cx::current() else {
-            return Err(Status::unauthenticated(
-                "reflection: auth callback installed but no Cx in scope",
-            ));
-        };
-        auth(&cx, method)
+        match &self.auth {
+            ReflectionAuthMode::Locked => Err(Status::permission_denied(format!(
+                "reflection.{method}: service is in Locked mode — call \
+                 .with_auth(...) for production or .allow_anonymous() for \
+                 dev/test before serving reflection RPCs"
+            ))),
+            ReflectionAuthMode::Required(auth) => {
+                let Some(cx) = Cx::current() else {
+                    return Err(Status::unauthenticated(
+                        "reflection: auth callback installed but no Cx in scope",
+                    ));
+                };
+                auth(&cx, method)
+            }
+            ReflectionAuthMode::Anonymous => Ok(()),
+        }
     }
 
     /// Build a reflection registry from existing handlers.
@@ -379,7 +450,7 @@ mod tests {
     #[test]
     fn reflection_register_list_and_describe() {
         init_test("reflection_register_list_and_describe");
-        let reflection = ReflectionService::new();
+        let reflection = ReflectionService::new().allow_anonymous();
         let echo = EchoService;
         reflection.register_handler(&echo);
 
@@ -419,7 +490,7 @@ mod tests {
     #[test]
     fn reflection_describe_missing_service() {
         init_test("reflection_describe_missing_service");
-        let reflection = ReflectionService::new();
+        let reflection = ReflectionService::new().allow_anonymous();
         let err = reflection
             .describe_service("pkg.Missing")
             .expect_err("missing service should fail");
@@ -435,7 +506,7 @@ mod tests {
     #[test]
     fn reflection_async_helpers() {
         init_test("reflection_async_helpers");
-        let reflection = ReflectionService::new();
+        let reflection = ReflectionService::new().allow_anonymous();
         let echo = EchoService;
         reflection.register_handler(&echo);
 
@@ -466,7 +537,7 @@ mod tests {
     #[test]
     fn reflection_service_traits() {
         init_test("reflection_service_traits");
-        let reflection = ReflectionService::new();
+        let reflection = ReflectionService::new().allow_anonymous();
         crate::assert_with_log!(
             ReflectionService::NAME == "grpc.reflection.v1alpha.ServerReflection",
             "service name",
@@ -493,7 +564,7 @@ mod tests {
     #[test]
     fn reflection_descriptor_enum_output_snapshot() {
         init_test("reflection_descriptor_enum_output_snapshot");
-        let reflection = ReflectionService::new();
+        let reflection = ReflectionService::new().allow_anonymous();
         let enum_shape = EnumShapeService;
         reflection.register_handler(&enum_shape);
 
@@ -513,7 +584,7 @@ mod tests {
     #[test]
     fn auth_default_is_open() {
         init_test("auth_default_is_open");
-        let reflection = ReflectionService::new();
+        let reflection = ReflectionService::new().allow_anonymous();
         reflection.register_handler(&EchoService);
         assert!(!reflection.auth_installed(), "default must be no auth");
         // Both entry points succeed without an ambient Cx because no auth
@@ -528,11 +599,7 @@ mod tests {
         init_test("auth_callback_can_reject");
         let reflection = ReflectionService::new()
             .register_for_test()
-            .with_auth(|_cx, method| {
-                Err(Status::permission_denied(format!(
-                    "denied: {method}"
-                )))
-            });
+            .with_auth(|_cx, method| Err(Status::permission_denied(format!("denied: {method}"))));
         assert!(reflection.auth_installed());
         // No ambient Cx → check_auth short-circuits on the missing-Cx
         // branch and returns Unauthenticated. That's still a rejection
@@ -557,18 +624,21 @@ mod tests {
         let saw_describe = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let saw_list_clone = saw_list.clone();
         let saw_describe_clone = saw_describe.clone();
-        let reflection = ReflectionService::new()
-            .register_for_test()
-            .with_auth(move |_cx, method| {
-                match method {
-                    "ListServices" => saw_list_clone
-                        .store(true, std::sync::atomic::Ordering::Relaxed),
-                    "DescribeService" => saw_describe_clone
-                        .store(true, std::sync::atomic::Ordering::Relaxed),
-                    _ => {}
-                }
-                Ok(())
-            });
+        let reflection =
+            ReflectionService::new()
+                .register_for_test()
+                .with_auth(move |_cx, method| {
+                    match method {
+                        "ListServices" => {
+                            saw_list_clone.store(true, std::sync::atomic::Ordering::Relaxed)
+                        }
+                        "DescribeService" => {
+                            saw_describe_clone.store(true, std::sync::atomic::Ordering::Relaxed)
+                        }
+                        _ => {}
+                    }
+                    Ok(())
+                });
         let cx = Cx::for_testing();
         // Install cx as the ambient Cx for the duration of the calls so
         // check_auth's Cx::current() finds it (instead of returning the
@@ -596,5 +666,66 @@ mod tests {
             self.register_handler(&EchoService);
             self
         }
+    }
+
+    // =====================================================================
+    // br-asupersync-mi4hzh: fail-closed default tests. ReflectionService::new()
+    // returns a service in Locked mode that rejects every RPC until the
+    // caller chains either .with_auth(...) (production) or .allow_anonymous()
+    // (dev / test).
+    // =====================================================================
+
+    #[test]
+    fn mi4hzh_locked_default_rejects_list_services() {
+        init_test("mi4hzh_locked_default_rejects_list_services");
+        let reflection = ReflectionService::new().register_for_test();
+        // No .with_auth, no .allow_anonymous. Must reject.
+        let err = reflection
+            .list_services()
+            .expect_err("Locked mode must reject ListServices");
+        assert_eq!(err.code(), super::super::status::Code::PermissionDenied);
+        // Diagnostic message names both opt-ins so operators can fix.
+        let msg = err.message();
+        assert!(
+            msg.contains(".with_auth") && msg.contains(".allow_anonymous"),
+            "PermissionDenied message must name both opt-ins: {msg}"
+        );
+        crate::test_complete!("mi4hzh_locked_default_rejects_list_services");
+    }
+
+    #[test]
+    fn mi4hzh_locked_default_rejects_describe_service() {
+        init_test("mi4hzh_locked_default_rejects_describe_service");
+        let reflection = ReflectionService::new().register_for_test();
+        let err = reflection
+            .describe_service("pkg.Echo")
+            .expect_err("Locked mode must reject DescribeService");
+        assert_eq!(err.code(), super::super::status::Code::PermissionDenied);
+        crate::test_complete!("mi4hzh_locked_default_rejects_describe_service");
+    }
+
+    #[test]
+    fn mi4hzh_allow_anonymous_unlocks_dev_mode() {
+        init_test("mi4hzh_allow_anonymous_unlocks_dev_mode");
+        let reflection = ReflectionService::new()
+            .register_for_test()
+            .allow_anonymous();
+        // Locked → Anonymous → both RPCs succeed.
+        assert!(reflection.list_services().is_ok());
+        assert!(reflection.describe_service("pkg.Echo").is_ok());
+        // auth_installed() reports false for both Locked and Anonymous —
+        // only Required(_) is true (production-hardened).
+        assert!(!reflection.auth_installed());
+        crate::test_complete!("mi4hzh_allow_anonymous_unlocks_dev_mode");
+    }
+
+    #[test]
+    fn mi4hzh_with_auth_reports_installed() {
+        init_test("mi4hzh_with_auth_reports_installed");
+        let reflection = ReflectionService::new()
+            .register_for_test()
+            .with_auth(|_cx, _method| Ok(()));
+        assert!(reflection.auth_installed());
+        crate::test_complete!("mi4hzh_with_auth_reports_installed");
     }
 }

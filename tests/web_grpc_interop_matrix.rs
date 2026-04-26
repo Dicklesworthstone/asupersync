@@ -858,13 +858,15 @@ impl ServiceHandler for MockChatService {
 fn t57_health_03_reflection_list_services() {
     init_test("t57_health_03_reflection_list_services");
 
-    let reflection = ReflectionService::new();
+    let reflection = ReflectionService::new().allow_anonymous();
     let echo = MockEchoService;
     let chat = MockChatService;
     reflection.register_handler(&echo);
     reflection.register_handler(&chat);
 
-    let services = reflection.list_services();
+    let services = reflection
+        .list_services()
+        .expect("list_services must succeed");
     assert!(
         services.iter().any(|s| s == "test.Echo"),
         "must list Echo service"
@@ -881,7 +883,7 @@ fn t57_health_03_reflection_list_services() {
 fn t57_health_04_reflection_describe_service() {
     init_test("t57_health_04_reflection_describe_service");
 
-    let reflection = ReflectionService::new();
+    let reflection = ReflectionService::new().allow_anonymous();
     let echo = MockEchoService;
     reflection.register_handler(&echo);
 

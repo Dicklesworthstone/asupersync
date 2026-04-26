@@ -604,7 +604,7 @@ fn t59_ref_18_reflection_service_lists_services() {
     init_test("t59_ref_18_reflection_service_lists_services");
 
     let _health = HealthService::new();
-    let reflection = ReflectionService::new();
+    let reflection = ReflectionService::new().allow_anonymous();
 
     test_section!("reflection_knows_its_own_name");
     let desc = reflection.descriptor();

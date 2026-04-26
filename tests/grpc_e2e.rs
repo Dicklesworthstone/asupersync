@@ -895,7 +895,7 @@ fn e2e_grpc_reflection_registry_roundtrip() {
     init_test("e2e_grpc_reflection_registry_roundtrip");
 
     test_section!("setup_reflection");
-    let reflection = ReflectionService::new();
+    let reflection = ReflectionService::new().allow_anonymous();
     let health = HealthService::new();
     reflection.register_handler(&health);
 
