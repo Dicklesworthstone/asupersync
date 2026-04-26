@@ -412,6 +412,7 @@ pub struct PooledResource<R> {
     /// the idle pool — even when the holder hits an error path that
     /// drops the wrapper via `?`-propagation rather than calling
     /// [`discard`](Self::discard) explicitly. (br-asupersync-ob62ki)
+    #[allow(dead_code)]
     is_broken: bool,
 }
 
@@ -2548,9 +2549,19 @@ mod tests {
         init_test("ob62ki_mark_broken_routes_drop_to_discard");
         let (tx, rx) = mpsc::channel();
         let mut pooled = PooledResource::new(99u8, tx);
-        crate::assert_with_log!(!pooled.is_broken(), "default not broken", false, pooled.is_broken());
+        crate::assert_with_log!(
+            !pooled.is_broken(),
+            "default not broken",
+            false,
+            pooled.is_broken()
+        );
         pooled.mark_broken();
-        crate::assert_with_log!(pooled.is_broken(), "after mark_broken", true, pooled.is_broken());
+        crate::assert_with_log!(
+            pooled.is_broken(),
+            "after mark_broken",
+            true,
+            pooled.is_broken()
+        );
         drop(pooled);
 
         let msg = rx.recv().expect("discard message");
@@ -2576,7 +2587,9 @@ mod tests {
         drop(pooled);
         let msg = rx.recv().expect("return message");
         match msg {
-            PoolReturn::Return { resource: value, .. } => {
+            PoolReturn::Return {
+                resource: value, ..
+            } => {
                 crate::assert_with_log!(value == 11, "default Drop returns", 11u8, value);
             }
             PoolReturn::Discard { .. } => panic!("default Drop must Return, not Discard"),
