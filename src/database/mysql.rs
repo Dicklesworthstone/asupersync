@@ -3006,6 +3006,21 @@ pub trait ToSql: Sync {
     fn is_null(&self) -> bool {
         false
     }
+
+    /// Whether this parameter is an UNSIGNED integer.
+    ///
+    /// The MySQL binary protocol's per-parameter type field is a 2-byte
+    /// value where the high byte's bit `0x80` is the UNSIGNED flag.
+    /// Without setting it, the server interprets every numeric parameter
+    /// as signed: `u32::MAX` round-trips as `-1`, `u64 > i64::MAX` lands
+    /// negative, and `WHERE id = ?` predicates against `BIGINT UNSIGNED`
+    /// columns silently miss their target row.
+    ///
+    /// Default `false`; integer impls below override for unsigned types.
+    /// (br-asupersync-mx5b9p)
+    fn is_unsigned(&self) -> bool {
+        false
+    }
 }
 
 impl ToSql for bool {
@@ -3015,6 +3030,35 @@ impl ToSql for bool {
 
     fn mysql_type_code(&self) -> u8 {
         mysql_type::MYSQL_TYPE_TINY
+    }
+
+    fn is_unsigned(&self) -> bool {
+        // Bool is encoded as a 1-byte tinyint; treating it as unsigned
+        // matches MySQL's BOOL alias for TINYINT(1) and avoids any
+        // sign-extension surprise on the server side.
+        true
+    }
+}
+
+// ----- Signed integers --------------------------------------------------
+
+impl ToSql for i8 {
+    fn to_sql(&self) -> Result<Vec<u8>, MySqlError> {
+        Ok((*self as u8).to_le_bytes().to_vec())
+    }
+
+    fn mysql_type_code(&self) -> u8 {
+        mysql_type::MYSQL_TYPE_TINY
+    }
+}
+
+impl ToSql for i16 {
+    fn to_sql(&self) -> Result<Vec<u8>, MySqlError> {
+        Ok(self.to_le_bytes().to_vec())
+    }
+
+    fn mysql_type_code(&self) -> u8 {
+        mysql_type::MYSQL_TYPE_SHORT
     }
 }
 
@@ -3035,6 +3079,89 @@ impl ToSql for i64 {
 
     fn mysql_type_code(&self) -> u8 {
         mysql_type::MYSQL_TYPE_LONGLONG
+    }
+}
+
+// ----- Unsigned integers (br-asupersync-mx5b9p) ------------------------
+//
+// Each unsigned int impl sets `is_unsigned() = true` so
+// `write_stmt_execute_params` can OR in the UNSIGNED flag in the
+// per-parameter type field. Without these the calling code couldn't
+// even pass a `&u32` to `query_prepared` (no impl existed) — the
+// silent at-most-half-range bug was previously hidden behind a
+// compile error rather than a wrong-data error, but downstream
+// callers were forced to cast and lose the unsigned semantics.
+
+impl ToSql for u8 {
+    fn to_sql(&self) -> Result<Vec<u8>, MySqlError> {
+        Ok(self.to_le_bytes().to_vec())
+    }
+
+    fn mysql_type_code(&self) -> u8 {
+        mysql_type::MYSQL_TYPE_TINY
+    }
+
+    fn is_unsigned(&self) -> bool {
+        true
+    }
+}
+
+impl ToSql for u16 {
+    fn to_sql(&self) -> Result<Vec<u8>, MySqlError> {
+        Ok(self.to_le_bytes().to_vec())
+    }
+
+    fn mysql_type_code(&self) -> u8 {
+        mysql_type::MYSQL_TYPE_SHORT
+    }
+
+    fn is_unsigned(&self) -> bool {
+        true
+    }
+}
+
+impl ToSql for u32 {
+    fn to_sql(&self) -> Result<Vec<u8>, MySqlError> {
+        Ok(self.to_le_bytes().to_vec())
+    }
+
+    fn mysql_type_code(&self) -> u8 {
+        mysql_type::MYSQL_TYPE_LONG
+    }
+
+    fn is_unsigned(&self) -> bool {
+        true
+    }
+}
+
+impl ToSql for u64 {
+    fn to_sql(&self) -> Result<Vec<u8>, MySqlError> {
+        Ok(self.to_le_bytes().to_vec())
+    }
+
+    fn mysql_type_code(&self) -> u8 {
+        mysql_type::MYSQL_TYPE_LONGLONG
+    }
+
+    fn is_unsigned(&self) -> bool {
+        true
+    }
+}
+
+impl ToSql for usize {
+    fn to_sql(&self) -> Result<Vec<u8>, MySqlError> {
+        // Always serialize as 8 bytes so the wire encoding is stable
+        // regardless of host pointer width (32-bit vs 64-bit Rust
+        // targets must produce identical packets for the same value).
+        Ok((*self as u64).to_le_bytes().to_vec())
+    }
+
+    fn mysql_type_code(&self) -> u8 {
+        mysql_type::MYSQL_TYPE_LONGLONG
+    }
+
+    fn is_unsigned(&self) -> bool {
+        true
     }
 }
 
@@ -3116,6 +3243,13 @@ impl<T: ToSql> ToSql for Option<T> {
     fn is_null(&self) -> bool {
         self.is_none()
     }
+
+    fn is_unsigned(&self) -> bool {
+        match self {
+            Some(value) => value.is_unsigned(),
+            None => false,
+        }
+    }
 }
 
 impl<T: ToSql + ?Sized> ToSql for &T {
@@ -3129,6 +3263,10 @@ impl<T: ToSql + ?Sized> ToSql for &T {
 
     fn is_null(&self) -> bool {
         (*self).is_null()
+    }
+
+    fn is_unsigned(&self) -> bool {
+        (*self).is_unsigned()
     }
 }
 
@@ -3151,7 +3289,19 @@ fn write_stmt_execute_params(
     // Always send fresh parameter type metadata with the execute packet.
     buf.write_byte(0x01);
     for param in params {
-        buf.write_u16_le(u16::from(param.mysql_type_code()));
+        // Per the MySQL Internals manual (COM_STMT_EXECUTE), each
+        // parameter's type is a 2-byte LE field where the LO byte
+        // carries MYSQL_TYPE_xxx and the HI byte's bit 0x80 is the
+        // UNSIGNED flag. Without the flag, every numeric parameter is
+        // interpreted as signed by the server — which silently rewrites
+        // u32::MAX to -1, anything past i64::MAX to negative, and
+        // breaks predicates against BIGINT UNSIGNED columns.
+        // (br-asupersync-mx5b9p)
+        let mut type_field = u16::from(param.mysql_type_code());
+        if param.is_unsigned() {
+            type_field |= param_flag::UNSIGNED_LE_U16;
+        }
+        buf.write_u16_le(type_field);
     }
 
     for param in params {
@@ -3174,6 +3324,7 @@ fn encode_lenenc_bytes(data: &[u8]) -> Vec<u8> {
 /// MySQL type codes for protocol.
 mod mysql_type {
     pub const MYSQL_TYPE_TINY: u8 = 1;
+    pub const MYSQL_TYPE_SHORT: u8 = 2;
     pub const MYSQL_TYPE_LONG: u8 = 3;
     pub const MYSQL_TYPE_FLOAT: u8 = 4;
     pub const MYSQL_TYPE_DOUBLE: u8 = 5;
@@ -3181,6 +3332,16 @@ mod mysql_type {
     pub const MYSQL_TYPE_LONGLONG: u8 = 8;
     pub const MYSQL_TYPE_VAR_STRING: u8 = 253;
     pub const MYSQL_TYPE_BLOB: u8 = 252;
+}
+
+/// COM_STMT_EXECUTE parameter-type flags.
+///
+/// The 2-byte type field per parameter in COM_STMT_EXECUTE is documented
+/// in the MySQL Internals manual as `MYSQL_TYPE_<n> | flag<<8`. The only
+/// flag in current use is `UNSIGNED = 0x80` (bit 7 of the high byte).
+/// In the little-endian wire u16 that means bit 0x80_00.
+mod param_flag {
+    pub const UNSIGNED_LE_U16: u16 = 0x80_00;
 }
 
 /// A MySQL prepared statement.
