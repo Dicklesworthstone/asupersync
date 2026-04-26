@@ -884,16 +884,38 @@ impl<H: Handler> Handler for RequestBodyLimitMiddleware<H> {
 
 // ─── RequestIdMiddleware ──────────────────────────────────────────────────
 
+/// Default upper bound on a client-supplied request-ID character length.
+///
+/// 128 chars is generous for legitimate UUIDs (36 chars), ULIDs (26 chars),
+/// CUIDs (25 chars), and the longest standard correlation IDs in the
+/// ecosystem (W3C `traceparent` tracestate ~128 chars). Anything longer
+/// is almost certainly an attacker probing log-amplification surfaces.
+/// (br-asupersync-pol3ps.)
+pub const DEFAULT_REQUEST_ID_MAX_LENGTH: usize = 128;
+
 /// Middleware that generates or propagates a request ID.
 ///
 /// If the request contains a header matching `header_name`, its value is
 /// used. Otherwise, a monotonically increasing ID is generated. The ID
 /// is stored in the request extensions under `"request_id"` and echoed
 /// in the response header.
+///
+/// # Length bound (security)
+///
+/// Client-supplied request-ID values are TRUNCATED to `max_id_length`
+/// characters (default [`DEFAULT_REQUEST_ID_MAX_LENGTH`] = 128) BEFORE
+/// being stored in extensions or echoed in the response. Without this
+/// bound, an attacker could send a multi-MiB `X-Request-ID` header that
+/// is then cloned into request extensions twice (`request_id` +
+/// `trace_id`), echoed in the response header, and logged by every
+/// downstream middleware — a per-request log/memory amplification of
+/// 4-8x the header size. Configure with [`Self::with_max_length`].
+/// (br-asupersync-pol3ps.)
 pub struct RequestIdMiddleware<H> {
     inner: H,
     header_name: String,
     counter: Arc<AtomicU64>,
+    max_id_length: usize,
 }
 
 impl<H: Handler> RequestIdMiddleware<H> {
@@ -901,12 +923,17 @@ impl<H: Handler> RequestIdMiddleware<H> {
     ///
     /// `header_name` specifies which request/response header carries the ID
     /// (e.g., `"x-request-id"`).
+    ///
+    /// Client-supplied IDs are truncated at
+    /// [`DEFAULT_REQUEST_ID_MAX_LENGTH`] characters; override with
+    /// [`Self::with_max_length`].
     #[must_use]
     pub fn new(inner: H, header_name: impl Into<String>) -> Self {
         Self {
             inner,
             header_name: normalize_header_name(header_name),
             counter: Arc::new(AtomicU64::new(1)),
+            max_id_length: DEFAULT_REQUEST_ID_MAX_LENGTH,
         }
     }
 
@@ -919,8 +946,46 @@ impl<H: Handler> RequestIdMiddleware<H> {
             inner,
             header_name: normalize_header_name(header_name),
             counter,
+            max_id_length: DEFAULT_REQUEST_ID_MAX_LENGTH,
         }
     }
+
+    /// Set the maximum allowed length, in characters, of a client-supplied
+    /// request-ID header value. Values longer than this are TRUNCATED at a
+    /// UTF-8 character boundary before being stored or echoed. A value of
+    /// `0` is rejected and silently coerced to
+    /// [`DEFAULT_REQUEST_ID_MAX_LENGTH`] to prevent accidental
+    /// disable-the-cap configurations. (br-asupersync-pol3ps.)
+    #[must_use]
+    pub fn with_max_length(mut self, max: usize) -> Self {
+        self.max_id_length = if max == 0 {
+            DEFAULT_REQUEST_ID_MAX_LENGTH
+        } else {
+            max
+        };
+        self
+    }
+}
+
+/// Truncate `id` to at most `max` UTF-8 characters at a char boundary.
+/// String::truncate panics on a non-char boundary; we instead find the
+/// largest valid prefix.
+fn truncate_request_id(id: &str, max: usize) -> String {
+    if id.chars().count() <= max {
+        return id.to_string();
+    }
+    let mut end = 0usize;
+    for (i, _) in id.char_indices().take(max) {
+        end = i;
+    }
+    // `end` now holds the byte index of the LAST kept char; advance past it
+    // by walking one more char_indices step or using char_indices().nth.
+    let mut iter = id.char_indices().skip(max);
+    let cutoff = iter
+        .next()
+        .map_or(id.len(), |(idx, _)| idx);
+    let _ = end;
+    id[..cutoff].to_string()
 }
 
 impl<H: Handler> Handler for RequestIdMiddleware<H> {
@@ -929,8 +994,13 @@ impl<H: Handler> Handler for RequestIdMiddleware<H> {
             let id = self.counter.fetch_add(1, Ordering::Relaxed);
             format!("req-{id}")
         });
-        // Sanitize CRLF from client-supplied header to prevent response header injection.
+        // Sanitize CRLF from client-supplied header to prevent response
+        // header injection AND truncate at max_id_length to prevent log
+        // amplification (br-asupersync-pol3ps). Order matters: strip
+        // CRLF first so we don't truncate inside a control sequence,
+        // then bound the final stored length.
         let request_id = request_id.replace(['\r', '\n'], "");
+        let request_id = truncate_request_id(&request_id, self.max_id_length);
 
         req.extensions.insert("request_id", request_id.clone());
         req.extensions.insert("trace_id", request_id.clone());
@@ -2865,6 +2935,80 @@ mod tests {
         assert_eq!(resp.status, StatusCode::OK);
         let body = String::from_utf8_lossy(&resp.body);
         assert!(body.starts_with("req-"));
+    }
+
+    // br-asupersync-pol3ps: request-ID length cap prevents log amplification
+
+    #[test]
+    fn request_id_truncates_oversize_client_supplied_value_to_default_128() {
+        let mw = RequestIdMiddleware::new(FnHandler::new(ok_handler), "x-request-id");
+        // 4 KiB attacker-supplied request ID — would normally be cloned 3x
+        // (extensions["request_id"], extensions["trace_id"], response header)
+        // and then logged by every downstream middleware that touches the ID.
+        let huge = "A".repeat(4 * 1024);
+        let req = make_request().with_header("x-request-id", &huge);
+        let resp = mw.call(req);
+        let echoed = resp.headers.get("x-request-id").unwrap();
+        assert_eq!(
+            echoed.chars().count(),
+            DEFAULT_REQUEST_ID_MAX_LENGTH,
+            "echo header must be truncated to DEFAULT_REQUEST_ID_MAX_LENGTH (128 chars), \
+             got {} chars",
+            echoed.chars().count()
+        );
+        assert!(echoed.chars().all(|c| c == 'A'));
+    }
+
+    #[test]
+    fn request_id_with_max_length_overrides_default() {
+        let mw = RequestIdMiddleware::new(FnHandler::new(ok_handler), "x-request-id")
+            .with_max_length(16);
+        let huge = "B".repeat(1024);
+        let req = make_request().with_header("x-request-id", &huge);
+        let resp = mw.call(req);
+        let echoed = resp.headers.get("x-request-id").unwrap();
+        assert_eq!(echoed.chars().count(), 16);
+    }
+
+    #[test]
+    fn request_id_with_max_length_zero_falls_back_to_default() {
+        // 0 is rejected (would silently disable the cap); coerced to default.
+        let mw = RequestIdMiddleware::new(FnHandler::new(ok_handler), "x-request-id")
+            .with_max_length(0);
+        let huge = "C".repeat(4 * 1024);
+        let req = make_request().with_header("x-request-id", &huge);
+        let resp = mw.call(req);
+        let echoed = resp.headers.get("x-request-id").unwrap();
+        assert_eq!(echoed.chars().count(), DEFAULT_REQUEST_ID_MAX_LENGTH);
+    }
+
+    #[test]
+    fn request_id_truncate_respects_utf8_char_boundary() {
+        // 50 multi-byte chars (each = 4 bytes); cap at 10 chars.
+        // truncate_request_id MUST cut at a char boundary, not a byte boundary
+        // (String::truncate at a non-boundary panics).
+        let s: String = std::iter::repeat_n('🦀', 50).collect();
+        let mw = RequestIdMiddleware::new(FnHandler::new(ok_handler), "x-request-id")
+            .with_max_length(10);
+        let req = make_request().with_header("x-request-id", &s);
+        let resp = mw.call(req);
+        let echoed = resp.headers.get("x-request-id").unwrap();
+        assert_eq!(echoed.chars().count(), 10);
+        assert_eq!(echoed.chars().filter(|c| *c == '🦀').count(), 10);
+        // Must be valid UTF-8 (round-trip without panic).
+        let _ = echoed.as_bytes();
+    }
+
+    #[test]
+    fn request_id_passes_through_short_client_value_unchanged() {
+        let mw = RequestIdMiddleware::new(FnHandler::new(ok_handler), "x-request-id");
+        let req = make_request().with_header("x-request-id", "abc-123");
+        let resp = mw.call(req);
+        assert_eq!(
+            resp.headers.get("x-request-id"),
+            Some(&"abc-123".to_string()),
+            "values under the cap must pass through verbatim"
+        );
     }
 
     // --- RequestTraceMiddleware ---
