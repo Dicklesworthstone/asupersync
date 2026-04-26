@@ -40,6 +40,10 @@ fn connect_in_progress(err: &io::Error) -> bool {
     ) || err.raw_os_error() == Some(libc::EINPROGRESS)
 }
 
+fn cancelled_poll<T>() -> Poll<io::Result<T>> {
+    Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")))
+}
+
 async fn wait_for_connect(socket: &Socket) -> io::Result<Option<IoRegistration>> {
     let Some(driver) = Cx::current().and_then(|cx| cx.io_driver_handle()) else {
         wait_for_connect_fallback(socket).await?;
@@ -50,7 +54,7 @@ async fn wait_for_connect(socket: &Socket) -> io::Result<Option<IoRegistration>>
     let mut fallback = false;
     std::future::poll_fn(|cx| {
         if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            return cancelled_poll();
         }
 
         if let Some(err) = socket.take_error()? {
@@ -120,7 +124,7 @@ fn rearm_connect_registration(
 async fn wait_for_connect_fallback(socket: &Socket) -> io::Result<()> {
     std::future::poll_fn(|cx| {
         if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            return cancelled_poll();
         }
 
         if let Some(err) = socket.take_error()? {
@@ -364,14 +368,11 @@ impl UnixStream {
         &self.inner
     }
 
-    /// Registers interest with the I/O driver for read events.
-    fn register_interest_for_read(&self, cx: &Context<'_>) -> io::Result<()> {
-        self.register_interest(cx, Interest::READABLE)
-    }
-
-    /// Registers interest with the I/O driver for write events.
-    fn register_interest_for_write(&self, cx: &Context<'_>) -> io::Result<()> {
-        self.register_interest(cx, Interest::WRITABLE)
+    fn pending_on_interest<T>(&self, cx: &Context<'_>, interest: Interest) -> Poll<io::Result<T>> {
+        match self.register_interest(cx, interest) {
+            Ok(()) => Poll::Pending,
+            Err(err) => Poll::Ready(Err(err)),
+        }
     }
 
     /// Registers interest with the I/O driver.
@@ -507,16 +508,13 @@ impl UnixStream {
 
         std::future::poll_fn(|cx| {
             if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-                return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+                return cancelled_poll();
             }
 
             match send_with_ancillary_impl(self.inner.as_raw_fd(), buf, ancillary) {
                 Ok(n) => Poll::Ready(Ok(n)),
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    if let Err(e) = self.register_interest_for_write(cx) {
-                        return Poll::Ready(Err(e));
-                    }
-                    Poll::Pending
+                    self.pending_on_interest(cx, Interest::WRITABLE)
                 }
                 Err(e) => Poll::Ready(Err(e)),
             }
@@ -579,16 +577,13 @@ impl UnixStream {
 
         std::future::poll_fn(|cx| {
             if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-                return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+                return cancelled_poll();
             }
 
             match recv_with_ancillary_impl(self.inner.as_raw_fd(), buf, ancillary) {
                 Ok(n) => Poll::Ready(Ok(n)),
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    if let Err(e) = self.register_interest_for_read(cx) {
-                        return Poll::Ready(Err(e));
-                    }
-                    Poll::Pending
+                    self.pending_on_interest(cx, Interest::READABLE)
                 }
                 Err(e) => Poll::Ready(Err(e)),
             }
@@ -642,7 +637,7 @@ impl AsyncRead for UnixStream {
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            return cancelled_poll();
         }
         let inner: &net::UnixStream = &self.inner;
         // std::os::unix::net::UnixStream implements Read for &UnixStream
@@ -652,10 +647,7 @@ impl AsyncRead for UnixStream {
                 Poll::Ready(Ok(()))
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if let Err(e) = self.register_interest_for_read(cx) {
-                    return Poll::Ready(Err(e));
-                }
-                Poll::Pending
+                self.pending_on_interest(cx, Interest::READABLE)
             }
             Err(e) => Poll::Ready(Err(e)),
         }
@@ -669,16 +661,13 @@ impl AsyncReadVectored for UnixStream {
         bufs: &mut [IoSliceMut<'_>],
     ) -> Poll<io::Result<usize>> {
         if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            return cancelled_poll();
         }
         let inner: &net::UnixStream = &self.inner;
         match (&*inner).read_vectored(bufs) {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if let Err(e) = self.register_interest_for_read(cx) {
-                    return Poll::Ready(Err(e));
-                }
-                Poll::Pending
+                self.pending_on_interest(cx, Interest::READABLE)
             }
             Err(e) => Poll::Ready(Err(e)),
         }
@@ -692,16 +681,13 @@ impl AsyncWrite for UnixStream {
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
         if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            return cancelled_poll();
         }
         let inner: &net::UnixStream = &self.inner;
         match (&*inner).write(buf) {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if let Err(e) = self.register_interest_for_write(cx) {
-                    return Poll::Ready(Err(e));
-                }
-                Poll::Pending
+                self.pending_on_interest(cx, Interest::WRITABLE)
             }
             Err(e) => Poll::Ready(Err(e)),
         }
@@ -713,16 +699,13 @@ impl AsyncWrite for UnixStream {
         bufs: &[IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
         if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            return cancelled_poll();
         }
         let inner: &net::UnixStream = &self.inner;
         match (&*inner).write_vectored(bufs) {
             Ok(n) => Poll::Ready(Ok(n)),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if let Err(e) = self.register_interest_for_write(cx) {
-                    return Poll::Ready(Err(e));
-                }
-                Poll::Pending
+                self.pending_on_interest(cx, Interest::WRITABLE)
             }
             Err(e) => Poll::Ready(Err(e)),
         }
@@ -734,16 +717,13 @@ impl AsyncWrite for UnixStream {
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            return cancelled_poll();
         }
         let inner: &net::UnixStream = &self.inner;
         match (&*inner).flush() {
             Ok(()) => Poll::Ready(Ok(())),
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                if let Err(e) = self.register_interest_for_write(cx) {
-                    return Poll::Ready(Err(e));
-                }
-                Poll::Pending
+                self.pending_on_interest(cx, Interest::WRITABLE)
             }
             Err(e) => Poll::Ready(Err(e)),
         }
@@ -751,7 +731,7 @@ impl AsyncWrite for UnixStream {
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
-            return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
+            return cancelled_poll();
         }
         match self.inner.shutdown(Shutdown::Write) {
             Ok(()) => Poll::Ready(Ok(())),
