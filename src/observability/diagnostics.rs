@@ -22,6 +22,63 @@ use crate::console::Console;
 use crate::observability::spectral_health::{
     SpectralHealthMonitor, SpectralHealthReport, SpectralThresholds,
 };
+
+/// Maximum bytes a sanitized cancel-reason message may contribute to a
+/// diagnostic string (br-asupersync-3fq08n). Larger messages are truncated
+/// with an ellipsis suffix.
+///
+/// Defends against log-amplification: a CancelReason::message can come from
+/// arbitrary code (peer-bounded gateway → service paths, user-input
+/// passthrough, etc.) and a multi-KB message would explode log volume per
+/// diagnostic record.
+const MAX_SANITIZED_CANCEL_MESSAGE_LEN: usize = 256;
+
+/// Strip CR, LF, tab, NUL, and other ASCII control characters from a
+/// cancel-reason message before embedding it into a diagnostic string.
+///
+/// br-asupersync-3fq08n: `CancelReason::message` is set by callers via
+/// `cancel(reason, ...)` and may contain arbitrary text — including `\r`,
+/// `\n`, ANSI escapes, and other control characters. When diagnostic
+/// records are written to stdout / structured log / file / shipped to a
+/// SIEM, these embedded controls can:
+///   * spoof additional log lines (newline injection)
+///   * corrupt downstream parsers (newline-delimited JSON)
+///   * hide or alter records (CR overwrite)
+///   * inject ANSI escape sequences that change terminal display
+///
+/// Same sanitization rules as `tls/error.rs::sanitize_for_log` (kxw8nx
+/// pattern). Kept inline rather than refactored into a shared util to
+/// preserve loose coupling between observability and tls modules; if a
+/// third site arises, that's the time to refactor.
+///
+/// Sanitization rules:
+///   * `\r`, `\n`, `\t` → ASCII space (preserves field separation)
+///   * Any other ASCII control char (0x00..=0x1F, 0x7F) → `?` placeholder
+///   * UTF-8 truncation at MAX_SANITIZED_CANCEL_MESSAGE_LEN bytes, cut on
+///     a char boundary, with `…` suffix on truncation
+fn sanitize_cancel_message(input: &str) -> String {
+    let mut out = String::with_capacity(input.len().min(MAX_SANITIZED_CANCEL_MESSAGE_LEN + 3));
+    let mut byte_count = 0usize;
+    let mut truncated = false;
+    for ch in input.chars() {
+        let mapped = match ch {
+            '\r' | '\n' | '\t' => ' ',
+            c if (c as u32) < 0x20 || c == '\u{7f}' => '?',
+            c => c,
+        };
+        let mapped_len = mapped.len_utf8();
+        if byte_count + mapped_len > MAX_SANITIZED_CANCEL_MESSAGE_LEN {
+            truncated = true;
+            break;
+        }
+        out.push(mapped);
+        byte_count += mapped_len;
+    }
+    if truncated {
+        out.push('…');
+    }
+    out
+}
 use crate::record::ObligationState;
 use crate::record::region::RegionState;
 use crate::record::task::TaskState;
@@ -389,7 +446,9 @@ impl Diagnostics {
             TaskState::CancelRequested { reason, .. } => {
                 details.push(format!("cancel kind: {}", reason.kind));
                 if let Some(msg) = &reason.message.as_deref() {
-                    details.push(format!("message: {msg}"));
+                    // br-asupersync-3fq08n: peer/user-controlled message
+                    // sanitized before embedding into diagnostic string.
+                    details.push(format!("message: {}", sanitize_cancel_message(msg)));
                 }
                 recommendations.push("Task is cancelling; wait for drain/finalizers.".to_string());
                 BlockReason::CancelRequested {
@@ -851,10 +910,14 @@ pub struct CancelReasonInfo {
 }
 
 impl CancelReasonInfo {
+    /// br-asupersync-3fq08n: sanitize the cancel-reason message at the
+    /// chokepoint so all downstream consumers (Display, serde, debug)
+    /// observe the cleaned value. Once the value enters this struct, it
+    /// is safe for any log path.
     fn from_reason(kind: CancelKind, message: Option<&str>) -> Self {
         Self {
             kind,
-            message: message.map(str::to_string),
+            message: message.map(sanitize_cancel_message),
         }
     }
 }
@@ -862,6 +925,9 @@ impl CancelReasonInfo {
 impl fmt::Display for CancelReasonInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(msg) = &self.message {
+            // Message was sanitized at construction (from_reason) so this
+            // path is safe — no embedded CR/LF/control chars can splice
+            // fake log lines.
             write!(f, "{} ({msg})", self.kind)
         } else {
             write!(f, "{}", self.kind)
@@ -5229,5 +5295,89 @@ mod tests {
             "observability_diagnostics_v3_schema_validation",
             &rendered,
         );
+    }
+
+    // ─── br-asupersync-3fq08n: cancel-reason sanitization ─────────────
+
+    #[test]
+    fn sanitize_cancel_message_strips_crlf_to_space() {
+        let raw = "user cancelled\r\n[ERROR] FAKE LOG SPLICE";
+        let sanitized = sanitize_cancel_message(raw);
+        assert!(
+            !sanitized.contains('\r') && !sanitized.contains('\n'),
+            "CR/LF must be stripped, got {sanitized:?}"
+        );
+        // The injected text remains visible (just on the same log line).
+        assert!(sanitized.contains("FAKE LOG SPLICE"));
+    }
+
+    #[test]
+    fn sanitize_cancel_message_strips_tab_to_space() {
+        assert_eq!(sanitize_cancel_message("a\tb"), "a b");
+    }
+
+    #[test]
+    fn sanitize_cancel_message_replaces_other_controls_with_question() {
+        // NUL, BEL, ESC, DEL — non-printable controls beyond CR/LF/tab.
+        let raw = "x\x00y\x07z\x1bw\x7fv";
+        assert_eq!(sanitize_cancel_message(raw), "x?y?z?w?v");
+    }
+
+    #[test]
+    fn sanitize_cancel_message_preserves_printable_unicode() {
+        let raw = "deadline reached: ✓ 漢字";
+        assert_eq!(sanitize_cancel_message(raw), raw);
+    }
+
+    #[test]
+    fn sanitize_cancel_message_truncates_at_cap_with_ellipsis() {
+        let raw = "Y".repeat(500);
+        let sanitized = sanitize_cancel_message(&raw);
+        assert!(sanitized.starts_with(&"Y".repeat(MAX_SANITIZED_CANCEL_MESSAGE_LEN)));
+        assert!(sanitized.ends_with('…'));
+        // Total bytes: 256 ASCII + 3 bytes UTF-8 ellipsis = 259.
+        assert_eq!(sanitized.len(), MAX_SANITIZED_CANCEL_MESSAGE_LEN + 3);
+    }
+
+    #[test]
+    fn sanitize_cancel_message_truncates_on_char_boundary_for_multibyte() {
+        // '漢' is 3 bytes UTF-8. 86 of them = 258 bytes (over 256 cap).
+        // Cap is 256; 85 chars = 255 bytes (fits); 86th char's 3 bytes
+        // would push to 258 → truncated at 85 chars + '…'.
+        let raw = "漢".repeat(86);
+        let sanitized = sanitize_cancel_message(&raw);
+        assert!(sanitized.ends_with('…'));
+        // 85 * 3 = 255 bytes of 漢, plus 3 bytes of '…' = 258 total.
+        assert_eq!(sanitized.len(), 258);
+        // Verify char boundary respected (valid UTF-8).
+        assert!(std::str::from_utf8(sanitized.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn cancel_reason_info_from_reason_sanitizes_message() {
+        // The chokepoint test: an attacker-controlled message containing a
+        // log-injection attempt MUST be sanitized at construction so all
+        // downstream consumers (Display, serde) see the clean value.
+        let info = CancelReasonInfo::from_reason(
+            CancelKind::User,
+            Some("graceful shutdown\n[ALERT] privilege escalation"),
+        );
+        let stored = info.message.as_deref().unwrap();
+        assert!(
+            !stored.contains('\n'),
+            "stored message must be sanitized, got {stored:?}"
+        );
+        assert!(stored.contains("[ALERT] privilege escalation"));
+        // Display path inherits the sanitized value.
+        let display = format!("{info}");
+        assert!(!display.contains('\n'));
+    }
+
+    #[test]
+    fn cancel_reason_info_with_none_message_is_passthrough() {
+        let info = CancelReasonInfo::from_reason(CancelKind::User, None);
+        assert!(info.message.is_none());
+        let display = format!("{info}");
+        assert!(!display.contains('('));
     }
 }
