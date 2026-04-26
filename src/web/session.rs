@@ -1534,20 +1534,28 @@ mod tests {
     // br-asupersync-czbj90 — Origin/Referer extraction + allow-list
     // ================================================================
 
+    fn make_request_with_headers(method: &str, headers: &[(&str, &str)]) -> Request {
+        let mut h = HashMap::new();
+        for (k, v) in headers {
+            h.insert((*k).to_string(), (*v).to_string());
+        }
+        Request {
+            method: method.to_string(),
+            path: "/api/x".to_string(),
+            query: None,
+            headers: h,
+            body: crate::bytes::Bytes::new(),
+            path_params: HashMap::new(),
+            extensions: crate::web::extract::Extensions::new(),
+        }
+    }
+
     #[test]
     fn referer_origin_strips_path() {
-        // Origin absent; Referer present with path component.
-        let req = Request {
-            method: crate::http::Method::POST,
-            uri: "/api/x".to_string(),
-            version: crate::http::Version::HTTP_1_1,
-            headers: vec![(
-                "Referer".to_string(),
-                "https://app.example.com/foo/bar?q=1".to_string(),
-            )],
-            body: crate::bytes::Bytes::new(),
-            extensions: crate::web::Extensions::new(),
-        };
+        let req = make_request_with_headers(
+            "POST",
+            &[("Referer", "https://app.example.com/foo/bar?q=1")],
+        );
         let origin = request_origin(&req);
         assert_eq!(origin.as_deref(), Some("https://app.example.com"));
     }
@@ -1562,20 +1570,13 @@ mod tests {
 
     #[test]
     fn origin_header_takes_precedence_over_referer() {
-        let req = Request {
-            method: crate::http::Method::POST,
-            uri: "/api/x".to_string(),
-            version: crate::http::Version::HTTP_1_1,
-            headers: vec![
-                ("Origin".to_string(), "https://app.example.com".to_string()),
-                (
-                    "Referer".to_string(),
-                    "https://other.example.com/".to_string(),
-                ),
+        let req = make_request_with_headers(
+            "POST",
+            &[
+                ("Origin", "https://app.example.com"),
+                ("Referer", "https://other.example.com/"),
             ],
-            body: crate::bytes::Bytes::new(),
-            extensions: crate::web::Extensions::new(),
-        };
+        );
         assert_eq!(
             request_origin(&req).as_deref(),
             Some("https://app.example.com")
@@ -1584,20 +1585,13 @@ mod tests {
 
     #[test]
     fn null_origin_falls_back_to_referer() {
-        let req = Request {
-            method: crate::http::Method::POST,
-            uri: "/api/x".to_string(),
-            version: crate::http::Version::HTTP_1_1,
-            headers: vec![
-                ("Origin".to_string(), "null".to_string()),
-                (
-                    "Referer".to_string(),
-                    "https://app.example.com/foo".to_string(),
-                ),
+        let req = make_request_with_headers(
+            "POST",
+            &[
+                ("Origin", "null"),
+                ("Referer", "https://app.example.com/foo"),
             ],
-            body: crate::bytes::Bytes::new(),
-            extensions: crate::web::Extensions::new(),
-        };
+        );
         assert_eq!(
             request_origin(&req).as_deref(),
             Some("https://app.example.com")
