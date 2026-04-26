@@ -1419,8 +1419,19 @@ impl LabRuntime {
             let prefix_len = self.auto_divergent_prefix().len();
             (prefix_len > 0).then_some(prefix_len)
         };
+        // br-asupersync-9ri7x0: capture the truncation watermark BEFORE
+        // deciding whether to run the firewall. Previously, when
+        // total_pushed > buffer_len the refinement-firewall oracle was
+        // silently disabled and the scenario could still report
+        // 'passed' — adversarial event-heavy scenarios could drown out
+        // detection by deliberately exceeding the buffer. The new
+        // contract: a truncated trace MUST surface as an explicit
+        // violation in invariant_violations so the scenario fails
+        // loudly, naming the seed and the truncation watermark.
+        let trace_total_pushed = self.trace().total_pushed();
+        let trace_buffered_len = trace_events.len() as u64;
         let refinement_firewall_skipped_due_to_trace_truncation =
-            self.trace().total_pushed() > trace_events.len() as u64;
+            trace_total_pushed > trace_buffered_len;
         let refinement_violation = if refinement_firewall_skipped_due_to_trace_truncation {
             None
         } else {
@@ -1452,6 +1463,18 @@ impl LabRuntime {
         if let Some(prefix_len) = refinement_counterexample_prefix_len {
             invariant_violations.push(format!(
                 "refinement_firewall:minimal_counterexample_prefix_len={prefix_len}"
+            ));
+        }
+        // br-asupersync-9ri7x0: when the in-memory event buffer was
+        // overrun, the refinement-firewall oracle could not run on the
+        // suffix that was dropped. Report it as a hard scenario
+        // failure with the seed + watermark so an operator can
+        // increase trace_capacity (or split the scenario) instead of
+        // silently shipping a green result.
+        if refinement_firewall_skipped_due_to_trace_truncation {
+            invariant_violations.push(format!(
+                "refinement_firewall:scenario_failed_due_to_trace_truncation:\
+                 seed={seed},total_pushed={trace_total_pushed},buffered={trace_buffered_len}"
             ));
         }
         invariant_violations.sort();
@@ -1918,8 +1941,26 @@ impl LabRuntime {
                 None
             };
 
+        // br-asupersync-7uu7sa: even when SOME region is open, this
+        // specific task may belong to a region that has already
+        // transitioned to Closing/Draining/Closed during a different
+        // chaos action in the same step. Re-polling such a task
+        // violates the structured-concurrency contract the oracles
+        // assume — it produces a 'cancel-aware future re-polled after
+        // region close' code path that production never executes.
+        // Filter post-decision so chaos budget accounting stays in
+        // sync with the global gate decision.
+        let target_region_open = self
+            .state
+            .task(task_id)
+            .map(|t| t.owner)
+            .and_then(|owner| self.state.region(owner))
+            .is_some_and(|region| region.state().can_accept_work());
+
         // Apply the injection (no more borrowing chaos_rng)
-        if let Some(count) = wakeup_count {
+        if let Some(count) = wakeup_count
+            && target_region_open
+        {
             self.chaos_stats.record_wakeup_storm(count as u64);
             self.inject_spurious_wakes(task_id, priority, count);
         } else {
@@ -2185,6 +2226,23 @@ impl LabRuntime {
 
     /// Injects spurious wakeups for a task.
     fn inject_spurious_wakes(&mut self, task_id: TaskId, priority: u8, count: usize) {
+        // br-asupersync-7uu7sa: defense-in-depth — even when the chaos
+        // call site (inject_post_poll_chaos) gates correctly, future
+        // callers may invoke this method directly. Refuse to wake a
+        // task whose owning region is no longer accepting work
+        // (Closing / Draining / Closed). This silently no-ops rather
+        // than panicking so chaos campaigns with TaskId selection that
+        // races region close don't artificially abort.
+        let owner_open = self
+            .state
+            .task(task_id)
+            .map(|t| t.owner)
+            .and_then(|owner| self.state.region(owner))
+            .is_some_and(|region| region.state().can_accept_work());
+        if !owner_open {
+            return;
+        }
+
         // Record replay event
         self.replay_recorder
             .record_wakeup_storm_injection(task_id, u32::try_from(count).unwrap_or(u32::MAX));
@@ -4014,10 +4072,21 @@ mod tests {
         crate::test_complete!("report_surfaces_refinement_firewall_violation_from_trace_snapshot");
     }
 
+    // br-asupersync-9ri7x0: trace truncation no longer silently
+    // disables the refinement-firewall oracle. The flag remains set
+    // (it is part of the report contract) and the rule_id is None
+    // because the firewall did not run, but the scenario must now
+    // surface a hard 'scenario_failed_due_to_trace_truncation'
+    // invariant_violations entry so any caller that gates on
+    // invariant_violations.is_empty() will fail loudly. The seed and
+    // truncation watermark are embedded in the message so an
+    // operator can immediately bump trace_capacity or split the
+    // scenario.
     #[test]
-    fn report_skips_refinement_firewall_when_trace_buffer_is_truncated() {
-        init_test("report_skips_refinement_firewall_when_trace_buffer_is_truncated");
-        let config = LabConfig::new(35).trace_capacity(1);
+    fn report_fails_loudly_when_trace_buffer_is_truncated_l9ri7x0() {
+        init_test("report_fails_loudly_when_trace_buffer_is_truncated_l9ri7x0");
+        let seed = 35;
+        let config = LabConfig::new(seed).trace_capacity(1);
         let mut runtime = LabRuntime::new(config);
         let region = RegionId::new_for_test(43, 0);
         let task = TaskId::new_for_test(9, 0);
@@ -4034,34 +4103,153 @@ mod tests {
         let report = runtime.report();
         crate::assert_with_log!(
             report.refinement_firewall_skipped_due_to_trace_truncation,
-            "refinement skipped on truncated trace",
+            "refinement_firewall_skipped_due_to_trace_truncation",
             true,
             report.refinement_firewall_skipped_due_to_trace_truncation
         );
         crate::assert_with_log!(
             report.refinement_firewall_rule_id.is_none(),
-            "no refinement violation when skipped",
+            "no real rule_id when firewall could not run",
             true,
             report.refinement_firewall_rule_id.is_none()
         );
-        let has_refinement_marker = report
-            .invariant_violations
-            .iter()
-            .any(|v| v.starts_with("refinement_firewall:"));
-        crate::assert_with_log!(
-            !has_refinement_marker,
-            "no refinement markers when skipped",
-            false,
-            has_refinement_marker
+
+        // The new contract: invariant_violations MUST contain a
+        // hard-fail marker that names the truncation cause + seed +
+        // watermark. The substring is checked rather than equality
+        // so future format adjustments stay backward-compatible.
+        let truncation_marker = report.invariant_violations.iter().find(|v| {
+            v.starts_with("refinement_firewall:scenario_failed_due_to_trace_truncation")
+        });
+        let marker = truncation_marker.expect(
+            "truncation must surface as a hard refinement_firewall:scenario_failed_due_to_trace_truncation marker",
         );
+        assert!(
+            marker.contains(&format!("seed={seed}")),
+            "truncation marker must embed the seed, got: {marker}"
+        );
+        assert!(
+            marker.contains("total_pushed=") && marker.contains("buffered="),
+            "truncation marker must embed total_pushed + buffered watermark, got: {marker}"
+        );
+        // And of course the scenario must NOT report 'passed':
+        // invariant_violations.is_empty() is the standard pass gate.
+        crate::assert_with_log!(
+            !report.invariant_violations.is_empty(),
+            "scenario must fail loudly when trace buffer truncates",
+            true,
+            !report.invariant_violations.is_empty()
+        );
+
         let json = report.to_json();
         crate::assert_with_log!(
             json["refinement_firewall"]["skipped_due_to_trace_truncation"] == true,
-            "refinement skipped flag serialized",
+            "skipped flag still serialized for downstream tooling",
             true,
             json["refinement_firewall"]["skipped_due_to_trace_truncation"]
         );
-        crate::test_complete!("report_skips_refinement_firewall_when_trace_buffer_is_truncated");
+        crate::test_complete!("report_fails_loudly_when_trace_buffer_is_truncated_l9ri7x0");
+    }
+
+    // br-asupersync-7uu7sa: chaos-injected wakeup_storm must be
+    // suppressed when the targeted task's owning region has already
+    // transitioned to Closing/Draining/Closed. Drives the inner
+    // method directly, then drives it again after flipping the
+    // owning region's state to Closing — the second call must NOT
+    // schedule the task.
+    #[test]
+    fn inject_spurious_wakes_suppressed_when_owning_region_is_closing_l7uu7sa() {
+        init_test("inject_spurious_wakes_suppressed_when_owning_region_is_closing_l7uu7sa");
+
+        let mut runtime = LabRuntime::with_seed(42);
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let task_idx = runtime.state.insert_task(TaskRecord::new_with_time(
+            TaskId::from_arena(ArenaIndex::new(0, 0)),
+            region,
+            Budget::INFINITE,
+            runtime.state.now,
+        ));
+        let task_id = TaskId::from_arena(task_idx);
+        runtime.state.task_mut(task_id).unwrap().id = task_id;
+
+        // Region is Open: the inner method must schedule the task.
+        runtime.inject_spurious_wakes(task_id, 0, 2);
+        let scheduled_open = {
+            let mut sched = runtime.scheduler.lock();
+            let mut count = 0u32;
+            while sched
+                .pop_for_worker(0, count.into(), Time::ZERO)
+                .is_some()
+            {
+                count += 1;
+            }
+            count
+        };
+        crate::assert_with_log!(
+            scheduled_open == 2,
+            "while region is Open, 2 spurious wakes are scheduled",
+            2u32,
+            scheduled_open
+        );
+
+        // Transition the region into a non-accepting state.
+        runtime
+            .state
+            .region(region)
+            .expect("region exists")
+            .set_state(crate::record::region::RegionState::Closing);
+
+        // Now the call must be silently suppressed — no work on the queue.
+        runtime.inject_spurious_wakes(task_id, 0, 5);
+        let scheduled_closing = {
+            let mut sched = runtime.scheduler.lock();
+            let mut count = 0u32;
+            while sched
+                .pop_for_worker(0, count.into(), Time::ZERO)
+                .is_some()
+            {
+                count += 1;
+            }
+            count
+        };
+        crate::assert_with_log!(
+            scheduled_closing == 0,
+            "after region.set_state(Closing), spurious wakes are suppressed",
+            0u32,
+            scheduled_closing
+        );
+
+        // Defense-in-depth: walk every other terminal-ish state.
+        for state in [
+            crate::record::region::RegionState::Draining,
+            crate::record::region::RegionState::Closed,
+        ] {
+            runtime
+                .state
+                .region(region)
+                .expect("region exists")
+                .set_state(state);
+            runtime.inject_spurious_wakes(task_id, 0, 3);
+            let scheduled = {
+                let mut sched = runtime.scheduler.lock();
+                let mut count = 0u32;
+                while sched
+                    .pop_for_worker(0, count.into(), Time::ZERO)
+                    .is_some()
+                {
+                    count += 1;
+                }
+                count
+            };
+            assert_eq!(
+                scheduled, 0,
+                "spurious wakes must be suppressed in region state {state:?}"
+            );
+        }
+
+        crate::test_complete!(
+            "inject_spurious_wakes_suppressed_when_owning_region_is_closing_l7uu7sa"
+        );
     }
 
     #[test]
