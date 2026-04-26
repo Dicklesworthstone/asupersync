@@ -380,7 +380,21 @@ impl Worker {
             completed: false,
         };
 
-        let poll_start = Instant::now();
+        // br-asupersync-qdkyqs: replay-determinism. Sample the
+        // worker's installed TimerDriverHandle when present (which
+        // returns deterministic logical Time in the lab runtime);
+        // fall back to wall_now() when no driver is attached
+        // (production-default config). Both paths return
+        // [`crate::types::Time`] so the elapsed computation at the
+        // bottom of the poll loop is type-uniform. Pre-fix used
+        // `std::time::Instant::now()` directly, which baked
+        // wall-clock into a metric that — once a future refactor
+        // routes scheduler decisions through observability — would
+        // diverge across replays.
+        let poll_start: crate::types::Time = self
+            .timer_driver
+            .as_ref()
+            .map_or_else(crate::time::wall_now, TimerDriverHandle::now);
 
         // Get region ID for panic isolation context
         let region_id = {
@@ -634,7 +648,20 @@ impl Worker {
             }
         }
         let _ = guard.completed;
-        self.metrics.scheduler_tick(1, poll_start.elapsed());
+        // br-asupersync-qdkyqs: matched-pair sample with poll_start
+        // (above). `Time::duration_since` returns saturating
+        // u64-nanos which we wrap as `Duration` for the metric API.
+        // Same TimerDriver-or-wall_now branch as poll_start so the
+        // elapsed value is computed from a single clock source per
+        // poll.
+        let poll_end: crate::types::Time = self
+            .timer_driver
+            .as_ref()
+            .map_or_else(crate::time::wall_now, TimerDriverHandle::now);
+        self.metrics.scheduler_tick(
+            1,
+            Duration::from_nanos(poll_end.duration_since(poll_start)),
+        );
     }
 
     fn schedule_ready_finalizers(&self) -> bool {
