@@ -102,6 +102,17 @@ pub enum PgError {
     TransactionFinished,
     /// Unsupported authentication method.
     UnsupportedAuth(String),
+    /// br-asupersync-dvgvcu — `begin_with_isolation` issued a
+    /// `BEGIN ISOLATION LEVEL X` but the server-reported value of
+    /// `SHOW transaction_isolation` did not match the requested
+    /// level. The transaction has been rolled back before this
+    /// error is returned.
+    IsolationLevelMismatch {
+        /// The level the caller requested.
+        requested: IsolationLevel,
+        /// The raw value the server reported via `SHOW transaction_isolation`.
+        observed: String,
+    },
 }
 
 impl PgError {
@@ -230,6 +241,15 @@ impl fmt::Display for PgError {
             Self::UnsupportedAuth(method) => {
                 write!(f, "Unsupported authentication method: {method}")
             }
+            Self::IsolationLevelMismatch {
+                requested,
+                observed,
+            } => write!(
+                f,
+                "PostgreSQL isolation level mismatch: requested {requested}, server reported \
+                 {observed:?} — silent downgrade detected, transaction rolled back \
+                 (br-asupersync-dvgvcu)"
+            ),
         }
     }
 }
@@ -1321,6 +1341,7 @@ impl<'a> MessageReader<'a> {
 /// SCRAM channel-binding mode. Drives the GS2 header and the `c=` value.
 /// (br-asupersync-7n2xsi)
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 enum ScramChannelBinding {
     /// No TLS — `n,,` GS2 header. Used with `SCRAM-SHA-256` over plain TCP.
     None,
@@ -1736,6 +1757,40 @@ impl IsolationLevel {
             Self::ReadCommitted => "READ COMMITTED",
             Self::RepeatableRead => "REPEATABLE READ",
             Self::Serializable => "SERIALIZABLE",
+        }
+    }
+
+    /// br-asupersync-dvgvcu — Parse the value returned by
+    /// `SHOW transaction_isolation`. Postgres reports these as
+    /// lowercase with spaces (`read uncommitted`, `read committed`,
+    /// `repeatable read`, `serializable`). The match is
+    /// case-insensitive and tolerates either separator. Note
+    /// Postgres collapses `read uncommitted` to behave like
+    /// `read committed` internally; the server-reported string
+    /// still distinguishes the two. The verifier therefore checks
+    /// for exact requested-level match — a Postgres downgrade of
+    /// `read uncommitted` to `read committed` is reported as a
+    /// mismatch (the operator can opt out by requesting
+    /// `read committed` directly).
+    #[must_use]
+    pub fn from_server_string(value: &str) -> Option<Self> {
+        let normalised: String = value
+            .trim()
+            .chars()
+            .map(|c| {
+                if c == '-' || c == '_' {
+                    ' '
+                } else {
+                    c.to_ascii_uppercase()
+                }
+            })
+            .collect();
+        match normalised.as_str() {
+            "READ UNCOMMITTED" => Some(Self::ReadUncommitted),
+            "READ COMMITTED" => Some(Self::ReadCommitted),
+            "REPEATABLE READ" => Some(Self::RepeatableRead),
+            "SERIALIZABLE" => Some(Self::Serializable),
+            _ => None,
         }
     }
 }
@@ -3451,15 +3506,62 @@ impl PgConnection {
         let access_mode = if read_only { "READ ONLY" } else { "READ WRITE" };
         let sql = format!("BEGIN ISOLATION LEVEL {level} {access_mode}");
         match self.execute_unchecked(cx, &sql).await {
-            Outcome::Ok(_) => Outcome::Ok(PgTransaction {
+            Outcome::Ok(_) => {}
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+            Outcome::Panicked(p) => return Outcome::Panicked(p),
+        }
+
+        // br-asupersync-dvgvcu — verify the server-applied
+        // transaction isolation matches what was requested. The
+        // BEGIN ISOLATION LEVEL form is atomic against the server's
+        // own state, but Postgres deployments can layer
+        // default_transaction_isolation overrides via ALTER ROLE /
+        // ALTER DATABASE / GUC injection that would change the
+        // effective level despite the BEGIN succeeding without
+        // error. Without this verify, a caller that requests
+        // SERIALIZABLE could be silently transacting at READ
+        // COMMITTED, breaking correctness for read-modify-write.
+        let observed_level = match self
+            .query_unchecked(cx, "SHOW transaction_isolation")
+            .await
+        {
+            Outcome::Ok(rows) => match rows
+                .first()
+                .and_then(|r| r.get_str("transaction_isolation").ok())
+                .map(str::to_string)
+            {
+                Some(s) => s,
+                None => {
+                    let _ = self.execute_unchecked(cx, "ROLLBACK").await;
+                    return Outcome::Err(PgError::IsolationLevelMismatch {
+                        requested: level,
+                        observed: String::new(),
+                    });
+                }
+            },
+            Outcome::Err(e) => {
+                let _ = self.execute_unchecked(cx, "ROLLBACK").await;
+                return Outcome::Err(e);
+            }
+            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+            Outcome::Panicked(p) => return Outcome::Panicked(p),
+        };
+
+        match IsolationLevel::from_server_string(&observed_level) {
+            Some(parsed) if parsed == level => Outcome::Ok(PgTransaction {
                 conn: self,
                 finished: false,
                 isolation_level: Some(level),
                 read_only,
             }),
-            Outcome::Err(e) => Outcome::Err(e),
-            Outcome::Cancelled(r) => Outcome::Cancelled(r),
-            Outcome::Panicked(p) => Outcome::Panicked(p),
+            _ => {
+                let _ = self.execute_unchecked(cx, "ROLLBACK").await;
+                Outcome::Err(PgError::IsolationLevelMismatch {
+                    requested: level,
+                    observed: observed_level,
+                })
+            }
         }
     }
 
@@ -5438,6 +5540,55 @@ mod tests {
                 format!("BEGIN ISOLATION LEVEL SERIALIZABLE {expected_mode}")
             );
         }
+    }
+
+    /// br-asupersync-dvgvcu — IsolationLevel::from_server_string must
+    /// parse the Postgres-canonical lowercase + space form returned
+    /// by `SHOW transaction_isolation`.
+    #[test]
+    fn pg_isolation_level_from_server_string_parses_postgres_canonical_forms() {
+        // Postgres SHOW transaction_isolation reports lowercase space form.
+        assert_eq!(
+            IsolationLevel::from_server_string("read uncommitted"),
+            Some(IsolationLevel::ReadUncommitted)
+        );
+        assert_eq!(
+            IsolationLevel::from_server_string("read committed"),
+            Some(IsolationLevel::ReadCommitted)
+        );
+        assert_eq!(
+            IsolationLevel::from_server_string("repeatable read"),
+            Some(IsolationLevel::RepeatableRead)
+        );
+        assert_eq!(
+            IsolationLevel::from_server_string("serializable"),
+            Some(IsolationLevel::Serializable)
+        );
+
+        // Tolerates uppercase + extra whitespace.
+        assert_eq!(
+            IsolationLevel::from_server_string("  Serializable  "),
+            Some(IsolationLevel::Serializable)
+        );
+
+        // Bogus values must NOT parse.
+        assert_eq!(IsolationLevel::from_server_string(""), None);
+        assert_eq!(IsolationLevel::from_server_string("snapshot"), None);
+    }
+
+    /// br-asupersync-dvgvcu — IsolationLevelMismatch Display surfaces
+    /// the requested + observed values so operators can diagnose the
+    /// silent downgrade.
+    #[test]
+    fn pg_isolation_level_mismatch_display_includes_diagnostic_fields() {
+        let err = PgError::IsolationLevelMismatch {
+            requested: IsolationLevel::Serializable,
+            observed: "read committed".to_string(),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("SERIALIZABLE"), "missing requested in {msg}");
+        assert!(msg.contains("read committed"), "missing observed in {msg}");
+        assert!(msg.contains("dvgvcu"), "missing bead trace in {msg}");
     }
 
     #[test]

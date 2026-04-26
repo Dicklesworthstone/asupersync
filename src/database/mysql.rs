@@ -90,6 +90,22 @@ pub enum MySqlError {
     TransactionFinished,
     /// Unsupported authentication plugin.
     UnsupportedAuthPlugin(String),
+    /// br-asupersync-dvgvcu — `begin_with_isolation` issued
+    /// `SET TRANSACTION ISOLATION LEVEL X` but the server-reported
+    /// session value did NOT match the requested level. This signals
+    /// a silent downgrade (e.g., a server-side override, a permission
+    /// limit, or a replication-mode constraint stripping the
+    /// requested level back to the connection default). The
+    /// transaction has been rolled back before this error is
+    /// returned, so the caller can safely retry against a different
+    /// connection.
+    IsolationLevelMismatch {
+        /// The level the caller requested via `begin_with_isolation`.
+        requested: IsolationLevel,
+        /// The raw value the server reported via
+        /// `SELECT @@SESSION.transaction_isolation`.
+        observed: String,
+    },
 }
 
 impl MySqlError {
@@ -210,6 +226,14 @@ impl fmt::Display for MySqlError {
             Self::UnsupportedAuthPlugin(plugin) => {
                 write!(f, "Unsupported authentication plugin: {plugin}")
             }
+            Self::IsolationLevelMismatch {
+                requested,
+                observed,
+            } => write!(
+                f,
+                "MySQL isolation level mismatch: requested {requested}, server reported {observed:?} \
+                 — silent downgrade detected, transaction rolled back (br-asupersync-dvgvcu)"
+            ),
         }
     }
 }
@@ -990,6 +1014,40 @@ impl IsolationLevel {
             Self::ReadCommitted => "READ COMMITTED",
             Self::RepeatableRead => "REPEATABLE READ",
             Self::Serializable => "SERIALIZABLE",
+        }
+    }
+
+    /// br-asupersync-dvgvcu — Parse the server-reported value of
+    /// `@@SESSION.transaction_isolation` (or the older
+    /// `@@tx_isolation` synonym) into an `IsolationLevel`. MySQL /
+    /// MariaDB report these values with hyphens (`READ-UNCOMMITTED`),
+    /// while older versions and a handful of variants report the
+    /// space-form (`READ UNCOMMITTED`). The match is
+    /// case-insensitive and tolerates either separator.
+    ///
+    /// Returns `None` for unrecognised values — the caller should
+    /// surface those as `MySqlError::IsolationLevelMismatch` with
+    /// the raw observed string so the operator can inspect what the
+    /// server actually applied.
+    #[must_use]
+    pub fn from_server_string(value: &str) -> Option<Self> {
+        let normalised: String = value
+            .trim()
+            .chars()
+            .map(|c| {
+                if c == '-' || c == '_' {
+                    ' '
+                } else {
+                    c.to_ascii_uppercase()
+                }
+            })
+            .collect();
+        match normalised.as_str() {
+            "READ UNCOMMITTED" => Some(Self::ReadUncommitted),
+            "READ COMMITTED" => Some(Self::ReadCommitted),
+            "REPEATABLE READ" => Some(Self::RepeatableRead),
+            "SERIALIZABLE" => Some(Self::Serializable),
+            _ => None,
         }
     }
 }
@@ -2806,15 +2864,69 @@ impl MySqlConnection {
         let access_mode = if read_only { "READ ONLY" } else { "READ WRITE" };
         let start_sql = format!("START TRANSACTION {access_mode}");
         match self.execute_unchecked(cx, &start_sql).await {
-            Outcome::Ok(_) => Outcome::Ok(MySqlTransaction {
+            Outcome::Ok(_) => {}
+            Outcome::Err(e) => return outcome_from_error(e),
+            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+            Outcome::Panicked(p) => return Outcome::Panicked(p),
+        }
+
+        // br-asupersync-dvgvcu — verify the server actually applied
+        // the requested isolation level. `SET TRANSACTION ISOLATION
+        // LEVEL X` can be silently overridden by server-side
+        // configuration (super_read_only, replication mode, certain
+        // permission downgrades) — without this verify a caller that
+        // requests SERIALIZABLE could be silently transacting at
+        // REPEATABLE READ or worse, breaking correctness assumptions
+        // for read-modify-write workloads.
+        let observed_level = match self
+            .query_unchecked(
+                cx,
+                "SELECT @@SESSION.transaction_isolation AS isolation",
+            )
+            .await
+        {
+            Outcome::Ok(rows) => match rows
+                .first()
+                .and_then(|r| r.get_str("isolation").ok())
+                .map(str::to_string)
+            {
+                Some(s) => s,
+                None => {
+                    // Verification query returned no usable row —
+                    // roll back and surface as mismatch with empty
+                    // observed value so the caller sees the silent
+                    // failure mode.
+                    let _ = self.execute_unchecked(cx, "ROLLBACK").await;
+                    return Outcome::Err(MySqlError::IsolationLevelMismatch {
+                        requested: level,
+                        observed: String::new(),
+                    });
+                }
+            },
+            Outcome::Err(e) => {
+                let _ = self.execute_unchecked(cx, "ROLLBACK").await;
+                return outcome_from_error(e);
+            }
+            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+            Outcome::Panicked(p) => return Outcome::Panicked(p),
+        };
+
+        match IsolationLevel::from_server_string(&observed_level) {
+            Some(parsed) if parsed == level => Outcome::Ok(MySqlTransaction {
                 conn: self,
                 finished: false,
                 isolation_level: Some(level),
                 read_only,
             }),
-            Outcome::Err(e) => outcome_from_error(e),
-            Outcome::Cancelled(r) => Outcome::Cancelled(r),
-            Outcome::Panicked(p) => Outcome::Panicked(p),
+            _ => {
+                // Mismatch — roll back the in-flight transaction
+                // before returning so the connection is clean.
+                let _ = self.execute_unchecked(cx, "ROLLBACK").await;
+                Outcome::Err(MySqlError::IsolationLevelMismatch {
+                    requested: level,
+                    observed: observed_level,
+                })
+            }
         }
     }
 
@@ -4395,6 +4507,66 @@ mod tests {
         let access_mode = "READ ONLY";
         let start_sql = format!("START TRANSACTION {access_mode}");
         assert_eq!(start_sql, "START TRANSACTION READ ONLY");
+    }
+
+    /// br-asupersync-dvgvcu — IsolationLevel::from_server_string
+    /// must parse every value MySQL returns from
+    /// `@@SESSION.transaction_isolation` (hyphenated form), tolerate
+    /// the legacy space form, and accept either case.
+    #[test]
+    fn isolation_level_from_server_string_parses_mysql_canonical_forms() {
+        // MySQL 8.x reports hyphen form via @@SESSION.transaction_isolation.
+        assert_eq!(
+            IsolationLevel::from_server_string("READ-UNCOMMITTED"),
+            Some(IsolationLevel::ReadUncommitted)
+        );
+        assert_eq!(
+            IsolationLevel::from_server_string("READ-COMMITTED"),
+            Some(IsolationLevel::ReadCommitted)
+        );
+        assert_eq!(
+            IsolationLevel::from_server_string("REPEATABLE-READ"),
+            Some(IsolationLevel::RepeatableRead)
+        );
+        assert_eq!(
+            IsolationLevel::from_server_string("SERIALIZABLE"),
+            Some(IsolationLevel::Serializable)
+        );
+
+        // Older MySQL/MariaDB and SHOW VARIABLES variant returns space form.
+        assert_eq!(
+            IsolationLevel::from_server_string("REPEATABLE READ"),
+            Some(IsolationLevel::RepeatableRead)
+        );
+
+        // Case-insensitive + leading/trailing whitespace tolerated.
+        assert_eq!(
+            IsolationLevel::from_server_string("  serializable  "),
+            Some(IsolationLevel::Serializable)
+        );
+
+        // Bogus values must NOT parse.
+        assert_eq!(IsolationLevel::from_server_string(""), None);
+        assert_eq!(IsolationLevel::from_server_string("RANDOM-LEVEL"), None);
+        assert_eq!(IsolationLevel::from_server_string("READ"), None);
+    }
+
+    /// br-asupersync-dvgvcu — IsolationLevelMismatch Display surfaces
+    /// the requested + observed values so operators can diagnose the
+    /// silent downgrade.
+    #[test]
+    fn isolation_level_mismatch_display_includes_diagnostic_fields() {
+        let err = MySqlError::IsolationLevelMismatch {
+            requested: IsolationLevel::Serializable,
+            observed: "REPEATABLE-READ".to_string(),
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains("SERIALIZABLE"), "missing requested in {msg}");
+        assert!(msg.contains("REPEATABLE-READ"), "missing observed in {msg}");
+        assert!(
+            msg.contains("dvgvcu"),
+            "missing bead trace in {msg}"
+        );
     }
 
     #[test]
