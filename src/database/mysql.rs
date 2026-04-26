@@ -1108,10 +1108,31 @@ impl Drop for MySqlConnectionInner {
 ///
 /// All operations integrate with [`Cx`] for cancellation and checkpointing.
 ///
+/// # Cancellation mid-query
+///
+/// MySQL's wire protocol cannot deliver an in-band cancel on the same
+/// socket while a query is in flight: the server only observes the
+/// request after the response is fully written, so dropping the
+/// connection silently leaves the query running on the server until it
+/// finishes naturally (resource leak + correctness gap). To stop the
+/// server-side execution promptly, call
+/// [`MySqlConnection::cancel_in_flight_query`], which opens a *separate*
+/// connection and issues `KILL QUERY <connection_id>`. The thread id is
+/// captured from the server's HandshakeV10 packet at connect time and
+/// is exposed via [`connection_id`](Self::connection_id)
+/// (br-asupersync-og4pm6).
+///
 /// [`Cx`]: crate::cx::Cx
 pub struct MySqlConnection {
     /// Inner connection state.
     inner: MySqlConnectionInner,
+    /// Options used to construct this connection. Stored so that
+    /// [`cancel_in_flight_query`](Self::cancel_in_flight_query) can
+    /// reopen a fresh connection to the same server to issue
+    /// `KILL QUERY <connection_id>`. `None` for connections built
+    /// directly via test fixtures rather than `connect`/
+    /// `connect_with_options`.
+    options: Option<MySqlConnectOptions>,
 }
 
 impl fmt::Debug for MySqlConnection {
@@ -1120,6 +1141,7 @@ impl fmt::Debug for MySqlConnection {
             .field("connection_id", &self.inner.connection_id)
             .field("server_version", &self.inner.server_version)
             .field("closed", &self.inner.closed)
+            .field("kill_options_present", &self.options.is_some())
             .finish()
     }
 }
@@ -1194,9 +1216,15 @@ impl MySqlConnection {
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
             },
+            // Stash options so cancel_in_flight_query can reopen a fresh
+            // connection to issue KILL QUERY <connection_id>
+            // (br-asupersync-og4pm6).
+            options: Some(options.clone()),
         };
 
-        // Read initial handshake
+        // Read initial handshake — the server's HandshakeV10 packet carries
+        // the per-connection thread id (connection_id) which is the value
+        // KILL QUERY targets on cancellation.
         let handshake = match conn.read_handshake().await {
             Ok(h) => h,
             Err(e) => return outcome_from_error(e),
@@ -1222,6 +1250,87 @@ impl MySqlConnection {
         }
 
         Outcome::Ok(conn)
+    }
+
+    /// Send `KILL QUERY <connection_id>` to the server via a *separate*
+    /// connection so the server stops executing the query that is
+    /// currently in flight on `self`.
+    ///
+    /// MySQL's wire protocol cannot deliver an in-band cancel on the
+    /// same socket: the server only observes the request after the
+    /// query response is fully written. Dropping `self` closes the
+    /// socket, but the server may complete the query (and pay the full
+    /// resource cost) before noticing the FIN. The canonical mitigation
+    /// is to open a fresh connection and send `KILL QUERY <id>` where
+    /// `<id>` is the per-connection thread id captured from the
+    /// HandshakeV10 packet (see [`Self::connection_id`]).
+    ///
+    /// # Cx requirement
+    ///
+    /// `cx` is used to drive the kill connection and the KILL QUERY
+    /// statement. It MUST NOT be the cancelled Cx that triggered the
+    /// in-flight query's cancellation — re-using the cancelled Cx will
+    /// cause the kill connection's connect to also be cancelled. The
+    /// canonical pattern is to spawn a short-lived reaper region or to
+    /// use [`crate::cx::Cx::for_request_with_budget`] with a small
+    /// budget to bound how long the kill operation can take.
+    ///
+    /// # Errors
+    ///
+    /// * `MySqlError::Protocol` — the connection was constructed via a
+    ///   test harness rather than [`Self::connect_with_options`] and
+    ///   therefore has no stored options to reconnect with.
+    /// * `MySqlError::Cancelled` — the kill `cx` was cancelled.
+    /// * Any error from connecting to the server or executing
+    ///   `KILL QUERY`.
+    ///
+    /// After this returns successfully, the original connection (`self`)
+    /// should be dropped — the server has already stopped processing
+    /// the in-flight query, but the original socket is still open and
+    /// out of sync. The caller is responsible for the drop.
+    ///
+    /// br-asupersync-og4pm6.
+    pub async fn cancel_in_flight_query(&self, cx: &Cx) -> Result<(), MySqlError> {
+        let options = self.options.clone().ok_or_else(|| {
+            MySqlError::Protocol(
+                "cancel_in_flight_query: connection has no stored MySqlConnectOptions \
+                 (constructed outside of connect/connect_with_options — typically a \
+                 test fixture); cannot reopen a fresh connection to issue KILL QUERY"
+                    .to_string(),
+            )
+        })?;
+        let thread_id = self.connection_id();
+
+        let mut killer = match Self::connect_with_options(cx, options).await {
+            Outcome::Ok(c) => c,
+            Outcome::Err(e) => return Err(e),
+            Outcome::Cancelled(reason) => return Err(MySqlError::Cancelled(reason)),
+            Outcome::Panicked(_) => {
+                return Err(MySqlError::Protocol(
+                    "cancel_in_flight_query: kill connection panicked during connect"
+                        .to_string(),
+                ));
+            }
+        };
+
+        // KILL QUERY <id> stops the executing statement without dropping
+        // the target session — the server returns an OK packet to the
+        // killer connection. KILL <id> (without QUERY) would also close
+        // the target session, which the caller's `Drop` will handle on
+        // its own; we deliberately leave that to the caller to avoid
+        // racing with their session-cleanup logic.
+        let sql = format!("KILL QUERY {thread_id}");
+        match killer.execute(cx, &sql).await {
+            Outcome::Ok(_) => {
+                // The killer connection is dropped here, closing its socket.
+                Ok(())
+            }
+            Outcome::Err(e) => Err(e),
+            Outcome::Cancelled(reason) => Err(MySqlError::Cancelled(reason)),
+            Outcome::Panicked(_) => Err(MySqlError::Protocol(
+                "cancel_in_flight_query: KILL QUERY panicked during execute".to_string(),
+            )),
+        }
     }
 
     /// Read the initial handshake packet.
@@ -3612,6 +3721,7 @@ mod tests {
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
             },
+            options: None,
         }
     }
 
@@ -3667,6 +3777,7 @@ mod tests {
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
             },
+            options: None,
         };
 
         (conn, server)
@@ -3708,6 +3819,7 @@ mod tests {
                     needs_rollback: false,
                     max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 },
+                options: None,
             };
             conn.read_packet().await.expect("read packet")
         });
@@ -4601,6 +4713,7 @@ mod tests {
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
             },
+            options: None,
         };
         let cx = Cx::for_testing();
 
@@ -4676,6 +4789,7 @@ mod tests {
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
             },
+            options: None,
         };
         let cx = Cx::for_testing();
 
@@ -4748,6 +4862,7 @@ mod tests {
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
             },
+            options: None,
         };
         let cx = Cx::for_testing();
 
@@ -4853,6 +4968,7 @@ mod tests {
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
             },
+            options: None,
         };
         let cx = Cx::for_testing();
 
@@ -4922,6 +5038,7 @@ mod tests {
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
             },
+            options: None,
         };
         let cx = Cx::for_testing();
 
@@ -5011,6 +5128,7 @@ mod tests {
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
             },
+            options: None,
         };
         let stmt = MySqlStatement {
             statement_id: 7,
@@ -5088,6 +5206,7 @@ mod tests {
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
             },
+            options: None,
         };
         let stmt = MySqlStatement {
             statement_id: 7,
