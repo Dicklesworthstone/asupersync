@@ -53,6 +53,85 @@ const LAST_ACCESSED_KEY: &str = "__asupersync.last_accessed_unix_secs";
 /// rotating on auth boundary makes the captured ID worthless.
 const REGENERATE_FLAG_KEY: &str = "__asupersync.regenerate";
 
+/// br-asupersync-qokau8 / br-asupersync-z74jcy — fail-closed finalizer
+/// for session-ID rotation that runs on the cancel/panic path.
+///
+/// The hifab2 regenerate protocol relies on the middleware reading
+/// `REGENERATE_FLAG_KEY` back from the shared session_data AFTER the
+/// handler returns and then deleting the OLD store entry + minting a
+/// fresh ID. If the handler unwinds (panics, or — in a future async
+/// extension of this Handler trait — is cancelled) between calling
+/// `Session::regenerate()` and returning, the middleware never
+/// executes that step. The OLD session ID stays live in the store,
+/// defeating the session-fixation defense the rotation was supposed
+/// to provide.
+///
+/// `RegenerateGuard` captures the store reference, the OLD session
+/// ID, and a handle on the shared `SessionData`. On the happy path
+/// the middleware reaches the explicit regenerate-processing block
+/// and `disarm()`s the guard; the `Drop` impl then becomes a no-op.
+/// On any unwinding path the guard's `Drop` runs, inspects the
+/// shared `SessionData` under lock for `REGENERATE_FLAG_KEY`, and
+/// if the flag is set it FAILS CLOSED: the OLD store entry is
+/// deleted, invalidating the session server-side. The client's
+/// cookie still references the OLD ID but the store no longer
+/// recognises it, so the next request mints a fresh session and any
+/// session-fixation attempt is foiled.
+///
+/// `parking_lot::Mutex` is used here (matching the rest of the file),
+/// which does NOT poison on panic, so the lock acquisition inside
+/// the Drop impl is safe even when the panic happened while the
+/// handler held the lock.
+struct RegenerateGuard<'a, S: SessionStore + ?Sized> {
+    /// `true` until the middleware reaches its happy-path regenerate
+    /// processing and calls [`Self::disarm`]. While armed, `Drop`
+    /// runs the fail-closed path.
+    armed: bool,
+    /// Borrow of the configured session store. The lifetime ties the
+    /// guard to the middleware's `&self` borrow, which outlives the
+    /// inner handler call.
+    store: &'a S,
+    /// Shared session data (also seen by the handler). Inspected
+    /// under lock during fail-closed processing to detect a pending
+    /// `REGENERATE_FLAG_KEY`.
+    session_handle: Arc<Mutex<SessionData>>,
+    /// The session ID that was passed to the handler. If the handler
+    /// requested rotation and then unwound, this is the ID that
+    /// must be invalidated server-side.
+    session_id: String,
+    /// `true` if the session was newly minted on this request (no
+    /// existing store entry to delete on the fail-closed path).
+    is_new: bool,
+}
+
+impl<S: SessionStore + ?Sized> RegenerateGuard<'_, S> {
+    /// Disarm the guard. Called from the happy-path branch of the
+    /// middleware AFTER the handler has returned and the explicit
+    /// regenerate processing has taken responsibility for the
+    /// rotation. Once disarmed, `Drop` is a no-op.
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl<S: SessionStore + ?Sized> Drop for RegenerateGuard<'_, S> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // Cancel/panic path: the handler did not give the middleware
+        // a chance to rotate. Fail closed by invalidating the OLD
+        // session server-side if a rotation was in fact requested.
+        let regenerate_requested = {
+            let guard = self.session_handle.lock();
+            guard.get(REGENERATE_FLAG_KEY).is_some()
+        };
+        if regenerate_requested && !self.is_new {
+            self.store.delete(&self.session_id);
+        }
+    }
+}
+
 /// HTTP request methods that mutate server-side state. CSRF validation
 /// is required on these methods only — safe methods (GET/HEAD/OPTIONS)
 /// are exempt per the OWASP CSRF Prevention Cheat Sheet.
@@ -69,8 +148,7 @@ fn is_state_changing_method(method: &str) -> bool {
 fn now_unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+        .map_or(0, |d| d.as_secs())
 }
 
 // ─── SessionStore trait ─────────────────────────────────────────────────────
@@ -673,8 +751,7 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
                     .headers
                     .iter()
                     .find(|(k, _)| k.eq_ignore_ascii_case("x-csrf-token"))
-                    .map(|(_, v)| v.as_str())
-                    .unwrap_or("");
+                    .map_or("", |(_, v)| v.as_str());
                 let session_token = session_data.get(CSRF_TOKEN_KEY).unwrap_or("");
                 if !constant_time_eq_str(header_token, session_token) || session_token.is_empty() {
                     return Response::new(
@@ -691,6 +768,22 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
         let session_handle = Arc::new(Mutex::new(session_data));
         req.extensions
             .insert_typed(Session(Arc::clone(&session_handle)));
+
+        // br-asupersync-qokau8 / br-asupersync-z74jcy — install a
+        // fail-closed regenerate finalizer BEFORE the handler runs.
+        // If the handler unwinds (panic, or future async cancel)
+        // before we reach step 5b, the guard's `Drop` deletes the
+        // OLD store entry whenever `REGENERATE_FLAG_KEY` is set,
+        // preserving the session-fixation defense even on the
+        // cancel path. On the happy path we `disarm()` the guard
+        // once the explicit rotation logic has run.
+        let mut regenerate_guard = RegenerateGuard {
+            armed: true,
+            store: self.store.as_ref(),
+            session_handle: Arc::clone(&session_handle),
+            session_id: session_id.clone(),
+            is_new,
+        };
 
         // 4. Call inner handler.
         let mut resp = self.inner.call(req);
@@ -722,6 +815,10 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
             // Force the modified flag so the save+cookie branches fire.
             session_data.insert(LAST_ACCESSED_KEY, now_unix_secs().to_string());
         }
+        // br-asupersync-qokau8: explicit rotation path has now taken
+        // responsibility for the regenerate flag. Disarm the
+        // fail-closed finalizer so its Drop is a no-op.
+        regenerate_guard.disarm();
 
         // 6. Save if modified. Untouched new sessions are NOT saved to prevent DoS.
         let session_cleared = session_data.is_empty() && session_data.is_modified();
@@ -1595,6 +1692,187 @@ mod tests {
         assert_eq!(
             request_origin(&req).as_deref(),
             Some("https://app.example.com")
+        );
+    }
+
+    // ================================================================
+    // br-asupersync-qokau8 / br-asupersync-z74jcy — fail-closed
+    // regenerate finalizer (cancel/panic-tolerant)
+    // ================================================================
+
+    /// Helper: extract the session-id portion of a Set-Cookie header
+    /// produced by `set_cookie_header`.
+    fn extract_set_cookie_id(cookie_header: &str) -> &str {
+        cookie_header
+            .split(';')
+            .next()
+            .unwrap()
+            .splitn(2, '=')
+            .nth(1)
+            .unwrap()
+    }
+
+    /// Handler that calls `Session::regenerate()` and then PANICS,
+    /// simulating an unwinding cancel-path between the regenerate
+    /// call and the middleware's post-handler rotation logic.
+    struct PanicAfterRegenerateHandler;
+    impl Handler for PanicAfterRegenerateHandler {
+        fn call(&self, req: Request) -> Response {
+            let session = req
+                .extensions
+                .get_typed::<Session>()
+                .expect("middleware injects Session");
+            // Simulate the auth boundary: handler authenticates the
+            // user and then rotates the session ID per the hifab2
+            // protocol …
+            session.regenerate();
+            // … then unwinds before returning a Response.
+            panic!("simulated handler panic after regenerate");
+        }
+    }
+
+    /// br-asupersync-qokau8 / br-asupersync-z74jcy: when the handler
+    /// calls `Session::regenerate()` and then unwinds (panics) before
+    /// returning, the middleware's `RegenerateGuard` MUST fail closed
+    /// by deleting the OLD store entry. Otherwise the session-fixation
+    /// defense the rotation was supposed to provide is silently
+    /// skipped on the cancel path.
+    #[test]
+    fn regenerate_guard_fails_closed_when_handler_panics() {
+        let store = MemoryStore::new();
+        let layer = SessionLayer::new(store.clone());
+
+        // Seed an existing session so the request is loading-mode
+        // (is_new = false). The fail-closed branch only runs for
+        // pre-existing sessions; new ones have nothing to invalidate.
+        let original_id = "0123456789abcdef0123456789abcdef".to_string();
+        let mut seeded = SessionData::new();
+        seeded.insert("authed_user", "alice");
+        store.save(&original_id, &seeded);
+        assert_eq!(store.len(), 1);
+
+        let handler = layer.wrap(PanicAfterRegenerateHandler);
+
+        let mut req = Request::new("POST", "/login");
+        req.headers
+            .insert("cookie".to_string(), format!("session_id={original_id}"));
+
+        // Run inside catch_unwind so the panic doesn't escape the
+        // test. We expect the guard's Drop to have already run by
+        // the time catch_unwind returns Err.
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            handler.call(req);
+        }));
+        assert!(
+            outcome.is_err(),
+            "handler must propagate the panic — the test relies on it"
+        );
+
+        // The OLD session must have been deleted from the store on
+        // the unwinding path. Without RegenerateGuard, the OLD
+        // session would remain in the store and a session-fixation
+        // attacker could continue using `original_id`.
+        assert_eq!(
+            store.len(),
+            0,
+            "RegenerateGuard must invalidate the OLD session on the cancel/panic path"
+        );
+    }
+
+    /// Handler that does NOT call regenerate, then panics. The
+    /// fail-closed path must be a no-op in this case — only sessions
+    /// with a pending regenerate flag are eligible for invalidation.
+    struct PanicNoRegenerateHandler;
+    impl Handler for PanicNoRegenerateHandler {
+        fn call(&self, _req: Request) -> Response {
+            panic!("simulated handler panic without regenerate");
+        }
+    }
+
+    /// br-asupersync-qokau8: when the handler panics WITHOUT calling
+    /// regenerate, the guard's Drop must NOT delete the existing
+    /// session — there's no rotation request, so no fail-closed
+    /// invalidation is warranted.
+    #[test]
+    fn regenerate_guard_drop_is_noop_without_pending_flag() {
+        let store = MemoryStore::new();
+        let layer = SessionLayer::new(store.clone());
+
+        let original_id = "fedcba9876543210fedcba9876543210".to_string();
+        let mut seeded = SessionData::new();
+        seeded.insert("k", "v");
+        store.save(&original_id, &seeded);
+
+        let handler = layer.wrap(PanicNoRegenerateHandler);
+
+        let mut req = Request::new("GET", "/");
+        req.headers
+            .insert("cookie".to_string(), format!("session_id={original_id}"));
+
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            handler.call(req);
+        }));
+        assert!(outcome.is_err());
+
+        // The session must still be present — no regenerate flag was
+        // set, so the guard had no reason to invalidate.
+        assert_eq!(
+            store.len(),
+            1,
+            "guard must NOT invalidate sessions that did not request regenerate"
+        );
+    }
+
+    /// br-asupersync-qokau8: happy path — handler calls regenerate
+    /// and returns normally. The middleware's explicit rotation logic
+    /// MUST run (proving disarm() was called and the guard's Drop
+    /// did not double-delete).
+    struct RegenerateAndReturnHandler;
+    impl Handler for RegenerateAndReturnHandler {
+        fn call(&self, req: Request) -> Response {
+            let session = req
+                .extensions
+                .get_typed::<Session>()
+                .expect("middleware injects Session");
+            session.regenerate();
+            Response::new(StatusCode::OK, b"ok".to_vec())
+        }
+    }
+
+    #[test]
+    fn regenerate_guard_disarmed_on_happy_path_rotates_normally() {
+        let store = MemoryStore::new();
+        let layer = SessionLayer::new(store.clone());
+
+        let original_id = "1111222233334444aaaabbbbccccdddd".to_string();
+        let mut seeded = SessionData::new();
+        seeded.insert("authed_user", "bob");
+        store.save(&original_id, &seeded);
+        assert_eq!(store.len(), 1);
+
+        let handler = layer.wrap(RegenerateAndReturnHandler);
+
+        let mut req = Request::new("POST", "/login");
+        req.headers
+            .insert("cookie".to_string(), format!("session_id={original_id}"));
+        let resp = handler.call(req);
+        assert_eq!(resp.status, StatusCode::OK);
+
+        // The OLD session was deleted by the explicit rotation
+        // logic; a NEW session was minted under a fresh ID and
+        // saved. Net store size is 1, but the entry under the
+        // ORIGINAL ID is gone.
+        let cookie_header = resp.headers.get("set-cookie").expect("Set-Cookie present");
+        let new_id = extract_set_cookie_id(cookie_header);
+        assert_ne!(new_id, original_id, "ID must rotate");
+        assert_eq!(store.len(), 1, "exactly one entry under the new ID");
+        assert!(
+            store.load(&original_id).is_none(),
+            "original session must be deleted after rotation"
+        );
+        assert!(
+            store.load(new_id).is_some(),
+            "new session must be present"
         );
     }
 }
