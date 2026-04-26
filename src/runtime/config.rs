@@ -280,11 +280,53 @@ impl RuntimeConfig {
         self.blocking.normalize();
     }
 
-    pub(crate) fn default_worker_threads() -> usize {
-        std::thread::available_parallelism()
-            .map_or(1, std::num::NonZeroUsize::get)
-            .max(1)
+    /// Default worker thread count for a `RuntimeConfig::default()`.
+    ///
+    /// br-asupersync-ry2trw: this is now a deterministic constant,
+    /// NOT `std::thread::available_parallelism()`. The pre-fix shape
+    /// silently coupled the runtime's parallelism to the host's CPU
+    /// count + cgroup quota + cpuset mask + sibling-tenant cgroup
+    /// throttling. That broke replay determinism (a 4-CPU CI host
+    /// produced different dispatch ordering than a 32-CPU dev box)
+    /// and exposed a multi-tenant influence surface (a noisy
+    /// neighbour adjusting the shared cgroup quota changed the
+    /// runtime's worker count). Both shapes violate the asupersync
+    /// "no ambient authority" invariant.
+    ///
+    /// Production callers that want host-scaled parallelism opt in
+    /// EXPLICITLY via [`RuntimeBuilder::worker_threads`]
+    /// `(`[`ambient_default_worker_threads`]`())` — making the
+    /// wall-CPU dependency visible at the call site.
+    pub const DEFAULT_WORKER_THREADS: usize = 4;
+
+    pub(crate) const fn default_worker_threads() -> usize {
+        Self::DEFAULT_WORKER_THREADS
     }
+}
+
+/// Returns the host's `available_parallelism()` value (clamped to >= 1)
+/// for callers that want host-scaled parallelism.
+///
+/// br-asupersync-ry2trw: this is the explicit, grep-able opt-in for
+/// host-scaled worker counts. The previous default silently used
+/// this value, which broke replay determinism + exposed a multi-tenant
+/// influence surface (cgroup quota / cpuset / sibling-tenant throttling
+/// silently changed the runtime's parallelism). The fall-back when
+/// `available_parallelism()` errors (e.g. unsupported platform, sandboxed
+/// process) is `DEFAULT_WORKER_THREADS = 4` rather than 1, so a sandbox
+/// that returns Err does not silently single-thread the runtime.
+///
+/// Production callers must invoke this function ONLY when they want
+/// host-scaled parallelism; replay-stable test harnesses must instead
+/// hard-code `worker_threads(N)` to a fixed value.
+#[must_use]
+pub fn ambient_default_worker_threads() -> usize {
+    std::thread::available_parallelism()
+        .map_or(
+            RuntimeConfig::DEFAULT_WORKER_THREADS,
+            std::num::NonZeroUsize::get,
+        )
+        .max(1)
 }
 
 impl Default for RuntimeConfig {
@@ -981,5 +1023,28 @@ mod tests {
             config.adaptive_cancel_streak_epoch_steps
         );
         crate::test_complete!("test_default_governor_settings");
+    }
+
+    /// br-asupersync-ry2trw: `RuntimeConfig::default()` must produce a
+    /// host-independent worker_threads value. Two defaults built on
+    /// the same host must agree (sanity), and the value must equal
+    /// `DEFAULT_WORKER_THREADS` (the deterministic constant) — NOT
+    /// the host's `available_parallelism()`.
+    #[test]
+    fn ry2trw_default_worker_threads_is_host_independent_constant() {
+        let a = RuntimeConfig::default();
+        let b = RuntimeConfig::default();
+        assert_eq!(a.worker_threads, b.worker_threads);
+        assert_eq!(a.worker_threads, RuntimeConfig::DEFAULT_WORKER_THREADS);
+    }
+
+    /// br-asupersync-ry2trw: the explicit opt-in for host-scaled
+    /// parallelism must remain available for production callers that
+    /// genuinely want it. Asserts the function returns at least 1
+    /// (clamp invariant).
+    #[test]
+    fn ry2trw_ambient_default_worker_threads_returns_positive() {
+        let n = ambient_default_worker_threads();
+        assert!(n >= 1, "ambient_default_worker_threads must clamp to >= 1");
     }
 }
