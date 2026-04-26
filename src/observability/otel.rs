@@ -81,6 +81,17 @@ pub enum CardinalityOverflow {
 pub struct MetricsConfig {
     /// Maximum unique label combinations per metric.
     pub max_cardinality: usize,
+    /// Maximum distinct metric NAMES tracked. Once this cap is hit,
+    /// new metric names hit the overflow path and are not recorded
+    /// (br-asupersync-qipj44). Existing metric names continue to
+    /// accept new label combinations up to `max_cardinality`.
+    ///
+    /// The default cap (4096) is high enough that legitimate
+    /// applications never hit it (real services have on the order of
+    /// 50-500 distinct metric names) while bounding the worst case
+    /// for SaaS workloads where attacker-influenced strings could
+    /// otherwise reach a metric-naming code path.
+    pub max_metrics: usize,
     /// Strategy when cardinality limit is reached.
     pub overflow_strategy: CardinalityOverflow,
     /// Labels to always drop (e.g., request_id, trace_id).
@@ -93,6 +104,7 @@ impl Default for MetricsConfig {
     fn default() -> Self {
         Self {
             max_cardinality: 1000,
+            max_metrics: 4096,
             overflow_strategy: CardinalityOverflow::Drop,
             drop_labels: Vec::new(),
             sampling: None,
@@ -111,6 +123,15 @@ impl MetricsConfig {
     #[must_use]
     pub fn with_max_cardinality(mut self, max: usize) -> Self {
         self.max_cardinality = max;
+        self
+    }
+
+    /// Set maximum number of distinct metric NAMES (br-asupersync-qipj44).
+    /// Once the cap is hit, newly-named metrics are dropped to prevent
+    /// memory exhaustion via attacker-controlled metric strings.
+    #[must_use]
+    pub fn with_max_metrics(mut self, max: usize) -> Self {
+        self.max_metrics = max;
         self
     }
 
@@ -238,10 +259,36 @@ impl CardinalityTracker {
     /// record it if allowed.
     ///
     /// Returns `true` when the limit would be exceeded and the label set was
-    /// not recorded.
-    fn check_and_record(&self, metric: &str, labels: &[KeyValue], max_cardinality: usize) -> bool {
+    /// not recorded. Two distinct caps are enforced:
+    ///
+    ///   - `max_cardinality` — distinct label combinations PER metric
+    ///     (existing behaviour, preserved).
+    ///   - `max_metrics` — distinct metric NAMES across the whole tracker
+    ///     (br-asupersync-qipj44). Without this cap, a code path that
+    ///     derived the metric name from attacker-controlled input
+    ///     (`format!("user_{user_id}")`, request URL path, content type,
+    ///     etc.) could grow `seen` without bound — DoS via memory
+    ///     exhaustion. With the cap, the FIRST `max_metrics` distinct
+    ///     names are accepted and subsequent new names are dropped to
+    ///     the overflow bucket. Existing metric names continue to
+    ///     accept new label combinations.
+    fn check_and_record(
+        &self,
+        metric: &str,
+        labels: &[KeyValue],
+        max_cardinality: usize,
+        max_metrics: usize,
+    ) -> bool {
         let hash = self.hash_labels(labels);
         let mut seen = self.seen.write();
+
+        // br-asupersync-qipj44: enforce the metric-name cap BEFORE
+        // creating a new entry. If the cap is hit and this metric name
+        // is not already tracked, refuse to insert.
+        if !seen.contains_key(metric) && max_metrics > 0 && seen.len() >= max_metrics {
+            return true;
+        }
+
         let set = seen.entry(metric.to_string()).or_default();
 
         if set.contains(&hash) {
@@ -404,6 +451,36 @@ pub trait MetricsExporter: Send + Sync {
     fn flush(&self) -> Result<(), ExportError>;
 }
 
+/// br-asupersync-coxhdt — Escape a Prometheus label value per the
+/// exposition format. The spec mandates that values containing the
+/// canonical trio (`\\`, `\n`, `\"`) be backslash-escaped; without
+/// this, a value containing `"` would terminate the quoted string
+/// early (corrupting the line and potentially injecting attacker-
+/// controlled labels), and a value containing `\` or `\n` would
+/// likewise corrupt the exposition. CR is also escaped to keep
+/// downstream line-oriented parsers from splitting on it.
+///
+/// This is the otel-exporter parallel to
+/// [`crate::observability::metrics::escape_prometheus_label_value`]
+/// (br-asupersync-pdu7wg) — same canonical escape trio applied on a
+/// separate code path to keep otel.rs self-contained.
+fn escape_label_value(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str(r"\\"),
+            '\n' => out.push_str(r"\n"),
+            '"' => {
+                out.push('\\');
+                out.push('"');
+            }
+            '\r' => out.push_str(r"\r"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// Exporter that writes to stdout (for debugging).
 #[derive(Debug, Default)]
 pub struct StdoutExporter {
@@ -425,11 +502,24 @@ impl StdoutExporter {
         }
     }
 
+    /// br-asupersync-coxhdt — Format labels for the Prometheus
+    /// exposition output of `StdoutExporter`. The previous shape
+    /// was `format!("{k}=\"{v}\"")` — a value containing `"` would
+    /// terminate the quoted string early, and a value containing
+    /// `\` (or `\n`) would corrupt the line. Per the Prometheus
+    /// exposition spec the value MUST escape `\\`, `\n`, and `\"`.
+    /// This shares the spec-required trio with the
+    /// `escape_prometheus_label_value` function in metrics.rs
+    /// (br-asupersync-pdu7wg) — same canonical escape set, applied
+    /// to the otel exporter's separate code path.
     fn format_labels(labels: &[(String, String)]) -> String {
         if labels.is_empty() {
             String::new()
         } else {
-            let parts: Vec<_> = labels.iter().map(|(k, v)| format!("{k}=\"{v}\"")).collect();
+            let parts: Vec<_> = labels
+                .iter()
+                .map(|(k, v)| format!("{k}=\"{}\"", escape_label_value(v)))
+                .collect();
             format!("{{{}}}", parts.join(","))
         }
     }
@@ -887,10 +977,12 @@ impl OtelMetrics {
             .cloned()
             .collect();
 
-        if self
-            .cardinality_tracker
-            .check_and_record(metric, &filtered, self.config.max_cardinality)
-        {
+        if self.cardinality_tracker.check_and_record(
+            metric,
+            &filtered,
+            self.config.max_cardinality,
+            self.config.max_metrics,
+        ) {
             self.cardinality_tracker.record_overflow();
 
             match self.config.overflow_strategy {
@@ -905,6 +997,7 @@ impl OtelMetrics {
                         metric,
                         &aggregated,
                         self.config.max_cardinality,
+                        self.config.max_metrics,
                     ) {
                         return None;
                     }
@@ -1459,7 +1552,7 @@ mod tests {
             tracker.would_exceed("test", &labels, 0),
             "zero-cardinality budget must reject unseen label sets"
         );
-        assert!(tracker.check_and_record("test", &labels, 0));
+        assert!(tracker.check_and_record("test", &labels, 0, usize::MAX));
         assert_eq!(tracker.cardinality("test"), 0);
     }
 
@@ -1474,7 +1567,7 @@ mod tests {
             std::thread::spawn(move || {
                 let labels = [KeyValue::new("id", i.to_string())];
                 barrier.wait();
-                !tracker.check_and_record("test", &labels, 1)
+                !tracker.check_and_record("test", &labels, 1, usize::MAX)
             })
         });
 
@@ -1486,6 +1579,70 @@ mod tests {
 
         assert_eq!(accepted, 1, "exactly one series should fit under max=1");
         assert_eq!(tracker.cardinality("test"), 1);
+    }
+
+    /// br-asupersync-qipj44: with `max_metrics` set to N, the FIRST
+    /// N distinct metric names must be accepted; subsequent new
+    /// names must hit the overflow path. Existing metric names
+    /// continue to accept additional label combinations up to
+    /// `max_cardinality` regardless of the metric-name cap.
+    #[test]
+    fn metric_name_cap_rejects_new_names_after_limit() {
+        let tracker = CardinalityTracker::new();
+        let labels = [KeyValue::new("k", "v")];
+
+        // Cap = 3 — first three distinct names accepted.
+        for name in ["a", "b", "c"] {
+            assert!(
+                !tracker.check_and_record(name, &labels, 100, 3),
+                "name {name} should be accepted under cap=3"
+            );
+        }
+        // A fourth distinct name must be rejected.
+        assert!(
+            tracker.check_and_record("d", &labels, 100, 3),
+            "fourth distinct metric name must hit overflow path under cap=3"
+        );
+        // Existing names still accept new label combinations.
+        let other_labels = [KeyValue::new("k", "v2")];
+        assert!(
+            !tracker.check_and_record("a", &other_labels, 100, 3),
+            "existing metric must accept new label combinations even under cap"
+        );
+    }
+
+    /// `max_metrics = 0` is the legacy unbounded behaviour (cap
+    /// disabled) — preserved for callers that explicitly want it.
+    #[test]
+    fn metric_name_cap_zero_disables_the_limit() {
+        let tracker = CardinalityTracker::new();
+        let labels = [KeyValue::new("k", "v")];
+        for i in 0..1000 {
+            let name = format!("m{i}");
+            assert!(
+                !tracker.check_and_record(&name, &labels, 100, 0),
+                "max_metrics=0 must allow unbounded metric names"
+            );
+        }
+    }
+
+    /// Re-recording an already-tracked metric name must not reject
+    /// even when the cap is otherwise reached.
+    #[test]
+    fn metric_name_cap_does_not_reject_existing_metrics() {
+        let tracker = CardinalityTracker::new();
+        let labels = [KeyValue::new("k", "v")];
+        // Fill to cap.
+        for i in 0..3 {
+            let name = format!("m{i}");
+            assert!(!tracker.check_and_record(&name, &labels, 100, 3));
+        }
+        // Re-record one of the existing names with a brand-new label.
+        let new_labels = [KeyValue::new("k", "vNew")];
+        assert!(
+            !tracker.check_and_record("m0", &new_labels, 100, 3),
+            "existing metric must still accept new labels under cap"
+        );
     }
 
     #[test]

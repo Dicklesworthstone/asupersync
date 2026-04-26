@@ -254,7 +254,10 @@ impl ResourceAccounting {
     /// Returns the peak number of pending obligations ever seen.
     #[must_use]
     pub fn obligations_peak(&self) -> i64 {
-        self.pending_peak.load(Ordering::Relaxed)
+        // br-asupersync-8xtq3g: Acquire pairs with the AcqRel
+        // fetch_max in update_peak so the reader observes the
+        // peak-establishing writer's prior gauge mutations.
+        self.pending_peak.load(Ordering::Acquire)
     }
 
     // ================================================================
@@ -375,19 +378,22 @@ impl ResourceAccounting {
     /// Returns the peak tasks count.
     #[must_use]
     pub fn tasks_peak(&self) -> i64 {
-        self.tasks_peak.load(Ordering::Relaxed)
+        // br-asupersync-8xtq3g: Acquire pairs with update_peak's AcqRel.
+        self.tasks_peak.load(Ordering::Acquire)
     }
 
     /// Returns the peak children count.
     #[must_use]
     pub fn children_peak(&self) -> i64 {
-        self.children_peak.load(Ordering::Relaxed)
+        // br-asupersync-8xtq3g: Acquire pairs with update_peak's AcqRel.
+        self.children_peak.load(Ordering::Acquire)
     }
 
     /// Returns the peak heap bytes.
     #[must_use]
     pub fn heap_bytes_peak(&self) -> i64 {
-        self.heap_bytes_peak.load(Ordering::Relaxed)
+        // br-asupersync-8xtq3g: Acquire pairs with update_peak's AcqRel.
+        self.heap_bytes_peak.load(Ordering::Acquire)
     }
 
     // ================================================================
@@ -419,19 +425,23 @@ impl ResourceAccounting {
             });
         }
 
+        // br-asupersync-8xtq3g: peak loads use Acquire to pair with
+        // update_peak's AcqRel; the live counters and admission/quota
+        // counters stay Relaxed because they are best-effort gauges
+        // that are not consumed under a happens-before contract.
         ResourceAccountingSnapshot {
             obligation_stats,
             obligations_pending: self.pending.load(Ordering::Relaxed),
-            obligations_peak: self.pending_peak.load(Ordering::Relaxed),
+            obligations_peak: self.pending_peak.load(Ordering::Acquire),
             admission_stats,
             poll_quota_consumed: self.poll_quota_consumed.load(Ordering::Relaxed),
             cost_quota_consumed: self.cost_quota_consumed.load(Ordering::Relaxed),
             poll_quota_exhaustions: self.poll_quota_exhaustions.load(Ordering::Relaxed),
             cost_quota_exhaustions: self.cost_quota_exhaustions.load(Ordering::Relaxed),
             deadline_misses: self.deadline_misses.load(Ordering::Relaxed),
-            tasks_peak: self.tasks_peak.load(Ordering::Relaxed),
-            children_peak: self.children_peak.load(Ordering::Relaxed),
-            heap_bytes_peak: self.heap_bytes_peak.load(Ordering::Relaxed),
+            tasks_peak: self.tasks_peak.load(Ordering::Acquire),
+            children_peak: self.children_peak.load(Ordering::Acquire),
+            heap_bytes_peak: self.heap_bytes_peak.load(Ordering::Acquire),
         }
     }
 }
@@ -442,9 +452,28 @@ impl Default for ResourceAccounting {
     }
 }
 
-/// Atomically updates a peak gauge if the new value exceeds the current peak.
+/// Atomically updates a peak gauge if the new value exceeds the current
+/// peak.
+///
+/// br-asupersync-8xtq3g: uses `Ordering::AcqRel` so that:
+///   - the writer's prior gauge mutations (the increment/decrement that
+///     produced `new_value`) are *released* to any subsequent reader,
+///     and
+///   - if multiple writers race here, each observes the freshest value
+///     before deciding whether to swap.
+/// Snapshot readers must `load(Ordering::Acquire)` to acquire the
+/// release synchronization the writer just established.
+///
+/// Previously this used `Relaxed`. On weakly-ordered architectures
+/// (ARM64, PowerPC, RISC-V) `Relaxed` provides no synchronization
+/// between the writer and the snapshot reader: a thread that just
+/// observed a high water-mark via `fetch_max` may not propagate its
+/// write to a concurrent `snapshot()` reader before the reader's
+/// load — the snapshot returns a stale peak. x86-64 happens to be
+/// total-store-ordered so `Relaxed` worked by accident; cross-arch
+/// CI shards (ARM) could flake.
 fn update_peak(peak: &AtomicI64, new_value: i64) {
-    peak.fetch_max(new_value, Ordering::Relaxed);
+    peak.fetch_max(new_value, Ordering::AcqRel);
 }
 
 /// Atomically decrements a live gauge but never allows it to become negative.

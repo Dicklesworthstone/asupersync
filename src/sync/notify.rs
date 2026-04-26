@@ -356,10 +356,29 @@ impl Notified<'_> {
     fn try_consume_stored_notification(&self) -> bool {
         let mut stored = self.notify.stored_notifications.load(Ordering::Acquire);
         while stored > 0 {
+            // br-asupersync-fu402k: success ordering must be AcqRel.
+            // notify_one stores a notification with Release (around
+            // line 215) so subsequent producers/consumers form a
+            // happens-before chain through stored_notifications.
+            // Acquire on the consume side is required to OBSERVE the
+            // produced value — that part was already correct. But the
+            // CAS that decrements is itself a producer for any
+            // subsequent observer that reads the lower count via
+            // Acquire (e.g., a later notify_one finding the counter
+            // back at zero and re-storing): without Release on the
+            // consume side, the consumer's prior writes are NOT
+            // released to that observer, so the consumer's
+            // post-notification work can be reordered behind the
+            // producer's load. AcqRel restores both sides of the
+            // synchronization edge.
+            //
+            // Failure ordering stays Relaxed: a failed CAS does not
+            // form a happens-before edge — the next loop iteration
+            // re-reads with Acquire on its own.
             match self.notify.stored_notifications.compare_exchange_weak(
                 stored,
                 stored - 1,
-                Ordering::Acquire,
+                Ordering::AcqRel,
                 Ordering::Relaxed,
             ) {
                 Ok(_) => return true,
