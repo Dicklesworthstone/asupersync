@@ -121,9 +121,9 @@ impl fmt::Debug for AuthKey {
 /// to suspected leak). A single `AuthKey` cannot serve in-flight messages that
 /// were authenticated with the previous key once it has been swapped, which
 /// forces a flag-day cutover. `KeyRing` solves this by carrying an optional
-/// retired key alongside the active one: [`verify`](Self::verify) tries the
-/// active key first and falls back to the retired key if present, so the
-/// rotation window can absorb messages signed under either key.
+/// retired key alongside the active one: [`verify`](Self::verify) accepts a
+/// signature produced by either slot, so the rotation window can absorb
+/// messages signed under either key.
 ///
 /// Operational lifecycle:
 ///
@@ -177,23 +177,24 @@ impl KeyRing {
         self.retired = None;
     }
 
-    /// Verify an HMAC-SHA256 signature against the active key first, then
-    /// the retired key. Returns `true` if EITHER key produces an HMAC over
-    /// `msg` that matches `sig` in constant time.
+    /// Verify an HMAC-SHA256 signature against the active key and, when
+    /// present, the retired key. Returns `true` if EITHER key produces an
+    /// HMAC over `msg` that matches `sig` in constant time.
     ///
-    /// The active-first ordering keeps the steady-state cost at one HMAC
-    /// computation; only signatures that pre-date a rotation pay the second
-    /// HMAC. Constant-time equality (delegated to `mac.verify_slice`) guards
-    /// against timing side-channels regardless of which slot accepted.
+    /// Constant-time equality (delegated to `mac.verify_slice`) guards each
+    /// slot comparison. When a retired key is present, both slots are checked
+    /// without returning early on an active-key match; the existence of the
+    /// rotation window is operational state, but which slot accepted should
+    /// not affect verification control flow.
     #[must_use]
     pub fn verify(&self, msg: &[u8], sig: &[u8]) -> bool {
-        if Self::verify_with_key(&self.active, msg, sig) {
-            return true;
-        }
-        match &self.retired {
+        let active_matches = Self::verify_with_key(&self.active, msg, sig);
+        let retired_matches = match &self.retired {
             Some(retired) => Self::verify_with_key(retired, msg, sig),
             None => false,
-        }
+        };
+
+        active_matches | retired_matches
     }
 
     fn verify_with_key(key: &AuthKey, msg: &[u8], sig: &[u8]) -> bool {
@@ -446,7 +447,10 @@ mod tests {
 
         ring.rotate(new.clone());
         // Both must verify during the overlap window.
-        assert!(ring.verify(b"in_flight", &old_sig), "retired key must accept");
+        assert!(
+            ring.verify(b"in_flight", &old_sig),
+            "retired key must accept"
+        );
         assert!(ring.verify(b"fresh", &new_sig), "active key must accept");
         // Active is `new`, retired is the prior active.
         assert_eq!(ring.active, new);
