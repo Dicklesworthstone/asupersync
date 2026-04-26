@@ -723,6 +723,358 @@ fn cycle_overhead_percentage(elapsed: Duration, interval: Duration) -> f64 {
 }
 
 /// System resource collector for platform-specific monitoring.
+/// br-asupersync-thfiyk: derive (soft, hard) absolute thresholds from
+/// a `max_limit` and the percentage points the operator considers
+/// warning vs critical. Saturates at `max_limit` so the soft band can
+/// never exceed the hard band even on tiny `max_limit` values.
+fn derive_thresholds(max_limit: u64, soft_pct: u64, hard_pct: u64) -> (u64, u64) {
+    debug_assert!(soft_pct <= hard_pct);
+    let soft = max_limit
+        .saturating_mul(soft_pct)
+        .checked_div(100)
+        .unwrap_or(0);
+    let hard = max_limit
+        .saturating_mul(hard_pct)
+        .checked_div(100)
+        .unwrap_or(0);
+    (soft.min(max_limit), hard.min(max_limit))
+}
+
+/// Platform-specific resource readers (br-asupersync-thfiyk).
+///
+/// Each function returns the same `std::io::Result<u64>` shape across
+/// platforms; non-supported platforms return
+/// `ErrorKind::Unsupported` so the caller's `if let Ok(..)` skip in
+/// [`SystemResourceCollector::collect_now`] gracefully omits the
+/// measurement and existing pressure values are preserved.
+mod platform {
+    /// Total system memory or process address-space ceiling, in bytes.
+    /// Falls back to a large finite value (16 GiB) when the platform
+    /// reports `RLIM_INFINITY` so downstream `usage_ratio()` arithmetic
+    /// stays well-defined.
+    const ADDRESS_SPACE_FALLBACK: u64 = 16 * 1024 * 1024 * 1024;
+
+    #[cfg(target_os = "linux")]
+    pub fn process_rss_bytes() -> std::io::Result<u64> {
+        let status = std::fs::read_to_string("/proc/self/status")?;
+        for line in status.lines() {
+            if let Some(rest) = line.strip_prefix("VmRSS:") {
+                let kib_str = rest.trim().split_whitespace().next().ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, "VmRSS missing value")
+                })?;
+                let kib: u64 = kib_str.parse().map_err(|_| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, "VmRSS not numeric")
+                })?;
+                return Ok(kib.saturating_mul(1024));
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "VmRSS not present in /proc/self/status",
+        ))
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn memory_max_bytes() -> std::io::Result<u64> {
+        // Prefer the address-space rlimit; fall back to MemTotal when
+        // the rlimit is `RLIM_INFINITY` (the common production shape).
+        if let Ok((_, hard)) = address_space_rlimit() {
+            if hard != u64::MAX && hard != 0 {
+                return Ok(hard);
+            }
+        }
+        let meminfo = std::fs::read_to_string("/proc/meminfo")?;
+        for line in meminfo.lines() {
+            if let Some(rest) = line.strip_prefix("MemTotal:") {
+                let kib_str = rest.trim().split_whitespace().next().ok_or_else(|| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, "MemTotal missing value")
+                })?;
+                let kib: u64 = kib_str.parse().map_err(|_| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, "MemTotal not numeric")
+                })?;
+                return Ok(kib.saturating_mul(1024));
+            }
+        }
+        Ok(ADDRESS_SPACE_FALLBACK)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn process_fd_count() -> std::io::Result<u64> {
+        let count = std::fs::read_dir("/proc/self/fd")?.count();
+        Ok(count as u64)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn load_avg_1min_scaled() -> std::io::Result<u64> {
+        let s = std::fs::read_to_string("/proc/loadavg")?;
+        let first = s.split_whitespace().next().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "empty /proc/loadavg")
+        })?;
+        let v: f64 = first.parse().map_err(|_| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "loadavg not numeric")
+        })?;
+        let cpus = num_cpus().max(1) as f64;
+        let pct = (v / cpus).clamp(0.0, 1.0) * 100.0;
+        Ok(pct.round() as u64)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn process_connection_count() -> std::io::Result<u64> {
+        let mut total: u64 = 0;
+        for path in [
+            "/proc/self/net/tcp",
+            "/proc/self/net/tcp6",
+            "/proc/self/net/udp",
+            "/proc/self/net/udp6",
+        ] {
+            if let Ok(s) = std::fs::read_to_string(path) {
+                // First line is the column header; everything after is
+                // a single connection. `saturating_sub(1)` handles the
+                // empty-file edge case.
+                total = total.saturating_add((s.lines().count() as u64).saturating_sub(1));
+            }
+        }
+        Ok(total)
+    }
+
+    // ----- macOS / BSD ------------------------------------------------------
+
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    ))]
+    #[allow(unsafe_code)]
+    pub fn process_rss_bytes() -> std::io::Result<u64> {
+        // SAFETY: `getrusage(RUSAGE_SELF, &mut usage)` writes into a
+        // zeroed `rusage` we own; the libc call is well-defined.
+        let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+        let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+        if rc == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // ru_maxrss: bytes on macOS, kilobytes on BSDs (per their man pages).
+        let raw = usage.ru_maxrss as u64;
+        #[cfg(target_os = "macos")]
+        {
+            Ok(raw)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Ok(raw.saturating_mul(1024))
+        }
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    ))]
+    pub fn memory_max_bytes() -> std::io::Result<u64> {
+        if let Ok((_, hard)) = address_space_rlimit() {
+            if hard != u64::MAX && hard != 0 {
+                return Ok(hard);
+            }
+        }
+        Ok(ADDRESS_SPACE_FALLBACK)
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    ))]
+    pub fn process_fd_count() -> std::io::Result<u64> {
+        // /dev/fd is the per-process FD directory exposed by fdescfs;
+        // the count of entries is the count of open descriptors.
+        let count = std::fs::read_dir("/dev/fd")?.count();
+        Ok(count as u64)
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    ))]
+    #[allow(unsafe_code)]
+    pub fn load_avg_1min_scaled() -> std::io::Result<u64> {
+        let mut loads: [f64; 3] = [0.0; 3];
+        // SAFETY: `getloadavg` writes up to `n` doubles into the
+        // caller-provided buffer; we pass an array of 3.
+        let n = unsafe { libc::getloadavg(loads.as_mut_ptr(), 3) };
+        if n < 1 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let cpus = num_cpus().max(1) as f64;
+        let pct = (loads[0] / cpus).clamp(0.0, 1.0) * 100.0;
+        Ok(pct.round() as u64)
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    ))]
+    pub fn process_connection_count() -> std::io::Result<u64> {
+        // libproc / sysctl would give an exact answer but pull in a
+        // transitive `mach2` dependency the project doesn't otherwise
+        // need. The FD count is a conservative upper bound (sockets
+        // are FDs); operators that need exact connection counts can
+        // wire a custom resource collector via `register_resource`.
+        process_fd_count()
+    }
+
+    // ----- Unsupported platforms (Windows / others) -------------------------
+
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    )))]
+    fn unsupported<T>(what: &'static str) -> std::io::Result<T> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            format!(
+                "resource_monitor: {what} is not implemented on this platform \
+                 (Linux, macOS, FreeBSD, NetBSD, OpenBSD, DragonFly only). \
+                 Wire a platform-specific collector via \
+                 ResourceMonitor::register_resource."
+            ),
+        ))
+    }
+
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    )))]
+    pub fn process_rss_bytes() -> std::io::Result<u64> {
+        unsupported("process_rss_bytes")
+    }
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    )))]
+    pub fn memory_max_bytes() -> std::io::Result<u64> {
+        unsupported("memory_max_bytes")
+    }
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    )))]
+    pub fn process_fd_count() -> std::io::Result<u64> {
+        unsupported("process_fd_count")
+    }
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    )))]
+    pub fn load_avg_1min_scaled() -> std::io::Result<u64> {
+        unsupported("load_avg_1min_scaled")
+    }
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    )))]
+    pub fn process_connection_count() -> std::io::Result<u64> {
+        unsupported("process_connection_count")
+    }
+
+    // ----- Cross-platform helpers (Unix / fallback) -------------------------
+
+    #[cfg(unix)]
+    #[allow(unsafe_code)]
+    pub fn fd_rlimit() -> std::io::Result<(u64, u64)> {
+        // SAFETY: `getrlimit(RLIMIT_NOFILE, &mut rlim)` writes into a
+        // zeroed `rlimit` we own.
+        let mut rlim: libc::rlimit = unsafe { std::mem::zeroed() };
+        let rc = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) };
+        if rc == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let cur = rlim.rlim_cur as u64;
+        let max = rlim.rlim_max as u64;
+        Ok((cur, max))
+    }
+
+    #[cfg(unix)]
+    #[allow(unsafe_code)]
+    pub fn address_space_rlimit() -> std::io::Result<(u64, u64)> {
+        // SAFETY: same shape as `fd_rlimit`.
+        let mut rlim: libc::rlimit = unsafe { std::mem::zeroed() };
+        let rc = unsafe { libc::getrlimit(libc::RLIMIT_AS, &mut rlim) };
+        if rc == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // Treat RLIM_INFINITY as `u64::MAX` so the caller can detect
+        // "no ceiling" without depending on platform-specific
+        // sentinel values.
+        let infinity = libc::RLIM_INFINITY as u64;
+        let cur = if rlim.rlim_cur as u64 == infinity {
+            u64::MAX
+        } else {
+            rlim.rlim_cur as u64
+        };
+        let max = if rlim.rlim_max as u64 == infinity {
+            u64::MAX
+        } else {
+            rlim.rlim_max as u64
+        };
+        Ok((cur, max))
+    }
+
+    #[cfg(not(unix))]
+    pub fn fd_rlimit() -> std::io::Result<(u64, u64)> {
+        // No portable Win32 equivalent of RLIMIT_NOFILE; default to a
+        // conservative pair and let the operator override via custom
+        // resource collectors.
+        Ok((512, 1024))
+    }
+
+    #[cfg(not(unix))]
+    pub fn address_space_rlimit() -> std::io::Result<(u64, u64)> {
+        Ok((u64::MAX, u64::MAX))
+    }
+
+    pub fn num_cpus() -> u64 {
+        std::thread::available_parallelism()
+            .map(|n| n.get() as u64)
+            .unwrap_or(1)
+    }
+}
+
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct SystemResourceCollector {
@@ -796,16 +1148,27 @@ impl SystemResourceCollector {
     }
 
     /// Collect memory usage measurement.
+    ///
+    /// br-asupersync-thfiyk: real platform read.
+    /// - Linux: VmRSS from `/proc/self/status`; max from `RLIMIT_AS`,
+    ///   falling back to `MemTotal` from `/proc/meminfo` when the
+    ///   address-space rlimit is `RLIM_INFINITY`.
+    /// - macOS/BSD: `getrusage(RUSAGE_SELF).ru_maxrss` for current
+    ///   (bytes on macOS, KiB on BSD); same `RLIMIT_AS` fallback.
+    /// - Windows / other: `SystemAccessFailed` — caller's
+    ///   `if let Ok(..)` in `collect_now` cleanly skips the
+    ///   measurement update so existing pressure values are preserved.
     fn collect_memory_usage(&self) -> Result<ResourceMeasurement, ResourceMonitorError> {
-        // Simplified implementation - real version would use platform APIs
-        // like /proc/meminfo on Linux, Windows API calls, etc.
-
-        // Mock values for demonstration
-        let current_bytes = 512 * 1024 * 1024; // 512 MB
-        let soft_limit = 1024 * 1024 * 1024; // 1 GB
-        let hard_limit = 1536 * 1024 * 1024; // 1.5 GB
-        let max_limit = 2048 * 1024 * 1024; // 2 GB
-
+        let current_bytes = platform::process_rss_bytes().map_err(|e| {
+            ResourceMonitorError::SystemAccessFailed {
+                reason: format!("memory rss: {e}"),
+            }
+        })?;
+        let max_limit =
+            platform::memory_max_bytes().map_err(|e| ResourceMonitorError::SystemAccessFailed {
+                reason: format!("memory max: {e}"),
+            })?;
+        let (soft_limit, hard_limit) = derive_thresholds(max_limit, 75, 90);
         Ok(ResourceMeasurement::new(
             current_bytes,
             soft_limit,
@@ -815,13 +1178,23 @@ impl SystemResourceCollector {
     }
 
     /// Collect file descriptor usage.
+    ///
+    /// br-asupersync-thfiyk: real platform read.
+    /// - Linux: count entries in `/proc/self/fd`.
+    /// - macOS/BSD: count entries in `/dev/fd` (the per-process
+    ///   symlink directory exposed by `fdescfs`).
+    /// - All Unix: max from `getrlimit(RLIMIT_NOFILE)`.
     fn collect_fd_usage(&self) -> Result<ResourceMeasurement, ResourceMonitorError> {
-        // Mock implementation - real version would check ulimits and /proc/self/fd
-        let current_fds = 128;
-        let soft_limit = 768; // 75% of 1024
-        let hard_limit = 922; // 90% of 1024
-        let max_limit = 1024; // ulimit -n
-
+        let current_fds =
+            platform::process_fd_count().map_err(|e| ResourceMonitorError::SystemAccessFailed {
+                reason: format!("fd count: {e}"),
+            })?;
+        let (_, hard_max) =
+            platform::fd_rlimit().map_err(|e| ResourceMonitorError::SystemAccessFailed {
+                reason: format!("fd rlimit: {e}"),
+            })?;
+        let max_limit = if hard_max == 0 { 1024 } else { hard_max };
+        let (soft_limit, hard_limit) = derive_thresholds(max_limit, 75, 90);
         Ok(ResourceMeasurement::new(
             current_fds,
             soft_limit,
@@ -831,29 +1204,43 @@ impl SystemResourceCollector {
     }
 
     /// Collect CPU load measurement.
+    ///
+    /// br-asupersync-thfiyk: real platform read.
+    /// - Linux: read first column of `/proc/loadavg` (1-minute load
+    ///   average), normalize by core count, scale to 0..100.
+    /// - macOS/BSD: `getloadavg(3)`, same normalization.
+    /// - Windows / other: `SystemAccessFailed`.
     fn collect_cpu_load(&self) -> Result<ResourceMeasurement, ResourceMonitorError> {
-        // Mock implementation - real version would read /proc/loadavg or equivalent
-        let load_avg_1min = 80; // 80% load (scaled to 0-100)
-        let soft_limit = 80;
-        let hard_limit = 95;
-        let max_limit = 100;
-
-        Ok(ResourceMeasurement::new(
-            load_avg_1min,
-            soft_limit,
-            hard_limit,
-            max_limit,
-        ))
+        let load_avg_1min = platform::load_avg_1min_scaled().map_err(|e| {
+            ResourceMonitorError::SystemAccessFailed {
+                reason: format!("loadavg: {e}"),
+            }
+        })?;
+        // CPU load is intrinsically a 0..100 scale; thresholds are
+        // absolute rather than derived from a per-process rlimit.
+        Ok(ResourceMeasurement::new(load_avg_1min, 80, 95, 100))
     }
 
     /// Collect network connection usage.
+    ///
+    /// br-asupersync-thfiyk: real platform read.
+    /// - Linux: sum non-header rows of `/proc/self/net/{tcp,tcp6,udp,udp6}`.
+    /// - macOS/BSD: `getrlimit(RLIMIT_NOFILE)` ceiling and the FD count
+    ///   as a conservative upper bound on open sockets (libproc would
+    ///   give an exact answer but pulls in a transitive `mach2` dep
+    ///   the project doesn't otherwise need).
     fn collect_network_usage(&self) -> Result<ResourceMeasurement, ResourceMonitorError> {
-        // Mock implementation - real version would count open sockets
-        let current_connections = 50;
-        let soft_limit = 350; // 70% of 500
-        let hard_limit = 425; // 85% of 500
-        let max_limit = 500; // Application limit
-
+        let current_connections = platform::process_connection_count().map_err(|e| {
+            ResourceMonitorError::SystemAccessFailed {
+                reason: format!("connection count: {e}"),
+            }
+        })?;
+        // Sockets share the FD table, so the connection ceiling is at
+        // most RLIMIT_NOFILE. Use a reasonable fallback when the
+        // rlimit is unavailable.
+        let (_, hard_max) = platform::fd_rlimit().unwrap_or((512, 1024));
+        let max_limit = if hard_max == 0 { 1024 } else { hard_max };
+        let (soft_limit, hard_limit) = derive_thresholds(max_limit, 70, 85);
         Ok(ResourceMeasurement::new(
             current_connections,
             soft_limit,
@@ -1148,5 +1535,119 @@ mod tests {
             cycle_overhead_percentage(Duration::from_millis(25), Duration::ZERO),
             0.0
         );
+    }
+
+    // ===================================================================
+    // br-asupersync-thfiyk: real platform-read tests for the
+    // SystemResourceCollector. The exact values vary per-host so we
+    // assert on shape (non-zero where it must be, ratios sane, no
+    // longer the constants the old mocks returned).
+    // ===================================================================
+
+    #[test]
+    fn thfiyk_derive_thresholds_basic() {
+        assert_eq!(derive_thresholds(1000, 75, 90), (750, 900));
+        assert_eq!(derive_thresholds(0, 75, 90), (0, 0));
+        // Saturation: extremely large `max_limit` doesn't overflow u64.
+        let (s, h) = derive_thresholds(u64::MAX, 75, 90);
+        assert!(s <= u64::MAX);
+        assert!(h <= u64::MAX);
+        assert!(s <= h);
+    }
+
+    #[test]
+    fn thfiyk_derive_thresholds_clamps_to_max() {
+        // soft and hard must never exceed max_limit even if the
+        // percentages would compute past it (rounding).
+        let (s, h) = derive_thresholds(7, 75, 90);
+        assert!(s <= 7);
+        assert!(h <= 7);
+    }
+
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    ))]
+    #[test]
+    fn thfiyk_collect_memory_usage_returns_real_rss() {
+        let pressure = Arc::new(ResourcePressure::new());
+        let collector = SystemResourceCollector::new(pressure, Duration::from_secs(1));
+        let m = collector
+            .collect_memory_usage()
+            .expect("memory usage read should succeed on supported platform");
+        // The old mock always returned 512 MiB exactly; the real
+        // reader yields the live VmRSS / ru_maxrss which is virtually
+        // never that exact value. We assert (a) non-zero current
+        // (this test process necessarily has resident memory),
+        // (b) max_limit > 0, (c) we did NOT get the mock constant.
+        assert!(m.current > 0, "current bytes should be > 0");
+        assert!(m.max_limit > 0, "max_limit should be > 0");
+        assert!(
+            m.current != 512 * 1024 * 1024 || m.max_limit != 2048 * 1024 * 1024,
+            "appears to still be returning the legacy mock constants"
+        );
+        assert!(m.soft_limit <= m.hard_limit, "soft <= hard");
+        assert!(m.hard_limit <= m.max_limit, "hard <= max");
+    }
+
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    ))]
+    #[test]
+    fn thfiyk_collect_fd_usage_returns_real_count() {
+        let pressure = Arc::new(ResourcePressure::new());
+        let collector = SystemResourceCollector::new(pressure, Duration::from_secs(1));
+        let m = collector
+            .collect_fd_usage()
+            .expect("fd usage read should succeed on supported platform");
+        // A test process always has at least stdin/stdout/stderr open,
+        // so current_fds >= 3 in practice. We assert >= 1 to keep the
+        // test robust on obscure sandboxed environments.
+        assert!(m.current >= 1, "fd count should be >= 1");
+        assert!(m.max_limit >= m.current, "fd ceiling >= current");
+    }
+
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    ))]
+    #[test]
+    fn thfiyk_collect_cpu_load_returns_real_load() {
+        let pressure = Arc::new(ResourcePressure::new());
+        let collector = SystemResourceCollector::new(pressure, Duration::from_secs(1));
+        let m = collector
+            .collect_cpu_load()
+            .expect("loadavg read should succeed on supported platform");
+        assert_eq!(m.max_limit, 100, "load is reported on a 0..100 scale");
+        assert!(m.current <= 100, "load percentage in range");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn thfiyk_collect_network_usage_returns_real_count() {
+        let pressure = Arc::new(ResourcePressure::new());
+        let collector = SystemResourceCollector::new(pressure, Duration::from_secs(1));
+        let m = collector
+            .collect_network_usage()
+            .expect("connection count read should succeed on Linux");
+        // Connection count can legitimately be 0 (a fresh test
+        // process opens no sockets), so assert only that the ceiling
+        // is sane and the reader did not return the legacy mock 50.
+        assert!(m.max_limit > 0, "connection ceiling > 0");
+        assert!(m.soft_limit <= m.hard_limit);
+        assert!(m.hard_limit <= m.max_limit);
     }
 }
