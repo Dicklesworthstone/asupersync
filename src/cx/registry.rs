@@ -1006,15 +1006,115 @@ impl NameRegistry {
 
     /// Unregister a name, removing it from the registry.
     ///
+    /// br-asupersync-zpanx6: caller MUST supply its own `TaskId` so
+    /// the registry can verify it matches the holder of the lease
+    /// being dropped. Pre-fix any caller with `&mut NameRegistry`
+    /// could drop any other task's lease just by knowing the name —
+    /// a registry-handle-wide write authority that contradicted the
+    /// "registry as fine-grained capability" design intent
+    /// (line 4 of the module).
+    ///
     /// The caller is responsible for resolving the corresponding [`NameLease`].
     /// This does NOT check the waiter queue — use
     /// [`unregister_and_grant`](Self::unregister_and_grant) to also grant
     /// waiting tasks.
     ///
+    /// For admin-only force-drop paths (supervisor cleanup, region
+    /// teardown), use [`force_unregister`](Self::force_unregister)
+    /// or [`force_unregister_and_grant`](Self::force_unregister_and_grant)
+    /// — those bypass the identity check and are clearly named so
+    /// the privileged intent is visible at every call site.
+    ///
+    /// # Errors
+    ///
+    /// - `NameLeaseError::NotFound` if the name is not registered.
+    /// - `NameLeaseError::PermissionDenied` if the caller's `TaskId`
+    ///   does not match the holder of the lease.
+    pub fn unregister(&mut self, name: &str, caller: TaskId) -> Result<(), NameLeaseError> {
+        let Some(entry) = self.leases.get(name) else {
+            return Err(NameLeaseError::NotFound {
+                name: name.to_string(),
+            });
+        };
+        if entry.holder != caller {
+            return Err(NameLeaseError::PermissionDenied {
+                name: name.to_string(),
+            });
+        }
+        let entry = self
+            .leases
+            .remove(name)
+            .expect("entry was just observed under &mut self");
+        self.emit_name_change(
+            name,
+            entry.holder,
+            entry.region,
+            NameOwnershipKind::Released,
+        );
+        Ok(())
+    }
+
+    /// Unregister a name and grant it to the first eligible waiter.
+    ///
+    /// br-asupersync-zpanx6: see [`unregister`](Self::unregister) — the
+    /// caller's `TaskId` MUST match the lease holder. For admin-only
+    /// force paths use
+    /// [`force_unregister_and_grant`](Self::force_unregister_and_grant).
+    ///
+    /// If there are no waiters (or all have expired), the name is simply freed.
+    /// If a waiter is eligible, a new lease is created and pushed to the
+    /// `granted` queue. Use [`take_granted`](Self::take_granted) to retrieve it.
+    ///
+    /// # Errors
+    ///
+    /// - `NameLeaseError::NotFound` if the name is not registered.
+    /// - `NameLeaseError::PermissionDenied` if the caller's `TaskId`
+    ///   does not match the holder of the lease.
+    pub fn unregister_and_grant(
+        &mut self,
+        name: &str,
+        caller: TaskId,
+        now: Time,
+    ) -> Result<(), NameLeaseError> {
+        let Some(entry) = self.leases.get(name) else {
+            return Err(NameLeaseError::NotFound {
+                name: name.to_string(),
+            });
+        };
+        if entry.holder != caller {
+            return Err(NameLeaseError::PermissionDenied {
+                name: name.to_string(),
+            });
+        }
+        let entry = self
+            .leases
+            .remove(name)
+            .expect("entry was just observed under &mut self");
+        self.emit_name_change(
+            name,
+            entry.holder,
+            entry.region,
+            NameOwnershipKind::Released,
+        );
+        self.try_grant_to_first_waiter(name, now);
+        Ok(())
+    }
+
+    /// Force-unregister a name without an identity check.
+    ///
+    /// br-asupersync-zpanx6: privileged admin variant of
+    /// [`unregister`](Self::unregister). Bypasses the caller-identity
+    /// match. Intended for supervisor / region-teardown / explicit
+    /// admin paths where the caller has out-of-band authority over
+    /// the lease holder. Most call sites should use
+    /// [`unregister`](Self::unregister) (for the lease holder) or
+    /// [`cleanup_region`](Self::cleanup_region) /
+    /// [`cleanup_task`](Self::cleanup_task) (for bulk teardown).
+    ///
     /// # Errors
     ///
     /// Returns `NameLeaseError::NotFound` if the name is not registered.
-    pub fn unregister(&mut self, name: &str) -> Result<(), NameLeaseError> {
+    pub fn force_unregister(&mut self, name: &str) -> Result<(), NameLeaseError> {
         self.leases.remove(name).map_or_else(
             || {
                 Err(NameLeaseError::NotFound {
@@ -1033,16 +1133,21 @@ impl NameRegistry {
         )
     }
 
-    /// Unregister a name and grant it to the first eligible waiter.
+    /// Force-unregister a name without an identity check, granting
+    /// it to the first eligible waiter.
     ///
-    /// If there are no waiters (or all have expired), the name is simply freed.
-    /// If a waiter is eligible, a new lease is created and pushed to the
-    /// `granted` queue. Use [`take_granted`](Self::take_granted) to retrieve it.
+    /// br-asupersync-zpanx6: privileged admin variant of
+    /// [`unregister_and_grant`](Self::unregister_and_grant). See
+    /// [`force_unregister`](Self::force_unregister) for the contract.
     ///
     /// # Errors
     ///
     /// Returns `NameLeaseError::NotFound` if the name is not registered.
-    pub fn unregister_and_grant(&mut self, name: &str, now: Time) -> Result<(), NameLeaseError> {
+    pub fn force_unregister_and_grant(
+        &mut self,
+        name: &str,
+        now: Time,
+    ) -> Result<(), NameLeaseError> {
         let Some(entry) = self.leases.remove(name) else {
             return Err(NameLeaseError::NotFound {
                 name: name.to_string(),
@@ -1088,7 +1193,14 @@ impl NameRegistry {
                 name: name.to_string(),
             });
         }
-        self.unregister_and_grant(name, now)
+        // br-asupersync-zpanx6: identity check already performed
+        // above against the full lease (holder + region +
+        // acquired_at), which is strictly stronger than the
+        // caller-TaskId check unregister_and_grant performs. Use the
+        // force variant to avoid the redundant check; this also
+        // sidesteps name-clone churn (force_unregister_and_grant
+        // takes &str directly without re-reading entry).
+        self.force_unregister_and_grant(name, now)
     }
 
     /// Check the waiter queue for a name and grant to the first eligible waiter.
@@ -1702,13 +1814,13 @@ mod tests {
         let mut reg = NameRegistry::new();
         let mut lease = reg.register("temp", tid(1), rid(0), Time::ZERO).unwrap();
 
-        reg.unregister("temp").unwrap();
+        reg.unregister("temp", tid(1)).unwrap();
         assert!(!reg.is_registered("temp"));
         assert!(reg.is_empty());
 
-        // Unregistering unknown name is an error
+        // Unregistering unknown name is an error.
         assert_eq!(
-            reg.unregister("unknown"),
+            reg.unregister("unknown", tid(1)),
             Err(NameLeaseError::NotFound {
                 name: "unknown".into()
             })
@@ -1802,7 +1914,7 @@ mod tests {
         let mut l1 = reg
             .register("reusable", tid(1), rid(0), Time::ZERO)
             .unwrap();
-        reg.unregister("reusable").unwrap();
+        reg.unregister("reusable", tid(1)).unwrap();
         l1.release().unwrap();
 
         // Re-register same name with different task
@@ -1919,7 +2031,7 @@ mod tests {
         let mut lease = reg
             .register("svc", tid(1), rid(1), Time::from_secs(10))
             .unwrap();
-        reg.unregister("svc").unwrap();
+        reg.unregister("svc", tid(1)).unwrap();
         lease.release().unwrap();
 
         let notifications = reg.take_name_notifications();
@@ -1990,7 +2102,7 @@ mod tests {
         assert_eq!(removed_watchers.len(), 1);
         assert_eq!(reg.name_watcher_count(), 1);
 
-        reg.unregister("svc").unwrap();
+        reg.unregister("svc", tid(1)).unwrap();
         lease.release().unwrap();
         let released = reg.take_name_notifications();
         assert_eq!(released.len(), 1);
@@ -2014,7 +2126,7 @@ mod tests {
         assert_eq!(reg.name_watcher_count(), 1);
 
         let mut lease = reg.register("svc", tid(1), rid(9), Time::ZERO).unwrap();
-        reg.unregister("svc").unwrap();
+        reg.unregister("svc", tid(1)).unwrap();
         lease.release().unwrap();
 
         let notifications = reg.take_name_notifications();
@@ -2294,7 +2406,7 @@ mod tests {
         assert!(lease.is_active());
 
         // Simulate cancellation: unregister from registry, then abort the lease
-        reg.unregister("cancellable").unwrap();
+        reg.unregister("cancellable", tid(1)).unwrap();
         assert!(!reg.is_registered("cancellable"));
 
         let proof = lease.abort().unwrap();
@@ -2549,8 +2661,9 @@ mod tests {
             }
         }
 
-        // Phase 3: unregister svc_000 explicitly
-        reg.unregister("svc_000").unwrap();
+        // Phase 3: unregister svc_000 explicitly (holder is tid(0)
+        // per the bulk-register loop above)
+        reg.unregister("svc_000", tid(0)).unwrap();
         if let Some(lease) = active_leases.iter_mut().find(|l| l.name() == "svc_000") {
             lease.release().unwrap();
         }
@@ -2874,7 +2987,7 @@ mod tests {
         let mut lease = reg.commit_permit(fresh_permit).expect("fresh commit ok");
         assert_eq!(reg.whereis("svc"), Some(tid(1)));
 
-        reg.unregister("svc").unwrap();
+        reg.unregister("svc", tid(1)).unwrap();
         lease.release().unwrap();
 
         crate::test_complete!("commit_permit_rejects_stale_same_identity_replay");
@@ -2903,7 +3016,7 @@ mod tests {
 
         let mut lease = reg.commit_permit(fresh_permit).expect("fresh commit ok");
         assert_eq!(reg.whereis("svc"), Some(tid(1)));
-        reg.unregister("svc").unwrap();
+        reg.unregister("svc", tid(1)).unwrap();
         lease.release().unwrap();
 
         crate::test_complete!("cancel_permit_rejects_stale_same_identity_replay");
@@ -2939,7 +3052,7 @@ mod tests {
             .reserve("svc", tid(2), rid(0), Time::from_secs(2))
             .expect("reserve after cleanup");
         let mut lease = reg.commit_permit(replacement).expect("commit replacement");
-        reg.unregister("svc").expect("unregister replacement");
+        reg.unregister("svc", tid(2)).expect("unregister replacement");
         lease.release().expect("release replacement");
 
         crate::test_complete!("commit_permit_rejects_aborted_permit_without_mutating_registry");
@@ -3121,7 +3234,7 @@ mod tests {
         assert!(matches!(outcome, NameCollisionOutcome::Enqueued));
 
         // Free the name using unregister_and_grant.
-        reg.unregister_and_grant("svc", Time::from_secs(10))
+        reg.unregister_and_grant("svc", tid(1), Time::from_secs(10))
             .unwrap();
         lease.release().unwrap();
 
@@ -3185,7 +3298,7 @@ mod tests {
         .unwrap();
 
         // Free the name AFTER the deadline.
-        reg.unregister_and_grant("svc", Time::from_secs(10))
+        reg.unregister_and_grant("svc", tid(1), Time::from_secs(10))
             .unwrap();
         lease.release().unwrap();
 
@@ -3223,7 +3336,7 @@ mod tests {
         assert_eq!(reg.waiter_count(), 0);
         assert_eq!(reg.whereis("svc"), Some(tid(1)));
 
-        reg.unregister("svc").unwrap();
+        reg.unregister("svc", tid(1)).unwrap();
         lease.release().unwrap();
 
         crate::test_complete!("collision_wait_rejects_already_expired_budget");
@@ -3260,7 +3373,7 @@ mod tests {
         assert_eq!(reg.waiter_count(), 2);
 
         // Free the name — first waiter (tid 2) should win.
-        reg.unregister_and_grant("svc", Time::from_secs(10))
+        reg.unregister_and_grant("svc", tid(1), Time::from_secs(10))
             .unwrap();
         lease.release().unwrap();
 
@@ -3269,7 +3382,7 @@ mod tests {
 
         // Free again — second waiter (tid 3) should get it.
         let mut granted1 = reg.take_granted().into_iter().next().unwrap().lease;
-        reg.unregister_and_grant("svc", Time::from_secs(20))
+        reg.unregister_and_grant("svc", tid(2), Time::from_secs(20))
             .unwrap();
         granted1.release().unwrap();
 
@@ -3363,7 +3476,8 @@ mod tests {
         .unwrap();
 
         // Free the name — task 2 is granted the lease.
-        reg.unregister_and_grant("svc", Time::from_secs(5)).unwrap();
+        reg.unregister_and_grant("svc", tid(1), Time::from_secs(5))
+            .unwrap();
         lease.release().unwrap();
         assert_eq!(reg.whereis("svc"), Some(tid(2)));
 
@@ -3402,7 +3516,8 @@ mod tests {
         .unwrap();
 
         // Free the name — task 2 is granted.
-        reg.unregister_and_grant("svc", Time::from_secs(5)).unwrap();
+        reg.unregister_and_grant("svc", tid(1), Time::from_secs(5))
+            .unwrap();
         lease.release().unwrap();
         assert_eq!(reg.whereis("svc"), Some(tid(2)));
 
@@ -3875,8 +3990,10 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(outcome, NameCollisionOutcome::Enqueued));
+        // tid(3) is the holder after Replace.
         l3_new.release().unwrap();
-        reg.unregister_and_grant("c", Time::from_secs(2)).unwrap();
+        reg.unregister_and_grant("c", tid(3), Time::from_secs(2))
+            .unwrap();
         assert_eq!(reg.leases.get("c").unwrap().identity_nonce, 0);
         let mut granted = reg.take_granted();
         granted[0].lease.release().unwrap();
@@ -3885,5 +4002,155 @@ mod tests {
         l2.release().unwrap();
         l3.abort().unwrap(); // displaced
         crate::test_complete!("ziwcq4_all_register_paths_produce_zero_nonce_active_entries");
+    }
+
+    // ---------------------------------------------------------------
+    // br-asupersync-zpanx6: caller-identity check on unregister
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn zpanx6_unregister_with_wrong_caller_returns_permission_denied() {
+        // Pre-fix any caller with &mut NameRegistry could drop any
+        // task's lease just by knowing the name. Post-fix the caller
+        // MUST supply its own TaskId and it must match the lease
+        // holder.
+        init_test("zpanx6_unregister_with_wrong_caller_returns_permission_denied");
+        let mut reg = NameRegistry::new();
+        let mut lease = reg.register("svc", tid(1), rid(0), Time::ZERO).unwrap();
+
+        // Wrong caller: tid(99) attempts to drop tid(1)'s lease.
+        let err = reg.unregister("svc", tid(99)).unwrap_err();
+        assert_eq!(
+            err,
+            NameLeaseError::PermissionDenied {
+                name: "svc".into()
+            }
+        );
+        assert!(reg.is_registered("svc"), "rejected unregister must be a no-op");
+        assert_eq!(reg.whereis("svc"), Some(tid(1)));
+
+        // Correct caller succeeds.
+        reg.unregister("svc", tid(1)).unwrap();
+        assert!(!reg.is_registered("svc"));
+        lease.release().unwrap();
+    }
+
+    #[test]
+    fn zpanx6_unregister_and_grant_enforces_caller_identity_too() {
+        init_test("zpanx6_unregister_and_grant_enforces_caller_identity_too");
+        let mut reg = NameRegistry::new();
+        let mut lease = reg.register("svc", tid(1), rid(0), Time::ZERO).unwrap();
+
+        // Enqueue a waiter so we can verify a wrong-caller failure
+        // does NOT trigger the grant side effect.
+        reg.register_with_policy(
+            "svc",
+            tid(2),
+            rid(0),
+            Time::from_secs(1),
+            NameCollisionPolicy::Wait {
+                deadline: Time::from_secs(60),
+            },
+        )
+        .unwrap();
+        assert_eq!(reg.waiter_count(), 1);
+
+        // Wrong caller — must NOT free the name and must NOT grant
+        // the waiter.
+        let err = reg
+            .unregister_and_grant("svc", tid(99), Time::from_secs(5))
+            .unwrap_err();
+        assert_eq!(
+            err,
+            NameLeaseError::PermissionDenied {
+                name: "svc".into()
+            }
+        );
+        assert!(reg.is_registered("svc"));
+        assert_eq!(reg.waiter_count(), 1, "waiter must not be granted");
+        assert!(reg.take_granted().is_empty());
+
+        // Correct caller: succeeds and grants the waiter.
+        reg.unregister_and_grant("svc", tid(1), Time::from_secs(6))
+            .unwrap();
+        lease.release().unwrap();
+        assert_eq!(reg.whereis("svc"), Some(tid(2)));
+        let mut g = reg.take_granted();
+        assert_eq!(g.len(), 1);
+        g[0].lease.release().unwrap();
+    }
+
+    #[test]
+    fn zpanx6_unregister_unknown_name_returns_not_found_regardless_of_caller() {
+        // NotFound takes precedence over PermissionDenied so unknown
+        // names give the same error for any caller — avoids leaking
+        // "this name exists but you don't own it".
+        init_test("zpanx6_unregister_unknown_name_returns_not_found_regardless_of_caller");
+        let mut reg = NameRegistry::new();
+        let err1 = reg.unregister("ghost", tid(1)).unwrap_err();
+        let err2 = reg.unregister("ghost", tid(99)).unwrap_err();
+        assert_eq!(
+            err1,
+            NameLeaseError::NotFound {
+                name: "ghost".into()
+            }
+        );
+        assert_eq!(err1, err2, "unknown-name error must not depend on caller");
+    }
+
+    #[test]
+    fn zpanx6_force_unregister_bypasses_caller_check() {
+        // Admin force path explicitly bypasses identity — that's the
+        // contract. Verifies bulk-cleanup / supervisor paths still
+        // work when out-of-band authority is needed.
+        init_test("zpanx6_force_unregister_bypasses_caller_check");
+        let mut reg = NameRegistry::new();
+        let mut lease = reg.register("svc", tid(1), rid(0), Time::ZERO).unwrap();
+        reg.force_unregister("svc")
+            .expect("force path bypasses identity check");
+        assert!(!reg.is_registered("svc"));
+        lease.abort().unwrap();
+    }
+
+    #[test]
+    fn zpanx6_force_unregister_and_grant_bypasses_caller_check_and_grants() {
+        init_test("zpanx6_force_unregister_and_grant_bypasses_caller_check_and_grants");
+        let mut reg = NameRegistry::new();
+        let mut lease = reg.register("svc", tid(1), rid(0), Time::ZERO).unwrap();
+        reg.register_with_policy(
+            "svc",
+            tid(2),
+            rid(0),
+            Time::from_secs(1),
+            NameCollisionPolicy::Wait {
+                deadline: Time::from_secs(60),
+            },
+        )
+        .unwrap();
+
+        reg.force_unregister_and_grant("svc", Time::from_secs(5))
+            .expect("force path bypasses identity check");
+        lease.abort().unwrap();
+
+        assert_eq!(reg.whereis("svc"), Some(tid(2)));
+        let mut g = reg.take_granted();
+        assert_eq!(g.len(), 1);
+        g[0].lease.release().unwrap();
+    }
+
+    #[test]
+    fn zpanx6_unregister_owned_and_grant_still_works_via_force_path() {
+        // unregister_owned_and_grant performs its own (stronger)
+        // identity check then delegates to force_unregister_and_grant.
+        // Verifies the delegation didn't break the existing
+        // semantics.
+        init_test("zpanx6_unregister_owned_and_grant_still_works_via_force_path");
+        let mut reg = NameRegistry::new();
+        let lease = reg.register("svc", tid(1), rid(0), Time::ZERO).unwrap();
+        reg.unregister_owned_and_grant(&lease, Time::from_secs(5))
+            .expect("genuine lease unregister via force-grant path");
+        assert!(!reg.is_registered("svc"));
+        let mut lease = lease;
+        lease.abort().unwrap();
     }
 }

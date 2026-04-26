@@ -239,7 +239,7 @@ fn bench_registry_operations(c: &mut Criterion) {
                 .register("cycle_name", task_id, region, now)
                 .unwrap();
             let _ = lease.abort();
-            let _ = registry.unregister("cycle_name");
+            let _ = registry.unregister("cycle_name", task_id);
             std::hint::black_box(())
         })
     });
