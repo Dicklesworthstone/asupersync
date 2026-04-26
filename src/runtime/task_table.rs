@@ -313,31 +313,47 @@ impl TaskTable {
 
     /// Inserts a new task record produced by `f` into the arena.
     ///
-    /// The closure receives the assigned `ArenaIndex`.
+    /// The closure receives the assigned `ArenaIndex`. The Lyapunov phase
+    /// counter and deadline-sum are updated via `note_task_added` after
+    /// the record is in the arena (br-asupersync-i8f043: previously this
+    /// path skipped the bookkeeping, drifting `phase_counts` and
+    /// `deadline_sum_ns` against the live task population).
     #[inline]
     pub fn insert_task_with<F>(&mut self, f: F) -> ArenaIndex
     where
         F: FnOnce(ArenaIndex) -> TaskRecord,
     {
-        self.tasks.insert_with(|idx| {
+        let idx = self.tasks.insert_with(|idx| {
             let mut record = f(idx);
             // Preserve TaskTable invariant: record.id must match arena slot.
             record.id = TaskId::from_arena(idx);
             record
-        })
+        });
+        // Read phase + deadline back from the just-inserted record so the
+        // bookkeeping matches whatever the closure produced. The arena
+        // owns the record now, so read-through-arena is the only safe
+        // way to do this without changing the closure signature.
+        if let Some(record) = self.tasks.get(idx) {
+            let phase = record.phase.load();
+            let deadline = record.cx.as_ref().and_then(|cx| cx.budget().deadline);
+            self.note_task_added(phase, deadline);
+        }
+        idx
     }
 
     /// Creates a pooled TaskRecord using the provided factory function.
     ///
     /// This method combines object pooling with the flexible construction pattern
     /// of insert_task_with. The factory receives the arena index and should
-    /// configure the pooled TaskRecord appropriately.
+    /// configure the pooled TaskRecord appropriately. Bookkeeping is updated
+    /// via `note_task_added` after insertion, matching `insert_task_with`
+    /// (br-asupersync-i8f043).
     #[inline]
     pub fn insert_pooled_task_with<F>(&mut self, factory: F) -> ArenaIndex
     where
         F: FnOnce(ArenaIndex, &mut TaskRecord),
     {
-        self.tasks.insert_with(|idx| {
+        let idx = self.tasks.insert_with(|idx| {
             let record = self.task_record_pool.get_or_create(|| {
                 TaskRecord::new(
                     TaskId::from_arena(idx),
@@ -352,7 +368,13 @@ impl TaskTable {
             // Ensure TaskTable invariant: record.id matches arena slot
             record.id = TaskId::from_arena(idx);
             record
-        })
+        });
+        if let Some(record) = self.tasks.get(idx) {
+            let phase = record.phase.load();
+            let deadline = record.cx.as_ref().and_then(|cx| cx.budget().deadline);
+            self.note_task_added(phase, deadline);
+        }
+        idx
     }
 
     /// Updates a task record using a closure.
