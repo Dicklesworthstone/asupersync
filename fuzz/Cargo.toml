@@ -1868,3 +1868,14 @@ path = "fuzz_targets/dns_resolver_decode.rs"
 test = false
 doc = false
 bench = false
+
+# br-asupersync — URL-routing fuzzer for src/web/router.rs.
+# Random patterns ({:id}, /*, mixed literals) × random paths (encoded chars,
+# overlong, ambiguous, traversal-like). Oracles: no panics, well-typed
+# StatusCode, deterministic match, first-match-wins ordering.
+[[bin]]
+name = "web_router_match"
+path = "fuzz_targets/web_router_match.rs"
+test = false
+doc = false
+bench = false
