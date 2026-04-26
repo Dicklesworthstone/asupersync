@@ -15,6 +15,16 @@
 //!   - Unaligned buffers (offset 0..16) to flush out `unsafe` pointer math.
 //!   - Odd-length tails (lengths that straddle SIMD/scalar boundaries).
 //!   - Dual-slice `slices2` fused paths with asymmetric lengths.
+//!
+//! Metamorphic relations (additive to the byte-by-byte scalar oracle):
+//!   * MR-MUL-COMPOSE: `mul_slice(mul_slice(buf, c1), c2)` ≡ `mul_slice(buf, c1 · c2)`.
+//!     Verifies the SIMD kernel's choice of multiplication path
+//!     (table-lookup vs nibble-shuffle) composes with field multiplication.
+//!     Single-mul scalar-oracle calls cannot catch this.
+//!   * MR-ADDMUL-XOR-INVOLUTION: `addmul_slice(dst, src, c)` applied twice
+//!     restores `dst` (XOR is its own inverse). Hits the SIMD store path
+//!     symmetrically and catches read-clobbering-write regressions and any
+//!     non-determinism across invocations.
 
 use asupersync::raptorq::gf256::{
     Gf256, active_kernel, gf256_add_slice, gf256_add_slices2, gf256_addmul_slice,
@@ -36,13 +46,15 @@ fuzz_target!(|data: &[u8]| {
     let mut cursor = Cursor::new(data);
     for _ in 0..MAX_OPS {
         let Some(op) = cursor.take(1) else { return };
-        match op[0] % 6 {
+        match op[0] % 8 {
             0 => run_add_slice(&mut cursor),
             1 => run_mul_slice(&mut cursor),
             2 => run_addmul_slice(&mut cursor),
             3 => run_add_slices2(&mut cursor),
             4 => run_mul_slices2(&mut cursor),
             5 => run_addmul_slices2(&mut cursor),
+            6 => run_mr_mul_compose(&mut cursor),
+            7 => run_mr_addmul_involution(&mut cursor),
             _ => unreachable!(),
         }
     }
@@ -166,6 +178,53 @@ fn run_addmul_slices2(c: &mut Cursor) {
     assert_eq!(
         got_b, expected_b,
         "gf256_addmul_slices2 lane B diverged (c={scalar})"
+    );
+}
+
+/// MR-MUL-COMPOSE: `mul_slice(mul_slice(buf, c1), c2)` ≡ `mul_slice(buf, c1·c2)`.
+///
+/// Uses two distinct SIMD calls (so the kernel's table-vs-shuffle dispatch
+/// runs twice) and compares to a single SIMD call with the pre-composed
+/// scalar. Catches kernels that conflate `mul_field` for the c1·c2 path.
+fn run_mr_mul_compose(c: &mut Cursor) {
+    let Some(buf) = c.take_aligned() else { return };
+    let Some(c1) = c.scalar() else { return };
+    let Some(c2) = c.scalar() else { return };
+
+    let mut twostep = buf.clone();
+    gf256_mul_slice(&mut twostep, Gf256::new(c1));
+    gf256_mul_slice(&mut twostep, Gf256::new(c2));
+
+    let composed = Gf256::new(c1).mul_field(Gf256::new(c2)).raw();
+    let mut onestep = buf.clone();
+    gf256_mul_slice(&mut onestep, Gf256::new(composed));
+
+    assert_eq!(
+        twostep, onestep,
+        "MR-MUL-COMPOSE failed: c1={c1} c2={c2} c1·c2={composed} len={}",
+        buf.len()
+    );
+}
+
+/// MR-ADDMUL-XOR-INVOLUTION: `addmul_slice(dst, src, c)` applied twice with
+/// the same scalar restores the original `dst`. Holds because GF(2)
+/// addition is XOR and the SIMD kernel is required to be a pure function
+/// of (dst[i], src[i], c). Catches read-clobbering-write bugs and
+/// non-deterministic kernel state across invocations.
+fn run_mr_addmul_involution(c: &mut Cursor) {
+    let Some((dst0, src, _)) = c.take_aligned_pair() else {
+        return;
+    };
+    let Some(scalar) = c.scalar() else { return };
+
+    let mut work = dst0.clone();
+    gf256_addmul_slice(&mut work, &src, Gf256::new(scalar));
+    gf256_addmul_slice(&mut work, &src, Gf256::new(scalar));
+
+    assert_eq!(
+        work, dst0,
+        "MR-ADDMUL-XOR-INVOLUTION failed: c={scalar} len={}",
+        dst0.len()
     );
 }
 
