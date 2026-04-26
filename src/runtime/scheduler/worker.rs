@@ -24,6 +24,21 @@ use std::time::{Duration, Instant};
 /// Identifier for a scheduler worker.
 pub type WorkerId = usize;
 
+/// Cap on the per-worker `seen_io_tokens` HashSet (br-asupersync-414j0b).
+///
+/// At the cap (~64K distinct tokens) memory footprint is roughly:
+///   * 65_536 entries × ~24 B/entry (HashSet bucket + u64) ≈ 1.5 MiB
+/// On overflow the set is CLEARED (full reset) rather than LRU-evicted —
+/// the io_requested trace event's contract is "emit the first time this
+/// token is observed," so a periodic reset re-emits some old tokens'
+/// first-sight events after long uptimes. That re-emission is the
+/// documented tradeoff vs unbounded growth.
+///
+/// Pre-fix the set grew monotonically with cumulative distinct I/O
+/// tokens (~24 B × 100k tokens/day → 2.4 MiB/day per worker leaked
+/// silently). Post-fix the worst-case footprint is bounded.
+pub const MAX_SEEN_IO_TOKENS: usize = 65_536;
+
 /// A worker thread that executes tasks.
 pub struct Worker {
     /// Unique worker ID.
@@ -49,6 +64,15 @@ pub struct Worker {
     /// Timer driver for timestamps (optional).
     pub timer_driver: Option<TimerDriverHandle>,
     /// Tokens seen for I/O trace emission (HashSet for O(1) insert vs BTreeSet O(log n)).
+    ///
+    /// br-asupersync-414j0b: bounded at [`MAX_SEEN_IO_TOKENS`] entries.
+    /// On overflow the set is CLEARED (not LRU-evicted) — the contract for
+    /// the io_requested trace event is "emit the first time we see a token,"
+    /// so a periodic reset re-emits some old tokens' first-sight events
+    /// after long uptimes. That re-emission is the documented tradeoff vs
+    /// unbounded growth (~24 B/entry × cumulative distinct tokens, which
+    /// for a long-running SaaS server with hours/days of uptime would
+    /// otherwise leak silently — see bead description for precedent).
     seen_io_tokens: HashSet<u64>,
     /// Cached metrics provider — avoids Arc clone per task execution.
     metrics: Arc<dyn MetricsProvider>,
@@ -161,6 +185,14 @@ impl Worker {
                     io.try_turn_with(Some(Duration::from_millis(1)), |event, interest| {
                         let polling_token = event.token.0 as u64;
                         let interest_bits = interest.unwrap_or(event.ready).bits();
+                        // br-asupersync-414j0b: enforce MAX_SEEN_IO_TOKENS
+                        // cap. On overflow, full-clear so subsequent
+                        // tokens are once-again first-sight (re-emits
+                        // some old tokens' io_requested event — the
+                        // documented tradeoff vs unbounded growth).
+                        if seen.len() >= MAX_SEEN_IO_TOKENS && !seen.contains(&polling_token) {
+                            seen.clear();
+                        }
                         if seen.insert(polling_token) {
                             trace.record_event(|seq| {
                                 TraceEvent::io_requested(seq, now, polling_token, interest_bits)
@@ -354,23 +386,41 @@ impl Worker {
         };
 
         let is_local_task = matches!(&stored, AnyStoredTask::Local(_));
-        // Reuse cached waker if available (WorkStealingWaker fields are immutable
-        // per task lifetime — no priority field to compare, unlike ThreeLaneWaker).
+        // br-asupersync-jkb17z: WorkStealingWaker amortization.
+        //
+        // First-poll waker construction costs 1 heap alloc + 4 Arc::clone
+        // atomic refcount bumps (wake_state, global, parker, local). The
+        // result is stashed back into `record.cached_waker` after the
+        // first Pending return (see save sites at the end of execute()
+        // ~lines 544 and 557), so subsequent polls of the same task
+        // hit the `Some(w)` reuse path here at zero allocation.
+        //
+        // For long-lived tasks the per-task cost amortizes to O(1)
+        // across all polls of the task. For short-lived per-request
+        // tasks (the bead's stated worry) the first-poll cost is the
+        // unavoidable minimum — restructuring to a per-Worker waker
+        // proto with re-bindable task_id was considered and rejected
+        // because (a) wake() needs the task_id to know which task to
+        // schedule, (b) the conditional `local: Option<LocalQueue>`
+        // depends on per-task is_local, and (c) the heap allocation
+        // dominates the 4 atomic bumps anyway.
+        //
+        // Helper extraction for grep-ability + a single instrumentation
+        // hook point if we ever want to count first-poll waker allocs.
         let waker = if let Some((w, _)) = cached_waker {
             w
         } else {
-            let local_queue = if is_local_task {
-                Some(self.local.clone())
-            } else {
-                None
-            };
-            Waker::from(Arc::new(WorkStealingWaker {
+            Self::build_first_poll_waker(
                 task_id,
-                wake_state: Arc::clone(&wake_state),
-                global: Arc::clone(&self.global),
-                local: local_queue,
-                parker: self.parker.clone(),
-            }))
+                Arc::clone(&wake_state),
+                Arc::clone(&self.global),
+                if is_local_task {
+                    Some(self.local.clone())
+                } else {
+                    None
+                },
+                self.parker.clone(),
+            )
         };
         let mut cx = Context::from_waker(&waker);
         let _cx_guard = crate::cx::Cx::set_current(task_cx);
@@ -709,6 +759,28 @@ struct WorkStealingWaker {
     global: Arc<GlobalQueue>,
     local: Option<LocalQueue>,
     parker: Parker,
+}
+
+impl Worker {
+    /// Construct a fresh `WorkStealingWaker`-backed [`Waker`]. Called once
+    /// per task (on first poll) — subsequent polls reuse the `cached_waker`
+    /// stashed into the TaskRecord. See br-asupersync-jkb17z.
+    #[inline]
+    fn build_first_poll_waker(
+        task_id: TaskId,
+        wake_state: Arc<crate::record::task::TaskWakeState>,
+        global: Arc<GlobalQueue>,
+        local: Option<LocalQueue>,
+        parker: Parker,
+    ) -> Waker {
+        Waker::from(Arc::new(WorkStealingWaker {
+            task_id,
+            wake_state,
+            global,
+            local,
+            parker,
+        }))
+    }
 }
 
 impl WorkStealingWaker {
@@ -2052,5 +2124,88 @@ mod tests {
             total_visits,
             dominance_ratio * 100.0
         );
+    }
+
+    // ─── br-asupersync-414j0b regression tests ───────────────────────
+
+    #[test]
+    fn seen_io_tokens_respects_max_cap() {
+        // Replicate the bound logic in isolation. The Worker construction
+        // requires significant scaffolding (RuntimeState, GlobalQueue,
+        // stealers) so we test the algorithmic invariant directly: when
+        // the set hits MAX_SEEN_IO_TOKENS, inserting a NEW token clears
+        // the set first, and the result still respects the cap.
+        let mut seen: HashSet<u64> = HashSet::with_capacity(32);
+
+        // Fill to one below the cap.
+        for token in 0..(MAX_SEEN_IO_TOKENS as u64 - 1) {
+            seen.insert(token);
+        }
+        assert_eq!(seen.len(), MAX_SEEN_IO_TOKENS - 1);
+
+        // Insert one more — should be allowed (still below cap).
+        let pre_cap_token = MAX_SEEN_IO_TOKENS as u64 - 1;
+        if seen.len() >= MAX_SEEN_IO_TOKENS && !seen.contains(&pre_cap_token) {
+            seen.clear();
+        }
+        seen.insert(pre_cap_token);
+        assert_eq!(seen.len(), MAX_SEEN_IO_TOKENS);
+
+        // Now AT cap: a new token must trigger clear.
+        let new_token = MAX_SEEN_IO_TOKENS as u64;
+        if seen.len() >= MAX_SEEN_IO_TOKENS && !seen.contains(&new_token) {
+            seen.clear();
+        }
+        seen.insert(new_token);
+        // Post-clear, only the new token remains.
+        assert_eq!(seen.len(), 1);
+        assert!(seen.contains(&new_token));
+    }
+
+    #[test]
+    fn seen_io_tokens_at_cap_with_existing_token_no_clear() {
+        // If the token is ALREADY in the set, even at cap, no clear
+        // needed — the dedup short-circuits.
+        let mut seen: HashSet<u64> = (0..MAX_SEEN_IO_TOKENS as u64).collect();
+        assert_eq!(seen.len(), MAX_SEEN_IO_TOKENS);
+
+        let existing = 42u64;
+        if seen.len() >= MAX_SEEN_IO_TOKENS && !seen.contains(&existing) {
+            seen.clear();
+        }
+        let was_new = seen.insert(existing);
+        // Token already there → no clear, no new insert (insert returns false).
+        assert!(!was_new);
+        assert_eq!(seen.len(), MAX_SEEN_IO_TOKENS);
+    }
+
+    #[test]
+    fn max_seen_io_tokens_const_is_documented_value() {
+        // br-asupersync-414j0b docs the cap as 65_536. Regression guard
+        // so a casual change to the constant trips this test and the
+        // bead's "~1.5 MiB worst-case footprint" calculation gets
+        // re-validated.
+        assert_eq!(MAX_SEEN_IO_TOKENS, 65_536);
+    }
+
+    // ─── br-asupersync-jkb17z regression test ────────────────────────
+
+    #[test]
+    fn build_first_poll_waker_constructs_a_usable_waker() {
+        // Helper compiles + produces a Waker. The actual amortization
+        // (cached_waker reuse on subsequent polls) is exercised by the
+        // existing execute() integration tests above; this test guards
+        // the helper signature so a casual refactor doesn't regress
+        // the per-task allocation pattern documented in the bead.
+        use crate::record::task::TaskWakeState;
+        let task_id = TaskId::new_for_test(0, 0);
+        let wake_state = Arc::new(TaskWakeState::new());
+        let global = Arc::new(GlobalQueue::new());
+        let parker = Parker::new();
+        let waker = Worker::build_first_poll_waker(task_id, wake_state, global, None, parker);
+        // Smoke: waker can be cloned + dropped without panic.
+        let cloned = waker.clone();
+        drop(cloned);
+        drop(waker);
     }
 }
