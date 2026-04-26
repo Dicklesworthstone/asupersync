@@ -1862,6 +1862,12 @@ struct PgConnectionInner {
     process_id: i32,
     /// Secret key for cancel requests.
     secret_key: i32,
+    /// Cancellation target: host/port/connect-timeout retained from the
+    /// original connect so a `CancelRequest` (PG protocol cancellation
+    /// message — see RFC-style spec at PG docs §53.2.7) can be sent on
+    /// a fresh TCP connection without re-parsing the URL or carrying
+    /// the password forward (br-asupersync-gvkj1r).
+    cancel_target: CancelTarget,
     /// Server parameters.
     parameters: BTreeMap<String, String>,
     /// Transaction status.
@@ -1876,6 +1882,35 @@ struct PgConnectionInner {
     /// connection. Prevents unbounded memory growth from runaway queries or
     /// a malicious server sending an endless DataRow stream.
     max_result_rows: usize,
+}
+
+/// Coordinates needed to send a PG `CancelRequest` on a fresh socket.
+#[derive(Clone, Debug)]
+struct CancelTarget {
+    host: String,
+    port: u16,
+    /// Hard upper bound on the cancel-request connect — see
+    /// `PgConnection::fire_cancel_request` for why this is clamped to a
+    /// short value rather than inheriting the original `connect_timeout`.
+    connect_timeout: std::time::Duration,
+}
+
+impl CancelTarget {
+    fn from_options(options: &PgConnectOptions) -> Self {
+        // CancelRequest is best-effort signaling — bound the connect attempt
+        // to 500ms (or the user's configured connect_timeout, whichever is
+        // smaller) so a cancelling caller can't be stalled by an
+        // unreachable host on the cancel path.
+        let cap = std::time::Duration::from_millis(500);
+        let connect_timeout = options
+            .connect_timeout
+            .map_or(cap, |t| t.min(cap));
+        Self {
+            host: options.host.clone(),
+            port: options.port,
+            connect_timeout,
+        }
+    }
 }
 
 impl Drop for PgConnectionInner {
@@ -1947,6 +1982,84 @@ impl PgConnection {
     fn abort_in_flight_exchange(&mut self) {
         let _ = self.inner.stream.shutdown(std::net::Shutdown::Both);
         self.inner.closed = true;
+    }
+
+    /// Send a PostgreSQL `CancelRequest` on a fresh TCP connection.
+    ///
+    /// Per the PG protocol (PG docs §53.2.7), cancellation of an in-flight
+    /// query is signalled by opening a *separate* TCP connection to the
+    /// same server and writing a 16-byte `CancelRequest` frame containing
+    /// the target backend's process ID and cancellation key (both received
+    /// in the original connection's `BackendKeyData` (`b'K'`) message).
+    /// The server then sends `SIGINT` to the worker handling the cancelled
+    /// query, which causes a quick rollback. Without this signal, just
+    /// closing the original TCP socket leaves the server unaware — it may
+    /// continue executing the query (holding locks, burning CPU) until it
+    /// notices the closed socket on its next write attempt.
+    ///
+    /// Implementation properties (br-asupersync-gvkj1r):
+    ///
+    /// * Spawned on a detached `std::thread`, NOT through asupersync's
+    ///   structured-concurrency machinery, because the caller's `Cx` is
+    ///   already cancelled — we can't `.await` against it. Best-effort
+    ///   signaling: a thread-spawn failure or a downed network would
+    ///   simply mean the server learns of the cancel slightly later.
+    /// * Sends raw 16 bytes over plain TCP. Per spec, `CancelRequest`
+    ///   does NOT use TLS or any handshake — the secret key is the only
+    ///   authentication and the protocol is fixed-frame.
+    /// * Both the connect and write phases are bounded by
+    ///   `cancel_target.connect_timeout` (≤ 500ms) so a hostile or
+    ///   unreachable server cannot stall the cancel path indefinitely.
+    /// * Returns no error and never panics — failures are deliberately
+    ///   swallowed.
+    fn fire_cancel_request(&self) {
+        // No backend identity yet (e.g. cancel during pre-startup
+        // exchange) → nothing the server can match this cancel against.
+        if self.inner.process_id == 0 && self.inner.secret_key == 0 {
+            return;
+        }
+        let host = self.inner.cancel_target.host.clone();
+        let port = self.inner.cancel_target.port;
+        let connect_timeout = self.inner.cancel_target.connect_timeout;
+        let process_id = self.inner.process_id;
+        let secret_key = self.inner.secret_key;
+
+        // Detached. Bounded by connect_timeout + write_timeout. Errors
+        // intentionally swallowed.
+        let _ = std::thread::Builder::new()
+            .name("pg-cancel-request".to_string())
+            .spawn(move || {
+                use std::io::Write as _;
+                use std::net::ToSocketAddrs as _;
+
+                let addr_str = format!("{host}:{port}");
+                let addrs = match addr_str.to_socket_addrs() {
+                    Ok(it) => it,
+                    Err(_) => return,
+                };
+                for addr in addrs {
+                    let mut stream =
+                        match std::net::TcpStream::connect_timeout(&addr, connect_timeout) {
+                            Ok(s) => s,
+                            Err(_) => continue,
+                        };
+                    let _ = stream.set_write_timeout(Some(connect_timeout));
+
+                    // CancelRequest frame, all big-endian:
+                    //   length          = 16  (i32)
+                    //   request_code    = 80877102  (i32, magic per protocol)
+                    //   process_id      = i32 (from BackendKeyData)
+                    //   secret_key      = i32 (from BackendKeyData)
+                    let mut frame = [0u8; 16];
+                    frame[0..4].copy_from_slice(&16i32.to_be_bytes());
+                    frame[4..8].copy_from_slice(&80_877_102i32.to_be_bytes());
+                    frame[8..12].copy_from_slice(&process_id.to_be_bytes());
+                    frame[12..16].copy_from_slice(&secret_key.to_be_bytes());
+                    let _ = stream.write_all(&frame);
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                    return;
+                }
+            });
     }
 
     #[inline]
@@ -2081,11 +2194,13 @@ impl PgConnection {
             SslMode::Prefer => PgStream::Plain(tcp_stream),
         };
 
+        let cancel_target = CancelTarget::from_options(&options);
         let mut conn = Self {
             inner: PgConnectionInner {
                 stream,
                 process_id: 0,
                 secret_key: 0,
+                cancel_target,
                 parameters: BTreeMap::new(),
                 transaction_status: b'I', // Idle
                 closed: false,
@@ -2125,6 +2240,15 @@ impl PgConnection {
 
     #[inline]
     fn cancel_in_flight<T>(&mut self, cx: &Cx) -> Outcome<T, PgError> {
+        // Best-effort: tell the server to abort the in-flight query via
+        // PostgreSQL's CancelRequest protocol BEFORE we tear down the
+        // original socket. Sending the cancel after the original close
+        // would still work, but doing it first lets the server's SIGINT
+        // race the close-induced read failure and minimizes the window
+        // in which the server keeps holding locks for a query no one is
+        // listening for. (br-asupersync-gvkj1r)
+        self.fire_cancel_request();
+
         // Once a caller cancels mid-flight we can't safely continue decoding
         // protocol messages for subsequent operations, so close this connection.
         self.abort_in_flight_exchange();
