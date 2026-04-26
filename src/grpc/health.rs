@@ -32,6 +32,41 @@ use super::service::{NamedService, ServiceDescriptor, ServiceHandler};
 use super::status::Status;
 use super::streaming::{Request, Response, Streaming};
 
+/// Maximum permitted byte length of a gRPC service name passed to
+/// [`HealthService::set_status`] / [`HealthService::try_set_status`].
+///
+/// gRPC service names are dot-separated identifiers (`package.Service`)
+/// and are conventionally short. The cap defends against unbounded
+/// memory growth from attacker-controlled callers and matches the
+/// 256-byte limit used by other production gRPC servers.
+/// (br-asupersync-sdljgj)
+pub const MAX_SERVICE_NAME_LEN: usize = 256;
+
+/// Errors returned by the health service registration API.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HealthError {
+    /// The provided service name exceeds [`MAX_SERVICE_NAME_LEN`].
+    ServiceNameTooLong {
+        /// The actual byte length of the rejected name.
+        len: usize,
+        /// The cap that was exceeded.
+        max: usize,
+    },
+}
+
+impl std::fmt::Display for HealthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ServiceNameTooLong { len, max } => write!(
+                f,
+                "gRPC health: service name too long ({len} bytes, max {max})"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for HealthError {}
+
 /// Service status for health checking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[repr(i32)]
@@ -164,9 +199,37 @@ impl HealthService {
 
     /// Set the status of a service.
     ///
-    /// Use an empty string for the overall server status.
+    /// Use an empty string for the overall server status. Names exceeding
+    /// [`MAX_SERVICE_NAME_LEN`] are silently dropped with a `tracing::warn!`
+    /// (br-asupersync-sdljgj). For callers that want to surface the
+    /// rejection, use [`Self::try_set_status`] which returns a typed
+    /// [`HealthError`].
     pub fn set_status(&self, service: impl Into<String>, status: ServingStatus) {
+        if let Err(err) = self.try_set_status(service, status) {
+            crate::tracing_compat::warn!(
+                error = %err,
+                "gRPC health: rejecting set_status call"
+            );
+        }
+    }
+
+    /// Set the status of a service, surfacing length-cap violations.
+    ///
+    /// Equivalent to [`Self::set_status`] but returns
+    /// `Err(HealthError::ServiceNameTooLong)` if the name exceeds
+    /// [`MAX_SERVICE_NAME_LEN`]. (br-asupersync-sdljgj)
+    pub fn try_set_status(
+        &self,
+        service: impl Into<String>,
+        status: ServingStatus,
+    ) -> Result<(), HealthError> {
         let service = service.into();
+        if service.len() > MAX_SERVICE_NAME_LEN {
+            return Err(HealthError::ServiceNameTooLong {
+                len: service.len(),
+                max: MAX_SERVICE_NAME_LEN,
+            });
+        }
         let mut statuses = self.statuses.write();
         let changed = statuses.insert(service.clone(), status) != Some(status);
         if changed {
@@ -179,6 +242,7 @@ impl HealthService {
         if changed {
             self.notify_watch_waiters(&service);
         }
+        Ok(())
     }
 
     /// Set the status of the overall server.
@@ -381,10 +445,15 @@ impl HealthService {
             }
         } else {
             drop(statuses);
-            Err(Status::not_found(format!(
-                "service '{}' not registered for health checking",
-                request.service
-            )))
+            // Canonical NotFound — do NOT echo the queried service name back
+            // to the caller (br-asupersync-doa4lv). The original error
+            // message included the requested service name, which let an
+            // attacker probe-and-confirm: they could distinguish the error
+            // text per query, leaking which names had been queried (and via
+            // the Ok/Err discriminator, which existed). The Ok/Err split is
+            // required by the gRPC health spec, but the error message is
+            // not — it is now a fixed string with no per-request payload.
+            Err(Status::not_found("service not registered for health checking"))
         }
     }
 
