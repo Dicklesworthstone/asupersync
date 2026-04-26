@@ -1818,8 +1818,22 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h2_connection_io"
+path = "fuzz_targets/h2_connection_io.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "raptorq_gauss_solver"
 path = "fuzz_targets/raptorq_gauss_solver.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "raptorq_decision"
+path = "fuzz_targets/raptorq_decision.rs"
 test = false
 doc = false
 bench = false
