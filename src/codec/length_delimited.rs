@@ -2113,4 +2113,59 @@ mod tests {
         // 4-byte length prefix + max-byte payload.
         assert_eq!(dst.len(), 4 + max);
     }
+
+    /// METAMORPHIC PROPERTY: encoding any frame and then decoding the
+    /// resulting wire bytes must yield the original frame, byte-for-byte.
+    /// Symmetry: `decode ∘ encode = id` on the byte-string domain
+    /// (bounded by the codec's max frame length).
+    ///
+    /// Stronger property: also encode TWO frames concatenated, decode
+    /// both, and assert each matches its source — this exercises the
+    /// length-prefix advancing logic between frames.
+    /// 1000 iterations.
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            cases: 1000,
+            .. proptest::prelude::ProptestConfig::default()
+        })]
+
+        #[test]
+        fn metamorphic_length_delimited_round_trip(
+            payload in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..1024)
+        ) {
+            let mut encoder = LengthDelimitedCodec::new();
+            let mut decoder = LengthDelimitedCodec::new();
+            let mut wire = BytesMut::new();
+            let item: BytesMut = payload.as_slice().into();
+            encoder.encode(item, &mut wire).unwrap();
+            let decoded = decoder.decode(&mut wire).unwrap();
+            proptest::prop_assert!(decoded.is_some(), "decode must yield frame after full encode");
+            let frame = decoded.unwrap();
+            proptest::prop_assert_eq!(
+                frame.as_ref(), payload.as_slice(),
+                "decode(encode(payload)) must equal payload"
+            );
+            proptest::prop_assert!(wire.is_empty(), "wire must be fully consumed by decode");
+        }
+
+        #[test]
+        fn metamorphic_length_delimited_two_frame_concat(
+            first in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..256),
+            second in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..256),
+        ) {
+            // encode TWO frames into the same wire, then decode both.
+            let mut encoder = LengthDelimitedCodec::new();
+            let mut decoder = LengthDelimitedCodec::new();
+            let mut wire = BytesMut::new();
+            encoder.encode(first.as_slice().into(), &mut wire).unwrap();
+            encoder.encode(second.as_slice().into(), &mut wire).unwrap();
+            let f1 = decoder.decode(&mut wire).unwrap()
+                .expect("first frame must decode");
+            let f2 = decoder.decode(&mut wire).unwrap()
+                .expect("second frame must decode");
+            proptest::prop_assert_eq!(f1.as_ref(), first.as_slice(), "frame 1 round-trip");
+            proptest::prop_assert_eq!(f2.as_ref(), second.as_slice(), "frame 2 round-trip");
+            proptest::prop_assert!(wire.is_empty(), "wire fully consumed after two decodes");
+        }
+    }
 }

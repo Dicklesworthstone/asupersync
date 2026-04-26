@@ -725,4 +725,55 @@ mod tests {
             other => panic!("expected io error propagation, got {other:?}"), // ubs:ignore - test logic
         }
     }
+
+    /// METAMORPHIC PROPERTY: encoding a list of frames individually
+    /// and concatenating them into one wire, then running the wire
+    /// through one decoder, must yield the same list — in order, with
+    /// the wire fully consumed. Symmetry exploited:
+    ///   `decode_each(concat(encode_each(items))) == items`
+    /// Each encoder output is self-delimited, so concatenation is
+    /// associative w.r.t. decoding; this is the framed-codec analogue
+    /// of "encode is the inverse of decode batchwise".
+    /// Tests at 1000 iterations.
+    use proptest::prelude::Strategy as _ProptestStrategyForMetamorphic;
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            cases: 1000,
+            .. proptest::prelude::ProptestConfig::default()
+        })]
+
+        #[test]
+        fn metamorphic_framed_concat_decode_commutes(
+            // Each line: ASCII printable, no \n / \r (codec delimiters),
+            // bounded length to fit default max.
+            lines in proptest::collection::vec(
+                proptest::collection::vec(32u8..127, 0..200)
+                    .prop_map(|bytes| String::from_utf8(bytes).unwrap()),
+                0..32,
+            )
+        ) {
+            // Encode each line individually into a single concatenated wire.
+            let mut encoder = LinesCodec::new();
+            let mut wire = BytesMut::new();
+            for line in &lines {
+                encoder.encode(line.clone(), &mut wire).unwrap();
+            }
+
+            // Decode all lines from the concatenated wire.
+            let mut decoder = LinesCodec::new();
+            let mut decoded: Vec<String> = Vec::with_capacity(lines.len());
+            while let Some(line) = decoder.decode(&mut wire).unwrap() {
+                decoded.push(line);
+            }
+
+            proptest::prop_assert_eq!(
+                &decoded, &lines,
+                "decode_each(concat(encode_each(items))) must equal items"
+            );
+            proptest::prop_assert!(
+                wire.is_empty(),
+                "wire must be fully consumed after decoding all encoded lines"
+            );
+        }
+    }
 }

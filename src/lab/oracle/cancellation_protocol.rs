@@ -123,6 +123,45 @@ pub struct ViolationRecord {
     pub replay_command: Option<String>,
 }
 
+/// br-asupersync-2ybwmx — Deterministic wall-clock proxy for the
+/// violation `detected_at` field. Mirrors the established pattern
+/// in lab/oracle/region_leak.rs::violation_now (br-asupersync-hq5gou):
+/// in production stamps real `SystemTime::now()` rendered as
+/// nanos-since-epoch; under `cfg(any(test, feature =
+/// "deterministic-mode"))` returns `Time::ZERO` so test runs and
+/// lab replays produce byte-stable violation records.
+///
+/// cancellation_protocol was the one oracle in src/lab/oracle/
+/// that had not been migrated to this pattern after the 2026-04-26
+/// determinism audit batch (region_leak / waker_dedup /
+/// channel_atomicity all use the wrapper). This addresses the
+/// consistency gap: identical scenarios that fire a cancellation-
+/// protocol violation now produce byte-equal ViolationRecord
+/// stamps across replays, satisfying the lab golden-artifact
+/// run-twice-and-compare gate that
+/// tests/lab_runtime_seed_golden.rs::build_scenario depends on.
+///
+/// Note: this helper covers the violation-record `detected_at`
+/// field that flows out to crashpacks and trace certificates. The
+/// internal threshold-detection clock is a separate concern (matches
+/// region_leak's documented limitation).
+#[inline]
+fn violation_now() -> Time {
+    #[cfg(any(test, feature = "deterministic-mode"))]
+    {
+        Time::ZERO
+    }
+    #[cfg(not(any(test, feature = "deterministic-mode")))]
+    {
+        Time::from_nanos(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as u64,
+        )
+    }
+}
+
 impl ViolationRecord {
     /// Creates a new violation record with enhanced diagnostics.
     fn new(violation: CancellationProtocolViolation, config: &CancelCorrectnessConfig) -> Self {
@@ -143,12 +182,10 @@ impl ViolationRecord {
             violation,
             trace_id,
             stack_trace,
-            detected_at: Time::from_nanos(
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos() as u64,
-            ),
+            // br-asupersync-2ybwmx: route through the cfg-gated
+            // violation_now() helper so test/deterministic-mode
+            // builds produce byte-stable detected_at stamps.
+            detected_at: violation_now(),
             replay_command,
         }
     }
@@ -2728,5 +2765,59 @@ mod tests {
             "cancellation_protocol should accept well-formed stream, got {cp2_violations:?}"
         );
         crate::test_complete!("cancel_oracles_agree_on_epoch_invariants");
+    }
+
+    /// br-asupersync-2ybwmx: under `cfg(any(test, feature =
+    /// "deterministic-mode"))` (which the `#[cfg(test)]` attribute
+    /// implies for in-file unit tests) `violation_now()` MUST return
+    /// `Time::ZERO`. Two consecutive calls must produce identical
+    /// values — no wall-clock drift bleeds through. This is the
+    /// invariant the lab golden-artifact run-twice-and-compare gate
+    /// in tests/lab_runtime_seed_golden.rs depends on for
+    /// cancellation-protocol violation traces.
+    #[test]
+    fn violation_now_is_byte_stable_under_test_cfg() {
+        init_test("violation_now_is_byte_stable_under_test_cfg");
+        let t1 = violation_now();
+        let t2 = violation_now();
+        let t3 = violation_now();
+        assert_eq!(
+            t1,
+            Time::ZERO,
+            "violation_now must return Time::ZERO under cfg(test)"
+        );
+        assert_eq!(t1, t2);
+        assert_eq!(t2, t3);
+        crate::test_complete!("violation_now_is_byte_stable_under_test_cfg");
+    }
+
+    /// br-asupersync-2ybwmx: ViolationRecord::new must propagate the
+    /// deterministic stamp into the `detected_at` field. Construct
+    /// two records back-to-back from identical inputs and assert
+    /// the timestamps match — the only field that varies legitimately
+    /// is `trace_id` (a monotone counter).
+    #[test]
+    fn violation_record_detected_at_is_deterministic_under_test_cfg() {
+        init_test("violation_record_detected_at_is_deterministic_under_test_cfg");
+        let cfg = CancelCorrectnessConfig::default();
+        // Use a real variant from CancellationProtocolViolation — the
+        // shape doesn't matter, only that ViolationRecord::new wraps
+        // it and stamps detected_at via violation_now().
+        let v = CancellationProtocolViolation::CancelNotPropagated {
+            parent: region_id(0),
+            uncancelled_child: region_id(1),
+        };
+        let r1 = ViolationRecord::new(v.clone(), &cfg);
+        let r2 = ViolationRecord::new(v, &cfg);
+        assert_eq!(
+            r1.detected_at, r2.detected_at,
+            "br-2ybwmx: detected_at must be byte-stable across replays"
+        );
+        assert_eq!(
+            r1.detected_at,
+            Time::ZERO,
+            "under cfg(test) detected_at must be Time::ZERO"
+        );
+        crate::test_complete!("violation_record_detected_at_is_deterministic_under_test_cfg");
     }
 }

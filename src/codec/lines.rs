@@ -410,4 +410,47 @@ mod tests {
             Err(LinesCodecError::MaxLineLengthExceeded)
         ));
     }
+
+    /// METAMORPHIC PROPERTY: encoding a line and then decoding the
+    /// resulting bytes must yield the original line, for any UTF-8
+    /// string that does NOT contain newline (`\n`) or carriage
+    /// return (`\r`) — those characters are codec delimiters and
+    /// would split or strip the line by design.
+    ///
+    /// Symmetry exploited: `decode ∘ encode = id` on the
+    /// newline-free domain. Tests the basic codec round-trip
+    /// invariant @ 1000 iterations.
+    use proptest::prelude::Strategy as _ProptestStrategyForMetamorphic;
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            cases: 1000,
+            .. proptest::prelude::ProptestConfig::default()
+        })]
+
+        #[test]
+        fn metamorphic_lines_codec_round_trip(
+            line in proptest::prelude::any::<String>()
+                .prop_filter(
+                    "line must not contain newline or CR (codec delimiters)",
+                    |s| !s.contains('\n') && !s.contains('\r'),
+                )
+                .prop_filter(
+                    "line must fit in default max length",
+                    |s| s.len() <= DEFAULT_MAX_LINE_LENGTH,
+                )
+        ) {
+            let mut encoder = LinesCodec::new();
+            let mut decoder = LinesCodec::new();
+            let mut wire = BytesMut::new();
+            encoder.encode(line.clone(), &mut wire).unwrap();
+            // Encoded form ends with a single '\n'.
+            let decoded = decoder.decode(&mut wire).unwrap();
+            proptest::prop_assert_eq!(
+                decoded, Some(line.clone()),
+                "decode(encode(line)) must equal line"
+            );
+            // Buffer must be fully consumed.
+            proptest::prop_assert!(wire.is_empty(), "encoded buffer must be fully consumed by one decode");
+        }
+    }
 }
