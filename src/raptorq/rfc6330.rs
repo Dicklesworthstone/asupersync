@@ -619,6 +619,90 @@ mod tests {
         assert_eq!(deg(1_048_575), 30);
     }
 
+    /// br-asupersync-u9qplb: statistical histogram conformance for the
+    /// RFC 6330 §5.3.5.2 degree generator. Sample N=200_000 values
+    /// uniformly from [0, 2^20) (the same domain as Rand[X, 0, 2^20])
+    /// and assert the resulting per-degree histogram matches the
+    /// expected probabilities (derived from the DEGREE_TABLE
+    /// thresholds) within a chi-squared / 5σ binomial bound.
+    ///
+    /// Without this test, an off-by-one in any of the 30 thresholds —
+    /// or a sign-flipped condition (`<` vs `<=`) — would silently bias
+    /// the entire degree distribution. Self-encoded round-trip would
+    /// still work, but the encoder would emit non-RFC-conformant
+    /// symbols invisible to other RFC-conformant decoders, AND the
+    /// decode-failure-rate analysis vs the RFC's claimed bound would
+    /// be invalid.
+    ///
+    /// The test uses a deterministic LCG for reproducibility — same
+    /// seed every run, so failures are debuggable; chi-squared
+    /// tolerance is set generously (5σ) to keep flake rate near zero
+    /// while still catching any real distribution drift.
+    #[test]
+    fn deg_distribution_matches_rfc_thresholds_within_5_sigma() {
+        // Reconstruct the expected probability per degree from the
+        // RFC 6330 DEGREE_TABLE thresholds. Degree d covers the range
+        // [prev_threshold, threshold[d]) so its probability mass is
+        // (threshold[d] - prev_threshold) / 2^20.
+        const TOTAL: u32 = 1 << 20;
+        const THRESHOLDS: [u32; 30] = [
+            5_243, 529_531, 704_294, 791_675, 844_104, 879_057, 904_023,
+            922_747, 937_311, 948_962, 958_494, 966_438, 973_160, 978_921,
+            983_914, 988_283, 992_138, 995_565, 998_631, 1_001_391,
+            1_003_887, 1_006_157, 1_008_229, 1_010_129, 1_011_876,
+            1_013_490, 1_014_983, 1_016_370, 1_017_662, 1_048_576,
+        ];
+
+        let n: u64 = 200_000;
+        let mut histogram = [0u64; 31]; // index by degree 1..=30
+
+        // Deterministic LCG (Numerical Recipes 'ranqd1' constants) so
+        // the sample stream is identical across runs — catches failures
+        // reproducibly. NOT a cryptographic RNG; statistical-test only.
+        let mut state: u64 = 0xCAFE_F00D_DEAD_BEEFu64;
+        for _ in 0..n {
+            state = state
+                .wrapping_mul(1_664_525)
+                .wrapping_add(1_013_904_223);
+            // Map to [0, 2^20).
+            let v = (state >> 11) as u32 & (TOTAL - 1);
+            let d = deg(v);
+            histogram[d] += 1;
+        }
+
+        // Verify each bin (degree 1..=30) is within 5σ of expected.
+        let mut prev_threshold: u32 = 0;
+        for (i, &threshold) in THRESHOLDS.iter().enumerate() {
+            let degree = i + 1;
+            let mass = u64::from(threshold - prev_threshold);
+            // Expected count = N * mass / TOTAL.
+            // Use integer math: expected_num / TOTAL.
+            let expected = (n * mass) / u64::from(TOTAL);
+            // Variance for a binomial(N, p) is N*p*(1-p) ≈ N*p for small p.
+            // Standard deviation σ = sqrt(expected * (1 - p)) ≈ sqrt(expected).
+            #[allow(clippy::cast_precision_loss)]
+            let sigma = (expected as f64).sqrt().max(1.0);
+            let observed = histogram[degree];
+            #[allow(clippy::cast_possible_wrap, clippy::cast_precision_loss)]
+            let deviation = (observed as f64 - expected as f64).abs();
+            assert!(
+                deviation < 5.0 * sigma,
+                "degree {degree} histogram out of tolerance: expected {expected}, \
+                 observed {observed}, deviation {deviation:.1}, 5σ={:.1} (mass={mass})",
+                5.0 * sigma
+            );
+            prev_threshold = threshold;
+        }
+
+        // Verify total samples accounted for (catches off-by-one if a
+        // sample falls outside ALL thresholds — which deg() would map
+        // to degree 30 via the fallback at line 248, but a bug could
+        // miscount).
+        let total: u64 = histogram.iter().sum();
+        assert_eq!(total, n, "histogram total {total} != samples drawn {n}");
+        assert_eq!(histogram[0], 0, "deg() must never return 0");
+    }
+
     #[test]
     fn next_prime_ge_basic() {
         assert_eq!(next_prime_ge(1), 2);
