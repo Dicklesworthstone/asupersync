@@ -2,12 +2,42 @@
 //!
 //! These types provide deterministic hashing and collection iteration
 //! for use in deterministic tests and lab runtime logic.
+//!
+//! # Security boundary (br-asupersync-yrwie0)
+//!
+//! `DetHasher` uses a **fixed published seed** so that schedule
+//! exploration in the lab runtime is byte-reproducible across runs.
+//! That same property makes it **trivially attackable** when used as
+//! the hasher for any `HashMap` whose keys are attacker-controlled:
+//! an attacker who reads this source can compute thousands of distinct
+//! keys that all hash to the same bucket and weaponize the resulting
+//! O(n²) HashMap collisions into a CPU-exhaustion DoS.
+//!
+//! **Use `DetHashMap` / `DetHashSet` ONLY for**:
+//!   * Internal-only key spaces (TaskId, RegionId, ModuleId, etc.) where
+//!     keys come from monotonic counters or trusted runtime sources.
+//!   * Lab-runtime / replay paths where determinism is REQUIRED for
+//!     reproducible execution and the keys are not externally supplied.
+//!
+//! **NEVER use `DetHashMap` / `DetHashSet` for**:
+//!   * HTTP header names, query parameters, cookie names, or any other
+//!     value that arrives from a network peer.
+//!   * Cache keys derived from user input.
+//!   * JSON-object keys parsed from request bodies.
+//!
+//! For attacker-controlled keys, use `std::collections::HashMap` with
+//! its default `RandomState` (per-process random seed from OS entropy).
 
 use std::hash::{BuildHasher, Hasher};
 
 /// Deterministic, non-cryptographic hasher.
 ///
 /// This uses a fixed seed and a simple mixing strategy for reproducibility.
+///
+/// **WARNING**: see the module-level "Security boundary" docs.
+/// `DetHasher` MUST NOT be used as the hasher for any `HashMap` /
+/// `HashSet` whose keys are attacker-controlled — the fixed seed
+/// makes hash-collision DoS attacks trivial.
 #[derive(Debug, Clone)]
 pub struct DetHasher {
     state: u64,

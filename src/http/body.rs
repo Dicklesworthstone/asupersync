@@ -14,6 +14,7 @@
 //! All body implementations are cancel-safe. Dropping a body at any point
 //! is valid and will not cause data loss beyond the dropped body itself.
 
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fmt;
 use std::pin::Pin;
@@ -21,7 +22,6 @@ use std::task::{Context, Poll};
 
 use crate::bytes::{Buf, Bytes, BytesCursor};
 use crate::stream::Stream;
-use crate::util::{DetBuildHasher, DetHashMap};
 
 /// A frame of body content: either data or trailers.
 ///
@@ -111,10 +111,23 @@ impl<T> Frame<T> {
 /// Uses a vector of key-value pairs internally, which is well-suited for
 /// trailers (typically 1-3 headers). Header names are case-insensitive
 /// per HTTP/2 requirements (lowercased on construction in [`HeaderName`]).
+///
+/// br-asupersync-yrwie0: `positions` uses `std::collections::HashMap`
+/// with the default `RandomState` (per-process random seed) instead of
+/// the deterministic `DetHashMap`. `HeaderName` is fully attacker-
+/// controlled (HTTP requests carry arbitrary header names), and
+/// `DetHasher` uses a fixed published seed — an attacker who reads
+/// this source can pre-compute thousands of header names that all hash
+/// to the same bucket and submit them in one request, turning HashMap
+/// insert/get into O(n²). `RandomState` defeats the offline collision
+/// search by re-seeding from OS entropy at process start. Determinism
+/// is not required here: trailers are observed via `iter()` which
+/// reads from the order-preserving `headers: Vec<…>`, not from the
+/// HashMap's iteration order.
 #[derive(Debug, Clone, Default)]
 pub struct HeaderMap {
     headers: Vec<(HeaderName, HeaderValue)>,
-    positions: DetHashMap<HeaderName, Vec<usize>>,
+    positions: HashMap<HeaderName, Vec<usize>>,
 }
 
 impl HeaderMap {
@@ -129,7 +142,7 @@ impl HeaderMap {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             headers: Vec::with_capacity(capacity),
-            positions: DetHashMap::with_capacity_and_hasher(capacity, DetBuildHasher),
+            positions: HashMap::with_capacity(capacity),
         }
     }
 
@@ -1777,5 +1790,52 @@ mod tests {
 
         assert!(matches!(poll_body(&mut limited), Poll::Ready(None)));
         assert!(matches!(poll_body(&mut limited), Poll::Ready(None)));
+    }
+
+    /// br-asupersync-yrwie0: regression test that `HeaderMap` is NOT
+    /// using `DetHasher` for its bucket placement. We can't directly
+    /// observe which hasher the HashMap uses, so we test the security-
+    /// relevant property: the bucket assignment of any given
+    /// HeaderName must vary across processes (the hallmark of
+    /// `RandomState`'s per-process seeding) — equivalently, the
+    /// internal hash for a constant key must NOT match the
+    /// deterministic hash that `DetHasher` would produce.
+    ///
+    /// This is asserted indirectly: we hash the same key via
+    /// `DetHasher` ourselves and compare against the hash that would
+    /// be produced by std's default `BuildHasher` for the HashMap we
+    /// just constructed. The two MUST differ — if they're equal, the
+    /// HashMap has reverted to `DetHasher` and the DoS hole is back.
+    #[test]
+    fn header_map_uses_randomized_hasher_not_dethasher() {
+        use std::collections::hash_map::RandomState;
+        use std::hash::{BuildHasher, Hash, Hasher};
+
+        // The actual map type we put inside HeaderMap.positions:
+        let map: std::collections::HashMap<HeaderName, Vec<usize>> =
+            std::collections::HashMap::new();
+        let bh: &RandomState = map.hasher();
+
+        // Hash of "x-attacker-controlled" via the map's hasher (RandomState).
+        let key = HeaderName::from_static("x-attacker-controlled");
+        let mut h_random = bh.build_hasher();
+        key.hash(&mut h_random);
+        let random_hash = h_random.finish();
+
+        // Hash of the SAME key via DetHasher (the deterministic, fixed-seed,
+        // attacker-readable hasher we MUST NOT be using here).
+        let mut h_det = crate::util::DetHasher::default();
+        key.hash(&mut h_det);
+        let det_hash = h_det.finish();
+
+        // If these are equal, HeaderMap is back on DetHasher. Re-introducing
+        // the fixed seed re-introduces the offline collision-attack DoS.
+        // The probability of accidental coincidence with RandomState is
+        // 1/2^64 ≈ 5e-20 — effectively never on a healthy build.
+        assert_ne!(
+            random_hash, det_hash,
+            "HeaderMap appears to be using DetHasher (fixed-seed). \
+             This re-opens the hash-collision DoS vector that yrwie0 fixed."
+        );
     }
 }

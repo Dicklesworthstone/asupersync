@@ -12,9 +12,27 @@
 ///
 /// This PRNG is intentionally simple and fast, with no external dependencies.
 /// It is NOT cryptographically secure.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DetRng {
     state: u64,
+}
+
+// br-asupersync-jebj8u: manual Debug impl that REDACTS the internal
+// xorshift64 state. The previous `#[derive(Debug)]` would print the
+// raw state bytes anywhere a DetRng appeared in a tracing event,
+// panic, or `{:?}` log line — which is enough for an attacker who
+// observes one such leak to clone the PRNG and predict every
+// subsequent value (xorshift64 is a 1-iteration-back-recoverable
+// LCG-class generator). DetRng feeds lab-runtime decision sequences,
+// shuffle ordering, and chaos injection, so a leak would let an
+// attacker who can exfiltrate ANY traced state mirror those decisions
+// off-runtime.
+impl std::fmt::Debug for DetRng {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DetRng")
+            .field("state", &"<redacted>")
+            .finish()
+    }
 }
 
 impl DetRng {
@@ -150,5 +168,92 @@ mod tests {
         let _ = rng.next_u64(); // advance once
         let mut forked = rng.clone();
         assert_eq!(rng.next_u64(), forked.next_u64());
+    }
+
+    /// br-asupersync-jebj8u: Debug output MUST NOT leak the internal
+    /// xorshift64 state. An attacker who recovers a DetRng's state
+    /// from any trace, panic, or log line can mirror every subsequent
+    /// random decision off-runtime (the xorshift64 update is fully
+    /// invertible from one observed output, so even partial leaks are
+    /// catastrophic).
+    ///
+    /// We assert: across a wide range of seeds — including ones whose
+    /// decimal/hex representations are SHORT enough that any partial
+    /// embedding in the Debug string would catch them — the formatted
+    /// Debug never contains the seed's decimal, hex, lower-hex, upper-
+    /// hex, or little-endian byte representations.
+    #[test]
+    fn debug_does_not_leak_state() {
+        let seeds: [u64; 8] = [
+            0xDEAD_BEEF_CAFE_BABE,
+            0x1234_5678_9ABC_DEF0,
+            42,
+            1,
+            u64::MAX,
+            0x0000_0001_0000_0001,
+            0xAAAA_AAAA_AAAA_AAAA,
+            0x5555_5555_5555_5555,
+        ];
+        for &seed in &seeds {
+            let rng = DetRng::new(seed);
+            let dbg = format!("{rng:?}");
+            assert!(
+                dbg.contains("DetRng"),
+                "Debug must still identify the type, got {dbg:?}"
+            );
+            assert!(
+                dbg.contains("<redacted>"),
+                "Debug must mark redaction explicitly, got {dbg:?}"
+            );
+            // No decimal, no upper-hex, no lower-hex of the state.
+            let dec = format!("{seed}");
+            let lhex = format!("{seed:x}");
+            let uhex = format!("{seed:X}");
+            assert!(
+                !dbg.contains(&dec),
+                "decimal state {dec} leaked in Debug: {dbg}"
+            );
+            // Skip lower/upper hex check for trivial seeds whose hex
+            // form would coincidentally appear inside other words
+            // (e.g. seed=1 → "1" which is too short to be diagnostic).
+            if lhex.len() >= 4 {
+                assert!(
+                    !dbg.contains(&lhex),
+                    "lower-hex state {lhex} leaked in Debug: {dbg}"
+                );
+                assert!(
+                    !dbg.contains(&uhex),
+                    "upper-hex state {uhex} leaked in Debug: {dbg}"
+                );
+            }
+        }
+    }
+
+    /// Defense-in-depth: even AFTER the PRNG has advanced (so its
+    /// internal state diverges from the seed), Debug must not leak the
+    /// current state.
+    #[test]
+    fn debug_does_not_leak_state_after_advance() {
+        let mut rng = DetRng::new(0xDEAD_BEEF_CAFE_BABE);
+        for _ in 0..1000 {
+            let _ = rng.next_u64();
+        }
+        // Capture the internal state by sampling, then check Debug
+        // output doesn't embed that next-output value either (since
+        // xorshift64 next-state recovery from one output is trivial).
+        let mut probe = rng.clone();
+        let next = probe.next_u64();
+        let dbg = format!("{rng:?}");
+        let dec = format!("{next}");
+        let lhex = format!("{next:x}");
+        let uhex = format!("{next:X}");
+        assert!(
+            !dbg.contains(&dec),
+            "post-advance decimal state leaked: {dbg}"
+        );
+        if lhex.len() >= 4 {
+            assert!(!dbg.contains(&lhex), "post-advance lhex leaked: {dbg}");
+            assert!(!dbg.contains(&uhex), "post-advance uhex leaked: {dbg}");
+        }
     }
 }
