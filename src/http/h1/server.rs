@@ -34,6 +34,17 @@ pub struct Http1Config {
     /// Idle timeout between requests on a keep-alive connection.
     /// `None` means no timeout (wait forever).
     pub idle_timeout: Option<Duration>,
+    /// br-asupersync-t9yqht: optional allow-list of host names that
+    /// the server will accept in the request `Host` header. `None`
+    /// (the default) DISABLES validation — every Host is accepted, the
+    /// legacy behaviour. `Some(vec)` enables strict validation: any
+    /// request whose `Host` header (case-insensitive, port-stripped)
+    /// is not in the list receives a `421 Misdirected Request`
+    /// response and the connection closes. Defends against Host
+    /// header injection (attacker setting `Host: attacker.com` to
+    /// poison absolute URLs the application emits in password-reset
+    /// emails, OAuth `redirect_uri` validation, cache keys, etc.).
+    pub allowed_hosts: Option<Vec<String>>,
 }
 
 impl Default for Http1Config {
@@ -44,6 +55,7 @@ impl Default for Http1Config {
             keep_alive: true,
             max_requests_per_connection: Some(1000),
             idle_timeout: Some(Duration::from_mins(1)),
+            allowed_hosts: None,
         }
     }
 }
@@ -82,6 +94,72 @@ impl Http1Config {
     pub fn idle_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.idle_timeout = timeout;
         self
+    }
+
+    /// Set the allowed-hosts allow-list for the request `Host` header
+    /// (br-asupersync-t9yqht).
+    ///
+    /// `None` (the default) disables validation. `Some(vec)` enables
+    /// strict validation: any request whose `Host` header
+    /// (case-insensitive, port-stripped) is not in the list receives
+    /// `421 Misdirected Request` and the connection closes.
+    #[must_use]
+    pub fn allowed_hosts(mut self, hosts: Option<Vec<String>>) -> Self {
+        self.allowed_hosts = hosts;
+        self
+    }
+}
+
+/// br-asupersync-t9yqht: extract the host portion of a `Host` header
+/// value (strip port, lowercase, IPv6 brackets handled). Returns
+/// `None` if the value is malformed.
+fn parse_host_header_host(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    // IPv6 literals: `[::1]:8080` or `[::1]`. The last ':' OUTSIDE the
+    // brackets is the port separator.
+    if let Some(stripped) = value.strip_prefix('[') {
+        let close = stripped.find(']')?;
+        let host = &stripped[..close];
+        return Some(host.to_ascii_lowercase());
+    }
+    // Plain host or `host:port` — split on the last ':'.
+    let host = value.rsplit_once(':').map_or(value, |(h, _)| h);
+    Some(host.to_ascii_lowercase())
+}
+
+/// br-asupersync-t9yqht: validate the request's `Host` header against
+/// the allow-list. Returns `Ok(())` if validation passes (or is
+/// disabled); `Err(host_value)` carrying the offending host string
+/// for logging if the header is missing or not allow-listed.
+fn validate_host_header(
+    headers: &[(String, String)],
+    allowed_hosts: Option<&[String]>,
+) -> Result<(), String> {
+    let Some(allow_list) = allowed_hosts else {
+        return Ok(()); // Validation disabled.
+    };
+    if allow_list.is_empty() {
+        return Ok(()); // Empty allow-list = legacy behaviour (accept all).
+    }
+    let host_value = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("host"))
+        .map(|(_, value)| value.as_str());
+    let Some(host_value) = host_value else {
+        // RFC 7230 §5.4: HTTP/1.1 requests MUST include Host. Reject.
+        return Err(String::new());
+    };
+    let parsed = parse_host_header_host(host_value).unwrap_or_default();
+    if allow_list
+        .iter()
+        .any(|allowed| allowed.eq_ignore_ascii_case(&parsed))
+    {
+        Ok(())
+    } else {
+        Err(parsed)
     }
 }
 
@@ -415,6 +493,58 @@ where
                 }
             };
             req.peer_addr = peer_addr;
+
+            // br-asupersync-t9yqht: enforce the allowed-hosts allow-list
+            // BEFORE the handler runs. A request whose Host header isn't
+            // on the list (or is missing entirely on HTTP/1.1) gets a
+            // 421 Misdirected Request and the connection closes — the
+            // handler never sees the request, eliminating the host-
+            // injection attack surface for absolute-URL emission /
+            // OAuth redirect_uri / cache-key computation.
+            if let Err(rejected_host) = validate_host_header(
+                &req.headers,
+                self.config.allowed_hosts.as_deref(),
+            ) {
+                state.phase = ConnectionPhase::Writing;
+                let body_msg = if rejected_host.is_empty() {
+                    "Missing required Host header".to_string()
+                } else {
+                    format!("Host '{rejected_host}' not in allowed-hosts allow-list")
+                };
+                // br-asupersync-t9yqht: 421 Misdirected Request per
+                // RFC 7540 §9.1.2 — semantically the right code for
+                // "the server is unable to produce a response for the
+                // combination of the URI and HOST header (effective
+                // request URI) presented".
+                let reject_resp = Response {
+                    status: 421,
+                    reason: String::new(),
+                    version: req.version,
+                    headers: vec![
+                        (
+                            "content-type".to_string(),
+                            "text/plain; charset=utf-8".to_string(),
+                        ),
+                        ("connection".to_string(), "close".to_string()),
+                    ],
+                    body: body_msg.into_bytes(),
+                    trailers: Vec::new(),
+                };
+                framed.send(reject_resp)?;
+                poll_fn(|cx| {
+                    if Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                        return Poll::Ready(Err(HttpError::Io(std::io::Error::new(
+                            std::io::ErrorKind::Interrupted,
+                            "connection cancelled",
+                        ))));
+                    }
+                    framed.poll_flush(cx).map_err(HttpError::Io)
+                })
+                .await?;
+                state.requests_served += 1;
+                state.phase = ConnectionPhase::Closing;
+                break;
+            }
 
             let expectation_action = classify_expectation(&req);
             if expectation_action == ExpectationAction::Reject {
@@ -1052,6 +1182,103 @@ mod tests {
         let state = ConnectionState::new(crate::types::Time::ZERO);
         let req = make_request(Version::Http11, vec![("Connection".into(), "close".into())]);
         assert!(should_close_connection(&req, &config, &state));
+    }
+
+    /// br-asupersync-t9yqht: validate_host_header MUST accept Host
+    /// values that match the allow-list (case-insensitive,
+    /// port-stripped) and reject all others including the missing-Host
+    /// case which is itself an HTTP/1.1 protocol violation.
+    #[test]
+    fn validate_host_header_accepts_listed_rejects_others() {
+        let allowed = vec!["example.com".to_string(), "auth.example.com".to_string()];
+
+        // Listed host — accepted.
+        let headers = vec![("Host".to_string(), "example.com".to_string())];
+        assert!(validate_host_header(&headers, Some(&allowed)).is_ok());
+
+        // Listed host with port — accepted (port stripped).
+        let headers = vec![("Host".to_string(), "example.com:8080".to_string())];
+        assert!(validate_host_header(&headers, Some(&allowed)).is_ok());
+
+        // Case-insensitive match.
+        let headers = vec![("Host".to_string(), "EXAMPLE.COM".to_string())];
+        assert!(validate_host_header(&headers, Some(&allowed)).is_ok());
+
+        // Different listed host.
+        let headers = vec![("Host".to_string(), "auth.example.com".to_string())];
+        assert!(validate_host_header(&headers, Some(&allowed)).is_ok());
+
+        // Unlisted host — REJECTED. This is the host-injection defense.
+        let headers = vec![("Host".to_string(), "attacker.com".to_string())];
+        let err = validate_host_header(&headers, Some(&allowed)).unwrap_err();
+        assert_eq!(err, "attacker.com");
+
+        // Subdomain not in allowlist — REJECTED (allowlist is exact match).
+        let headers = vec![("Host".to_string(), "evil.example.com".to_string())];
+        let err = validate_host_header(&headers, Some(&allowed)).unwrap_err();
+        assert_eq!(err, "evil.example.com");
+
+        // Missing Host header (HTTP/1.1 protocol violation per RFC 7230 §5.4).
+        let headers = vec![("X-Other".to_string(), "value".to_string())];
+        let err = validate_host_header(&headers, Some(&allowed)).unwrap_err();
+        assert!(err.is_empty(), "missing Host should yield empty err string");
+    }
+
+    /// br-asupersync-t9yqht: validation DISABLED when allowed_hosts is
+    /// None — preserves legacy behaviour for callers that haven't
+    /// opted in. Empty allow-list is also no-op.
+    #[test]
+    fn validate_host_header_no_validation_when_disabled() {
+        let headers = vec![("Host".to_string(), "anywhere.com".to_string())];
+        // None disables validation.
+        assert!(validate_host_header(&headers, None).is_ok());
+        // Empty allowlist also disables validation.
+        let empty: Vec<String> = vec![];
+        assert!(validate_host_header(&headers, Some(&empty)).is_ok());
+    }
+
+    /// br-asupersync-t9yqht: IPv6 literal handling — strip brackets
+    /// and port correctly so allowed_hosts can be specified as the
+    /// bracket-less host.
+    #[test]
+    fn validate_host_header_ipv6_literal_handling() {
+        let allowed = vec!["::1".to_string()];
+
+        // IPv6 literal with port.
+        let headers = vec![("Host".to_string(), "[::1]:8080".to_string())];
+        assert!(validate_host_header(&headers, Some(&allowed)).is_ok());
+
+        // IPv6 literal without port.
+        let headers = vec![("Host".to_string(), "[::1]".to_string())];
+        assert!(validate_host_header(&headers, Some(&allowed)).is_ok());
+
+        // Different IPv6 — REJECTED.
+        let headers = vec![("Host".to_string(), "[fe80::1]:8080".to_string())];
+        assert!(validate_host_header(&headers, Some(&allowed)).is_err());
+    }
+
+    /// br-asupersync-t9yqht: parse_host_header_host handles edge
+    /// cases (whitespace, empty, malformed).
+    #[test]
+    fn parse_host_header_host_handles_edges() {
+        assert_eq!(
+            parse_host_header_host("example.com").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(
+            parse_host_header_host("  example.com  ").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(
+            parse_host_header_host("EXAMPLE.com:8080").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(
+            parse_host_header_host("[2001:db8::1]:443").as_deref(),
+            Some("2001:db8::1")
+        );
+        assert_eq!(parse_host_header_host(""), None);
+        assert_eq!(parse_host_header_host("   "), None);
     }
 
     #[test]
