@@ -4503,7 +4503,7 @@ mod tests {
             h(":authority", "example.com"),
             h("te", "trailers"),
         ];
-        assert!(validate_h2_pseudo_headers(&ok, true).is_ok());
+        assert!(validate_h2_pseudo_headers(&ok, true, false).is_ok());
 
         // te: gzip (forbidden value)
         let bad = vec![
@@ -4513,7 +4513,7 @@ mod tests {
             h(":authority", "example.com"),
             h("te", "gzip"),
         ];
-        let err = validate_h2_pseudo_headers(&bad, true).unwrap_err();
+        let err = validate_h2_pseudo_headers(&bad, true, false).unwrap_err();
         assert!(
             err.contains("RFC 9113 §8.2.2"),
             "wrong reject reason: {err}"

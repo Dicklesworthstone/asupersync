@@ -2712,7 +2712,7 @@ mod tests {
     /// trailer-validator on the decoded block.
     #[test]
     fn of0l5f_would_be_trailer_block_after_initial_headers() {
-        let mut stream = Stream::new(1, DEFAULT_INITIAL_WINDOW_SIZE);
+        let mut stream = Stream::new(1, DEFAULT_INITIAL_WINDOW_SIZE, DEFAULT_MAX_HEADER_LIST_SIZE);
         // Initially no headers received → not a trailer block.
         assert!(!stream.would_be_trailer_block());
 
@@ -2728,7 +2728,7 @@ mod tests {
     /// of clamping to MIN and stalling the stream.
     #[test]
     fn kaqld3_consume_recv_window_overshoot_returns_flow_control_error() {
-        let mut stream = Stream::new(1, DEFAULT_INITIAL_WINDOW_SIZE);
+        let mut stream = Stream::new(1, DEFAULT_INITIAL_WINDOW_SIZE, DEFAULT_MAX_HEADER_LIST_SIZE);
         // Drive the window very negative via several SETTINGS-shrink
         // simulations. We bypass the SETTINGS path here and just
         // poke the field to a value close to i32::MIN, so the next
@@ -2750,7 +2750,7 @@ mod tests {
     /// preserves the prior semantics for legitimate inputs.
     #[test]
     fn kaqld3_consume_recv_window_legitimate_succeeds() {
-        let mut stream = Stream::new(1, DEFAULT_INITIAL_WINDOW_SIZE);
+        let mut stream = Stream::new(1, DEFAULT_INITIAL_WINDOW_SIZE, DEFAULT_MAX_HEADER_LIST_SIZE);
         let before = stream.recv_window;
         stream
             .consume_recv_window(1024)
