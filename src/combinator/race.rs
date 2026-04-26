@@ -549,15 +549,13 @@ pub fn verify_losers_drained<T, E>(
 /// result constructors so any L-LOSER-DRAINED violation surfaces immediately
 /// at the boundary between the race driver and the result-shape layer.
 ///
+/// Wired into [`race2_outcomes`] and [`make_race_all_result`]
+/// (br-asupersync-ttoyaz / br-asupersync-jf1e6h) — every race result that
+/// the public API hands back to a caller passes through this assertion.
+///
 /// # Panics
 ///
 /// Panics with the offending [`LoserDrainViolation`] if the check fails.
-//
-// Currently unused at the call site — the result-constructor wiring promised
-// by br-asupersync-ttoyaz did not land in the same commit as the helper.
-// Marked `#[allow(dead_code)]` so the lib continues to compile under
-// `#![deny(dead_code)]`; the wiring is a follow-up.
-#[allow(dead_code)]
 #[track_caller]
 fn assert_losers_drained<T, E>(losers: &[&Outcome<T, E>]) -> LosersDrainedWitness {
     match verify_losers_drained(losers) {
