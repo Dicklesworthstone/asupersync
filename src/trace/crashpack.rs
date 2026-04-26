@@ -343,14 +343,34 @@ impl std::error::Error for ManifestValidationError {}
 
 impl CrashPackManifest {
     /// Create a new manifest with the given config and fingerprint.
+    ///
+    /// Stamps `created_at` from the wall clock. Deterministic-replay
+    /// callers should use [`Self::new_with_created_at`] instead so the
+    /// manifest is byte-stable across runs.
     #[must_use]
     pub fn new(config: CrashPackConfig, fingerprint: u64, event_count: u64) -> Self {
+        Self::new_with_created_at(config, fingerprint, event_count, wall_clock_nanos())
+    }
+
+    /// br-asupersync-h0vru4 — Create a manifest with an explicit
+    /// `created_at` timestamp (nanoseconds since UNIX epoch). Use this
+    /// from deterministic-replay paths that have a `Cx`-scoped time
+    /// (e.g. `cx.now().as_nanos()` under [`crate::lab::LabRuntime`]) so
+    /// the resulting manifest is byte-identical across runs of the same
+    /// scenario.
+    #[must_use]
+    pub fn new_with_created_at(
+        config: CrashPackConfig,
+        fingerprint: u64,
+        event_count: u64,
+        created_at: u64,
+    ) -> Self {
         Self {
             schema_version: CRASHPACK_SCHEMA_VERSION,
             config,
             fingerprint,
             event_count,
-            created_at: wall_clock_nanos(),
+            created_at,
             attachments: Vec::new(),
         }
     }
@@ -1175,6 +1195,36 @@ mod tests {
         );
 
         crate::test_complete!("builder_missing_failure_returns_error");
+    }
+
+    /// br-asupersync-h0vru4 — `new_with_created_at` honours the
+    /// supplied timestamp rather than minting one from the wall clock.
+    /// Determinism-sensitive callers route this from `cx.now()` so the
+    /// resulting manifest is byte-stable across replays of the same
+    /// scenario.
+    #[test]
+    fn manifest_new_with_created_at_uses_supplied_timestamp() {
+        init_test("manifest_new_with_created_at_uses_supplied_timestamp");
+        let manifest = CrashPackManifest::new_with_created_at(
+            CrashPackConfig::default(),
+            0xCAFE_BABE,
+            42,
+            1_700_000_000_000_000_000,
+        );
+        assert_eq!(manifest.created_at, 1_700_000_000_000_000_000);
+        assert_eq!(manifest.fingerprint, 0xCAFE_BABE);
+        assert_eq!(manifest.event_count, 42);
+
+        // Two manifests built with the same explicit timestamp must
+        // be byte-identical on created_at — the determinism contract.
+        let other = CrashPackManifest::new_with_created_at(
+            CrashPackConfig::default(),
+            0xCAFE_BABE,
+            42,
+            1_700_000_000_000_000_000,
+        );
+        assert_eq!(manifest.created_at, other.created_at);
+        crate::test_complete!("manifest_new_with_created_at_uses_supplied_timestamp");
     }
 
     #[test]

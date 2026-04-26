@@ -16,7 +16,84 @@
 use crate::record::ObligationKind;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
+
+/// br-asupersync-qu7yet — Pluggable wall-clock for the minimizer.
+///
+/// `TraceMinimizer::minimize` previously called `std::time::Instant::now()`
+/// at four sites to time minimization phases. Wall-clock durations baked
+/// into the resulting `MinimizationReport` make the report non-stable
+/// across deterministic replays — the same scenario minimized twice
+/// produces different `wall_time_ms` / `replay_time_ms` values, which
+/// breaks property tests that assert byte-identical reports.
+///
+/// Production callers use [`WallMinimizerClock`] (the default — reads
+/// `Instant::now()`); deterministic tests pass a [`LogicalMinimizerClock`]
+/// that monotonically advances by 1 ms per query.
+pub trait MinimizerClock: Send + Sync {
+    /// Returns "now" in milliseconds since the clock was created.
+    fn now_ms(&self) -> u64;
+}
+
+/// Wall-clock implementation of [`MinimizerClock`].
+pub struct WallMinimizerClock {
+    started_at: Instant,
+}
+
+impl WallMinimizerClock {
+    /// Creates a new wall-clock anchored at the current `Instant::now()`.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            started_at: Instant::now(),
+        }
+    }
+}
+
+impl Default for WallMinimizerClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MinimizerClock for WallMinimizerClock {
+    fn now_ms(&self) -> u64 {
+        self.started_at
+            .elapsed()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64
+    }
+}
+
+/// Logical (counter-driven) implementation of [`MinimizerClock`] for
+/// deterministic tests. Each `now_ms()` call returns the next monotonic
+/// integer, so phase timings are stable across runs.
+pub struct LogicalMinimizerClock {
+    counter: AtomicU64,
+}
+
+impl LogicalMinimizerClock {
+    /// Creates a new logical clock at counter = 0.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            counter: AtomicU64::new(0),
+        }
+    }
+}
+
+impl Default for LogicalMinimizerClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MinimizerClock for LogicalMinimizerClock {
+    fn now_ms(&self) -> u64 {
+        self.counter.fetch_add(1, Ordering::Relaxed)
+    }
+}
 
 // ============================================================================
 // Scenario elements
@@ -264,6 +341,9 @@ pub struct TraceMinimizer;
 impl TraceMinimizer {
     /// Find the minimal subset of `elements` that still reproduces the failure.
     ///
+    /// Uses a [`WallMinimizerClock`] for phase timings. Deterministic callers
+    /// must use [`Self::minimize_with_clock`] instead.
+    ///
     /// # Panics
     ///
     /// Panics if the full element set does not reproduce the failure.
@@ -272,7 +352,24 @@ impl TraceMinimizer {
         elements: &[ScenarioElement],
         checker: impl Fn(&[ScenarioElement]) -> bool,
     ) -> MinimizationReport {
-        let start = Instant::now();
+        Self::minimize_with_clock(elements, checker, &WallMinimizerClock::new())
+    }
+
+    /// br-asupersync-qu7yet — Same as [`Self::minimize`] but uses an
+    /// explicit clock for phase timings. Deterministic-replay tests
+    /// pass a [`LogicalMinimizerClock`] so the resulting report is
+    /// byte-stable across runs.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the full element set does not reproduce the failure.
+    #[allow(clippy::cast_precision_loss)]
+    pub fn minimize_with_clock(
+        elements: &[ScenarioElement],
+        checker: impl Fn(&[ScenarioElement]) -> bool,
+        clock: &dyn MinimizerClock,
+    ) -> MinimizationReport {
+        let start_ms = clock.now_ms();
         let mut steps = Vec::new();
         let mut replays: usize = 0;
         let n = elements.len();
@@ -291,6 +388,7 @@ impl TraceMinimizer {
             elements,
             &tree,
             &checker,
+            clock,
             &mut active,
             &mut replays,
             &mut steps,
@@ -303,11 +401,24 @@ impl TraceMinimizer {
             .filter(|(_, a)| **a)
             .map(|(i, _)| i)
             .collect();
-        remaining = ddmin(&remaining, elements, &checker, &mut replays, &mut steps);
+        remaining = ddmin(
+            &remaining,
+            elements,
+            &checker,
+            clock,
+            &mut replays,
+            &mut steps,
+        );
 
         // Phase 3: 1-minimality check.
-        let is_minimal =
-            verify_minimality(&remaining, elements, &checker, &mut replays, &mut steps);
+        let is_minimal = verify_minimality(
+            &remaining,
+            elements,
+            &checker,
+            clock,
+            &mut replays,
+            &mut steps,
+        );
 
         let minimized_count = remaining.len();
         MinimizationReport {
@@ -321,7 +432,7 @@ impl TraceMinimizer {
                 0.0
             },
             replay_attempts: replays,
-            wall_time_ms: start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+            wall_time_ms: clock.now_ms().saturating_sub(start_ms),
             is_minimal,
             steps,
         }
@@ -336,6 +447,7 @@ fn top_down_prune(
     elements: &[ScenarioElement],
     tree: &ConcurrencyTree,
     checker: &impl Fn(&[ScenarioElement]) -> bool,
+    clock: &dyn MinimizerClock,
     active: &mut [bool],
     replays: &mut usize,
     steps: &mut Vec<MinimizationStep>,
@@ -350,10 +462,10 @@ fn top_down_prune(
             active[idx] = false;
         }
         let subset = collect_active(elements, active);
-        let t = Instant::now();
+        let t_start = clock.now_ms();
         *replays += 1;
         let ok = checker(&subset);
-        let ms = t.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        let ms = clock.now_ms().saturating_sub(t_start);
         if ok {
             steps.push(MinimizationStep {
                 kind: StepKind::TopDownPrune,
@@ -385,6 +497,7 @@ fn ddmin(
     indices: &[usize],
     all: &[ScenarioElement],
     checker: &impl Fn(&[ScenarioElement]) -> bool,
+    clock: &dyn MinimizerClock,
     replays: &mut usize,
     steps: &mut Vec<MinimizationStep>,
 ) -> Vec<usize> {
@@ -416,10 +529,10 @@ fn ddmin(
             }
             let subset: Vec<ScenarioElement> =
                 complement.iter().map(|&idx| all[idx].clone()).collect();
-            let t = Instant::now();
+            let t_start = clock.now_ms();
             *replays += 1;
             let ok = checker(&subset);
-            let ms = t.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+            let ms = clock.now_ms().saturating_sub(t_start);
             steps.push(MinimizationStep {
                 kind: StepKind::BottomUpRemove,
                 events_remaining: complement.len(),
@@ -452,6 +565,7 @@ fn verify_minimality(
     indices: &[usize],
     all: &[ScenarioElement],
     checker: &impl Fn(&[ScenarioElement]) -> bool,
+    clock: &dyn MinimizerClock,
     replays: &mut usize,
     steps: &mut Vec<MinimizationStep>,
 ) -> bool {
@@ -463,10 +577,10 @@ fn verify_minimality(
             .filter(|(j, _)| *j != skip)
             .map(|(_, &idx)| all[idx].clone())
             .collect();
-        let t = Instant::now();
+        let t_start = clock.now_ms();
         *replays += 1;
         let ok = checker(&without);
-        let ms = t.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        let ms = clock.now_ms().saturating_sub(t_start);
         steps.push(MinimizationStep {
             kind: StepKind::MinimalityCheck,
             events_remaining: without.len(),
@@ -862,5 +976,28 @@ mod tests {
         let report = TraceMinimizer::minimize(&elems, leak_checker(1));
         let minimized = report.minimized_elements();
         assert_eq!(minimized.len(), report.minimized_count);
+    }
+
+    /// br-asupersync-qu7yet — `minimize_with_clock(LogicalMinimizerClock)`
+    /// produces a deterministic report: the per-step `replay_time_ms`
+    /// values are derived from a monotonic counter rather than wall
+    /// clock, so the same input gives byte-stable timing fields across
+    /// runs.
+    #[test]
+    fn logical_clock_yields_deterministic_timings() {
+        let elems = make_scenario(5, 1);
+
+        let clock_a = LogicalMinimizerClock::new();
+        let report_a = TraceMinimizer::minimize_with_clock(&elems, leak_checker(1), &clock_a);
+        let clock_b = LogicalMinimizerClock::new();
+        let report_b = TraceMinimizer::minimize_with_clock(&elems, leak_checker(1), &clock_b);
+
+        // wall_time_ms and per-step ms must match across two runs with
+        // matching logical clocks (the wall-clock variant would not
+        // satisfy this).
+        assert_eq!(report_a.wall_time_ms, report_b.wall_time_ms);
+        let times_a: Vec<u64> = report_a.steps.iter().map(|s| s.replay_time_ms).collect();
+        let times_b: Vec<u64> = report_b.steps.iter().map(|s| s.replay_time_ms).collect();
+        assert_eq!(times_a, times_b);
     }
 }

@@ -6,7 +6,15 @@ use super::span::{SymbolSpan, SymbolSpanKind, SymbolSpanStatus};
 use crate::types::Time;
 use crate::types::symbol::ObjectId;
 use parking_lot::RwLock;
-use std::collections::HashMap;
+// br-asupersync-q6vujm — `BTreeMap` (not `HashMap`) is the keyed
+// container for in-flight distributed traces. The keyspace
+// (`DistTraceId`) is attacker-influenced — IDs arrive from remote peers
+// via the distributed bridge — so a hash-DoS through known SipHash
+// collisions would degrade lookup to O(N) regardless of `max_traces`.
+// `BTreeMap` is O(log N) worst-case under any key distribution and
+// gives deterministic iteration order on tied timestamps, which the
+// minimizer + replay paths rely on for stable test assertions.
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 /// Stored trace record for a single trace ID.
@@ -63,7 +71,7 @@ pub struct TraceSummary {
 
 /// Collector for symbol-based traces.
 pub struct SymbolTraceCollector {
-    traces: RwLock<HashMap<DistTraceId, TraceRecord>>,
+    traces: RwLock<BTreeMap<DistTraceId, TraceRecord>>,
     max_traces: usize,
     max_age: Duration,
     clock_skew_tolerance: Duration,
@@ -75,7 +83,7 @@ impl SymbolTraceCollector {
     #[must_use]
     pub fn new(local_region: RegionTag) -> Self {
         Self {
-            traces: RwLock::new(HashMap::new()),
+            traces: RwLock::new(BTreeMap::new()),
             max_traces: 10_000,
             max_age: Duration::from_hours(1),
             clock_skew_tolerance: Duration::from_millis(100),
@@ -277,7 +285,7 @@ impl SymbolTraceCollector {
             .collect()
     }
 
-    fn evict_oldest(&self, traces: &mut HashMap<DistTraceId, TraceRecord>, now: Time) {
+    fn evict_oldest(&self, traces: &mut BTreeMap<DistTraceId, TraceRecord>, now: Time) {
         // First pass: evict oldest complete traces (cheapest to discard).
         let mut to_remove: Vec<_> = traces
             .iter()
@@ -482,5 +490,43 @@ mod tests {
                 .get_summary(DistTraceId::new_for_test(999))
                 .is_none()
         );
+    }
+
+    /// br-asupersync-q6vujm — accessors that walk the trace map must
+    /// yield a deterministic order regardless of insertion order.
+    /// `BTreeMap` orders by key (DistTraceId, which derives `Ord`) so
+    /// inserting the same set in different orders observes the same
+    /// iteration. The previous `HashMap` would have observed the
+    /// random-seeded hash order, breaking byte-stable replay.
+    #[test]
+    fn deterministic_iteration_order_under_insertion_permutation() {
+        let make = |ids: &[u64]| {
+            let collector = SymbolTraceCollector::new(RegionTag::new("test"));
+            for &id in ids {
+                let mut rng = DetRng::new(id);
+                let trace_id = DistTraceId::new_for_test(id);
+                let ctx = SymbolTraceContext::new_for_encoding(
+                    trace_id,
+                    SymbolSpanId::NIL,
+                    RegionTag::new("us-east-1"),
+                    &mut rng,
+                );
+                let span = SymbolSpan::new_encode(
+                    ctx,
+                    ObjectId::new_for_test(id),
+                    Time::from_millis(0),
+                );
+                collector.record_span(&span, Time::from_millis(0));
+            }
+            // get_traces returns iteration of all keys.
+            let traces = collector.traces.read();
+            traces.keys().copied().collect::<Vec<_>>()
+        };
+
+        let order_a = make(&[5, 3, 1, 7, 9]);
+        let order_b = make(&[9, 7, 5, 3, 1]);
+        let order_c = make(&[1, 9, 3, 7, 5]);
+        assert_eq!(order_a, order_b);
+        assert_eq!(order_b, order_c);
     }
 }
