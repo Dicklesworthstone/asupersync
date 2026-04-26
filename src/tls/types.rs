@@ -608,6 +608,19 @@ impl CertificatePinSet {
     ///
     /// Returns Ok(true) if a pin matches, Ok(false) if no pins match but
     /// enforcement is disabled, or Err if no pins match and enforcement is enabled.
+    ///
+    /// # Timing safety (br-asupersync-86n63i)
+    ///
+    /// Pin comparison iterates ALL stored pins and uses a constant-time byte
+    /// equality check on the SHA-256 hashes. The previous implementation used
+    /// `BTreeSet::contains`, which performs `Vec<u8>::cmp` (an `Ord`-based
+    /// byte-by-byte comparison that short-circuits on the first mismatching
+    /// byte). Against a remote attacker who can present arbitrary leaf certs
+    /// and observe validation timing, that variable-time comparison would
+    /// leak prefixes of the pinned hashes — eventually defeating pinning's
+    /// secrecy. The replacement loop touches every stored pin and OR-folds
+    /// match results into a single accumulator so timing reflects the size
+    /// of the pin set, not its contents or the cert under test.
     #[cfg(feature = "tls")]
     pub fn validate(&self, cert: &Certificate) -> Result<bool, TlsError> {
         if self.pins.is_empty() {
@@ -619,10 +632,45 @@ impl CertificatePinSet {
         let spki_pin = CertificatePin::compute_spki_sha256(cert).ok();
         let cert_pin = CertificatePin::compute_cert_sha256(cert).ok();
 
-        // Check if any pin matches
-        if spki_pin.as_ref().is_some_and(|p| self.pins.contains(p))
-            || cert_pin.as_ref().is_some_and(|p| self.pins.contains(p))
-        {
+        // br-asupersync-86n63i: constant-time membership check. Iterate every
+        // stored pin (no early break), compare hashes with `constant_time_eq`,
+        // and accumulate match results into `matched` via bitwise OR so the
+        // overall control flow never branches on whether any individual pin
+        // matched. The match on pin TYPE (Spki vs Cert) is fine to branch on
+        // because pin types are public configuration (they were chosen at
+        // builder time, not derived from the candidate cert).
+        let mut matched: u8 = 0;
+        for stored in &self.pins {
+            match (stored, spki_pin.as_ref(), cert_pin.as_ref()) {
+                (
+                    CertificatePin::SpkiSha256(stored_bytes),
+                    Some(CertificatePin::SpkiSha256(candidate_bytes)),
+                    _,
+                ) => {
+                    matched |= u8::from(constant_time_eq(stored_bytes, candidate_bytes));
+                }
+                (
+                    CertificatePin::CertSha256(stored_bytes),
+                    _,
+                    Some(CertificatePin::CertSha256(candidate_bytes)),
+                ) => {
+                    matched |= u8::from(constant_time_eq(stored_bytes, candidate_bytes));
+                }
+                _ => {
+                    // Stored pin type has no candidate (compute failed or
+                    // type mismatch). Run a sham comparison against a 32-byte
+                    // zero baseline so the iteration's per-pin work is the
+                    // same shape regardless of which pin types appear in
+                    // the set or which candidates were derivable.
+                    let stored_bytes = stored.hash_bytes();
+                    let zero = [0u8; 32];
+                    let _ =
+                        std::hint::black_box(constant_time_eq(stored_bytes, &zero));
+                }
+            }
+        }
+
+        if std::hint::black_box(matched) != 0 {
             return Ok(true);
         }
 
@@ -656,6 +704,26 @@ impl CertificatePinSet {
     pub fn iter(&self) -> impl Iterator<Item = &CertificatePin> {
         self.pins.iter()
     }
+}
+
+/// Constant-time byte-slice equality (br-asupersync-86n63i).
+///
+/// Used by [`CertificatePinSet::validate`] to compare SHA-256 pin hashes
+/// without leaking match progress through timing. Returns `false` immediately
+/// for length mismatches because lengths of stored pins are public (always
+/// 32 bytes for SHA-256) so the early-return cannot leak a secret. The XOR
+/// accumulator is wrapped in `std::hint::black_box` so an aggressive
+/// optimiser cannot rewrite the loop into an early-exit comparison.
+#[inline]
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (&x, &y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    std::hint::black_box(diff) == 0
 }
 
 impl FromIterator<CertificatePin> for CertificatePinSet {
@@ -801,6 +869,110 @@ Lru15URJw9pE1Uae8IuzyzHiF1fnn45swnvW3Szb
             }
             other => panic!("expected certificate error, got {other:?}"),
         }
+    }
+
+    /// br-asupersync-86n63i: regression. constant_time_eq must (a) accept
+    /// identical inputs, (b) reject length-mismatched and content-mismatched
+    /// inputs, and (c) — most importantly — perform the full comparison
+    /// regardless of where the first mismatching byte appears. We can't
+    /// directly observe wall-clock timing without flake risk, so we
+    /// instead assert the FUNCTIONAL property that mismatches at the
+    /// front, middle, and end all produce the same result, and that the
+    /// helper handles the empty/full-zero edge cases.
+    #[test]
+    fn constant_time_eq_correctness_and_full_iteration_invariants() {
+        // Identical
+        assert!(constant_time_eq(&[1, 2, 3], &[1, 2, 3]));
+        assert!(constant_time_eq(b"", b""));
+
+        // Length mismatch — we accept this short-circuit because pin lengths
+        // are public (always 32 for SHA-256).
+        assert!(!constant_time_eq(&[1, 2, 3], &[1, 2]));
+
+        // Mismatch at front, middle, end — all must return false. The CT
+        // property is enforced by the loop structure: every byte is XORed
+        // into the diff accumulator regardless of where the mismatch is.
+        assert!(!constant_time_eq(&[9, 2, 3, 4], &[1, 2, 3, 4]));
+        assert!(!constant_time_eq(&[1, 2, 9, 4], &[1, 2, 3, 4]));
+        assert!(!constant_time_eq(&[1, 2, 3, 9], &[1, 2, 3, 4]));
+
+        // 32-byte realistic SHA-256 length
+        let a = [0x42u8; 32];
+        let mut b = [0x42u8; 32];
+        assert!(constant_time_eq(&a, &b));
+        b[31] ^= 0x01;
+        assert!(!constant_time_eq(&a, &b));
+        b[31] ^= 0x01;
+        b[0] ^= 0x80;
+        assert!(!constant_time_eq(&a, &b));
+    }
+
+    /// br-asupersync-86n63i: regression. CertificatePinSet::validate must
+    /// iterate every stored pin and use constant-time byte equality. We
+    /// verify this functionally: a set with many decoy pins plus one real
+    /// match still accepts the matching cert. This catches refactors that
+    /// reintroduce BTreeSet::contains or any short-circuiting Ord-based
+    /// lookup (which, with the test certificate's SPKI hash sorted into
+    /// the middle of the decoy ordering, would still functionally pass
+    /// — but the *property* under test is that every stored pin
+    /// participates in the comparison, which the unit test above
+    /// (`constant_time_eq_correctness_*`) covers at the helper layer.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn pin_set_validate_accepts_match_among_many_decoys() {
+        let cert = Certificate::from_pem(TEST_CERT_PEM).unwrap().remove(0);
+        let real_pin = CertificatePin::compute_spki_sha256(&cert).unwrap();
+
+        let mut set = CertificatePinSet::new();
+        // Decoys: 32-byte hashes that are NOT the real pin. Vary them
+        // across the byte space so the set's BTree storage interleaves
+        // them with the real pin (defeating any test that secretly relies
+        // on Ord ordering).
+        for byte in [0x00u8, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70] {
+            set.add(CertificatePin::spki_sha256(vec![byte; 32]).unwrap());
+        }
+        set.add(real_pin);
+        for byte in [0x80u8, 0x90, 0xA0, 0xB0, 0xC0, 0xD0, 0xE0, 0xF0] {
+            set.add(CertificatePin::spki_sha256(vec![byte; 32]).unwrap());
+        }
+        assert_eq!(set.len(), 17);
+
+        // Real cert must validate even when surrounded by decoys.
+        assert!(
+            set.validate(&cert).unwrap(),
+            "validate should match the real pin among 16 decoys"
+        );
+
+        // A cert that does NOT match any pin must yield PinMismatch.
+        let mut decoy_only = CertificatePinSet::new();
+        for byte in 0u8..16u8 {
+            decoy_only
+                .add(CertificatePin::spki_sha256(vec![byte; 32]).unwrap());
+        }
+        let err = decoy_only.validate(&cert).unwrap_err();
+        assert!(matches!(err, TlsError::PinMismatch { .. }));
+    }
+
+    /// br-asupersync-86n63i: regression. Mixed pin types (Spki + Cert) in
+    /// the same set must both work after the constant-time refactor.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn pin_set_validate_mixed_pin_types_each_resolved_independently() {
+        let cert = Certificate::from_pem(TEST_CERT_PEM).unwrap().remove(0);
+        let spki_pin = CertificatePin::compute_spki_sha256(&cert).unwrap();
+        let cert_pin = CertificatePin::compute_cert_sha256(&cert).unwrap();
+
+        // Set with only SPKI pin matches the cert.
+        let mut spki_only = CertificatePinSet::new();
+        spki_only.add(spki_pin.clone());
+        spki_only.add(CertificatePin::cert_sha256(vec![0u8; 32]).unwrap());
+        assert!(spki_only.validate(&cert).unwrap());
+
+        // Set with only Cert pin matches the cert.
+        let mut cert_only = CertificatePinSet::new();
+        cert_only.add(CertificatePin::spki_sha256(vec![0u8; 32]).unwrap());
+        cert_only.add(cert_pin);
+        assert!(cert_only.validate(&cert).unwrap());
     }
 
     #[cfg(feature = "tls")]
