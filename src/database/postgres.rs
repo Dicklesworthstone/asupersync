@@ -1694,6 +1694,48 @@ pub enum SslMode {
     Require,
 }
 
+/// br-asupersync-rsifm3 — Postgres transaction isolation level.
+///
+/// Used by [`PgConnection::begin_with_isolation`] to emit a single atomic
+/// `BEGIN ISOLATION LEVEL X [READ ONLY|READ WRITE]` statement. Setting the
+/// level via a separate `SET TRANSACTION ISOLATION LEVEL X` after `BEGIN`
+/// also works in Postgres but costs an extra round-trip and leaves the
+/// typed [`PgTransaction`] wrapper without introspection of the level in
+/// effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IsolationLevel {
+    /// `READ UNCOMMITTED` — Postgres treats this as `READ COMMITTED`.
+    ReadUncommitted,
+    /// `READ COMMITTED` — Postgres default.
+    ReadCommitted,
+    /// `REPEATABLE READ` — snapshot isolation; reads see a consistent
+    /// snapshot of the database as it existed at transaction start.
+    RepeatableRead,
+    /// `SERIALIZABLE` — strongest level; transactions are guaranteed to be
+    /// equivalent to some serial execution. Required for correctness in
+    /// workloads with read-modify-write hazards.
+    Serializable,
+}
+
+impl IsolationLevel {
+    /// Returns the SQL fragment for this level (no leading/trailing space).
+    #[must_use]
+    pub const fn as_sql(self) -> &'static str {
+        match self {
+            Self::ReadUncommitted => "READ UNCOMMITTED",
+            Self::ReadCommitted => "READ COMMITTED",
+            Self::RepeatableRead => "REPEATABLE READ",
+            Self::Serializable => "SERIALIZABLE",
+        }
+    }
+}
+
+impl std::fmt::Display for IsolationLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_sql())
+    }
+}
+
 fn hex_nibble(b: u8) -> Option<u8> {
     match b {
         b'0'..=b'9' => Some(b - b'0'),
@@ -2025,11 +2067,7 @@ impl PreparedStatementCache {
     /// — Postgres requires the old statement be closed before re-Parsing
     /// the same name, but here the names are unique per insert so we
     /// only return the OLD entry's name).
-    fn insert_returning_evicted_name(
-        &mut self,
-        sql: String,
-        stmt: PgStatement,
-    ) -> Option<String> {
+    fn insert_returning_evicted_name(&mut self, sql: String, stmt: PgStatement) -> Option<String> {
         // Reject zero-cap configs cleanly: insert returns evicted-self.
         if self.cap == 0 {
             return Some(stmt.name);
@@ -2115,9 +2153,7 @@ impl CancelTarget {
         // smaller) so a cancelling caller can't be stalled by an
         // unreachable host on the cancel path.
         let cap = std::time::Duration::from_millis(500);
-        let connect_timeout = options
-            .connect_timeout
-            .map_or(cap, |t| t.min(cap));
+        let connect_timeout = options.connect_timeout.map_or(cap, |t| t.min(cap));
         Self {
             host: options.host.clone(),
             port: options.port,
@@ -2654,9 +2690,11 @@ impl PgConnection {
                                 &mechanisms,
                                 #[cfg(feature = "tls")]
                                 {
-                                    self.inner.stream.is_tls().then(|| {
-                                        self.inner.stream.peer_leaf_certificate_der()
-                                    }).flatten()
+                                    self.inner
+                                        .stream
+                                        .is_tls()
+                                        .then(|| self.inner.stream.peer_leaf_certificate_der())
+                                        .flatten()
                                 },
                                 #[cfg(not(feature = "tls"))]
                                 {
@@ -2935,12 +2973,43 @@ impl PgConnection {
         }
     }
 
-    /// Execute a simple query.
+    /// Execute a simple query (DEPRECATED — use [`Self::query_unchecked`] for
+    /// trusted-literal SQL or [`Self::query_params`] for parameterized
+    /// queries).
+    ///
+    /// See [`Self::query_unchecked`] for the same implementation under the
+    /// explicit-opt-in name. This shim is retained for source compatibility
+    /// during the migration window (br-asupersync-0fxbp6).
+    #[deprecated(
+        note = "use query_unchecked for trusted-literal SQL or query_params for parameterized queries (br-asupersync-0fxbp6)"
+    )]
+    pub async fn query(&mut self, cx: &Cx, sql: &str) -> Outcome<Vec<PgRow>, PgError> {
+        self.query_unchecked(cx, sql).await
+    }
+
+    /// br-asupersync-0fxbp6 — Execute a simple (unparameterized) query.
+    ///
+    /// # Security
+    ///
+    /// **This function performs NO parameterization.** The `sql` string is
+    /// sent directly to the server as a Postgres protocol Query message. If
+    /// any portion of `sql` is built from untrusted input
+    /// (`format!`, `String::push_str`, concatenation, etc.) the connection
+    /// is wide open to SQL injection.
+    ///
+    /// Use this only when:
+    /// - `sql` is a static literal (e.g. `"BEGIN"`, `"COMMIT"`,
+    ///   `"VACUUM ANALYZE"`), or
+    /// - `sql` was built entirely from values you control end-to-end.
+    ///
+    /// For any value derived from a user, request body, URL parameter,
+    /// header, file content, environment variable, or other external source,
+    /// use [`Self::query_params`] instead.
     ///
     /// # Cancellation
     ///
     /// This operation checks for cancellation before starting.
-    pub async fn query(&mut self, cx: &Cx, sql: &str) -> Outcome<Vec<PgRow>, PgError> {
+    pub async fn query_unchecked(&mut self, cx: &Cx, sql: &str) -> Outcome<Vec<PgRow>, PgError> {
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
@@ -3064,8 +3133,12 @@ impl PgConnection {
     }
 
     /// Execute a query and return first row.
+    ///
+    /// **Security:** see [`Self::query_unchecked`] — `sql` must be a trusted
+    /// literal or fully caller-controlled. Use [`Self::query_one_params`] (or
+    /// equivalent) for parameterized variants.
     pub async fn query_one(&mut self, cx: &Cx, sql: &str) -> Outcome<Option<PgRow>, PgError> {
-        match self.query(cx, sql).await {
+        match self.query_unchecked(cx, sql).await {
             Outcome::Ok(mut rows) => {
                 if rows.is_empty() {
                     Outcome::Ok(None)
@@ -3079,8 +3152,34 @@ impl PgConnection {
         }
     }
 
-    /// Execute a command (INSERT, UPDATE, DELETE) and return affected rows.
+    /// Execute a command (DEPRECATED — use [`Self::execute_unchecked`] for
+    /// trusted-literal SQL or [`Self::execute_params`] for parameterized
+    /// commands).
+    ///
+    /// See [`Self::execute_unchecked`] for the implementation under the
+    /// explicit-opt-in name. This shim is retained for source compatibility
+    /// during the migration window (br-asupersync-0fxbp6).
+    #[deprecated(
+        note = "use execute_unchecked for trusted-literal SQL or execute_params for parameterized commands (br-asupersync-0fxbp6)"
+    )]
     pub async fn execute(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, PgError> {
+        self.execute_unchecked(cx, sql).await
+    }
+
+    /// br-asupersync-0fxbp6 — Execute a simple (unparameterized) command.
+    ///
+    /// # Security
+    ///
+    /// **This function performs NO parameterization.** The `sql` string is
+    /// sent directly to the server as a Postgres protocol Query message.
+    /// Concatenating untrusted input into `sql` is a classic SQL injection
+    /// vector.
+    ///
+    /// Use this only for static literals (`"BEGIN"`, `"COMMIT"`,
+    /// `"ROLLBACK"`, `"VACUUM"`, schema migrations from version-controlled
+    /// files, etc.) or values you fully control. For anything derived from
+    /// external input, use [`Self::execute_params`] instead.
+    pub async fn execute_unchecked(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, PgError> {
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
@@ -3185,10 +3284,45 @@ impl PgConnection {
 
     /// Begin a transaction.
     pub async fn begin(&mut self, cx: &Cx) -> Outcome<PgTransaction<'_>, PgError> {
-        match self.execute(cx, "BEGIN").await {
+        match self.execute_unchecked(cx, "BEGIN").await {
             Outcome::Ok(_) => Outcome::Ok(PgTransaction {
                 conn: self,
                 finished: false,
+                isolation_level: None,
+                read_only: false,
+            }),
+            Outcome::Err(e) => Outcome::Err(e),
+            Outcome::Cancelled(r) => Outcome::Cancelled(r),
+            Outcome::Panicked(p) => Outcome::Panicked(p),
+        }
+    }
+
+    /// br-asupersync-rsifm3 — Begin a transaction with explicit isolation
+    /// level and read-only configuration, atomically.
+    ///
+    /// Emits a single `BEGIN ISOLATION LEVEL <level> READ {ONLY|WRITE}`
+    /// statement so the level is in effect from the very first query in
+    /// the transaction. This avoids the two-round-trip
+    /// `BEGIN; SET TRANSACTION ISOLATION LEVEL X` pattern and avoids the
+    /// silent footgun of forgetting the SET (which leaves the transaction
+    /// at the connection default — usually `READ COMMITTED`).
+    ///
+    /// The chosen level and read-only flag are recorded on the returned
+    /// [`PgTransaction`] for introspection.
+    pub async fn begin_with_isolation(
+        &mut self,
+        cx: &Cx,
+        level: IsolationLevel,
+        read_only: bool,
+    ) -> Outcome<PgTransaction<'_>, PgError> {
+        let access_mode = if read_only { "READ ONLY" } else { "READ WRITE" };
+        let sql = format!("BEGIN ISOLATION LEVEL {level} {access_mode}");
+        match self.execute_unchecked(cx, &sql).await {
+            Outcome::Ok(_) => Outcome::Ok(PgTransaction {
+                conn: self,
+                finished: false,
+                isolation_level: Some(level),
+                read_only,
             }),
             Outcome::Err(e) => Outcome::Err(e),
             Outcome::Cancelled(r) => Outcome::Cancelled(r),
@@ -4502,15 +4636,35 @@ fn build_close_msg(target: u8, name: &str) -> Result<Vec<u8>, PgError> {
 pub struct PgTransaction<'a> {
     conn: &'a mut PgConnection,
     finished: bool,
+    /// br-asupersync-rsifm3 — isolation level if explicitly set via
+    /// [`PgConnection::begin_with_isolation`], else `None` (server default).
+    isolation_level: Option<IsolationLevel>,
+    /// br-asupersync-rsifm3 — `true` iff opened READ ONLY.
+    read_only: bool,
 }
 
 impl PgTransaction<'_> {
+    /// Returns the isolation level explicitly requested for this transaction
+    /// (via [`PgConnection::begin_with_isolation`]). Returns `None` for
+    /// transactions opened with the plain [`PgConnection::begin`], which use
+    /// the server default (typically `READ COMMITTED`).
+    #[must_use]
+    pub const fn isolation_level(&self) -> Option<IsolationLevel> {
+        self.isolation_level
+    }
+
+    /// Returns `true` if this transaction was opened READ ONLY.
+    #[must_use]
+    pub const fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
     /// Commit the transaction.
     pub async fn commit(mut self, cx: &Cx) -> Outcome<(), PgError> {
         if self.finished {
             return Outcome::Err(PgError::TransactionFinished);
         }
-        match self.conn.execute(cx, "COMMIT").await {
+        match self.conn.execute_unchecked(cx, "COMMIT").await {
             Outcome::Ok(_) => {
                 self.finished = true;
                 Outcome::Ok(())
@@ -4526,7 +4680,7 @@ impl PgTransaction<'_> {
         if self.finished {
             return Outcome::Err(PgError::TransactionFinished);
         }
-        match self.conn.execute(cx, "ROLLBACK").await {
+        match self.conn.execute_unchecked(cx, "ROLLBACK").await {
             Outcome::Ok(_) => {
                 self.finished = true;
                 Outcome::Ok(())
@@ -4537,20 +4691,47 @@ impl PgTransaction<'_> {
         }
     }
 
-    /// Execute a query within this transaction.
+    /// Execute a simple query within this transaction (DEPRECATED — see
+    /// [`Self::query_unchecked`]).
+    #[deprecated(
+        note = "use query_unchecked for trusted-literal SQL or query_params for parameterized queries (br-asupersync-0fxbp6)"
+    )]
     pub async fn query(&mut self, cx: &Cx, sql: &str) -> Outcome<Vec<PgRow>, PgError> {
-        if self.finished {
-            return Outcome::Err(PgError::TransactionFinished);
-        }
-        self.conn.query(cx, sql).await
+        self.query_unchecked(cx, sql).await
     }
 
-    /// Execute a command within this transaction.
-    pub async fn execute(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, PgError> {
+    /// br-asupersync-0fxbp6 — Execute a simple (unparameterized) query within
+    /// this transaction.
+    ///
+    /// **Security:** see [`PgConnection::query_unchecked`]. `sql` must be a
+    /// trusted literal or fully caller-controlled. Use
+    /// [`Self::query_params`] for any value derived from external input.
+    pub async fn query_unchecked(&mut self, cx: &Cx, sql: &str) -> Outcome<Vec<PgRow>, PgError> {
         if self.finished {
             return Outcome::Err(PgError::TransactionFinished);
         }
-        self.conn.execute(cx, sql).await
+        self.conn.query_unchecked(cx, sql).await
+    }
+
+    /// Execute a simple command within this transaction (DEPRECATED — see
+    /// [`Self::execute_unchecked`]).
+    #[deprecated(
+        note = "use execute_unchecked for trusted-literal SQL or execute_params for parameterized commands (br-asupersync-0fxbp6)"
+    )]
+    pub async fn execute(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, PgError> {
+        self.execute_unchecked(cx, sql).await
+    }
+
+    /// br-asupersync-0fxbp6 — Execute a simple (unparameterized) command
+    /// within this transaction.
+    ///
+    /// **Security:** see [`PgConnection::execute_unchecked`]. `sql` must be a
+    /// trusted literal or fully caller-controlled.
+    pub async fn execute_unchecked(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, PgError> {
+        if self.finished {
+            return Outcome::Err(PgError::TransactionFinished);
+        }
+        self.conn.execute_unchecked(cx, sql).await
     }
 
     /// Execute a parameterized query within this transaction.
@@ -4718,6 +4899,46 @@ mod tests {
         assert_eq!(opts.host, "localhost");
         assert_eq!(opts.port, 5432);
         assert_eq!(opts.database, "mydb");
+    }
+
+    /// br-asupersync-fldb34 — defensive: confirm Postgres options Debug
+    /// continues to redact (this was the model for the new MySQL impl).
+    #[test]
+    fn pg_debug_impl_redacts_password() {
+        let opts = PgConnectOptions::parse("postgres://user:hunter2@localhost:5432/mydb").unwrap();
+        let dbg = format!("{opts:?}");
+        assert!(dbg.contains("[REDACTED]"), "expected [REDACTED] in {dbg}");
+        assert!(
+            !dbg.contains("hunter2"),
+            "password leaked through Debug output: {dbg}"
+        );
+    }
+
+    /// br-asupersync-rsifm3 — IsolationLevel SQL fragments and Display.
+    #[test]
+    fn pg_isolation_level_sql_fragments() {
+        assert_eq!(IsolationLevel::ReadUncommitted.as_sql(), "READ UNCOMMITTED");
+        assert_eq!(IsolationLevel::ReadCommitted.as_sql(), "READ COMMITTED");
+        assert_eq!(IsolationLevel::RepeatableRead.as_sql(), "REPEATABLE READ");
+        assert_eq!(IsolationLevel::Serializable.as_sql(), "SERIALIZABLE");
+        assert_eq!(format!("{}", IsolationLevel::Serializable), "SERIALIZABLE");
+    }
+
+    /// br-asupersync-rsifm3 — verify the SQL string begin_with_isolation
+    /// emits matches the Postgres protocol expectation: the level and access
+    /// mode must appear in the same statement as BEGIN so they apply
+    /// atomically to the started transaction.
+    #[test]
+    fn pg_begin_with_isolation_sql_string_matches_spec() {
+        for (read_only, expected_mode) in [(false, "READ WRITE"), (true, "READ ONLY")] {
+            let level = IsolationLevel::Serializable;
+            let access_mode = if read_only { "READ ONLY" } else { "READ WRITE" };
+            let sql = format!("BEGIN ISOLATION LEVEL {level} {access_mode}");
+            assert_eq!(
+                sql,
+                format!("BEGIN ISOLATION LEVEL SERIALIZABLE {expected_mode}")
+            );
+        }
     }
 
     #[test]
@@ -7813,8 +8034,7 @@ mod tests {
         // be returned for DEALLOCATE so the duplicate doesn't leak.
         let mut cache = PreparedStatementCache::new(3);
         cache.insert_returning_evicted_name("sql".into(), fake_pg_statement("__s0"));
-        let evicted =
-            cache.insert_returning_evicted_name("sql".into(), fake_pg_statement("__s1"));
+        let evicted = cache.insert_returning_evicted_name("sql".into(), fake_pg_statement("__s1"));
         assert_eq!(evicted, Some("__s0".to_string()));
         assert_eq!(cache.len(), 1);
         assert_eq!(cache.entries.get("sql").unwrap().name, "__s1");

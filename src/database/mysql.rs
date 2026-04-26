@@ -16,7 +16,7 @@
 //! async fn example(cx: &Cx) -> Result<(), MySqlError> {
 //!     let conn = MySqlConnection::connect(cx, "mysql://user:pass@localhost/db").await?;
 //!
-//!     let rows = conn.query(cx, "SELECT id, name FROM users WHERE active = 1").await?;
+//!     let rows = conn.query_unchecked(cx, "SELECT id, name FROM users WHERE active = 1").await?;
 //!     for row in rows {
 //!         let id: i32 = row.get_i32("id")?;
 //!         let name: &str = row.get_str("name")?;
@@ -892,7 +892,7 @@ fn caching_sha2_auth(password: &str, nonce: &[u8]) -> Vec<u8> {
 // ============================================================================
 
 /// Parsed MySQL connection URL.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct MySqlConnectOptions {
     /// Host name or IP address.
     pub host: String,
@@ -910,6 +910,24 @@ pub struct MySqlConnectOptions {
     pub ssl_mode: SslMode,
 }
 
+// br-asupersync-fldb34 — manual Debug impl that redacts the password field.
+// Mirrors the PgConnectOptions pattern in src/database/postgres.rs.
+// The derived Debug would have printed the password verbatim in any
+// `tracing::error!(?config, ...)` or `format!("{:?}", opts)` call.
+impl std::fmt::Debug for MySqlConnectOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MySqlConnectOptions")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("database", &self.database)
+            .field("user", &self.user)
+            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .field("connect_timeout", &self.connect_timeout)
+            .field("ssl_mode", &self.ssl_mode)
+            .finish()
+    }
+}
+
 /// SSL connection mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SslMode {
@@ -920,6 +938,47 @@ pub enum SslMode {
     Preferred,
     /// Require SSL.
     Required,
+}
+
+/// br-asupersync-rsifm3 — MySQL transaction isolation level.
+///
+/// Used by [`MySqlConnection::begin_with_isolation`]. MySQL/MariaDB require
+/// two separate statements to start a transaction at a non-default level:
+/// `SET TRANSACTION ISOLATION LEVEL X` followed by
+/// `START TRANSACTION [READ ONLY|READ WRITE]`. The `SET TRANSACTION`
+/// statement (without `GLOBAL`/`SESSION`) applies only to the next
+/// transaction on the connection, so the pair is effectively atomic from
+/// the connection's perspective even though it is two round-trips.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IsolationLevel {
+    /// `READ UNCOMMITTED` — dirty reads allowed.
+    ReadUncommitted,
+    /// `READ COMMITTED` — non-repeatable reads possible.
+    ReadCommitted,
+    /// `REPEATABLE READ` — MySQL/InnoDB default.
+    RepeatableRead,
+    /// `SERIALIZABLE` — strongest level; converts plain reads to
+    /// `SELECT ... LOCK IN SHARE MODE` under InnoDB.
+    Serializable,
+}
+
+impl IsolationLevel {
+    /// Returns the SQL fragment for this level (no leading/trailing space).
+    #[must_use]
+    pub const fn as_sql(self) -> &'static str {
+        match self {
+            Self::ReadUncommitted => "READ UNCOMMITTED",
+            Self::ReadCommitted => "READ COMMITTED",
+            Self::RepeatableRead => "REPEATABLE READ",
+            Self::Serializable => "SERIALIZABLE",
+        }
+    }
+}
+
+impl std::fmt::Display for IsolationLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_sql())
+    }
 }
 
 /// Percent-decode a URL component (e.g., user or password).
@@ -1307,8 +1366,7 @@ impl MySqlConnection {
             Outcome::Cancelled(reason) => return Err(MySqlError::Cancelled(reason)),
             Outcome::Panicked(_) => {
                 return Err(MySqlError::Protocol(
-                    "cancel_in_flight_query: kill connection panicked during connect"
-                        .to_string(),
+                    "cancel_in_flight_query: kill connection panicked during connect".to_string(),
                 ));
             }
         };
@@ -1320,7 +1378,7 @@ impl MySqlConnection {
         // its own; we deliberately leave that to the caller to avoid
         // racing with their session-cleanup logic.
         let sql = format!("KILL QUERY {thread_id}");
-        match killer.execute(cx, &sql).await {
+        match killer.execute_unchecked(cx, &sql).await {
             Outcome::Ok(_) => {
                 // The killer connection is dropped here, closing its socket.
                 Ok(())
@@ -1624,14 +1682,42 @@ impl MySqlConnection {
         }
     }
 
-    /// Execute a query.
+    /// Execute a query (DEPRECATED — use [`Self::query_unchecked`] for
+    /// trusted-literal SQL or the prepared-statement APIs for parameterized
+    /// queries).
+    ///
+    /// See [`Self::query_unchecked`] for the same implementation under the
+    /// explicit-opt-in name (br-asupersync-0fxbp6).
+    #[deprecated(
+        note = "use query_unchecked for trusted-literal SQL or the prepared-statement APIs for parameterized queries (br-asupersync-0fxbp6)"
+    )]
+    pub async fn query(&mut self, cx: &Cx, sql: &str) -> Outcome<Vec<MySqlRow>, MySqlError> {
+        self.query_unchecked(cx, sql).await
+    }
+
+    /// br-asupersync-0fxbp6 — Execute a simple (unparameterized) query.
+    ///
+    /// # Security
+    ///
+    /// **This function performs NO parameterization.** The `sql` string is
+    /// sent directly to the server as a `COM_QUERY`. Concatenating untrusted
+    /// input into `sql` is a classic SQL injection vector.
+    ///
+    /// Use this only for static literals (`"START TRANSACTION"`, `"COMMIT"`,
+    /// `"ROLLBACK"`, schema migrations from version-controlled files, etc.)
+    /// or values you fully control. For anything derived from external
+    /// input, use the prepared-statement APIs (`prepare` + `execute_params`).
     ///
     /// # Cancellation
     ///
     /// This operation checks for cancellation before starting.
     /// If a previous transaction was dropped without commit/rollback,
     /// an implicit ROLLBACK is issued first.
-    pub async fn query(&mut self, cx: &Cx, sql: &str) -> Outcome<Vec<MySqlRow>, MySqlError> {
+    pub async fn query_unchecked(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+    ) -> Outcome<Vec<MySqlRow>, MySqlError> {
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
@@ -2364,11 +2450,36 @@ impl MySqlConnection {
         )
     }
 
-    /// Execute a command (INSERT, UPDATE, DELETE) and return affected rows.
+    /// Execute a command (DEPRECATED — use [`Self::execute_unchecked`] for
+    /// trusted-literal SQL or the prepared-statement APIs for parameterized
+    /// commands).
+    ///
+    /// See [`Self::execute_unchecked`] for the same implementation under the
+    /// explicit-opt-in name (br-asupersync-0fxbp6).
+    #[deprecated(
+        note = "use execute_unchecked for trusted-literal SQL or the prepared-statement APIs for parameterized commands (br-asupersync-0fxbp6)"
+    )]
+    pub async fn execute(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, MySqlError> {
+        self.execute_unchecked(cx, sql).await
+    }
+
+    /// br-asupersync-0fxbp6 — Execute a simple (unparameterized) command
+    /// (INSERT, UPDATE, DELETE) and return affected rows.
+    ///
+    /// # Security
+    ///
+    /// **This function performs NO parameterization.** The `sql` string is
+    /// sent directly to the server as a `COM_QUERY`. Concatenating untrusted
+    /// input into `sql` is a classic SQL injection vector.
+    ///
+    /// Use this only for static literals (`"START TRANSACTION"`, `"COMMIT"`,
+    /// `"ROLLBACK"`, schema migrations from version-controlled files, etc.)
+    /// or values you fully control. For anything derived from external
+    /// input, use the prepared-statement APIs.
     ///
     /// If a previous transaction was dropped without commit/rollback,
     /// an implicit ROLLBACK is issued first.
-    pub async fn execute(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, MySqlError> {
+    pub async fn execute_unchecked(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, MySqlError> {
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
@@ -2453,10 +2564,53 @@ impl MySqlConnection {
 
     /// Begin a transaction.
     pub async fn begin(&mut self, cx: &Cx) -> Outcome<MySqlTransaction<'_>, MySqlError> {
-        match self.execute(cx, "START TRANSACTION").await {
+        match self.execute_unchecked(cx, "START TRANSACTION").await {
             Outcome::Ok(_) => Outcome::Ok(MySqlTransaction {
                 conn: self,
                 finished: false,
+                isolation_level: None,
+                read_only: false,
+            }),
+            Outcome::Err(e) => outcome_from_error(e),
+            Outcome::Cancelled(r) => Outcome::Cancelled(r),
+            Outcome::Panicked(p) => Outcome::Panicked(p),
+        }
+    }
+
+    /// br-asupersync-rsifm3 — Begin a transaction with explicit isolation
+    /// level and read-only configuration.
+    ///
+    /// Sends `SET TRANSACTION ISOLATION LEVEL <level>` followed by
+    /// `START TRANSACTION [READ ONLY|READ WRITE]`. MySQL/MariaDB do not
+    /// support setting the level inside the START TRANSACTION statement
+    /// itself, so this is two protocol round-trips. The `SET TRANSACTION`
+    /// (without `GLOBAL`/`SESSION`) only affects the next transaction on
+    /// this connection, so the level cannot leak past the START TRANSACTION
+    /// that follows.
+    ///
+    /// On failure of the `SET TRANSACTION` half, no transaction is started
+    /// and the connection state is unchanged.
+    pub async fn begin_with_isolation(
+        &mut self,
+        cx: &Cx,
+        level: IsolationLevel,
+        read_only: bool,
+    ) -> Outcome<MySqlTransaction<'_>, MySqlError> {
+        let set_sql = format!("SET TRANSACTION ISOLATION LEVEL {level}");
+        match self.execute_unchecked(cx, &set_sql).await {
+            Outcome::Ok(_) => {}
+            Outcome::Err(e) => return outcome_from_error(e),
+            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+            Outcome::Panicked(p) => return Outcome::Panicked(p),
+        }
+        let access_mode = if read_only { "READ ONLY" } else { "READ WRITE" };
+        let start_sql = format!("START TRANSACTION {access_mode}");
+        match self.execute_unchecked(cx, &start_sql).await {
+            Outcome::Ok(_) => Outcome::Ok(MySqlTransaction {
+                conn: self,
+                finished: false,
+                isolation_level: Some(level),
+                read_only,
             }),
             Outcome::Err(e) => outcome_from_error(e),
             Outcome::Cancelled(r) => Outcome::Cancelled(r),
@@ -3503,15 +3657,35 @@ impl MySqlStatement {
 pub struct MySqlTransaction<'a> {
     conn: &'a mut MySqlConnection,
     finished: bool,
+    /// br-asupersync-rsifm3 — isolation level if explicitly set via
+    /// [`MySqlConnection::begin_with_isolation`], else `None`.
+    isolation_level: Option<IsolationLevel>,
+    /// br-asupersync-rsifm3 — `true` iff opened READ ONLY.
+    read_only: bool,
 }
 
 impl MySqlTransaction<'_> {
+    /// Returns the isolation level explicitly requested for this transaction
+    /// (via [`MySqlConnection::begin_with_isolation`]). Returns `None` for
+    /// transactions opened with the plain [`MySqlConnection::begin`], which
+    /// use the connection default (typically `REPEATABLE READ` for InnoDB).
+    #[must_use]
+    pub const fn isolation_level(&self) -> Option<IsolationLevel> {
+        self.isolation_level
+    }
+
+    /// Returns `true` if this transaction was opened READ ONLY.
+    #[must_use]
+    pub const fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
     /// Commit the transaction.
     pub async fn commit(mut self, cx: &Cx) -> Outcome<(), MySqlError> {
         if self.finished {
             return Outcome::Err(MySqlError::TransactionFinished);
         }
-        match self.conn.execute(cx, "COMMIT").await {
+        match self.conn.execute_unchecked(cx, "COMMIT").await {
             Outcome::Ok(_) => {
                 self.finished = true;
                 Outcome::Ok(())
@@ -3527,7 +3701,7 @@ impl MySqlTransaction<'_> {
         if self.finished {
             return Outcome::Err(MySqlError::TransactionFinished);
         }
-        match self.conn.execute(cx, "ROLLBACK").await {
+        match self.conn.execute_unchecked(cx, "ROLLBACK").await {
             Outcome::Ok(_) => {
                 self.finished = true;
                 Outcome::Ok(())
@@ -3538,20 +3712,50 @@ impl MySqlTransaction<'_> {
         }
     }
 
-    /// Execute a query within this transaction.
+    /// Execute a simple query within this transaction (DEPRECATED — see
+    /// [`Self::query_unchecked`]).
+    #[deprecated(
+        note = "use query_unchecked for trusted-literal SQL or the prepared-statement APIs for parameterized queries (br-asupersync-0fxbp6)"
+    )]
     pub async fn query(&mut self, cx: &Cx, sql: &str) -> Outcome<Vec<MySqlRow>, MySqlError> {
-        if self.finished {
-            return Outcome::Err(MySqlError::TransactionFinished);
-        }
-        self.conn.query(cx, sql).await
+        self.query_unchecked(cx, sql).await
     }
 
-    /// Execute a command within this transaction.
-    pub async fn execute(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, MySqlError> {
+    /// br-asupersync-0fxbp6 — Execute a simple (unparameterized) query within
+    /// this transaction.
+    ///
+    /// **Security:** see [`MySqlConnection::query_unchecked`]. `sql` must be
+    /// a trusted literal or fully caller-controlled.
+    pub async fn query_unchecked(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+    ) -> Outcome<Vec<MySqlRow>, MySqlError> {
         if self.finished {
             return Outcome::Err(MySqlError::TransactionFinished);
         }
-        self.conn.execute(cx, sql).await
+        self.conn.query_unchecked(cx, sql).await
+    }
+
+    /// Execute a simple command within this transaction (DEPRECATED — see
+    /// [`Self::execute_unchecked`]).
+    #[deprecated(
+        note = "use execute_unchecked for trusted-literal SQL or the prepared-statement APIs for parameterized commands (br-asupersync-0fxbp6)"
+    )]
+    pub async fn execute(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, MySqlError> {
+        self.execute_unchecked(cx, sql).await
+    }
+
+    /// br-asupersync-0fxbp6 — Execute a simple (unparameterized) command
+    /// within this transaction.
+    ///
+    /// **Security:** see [`MySqlConnection::execute_unchecked`]. `sql` must
+    /// be a trusted literal or fully caller-controlled.
+    pub async fn execute_unchecked(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, MySqlError> {
+        if self.finished {
+            return Outcome::Err(MySqlError::TransactionFinished);
+        }
+        self.conn.execute_unchecked(cx, sql).await
     }
 }
 
@@ -3870,6 +4074,56 @@ mod tests {
         assert_eq!(opts.host, "localhost");
         assert_eq!(opts.port, 3306);
         assert_eq!(opts.database, Some("mydb".to_string()));
+    }
+
+    /// br-asupersync-fldb34 — Debug must redact the password.
+    #[test]
+    fn debug_impl_redacts_password() {
+        let opts = MySqlConnectOptions::parse("mysql://user:hunter2@localhost:3306/mydb").unwrap();
+        let dbg = format!("{opts:?}");
+        assert!(dbg.contains("[REDACTED]"), "expected [REDACTED] in {dbg}");
+        assert!(
+            !dbg.contains("hunter2"),
+            "password leaked through Debug output: {dbg}"
+        );
+        assert!(dbg.contains("user"), "username should still appear: {dbg}");
+        assert!(dbg.contains("localhost"), "host should still appear: {dbg}");
+    }
+
+    /// br-asupersync-fldb34 — None password renders as `None`, not `[REDACTED]`.
+    #[test]
+    fn debug_impl_password_none_is_not_redacted() {
+        let opts = MySqlConnectOptions::parse("mysql://user@localhost/db").unwrap();
+        let dbg = format!("{opts:?}");
+        // password: None → field renders as "password: None"
+        assert!(
+            dbg.contains("None"),
+            "missing password should render as None: {dbg}"
+        );
+        assert!(!dbg.contains("[REDACTED]"));
+    }
+
+    /// br-asupersync-rsifm3 — IsolationLevel SQL fragments are exact and stable.
+    #[test]
+    fn isolation_level_sql_fragments() {
+        assert_eq!(IsolationLevel::ReadUncommitted.as_sql(), "READ UNCOMMITTED");
+        assert_eq!(IsolationLevel::ReadCommitted.as_sql(), "READ COMMITTED");
+        assert_eq!(IsolationLevel::RepeatableRead.as_sql(), "REPEATABLE READ");
+        assert_eq!(IsolationLevel::Serializable.as_sql(), "SERIALIZABLE");
+        assert_eq!(format!("{}", IsolationLevel::Serializable), "SERIALIZABLE");
+    }
+
+    /// br-asupersync-rsifm3 — verify the SQL strings begin_with_isolation
+    /// will emit. The pair of statements (SET TRANSACTION + START TRANSACTION)
+    /// must match what the MySQL/MariaDB protocol expects.
+    #[test]
+    fn isolation_level_begin_sql_strings_match_spec() {
+        let level = IsolationLevel::Serializable;
+        let set_sql = format!("SET TRANSACTION ISOLATION LEVEL {level}");
+        assert_eq!(set_sql, "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE");
+        let access_mode = "READ ONLY";
+        let start_sql = format!("START TRANSACTION {access_mode}");
+        assert_eq!(start_sql, "START TRANSACTION READ ONLY");
     }
 
     #[test]
