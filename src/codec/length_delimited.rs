@@ -27,6 +27,26 @@ pub struct LengthDelimitedCodecBuilder {
 enum DecodeState {
     Head,
     Data(usize),
+    /// Discarding the remaining bytes of an over-sized frame (or any
+    /// frame whose adjusted length failed validation post-header). The
+    /// counter is the number of bytes still to drain before the codec
+    /// can attempt to decode the next frame's header.
+    ///
+    /// br-asupersync-o7e5xu: previously, when `adjusted_frame_len`
+    /// returned `Err(frame length exceeds max_frame_length)`, the `?`
+    /// propagated WITHOUT consuming the length-prefix bytes. The next
+    /// `decode()` call read the same bytes, computed the same too-large
+    /// length, returned the same `Err` — infinite re-emission per
+    /// poll. The Skip state is the framing-recovery counter: once we
+    /// detect a bad length we consume the header + skip the body
+    /// across however many `decode()` calls it takes for the body to
+    /// arrive on the wire, then resume normal decoding.
+    ///
+    /// `u64` (not `usize`) because the offending advertised length can
+    /// be near `u64::MAX` on a 64-bit target while we only buffer
+    /// `usize::MAX` bytes per call — the counter must outlive the
+    /// in-buffer suffix.
+    Skip(u64),
 }
 
 fn max_length_field_value(length_field_length: usize) -> io::Result<u64> {
@@ -220,7 +240,36 @@ impl Decoder for LengthDelimitedCodec {
                     }
 
                     let raw_len = self.decode_head(src)?;
-                    let frame_len = self.adjusted_frame_len(raw_len)?;
+                    let frame_len = match self.adjusted_frame_len(raw_len) {
+                        Ok(n) => n,
+                        Err(e) => {
+                            // br-asupersync-o7e5xu: framing recovery on
+                            // any post-header length validation failure
+                            // (max_frame_length exceeded, negative
+                            // adjustment, length overflow, etc).
+                            //
+                            // Without this branch, the `?` shortcut would
+                            // propagate `e` while leaving `src` untouched.
+                            // The next decode() call would re-read the
+                            // same length bytes and re-emit the same Err
+                            // — an infinite loop on the caller's poll.
+                            //
+                            // Consume the header bytes from the buffer
+                            // and transition to Skip state with a counter
+                            // sized to drain the offending frame's body
+                            // across however many decode() calls it
+                            // takes for the body to arrive on the wire.
+                            // The body skip-count is the RAW length
+                            // (pre-adjustment) because that's what the
+                            // peer claims to have written — adjustment
+                            // is a length-field semantic, not a wire
+                            // count. Saturate to u64::MAX defensively
+                            // if the raw length is somehow nonsense.
+                            let _ = src.split_to(header_len);
+                            self.state = DecodeState::Skip(raw_len);
+                            return Err(e);
+                        }
+                    };
                     let total_frame_len = header_len.checked_add(frame_len).ok_or_else(|| {
                         io::Error::new(io::ErrorKind::InvalidData, "frame length overflow")
                     })?;
@@ -255,6 +304,32 @@ impl Decoder for LengthDelimitedCodec {
                     let data = src.split_to(frame_len);
                     self.state = DecodeState::Head;
                     return Ok(Some(data));
+                }
+                DecodeState::Skip(remaining) => {
+                    // br-asupersync-o7e5xu: drain up to `remaining` bytes
+                    // from src; the offending body may span many decode()
+                    // calls. Once 0, transition back to Head and resume
+                    // normal decoding on the next iteration of the loop
+                    // (so a subsequent next-frame header in the same
+                    // buffer is processed without an extra poll).
+                    let avail = src.len() as u64;
+                    let drain = remaining.min(avail);
+                    if drain > 0 {
+                        // `drain` is bounded by `avail` (a usize) so this
+                        // try_from cannot fail; use as_usize via try_from
+                        // for explicitness.
+                        let drain_usize = usize::try_from(drain).unwrap_or(usize::MAX);
+                        let _ = src.split_to(drain_usize);
+                    }
+                    let new_remaining = remaining - drain;
+                    if new_remaining == 0 {
+                        self.state = DecodeState::Head;
+                        // Continue the loop — there may be a fresh
+                        // header already buffered.
+                        continue;
+                    }
+                    self.state = DecodeState::Skip(new_remaining);
+                    return Ok(None);
                 }
             }
         }
@@ -468,6 +543,121 @@ mod tests {
 
         let err = codec.decode(&mut buf).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    // ─── br-asupersync-o7e5xu: framing-recovery regression tests ────────
+
+    /// The decoder MUST advance past the offending header on a
+    /// max_frame_length violation. Without the fix, repeated decode()
+    /// calls re-emit the same Err forever (infinite loop on the
+    /// caller's poll).
+    #[test]
+    fn o7e5xu_max_frame_length_consumes_header_then_skips_body() {
+        let mut codec = LengthDelimitedCodec::builder()
+            .max_frame_length(4)
+            .new_codec();
+
+        let mut buf = BytesMut::new();
+        // Frame 1: oversized (length=5, max=4). 4-byte header + 5-byte body.
+        buf.put_u8(0);
+        buf.put_u8(0);
+        buf.put_u8(0);
+        buf.put_u8(5);
+        buf.put_slice(b"hello");
+        // Frame 2: well-formed (length=3, body=b"abc").
+        buf.put_u8(0);
+        buf.put_u8(0);
+        buf.put_u8(0);
+        buf.put_u8(3);
+        buf.put_slice(b"abc");
+
+        // First call: returns the max-frame-length error AND consumes
+        // the offending header + transitions to Skip state.
+        let err = codec.decode(&mut buf).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+
+        // Second call: drains the over-sized body (5 bytes), transitions
+        // back to Head, and immediately decodes the next well-formed
+        // frame in the same loop iteration.
+        let frame = codec.decode(&mut buf).expect("decode must not error").expect("frame ready");
+        assert_eq!(frame.as_ref(), b"abc");
+
+        // Buffer is fully drained.
+        assert_eq!(buf.len(), 0);
+    }
+
+    /// Repeated polls after a max-frame-length error MUST NOT re-emit
+    /// the same Err — they must drain the offending body and then
+    /// either need-more-bytes or yield the next frame.
+    #[test]
+    fn o7e5xu_repeat_poll_does_not_reemit_max_frame_error() {
+        let mut codec = LengthDelimitedCodec::builder()
+            .max_frame_length(4)
+            .new_codec();
+
+        let mut buf = BytesMut::new();
+        // Single oversized frame; no follow-on data.
+        buf.put_u8(0);
+        buf.put_u8(0);
+        buf.put_u8(0);
+        buf.put_u8(5);
+        buf.put_slice(b"hello");
+
+        // First call: error.
+        let err = codec.decode(&mut buf).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+
+        // Second and subsequent calls: NEVER again the same Err.
+        // The body got drained on the second call (5 bytes available,
+        // 5 to skip → Skip(0) → Head). Buffer is empty so the third
+        // call returns Ok(None).
+        let _drained = codec.decode(&mut buf).expect("must not Err on second poll");
+        let third = codec.decode(&mut buf).expect("must not Err on third poll");
+        assert!(third.is_none(), "buffer is empty, must yield Ok(None)");
+    }
+
+    /// The Skip state must persist across decode() calls when the
+    /// offending body arrives in chunks (the realistic IO pattern).
+    #[test]
+    fn o7e5xu_skip_state_persists_across_chunked_body_arrival() {
+        let mut codec = LengthDelimitedCodec::builder()
+            .max_frame_length(2)
+            .new_codec();
+
+        // Header advertises 7 bytes; max is 2.
+        let mut buf = BytesMut::new();
+        buf.put_u8(0);
+        buf.put_u8(0);
+        buf.put_u8(0);
+        buf.put_u8(7);
+        // Body chunk 1: 3 of 7 bytes.
+        buf.put_slice(b"abc");
+
+        // First call: Err + transition to Skip(7).
+        let err = codec.decode(&mut buf).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+
+        // Second call: drains the 3 bytes available; remaining = 4.
+        let r = codec.decode(&mut buf).expect("must not Err");
+        assert!(r.is_none(), "still skipping");
+        assert_eq!(buf.len(), 0);
+
+        // Body chunk 2: 4 more bytes arrive.
+        buf.put_slice(b"defg");
+
+        // Third call: drains the 4 bytes; Skip(0) → Head; buffer empty.
+        let r = codec.decode(&mut buf).expect("must not Err");
+        assert!(r.is_none(), "skip complete, no next frame yet");
+
+        // Now a fresh frame arrives.
+        buf.put_u8(0);
+        buf.put_u8(0);
+        buf.put_u8(0);
+        buf.put_u8(2);
+        buf.put_slice(b"OK");
+
+        let frame = codec.decode(&mut buf).expect("decode").expect("frame");
+        assert_eq!(frame.as_ref(), b"OK");
     }
 
     // Pure data-type tests (wave 15 – CyanBarn)
