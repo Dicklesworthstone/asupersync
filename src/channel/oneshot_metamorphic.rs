@@ -87,7 +87,7 @@ fn mr1_permit_drop_equivalence() {
 
             // Reserve and immediately drop permit
             {
-                let _permit: oneshot::SendPermit<TestValue> = tx.reserve(&cx);
+                let _permit: oneshot::SendPermit<TestValue> = tx.reserve(&cx).expect("reserve 1");
                 // permit is dropped here without send()
             }
 
@@ -179,9 +179,9 @@ fn mr2_send_atomicity() {
                             Err(e) => Err(format!("Recv failed after successful send: {:?}", e)),
                         }
                     }
-                    Err(SendError::Disconnected(_)) => {
-                        // Receiver was dropped - this shouldn't happen in this path
-                        Err("Unexpected SendError::Disconnected".to_string())
+                    Err(SendError::Disconnected(_) | SendError::Cancelled(_)) => {
+                        // Receiver was dropped or cancelled - this shouldn't happen in this path
+                        Err("Unexpected SendError::Disconnected or Cancelled".to_string())
                     }
                 }
             }
@@ -240,7 +240,7 @@ fn mr3_receiver_drop_detection() {
 
             if use_reserve {
                 // Test via reserve + send pattern
-                let permit = tx.reserve(&cx);
+                let permit = tx.reserve(&cx).expect("reserve 3");
 
                 // MR3.1: is_closed should detect receiver drop
                 if !permit.is_closed() {
@@ -249,7 +249,7 @@ fn mr3_receiver_drop_detection() {
 
                 // Send should still fail gracefully with original value
                 match permit.send(value.clone()) {
-                    Err(SendError::Disconnected(returned_value)) => {
+                    Err(SendError::Disconnected(returned_value) | SendError::Cancelled(returned_value)) => {
                         if returned_value == value {
                             Ok(("reserve_disconnected", returned_value))
                         } else {
@@ -262,7 +262,7 @@ fn mr3_receiver_drop_detection() {
             } else {
                 // Test via direct send pattern
                 match tx.send(&cx, value.clone()) {
-                    Err(SendError::Disconnected(returned_value)) => {
+                    Err(SendError::Disconnected(returned_value) | SendError::Cancelled(returned_value)) => {
                         if returned_value == value {
                             Ok(("direct_disconnected", returned_value))
                         } else {
@@ -336,7 +336,7 @@ fn mr4_cancel_invariant_preservation() {
         let cx_send_after_drop = create_test_context(3, 1);
         drop(rx_after_drop);
         match tx_after_drop.send(&cx_send_after_drop, value.clone()) {
-            Err(SendError::Disconnected(returned_value)) => {
+            Err(SendError::Disconnected(returned_value) | SendError::Cancelled(returned_value)) => {
                 prop_assert_eq!(returned_value, value);
             }
             Ok(()) => prop_assert!(false, "send should fail when receiver is dropped"),
@@ -362,7 +362,7 @@ fn mr_composite_abort_vs_send_fail_equivalence() {
             let (tx, rx) = oneshot::channel::<TestValue>();
             let cx = create_test_context(1, 1);
 
-            let permit = tx.reserve(&cx);
+            let permit = tx.reserve(&cx).expect("reserve 5");
             drop(rx); // Drop receiver
             permit.abort(); // Explicit abort
 
@@ -374,11 +374,11 @@ fn mr_composite_abort_vs_send_fail_equivalence() {
             let (tx, rx) = oneshot::channel::<TestValue>();
             let cx = create_test_context(1, 2);
 
-            let permit = tx.reserve(&cx);
+            let permit = tx.reserve(&cx).expect("reserve 5");
             drop(rx); // Drop receiver
 
             match permit.send(value.clone()) {
-                Err(SendError::Disconnected(returned_value)) => {
+                Err(SendError::Disconnected(returned_value) | SendError::Cancelled(returned_value)) => {
                     if returned_value == value {
                         Ok("send_failed")
                     } else {
@@ -400,7 +400,7 @@ fn mr_composite_abort_vs_send_fail_equivalence() {
         let cx4 = create_test_context(4, 4);
 
         // Simulate abort scenario
-        let permit3 = tx3.reserve(&cx3);
+        let permit3 = tx3.reserve(&cx3).expect("reserve 3");
         permit3.abort();
         let recv_result3 = block_on(rx3.recv(&cx3));
 
@@ -495,7 +495,7 @@ mod tests {
             let cx = create_test_context(1, 1);
 
             {
-                let _permit: oneshot::SendPermit<TestValue> = tx.reserve(&cx);
+                let _permit: oneshot::SendPermit<TestValue> = tx.reserve(&cx).expect("reserve 1");
                 // Drop permit without sending
             }
 
