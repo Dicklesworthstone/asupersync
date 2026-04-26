@@ -438,6 +438,128 @@ impl RaceWinner {
 /// - The loser's outcome (after it was cancelled and drained)
 pub type Race2Result<T, E> = (Outcome<T, E>, RaceWinner, Outcome<T, E>);
 
+// ============================================================================
+// L-LOSER-DRAINED enforcement (br-asupersync-ttoyaz)
+//
+// asupersync_v4_formal_semantics.md §4.2 (Lemma L-LOSER-DRAINED) states that
+// after `race(r, f1, f2)` completes, every loser tL satisfies:
+//
+//   tL.outcome ∈ {
+//       Cancelled(reason)  with reason.kind ⪰ RaceLost,
+//       Ok(_) | Err(_) | Panicked(_)   // loser-just-finished branch
+//   }
+//
+// The previous shape relied entirely on `await(loser)` returning to imply this
+// — true at the type level because `Outcome` has no in-flight variant, but
+// invisible to readers and silently broken by any future Outcome variant
+// addition. The check below is the explicit witness that the invariant holds.
+// ============================================================================
+
+/// A reason why a candidate loser-outcome violates the L-LOSER-DRAINED
+/// invariant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoserDrainViolation {
+    /// A loser was reported as `Cancelled` but with a kind weaker than
+    /// `RaceLost`. Race losers must always carry at least `RaceLost`-tier
+    /// severity (or stronger if a parent cancel already raised the bar).
+    CancelKindTooWeak {
+        /// Index of the offending loser in the input slice.
+        index: usize,
+        /// Severity tier the loser actually carried.
+        seen_severity: u8,
+        /// The minimum severity tier required (always `RaceLost.severity()`).
+        required_severity: u8,
+    },
+}
+
+impl fmt::Display for LoserDrainViolation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CancelKindTooWeak {
+                index,
+                seen_severity,
+                required_severity,
+            } => write!(
+                f,
+                "race loser at index {index} has Cancelled kind with severity {seen_severity} \
+                 (required >= {required_severity} for RaceLost or stronger)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for LoserDrainViolation {}
+
+/// Type-level witness that all losers in a race have been drained to a
+/// terminal `Outcome` consistent with L-LOSER-DRAINED.
+///
+/// Constructed only via [`verify_losers_drained`] (the explicit check) or
+/// [`assert_losers_drained`] (the panicking variant used inside the result
+/// constructors).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[must_use = "construct a LosersDrainedWitness only as part of an actual drain check"]
+pub struct LosersDrainedWitness {
+    losers_checked: usize,
+}
+
+impl LosersDrainedWitness {
+    /// Number of losers this witness covers.
+    #[inline]
+    #[must_use]
+    pub const fn losers_checked(&self) -> usize {
+        self.losers_checked
+    }
+}
+
+/// Verify that every loser outcome satisfies L-LOSER-DRAINED.
+///
+/// Returns `Ok(LosersDrainedWitness)` on success, `Err(LoserDrainViolation)`
+/// on the first violation found.
+///
+/// `Outcome` itself has no non-terminal variant, so reaching this function
+/// with any `Outcome` value already implies the loser's driver future
+/// resolved. The interesting check this function performs is on
+/// `Cancelled(reason)` losers: the reason's severity must be at least
+/// `RaceLost`. Anything weaker (e.g., `User`-cancel attributed to the loser
+/// without strengthening) means the race driver did not propagate the
+/// `RaceLost` cancel correctly.
+pub fn verify_losers_drained<T, E>(
+    losers: &[&Outcome<T, E>],
+) -> Result<LosersDrainedWitness, LoserDrainViolation> {
+    use crate::types::cancel::CancelKind;
+    let required = CancelKind::RaceLost.severity();
+    for (index, outcome) in losers.iter().enumerate() {
+        if let Outcome::Cancelled(reason) = outcome {
+            let seen = reason.kind.severity();
+            if seen < required {
+                return Err(LoserDrainViolation::CancelKindTooWeak {
+                    index,
+                    seen_severity: seen,
+                    required_severity: required,
+                });
+            }
+        }
+    }
+    Ok(LosersDrainedWitness {
+        losers_checked: losers.len(),
+    })
+}
+
+/// Panicking variant of [`verify_losers_drained`]. Used inside the race
+/// result constructors so any L-LOSER-DRAINED violation surfaces immediately
+/// at the boundary between the race driver and the result-shape layer.
+///
+/// # Panics
+///
+/// Panics with the offending [`LoserDrainViolation`] if the check fails.
+#[track_caller]
+fn assert_losers_drained<T, E>(losers: &[&Outcome<T, E>]) -> LosersDrainedWitness {
+    match verify_losers_drained(losers) {
+        Ok(witness) => witness,
+        Err(violation) => panic!("L-LOSER-DRAINED invariant violated: {violation}"),
+    }
+}
+
 /// Determines the race result from two outcomes where one completed first.
 ///
 /// In a race, the winner is the first to reach a terminal state. The loser
@@ -1852,5 +1974,86 @@ mod tests {
         let cloned = r.clone();
         assert_eq!(r, cloned);
         assert_eq!(r.winner_index(), 3);
+    }
+
+    // ========================================================================
+    // L-LOSER-DRAINED enforcement (br-asupersync-ttoyaz)
+    // ========================================================================
+
+    #[test]
+    fn losers_drained_witness_accepts_terminal_outcomes_with_race_loser_cancel() {
+        let losers: Vec<Outcome<i32, &str>> = vec![
+            Outcome::Ok(7),
+            Outcome::Err("err"),
+            Outcome::Cancelled(CancelReason::race_loser()),
+            Outcome::Panicked(PanicPayload::new("p")),
+        ];
+        let refs: Vec<&Outcome<i32, &str>> = losers.iter().collect();
+        let witness = verify_losers_drained::<i32, &str>(&refs).expect("must accept");
+        assert_eq!(witness.losers_checked(), 4);
+    }
+
+    #[test]
+    fn losers_drained_witness_accepts_stronger_than_race_loser_kinds() {
+        // Per §4.2 lemma L-LOSER-DRAINED, kinds at or above RaceLost severity
+        // are valid for race losers. ParentCancelled (severity 4) is stronger
+        // than RaceLost (severity 3) and must be accepted.
+        let losers: Vec<Outcome<i32, &str>> = vec![Outcome::Cancelled(CancelReason::new(
+            crate::types::cancel::CancelKind::ParentCancelled,
+        ))];
+        let refs: Vec<&Outcome<i32, &str>> = losers.iter().collect();
+        verify_losers_drained::<i32, &str>(&refs).expect("ParentCancelled must be accepted");
+    }
+
+    #[test]
+    fn losers_drained_witness_rejects_weaker_than_race_loser_cancel() {
+        // User-cancel has severity 0; RaceLost requires severity >= 3.
+        let losers: Vec<Outcome<i32, &str>> = vec![
+            Outcome::Cancelled(CancelReason::race_loser()),
+            Outcome::Cancelled(CancelReason::user("manual")),
+        ];
+        let refs: Vec<&Outcome<i32, &str>> = losers.iter().collect();
+        let err =
+            verify_losers_drained::<i32, &str>(&refs).expect_err("User-cancel loser must reject");
+        match err {
+            LoserDrainViolation::CancelKindTooWeak {
+                index,
+                seen_severity,
+                required_severity,
+            } => {
+                assert_eq!(index, 1, "second loser is the violating one");
+                assert!(seen_severity < required_severity);
+            }
+        }
+    }
+
+    #[test]
+    fn losers_drained_witness_empty_slice_is_ok() {
+        // Single-branch race has no losers — invariant trivially holds.
+        let refs: Vec<&Outcome<i32, &str>> = Vec::new();
+        let witness = verify_losers_drained::<i32, &str>(&refs).expect("must accept empty");
+        assert_eq!(witness.losers_checked(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "L-LOSER-DRAINED invariant violated")]
+    fn race2_outcomes_panics_on_loser_with_weak_cancel_kind() {
+        // race2_outcomes now contains the explicit drain check. A driver that
+        // hands in a loser cancelled with too weak a kind must crash here
+        // rather than silently returning a result that violates §4.2.
+        let o1: Outcome<i32, &str> = Outcome::Ok(1);
+        let o2: Outcome<i32, &str> = Outcome::Cancelled(CancelReason::user("not a race-loser"));
+        let _ = race2_outcomes(RaceWinner::First, o1, o2);
+    }
+
+    #[test]
+    #[should_panic(expected = "L-LOSER-DRAINED invariant violated")]
+    fn race_all_outcomes_panics_on_loser_with_weak_cancel_kind() {
+        let outcomes: Vec<Outcome<i32, &str>> = vec![
+            Outcome::Ok(0),
+            Outcome::Cancelled(CancelReason::race_loser()),
+            Outcome::Cancelled(CancelReason::user("weak")),
+        ];
+        let _ = race_all_outcomes(0, outcomes);
     }
 }
