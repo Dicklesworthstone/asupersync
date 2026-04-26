@@ -3428,6 +3428,23 @@ struct RuntimeInner {
     deadline_monitor_shutdown: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Deadline monitor background thread handle.
     deadline_monitor_thread: Option<std::thread::JoinHandle<()>>,
+    /// Per-runtime monotonic counter for request-scoped task IDs.
+    ///
+    /// br-asupersync-3lk5n2: every request-scoped Cx built via
+    /// [`build_request_cx_from_inner`] used to mint its TaskId via
+    /// `TaskId::new_ephemeral()`, which draws from a process-global
+    /// `EPHEMERAL_TASK_COUNTER`. That counter is non-replayable
+    /// across processes and is shared by every runtime instance in
+    /// the same process. Two replays of the same lab scenario, or
+    /// two ostensibly-isolated lab runtimes in the same process,
+    /// produced different request-scoped TaskIds — defeating
+    /// crashpack-hash determinism and leaving the request task
+    /// invisible to oracle/deadline-monitor walks of `state.tasks`.
+    /// This per-runtime counter restores at-least intra-runtime
+    /// determinism. The TaskId is still not in the runtime's task
+    /// arena (which would require a deeper structured-spawn
+    /// refactor) but the determinism breach is closed.
+    request_task_counter: std::sync::atomic::AtomicU32,
 }
 
 impl RuntimeInner {
@@ -3543,9 +3560,28 @@ impl RuntimeInner {
                 blocking_pool,
                 deadline_monitor_shutdown: deadline_monitor.shutdown,
                 deadline_monitor_thread: deadline_monitor.thread,
+                request_task_counter: std::sync::atomic::AtomicU32::new(1),
             },
             workers,
         )
+    }
+
+    /// br-asupersync-3lk5n2: returns a fresh request-scoped TaskId
+    /// minted from a per-runtime monotonic counter. The ID is still
+    /// not in the runtime's task arena (closing that gap requires a
+    /// deeper structured-spawn refactor — see the bead notes), but
+    /// it is now replay-deterministic within a single runtime
+    /// instance: two LabRuntimes in the same process no longer share
+    /// a counter, and two replays of the same scenario produce the
+    /// same sequence of request-scoped IDs.
+    #[inline]
+    fn next_request_task_id(&self) -> crate::types::TaskId {
+        let index = self
+            .request_task_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Use generation 1 as the "request-scoped" marker, matching
+        // the bootstrap convention from types/id.rs::next_bootstrap_task_id.
+        crate::types::TaskId::from_arena(crate::util::ArenaIndex::new(index, 1))
     }
 
     /// Creates the blocking pool if configured with non-zero max threads.
@@ -3770,7 +3806,14 @@ fn run_future_with_budget<F: Future>(future: F, poll_budget: u32) -> F::Output {
 }
 
 fn build_request_cx_from_inner(inner: &Arc<RuntimeInner>, budget: Budget) -> crate::cx::Cx {
-    let task = crate::types::TaskId::new_ephemeral();
+    // br-asupersync-3lk5n2: was `TaskId::new_ephemeral()`, which
+    // drew from a process-global counter and randomised the
+    // request-scoped TaskId across replays + across sibling
+    // runtimes in the same process. The per-runtime counter
+    // restores intra-runtime determinism. The task is still not
+    // registered in `state.tasks` — that's a deeper refactor — but
+    // the determinism breach is closed.
+    let task = inner.next_request_task_id();
     let (observability, io_driver, timer_driver, blocking_pool, logical_clock, entropy, trace) = {
         let guard = inner
             .state
@@ -5783,5 +5826,53 @@ worker_threads = 16
             join.as_ref().get_ref().is_finished(),
             "join handle should remain finished after the terminal dropped-task poll"
         );
+    }
+
+    /// br-asupersync-3lk5n2: a Runtime's `request_cx_with_budget`
+    /// must mint successive request-scoped TaskIds from a per-runtime
+    /// counter — NOT from the process-global `EPHEMERAL_TASK_COUNTER`.
+    /// This test confirms intra-runtime monotonicity AND that two
+    /// independently-built runtimes share the deterministic counter
+    /// shape (each starts at 1) rather than racing on the global
+    /// counter. Replay determinism follows.
+    #[test]
+    fn lk5n2_request_task_ids_are_deterministic_per_runtime() {
+        init_test_logging();
+        let rt_a = RuntimeBuilder::new().build().expect("build runtime A");
+        let rt_b = RuntimeBuilder::new().build().expect("build runtime B");
+
+        let a1 = rt_a.request_cx_with_budget(Budget::INFINITE).task_id();
+        let a2 = rt_a.request_cx_with_budget(Budget::INFINITE).task_id();
+        let b1 = rt_b.request_cx_with_budget(Budget::INFINITE).task_id();
+        let b2 = rt_b.request_cx_with_budget(Budget::INFINITE).task_id();
+
+        // Successive ids in the same runtime must increment.
+        assert_ne!(
+            a1, a2,
+            "br-asupersync-3lk5n2: per-runtime counter must advance"
+        );
+        assert_ne!(
+            b1, b2,
+            "br-asupersync-3lk5n2: per-runtime counter must advance"
+        );
+
+        // Two runtimes must each start their own counter, so the
+        // first-id-of-A and first-id-of-B match — they are NOT racing
+        // on the process-global EPHEMERAL_TASK_COUNTER.
+        assert_eq!(
+            a1, b1,
+            "br-asupersync-3lk5n2: each runtime starts its own counter; \
+             this assertion would have failed when both shared the \
+             process-global ephemeral counter"
+        );
+        assert_eq!(
+            a2, b2,
+            "br-asupersync-3lk5n2: per-runtime counters advance \
+             identically — replay determinism"
+        );
+
+        // Drop the runtimes cleanly to avoid side effects on later tests.
+        drop(rt_a);
+        drop(rt_b);
     }
 }
