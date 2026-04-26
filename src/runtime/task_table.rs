@@ -224,11 +224,15 @@ impl TaskTable {
     /// Inserts a task record into the arena (arena-index based).
     #[inline]
     pub fn insert(&mut self, mut record: TaskRecord) -> ArenaIndex {
-        self.tasks.insert_with(|idx| {
+        let phase = record.phase.load();
+        let deadline = record.deadline;
+        let idx = self.tasks.insert_with(|idx| {
             // Canonicalize record.id to its arena slot to keep table invariants intact.
             record.id = TaskId::from_arena(idx);
             record
-        })
+        });
+        self.note_task_added(phase, deadline);
+        idx
     }
 
     /// Removes a task record by arena index.
