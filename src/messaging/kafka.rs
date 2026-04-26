@@ -85,6 +85,13 @@ pub enum KafkaError {
     PolledAfterCompletion,
     /// Configuration error.
     Config(String),
+    /// The `kafka` feature is not enabled in this build.
+    ///
+    /// `KafkaProducer` / `TransactionalProducer` cannot reach a real broker
+    /// without the `kafka` cargo feature. Returned by `send`-family methods so
+    /// callers fail loudly instead of silently dropping messages onto the
+    /// in-process test stub. To use Kafka, build with `--features kafka`.
+    FeatureDisabled,
 }
 
 impl fmt::Display for KafkaError {
@@ -104,6 +111,10 @@ impl fmt::Display for KafkaError {
                 write!(f, "Kafka future polled after completion")
             }
             Self::Config(msg) => write!(f, "Kafka configuration error: {msg}"),
+            Self::FeatureDisabled => write!(
+                f,
+                "Kafka is unavailable: the `kafka` cargo feature is not enabled in this build"
+            ),
         }
     }
 }
@@ -988,7 +999,11 @@ impl KafkaProducer {
             .await
         }
 
-        #[cfg(not(feature = "kafka"))]
+        // Without the `kafka` cargo feature, only this crate's own tests are
+        // permitted to drive the in-process stub broker. Downstream production
+        // builds get a loud `FeatureDisabled` error instead of silent message
+        // loss against the stub. See br-asupersync-w2p2a0.
+        #[cfg(all(not(feature = "kafka"), test))]
         {
             Ok(stub_broker_publish(StubBrokerRecord {
                 topic: topic.to_string(),
@@ -998,6 +1013,10 @@ impl KafkaProducer {
                 timestamp: None,
                 headers: Vec::new(),
             }))
+        }
+        #[cfg(all(not(feature = "kafka"), not(test)))]
+        {
+            Err(KafkaError::FeatureDisabled)
         }
     }
 
@@ -1047,7 +1066,8 @@ impl KafkaProducer {
             .await
         }
 
-        #[cfg(not(feature = "kafka"))]
+        // See `send` above for the cfg-gating rationale (br-w2p2a0).
+        #[cfg(all(not(feature = "kafka"), test))]
         {
             Ok(stub_broker_publish(StubBrokerRecord {
                 topic: topic.to_string(),
@@ -1060,6 +1080,10 @@ impl KafkaProducer {
                     .map(|(key, value)| ((*key).to_string(), (*value).to_vec()))
                     .collect(),
             }))
+        }
+        #[cfg(all(not(feature = "kafka"), not(test)))]
+        {
+            Err(KafkaError::FeatureDisabled)
         }
     }
 
@@ -2802,5 +2826,34 @@ mod tests {
             thread_name, "asupersync-blocking",
             "expected kafka blocking helper to use the dedicated blocking-thread fallback"
         );
+    }
+
+    /// br-asupersync-w2p2a0 regression: when the `kafka` cargo feature is OFF,
+    /// downstream production code must receive a loud `FeatureDisabled` error
+    /// from the producer's send path instead of silently writing to the
+    /// in-process stub broker. The stub remains available to *this* crate's
+    /// own tests via `cfg(test)`, so the production-vs-test split is what we
+    /// pin here through Display + classifier checks.
+    #[test]
+    fn feature_disabled_error_has_clear_display_and_safe_classifiers() {
+        let err = KafkaError::FeatureDisabled;
+        let rendered = format!("{err}");
+        assert!(
+            rendered.contains("kafka") && rendered.contains("not enabled"),
+            "FeatureDisabled Display must explain the missing feature; got {rendered}"
+        );
+        // Loud failure semantics: NEVER classify as transient/retryable so
+        // retry loops cannot mask the silent-loss bug we just fixed.
+        assert!(!err.is_transient(), "FeatureDisabled is permanent");
+        assert!(!err.is_retryable(), "FeatureDisabled must not be retried");
+        assert!(
+            !err.is_connection_error(),
+            "FeatureDisabled is a build-config error, not a connection problem"
+        );
+        assert!(
+            !err.is_capacity_error(),
+            "FeatureDisabled is a build-config error, not a capacity problem"
+        );
+        assert!(!err.is_timeout(), "FeatureDisabled is not a timeout");
     }
 }
