@@ -1,0 +1,14 @@
+---
+source: tests/grpc_codec_golden.rs
+assertion_line: 116
+expression: "json!({\n    \"truncated_length_prefixed_message\":\n    {\n        \"decode_result\": match truncated_result\n        { Some(_) => \"decoded\", None => \"pending\", }, \"remaining_wire_hex\":\n        hex(truncated.as_ref()),\n    }, \"max_size_rejection\": { \"error\": oversize_error.to_string(), },\n})"
+---
+{
+  "max_size_rejection": {
+    "error": "message too large"
+  },
+  "truncated_length_prefixed_message": {
+    "decode_result": "pending",
+    "remaining_wire_hex": "00 00 00 00 04 61 62 63"
+  }
+}

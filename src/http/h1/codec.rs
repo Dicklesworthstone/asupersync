@@ -567,6 +567,7 @@ enum BodyKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(not(target_arch = "wasm32"))]
 pub(super) struct RequestHeadPreview {
     pub version: Version,
     pub headers: Vec<(String, String)>,
@@ -860,6 +861,7 @@ fn decode_head(
     Ok(Some((method, uri, version, headers, kind)))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(super) fn preview_request_head(
     codec: &Http1Codec,
     src: &BytesMut,
@@ -1678,7 +1680,7 @@ mod tests {
                 let mut request = Vec::new();
 
                 // Request line
-                let method = self.next_choice::<&[u8]>(&[b"POST", b"PUT", b"PATCH"]);
+                let method = self.next_choice(&[&b"POST"[..], &b"PUT"[..], &b"PATCH"[..]]);
                 request.extend_from_slice(method);
                 request.extend_from_slice(b" /test HTTP/1.1\r\n");
 
@@ -1710,9 +1712,12 @@ mod tests {
 
                 // Trailers (grammar condition)
                 if self.next_bool() {
-                    let trailer_names: &[&[u8]] =
-                        &[b"X-Checksum", b"X-Final-Status", b"X-Processing-Time"];
-                    let trailer_name = self.next_choice(trailer_names);
+                    let trailer_names = [
+                        &b"X-Checksum"[..],
+                        &b"X-Final-Status"[..],
+                        &b"X-Processing-Time"[..],
+                    ];
+                    let trailer_name = self.next_choice(&trailer_names);
                     request.extend_from_slice(trailer_name);
                     request.extend_from_slice(b": test-value\r\n");
                 }
@@ -1748,12 +1753,12 @@ mod tests {
                 requests.extend_from_slice(b"\r\n");
 
                 // Second request (pipelined)
-                let second_method = self.next_choice::<&[u8]>(&[b"GET", b"HEAD", b"POST"]);
+                let second_method = self.next_choice(&[&b"GET"[..], &b"HEAD"[..], &b"POST"[..]]);
                 requests.extend_from_slice(second_method);
                 requests.extend_from_slice(b" /second HTTP/1.1\r\n");
                 requests.extend_from_slice(b"Host: example.com\r\n");
 
-                if second_method == b"POST" {
+                if second_method == &b"POST"[..] {
                     requests.extend_from_slice(b"Content-Length: 4\r\n");
                     requests.extend_from_slice(b"\r\n");
                     requests.extend_from_slice(b"data");
@@ -1871,14 +1876,19 @@ mod tests {
             let mut request = Vec::new();
 
             // Grammar: Method selection
-            let method = combined_grammar.next_choice::<&[u8]>(&[b"GET", b"HEAD", b"POST", b"PUT"]);
+            let method = combined_grammar.next_choice(&[
+                &b"GET"[..],
+                &b"HEAD"[..],
+                &b"POST"[..],
+                &b"PUT"[..],
+            ]);
             request.extend_from_slice(method);
             request.extend_from_slice(b" /combined HTTP/1.1\r\n");
 
             // Grammar: Header combinations
             request.extend_from_slice(b"Host: test.example\r\n");
 
-            if method == b"POST" || method == b"PUT" {
+            if method == &b"POST"[..] || method == &b"PUT"[..] {
                 if combined_grammar.next_bool() {
                     // Chunked
                     request.extend_from_slice(b"Transfer-Encoding: chunked\r\n");

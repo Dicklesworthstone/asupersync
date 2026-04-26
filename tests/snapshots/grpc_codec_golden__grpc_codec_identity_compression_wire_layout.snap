@@ -1,0 +1,12 @@
+---
+source: tests/grpc_codec_golden.rs
+assertion_line: 77
+expression: "frame_fixture(\"identity\", wire.as_ref())"
+---
+{
+  "compressed": true,
+  "declared_length": 14,
+  "name": "identity",
+  "wire_hex": "01 00 00 00 0e 69 64 65 6e 74 69 74 79 2d 63 6f 64 65 63",
+  "wire_len": 19
+}
