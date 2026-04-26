@@ -2844,7 +2844,8 @@ mod tests {
         let mut cmd = Command::new("echo");
         cmd.arg("preserved-async").stdout(Stdio::Null);
 
-        let output = futures_lite::future::block_on(cmd.output_async()).expect("output failed");
+        let cx = Cx::for_testing();
+        let output = futures_lite::future::block_on(cmd.output_async(&cx)).expect("output failed");
         crate::assert_with_log!(
             output.stdout == b"preserved-async\n",
             "async output stdout",
@@ -2893,7 +2894,8 @@ mod tests {
         let mut cmd = Command::new("echo");
         cmd.arg("status-async-preserved").stdout(Stdio::Pipe);
 
-        let status = futures_lite::future::block_on(cmd.status_async()).expect("status failed");
+        let cx = Cx::for_testing();
+        let status = futures_lite::future::block_on(cmd.status_async(&cx)).expect("status failed");
         crate::assert_with_log!(
             status.success(),
             "async status success",
