@@ -1234,3 +1234,81 @@ mod validation_tests {
         }
     }
 }
+
+/// MR13: Byte-Identical Determinism Across Runs (br-asupersync-kohtae)
+///
+/// Property: encode(data, seed, symbol_size) × N runs MUST produce the
+/// EXACT SAME byte sequence for every emitted symbol. Any nondeterminism
+/// (HashMap iteration order, ambient time leak, scheduler-induced race in
+/// the encoder pipeline, non-deterministic pivot selection in the GF256
+/// solver) would surface here BEFORE corrupting downstream replay traces.
+///
+/// This is the foundation of asupersync's replay-determinism guarantee:
+/// MR1 (mr_encode_decode_identity) only verifies round-trip correctness —
+/// it does NOT assert the encoded SYMBOLS are byte-identical across runs,
+/// only that they decode back to the input. A subtly non-deterministic
+/// encoder could pass MR1 (round-trip works) while breaking replay.
+///
+/// Catches: HashMap-iteration order leaks, RNG state leaks across calls,
+/// any future change that introduces parallelism into the encoder.
+#[test]
+fn mr_byte_identical_determinism_across_runs() {
+    proptest!(|(
+        data_size in 128usize..512,
+        seed in any::<u64>(),
+    )| {
+        let cx = Cx::for_testing();
+        let data = generate_test_data(data_size, seed);
+        let object_id = ObjectId::new_for_test(seed);
+
+        let config = RaptorQConfig {
+            encoding: crate::config::EncodingConfig {
+                symbol_size: 16,
+                repair_overhead: 2.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        const N_RUNS: usize = 16;
+        let mut runs: Vec<Vec<Vec<u8>>> = Vec::with_capacity(N_RUNS);
+
+        for _ in 0..N_RUNS {
+            let sink = CollectorSink::new();
+            let mut sender = RaptorQSenderBuilder::new()
+                .config(config.clone())
+                .transport(sink)
+                .build()
+                .expect("sender build");
+            sender
+                .send_object(&cx, object_id, &data)
+                .expect("encoding should succeed");
+            // Capture each emitted symbol as Vec<u8> for byte-equality.
+            let run_symbols: Vec<Vec<u8>> = sender
+                .transport_mut()
+                .symbols()
+                .iter()
+                .map(|s| s.symbol().data().to_vec())
+                .collect();
+            runs.push(run_symbols);
+        }
+
+        // Property: every run MUST be byte-identical to run 0.
+        let baseline = &runs[0];
+        for (i, run) in runs.iter().enumerate().skip(1) {
+            prop_assert_eq!(
+                run.len(),
+                baseline.len(),
+                "run {} produced {} symbols vs baseline {} — non-deterministic count",
+                i, run.len(), baseline.len()
+            );
+            for (j, (a, b)) in baseline.iter().zip(run.iter()).enumerate() {
+                prop_assert_eq!(
+                    a, b,
+                    "non-deterministic symbol {} on run {}",
+                    j, i
+                );
+            }
+        }
+    });
+}

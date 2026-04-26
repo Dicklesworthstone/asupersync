@@ -579,7 +579,10 @@ mod tests {
         // Second call: drains the over-sized body (5 bytes), transitions
         // back to Head, and immediately decodes the next well-formed
         // frame in the same loop iteration.
-        let frame = codec.decode(&mut buf).expect("decode must not error").expect("frame ready");
+        let frame = codec
+            .decode(&mut buf)
+            .expect("decode must not error")
+            .expect("frame ready");
         assert_eq!(frame.as_ref(), b"abc");
 
         // Buffer is fully drained.
@@ -1804,6 +1807,103 @@ mod tests {
                 "Configuration {:?} failed round-trip test",
                 config
             );
+        }
+    }
+
+    /// MR7: Encoded-Length Monotonicity (br-asupersync-acz1zk)
+    ///
+    /// Property: for a fixed LengthDelimitedCodec configuration,
+    ///     payload_a.len() <= payload_b.len()
+    ///   ⇒
+    ///     encoded(payload_a).len() <= encoded(payload_b).len()
+    ///
+    /// This is the canonical sanity check for any framing codec —
+    /// violations indicate either non-deterministic header sizing
+    /// (length_field_length should be const per codec instance) or a
+    /// bug where the adjustment field accidentally inverts the encoded
+    /// ordering.
+    ///
+    /// The property holds trivially for the current implementation
+    /// (header is fixed-width, body is appended verbatim) but the lack
+    /// of an explicit test means any future variable-length-header
+    /// refactor or compression integration could regress without
+    /// detection. This regression guard locks in the invariant.
+    ///
+    /// Catches: variable-header reframings, header-compression
+    /// experiments, length_adjustment that accidentally inverts
+    /// ordering, padding policies that grow shorter inputs more than
+    /// longer ones.
+    #[test]
+    fn mr_encoded_length_monotonicity() {
+        // Sweep across multiple length-field widths and a representative
+        // payload-length grid. The grid is dense in the small-payload
+        // region (where header overhead dominates), and skips to a few
+        // large jumps to catch any width-dependent bug.
+        for length_field_length in [1usize, 2, 4, 8] {
+            // 1-byte width caps payloads at 255; respect that cap.
+            let cap = match length_field_length {
+                1 => 255,
+                2 => 65_535,
+                _ => 100_000,
+            };
+            let lengths: Vec<usize> = vec![
+                0, 1, 2, 7, 16, 31, 64, 100, 127, 200, 255,
+            ]
+            .into_iter()
+            .filter(|&l| l <= cap)
+            .chain(if cap > 1024 { vec![1024, 4096, 65_535] } else { vec![] })
+            .filter(|&l| l <= cap)
+            .collect();
+
+            // Encode each length and capture the encoded-output size.
+            let mut encoded_sizes: Vec<(usize, usize)> = Vec::new();
+            for &payload_len in &lengths {
+                let mut codec = LengthDelimitedCodec::builder()
+                    .length_field_length(length_field_length)
+                    .max_frame_length(8 * 1024 * 1024)
+                    .new_codec();
+                let payload = vec![0xA5u8; payload_len];
+                let mut buf = BytesMut::new();
+                codec
+                    .encode(BytesMut::from(&payload[..]), &mut buf)
+                    .unwrap_or_else(|e| panic!(
+                        "encode failed for width={length_field_length} len={payload_len}: {e}"
+                    ));
+                encoded_sizes.push((payload_len, buf.len()));
+            }
+
+            // Property: for every (a, b) pair with a.payload_len <=
+            // b.payload_len, a.encoded_len MUST be <= b.encoded_len.
+            for i in 0..encoded_sizes.len() {
+                for j in (i + 1)..encoded_sizes.len() {
+                    let (a_len, a_enc) = encoded_sizes[i];
+                    let (b_len, b_enc) = encoded_sizes[j];
+                    assert!(
+                        a_len <= b_len,
+                        "test bug: lengths not sorted ({a_len} > {b_len})"
+                    );
+                    assert!(
+                        a_enc <= b_enc,
+                        "MONOTONICITY VIOLATION (width={length_field_length}): \
+                         payload {a_len}B → encoded {a_enc}B, \
+                         payload {b_len}B → encoded {b_enc}B; \
+                         smaller input produced LARGER encoded output"
+                    );
+                }
+            }
+
+            // Additional invariant: encoded length = header + payload.
+            // (Locks the current fixed-header semantics — if a future
+            // refactor introduces variable headers, this assertion
+            // forces a deliberate update.)
+            for &(payload_len, encoded_len) in &encoded_sizes {
+                assert_eq!(
+                    encoded_len,
+                    payload_len + length_field_length,
+                    "encoded == payload + header invariant violated for \
+                     width={length_field_length} payload_len={payload_len}"
+                );
+            }
         }
     }
 }
