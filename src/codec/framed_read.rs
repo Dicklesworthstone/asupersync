@@ -4,6 +4,7 @@ use crate::bytes::BytesMut;
 use crate::codec::Decoder;
 use crate::io::{AsyncRead, ReadBuf};
 use crate::stream::Stream;
+use std::io;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -18,6 +19,20 @@ const READ_BUF_SIZE: usize = 8192;
 /// can monopolize a single executor turn indefinitely.
 const MAX_READ_PASSES_PER_POLL: usize = 32;
 
+/// Default upper bound, in bytes, on the partial-frame buffer
+/// retained across `poll_next` calls.
+///
+/// 8 MiB matches `LengthDelimitedCodec`'s default `max_frame_length`,
+/// so the cap accommodates a single max-size frame mid-flight per
+/// FramedRead. Without this bound, a slowloris-style attacker can
+/// stream just under `max_frame_length` bytes per connection without
+/// ever producing a complete frame; the buffer grows monotonically
+/// per connection and, multiplied by concurrent connections, exhausts
+/// server memory. The cooperative `MAX_READ_PASSES_PER_POLL` budget
+/// only yields the executor — it does NOT free the buffer.
+/// (br-asupersync-bj427s.)
+pub const DEFAULT_MAX_BUFFER_LEN: usize = 8 * 1024 * 1024;
+
 /// Async framed reader that applies a `Decoder` to an `AsyncRead` source.
 ///
 /// Implements `Stream` where each item is a decoded frame. Data is read
@@ -28,11 +43,27 @@ const MAX_READ_PASSES_PER_POLL: usize = 32;
 ///
 /// `poll_next` is cancel-safe. Partial data remains in the internal buffer
 /// across cancellations. No decoded frame is lost unless it was already yielded.
+///
+/// # Memory bound (security)
+///
+/// Each instance carries a `max_buffer_len` cap (default
+/// [`DEFAULT_MAX_BUFFER_LEN`] = 8 MiB). When inbound bytes would push
+/// the partial-frame buffer past this cap, `poll_next` yields
+/// `Err(InvalidData)` rather than appending — the caller MUST treat
+/// the FramedRead as terminated. Without this bound, a peer that
+/// streams bytes without ever closing a frame causes unbounded
+/// per-connection memory growth (canonical slowloris-on-framing
+/// attack — see asupersync-bj427s).
+///
+/// Configure with [`Self::with_max_buffer_len`]; a value of `0`
+/// disables enforcement (matches the no-cap convention used elsewhere
+/// in this crate).
 pub struct FramedRead<R, D> {
     inner: R,
     decoder: D,
     buffer: BytesMut,
     eof: bool,
+    max_buffer_len: usize,
 }
 
 impl<R, D> FramedRead<R, D> {
@@ -49,7 +80,29 @@ impl<R, D> FramedRead<R, D> {
             decoder,
             buffer: BytesMut::with_capacity(capacity),
             eof: false,
+            max_buffer_len: DEFAULT_MAX_BUFFER_LEN,
         }
+    }
+
+    /// Set the maximum byte length of the partial-frame buffer. When
+    /// inbound bytes would push the buffer past this cap, `poll_next`
+    /// yields `Err(InvalidData)` rather than appending. A value of `0`
+    /// disables enforcement entirely (matches the no-cap convention
+    /// used elsewhere in this crate). Defaults to
+    /// [`DEFAULT_MAX_BUFFER_LEN`] = 8 MiB.
+    /// (br-asupersync-bj427s.)
+    #[must_use]
+    pub fn with_max_buffer_len(mut self, max: usize) -> Self {
+        self.max_buffer_len = max;
+        self
+    }
+
+    /// Returns the configured maximum partial-frame buffer length in
+    /// bytes. `0` indicates no cap.
+    #[inline]
+    #[must_use]
+    pub fn max_buffer_len(&self) -> usize {
+        self.max_buffer_len
     }
 
     /// Returns a reference to the underlying reader.
@@ -142,6 +195,37 @@ where
                         this.eof = true;
                         // Loop back to handle EOF decoding.
                     } else {
+                        // br-asupersync-bj427s: bound the partial-frame
+                        // buffer BEFORE appending. Without this check,
+                        // a peer that streams bytes without ever
+                        // closing a frame causes unbounded per-
+                        // connection memory growth. The check is
+                        // intentionally PRE-append so the buffer
+                        // never crosses the cap; the caller observes
+                        // the error before any over-the-cap memory is
+                        // ever allocated. A max_buffer_len of 0
+                        // disables enforcement.
+                        if this.max_buffer_len > 0 {
+                            let projected = this
+                                .buffer
+                                .len()
+                                .saturating_add(filled.len());
+                            if projected > this.max_buffer_len {
+                                let cap = this.max_buffer_len;
+                                let buffered = this.buffer.len();
+                                let added = filled.len();
+                                let err = io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    format!(
+                                        "FramedRead buffer would exceed max_buffer_len: \
+                                         {buffered} + {added} = {projected} > {cap} bytes \
+                                         (slowloris-style partial-frame attack? \
+                                         see br-asupersync-bj427s)"
+                                    ),
+                                );
+                                return Poll::Ready(Some(Err(err.into())));
+                            }
+                        }
                         this.buffer.put_slice(filled);
                         read_passes += 1;
                         if read_passes >= MAX_READ_PASSES_PER_POLL {
@@ -441,6 +525,119 @@ mod tests {
                 assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
             }
             other => panic!("expected io error propagation, got {other:?}"), // ubs:ignore - test logic
+        }
+    }
+
+    // br-asupersync-bj427s: max_buffer_len cap prevents slowloris-style
+    // partial-frame memory exhaustion.
+
+    #[test]
+    fn framed_read_default_max_buffer_len_matches_lengthdelimited_default() {
+        let reader = SliceReader::new(b"");
+        let framed: FramedRead<SliceReader, LinesCodec> =
+            FramedRead::new(reader, LinesCodec::new());
+        assert_eq!(framed.max_buffer_len(), DEFAULT_MAX_BUFFER_LEN);
+        assert_eq!(framed.max_buffer_len(), 8 * 1024 * 1024);
+    }
+
+    #[test]
+    fn framed_read_with_max_buffer_len_overrides_default() {
+        let reader = SliceReader::new(b"");
+        let framed: FramedRead<SliceReader, LinesCodec> =
+            FramedRead::new(reader, LinesCodec::new()).with_max_buffer_len(64);
+        assert_eq!(framed.max_buffer_len(), 64);
+    }
+
+    #[test]
+    fn framed_read_max_buffer_len_zero_disables_cap() {
+        let reader = SliceReader::new(b"");
+        let framed: FramedRead<SliceReader, LinesCodec> =
+            FramedRead::new(reader, LinesCodec::new()).with_max_buffer_len(0);
+        assert_eq!(framed.max_buffer_len(), 0);
+    }
+
+    #[test]
+    fn framed_read_rejects_buffer_growth_past_max_buffer_len() {
+        // Reader serves 256 bytes of "A" with NO newline → LinesCodec
+        // never produces a frame, so without the cap the buffer would
+        // accumulate forever. Cap at 64 bytes — the first read of 256
+        // bytes must trip the cap and surface InvalidData.
+        let payload: Vec<u8> = vec![b'A'; 256];
+        let reader = SliceReader::new(&payload);
+        let mut framed = FramedRead::new(reader, LinesCodec::new()).with_max_buffer_len(64);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut framed).poll_next(&mut cx);
+        match poll {
+            Poll::Ready(Some(Err(LinesCodecError::Io(err)))) => {
+                assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+                let msg = format!("{err}");
+                assert!(
+                    msg.contains("max_buffer_len"),
+                    "error message must reference max_buffer_len, got: {msg}"
+                );
+                assert!(
+                    msg.contains("64"),
+                    "error message must include the cap, got: {msg}"
+                );
+            }
+            other => panic!(
+                "expected InvalidData from max_buffer_len enforcement, got {other:?}"
+            ),
+        }
+        // The buffer must NOT have crossed the cap — the check is
+        // pre-append, so we never allocate over-the-cap memory.
+        assert!(
+            framed.read_buffer().len() <= 64,
+            "buffer crossed the cap before enforcement fired (len={})",
+            framed.read_buffer().len()
+        );
+    }
+
+    #[test]
+    fn framed_read_max_buffer_len_zero_allows_unbounded_growth() {
+        // With max_buffer_len=0 (cap disabled) a 1 MiB payload without
+        // any newline must accumulate into the buffer without error.
+        let payload: Vec<u8> = vec![b'A'; 1024 * 1024];
+        let reader = SliceReader::new(&payload);
+        let mut framed = FramedRead::new(reader, LinesCodec::new()).with_max_buffer_len(0);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut framed).poll_next(&mut cx);
+        // SliceReader will return all bytes in successive reads, then
+        // EOF. LinesCodec without a newline + EOF yields the buffered
+        // bytes as the final frame. We don't assert the exact poll
+        // outcome — only that no max_buffer_len error is raised.
+        match poll {
+            Poll::Ready(Some(Err(LinesCodecError::Io(err)))) => {
+                let msg = format!("{err}");
+                assert!(
+                    !msg.contains("max_buffer_len"),
+                    "limit=0 must disable enforcement, got: {msg}"
+                );
+            }
+            _ => {} // Pending or Ready(Ok) or Ready(None) all fine
+        }
+    }
+
+    #[test]
+    fn framed_read_under_cap_pass_through_unchanged() {
+        // Single frame ending in newline, well under the cap → must
+        // decode normally without triggering the buffer-cap path.
+        let payload: &[u8] = b"hello\n";
+        let reader = SliceReader::new(payload);
+        let mut framed = FramedRead::new(reader, LinesCodec::new()).with_max_buffer_len(1024);
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let poll = Pin::new(&mut framed).poll_next(&mut cx);
+        match poll {
+            Poll::Ready(Some(Ok(line))) => {
+                assert_eq!(line, "hello");
+            }
+            other => panic!("expected Ready(Some(Ok(\"hello\"))), got {other:?}"),
         }
     }
 }
