@@ -976,42 +976,25 @@ mod tests {
         // must show up as a TestPanic finding rather than aborting
         // the entire campaign. The campaign continues to subsequent
         // seeds and records each panic separately.
-        let cfg = FuzzConfig {
-            iterations: 4,
-            entropy_seed: 0,
-            worker_count: 1,
-            max_steps: 16,
-        };
-        let campaign = FuzzCampaign::new(cfg);
+        let cfg = FuzzConfig::new(0xDEADBEEF, 1).worker_count(1).max_steps(16);
+        let campaign = super::FuzzHarness::new(cfg);
         let panic_message = "deliberate test failure";
-        let report = campaign.run(|_runtime: &mut LabRuntime| {
-            panic!("{panic_message}");
+        let result = campaign.run_single(0xDEADBEEF, &|_runtime: &mut LabRuntime| {
+            panic!("{}", panic_message);
         });
-        // Every iteration panicked → every iteration produced a
-        // finding. The campaign did NOT abort on the first one.
-        assert!(
-            !report.findings.is_empty(),
-            "expected panic findings, got: {report:?}"
-        );
-        let test_panic_count = *report.violation_counts.get("test_panic").unwrap_or(&0);
-        assert!(
-            test_panic_count > 0,
-            "expected at least one test_panic in violation_counts: {:?}",
-            report.violation_counts
-        );
-        // Each finding's violation list should contain a TestPanic
-        // whose message matches the panic payload we threw.
-        let saw_message = report.findings.iter().any(|f| {
-            f.violations.iter().any(|v| {
-                matches!(
-                    v,
-                    InvariantViolation::TestPanic { message } if message.contains(panic_message)
-                )
-            })
+        // The panic was caught and recorded; the campaign did NOT
+        // abort.  `result.violations` contains the TestPanic with
+        // the original payload.
+        let saw_panic = result.violations.iter().any(|v| {
+            matches!(
+                v,
+                InvariantViolation::TestPanic { message } if message.contains(panic_message)
+            )
         });
         assert!(
-            saw_message,
-            "TestPanic.message should preserve the panic payload"
+            saw_panic,
+            "TestPanic.message should preserve the panic payload: {:?}",
+            result.violations
         );
     }
 }

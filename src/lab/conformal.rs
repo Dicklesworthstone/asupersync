@@ -1662,13 +1662,13 @@ mod tests {
     // alpha/5 (1pp at the default alpha=0.05).
     // ===================================================================
 
-    fn report_with(alpha: f64, total: u64, covered: u64) -> CalibrationReport {
+    fn report_with(alpha: f64, total: usize, covered: usize) -> CalibrationReport {
         CalibrationReport {
             prediction_sets: Vec::new(),
             coverage: BTreeMap::new(),
             overall_coverage: CoverageTracker { total, covered },
             alpha,
-            calibration_samples: total as usize,
+            calibration_samples: total,
         }
     }
 

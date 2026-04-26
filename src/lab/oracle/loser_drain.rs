@@ -227,29 +227,27 @@ impl LoserDrainOracle {
     pub fn on_race_complete(&mut self, race_id: u64, winner: TaskId, time: Time) {
         if let Some(prior) = self.completed_races.get(&race_id) {
             if prior.winner != winner || prior.complete_time != time {
-                self.runtime_violations.push(
-                    LoserDrainViolation::InconsistentRaceCompletion {
+                self.runtime_violations
+                    .push(LoserDrainViolation::InconsistentRaceCompletion {
                         race_id,
                         original_winner: prior.winner,
                         original_time: prior.complete_time,
                         duplicate_winner: winner,
                         duplicate_time: time,
-                    },
-                );
+                    });
             }
             return;
         }
         if let Some(prior) = self.unknown_completions.get(&race_id) {
             if prior.winner != winner || prior.complete_time != time {
-                self.runtime_violations.push(
-                    LoserDrainViolation::InconsistentRaceCompletion {
+                self.runtime_violations
+                    .push(LoserDrainViolation::InconsistentRaceCompletion {
                         race_id,
                         original_winner: prior.winner,
                         original_time: prior.complete_time,
                         duplicate_winner: winner,
                         duplicate_time: time,
-                    },
-                );
+                    });
             }
             return;
         }
@@ -527,6 +525,9 @@ mod tests {
                 "race_id": race_id,
                 "winner": winner.to_string(),
                 "race_complete_time_nanos": race_complete_time.as_nanos(),
+            }),
+            Err(LoserDrainViolation::InconsistentRaceCompletion { .. }) => json!({
+                "violation": "inconsistent_race_completion",
             }),
         };
 
@@ -936,7 +937,12 @@ mod tests {
             violation,
             LoserDrainViolation::InconsistentRaceCompletion { .. }
         );
-        crate::assert_with_log!(inconsistent, "InconsistentRaceCompletion", true, inconsistent);
+        crate::assert_with_log!(
+            inconsistent,
+            "InconsistentRaceCompletion",
+            true,
+            inconsistent
+        );
         crate::test_complete!("duplicate_race_complete_with_different_winner_flags_violation");
     }
 
@@ -956,7 +962,12 @@ mod tests {
             violation,
             LoserDrainViolation::InconsistentRaceCompletion { .. }
         );
-        crate::assert_with_log!(inconsistent, "InconsistentRaceCompletion", true, inconsistent);
+        crate::assert_with_log!(
+            inconsistent,
+            "InconsistentRaceCompletion",
+            true,
+            inconsistent
+        );
         crate::test_complete!("duplicate_race_complete_with_different_time_flags_violation");
     }
 

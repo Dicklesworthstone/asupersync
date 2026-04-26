@@ -1934,12 +1934,11 @@ impl LabRuntime {
         // schedule that production cannot reproduce, defeating the
         // whole point of chaos-driven trace minimisation.
         let has_open_region = self.state.live_region_count() > 0;
-        let wakeup_count =
-            if chaos_rng.should_inject_wakeup_storm(&chaos_config, has_open_region) {
-                Some(chaos_rng.next_wakeup_count(&chaos_config))
-            } else {
-                None
-            };
+        let wakeup_count = if chaos_rng.should_inject_wakeup_storm(&chaos_config, has_open_region) {
+            Some(chaos_rng.next_wakeup_count(&chaos_config))
+        } else {
+            None
+        };
 
         // br-asupersync-7uu7sa: even when SOME region is open, this
         // specific task may belong to a region that has already
@@ -4118,9 +4117,10 @@ mod tests {
         // hard-fail marker that names the truncation cause + seed +
         // watermark. The substring is checked rather than equality
         // so future format adjustments stay backward-compatible.
-        let truncation_marker = report.invariant_violations.iter().find(|v| {
-            v.starts_with("refinement_firewall:scenario_failed_due_to_trace_truncation")
-        });
+        let truncation_marker = report
+            .invariant_violations
+            .iter()
+            .find(|v| v.starts_with("refinement_firewall:scenario_failed_due_to_trace_truncation"));
         let marker = truncation_marker.expect(
             "truncation must surface as a hard refinement_firewall:scenario_failed_due_to_trace_truncation marker",
         );
@@ -4177,10 +4177,7 @@ mod tests {
         let scheduled_open = {
             let mut sched = runtime.scheduler.lock();
             let mut count = 0u32;
-            while sched
-                .pop_for_worker(0, count.into(), Time::ZERO)
-                .is_some()
-            {
+            while sched.pop_for_worker(0, count.into(), Time::ZERO).is_some() {
                 count += 1;
             }
             count
@@ -4204,10 +4201,7 @@ mod tests {
         let scheduled_closing = {
             let mut sched = runtime.scheduler.lock();
             let mut count = 0u32;
-            while sched
-                .pop_for_worker(0, count.into(), Time::ZERO)
-                .is_some()
-            {
+            while sched.pop_for_worker(0, count.into(), Time::ZERO).is_some() {
                 count += 1;
             }
             count
@@ -4233,10 +4227,7 @@ mod tests {
             let scheduled = {
                 let mut sched = runtime.scheduler.lock();
                 let mut count = 0u32;
-                while sched
-                    .pop_for_worker(0, count.into(), Time::ZERO)
-                    .is_some()
-                {
+                while sched.pop_for_worker(0, count.into(), Time::ZERO).is_some() {
                     count += 1;
                 }
                 count
