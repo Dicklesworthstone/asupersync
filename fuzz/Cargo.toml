@@ -1828,6 +1828,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "grpc_streaming_io"
+path = "fuzz_targets/grpc_streaming_io.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "raptorq_gauss_solver"
 path = "fuzz_targets/raptorq_gauss_solver.rs"
 test = false
