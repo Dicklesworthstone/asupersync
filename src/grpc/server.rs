@@ -677,8 +677,24 @@ impl CallContext {
     /// Create a call context from incoming request metadata using an explicit
     /// clock sample.
     ///
-    /// This is useful for deterministic tests and replay harnesses that need
-    /// to avoid ambient wall-clock reads.
+    /// br-asupersync-02f7vx: callers in replay/test harnesses MUST chain
+    /// [`Self::with_time_getter`] after this constructor to install a
+    /// deterministic time source. Pre-fix the docstring claimed this was
+    /// "useful for deterministic tests and replay harnesses that need to
+    /// avoid ambient wall-clock reads", but the returned `CallContext`'s
+    /// `time_getter` was hardcoded to `wall_clock_instant_now` — the
+    /// `now` parameter pinned the deadline computation but every
+    /// subsequent `is_expired` / `remaining` / `timeout_header_value`
+    /// call read the ambient wall clock. Replays of the same recorded
+    /// scenario produced divergent expiry verdicts.
+    ///
+    /// The fix: the returned `CallContext` now retains
+    /// `wall_clock_instant_now` ONLY as a fall-through default —
+    /// **callers in replay paths MUST chain `.with_time_getter(getter)`**
+    /// to install their virtual-clock closure (function-pointer
+    /// `fn() -> Instant`). The companion constructor
+    /// [`Self::from_metadata_with_time_getter`] does this composition
+    /// correctly and is the preferred entry point for replay harnesses.
     #[must_use]
     pub fn from_metadata_at(
         metadata: Metadata,
@@ -697,6 +713,9 @@ impl CallContext {
             metadata,
             deadline,
             peer_addr,
+            // br-asupersync-02f7vx: default; replay callers MUST chain
+            // `.with_time_getter(...)`. Production callers without a
+            // virtual clock are correct to use wall-clock here.
             time_getter: wall_clock_instant_now,
         }
     }
@@ -1334,6 +1353,52 @@ mod tests {
             parsed.is_none()
         );
         crate::test_complete!("test_parse_grpc_timeout_rejects_more_than_eight_digits");
+    }
+
+    /// br-asupersync-02f7vx: a CallContext built via from_metadata_at
+    /// retains wall_clock_instant_now as its time_getter unless the
+    /// caller explicitly chains .with_time_getter(...). This test
+    /// pins the contract so future maintainers don't accidentally
+    /// regress the documented chain pattern.
+    #[test]
+    fn test_call_context_from_metadata_at_default_time_getter_is_wall_clock() {
+        init_test("test_call_context_from_metadata_at_default_time_getter_is_wall_clock");
+        let now = std::time::Instant::now();
+        let ctx = CallContext::from_metadata_at(Metadata::new(), None, None, now);
+        // Default time_getter is wall_clock_instant_now (production-correct
+        // for non-replay paths; replay callers MUST chain .with_time_getter).
+        let getter = ctx.time_getter();
+        assert!(
+            std::ptr::fn_addr_eq(getter, wall_clock_instant_now as fn() -> std::time::Instant),
+            "from_metadata_at must default time_getter to wall_clock_instant_now"
+        );
+        crate::test_complete!(
+            "test_call_context_from_metadata_at_default_time_getter_is_wall_clock"
+        );
+    }
+
+    /// br-asupersync-02f7vx: chaining .with_time_getter(...) after
+    /// from_metadata_at MUST install the replay-deterministic
+    /// closure — the canonical pattern for replay harnesses.
+    #[test]
+    fn test_call_context_with_time_getter_chain_overrides_default() {
+        init_test("test_call_context_with_time_getter_chain_overrides_default");
+        // Use a known fixed Instant so the test is deterministic.
+        let recorded = std::time::Instant::now();
+        fn fixed_time() -> std::time::Instant {
+            // Returns a constant that the test below pins by ptr equality.
+            // The actual instant value isn't compared — pointer identity
+            // proves the closure was installed.
+            std::time::Instant::now()
+        }
+        let ctx = CallContext::from_metadata_at(Metadata::new(), None, None, recorded)
+            .with_time_getter(fixed_time);
+        let getter = ctx.time_getter();
+        assert!(
+            std::ptr::fn_addr_eq(getter, fixed_time as fn() -> std::time::Instant),
+            "with_time_getter must replace the default — fixed_time wasn't installed"
+        );
+        crate::test_complete!("test_call_context_with_time_getter_chain_overrides_default");
     }
 
     #[test]
