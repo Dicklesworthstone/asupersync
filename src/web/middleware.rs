@@ -127,8 +127,39 @@ pub struct CorsMiddleware<H> {
 
 impl<H: Handler> CorsMiddleware<H> {
     /// Wrap a handler with CORS policy.
+    ///
+    /// # Panics (debug builds)
+    ///
+    /// Per the CORS specification (Fetch §3.2.5), the combination
+    /// `Access-Control-Allow-Origin: *` with
+    /// `Access-Control-Allow-Credentials: true` is forbidden — it
+    /// would allow any origin to read credentialed responses, which is
+    /// the canonical credential-reflection vulnerability. Until 2026-04
+    /// this implementation silently downgraded `Any` to a per-request
+    /// echo of the caller's `Origin` when `allow_credentials = true`,
+    /// effectively reflecting credentials to any caller.
+    ///
+    /// In debug builds this constructor now panics on that
+    /// configuration so the misuse is loud at development time. Release
+    /// builds retain the prior reflective behaviour for backward
+    /// compatibility but emit a structured warning via
+    /// `tracing_compat::warn!` so SREs can spot the pattern in logs.
+    /// (br-asupersync-cors-credentialed-any.)
     #[must_use]
     pub fn new(inner: H, policy: CorsPolicy) -> Self {
+        if matches!(policy.allow_origin, CorsAllowOrigin::Any) && policy.allow_credentials {
+            debug_assert!(
+                false,
+                "CorsPolicy violates Fetch §3.2.5: allow_origin = Any with \
+                 allow_credentials = true is a credential-reflection vulnerability. \
+                 Use CorsPolicy::with_exact_origins(...) when allow_credentials is true."
+            );
+            crate::tracing_compat::warn!(
+                "CorsPolicy: allow_origin=Any with allow_credentials=true — \
+                 forbidden by Fetch §3.2.5; per-request Origin will be echoed \
+                 (credential reflection). Use exact-origin allow-list instead."
+            );
+        }
         Self { inner, policy }
     }
 
