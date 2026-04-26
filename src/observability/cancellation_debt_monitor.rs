@@ -18,6 +18,18 @@ use std::time::{Duration, SystemTime};
 /// length. Anything past this is truncated with a `…` suffix.
 const DEFAULT_MAX_CANCEL_REASON_BYTES: usize = 64;
 
+/// br-asupersync-af24n5 — Cardinality cap on the
+/// `entity_queue_depths` map computed in `get_debt_snapshot`.
+/// Keys come from the user-controllable `entity_id` of pending
+/// work; this cap prevents an attacker from driving unbounded
+/// HashMap growth on every snapshot.
+const MAX_QUEUE_DEPTH_ENTITIES: usize = 4096;
+
+/// br-asupersync-af24n5 — Sentinel key used when the entity-
+/// queue-depth cap is hit. Operators see the bucket explicitly so
+/// the cap activation is auditable rather than silent.
+const QUEUE_DEPTH_OVERFLOW_BUCKET: &str = "__overflow__";
+
 /// br-asupersync-i40ap4 — default cap on pending entries per `WorkType`.
 /// When `record_pending_work`/`queue_work` would exceed this, the oldest
 /// entry of that work type is evicted and an Emergency alert is generated.
@@ -564,10 +576,21 @@ impl CancellationDebtMonitor {
             pending_by_type.insert(*work_type, type_count);
 
             for work in work_map.values() {
-                // Track queue depth per entity
-                *entity_queue_depths
-                    .entry(work.entity_id.clone())
-                    .or_default() += 1;
+                // br-asupersync-af24n5 — entity_queue_depths is keyed
+                // by user-controllable entity_id; cap at
+                // MAX_QUEUE_DEPTH_ENTITIES with overflow folded into
+                // the QUEUE_DEPTH_OVERFLOW_BUCKET sentinel. Without
+                // the cap, a malicious or buggy producer with
+                // attacker-shaped entity_id can drive unbounded
+                // HashMap growth on every snapshot pass (DoS / OOM).
+                let key = if entity_queue_depths.contains_key(&work.entity_id)
+                    || entity_queue_depths.len() < MAX_QUEUE_DEPTH_ENTITIES
+                {
+                    work.entity_id.clone()
+                } else {
+                    QUEUE_DEPTH_OVERFLOW_BUCKET.to_string()
+                };
+                *entity_queue_depths.entry(key).or_default() += 1;
 
                 // Find oldest work
                 if let Ok(age) = now.duration_since(work.queued_at) {
@@ -1191,5 +1214,40 @@ mod tests {
         assert!(out.ends_with('…'));
         // Cap exceeding the input length leaves it untouched.
         assert_eq!(truncate_to_bytes("hi", 100), "hi");
+    }
+
+    /// br-asupersync-af24n5 — entity_queue_depths in DebtSnapshot
+    /// MUST stay bounded when work is queued under attacker-shaped
+    /// (high-cardinality) entity_ids. Excess entities fold into
+    /// the `__overflow__` sentinel.
+    #[test]
+    fn af24n5_entity_queue_depths_cap_with_overflow_bucket() {
+        let monitor = CancellationDebtMonitor::default();
+        let cap = super::MAX_QUEUE_DEPTH_ENTITIES;
+        let total = cap + 100;
+        let reason = CancelReason::user("af24n5-cap-test");
+        for i in 0..total {
+            let _ = monitor.queue_work(
+                WorkType::TaskCleanup,
+                format!("entity_{i}"),
+                10,
+                1,
+                &reason,
+                CancelKind::User,
+                Vec::new(),
+            );
+        }
+        let snapshot = monitor.get_debt_snapshot();
+        assert!(
+            snapshot.entity_queue_depths.len() <= cap + 1,
+            "entity_queue_depths grew past cap+overflow: {} (cap {cap})",
+            snapshot.entity_queue_depths.len()
+        );
+        assert!(
+            snapshot
+                .entity_queue_depths
+                .contains_key(super::QUEUE_DEPTH_OVERFLOW_BUCKET),
+            "overflow sentinel must be present once cap is exceeded"
+        );
     }
 }

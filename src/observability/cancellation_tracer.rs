@@ -274,8 +274,35 @@ pub struct CancellationTracer {
     /// Completed traces.
     completed_traces: Arc<Mutex<VecDeque<CancellationTrace>>>,
     /// Mapping from entity to active trace IDs.
+    ///
+    /// br-asupersync-uae0hk — keys come from the user-controllable
+    /// `root_entity` string; cardinality is capped at
+    /// [`MAX_TRACED_ENTITIES`] with overflow folded into the
+    /// `__overflow__` bucket and per-entity trace lists bounded by
+    /// [`MAX_TRACES_PER_ENTITY`].
     entity_traces: Arc<Mutex<HashMap<String, Vec<CancellationTraceId>>>>,
 }
+
+/// br-asupersync-uae0hk — Maximum distinct entity IDs tracked in
+/// the entity→traces map before further entities are folded into
+/// the [`ENTITY_OVERFLOW_BUCKET`] sentinel. Sized for "high but
+/// finite" tenancy — typical multi-tenant deployments have a few
+/// hundred logical entities; 4096 admits a healthy long tail
+/// without exposing the map to a HashMap-DoS / OOM amplifier
+/// driven by attacker-supplied root_entity values.
+const MAX_TRACED_ENTITIES: usize = 4096;
+
+/// br-asupersync-uae0hk — Per-entity bound on the trace-id list
+/// length. Older trace ids are dropped first (FIFO) when this cap
+/// is exceeded, which keeps memory bounded even under a single
+/// hot entity producing many traces per second.
+const MAX_TRACES_PER_ENTITY: usize = 1024;
+
+/// br-asupersync-uae0hk — Sentinel key used when the entity
+/// cardinality cap is hit. Operators querying `entities_traced`
+/// or per-entity analytics observe this bucket explicitly so the
+/// cardinality breach is auditable rather than silent.
+const ENTITY_OVERFLOW_BUCKET: &str = "__overflow__";
 
 impl CancellationTracer {
     /// Creates a new cancellation tracer.
@@ -347,9 +374,30 @@ impl CancellationTracer {
             in_progress.insert(trace_id, in_progress_trace);
         }
 
-        // Track entity -> trace mapping
+        // br-asupersync-uae0hk — bound entity_traces cardinality
+        // and per-entity trace-list length. The map's keys come from
+        // the user-controllable `root_entity` string; without a cap
+        // a malicious or buggy producer can grow this map without
+        // bound (HashMap-DoS / OOM). When the map is at the entity
+        // cap, all further entities are folded into the
+        // `__overflow__` bucket — an existing operator-visible
+        // sentinel that surfaces the cardinality breach in
+        // `entities_traced` analytics. Per-entity trace lists are
+        // also capped (oldest dropped) so a single hot entity
+        // cannot memory-bomb us either.
         if let Ok(mut entity_traces) = self.entity_traces.lock() {
-            entity_traces.entry(root_entity).or_default().push(trace_id);
+            let key = if entity_traces.contains_key(&root_entity)
+                || entity_traces.len() < MAX_TRACED_ENTITIES
+            {
+                root_entity
+            } else {
+                ENTITY_OVERFLOW_BUCKET.to_string()
+            };
+            let list = entity_traces.entry(key).or_default();
+            list.push(trace_id);
+            while list.len() > MAX_TRACES_PER_ENTITY {
+                list.remove(0);
+            }
         }
 
         self.stats.traces_collected.fetch_add(1, Ordering::Relaxed);
@@ -1448,6 +1496,41 @@ mod tests {
         assert!(
             has_bottleneck_recommendation,
             "Should recommend addressing bottlenecks"
+        );
+    }
+
+    /// br-asupersync-uae0hk — entity_traces map MUST stay bounded
+    /// when a producer feeds attacker-shaped (high-cardinality)
+    /// entity_id strings. Excess entities fold into the
+    /// `__overflow__` bucket and per-entity trace lists are
+    /// FIFO-trimmed to MAX_TRACES_PER_ENTITY.
+    #[test]
+    fn uae0hk_entity_traces_cap_with_overflow_bucket() {
+        let tracer = CancellationTracer::new(CancellationTracerConfig::default());
+        // Inject MAX_TRACED_ENTITIES + 100 distinct entities. With
+        // MAX_TRACED_ENTITIES = 4096 and a real start_trace per
+        // call this would be slow; instead we exercise the gate
+        // directly via the public start_trace API for a
+        // representative subset and assert the cap on the inner map.
+        let cap = super::MAX_TRACED_ENTITIES;
+        let reason = CancelReason::user("uae0hk-cap-test");
+        for i in 0..cap + 50 {
+            let _ = tracer.start_trace(
+                format!("entity_{i}"),
+                EntityType::Region,
+                &reason,
+                CancelKind::User,
+            );
+        }
+        let entity_traces = tracer.entity_traces.lock().expect("lock");
+        assert!(
+            entity_traces.len() <= cap + 1,
+            "entity_traces grew past cap+overflow: {} (cap {cap})",
+            entity_traces.len()
+        );
+        assert!(
+            entity_traces.contains_key(super::ENTITY_OVERFLOW_BUCKET),
+            "overflow sentinel must be present once cap is exceeded"
         );
     }
 }

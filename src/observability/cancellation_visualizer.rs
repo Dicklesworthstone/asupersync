@@ -10,6 +10,17 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
+/// br-asupersync-indxfz — Cardinality cap on the entity_throughput
+/// HashMap so attacker-controllable entity_id strings cannot drive
+/// unbounded HashMap growth (DoS / OOM amplifier). Sized for
+/// "high but finite" tenancy.
+const MAX_THROUGHPUT_ENTITIES: usize = 4096;
+
+/// br-asupersync-indxfz — Sentinel key used when the throughput
+/// cardinality cap is hit. Operators see the bucket explicitly so
+/// the cap activation is auditable rather than silent.
+const THROUGHPUT_OVERFLOW_BUCKET: &str = "__overflow__";
+
 /// Configuration for visualization output.
 #[derive(Debug, Clone)]
 pub struct VisualizerConfig {
@@ -449,6 +460,15 @@ impl CancellationVisualizer {
     }
 
     /// Calculate throughput statistics for entities.
+    ///
+    /// br-asupersync-indxfz — entity_id strings flow through here
+    /// from upstream user-controllable sources. The accumulator
+    /// HashMap is bounded at [`MAX_THROUGHPUT_ENTITIES`]; once
+    /// full, additional distinct entity_ids fold into the
+    /// [`THROUGHPUT_OVERFLOW_BUCKET`] sentinel so a malicious
+    /// producer can't drive unbounded HashMap growth (DoS / OOM
+    /// vector). The overflow bucket aggregates the metric for
+    /// auditability rather than dropping the data silently.
     fn calculate_entity_throughput(
         &self,
         traces: &[CancellationTrace],
@@ -463,14 +483,18 @@ impl CancellationVisualizer {
 
         for trace in traces {
             for step in &trace.steps {
-                let accumulator =
-                    accumulators
-                        .entry(step.entity_id.clone())
-                        .or_insert(ThroughputAccumulator {
-                            samples: 0,
-                            total_processing_nanos: 0,
-                            completed: 0,
-                        });
+                let key = if accumulators.contains_key(&step.entity_id)
+                    || accumulators.len() < MAX_THROUGHPUT_ENTITIES
+                {
+                    step.entity_id.clone()
+                } else {
+                    THROUGHPUT_OVERFLOW_BUCKET.to_string()
+                };
+                let accumulator = accumulators.entry(key).or_insert(ThroughputAccumulator {
+                    samples: 0,
+                    total_processing_nanos: 0,
+                    completed: 0,
+                });
                 accumulator.samples += 1;
                 accumulator.total_processing_nanos += step.elapsed_since_prev.as_nanos();
                 if step.propagation_completed {
@@ -1007,5 +1031,59 @@ mod tests {
         assert!(dot.contains(&format!("trace:{}:root\\\"task", trace_b.trace_id.as_u64())));
         assert!(dot.contains("child\\\"a"));
         assert!(dot.contains("line\\nbreak"));
+    }
+
+    /// br-asupersync-indxfz — entity_throughput map MUST stay
+    /// bounded when traces carry attacker-shaped (high-cardinality)
+    /// entity_id strings; excess entities fold into the
+    /// `__overflow__` sentinel.
+    #[test]
+    fn indxfz_entity_throughput_cap_with_overflow_bucket() {
+        use std::time::SystemTime;
+        let visualizer = CancellationVisualizer::new(VisualizerConfig::default());
+        let cap = super::MAX_THROUGHPUT_ENTITIES;
+        let total = cap + 50;
+        let mut traces = Vec::with_capacity(total);
+        for i in 0..total {
+            let trace_id = CancellationTraceId::new();
+            let step = CancellationTraceStep {
+                step_id: 1,
+                entity_id: format!("entity_{i}"),
+                entity_type: EntityType::Region,
+                cancel_reason: "test".to_string(),
+                cancel_kind: "User".to_string(),
+                timestamp: SystemTime::UNIX_EPOCH,
+                elapsed_since_start: Duration::from_micros(10),
+                elapsed_since_prev: Duration::from_micros(10),
+                depth: 1,
+                parent_entity: None,
+                entity_state: "closing".to_string(),
+                propagation_completed: true,
+            };
+            traces.push(CancellationTrace {
+                trace_id,
+                root_cancel_reason: "test".to_string(),
+                root_cancel_kind: "User".to_string(),
+                root_entity: format!("root_{i}"),
+                root_entity_type: EntityType::Region,
+                start_time: SystemTime::UNIX_EPOCH,
+                steps: vec![step],
+                is_complete: true,
+                total_propagation_time: Some(Duration::from_micros(10)),
+                max_depth: 1,
+                entities_cancelled: 1,
+                anomalies: Vec::new(),
+            });
+        }
+        let throughput = visualizer.calculate_entity_throughput(&traces);
+        assert!(
+            throughput.len() <= cap + 1,
+            "entity_throughput grew past cap+overflow: {} (cap {cap})",
+            throughput.len()
+        );
+        assert!(
+            throughput.contains_key(super::THROUGHPUT_OVERFLOW_BUCKET),
+            "overflow sentinel must be present once cap is exceeded"
+        );
     }
 }
