@@ -2890,21 +2890,25 @@ impl ThreeLaneWorker {
             self.record_ready_dispatch();
             return Some(self.finish_dispatch(task));
         }
+
+        // br-asupersync-fvixmw: pre-fix took self.local.lock() THREE additional
+        // times in Phase 3 / 3b (lines 2895, 2905, 2917) — twice for read-only
+        // peek_ready_task() inversion-check observability and once to pop. Snapshot
+        // the peek once here; both fast_queue and global.pop_ready inversion-check
+        // call sites reuse the snapshot. The Phase 3b pop_ready_only_with_hint
+        // call below stays in its own lock since it MUTATES the local queue and
+        // we want it to observe any concurrent producer that ran between phases.
+        // Net: 2 fewer lock acquisitions per dispatch hitting fast_queue OR
+        // global.pop_ready (the common Phase 3 hot path).
+        let blocked_local_task = self.local.lock().peek_ready_task();
+
         if let Some(task) = self.fast_queue.pop() {
-            let blocked_local_task = {
-                let local = self.local.lock();
-                local.peek_ready_task()
-            };
             let dispatched_priority = self.task_sched_priority(task);
             self.record_ready_priority_inversion(blocked_local_task, task, dispatched_priority);
             self.record_ready_dispatch();
             return Some(self.finish_dispatch(task));
         }
         if let Some(pt) = self.global.pop_ready() {
-            let blocked_local_task = {
-                let local = self.local.lock();
-                local.peek_ready_task()
-            };
             self.record_ready_priority_inversion(blocked_local_task, pt.task, Some(pt.priority));
             self.record_ready_dispatch();
             return Some(self.finish_dispatch(pt.task));
