@@ -19,8 +19,11 @@
 //! // Explicit seed for reproducibility
 //! let config = LabConfig::new(12345);
 //!
-//! // Time-based seed for variety (useful in CI)
-//! let config = LabConfig::from_time();
+//! // Wall-clock-derived seed (NON-REPLAYABLE — see deprecation note
+//! // on LabConfig::from_time). Prefer LabConfig::new(seed) for
+//! // replay-stable scenarios; from_time is retained as
+//! // [`from_time_unstable`] only for genuinely-throwaway local
+//! // experimentation.
 //! ```
 //!
 //! # Chaos Testing
@@ -190,9 +193,49 @@ impl LabConfig {
         }
     }
 
-    /// Creates a lab configuration from the current time (for quick testing).
+    /// Creates a lab configuration from the current wall clock.
+    ///
+    /// br-asupersync-eij5e4: this constructor derives the PRNG seed
+    /// from `SystemTime::now()` and is therefore **NOT replay-
+    /// deterministic** — every call produces a different seed, every
+    /// LabRuntime built from it produces a different schedule, and
+    /// any test that asserts a deterministic outcome (oracle
+    /// violations, trace fingerprints, certificate hashes) will be
+    /// flaky in CI. The asupersync core invariant 'lab replay is
+    /// byte-identical given the same seed' is silently violated.
+    ///
+    /// Prefer [`LabConfig::new(seed)`] with an explicit seed for
+    /// every scenario where replay determinism matters (which is
+    /// almost every CI test, every snapshot test, every crashpack
+    /// reproduction). The constructor is retained ONLY for
+    /// genuinely-throwaway local experimentation where the user is
+    /// holding the seed in their head; the
+    /// [`from_time_unstable`](Self::from_time_unstable) alias makes
+    /// the non-replayability impossible to overlook at the call site.
+    #[deprecated(
+        since = "0.0.0",
+        note = "from_time is non-replayable — use LabConfig::new(seed) with an \
+                explicit seed for any test or production caller; if a wall-clock \
+                seed is genuinely required, call from_time_unstable() so the \
+                non-replayability is visible at the call site"
+    )]
     #[must_use]
     pub fn from_time() -> Self {
+        Self::from_time_unstable()
+    }
+
+    /// br-asupersync-eij5e4: wall-clock-derived LabConfig with a
+    /// deliberately conspicuous name. Use this only when the test or
+    /// experiment genuinely cannot be replayed (e.g., a one-off
+    /// soak run), and prefer [`LabConfig::new(seed)`] anywhere
+    /// determinism matters.
+    ///
+    /// The `_unstable` suffix follows the asupersync convention for
+    /// APIs whose behaviour is intentionally non-deterministic, so
+    /// `grep -r from_time_unstable` enumerates every call site that
+    /// has knowingly opted into wall-clock seeding.
+    #[must_use]
+    pub fn from_time_unstable() -> Self {
         use std::time::{SystemTime, UNIX_EPOCH};
         let seed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -476,7 +519,11 @@ mod tests {
     #[test]
     fn from_time_creates_valid_config() {
         init_test("from_time_creates_valid_config");
-        let cfg = LabConfig::from_time();
+        // br-asupersync-eij5e4: route through the new
+        // from_time_unstable alias so the test does not trip the
+        // (deliberate) deprecation warning on the bare `from_time`
+        // foot-gun.
+        let cfg = LabConfig::from_time_unstable();
         // seed should be set from system time (non-deterministic but valid)
         assert_eq!(cfg.entropy_seed, cfg.seed);
         assert_eq!(cfg.worker_count, 1);

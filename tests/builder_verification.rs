@@ -452,7 +452,11 @@ fn builder_verify_017_no_step_limit() {
 fn builder_verify_018_from_time() {
     init_test("builder_verify_018_from_time");
 
-    let config1 = LabConfig::from_time();
+    // br-asupersync-eij5e4: bare from_time is now #[deprecated] —
+    // route through the explicit-non-determinism alias so the
+    // builder-verification test does not trip the deprecation
+    // warning that fires for production callers.
+    let config1 = LabConfig::from_time_unstable();
     // Seed is derived from system time, so it should be nonzero
     assert_ne!(config1.seed, 0, "time-based seed should be nonzero");
 
