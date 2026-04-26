@@ -82,14 +82,21 @@ fn authority_form_valid(uri: &str) -> bool {
 #[allow(dead_code)]
 fn origin_form_strategy() -> impl Strategy<Value = String> {
     prop::collection::vec(
-        prop::char::range('a', 'z').prop_union(prop::char::range('A', 'Z'))
-            .prop_union(prop::char::range('0', '9'))
-            .prop_union(Just('-').prop_union(Just('_'))),
+        prop_oneof![
+            prop::char::range('a', 'z'),
+            prop::char::range('A', 'Z'),
+            prop::char::range('0', '9'),
+            Just('-'),
+            Just('_'),
+        ],
         1..20
     ).prop_flat_map(|chars| {
         let path: String = chars.into_iter().collect();
         let query = prop::option::of(prop::collection::vec(
-            prop::char::range('a', 'z').prop_union(prop::char::range('0', '9')),
+            prop_oneof![
+                prop::char::range('a', 'z'),
+                prop::char::range('0', '9'),
+            ],
             1..10
         ).prop_map(|chars| chars.into_iter().collect::<String>()));
 
@@ -182,10 +189,10 @@ fn mr1_origin_form_validity() {
             "Valid origin-form '{}' should be accepted for method {}, got: {:?}",
             valid_uri, method.as_str(), result.err());
 
-        if let Ok(req) = result {
+        if let Ok(ref req) = result {
             prop_assert_eq!(&req.uri, &valid_uri,
                 "Parsed URI should match input");
-            prop_assert_eq!(req.method, method,
+            prop_assert_eq!(&req.method, &method,
                 "Parsed method should match input");
         }
 
@@ -193,15 +200,7 @@ fn mr1_origin_form_validity() {
         let invalid_request = format!("{} {} HTTP/1.1\r\nHost: example.com\r\n\r\n",
             method.as_str(), invalid_uri);
         let result = decode_request(&invalid_request);
-        // Note: Current implementation may not validate request-target format
-        // This test documents the expected behavior per RFC 9112 Section 3.2
-        if result.is_ok() {
-            // TODO: Implement request-target validation in HTTP codec
-            // For now, just verify the URI is preserved as-is
-            if let Ok(req) = result {
-                prop_assert_eq!(&req.uri, &invalid_uri);
-            }
-        }
+        prop_assert!(result.is_err(), "Invalid request-target '{}' should be rejected", invalid_uri);
     });
 }
 
@@ -261,21 +260,14 @@ fn mr3_connect_authority_form() {
         }
 
         // MR3.2: CONNECT with origin-form should be rejected (per RFC)
-        // Note: Current implementation may accept this - documents expected behavior
         let invalid_connect = format!("CONNECT {} HTTP/1.1\r\nHost: example.com\r\n\r\n", origin_uri);
         let result = decode_request(&invalid_connect);
-        if result.is_ok() {
-            // TODO: Implement proper CONNECT validation
-            // Current implementation accepts any URI form
-        }
+        prop_assert!(result.is_err(), "CONNECT with origin-form should be rejected");
 
         // MR3.3: CONNECT with absolute-form should be rejected (per RFC)
         let invalid_connect_abs = format!("CONNECT {} HTTP/1.1\r\nHost: example.com\r\n\r\n", absolute_uri);
         let result = decode_request(&invalid_connect_abs);
-        if result.is_ok() {
-            // TODO: Implement proper CONNECT validation
-            // Current implementation accepts any URI form
-        }
+        prop_assert!(result.is_err(), "CONNECT with absolute-form should be rejected");
     });
 }
 
@@ -314,14 +306,7 @@ fn mr4_options_asterisk_form() {
         let invalid_asterisk = format!("{} * HTTP/1.1\r\nHost: example.com\r\n\r\n",
             other_method.as_str());
         let result = decode_request(&invalid_asterisk);
-        if result.is_ok() {
-            // TODO: Implement asterisk-form validation per method
-            // Current implementation accepts * for any method
-            if let Ok(req) = result {
-                prop_assert_eq!(&req.uri, "*");
-                prop_assert_eq!(req.method, other_method);
-            }
-        }
+        prop_assert!(result.is_err(), "Non-OPTIONS method '{}' should not use asterisk-form", other_method);
     });
 }
 
@@ -351,18 +336,16 @@ fn mr5_request_target_consistency() {
         prop_assert!(result.is_ok(),
             "Valid request should parse successfully");
 
-        if let Ok(req) = result {
+        if let Ok(ref req) = result {
             prop_assert_eq!(&req.uri, &uri,
                 "Request-target should be preserved exactly");
-            prop_assert_eq!(req.method, method,
+            prop_assert_eq!(&req.method, &method,
                 "Method should be preserved exactly");
 
             // MR5.2: Request-target should be valid for its method
             let is_valid = is_valid_request_target_for_method(&method, &uri);
-            // Note: This may fail with current implementation
-            // Documents the expected RFC 9112 behavior
             if !is_valid {
-                // TODO: Implement method-specific request-target validation
+                prop_assert!(result.is_err(), "Invalid method/target combo '{}' '{}' should be rejected", method, uri);
             }
         }
     });
@@ -415,12 +398,7 @@ fn comprehensive_request_target_validation() {
                     "Method should be preserved");
             }
         } else {
-            // Note: Current implementation may accept invalid combinations
-            // This documents the expected RFC 9112 behavior
-            if result.is_ok() {
-                // TODO: Implement strict RFC 9112 Section 3.2 validation
-                // Invalid combinations should be rejected with 400 Bad Request
-            }
+            assert!(result.is_err(), "Invalid combination '{}' '{}' should be rejected with 400 Bad Request", method, uri);
         }
     }
 }

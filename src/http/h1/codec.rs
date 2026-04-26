@@ -290,6 +290,9 @@ fn parse_request_line_bytes(line: &[u8]) -> Result<(Method, String, Version), Ht
                             .ok_or(HttpError::UnsupportedVersion)?;
                         let uri = std::str::from_utf8(uri_bytes)
                             .map_err(|_| HttpError::BadRequestLine)?;
+
+                        validate_request_target(&method, uri)?;
+
                         return Ok((method, uri.to_owned(), version));
                     }
                 }
@@ -330,7 +333,60 @@ fn parse_request_line_bytes_slow(line: &[u8]) -> Result<(Method, String, Version
         .ok_or(HttpError::UnsupportedVersion)?;
     let uri = std::str::from_utf8(uri_bytes).map_err(|_| HttpError::BadRequestLine)?;
 
+    validate_request_target(&method, uri)?;
+
     Ok((method, uri.to_owned(), version))
+}
+
+fn validate_request_target(method: &Method, uri: &str) -> Result<(), HttpError> {
+    if uri.is_empty() {
+        return Err(HttpError::BadRequestLine);
+    }
+
+    // asterisk-form (RFC 9112 §3.2.4)
+    if uri == "*" {
+        if *method != Method::Options {
+            return Err(HttpError::BadRequestLine);
+        }
+        return Ok(());
+    }
+
+    // authority-form (RFC 9112 §3.2.3)
+    if *method == Method::Connect {
+        if uri.starts_with('/') || uri.contains("://") {
+            return Err(HttpError::BadRequestLine);
+        }
+        // Authority-form must be host:port
+        let (host, port) = uri.split_once(':').ok_or(HttpError::BadRequestLine)?;
+        if host.is_empty() || port.is_empty() {
+            return Err(HttpError::BadRequestLine);
+        }
+        return Ok(());
+    }
+
+    // origin-form (RFC 9112 §3.2.1)
+    if uri.starts_with('/') {
+        // MUST NOT start with // (ambiguous or potential smuggling vector)
+        if uri.starts_with("//") {
+            return Err(HttpError::BadRequestLine);
+        }
+        return Ok(());
+    }
+
+    // absolute-form (RFC 9112 §3.2.2)
+    if let Some((scheme, rest)) = uri.split_once("://") {
+        if scheme.is_empty() || !scheme.chars().all(|c| c.is_ascii_alphabetic()) {
+            return Err(HttpError::BadRequestLine);
+        }
+        // absolute-form MUST have an authority
+        if rest.is_empty() {
+            return Err(HttpError::BadRequestLine);
+        }
+        return Ok(());
+    }
+
+    // If it doesn't match any allowed form, it's invalid.
+    Err(HttpError::BadRequestLine)
 }
 
 /// Validates an HTTP field-name (RFC 7230 token / tchar set).

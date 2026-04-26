@@ -71,6 +71,62 @@ impl std::error::Error for RegionCreateError {}
 #[derive(Debug, Default)]
 pub struct RegionTable {
     regions: Arena<RegionRecord>,
+    /// Incremental count of regions in Draining or Finalizing state.
+    /// Used for O(1) Lyapunov snapshots (br-asupersync-xxcss5).
+    cached_draining_count: usize,
+}
+
+impl RegionTable {
+    /// Returns the number of regions currently draining or finalizing.
+    ///
+    /// O(1) — maintained incrementally for O(1) Lyapunov snapshots.
+    #[inline]
+    #[must_use]
+    pub fn draining_region_count(&self) -> usize {
+        self.cached_draining_count
+    }
+
+    /// Records a region state transition for incremental bookkeeping.
+    #[inline]
+    pub fn note_region_state_transition(
+        &mut self,
+        old_state: crate::record::region::RegionState,
+        new_state: crate::record::region::RegionState,
+    ) {
+        use crate::record::region::RegionState;
+
+        if old_state == new_state {
+            return;
+        }
+
+        // Decrement if leaving a draining state
+        if matches!(old_state, RegionState::Draining | RegionState::Finalizing) {
+            self.cached_draining_count = self.cached_draining_count.saturating_sub(1);
+        }
+
+        // Increment if entering a draining state
+        if matches!(new_state, RegionState::Draining | RegionState::Finalizing) {
+            self.cached_draining_count = self.cached_draining_count.saturating_add(1);
+        }
+    }
+
+    /// Internal helper to register a new region.
+    #[inline]
+    fn note_region_added(&mut self, state: crate::record::region::RegionState) {
+        use crate::record::region::RegionState;
+        if matches!(state, RegionState::Draining | RegionState::Finalizing) {
+            self.cached_draining_count = self.cached_draining_count.saturating_add(1);
+        }
+    }
+
+    /// Internal helper to unregister a region.
+    #[inline]
+    fn note_region_removed(&mut self, state: crate::record::region::RegionState) {
+        use crate::record::region::RegionState;
+        if matches!(state, RegionState::Draining | RegionState::Finalizing) {
+            self.cached_draining_count = self.cached_draining_count.saturating_sub(1);
+        }
+    }
 }
 
 impl RegionTable {
@@ -80,6 +136,7 @@ impl RegionTable {
     pub fn new() -> Self {
         Self {
             regions: Arena::new(),
+            cached_draining_count: 0,
         }
     }
 
@@ -92,6 +149,7 @@ impl RegionTable {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             regions: Arena::with_capacity(capacity),
+            cached_draining_count: 0,
         }
     }
 
@@ -115,10 +173,13 @@ impl RegionTable {
     /// Inserts a new region record into the arena.
     #[inline]
     pub fn insert(&mut self, mut record: RegionRecord) -> ArenaIndex {
-        self.regions.insert_with(|idx| {
+        let state = record.state();
+        let idx = self.regions.insert_with(|idx| {
             record.id = RegionId::from_arena(idx);
             record
-        })
+        });
+        self.note_region_added(state);
+        idx
     }
 
     /// Inserts a new region record produced by `f` into the arena.
@@ -129,17 +190,23 @@ impl RegionTable {
     where
         F: FnOnce(ArenaIndex) -> RegionRecord,
     {
-        self.regions.insert_with(|idx| {
+        let mut state = crate::record::region::RegionState::Open;
+        let idx = self.regions.insert_with(|idx| {
             let mut record = f(idx);
             record.id = RegionId::from_arena(idx);
+            state = record.state();
             record
-        })
+        });
+        self.note_region_added(state);
+        idx
     }
 
     /// Removes a region record from the arena.
     #[inline]
     pub fn remove(&mut self, index: ArenaIndex) -> Option<RegionRecord> {
-        self.regions.remove(index)
+        let record = self.regions.remove(index)?;
+        self.note_region_removed(record.state());
+        Some(record)
     }
 
     /// Returns an iterator over all region records.

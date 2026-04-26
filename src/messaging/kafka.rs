@@ -634,6 +634,7 @@ pub(crate) fn stub_broker_fetch(
 }
 
 #[cfg(not(feature = "kafka"))]
+#[allow(dead_code)]
 pub(crate) fn stub_broker_publish(record: StubBrokerRecord) -> RecordMetadata {
     stub_broker_publish_batch(vec![record])
         .into_iter()

@@ -231,6 +231,16 @@ impl TaskTable {
         })
     }
 
+    /// Updates a task record using a closure.
+    #[inline]
+    pub fn update_task<F, R>(&mut self, task_id: TaskId, f: F) -> Option<R>
+    where
+        F: FnOnce(&mut TaskRecord) -> R,
+    {
+        let record = self.tasks.get_mut(task_id.arena_index())?;
+        Some(f(record))
+    }
+
     /// Removes a task record from the arena.
     ///
     /// Returns the removed record if it existed.
