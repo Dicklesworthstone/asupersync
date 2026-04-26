@@ -33,6 +33,10 @@ use std::task::{Context, Poll, Waker};
 pub enum SendError<T> {
     /// There are no active receivers. The message is returned.
     Closed(T),
+    /// The capability context was cancelled before the reservation
+    /// could be granted. No slot was consumed; no receiver observed
+    /// the message. (br-asupersync-bed5oh)
+    Cancelled,
 }
 
 impl<T> std::fmt::Display for SendError<T> {
@@ -40,6 +44,7 @@ impl<T> std::fmt::Display for SendError<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Closed(_) => write!(f, "sending on a closed broadcast channel"),
+            Self::Cancelled => write!(f, "broadcast send cancelled by Cx"),
         }
     }
 }
@@ -188,8 +193,16 @@ impl<T: Clone> Sender<T> {
     /// Returns `SendError::Closed(())` if there are no active receivers.
     #[inline]
     pub fn reserve(&self, cx: &Cx) -> Result<SendPermit<'_, T>, SendError<()>> {
+        // br-asupersync-bed5oh: cancel-correctness invariant. The previous
+        // implementation only TRACED the cancel and fell through to grant
+        // the permit. Per AGENTS.md ("cancellation is a protocol — request
+        // → drain → finalize, not a silent drop") and the broadcast
+        // contract above ("reserve is cancel-safe: if cancelled, no slot
+        // is consumed"), reserve MUST surface the cancel as an error so
+        // the caller doesn't proceed to commit a message under a cancelled
+        // Cx.
         if cx.checkpoint().is_err() {
-            cx.trace("broadcast::reserve called with cancel pending");
+            return Err(SendError::Cancelled);
         }
 
         if self.channel.receiver_count.load(Ordering::Acquire) == 0 {
@@ -203,15 +216,17 @@ impl<T: Clone> Sender<T> {
     ///
     /// # Errors
     ///
-    /// Returns `SendError::Closed(msg)` if there are no active receivers when
-    /// reservation is attempted.
-    ///
-    /// Returns `Ok(0)` if all receivers drop between reservation and commit.
+    /// Returns `SendError::Closed(msg)` if there are no active receivers
+    /// when reservation is attempted. Returns `SendError::Cancelled` if
+    /// the capability context was cancelled before the permit was granted
+    /// (the message is dropped — caller retains nothing). Returns
+    /// `Ok(0)` if all receivers drop between reservation and commit.
     #[inline]
     pub fn send(&self, cx: &Cx, msg: T) -> Result<usize, SendError<T>> {
         let permit = match self.reserve(cx) {
             Ok(p) => p,
             Err(SendError::Closed(())) => return Err(SendError::Closed(msg)),
+            Err(SendError::Cancelled) => return Err(SendError::Cancelled),
         };
         Ok(permit.send(msg))
     }
@@ -980,6 +995,67 @@ mod tests {
         crate::assert_with_log!(got == 7, "received after cancel", 7, got);
 
         crate::test_complete!("recv_cancelled_does_not_advance_cursor");
+    }
+
+    /// br-asupersync-bed5oh: Sender::reserve must surface cancellation as
+    /// SendError::Cancelled — the previous implementation only traced the
+    /// cancel and granted the permit anyway, violating the documented
+    /// "reserve is cancel-safe" contract.
+    #[test]
+    fn reserve_cancelled_returns_err_not_permit() {
+        init_test("reserve_cancelled_returns_err_not_permit");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<i32>(10);
+        // Drain initial state.
+        let _ = rx;
+
+        cx.set_cancel_requested(true);
+        let result = tx.reserve(&cx);
+        crate::assert_with_log!(
+            matches!(result, Err(SendError::Cancelled)),
+            "reserve under cancel must return Cancelled",
+            "Err(Cancelled)",
+            format!("{:?}", result.map(|_| "Ok(permit)"))
+        );
+
+        // Sanity: clearing the cancel restores normal behavior.
+        cx.set_cancel_requested(false);
+        let permit = tx.reserve(&cx).expect("reserve should succeed after clear");
+        drop(permit);
+
+        crate::test_complete!("reserve_cancelled_returns_err_not_permit");
+    }
+
+    /// br-asupersync-bed5oh: Sender::send is the public hot path; verify
+    /// it propagates Cancelled (and that no message is observed by any
+    /// receiver in that case — the cancel signal cannot be smuggled
+    /// across as data).
+    #[test]
+    fn send_cancelled_propagates_and_drops_message() {
+        init_test("send_cancelled_propagates_and_drops_message");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<i32>(10);
+
+        cx.set_cancel_requested(true);
+        let result = tx.send(&cx, 99);
+        crate::assert_with_log!(
+            matches!(result, Err(SendError::Cancelled)),
+            "send under cancel must return Cancelled",
+            "Err(Cancelled)",
+            format!("{:?}", result)
+        );
+
+        // Receiver sees nothing — cancel did not silently push a message.
+        cx.set_cancel_requested(false);
+        let try_recv = rx.try_recv();
+        crate::assert_with_log!(
+            matches!(try_recv, Err(_)),
+            "no message should have been buffered",
+            "Err(_)",
+            format!("{:?}", try_recv)
+        );
+
+        crate::test_complete!("send_cancelled_propagates_and_drops_message");
     }
 
     #[test]
