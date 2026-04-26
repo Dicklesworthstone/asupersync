@@ -58,7 +58,7 @@ use std::fmt;
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::task::{Context, Poll};
 
@@ -1994,11 +1994,33 @@ struct InMemoryBroadcastSubscriber {
     closed: Arc<AtomicBool>,
 }
 
-static NEXT_IN_MEMORY_BROADCAST_ID: AtomicU64 = AtomicU64::new(1);
+/// br-asupersync-k60i5x — per-channel state. The previous design
+/// used a process-global `static NEXT_IN_MEMORY_BROADCAST_ID:
+/// AtomicU64`, which leaked monotonically across runtime
+/// instantiations and broke replay determinism: identical workloads
+/// in distinct runtime cycles observed different subscriber IDs
+/// because the global counter never reset.
+///
+/// Coupling the counter to the channel-name entry restores
+/// determinism: when every subscriber on a channel disconnects, the
+/// entry is removed (`registry.remove(&self.name)`), and the next
+/// caller that opens that name gets a freshly-zeroed counter. This
+/// preserves the within-channel-uniqueness invariant the id is
+/// actually used for (self-recognition in `send`/`close` at
+/// `subscriber.id == self.id`) while removing the cross-cycle leak.
+#[derive(Debug, Default)]
+struct InMemoryBroadcastChannelEntry {
+    /// Per-channel monotone counter for minting subscriber IDs.
+    /// Reset implicitly when the channel name is removed from the
+    /// registry (i.e., when all subscribers have closed).
+    next_id: u64,
+    /// Live subscribers on this channel.
+    subscribers: Vec<InMemoryBroadcastSubscriber>,
+}
 
 fn in_memory_broadcast_registry()
--> &'static Mutex<BTreeMap<String, Vec<InMemoryBroadcastSubscriber>>> {
-    static REGISTRY: OnceLock<Mutex<BTreeMap<String, Vec<InMemoryBroadcastSubscriber>>>> =
+-> &'static Mutex<BTreeMap<String, InMemoryBroadcastChannelEntry>> {
+    static REGISTRY: OnceLock<Mutex<BTreeMap<String, InMemoryBroadcastChannelEntry>>> =
         OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
@@ -2014,18 +2036,27 @@ struct InMemoryBroadcastChannelState {
 impl InMemoryBroadcastChannelState {
     fn open(name: impl Into<String>) -> Self {
         let name = name.into();
-        let id = NEXT_IN_MEMORY_BROADCAST_ID.fetch_add(1, Ordering::Relaxed);
         let inbox = Arc::new(Mutex::new(VecDeque::new()));
         let closed = Arc::new(AtomicBool::new(false));
-        let subscriber = InMemoryBroadcastSubscriber {
-            id,
-            inbox: Arc::clone(&inbox),
-            closed: Arc::clone(&closed),
+        let id = {
+            // br-asupersync-k60i5x: mint the subscriber ID from a
+            // per-channel counter rather than a process-global static.
+            // The counter is `Default`-initialised to 0 the first
+            // time a name is opened (or the first time after every
+            // subscriber on that name disconnects and the entry is
+            // removed at line ~2079), so identical workloads across
+            // runtime cycles see identical ID sequences.
+            let mut registry = lock_or_recover(in_memory_broadcast_registry());
+            let entry = registry.entry(name.clone()).or_default();
+            let id = entry.next_id;
+            entry.next_id = entry.next_id.saturating_add(1);
+            entry.subscribers.push(InMemoryBroadcastSubscriber {
+                id,
+                inbox: Arc::clone(&inbox),
+                closed: Arc::clone(&closed),
+            });
+            id
         };
-        lock_or_recover(in_memory_broadcast_registry())
-            .entry(name.clone())
-            .or_default()
-            .push(subscriber);
         Self {
             name,
             id,
@@ -2040,9 +2071,11 @@ impl InMemoryBroadcastChannelState {
         }
 
         let mut registry = lock_or_recover(in_memory_broadcast_registry());
-        if let Some(subscribers) = registry.get_mut(&self.name) {
-            subscribers.retain(|subscriber| !subscriber.closed.load(Ordering::Acquire));
-            for subscriber in subscribers.iter() {
+        if let Some(entry) = registry.get_mut(&self.name) {
+            entry
+                .subscribers
+                .retain(|subscriber| !subscriber.closed.load(Ordering::Acquire));
+            for subscriber in entry.subscribers.iter() {
                 if subscriber.id == self.id {
                     continue;
                 }
@@ -2061,11 +2094,16 @@ impl InMemoryBroadcastChannelState {
     fn close(&self) {
         self.closed.store(true, Ordering::Release);
         let mut registry = lock_or_recover(in_memory_broadcast_registry());
-        if let Some(subscribers) = registry.get_mut(&self.name) {
-            subscribers.retain(|subscriber| {
+        if let Some(entry) = registry.get_mut(&self.name) {
+            entry.subscribers.retain(|subscriber| {
                 subscriber.id != self.id && !subscriber.closed.load(Ordering::Acquire)
             });
-            if subscribers.is_empty() {
+            if entry.subscribers.is_empty() {
+                // br-asupersync-k60i5x: removing the entry resets the
+                // per-channel `next_id` counter — the next time this
+                // name is opened, IDs start from 0 again. This makes
+                // workloads that fully drain a channel and reopen it
+                // observe a deterministic ID sequence.
                 registry.remove(&self.name);
             }
         }

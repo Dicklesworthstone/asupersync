@@ -4,6 +4,7 @@
 //! replicas and tracking acknowledgements with quorum semantics.
 
 use crate::combinator::quorum::{QuorumResult, quorum_outcomes};
+use crate::cx::Cx;
 use crate::error::ErrorKind;
 use crate::record::distributed_region::{ConsistencyLevel, ReplicaInfo};
 use crate::security::SecurityContext;
@@ -162,14 +163,25 @@ impl SymbolDistributor {
     /// Distributes symbols to replicas using the provided transport.
     ///
     /// This orchestrates the assignment, signing, and transmission of symbols.
+    ///
+    /// br-asupersync-307rnt: the start/end timestamps used to compute
+    /// `DistributionResult.duration` are read through `cx.timer_driver()`
+    /// (falling back to `crate::time::wall_now` when no driver is
+    /// installed). In the lab runtime the timer driver returns
+    /// virtual time, which makes the resulting `duration` field
+    /// replay-stable. Previously this captured `std::time::Instant::now()`
+    /// directly and leaked wall-clock into the public result.
     pub async fn distribute<T: DistributorTransport>(
         &mut self,
+        cx: &Cx,
         encoded: &EncodedState,
         replicas: &[ReplicaInfo],
         transport: &T,
         auth_context: &SecurityContext,
     ) -> DistributionResult {
-        let start = std::time::Instant::now();
+        let start = cx
+            .timer_driver()
+            .map_or_else(crate::time::wall_now, |d| d.now());
         let assignments = Self::compute_assignments(encoded, replicas);
         let mut outcomes = Vec::with_capacity(assignments.len());
         let mut symbols_sent_total = 0_u64;
@@ -199,12 +211,17 @@ impl SymbolDistributor {
             });
         }
 
+        let end = cx
+            .timer_driver()
+            .map_or_else(crate::time::wall_now, |d| d.now());
+        let duration = Duration::from_nanos(end.duration_since(start));
+
         self.evaluate_outcomes_with_sent(
             encoded,
             replicas,
             outcomes,
             symbols_sent_total,
-            start.elapsed(),
+            duration,
         )
     }
 
@@ -505,9 +522,10 @@ mod tests {
                 .map(|assignment| assignment.symbol_indices.len() as u64)
                 .sum();
 
+        let cx = Cx::for_testing();
         let result = futures_lite::future::block_on(async {
             distributor
-                .distribute(&encoded, &replicas, &transport, &auth_context)
+                .distribute(&cx, &encoded, &replicas, &transport, &auth_context)
                 .await
         });
 
@@ -522,6 +540,43 @@ mod tests {
             result.symbols_distributed,
             u32::try_from(expected_symbols_sent).unwrap_or(u32::MAX)
         );
+    }
+
+    /// br-asupersync-307rnt: distribute() reads its start/end
+    /// timestamps via `cx.timer_driver()` and falls back to
+    /// `crate::time::wall_now()` only when no driver is installed.
+    /// This test exercises the no-driver path (`Cx::for_testing`
+    /// has none) and asserts that the resulting duration is at
+    /// least non-negative and well-defined; the virtual-clock
+    /// determinism path is exercised by lab-runtime integration
+    /// tests that wire a `TimerDriverHandle::with_virtual_clock`
+    /// through the runtime builder. The key invariant tested here
+    /// is that distribute() now accepts a `&Cx` rather than reaching
+    /// for ambient `std::time::Instant::now()`.
+    #[test]
+    fn distribute_duration_is_well_defined_through_cx() {
+        let config = DistributionConfig::default();
+        let mut distributor = SymbolDistributor::new(config);
+        let replicas = create_test_replicas(3);
+        let encoded = create_test_encoded_state();
+        let auth_context = SecurityContext::for_testing(7);
+        let transport = MockSuccessTransport;
+
+        let cx = Cx::for_testing();
+        let result = futures_lite::future::block_on(async {
+            distributor
+                .distribute(&cx, &encoded, &replicas, &transport, &auth_context)
+                .await
+        });
+
+        // Duration is computed via Time::duration_since which is
+        // saturating_sub, so it can never be negative; with the
+        // wall_now fallback path it can be very small but not
+        // pathological. The point of this test is to confirm
+        // distribute() compiles + runs with the new Cx-threaded
+        // signature; replay-determinism is covered by integration
+        // tests that wire a virtual timer driver.
+        assert!(result.duration <= Duration::from_secs(60));
     }
 
     #[test]

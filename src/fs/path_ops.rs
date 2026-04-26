@@ -207,10 +207,23 @@ fn normalized_parent(path: &Path) -> &Path {
 }
 
 fn unique_tmp_path(parent: &Path, file_name: &std::ffi::OsStr) -> PathBuf {
+    // br-asupersync-vbr1zf: prior implementation embedded
+    // `std::process::id()` in the temp-file name, leaking host PID
+    // into the filesystem and producing run-to-run differences in
+    // path strings even for identical workloads. Replaced with a
+    // 64-bit OS-entropy random nonce (rendered as fixed-width hex)
+    // plus the existing per-process monotone counter for in-process
+    // collision avoidance. The nonce is drawn from `OsEntropy`,
+    // which is the project's documented ambient-authority boundary
+    // for entropy. Across replays the nonce differs (good — that's
+    // its purpose), but the PID leak is gone and the format stays
+    // wasm-portable (`std::process::id()` is meaningless on wasm32).
+    use crate::util::entropy::{EntropySource, OsEntropy};
     let counter = ATOMIC_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nonce = OsEntropy.next_u64();
     let mut tmp_name = std::ffi::OsString::from(".");
     tmp_name.push(file_name);
-    tmp_name.push(format!(".asupersync-tmp-{}-{counter}", std::process::id()));
+    tmp_name.push(format!(".asupersync-tmp-{nonce:016x}-{counter}"));
     parent.join(tmp_name)
 }
 
