@@ -1103,10 +1103,45 @@ impl RegionRecord {
     /// This method is used by the distributed bridge to update the local region state
     /// to match the state recovered from a remote replica.
     ///
+    /// # CRDT semantics (br-asupersync-g4mv9b)
+    ///
+    /// `children` and `tasks` are merged as **G-set unions** (set semantics
+    /// preserved as `Vec` for backwards compatibility with the storage
+    /// format). The previous REPLACE semantics broke CRDT commutativity
+    /// and associativity: if replica A held tasks `{1, 2}` and a snapshot
+    /// from replica B carrying tasks `{3, 4}` was applied, A's local
+    /// view became `{3, 4}` — silently dropping `{1, 2}`. Symmetrically
+    /// applying A's snapshot to B dropped B's tasks. After a partition
+    /// heal, the total task count could collapse, the region's
+    /// quiescence check would falsely report zero live tasks for the
+    /// overwritten side, and the close-to-quiescence invariant would be
+    /// broken without diagnostic.
+    ///
+    /// Union semantics restore both CRDT properties on the additive
+    /// direction: `merge(A, B) == merge(B, A)` (commutativity) and
+    /// `merge(merge(A, B), C) == merge(A, merge(B, C))` (associativity).
+    ///
+    /// **Caveat — known stale-element gap**: this is a grow-only set.
+    /// If a task was completed and removed locally on replica A before
+    /// the heal, replica B's snapshot (which observed the task before A
+    /// removed it) will re-add the now-stale entry. Closing that gap
+    /// requires per-element vclock-aware lattice merge — tracked
+    /// separately as a follow-up. The G-set fix immediately closes the
+    /// silent-task-loss vector, trading "may re-add a completed task"
+    /// (visible, recoverable via the quiescence check) for "may lose a
+    /// live task" (silent, unrecoverable).
+    ///
+    /// `budget` and `cancel_reason` retain LWW (last-writer-wins)
+    /// semantics — the bead scope was children + tasks; broadening to
+    /// `cancel_reason` fail-closed semantics ("Some-priority over None")
+    /// is left as a follow-up since changing it risks dropping a
+    /// legitimate cancel-clear from the snapshot author.
+    ///
     /// # Safety
     ///
-    /// This method blindly overwrites the internal state of the region. It should
-    /// only be used by the distributed bridge when applying a validated snapshot.
+    /// This method modifies the internal state of the region. It should
+    /// only be used by the distributed bridge when applying a validated
+    /// snapshot.
     pub fn apply_distributed_snapshot(
         &self,
         state: RegionState,
@@ -1121,8 +1156,19 @@ impl RegionRecord {
         // readers never see new state with old inner data (torn read).
         let mut inner = self.inner.write();
         inner.budget = budget;
-        inner.children = children;
-        inner.tasks = tasks;
+        // br-asupersync-g4mv9b: G-set union for children + tasks.
+        // O(n*m) contains() is acceptable here — region children and
+        // tasks lists are small (typical region holds 1-10s of each).
+        for child_id in children {
+            if !inner.children.contains(&child_id) {
+                inner.children.push(child_id);
+            }
+        }
+        for task_id in tasks {
+            if !inner.tasks.contains(&task_id) {
+                inner.tasks.push(task_id);
+            }
+        }
         inner.cancel_reason = cancel_reason;
         // Publish state change while still holding the write lock — readers
         // acquiring the lock after this point see both new state and new data.
@@ -2790,5 +2836,148 @@ mod tests {
             region.rref_with(&rref, |inner_val: &String| inner_val.len())
         });
         assert_eq!(result, Ok(Ok(4)));
+    }
+
+    /// br-asupersync-g4mv9b: regression test that
+    /// `apply_distributed_snapshot` merges children + tasks via
+    /// G-set union, restoring CRDT commutativity and associativity.
+    /// Pre-fix this method REPLACED the lists, silently dropping
+    /// the local replica's children/tasks on partition heal —
+    /// breaking the close-to-quiescence invariant.
+    ///
+    /// The test constructs three disjoint snapshots (A, B, C) and
+    /// verifies that:
+    ///   * commutativity: merge(A, B) == merge(B, A) as sets
+    ///   * associativity: merge(merge(A, B), C) == merge(A, merge(B, C))
+    ///   * idempotence: merge(A, A) == A (G-set guarantee)
+    ///   * pre-existing local state is preserved across an incoming
+    ///     snapshot (the silent-loss vector the bead documents)
+    #[test]
+    fn apply_distributed_snapshot_is_commutative_and_associative() {
+        use std::collections::BTreeSet;
+
+        fn snapshot_apply(
+            r: &RegionRecord,
+            children: Vec<RegionId>,
+            tasks: Vec<TaskId>,
+        ) {
+            r.apply_distributed_snapshot(
+                RegionState::Open,
+                Budget::INFINITE,
+                children,
+                tasks,
+                None,
+            );
+        }
+
+        fn ids_set<I: Ord>(v: Vec<I>) -> BTreeSet<I> {
+            v.into_iter().collect()
+        }
+
+        let rid = |n: u32| RegionId::from_arena(ArenaIndex::new(n, 0));
+        let tid = |n: u32| TaskId::from_arena(ArenaIndex::new(n, 0));
+
+        let snap_a = (
+            vec![rid(101), rid(102)],
+            vec![tid(201), tid(202)],
+        );
+        let snap_b = (
+            vec![rid(103), rid(104)],
+            vec![tid(203), tid(204)],
+        );
+        let snap_c = (
+            vec![rid(105), rid(106)],
+            vec![tid(205), tid(206)],
+        );
+
+        // ── Commutativity: merge(A, B) == merge(B, A) ──
+        let region_ab = RegionRecord::new(test_region_id(), None, Budget::INFINITE);
+        snapshot_apply(&region_ab, snap_a.0.clone(), snap_a.1.clone());
+        snapshot_apply(&region_ab, snap_b.0.clone(), snap_b.1.clone());
+
+        let region_ba = RegionRecord::new(test_region_id(), None, Budget::INFINITE);
+        snapshot_apply(&region_ba, snap_b.0.clone(), snap_b.1.clone());
+        snapshot_apply(&region_ba, snap_a.0.clone(), snap_a.1.clone());
+
+        assert_eq!(
+            ids_set(region_ab.child_ids()),
+            ids_set(region_ba.child_ids()),
+            "G-set union of children must be commutative"
+        );
+        assert_eq!(
+            ids_set(region_ab.task_ids()),
+            ids_set(region_ba.task_ids()),
+            "G-set union of tasks must be commutative"
+        );
+
+        // ── Associativity: merge(merge(A, B), C) == merge(A, merge(B, C)) ──
+        // The straightforward way to check: apply A then B then C in both
+        // groupings and ensure the resulting sets are equal.
+        let region_abc_left = RegionRecord::new(test_region_id(), None, Budget::INFINITE);
+        snapshot_apply(&region_abc_left, snap_a.0.clone(), snap_a.1.clone());
+        snapshot_apply(&region_abc_left, snap_b.0.clone(), snap_b.1.clone());
+        snapshot_apply(&region_abc_left, snap_c.0.clone(), snap_c.1.clone());
+
+        let region_abc_right = RegionRecord::new(test_region_id(), None, Budget::INFINITE);
+        snapshot_apply(&region_abc_right, snap_b.0.clone(), snap_b.1.clone());
+        snapshot_apply(&region_abc_right, snap_c.0.clone(), snap_c.1.clone());
+        // Now apply A to (B ∪ C); union should equal A ∪ B ∪ C regardless
+        // of the order the union was built.
+        snapshot_apply(&region_abc_right, snap_a.0.clone(), snap_a.1.clone());
+
+        assert_eq!(
+            ids_set(region_abc_left.child_ids()),
+            ids_set(region_abc_right.child_ids()),
+            "G-set union of children must be associative"
+        );
+        assert_eq!(
+            ids_set(region_abc_left.task_ids()),
+            ids_set(region_abc_right.task_ids()),
+            "G-set union of tasks must be associative"
+        );
+
+        // ── Idempotence: merge(A, A) == A ──
+        let region_aa = RegionRecord::new(test_region_id(), None, Budget::INFINITE);
+        snapshot_apply(&region_aa, snap_a.0.clone(), snap_a.1.clone());
+        snapshot_apply(&region_aa, snap_a.0.clone(), snap_a.1.clone());
+        assert_eq!(
+            ids_set(region_aa.child_ids()),
+            ids_set(snap_a.0.clone()),
+            "G-set union must be idempotent on children"
+        );
+        assert_eq!(
+            ids_set(region_aa.task_ids()),
+            ids_set(snap_a.1.clone()),
+            "G-set union must be idempotent on tasks"
+        );
+
+        // ── Silent-loss regression: pre-existing local state preserved
+        //    across an incoming snapshot from a remote replica. This is
+        //    the literal pre-fix bug the bead documented (replica A
+        //    holds {1, 2}, remote snapshot from B has {3, 4}, after
+        //    apply A's view should be {1, 2, 3, 4}, NOT {3, 4}).
+        let region_local = RegionRecord::new(test_region_id(), None, Budget::INFINITE);
+        // Establish local state via the public add_child / add_task path.
+        region_local.add_child(rid(101)).expect("add local child 1");
+        region_local.add_child(rid(102)).expect("add local child 2");
+        region_local.add_task(tid(201)).expect("add local task 1");
+        region_local.add_task(tid(202)).expect("add local task 2");
+        // Apply remote snapshot carrying disjoint IDs.
+        snapshot_apply(&region_local, snap_b.0.clone(), snap_b.1.clone());
+
+        let local_children = ids_set(region_local.child_ids());
+        let local_tasks = ids_set(region_local.task_ids());
+        let expected_children: BTreeSet<_> =
+            [rid(101), rid(102), rid(103), rid(104)].into_iter().collect();
+        let expected_tasks: BTreeSet<_> =
+            [tid(201), tid(202), tid(203), tid(204)].into_iter().collect();
+        assert_eq!(
+            local_children, expected_children,
+            "remote snapshot must NOT silently drop local children (silent-loss regression)"
+        );
+        assert_eq!(
+            local_tasks, expected_tasks,
+            "remote snapshot must NOT silently drop local tasks (silent-loss regression)"
+        );
     }
 }
