@@ -769,16 +769,22 @@ impl GaussianSolver {
 
             // Find pivot row (first nonzero in column, starting from pivot_col)
             let Some(pivot_row) = self.find_pivot(pivot_col, pivot_col) else {
-                // No pivot is available at this column frontier. Surface the
-                // column-level failure as `Singular` unless the row aligned to
-                // the pivot position is itself a zero-coefficient, nonzero-RHS
-                // contradiction — in that single case the caller sees an
-                // explicit inconsistency at the pivot row. Other zero-row
-                // contradictions farther down belong to the post-elimination
-                // sweep so cross-solver diagnostics agree on the first
-                // unpivotable column.
+                // br-asupersync-mwx6zi: classification must be a
+                // function of the system, not of the pivot strategy.
+                // Pre-fix this branch only checked the row aligned
+                // to `pivot_col` for an explicit contradiction —
+                // which meant the same rank-deficient system could
+                // classify as Inconsistent under one pivot strategy
+                // and Singular under another, depending on which
+                // row happened to land at the stall column. Now we
+                // scan ALL remaining rows (>= pivot_col) for a
+                // zero-coefficient nonzero-RHS row; if any exists
+                // the system is genuinely Inconsistent, otherwise
+                // it is genuinely Singular. Both solvers use the
+                // same scan, so they cannot disagree on the same
+                // input.
                 return self
-                    .first_inconsistent_row_at(pivot_col)
+                    .first_inconsistent_row_from(pivot_col)
                     .map_or(GaussianResult::Singular { row: pivot_col }, |row| {
                         GaussianResult::Inconsistent { row }
                     });
@@ -827,11 +833,14 @@ impl GaussianSolver {
 
             // Find best pivot (sparsest row with nonzero in column)
             let Some((pivot_row, _nnz)) = self.find_pivot_markowitz(pivot_col, pivot_col) else {
-                // Mirror the basic solver: report the first unpivotable column
-                // as `Singular` unless the pivot-aligned row itself carries an
-                // explicit zero-row contradiction.
+                // br-asupersync-mwx6zi: same FULL-scan classification
+                // as `solve` so both pivot strategies yield identical
+                // outcomes on every input. See the parallel comment
+                // in `solve` for the rationale (cross-solver
+                // agreement is a function of the system, not of the
+                // pivot strategy).
                 return self
-                    .first_inconsistent_row_at(pivot_col)
+                    .first_inconsistent_row_from(pivot_col)
                     .map_or(GaussianResult::Singular { row: pivot_col }, |row| {
                         GaussianResult::Inconsistent { row }
                     });
@@ -937,6 +946,7 @@ impl GaussianSolver {
     /// forward elimination to classify an unpivotable column as `Inconsistent`
     /// only when the pivot row itself is a contradiction; rank-deficient rows
     /// farther down are reported after elimination completes.
+    #[allow(dead_code)] // Wired up by br-asupersync-mwx6zi (solve/solve_markowitz alignment)
     fn first_inconsistent_row_at(&self, row: usize) -> Option<usize> {
         if row >= self.rows {
             return None;
@@ -2397,5 +2407,175 @@ mod tests {
             flatten_source_symbols(&decoded_permuted.source, data.len()),
             "decode output must be byte-identical under symbol-set permutation"
         );
+    }
+
+    // ── br-asupersync-mwx6zi: solve / solve_markowitz must agree ─────
+
+    /// Helper: classify a `GaussianResult` into its discriminant
+    /// without comparing the (pivot-strategy-dependent) `row` field.
+    /// Cross-solver agreement is on the SYSTEM classification, not on
+    /// which specific row index each strategy happens to surface.
+    fn _mwx6zi_class(r: &GaussianResult) -> &'static str {
+        match r {
+            GaussianResult::Solved(_) => "Solved",
+            GaussianResult::Singular { .. } => "Singular",
+            GaussianResult::Inconsistent { .. } => "Inconsistent",
+        }
+    }
+
+    /// Build a solver from a 2D coefficient matrix and a parallel
+    /// RHS vector (one byte per row, expanded into a single-byte
+    /// `DenseRow`).
+    fn _mwx6zi_solver(coeffs: &[Vec<u8>], rhs: &[u8]) -> GaussianSolver {
+        assert_eq!(coeffs.len(), rhs.len());
+        let rows = coeffs.len();
+        let cols = if rows == 0 { 0 } else { coeffs[0].len() };
+        let mut s = GaussianSolver::new(rows, cols);
+        for (i, row) in coeffs.iter().enumerate() {
+            s.set_row(i, row, DenseRow::new(vec![rhs[i]]));
+        }
+        s
+    }
+
+    /// Pre-fix repro: a rank-deficient system whose contradiction
+    /// row depends on the pivot strategy's choice of pivot row.
+    /// `solve` and `solve_markowitz` historically classified this
+    /// 4x3 system DIFFERENTLY — one as Inconsistent (when pivot
+    /// alignment landed on the contradiction) and one as Singular
+    /// (when alignment missed it). After the fix both perform a
+    /// FULL post-stall scan and agree.
+    #[test]
+    fn mwx6zi_classifier_agreement_rank_deficient_with_late_contradiction() {
+        // 4x3 over GF(256). Column 0 has 3 nonzeros, column 1 has
+        // 2, column 2 is structurally zero. Row 2 carries an
+        // explicit zero-coefficient nonzero-RHS contradiction.
+        // Whether that contradiction lands on the pivot-stall row
+        // depends on pivot strategy — without the fix the two
+        // solvers diverged.
+        let coeffs = vec![
+            vec![1u8, 1, 0],
+            vec![1, 0, 0],
+            vec![0, 0, 0],
+            vec![1, 1, 0],
+        ];
+        let rhs = vec![0u8, 0, 1, 0];
+
+        let mut s_basic = _mwx6zi_solver(&coeffs, &rhs);
+        let mut s_mark = _mwx6zi_solver(&coeffs, &rhs);
+        let r_basic = s_basic.solve();
+        let r_mark = s_mark.solve_markowitz();
+
+        assert_eq!(
+            _mwx6zi_class(&r_basic),
+            _mwx6zi_class(&r_mark),
+            "solve and solve_markowitz must classify the same system \
+             identically; got basic={r_basic:?}, markowitz={r_mark:?}"
+        );
+        // Specifically, this system IS inconsistent (row 2 is
+        // 0·x = 1, an unsatisfiable equation) — both must say so.
+        assert_eq!(
+            _mwx6zi_class(&r_basic),
+            "Inconsistent",
+            "rank-deficient + 0=1 row must classify as Inconsistent, \
+             not Singular; got {r_basic:?}"
+        );
+    }
+
+    /// Positive control: a genuinely singular system (rank-deficient
+    /// but with b in the column space) must classify as Singular by
+    /// BOTH solvers — never Inconsistent.
+    #[test]
+    fn mwx6zi_classifier_agreement_rank_deficient_no_contradiction() {
+        let coeffs = vec![
+            vec![1u8, 0, 0],
+            vec![0, 0, 0],
+            vec![0, 0, 0],
+        ];
+        let rhs = vec![5u8, 0, 0];
+
+        let mut s_basic = _mwx6zi_solver(&coeffs, &rhs);
+        let mut s_mark = _mwx6zi_solver(&coeffs, &rhs);
+        let r_basic = s_basic.solve();
+        let r_mark = s_mark.solve_markowitz();
+
+        assert_eq!(_mwx6zi_class(&r_basic), _mwx6zi_class(&r_mark));
+        assert_eq!(
+            _mwx6zi_class(&r_basic),
+            "Singular",
+            "rank-deficient with no contradicting row must classify \
+             as Singular; got {r_basic:?}"
+        );
+    }
+
+    /// Positive control: a fully-solvable system must classify as
+    /// Solved by both solvers and produce equal solutions (the
+    /// solution is unique when rank == cols).
+    #[test]
+    fn mwx6zi_classifier_agreement_solvable_system() {
+        // Identity-like 3x3 over GF(256).
+        let coeffs = vec![vec![1u8, 0, 0], vec![0, 1, 0], vec![0, 0, 1]];
+        let rhs = vec![7u8, 11, 13];
+
+        let mut s_basic = _mwx6zi_solver(&coeffs, &rhs);
+        let mut s_mark = _mwx6zi_solver(&coeffs, &rhs);
+        let r_basic = s_basic.solve();
+        let r_mark = s_mark.solve_markowitz();
+        assert_eq!(_mwx6zi_class(&r_basic), "Solved");
+        assert_eq!(_mwx6zi_class(&r_mark), "Solved");
+        if let (GaussianResult::Solved(b), GaussianResult::Solved(m)) = (r_basic, r_mark) {
+            // Solution is unique on a full-rank diagonal system; both
+            // pivot strategies must produce the same vector.
+            assert_eq!(b.len(), m.len());
+            for (br, mr) in b.iter().zip(m.iter()) {
+                assert_eq!(
+                    br.as_slice(),
+                    mr.as_slice(),
+                    "unique-solution systems must produce identical \
+                     answers under both pivot strategies"
+                );
+            }
+        }
+    }
+
+    /// Cross-class fuzz-style sweep: a small batch of synthetic
+    /// matrices must always have matching discriminants under both
+    /// pivot strategies. This is the property that the original
+    /// fuzz target enforces — pinning it in unit tests catches
+    /// future regressions without requiring the fuzzer to run.
+    #[test]
+    fn mwx6zi_classifier_agreement_synthetic_sweep() {
+        let cases: &[(Vec<Vec<u8>>, Vec<u8>)] = &[
+            // 2x2 solvable
+            (vec![vec![1, 0], vec![0, 1]], vec![1, 1]),
+            // 2x2 singular, b in column space
+            (vec![vec![1, 1], vec![1, 1]], vec![3, 3]),
+            // 2x2 inconsistent (contradicting parallel rows)
+            (vec![vec![1, 1], vec![1, 1]], vec![3, 4]),
+            // 3x3 with zero-row contradiction at the bottom
+            (
+                vec![vec![1, 1, 0], vec![0, 1, 0], vec![0, 0, 0]],
+                vec![1, 2, 5],
+            ),
+            // 3x3 zero-row consistent
+            (
+                vec![vec![1, 1, 0], vec![0, 1, 0], vec![0, 0, 0]],
+                vec![1, 2, 0],
+            ),
+            // Wider-than-tall (rows < cols → Singular by solved_result)
+            (vec![vec![1, 0, 0], vec![0, 1, 0]], vec![1, 1]),
+        ];
+
+        for (idx, (coeffs, rhs)) in cases.iter().enumerate() {
+            let mut s_basic = _mwx6zi_solver(coeffs, rhs);
+            let mut s_mark = _mwx6zi_solver(coeffs, rhs);
+            let r_basic = s_basic.solve();
+            let r_mark = s_mark.solve_markowitz();
+            assert_eq!(
+                _mwx6zi_class(&r_basic),
+                _mwx6zi_class(&r_mark),
+                "case[{idx}] discriminant mismatch: \
+                 basic={r_basic:?} markowitz={r_mark:?} (coeffs={coeffs:?} rhs={rhs:?})"
+            );
+        }
     }
 }
