@@ -2200,3 +2200,11 @@ path = "fuzz_targets/plan_analysis_budget.rs"
 test = false
 doc = false
 bench = false
+
+# Fuzz coverage gap: plan/latency_algebra.rs PiecewiseLinearCurve algebra
+[[bin]]
+name = "plan_latency_curves"
+path = "fuzz_targets/plan_latency_curves.rs"
+test = false
+doc = false
+bench = false
