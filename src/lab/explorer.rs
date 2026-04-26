@@ -878,9 +878,17 @@ impl DporExplorer {
             self.work_queue.push_front(seed);
             return true;
         }
-        if let Some(position) = self.work_queue.iter().position(|queued| *queued == seed)
-            && position > 0
-        {
+        if let Some(position) = self.work_queue.iter().position(|queued| *queued == seed) {
+            if position == 0 {
+                // br-asupersync-vba3uv: seed is already at the front
+                // of the work queue. The previous logic fell through
+                // to the trailing `pruned_backtrack_points += 1;
+                // false` block, over-counting prunes for the
+                // common "front-prefer of an already-front seed"
+                // case. The seed IS the prioritised one — return
+                // success without bumping the prune counter.
+                return true;
+            }
             self.work_queue.remove(position);
             self.work_queue.push_front(seed);
             return true;

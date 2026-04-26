@@ -33,7 +33,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Runtime modules that participate in epoch synchronization.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// br-asupersync-1ztyho: now derives `PartialOrd` and `Ord` so callers
+/// (notably `check_epoch_consistency`) can sort module collections
+/// before iteration. The variant ordering follows declaration order —
+/// Scheduler < RegionTable < TaskTable < ObligationTable < TimerWheel
+/// < IoReactor < CancelProtocol — which is the canonical replay order
+/// used by the lab harness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum RuntimeModule {
     /// Task scheduler module.
     Scheduler,
@@ -628,7 +635,15 @@ impl RuntimeEpochOracle {
             .fetch_add(1, Ordering::Relaxed);
 
         let states = self.module_states.read();
-        let modules: Vec<_> = states.keys().copied().collect();
+        // br-asupersync-1ztyho: sort the keys before iterating so
+        // every replay reports skew violations in the same module-
+        // pair order. Pre-fix the HashMap iteration order was
+        // non-deterministic, so the (module_a, module_b) pair that
+        // appeared FIRST in the violations list varied across runs
+        // — the first-violation report (which downstream tooling
+        // uses for ranking) was effectively random across replays.
+        let mut modules: Vec<_> = states.keys().copied().collect();
+        modules.sort();
 
         // Check for epoch skew between all module pairs
         for i in 0..modules.len() {
@@ -659,8 +674,12 @@ impl RuntimeEpochOracle {
             }
         }
 
-        // Check for slow ongoing transitions
-        for state in states.values() {
+        // br-asupersync-1ztyho: same canonical-order treatment for the
+        // slow-transition scan so SlowTransition violations are also
+        // reported in deterministic module order.
+        let mut sorted_states: Vec<_> = states.values().collect();
+        sorted_states.sort_by_key(|s| s.module);
+        for state in sorted_states {
             if let Some(transition_duration) = state.transition_duration_so_far(now) {
                 if transition_duration > self.config.max_transition_duration_ns {
                     let violation = RuntimeEpochViolation::SlowTransition {
