@@ -247,10 +247,13 @@ impl Semaphore {
             // On ARM this avoids a store-release barrier per acquisition.
             self.permits_shadow.store(state.permits, Ordering::Relaxed);
             Ok(SemaphorePermit {
-                obligation: Some(ObligationToken::reserve(format!(
-                    "semaphore-permit-{}",
-                    count
-                ))),
+                // br-asupersync-13jmt3: static description avoids the
+                // per-acquire String allocation. The permit count is
+                // already exposed via SemaphorePermit.count for any
+                // observer that needs the numeric identity; duplicating
+                // it here in heap-allocated form was wasted work on the
+                // synchronization-critical path.
+                obligation: Some(ObligationToken::reserve("semaphore-permit")),
                 semaphore: self,
                 count,
             })
@@ -395,10 +398,10 @@ impl<'a> Future for AcquireFuture<'a, '_> {
                 next.wake();
             }
             return Poll::Ready(Ok(SemaphorePermit {
-                obligation: Some(ObligationToken::reserve(format!(
-                    "semaphore-permit-{}",
-                    self.count
-                ))),
+                // br-asupersync-13jmt3: static description (see paired
+                // comment in try_acquire); count is exposed via
+                // SemaphorePermit.count.
+                obligation: Some(ObligationToken::reserve("semaphore-permit")),
                 semaphore: self.semaphore,
                 count: self.count,
             }));
@@ -731,10 +734,10 @@ impl Future for OwnedAcquireFuture {
                 next.wake();
             }
             return Poll::Ready(Ok(OwnedSemaphorePermit {
-                obligation: Some(ObligationToken::reserve(format!(
-                    "semaphore-permit-{}",
-                    this.count
-                ))),
+                // br-asupersync-13jmt3: static description (see paired
+                // comment in try_acquire); count is exposed via
+                // OwnedSemaphorePermit.count.
+                obligation: Some(ObligationToken::reserve("semaphore-permit")),
                 semaphore: this.semaphore.clone(),
                 count: this.count,
             }));

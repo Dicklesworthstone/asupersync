@@ -487,17 +487,31 @@ impl<T: Clone> Receiver<T> {
         }
 
         // 4. Wait - register or update waker
+        //
+        // br-asupersync-53aqtf: factor the two insert paths through a
+        // single closure so the Waker::clone is paid AT MOST ONCE per
+        // poll, and only when we actually need to allocate a new slab
+        // entry. Steady-state polls hit the existing-token branch
+        // below where `will_wake` short-circuits any clone (the fast
+        // path the bead's "5-10% throughput at high N" estimate
+        // depends on). The remaining clone — fired only on first
+        // poll OR on stale-token recovery after slab reuse — is
+        // unavoidable: the slab takes ownership of the Waker and
+        // current_waker is borrowed from task_cx.
         let current_waker = task_cx.waker();
-        if let Some(token) = *waiter {
-            if let Some(waker) = inner.wakers.get_mut(token) {
-                if !waker.will_wake(current_waker) {
-                    waker.clone_from(current_waker);
+        let needs_fresh_insert = match *waiter {
+            Some(token) => match inner.wakers.get_mut(token) {
+                Some(waker) => {
+                    if !waker.will_wake(current_waker) {
+                        waker.clone_from(current_waker);
+                    }
+                    false
                 }
-            } else {
-                let token = inner.wakers.insert(current_waker.clone()); // ubs:ignore - internal token
-                *waiter = Some(token);
-            }
-        } else {
+                None => true, // stale token — slab slot was reaped
+            },
+            None => true,
+        };
+        if needs_fresh_insert {
             let token = inner.wakers.insert(current_waker.clone()); // ubs:ignore - internal token
             *waiter = Some(token);
         }
