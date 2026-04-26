@@ -2184,3 +2184,11 @@ path = "fuzz_targets/web_session_data.rs"
 test = false
 doc = false
 bench = false
+
+# Fuzz coverage gap: plan/rewrite.rs RewritePolicy + RewriteRule
+[[bin]]
+name = "plan_rewrite_policy"
+path = "fuzz_targets/plan_rewrite_policy.rs"
+test = false
+doc = false
+bench = false
