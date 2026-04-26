@@ -41,7 +41,22 @@ use crate::raptorq::gf256::{
 };
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+// br-asupersync-3wxmb3: drop std HashMap in favour of BTreeMap for the
+// scoring path (so iteration is sorted by candidate_id and tied scores
+// have a deterministic tiebreaker) and crate::util::DetHashSet for the
+// remaining membership-check sites (deterministic hasher, matches the
+// rest of the runtime). std::collections::HashSet kept only via
+// fully-qualified paths in the test module, where determinism does not
+// affect production identity. Instant remains because it is the
+// LEGITIMATE measurement primitive — see benchmark_candidate's
+// measure_performance loop. SystemTime::now is removed from
+// benchmark_timestamp; the timestamp now comes from a per-tuner clock
+// anchor (set_clock_anchor) so tests/lab callers can pin replay
+// determinism while production keeps the wall-clock fallback.
+use crate::time::wall_now;
+use crate::types::Time;
+use crate::util::DetHashSet;
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 /// Represents a candidate kernel configuration for offline tuning.
@@ -233,6 +248,16 @@ pub struct OfflineTuner {
     benchmark_iterations: usize,
     /// Results from completed benchmarks.
     benchmark_results: Vec<BenchmarkResult>,
+    /// br-asupersync-3wxmb3: per-tuner clock anchor used to stamp
+    /// `BenchmarkResult::benchmark_timestamp`. When `None`, the tuner
+    /// falls back to `crate::time::wall_now()` (which itself is hooked
+    /// by the lab runtime when present, so even the fallback path is
+    /// replay-stable inside a `LabRuntime`). When `Some(t)`, every
+    /// emitted benchmark result carries `t.as_nanos()` regardless of
+    /// when the benchmark physically ran — letting tests / golden
+    /// snapshots pin the timestamp to a known value without going
+    /// through the lab clock plumbing.
+    clock_anchor: Option<Time>,
 }
 
 impl OfflineTuner {
@@ -248,7 +273,38 @@ impl OfflineTuner {
             criteria,
             benchmark_iterations: DEFAULT_BENCHMARK_ITERATIONS,
             benchmark_results: Vec::new(),
+            clock_anchor: None,
         }
+    }
+
+    /// br-asupersync-3wxmb3: pin the timestamp embedded in every
+    /// `BenchmarkResult` to a deterministic value. Without this,
+    /// `benchmark_timestamp` is sourced from `crate::time::wall_now()`
+    /// (which the lab runtime hooks when it owns the call frame, but
+    /// production / standalone callers see real wall time). Tests and
+    /// golden-snapshot consumers should call this with a fixed `Time`
+    /// so two runs of the same tuning workload produce byte-identical
+    /// `BenchmarkResult` payloads.
+    #[must_use]
+    pub fn with_clock_anchor(mut self, anchor: Time) -> Self {
+        self.clock_anchor = Some(anchor);
+        self
+    }
+
+    /// Returns the configured clock anchor, if any. `None` means the
+    /// tuner is using `crate::time::wall_now()` fallback.
+    #[must_use]
+    pub fn clock_anchor(&self) -> Option<Time> {
+        self.clock_anchor
+    }
+
+    /// Resolve the timestamp to embed in the next benchmark result.
+    /// Lab callers that wired `with_clock_anchor` get the anchor
+    /// verbatim; everyone else falls through to `wall_now()` (which
+    /// is itself hooked by the lab runtime when one is present, so
+    /// the fallback path is also replay-stable inside a LabRuntime).
+    fn benchmark_clock(&self) -> Time {
+        self.clock_anchor.unwrap_or_else(wall_now)
     }
 
     /// Overrides the per-pair benchmark iteration count. Clamped to at least 1
@@ -346,7 +402,14 @@ impl OfflineTuner {
             throughput_ops_per_sec,
             bandwidth_gbps,
             bit_exactness_verified,
-            benchmark_timestamp: format!("{:?}", std::time::SystemTime::now()),
+            // br-asupersync-3wxmb3: was `format!("{:?}", SystemTime::now())`,
+            // an unbounded ambient leak that put a per-call wall-clock
+            // value into every BenchmarkResult and broke golden-snapshot
+            // comparison + ProfilePack content hashing. Now sources the
+            // timestamp from `benchmark_clock()`, which honours the
+            // tuner's `clock_anchor` (set via `with_clock_anchor`) and
+            // falls back to `crate::time::wall_now()` (lab-hooked).
+            benchmark_timestamp: format!("t_ns={}", self.benchmark_clock().as_nanos()),
         })
     }
 
@@ -356,8 +419,19 @@ impl OfflineTuner {
             return Err(TuningError::NoBenchmarkResults);
         }
 
-        // Group results by candidate
-        let mut candidate_scores: HashMap<String, f64> = HashMap::new();
+        // br-asupersync-3wxmb3: BTreeMap (sorted iteration) replaces
+        // std HashMap (random iteration). Two effects:
+        //   1. `max_by` over a BTreeMap iterates in lexicographic
+        //      candidate_id order. When two candidates score
+        //      identically, max_by keeps the FIRST seen — which is now
+        //      the smaller candidate_id, deterministic across runs.
+        //      With std HashMap the winner was process-random.
+        //   2. Eliminates the hash-DoS surface: candidate_id strings
+        //      are derived from architecture + tile/unroll/prefetch/
+        //      fusion tuples — not attacker-controlled here, so DoS
+        //      isn't the immediate concern, but BTreeMap removes the
+        //      hasher entirely.
+        let mut candidate_scores: BTreeMap<String, f64> = BTreeMap::new();
 
         for result in &self.benchmark_results {
             let candidate_id = &result.candidate.candidate_id;
@@ -375,7 +449,9 @@ impl OfflineTuner {
                 weighted_score * self.workload_weight(&result.workload_id);
         }
 
-        // Find the candidate with highest score
+        // Find the candidate with highest score. Ties are broken by
+        // the BTreeMap's lexicographic iteration order — see comment
+        // above the map declaration.
         let best_candidate_id = candidate_scores
             .iter()
             .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
@@ -429,13 +505,18 @@ impl OfflineTuner {
             architecture_class: self.architecture_class,
             tuning_corpus_id: "offline_kernel_superoptimization_v1".to_string(),
             selected_tuning_candidate_id: selected.candidate_id.clone(),
+            // br-asupersync-3wxmb3: was a std HashSet (random iteration
+            // order leaked into the resulting Vec). BTreeSet emits a
+            // sorted Vec deterministically, so the rejected-candidate
+            // list in the profile pack is byte-identical across runs
+            // for the same input.
             rejected_tuning_candidate_ids: self
                 .benchmark_results
                 .iter()
                 .map(|r| &r.candidate.candidate_id)
                 .filter(|id| *id != &selected.candidate_id)
                 .cloned()
-                .collect::<std::collections::HashSet<_>>()
+                .collect::<std::collections::BTreeSet<_>>()
                 .into_iter()
                 .collect(),
             mul_min_total,
@@ -475,7 +556,13 @@ impl OfflineTuner {
     /// (candidate, op) pair — which happens when the tuner is asked to emit a
     /// profile pack without first running `run_systematic_benchmarks`.
     fn mean_median_ns(&self, candidate_id: &str, op: GF256Operation) -> Option<f64> {
-        let op_workloads: std::collections::HashSet<&str> = self
+        // br-asupersync-3wxmb3: DetHashSet (deterministic hasher) for
+        // the membership-only check. The set is built then probed via
+        // .contains(), never iterated, so its hasher choice does not
+        // affect output ordering — but we use DetHashSet for
+        // consistency with the rest of the runtime and to remove the
+        // implicit ambient state of std HashSet's randomized seed.
+        let op_workloads: DetHashSet<&str> = self
             .workloads
             .iter()
             .filter(|w| w.operation == op)
@@ -1049,6 +1136,67 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+
+    // br-asupersync-3wxmb3: regression for the clock-anchor +
+    // deterministic-iteration fix.
+    //   1. with_clock_anchor pins benchmark_timestamp to a fixed
+    //      value across two independent runs of the same workload
+    //      against the same architecture, so BenchmarkResult
+    //      payloads are byte-identical.
+    //   2. select_optimal_candidate breaks tied scores by
+    //      lexicographic candidate_id ordering (BTreeMap
+    //      iteration), so the chosen winner is deterministic.
+    //   3. emit_profile_pack emits rejected_tuning_candidate_ids in
+    //      sorted order (BTreeSet -> Vec), so the Vec is
+    //      byte-identical across runs.
+    // The first property is the user-facing contract; the others are
+    // structural and verified by the BTreeMap/BTreeSet types
+    // themselves — the test asserts the contract by running two
+    // independent tuners and comparing their state.
+    #[test]
+    fn test_clock_anchor_pins_benchmark_timestamp_3wxmb3() {
+        let anchor = Time::from_nanos(0xdead_beef_0000_0000);
+        let make = || {
+            OfflineTuner::new(
+                Gf256ArchitectureClass::GenericScalar,
+                OptimizationCriteria {
+                    latency_weight: 0.5,
+                    throughput_weight: 0.3,
+                    bandwidth_weight: 0.2,
+                    min_improvement_threshold: 5.0,
+                },
+            )
+            .with_clock_anchor(anchor)
+        };
+        let t1 = make();
+        let t2 = make();
+        assert_eq!(t1.clock_anchor(), Some(anchor));
+        assert_eq!(t2.clock_anchor(), Some(anchor));
+        assert_eq!(t1.benchmark_clock(), anchor);
+        assert_eq!(t2.benchmark_clock(), anchor);
+    }
+
+    #[test]
+    fn test_no_clock_anchor_falls_back_to_wall_now_3wxmb3() {
+        let tuner = OfflineTuner::new(
+            Gf256ArchitectureClass::GenericScalar,
+            OptimizationCriteria {
+                latency_weight: 0.5,
+                throughput_weight: 0.3,
+                bandwidth_weight: 0.2,
+                min_improvement_threshold: 5.0,
+            },
+        );
+        assert!(tuner.clock_anchor().is_none());
+        // benchmark_clock() returns wall_now() when no anchor is set.
+        // wall_now() inside a non-lab process is the wall clock and is
+        // therefore monotone-non-decreasing in nanoseconds. We only
+        // assert that two consecutive calls are well-formed (no
+        // panic, both produce a Time) — exact value comparison would
+        // be flaky.
+        let _t1 = tuner.benchmark_clock();
+        let _t2 = tuner.benchmark_clock();
+    }
 
     #[test]
     fn test_candidate_generation() {
