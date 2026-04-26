@@ -11,7 +11,7 @@ use crate::raptorq::decoder::{
     DecodeError as RaptorDecodeError, InactivationDecoder, ReceivedSymbol,
 };
 use crate::raptorq::gf256::Gf256;
-use crate::raptorq::systematic::SystematicError;
+use crate::raptorq::systematic::{SystematicError, SystematicParams};
 use crate::security::{AuthenticatedSymbol, SecurityContext};
 use crate::types::symbol_set::{InsertResult, SymbolSet, ThresholdConfig};
 use crate::types::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
@@ -668,6 +668,28 @@ fn validate_object_params_layout(
                 "object params symbols_per_block mismatch: expected {expected_k}, got {declared_k}"
             ),
         });
+    }
+
+    // br-asupersync-qokghh: reject K outside the RFC 6330 systematic-index
+    // table BEFORE decode_block reaches InactivationDecoder::new, which
+    // would otherwise panic via SystematicParams::for_source_block. A
+    // peer-supplied symbols_per_block (u16, 0..65535) or a misconfigured
+    // DecodingConfig (e.g., symbol_size=1 with default max_block_size)
+    // can drive K above the 56403 max; surface that as a typed
+    // InconsistentMetadata at validation time.
+    let symbol_size = usize::from(params.symbol_size);
+    if symbol_size > 0 {
+        for plan in plans {
+            if let Err(err) = SystematicParams::try_for_source_block(plan.k, symbol_size) {
+                return Err(DecodingError::InconsistentMetadata {
+                    sbn: plan.sbn,
+                    details: format!(
+                        "block K={} exceeds RFC 6330 systematic-index table: {err:?}",
+                        plan.k
+                    ),
+                });
+            }
+        }
     }
 
     Ok(())
@@ -1530,6 +1552,37 @@ mod tests {
         pipeline
             .set_object_params(ObjectParams::new(oid, 512, config.symbol_size, 1, 2))
             .expect("second with same id should succeed");
+    }
+
+    #[test]
+    fn pipeline_set_object_params_rejects_k_above_rfc_systematic_max() {
+        // br-asupersync-qokghh: a misconfigured DecodingConfig (here:
+        // symbol_size=1 with default max_block_size=1MB) drives K above
+        // the RFC 6330 systematic-index table maximum (56,403). Without
+        // the validation guard, decode_block would later panic via
+        // SystematicParams::for_source_block; with the guard the error
+        // is surfaced as a typed InconsistentMetadata at the validation
+        // boundary so callers can react instead of crashing the
+        // decoder.
+        let object_id = ObjectId::new_for_test(0xDE);
+        let mut pipeline = DecodingPipeline::new(DecodingConfig {
+            symbol_size: 1,
+            max_block_size: 1024 * 1024,
+            ..DecodingConfig::default()
+        });
+        // 65_000 bytes / 1-byte-symbols = 65_000 symbols/block — exceeds
+        // the RFC max of 56,403.
+        let err = pipeline
+            .set_object_params(ObjectParams::new(object_id, 65_000, 1, 1, 65_000))
+            .unwrap_err();
+        assert!(
+            matches!(err, DecodingError::InconsistentMetadata { .. }),
+            "expected InconsistentMetadata, got {err:?}"
+        );
+        assert!(
+            err.to_string().contains("RFC 6330 systematic-index table"),
+            "expected RFC bound message, got: {err}"
+        );
     }
 
     #[test]
