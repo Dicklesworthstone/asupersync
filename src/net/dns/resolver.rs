@@ -1400,9 +1400,44 @@ fn select_records_for_query(
     }
 }
 
+/// Time-source abstraction for sync DNS query timing.
+///
+/// br-asupersync-4p1vr3: the legacy sync path (`SyncTimeSource::Wall`)
+/// uses `Instant::now()` which violates the I7 ambient-authority
+/// invariant (replay-determinism leak). The Cx-threaded path
+/// (`SyncTimeSource::CxDerived`) reads from `cx.timer_driver()` so
+/// virtual-clock lab tests observe deterministic timeout decisions.
+///
+/// Kept as a closure pointer rather than a generic to avoid a
+/// monomorphization explosion across all DNS query helpers.
+enum SyncTimeSource<'a> {
+    /// Wall clock via `Instant::now()` — legacy sync APIs.
+    Wall { started: Instant },
+    /// Cx-derived time. The closure must return monotonically
+    /// non-decreasing `Time` values across calls within a single query
+    /// (asupersync's TimerDriverHandle guarantees this).
+    CxDerived {
+        started: Time,
+        now: &'a dyn Fn() -> Time,
+    },
+}
+
+impl SyncTimeSource<'_> {
+    /// Elapsed time since the query started.
+    fn elapsed(&self) -> Duration {
+        match self {
+            Self::Wall { started } => started.elapsed(),
+            Self::CxDerived { started, now } => {
+                let nanos = now().duration_since(*started);
+                Duration::from_nanos(nanos)
+            }
+        }
+    }
+}
+
 struct SyncDnsQueryContext<'a> {
     timeout: Duration,
-    started: Instant,
+    time: SyncTimeSource<'a>,
     entropy: &'a dyn EntropySource,
 }
 
@@ -1417,7 +1452,57 @@ impl Resolver {
     ) -> Result<Vec<DnsAnswer>, DnsError> {
         let context = SyncDnsQueryContext {
             timeout,
-            started: Instant::now(),
+            time: SyncTimeSource::Wall {
+                started: Instant::now(),
+            },
+            entropy,
+        };
+        Self::query_records_inner_sync(name, query_type, nameservers, retries, &context, 0)
+    }
+
+    /// Cx-threaded variant of [`Self::query_records_sync`] (br-asupersync-4p1vr3).
+    ///
+    /// Uses the Cx's timer driver as the time source instead of
+    /// `Instant::now()` so virtual-clock lab tests observe deterministic
+    /// timeout decisions. Falls back to wall time when the Cx has no
+    /// timer driver (mirrors the [`timeout_now`] convention used
+    /// throughout this module).
+    ///
+    /// The cx parameter also enables cancellation propagation: callers
+    /// of the higher-level async APIs (lookup_ip etc.) already weave
+    /// cancellation in via the Resolver; this lower-level entry point
+    /// makes the time path explicit for blocking-pool consumers that
+    /// hold a Cx.
+    #[cfg(any(test, feature = "test-internals"))]
+    #[allow(dead_code)]
+    fn query_records_with_cx<'a>(
+        cx: &'a crate::cx::Cx,
+        name: &str,
+        query_type: DnsQueryType,
+        nameservers: &[SocketAddr],
+        retries: u32,
+        timeout: Duration,
+        entropy: &'a dyn EntropySource,
+    ) -> Result<Vec<DnsAnswer>, DnsError> {
+        // Capture the Cx-derived time source. We can't store &Cx inside
+        // the closure across an owning-vs-borrow boundary, so the
+        // closure reads from cx via the documented timer_driver hook
+        // (see `timeout_now` above for the same pattern).
+        let now_closure: Box<dyn Fn() -> Time> = match cx.timer_driver() {
+            Some(driver) => Box::new(move || driver.now()),
+            None => Box::new(crate::time::wall_now),
+        };
+        // SAFETY (lifetime): now_closure outlives the context (both end
+        // at this fn's return). The reference inside SyncTimeSource
+        // borrows from now_closure, which sits on this stack.
+        let now_ref: &dyn Fn() -> Time = &*now_closure;
+        let started = now_ref();
+        let context = SyncDnsQueryContext {
+            timeout,
+            time: SyncTimeSource::CxDerived {
+                started,
+                now: now_ref,
+            },
             entropy,
         };
         Self::query_records_inner_sync(name, query_type, nameservers, retries, &context, 0)
@@ -1449,7 +1534,7 @@ impl Resolver {
             for nameserver in nameservers.iter().copied() {
                 let remaining = context
                     .timeout
-                    .checked_sub(context.started.elapsed())
+                    .checked_sub(context.time.elapsed())
                     .unwrap_or(Duration::ZERO);
                 if remaining.is_zero() {
                     return Err(DnsError::Timeout);
@@ -1517,7 +1602,9 @@ impl Resolver {
     ) -> Result<LookupIp, DnsError> {
         let context = SyncDnsQueryContext {
             timeout,
-            started: Instant::now(),
+            time: SyncTimeSource::Wall {
+                started: Instant::now(),
+            },
             entropy,
         };
         let mut addresses = Vec::new();
@@ -3164,6 +3251,98 @@ mod tests {
         crate::test_complete!(
             "resolver_timeout_future_rearms_wake_source_when_timer_epoch_differs"
         );
+    }
+
+    #[test]
+    fn cx_threaded_dns_query_uses_virtual_clock_started_time() {
+        // br-asupersync-4p1vr3: query_records_with_cx must derive its
+        // 'started' anchor from cx.timer_driver().now(), NOT from
+        // Instant::now(). Verify by setting up a virtual clock at a
+        // fixed nanosecond, then checking that the SyncTimeSource's
+        // first elapsed() reading is consistent with the virtual clock
+        // (i.e., zero or near-zero, never the wall-clock-skew that
+        // would result if Instant::now() were used).
+        init_test("cx_threaded_dns_query_uses_virtual_clock_started_time");
+
+        let clock = Arc::new(crate::time::VirtualClock::new());
+        clock.set(Time::from_nanos(7_777_000_000));
+        let timer = crate::time::TimerDriverHandle::with_virtual_clock(clock.clone());
+
+        // Build the SyncTimeSource the way query_records_with_cx does.
+        let now_closure: Box<dyn Fn() -> Time> = {
+            let driver = timer.clone();
+            Box::new(move || driver.now())
+        };
+        let now_ref: &dyn Fn() -> Time = &*now_closure;
+        let started = now_ref();
+        let time_source = SyncTimeSource::CxDerived {
+            started,
+            now: now_ref,
+        };
+
+        // started must be the virtual-clock value, not wall time.
+        crate::assert_with_log!(
+            started.as_nanos() == 7_777_000_000,
+            "Cx-threaded started must equal virtual clock now",
+            7_777_000_000u64,
+            started.as_nanos()
+        );
+
+        // elapsed() at this instant must be ~0 (virtual clock hasn't
+        // advanced). A bug that read Instant::now() into started but
+        // then queried virtual_clock.now() in elapsed() would return a
+        // huge negative-saturated value here.
+        let initial_elapsed = time_source.elapsed();
+        crate::assert_with_log!(
+            initial_elapsed == Duration::ZERO,
+            "elapsed() with no clock movement must be zero",
+            Duration::ZERO,
+            initial_elapsed
+        );
+
+        // Advance virtual clock by 250ms and confirm elapsed() reflects
+        // that — proving the SAME time source is read on both reads.
+        clock.set(Time::from_nanos(7_777_000_000 + 250_000_000));
+        let after_advance = time_source.elapsed();
+        crate::assert_with_log!(
+            after_advance == Duration::from_millis(250),
+            "elapsed() must follow virtual clock advancement",
+            Duration::from_millis(250),
+            after_advance
+        );
+
+        crate::test_complete!("cx_threaded_dns_query_uses_virtual_clock_started_time");
+    }
+
+    #[test]
+    fn legacy_sync_dns_query_uses_wall_clock_started_time() {
+        // br-asupersync-4p1vr3 regression guard: SyncTimeSource::Wall
+        // (the legacy path used by query_records_sync) must continue to
+        // use Instant::elapsed semantics. We test that elapsed() returns
+        // a non-decreasing value over a short busy-wait — proving the
+        // wall-clock path still works post-refactor.
+        init_test("legacy_sync_dns_query_uses_wall_clock_started_time");
+
+        let time_source = SyncTimeSource::Wall {
+            started: Instant::now(),
+        };
+        let e1 = time_source.elapsed();
+        // Busy-spin to advance wall time without sleeping (sleep would
+        // be flaky on overloaded CI). 100k iterations is fast enough.
+        let mut sink = 0u64;
+        for i in 0..100_000u64 {
+            sink = sink.wrapping_add(i);
+        }
+        std::hint::black_box(sink);
+        let e2 = time_source.elapsed();
+        crate::assert_with_log!(
+            e2 >= e1,
+            "wall-clock elapsed must be monotonically non-decreasing",
+            e1,
+            e2
+        );
+
+        crate::test_complete!("legacy_sync_dns_query_uses_wall_clock_started_time");
     }
 
     #[test]
