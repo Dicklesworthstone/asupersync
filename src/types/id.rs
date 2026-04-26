@@ -138,25 +138,65 @@ impl fmt::Display for RegionId {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-struct SerdeArenaIndex {
+/// br-asupersync-o2oa4l — Pre-shared per-type discriminant strings.
+///
+/// `RegionId`, `TaskId`, `ObligationId`, and `DecisionId` previously
+/// shared a single `SerdeArenaIndex { index, generation }` wire shape
+/// — every (index, generation) tuple deserialised equally well as
+/// any of the four. An attacker submitting a snapshot or a peer
+/// transmitting a trace artifact could swap an ID across the type
+/// boundary by relabelling the JSON / MessagePack key, and the
+/// deserialiser would have no way to reject the cross-type
+/// confusion.
+///
+/// The new wire shape `SerdeIdEnvelope { kind, index, generation }`
+/// stamps a stable per-type tag on serialise; deserialise verifies
+/// the tag matches the target type and rejects with
+/// `serde::de::Error::custom` otherwise. The four constants below
+/// are the canonical tag values; they are stable across versions and
+/// MUST NOT be reused for any other type without coordinating a
+/// schema-version bump.
+const KIND_REGION_ID: &str = "RegionId";
+const KIND_TASK_ID: &str = "TaskId";
+const KIND_OBLIGATION_ID: &str = "ObligationId";
+// Note: DecisionId lives in `franken_kernel` and serialises as a hex
+// u128 — its wire shape is already distinct from the SerdeArenaIndex
+// triple here, so it does not need a discriminant tag.
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SerdeIdEnvelope {
+    kind: String,
     index: u32,
     generation: u32,
 }
 
-impl SerdeArenaIndex {
+impl SerdeIdEnvelope {
     #[inline]
-    const fn to_arena(self) -> ArenaIndex {
+    fn from_arena(arena: ArenaIndex, kind: &'static str) -> Self {
+        Self {
+            kind: kind.to_string(),
+            index: arena.index(),
+            generation: arena.generation(),
+        }
+    }
+
+    #[inline]
+    fn to_arena(&self) -> ArenaIndex {
         ArenaIndex::new(self.index, self.generation)
     }
-}
 
-impl From<ArenaIndex> for SerdeArenaIndex {
     #[inline]
-    fn from(value: ArenaIndex) -> Self {
-        Self {
-            index: value.index(),
-            generation: value.generation(),
+    fn check_kind<E>(&self, expected: &'static str) -> Result<(), E>
+    where
+        E: serde::de::Error,
+    {
+        if self.kind == expected {
+            Ok(())
+        } else {
+            Err(E::custom(format!(
+                "br-asupersync-o2oa4l: ID kind mismatch — expected {expected:?}, got {:?}",
+                self.kind
+            )))
         }
     }
 }
@@ -167,7 +207,7 @@ impl Serialize for RegionId {
     where
         S: Serializer,
     {
-        SerdeArenaIndex::from(self.0).serialize(serializer)
+        SerdeIdEnvelope::from_arena(self.0, KIND_REGION_ID).serialize(serializer)
     }
 }
 
@@ -177,8 +217,9 @@ impl<'de> Deserialize<'de> for RegionId {
     where
         D: Deserializer<'de>,
     {
-        let idx = SerdeArenaIndex::deserialize(deserializer)?;
-        Ok(Self(idx.to_arena()))
+        let env = SerdeIdEnvelope::deserialize(deserializer)?;
+        env.check_kind::<D::Error>(KIND_REGION_ID)?;
+        Ok(Self(env.to_arena()))
     }
 }
 
@@ -279,7 +320,7 @@ impl Serialize for TaskId {
     where
         S: Serializer,
     {
-        SerdeArenaIndex::from(self.0).serialize(serializer)
+        SerdeIdEnvelope::from_arena(self.0, KIND_TASK_ID).serialize(serializer)
     }
 }
 
@@ -289,8 +330,9 @@ impl<'de> Deserialize<'de> for TaskId {
     where
         D: Deserializer<'de>,
     {
-        let idx = SerdeArenaIndex::deserialize(deserializer)?;
-        Ok(Self(idx.to_arena()))
+        let env = SerdeIdEnvelope::deserialize(deserializer)?;
+        env.check_kind::<D::Error>(KIND_TASK_ID)?;
+        Ok(Self(env.to_arena()))
     }
 }
 
@@ -362,7 +404,7 @@ impl Serialize for ObligationId {
     where
         S: Serializer,
     {
-        SerdeArenaIndex::from(self.0).serialize(serializer)
+        SerdeIdEnvelope::from_arena(self.0, KIND_OBLIGATION_ID).serialize(serializer)
     }
 }
 
@@ -372,8 +414,9 @@ impl<'de> Deserialize<'de> for ObligationId {
     where
         D: Deserializer<'de>,
     {
-        let idx = SerdeArenaIndex::deserialize(deserializer)?;
-        Ok(Self(idx.to_arena()))
+        let env = SerdeIdEnvelope::deserialize(deserializer)?;
+        env.check_kind::<D::Error>(KIND_OBLIGATION_ID)?;
+        Ok(Self(env.to_arena()))
     }
 }
 
@@ -882,5 +925,48 @@ mod tests {
         assert_ne!(t1, t2);
         assert_eq!(t1.arena_index().generation(), 1);
         assert_eq!(t2.arena_index().generation(), 1);
+    }
+
+    /// br-asupersync-o2oa4l — Cross-type ID confusion: a serialised
+    /// RegionId must not deserialise as TaskId / ObligationId, even
+    /// when their arena (index, generation) tuples are identical.
+    /// The discriminant tag rejects the mis-typed payload at the
+    /// envelope level.
+    #[test]
+    fn serde_rejects_cross_type_id_confusion() {
+        let region = RegionId::from_arena(ArenaIndex::new(7, 3));
+        let json = serde_json::to_string(&region).expect("serialise RegionId");
+        // Sanity: the wire form contains the discriminant tag.
+        assert!(json.contains("\"kind\""));
+        assert!(json.contains("RegionId"));
+
+        // Round-trip back to the original type works.
+        let region_back: RegionId =
+            serde_json::from_str(&json).expect("RegionId round-trip");
+        assert_eq!(region_back, region);
+
+        // Cross-type deserialisation must fail.
+        let task_err = serde_json::from_str::<TaskId>(&json);
+        assert!(task_err.is_err(), "TaskId must reject RegionId payload");
+        let obl_err = serde_json::from_str::<ObligationId>(&json);
+        assert!(obl_err.is_err(), "ObligationId must reject RegionId payload");
+    }
+
+    /// br-asupersync-o2oa4l — TaskId / ObligationId must each reject
+    /// payloads tagged for the other type.
+    #[test]
+    fn serde_rejects_task_obligation_confusion() {
+        let task = TaskId::from_arena(ArenaIndex::new(11, 2));
+        let task_json = serde_json::to_string(&task).expect("serialise TaskId");
+        assert!(serde_json::from_str::<RegionId>(&task_json).is_err());
+        assert!(serde_json::from_str::<ObligationId>(&task_json).is_err());
+        let task_back: TaskId =
+            serde_json::from_str(&task_json).expect("TaskId round-trip");
+        assert_eq!(task_back, task);
+
+        let obl = ObligationId::from_arena(ArenaIndex::new(11, 2));
+        let obl_json = serde_json::to_string(&obl).expect("serialise ObligationId");
+        assert!(serde_json::from_str::<RegionId>(&obl_json).is_err());
+        assert!(serde_json::from_str::<TaskId>(&obl_json).is_err());
     }
 }

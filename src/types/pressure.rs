@@ -41,11 +41,12 @@ impl SystemPressure {
 
     /// Create with an explicit initial headroom value.
     ///
-    /// Headroom is clamped to `[0.0, 1.0]`.
+    /// Headroom is clamped to `[0.0, 1.0]`. NaN inputs are treated as
+    /// `0.0` (fully degraded — fail-safe), see [`sanitise_headroom`].
     #[must_use]
     #[inline]
     pub fn with_headroom(headroom: f32) -> Self {
-        let clamped = headroom.clamp(0.0, 1.0);
+        let clamped = sanitise_headroom(headroom);
         Self {
             headroom_bits: AtomicU32::new(clamped.to_bits()),
         }
@@ -63,10 +64,11 @@ impl SystemPressure {
 
     /// Update the headroom value.
     ///
-    /// Headroom is clamped to `[0.0, 1.0]`.
+    /// Headroom is clamped to `[0.0, 1.0]`. NaN inputs are treated as
+    /// `0.0` (fully degraded — fail-safe), see [`sanitise_headroom`].
     #[inline]
     pub fn set_headroom(&self, headroom: f32) {
-        let clamped = headroom.clamp(0.0, 1.0);
+        let clamped = sanitise_headroom(headroom);
         self.headroom_bits
             .store(clamped.to_bits(), Ordering::Relaxed);
     }
@@ -125,6 +127,31 @@ impl Default for SystemPressure {
     #[inline]
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// br-asupersync-ksvi5z — Fail-safe NaN/Inf sanitiser for headroom inputs.
+///
+/// `f32::clamp` propagates NaN unchanged (every NaN comparison returns
+/// `false`, so the internal `min(max(x, lo), hi)` chain leaves NaN
+/// alone). Once a NaN bit pattern is stored in `headroom_bits`, every
+/// `should_degrade(threshold)` and `degradation_level()` returns the
+/// "no degradation needed" branch — the threshold-based defence is
+/// silently disabled and an attacker can DoS the runtime by feeding a
+/// single NaN through any deserialisation path that lands in
+/// `with_headroom` / `set_headroom`.
+///
+/// Treatment: NaN and ±∞ map to `0.0` — the most-degraded value. This
+/// is the fail-safe interpretation: an unparseable pressure input
+/// should make the runtime *more* cautious, not less. Finite-but-
+/// out-of-range values clamp to `[0.0, 1.0]` as before.
+#[inline]
+fn sanitise_headroom(headroom: f32) -> f32 {
+    if headroom.is_finite() {
+        headroom.clamp(0.0, 1.0)
+    } else {
+        // NaN, +inf, -inf all collapse to 0.0 (fully degraded).
+        0.0
     }
 }
 
@@ -234,5 +261,42 @@ mod tests {
                 "should_degrade_0_5": p.should_degrade(0.5),
             }))
         );
+    }
+
+    /// br-asupersync-ksvi5z — NaN inputs to `with_headroom` and
+    /// `set_headroom` collapse to 0.0 (fully degraded). Without this,
+    /// every `should_degrade(threshold)` returns false (NaN comparison)
+    /// and the threshold-based defence is silently disabled.
+    #[test]
+    fn nan_headroom_collapses_to_fully_degraded() {
+        let p = SystemPressure::with_headroom(f32::NAN);
+        assert_eq!(p.headroom(), 0.0);
+        assert!(p.should_degrade(0.5));
+        assert!(p.should_degrade(0.0001));
+        // Degradation level at 0.0 headroom is the most-severe band.
+        assert_eq!(p.degradation_level(), 4);
+
+        let p2 = SystemPressure::new();
+        p2.set_headroom(f32::NAN);
+        assert_eq!(p2.headroom(), 0.0);
+    }
+
+    /// br-asupersync-ksvi5z — ±∞ inputs also collapse to 0.0.
+    #[test]
+    fn infinite_headroom_collapses_to_fully_degraded() {
+        let p_pos = SystemPressure::with_headroom(f32::INFINITY);
+        assert_eq!(p_pos.headroom(), 0.0);
+        let p_neg = SystemPressure::with_headroom(f32::NEG_INFINITY);
+        assert_eq!(p_neg.headroom(), 0.0);
+    }
+
+    /// br-asupersync-ksvi5z — finite-but-out-of-range inputs still clamp
+    /// to [0.0, 1.0] (unchanged behaviour, regression guard).
+    #[test]
+    fn out_of_range_finite_headroom_clamps() {
+        let p_high = SystemPressure::with_headroom(2.0);
+        assert_eq!(p_high.headroom(), 1.0);
+        let p_low = SystemPressure::with_headroom(-0.5);
+        assert_eq!(p_low.headroom(), 0.0);
     }
 }

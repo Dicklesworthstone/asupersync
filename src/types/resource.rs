@@ -790,13 +790,29 @@ fn exceeds_with_current(limit: usize, current: usize, requested: usize) -> bool 
     current.saturating_add(requested) > limit
 }
 
+/// br-asupersync-ksvi5z — `ratio` already guards `limit == 0`
+/// explicitly; the remaining `usage as f64 / limit as f64` cannot
+/// produce NaN (both operands are finite usize→f64 conversions and
+/// the divisor is nonzero). The defensive `is_finite()` check below
+/// is a regression guard — a future refactor that introduces a
+/// non-finite path (e.g. accepting f64 directly from a deserialised
+/// snapshot) will fail closed at the saturated `1.0` rather than
+/// silently disabling threshold checks. NaN at any downstream
+/// comparison returns false, which is precisely the bypass shape the
+/// bead flagged in `pressure.rs`.
 #[allow(clippy::cast_precision_loss)]
 #[inline]
 fn ratio(usage: usize, limit: usize) -> f64 {
-    if limit == 0 {
+    let raw = if limit == 0 {
         if usage == 0 { 0.0 } else { 1.0 }
     } else {
         (usage as f64) / (limit as f64)
+    };
+    if raw.is_finite() {
+        raw.clamp(0.0, 1.0)
+    } else {
+        // Fail-safe: treat unparseable ratio as fully-saturated.
+        1.0
     }
 }
 
