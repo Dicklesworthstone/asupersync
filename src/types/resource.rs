@@ -184,9 +184,28 @@ pub struct SymbolPool {
 
 impl SymbolPool {
     /// Creates a new symbol pool using the provided configuration.
+    ///
+    /// br-asupersync-jpzl5a — Mints `pool_id` from a process-global
+    /// counter. This is fine for accounting / back-pressure decisions
+    /// where the only contract is "distinct pools have distinct ids",
+    /// but it leaks ambient identity that breaks deterministic replay
+    /// across separate `LabRuntime` instances. Determinism-sensitive
+    /// callers should use [`Self::new_with_pool_id`] and supply an ID
+    /// minted from the runtime-scoped allocator they already hold.
     #[must_use]
     #[inline]
-    pub fn new(mut config: PoolConfig) -> Self {
+    pub fn new(config: PoolConfig) -> Self {
+        Self::new_with_pool_id(config, next_symbol_pool_id())
+    }
+
+    /// br-asupersync-jpzl5a — Creates a new symbol pool with an
+    /// explicit `pool_id`. Use this from runtime-scoped factories that
+    /// want pool identity tied to a deterministic allocator (e.g. a
+    /// per-runtime counter or a Cx-derived hash) rather than the
+    /// process-global atomic in [`Self::new`].
+    #[must_use]
+    #[inline]
+    pub fn new_with_pool_id(mut config: PoolConfig, pool_id: u64) -> Self {
         if config.max_size < config.initial_size {
             config.max_size = config.initial_size;
         }
@@ -199,7 +218,7 @@ impl SymbolPool {
         Self {
             free_list,
             allocated: 0,
-            pool_id: next_symbol_pool_id(),
+            pool_id,
             config,
             stats: PoolStats::default(),
         }
@@ -348,6 +367,14 @@ impl SymbolPool {
     }
 }
 
+/// br-asupersync-jpzl5a — Process-global SymbolPool id allocator.
+///
+/// Used by [`SymbolPool::new`] when the caller does not supply an
+/// explicit `pool_id`. Determinism-sensitive callers must instead route
+/// through [`SymbolPool::new_with_pool_id`] with an ID minted from a
+/// runtime-scoped allocator. The static is `pub(crate)`-equivalent —
+/// only callable from within this module — but the consequence on
+/// downstream observability is documented above the trait surface.
 #[inline]
 fn next_symbol_pool_id() -> u64 {
     static NEXT_SYMBOL_POOL_ID: AtomicU64 = AtomicU64::new(1);
@@ -1443,5 +1470,38 @@ mod tests {
         assert_ne!(e, ResourceExhausted::DecodingOps);
         let dbg = format!("{e:?}");
         assert!(dbg.contains("SymbolMemory"));
+    }
+
+    /// br-asupersync-jpzl5a — `new_with_pool_id` honours the supplied
+    /// id rather than minting a new one from the global allocator.
+    /// This is the deterministic-replay-friendly path.
+    #[test]
+    fn new_with_pool_id_uses_supplied_id() {
+        let cfg = PoolConfig {
+            symbol_size: 64,
+            initial_size: 0,
+            max_size: 0,
+            allow_growth: false,
+            growth_increment: 0,
+        };
+        let pool = SymbolPool::new_with_pool_id(cfg.clone(), 0xCAFE_BABE);
+        assert_eq!(pool.pool_id, 0xCAFE_BABE);
+    }
+
+    /// br-asupersync-jpzl5a — `new` mints distinct ids from the
+    /// process-global counter (the documented behaviour for
+    /// determinism-insensitive callers).
+    #[test]
+    fn new_mints_distinct_pool_ids() {
+        let cfg = PoolConfig {
+            symbol_size: 64,
+            initial_size: 0,
+            max_size: 0,
+            allow_growth: false,
+            growth_increment: 0,
+        };
+        let a = SymbolPool::new(cfg.clone());
+        let b = SymbolPool::new(cfg);
+        assert_ne!(a.pool_id, b.pool_id);
     }
 }

@@ -10,8 +10,38 @@ use std::ops::Add;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
+/// br-asupersync-u3gsst — Process-global ephemeral counters.
+///
+/// These back the test/test-internals-gated `new_ephemeral` constructors
+/// and the runtime-internal `next_bootstrap_*` helpers used during root-Cx
+/// boot in `app.rs`. They are NOT a substitute for runtime-allocated IDs
+/// produced by `Arena::insert`; those are the only IDs that appear in
+/// per-runtime-state structures, get registered with the scheduler, and
+/// participate in deterministic replay.
 static EPHEMERAL_REGION_COUNTER: AtomicU32 = AtomicU32::new(1);
 static EPHEMERAL_TASK_COUNTER: AtomicU32 = AtomicU32::new(1);
+
+/// br-asupersync-u3gsst — Mint a new bootstrap RegionId outside the
+/// runtime's arena. **Crate-internal only**; intended for the single
+/// production call-site in `app.rs::build_app_root_cx` that needs an ID
+/// before the runtime has registered the root region. All other
+/// production paths must use the runtime-allocated ID returned by
+/// `Arena::insert`.
+#[inline]
+#[must_use]
+pub(crate) fn next_bootstrap_region_id() -> RegionId {
+    let index = EPHEMERAL_REGION_COUNTER.fetch_add(1, Ordering::Relaxed);
+    RegionId(ArenaIndex::new(index, 1))
+}
+
+/// br-asupersync-u3gsst — Mint a new bootstrap TaskId outside the
+/// runtime's arena. Same contract as `next_bootstrap_region_id`.
+#[inline]
+#[must_use]
+pub(crate) fn next_bootstrap_task_id() -> TaskId {
+    let index = EPHEMERAL_TASK_COUNTER.fetch_add(1, Ordering::Relaxed);
+    TaskId(ArenaIndex::new(index, 1))
+}
 
 /// A unique identifier for a region in the runtime.
 ///
@@ -72,16 +102,25 @@ impl RegionId {
         Self(ArenaIndex::new(0, 0))
     }
 
-    /// Creates a new ephemeral region ID for request-scoped contexts created
-    /// outside the runtime scheduler.
+    /// Creates a new ephemeral region ID outside the runtime arena.
     ///
-    /// This is intended for production request handling that needs unique
-    /// identifiers without full runtime region registration.
+    /// br-asupersync-u3gsst — **Test / test-internals only.** Production
+    /// regions MUST be allocated by the runtime via
+    /// [`crate::runtime::RuntimeState`] so the resulting `RegionId`
+    /// appears in the region table, the lock-ordering invariants hold,
+    /// and deterministic replay through [`crate::lab::LabRuntime`]
+    /// observes the same IDs across runs. This constructor uses a
+    /// process-global atomic counter and therefore breaks both
+    /// invariants when called from production code; it is gated to
+    /// `cfg(any(test, feature = "test-internals"))`. The single
+    /// runtime-internal bootstrap call in `app.rs` uses the
+    /// `pub(crate)` [`next_bootstrap_region_id`] instead.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-internals"))]
     #[inline]
     #[must_use]
     pub fn new_ephemeral() -> Self {
-        let index = EPHEMERAL_REGION_COUNTER.fetch_add(1, Ordering::Relaxed);
-        Self(ArenaIndex::new(index, 1))
+        next_bootstrap_region_id()
     }
 }
 
@@ -203,13 +242,20 @@ impl TaskId {
         Self(ArenaIndex::new(0, 0))
     }
 
-    /// Creates a new ephemeral task ID for request-scoped contexts created
-    /// outside the runtime scheduler.
+    /// Creates a new ephemeral task ID outside the runtime arena.
+    ///
+    /// br-asupersync-u3gsst — **Test / test-internals only.** See
+    /// [`RegionId::new_ephemeral`] for the rationale: production task
+    /// IDs MUST come from the runtime's task arena. Gated to
+    /// `cfg(any(test, feature = "test-internals"))`. The single
+    /// runtime-internal bootstrap call in `app.rs` uses the
+    /// `pub(crate)` [`next_bootstrap_task_id`] instead.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-internals"))]
     #[inline]
     #[must_use]
     pub fn new_ephemeral() -> Self {
-        let index = EPHEMERAL_TASK_COUNTER.fetch_add(1, Ordering::Relaxed);
-        Self(ArenaIndex::new(index, 1))
+        next_bootstrap_task_id()
     }
 }
 
@@ -819,5 +865,22 @@ mod tests {
         a.hash(&mut ha);
         b.hash(&mut hb);
         assert_eq!(ha.finish(), hb.finish());
+    }
+
+    /// br-asupersync-u3gsst — bootstrap helpers mint distinct IDs and
+    /// keep generation pinned at 1 (the documented contract).
+    #[test]
+    fn bootstrap_helpers_mint_unique_ids() {
+        let r1 = next_bootstrap_region_id();
+        let r2 = next_bootstrap_region_id();
+        assert_ne!(r1, r2);
+        assert_eq!(r1.arena_index().generation(), 1);
+        assert_eq!(r2.arena_index().generation(), 1);
+
+        let t1 = next_bootstrap_task_id();
+        let t2 = next_bootstrap_task_id();
+        assert_ne!(t1, t2);
+        assert_eq!(t1.arena_index().generation(), 1);
+        assert_eq!(t2.arena_index().generation(), 1);
     }
 }

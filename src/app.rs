@@ -195,7 +195,11 @@ impl CompiledApp {
         budget: Budget,
         registry_override: Option<RegistryHandle>,
     ) -> Cx {
-        let task_id = TaskId::new_ephemeral();
+        // br-asupersync-u3gsst — root-Cx bootstrap path: the root task
+        // has no runtime-allocated arena slot yet (it IS the bootstrap),
+        // so we mint a synthetic ID via the crate-internal helper. All
+        // other production task IDs come from the runtime's task arena.
+        let task_id = crate::types::id::next_bootstrap_task_id();
         let timer_driver = parent_cx.timer_driver();
         let logical_clock = state
             .logical_clock_mode()

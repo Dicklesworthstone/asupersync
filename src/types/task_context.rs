@@ -39,6 +39,16 @@ impl CheckpointState {
     }
 
     /// Records a checkpoint without a message.
+    ///
+    /// br-asupersync-soyet0 — The no-suffix `record()` form reaches for
+    /// `crate::time::wall_now()` directly, which is ambient authority
+    /// (escapes capability-scoped time and breaks deterministic replay
+    /// under [`crate::lab::LabRuntime`]). Production callers MUST use
+    /// [`Self::record_at(cx.now())`] instead, threading time through the
+    /// `Cx` they already hold. This shim is gated to test/test-internals
+    /// to keep ergonomics for inline tests while preventing production
+    /// regressions.
+    #[cfg(any(test, feature = "test-internals"))]
     #[inline]
     pub fn record(&mut self) {
         self.record_at(crate::time::wall_now());
@@ -53,6 +63,11 @@ impl CheckpointState {
     }
 
     /// Records a checkpoint with a message.
+    ///
+    /// br-asupersync-soyet0 — Same ambient-time concern as
+    /// [`Self::record`]; gated to test/test-internals. Production callers
+    /// MUST use [`Self::record_with_message_at(msg, cx.now())`].
+    #[cfg(any(test, feature = "test-internals"))]
     #[inline]
     pub fn record_with_message(&mut self, message: String) {
         self.record_with_message_at(message, crate::time::wall_now());
@@ -425,5 +440,30 @@ mod tests {
         let cx = CxInner::new(region, task, Budget::new());
         let dbg = format!("{cx:?}");
         assert!(dbg.contains("CxInner"), "{dbg}");
+    }
+
+    /// br-asupersync-soyet0 — `record_at` (the explicit-time form
+    /// production callers use) updates checkpoint state without
+    /// reaching for `wall_now()`. This guards against a future
+    /// refactor accidentally re-introducing the ambient call inside
+    /// the explicit path.
+    #[test]
+    fn record_at_uses_supplied_time() {
+        let mut state = CheckpointState::new();
+        state.record_at(Time::from_nanos(42));
+        assert_eq!(state.last_checkpoint, Some(Time::from_nanos(42)));
+        assert_eq!(state.checkpoint_count, 1);
+        assert_eq!(state.last_message, None);
+    }
+
+    /// br-asupersync-soyet0 — `record_with_message_at` clears the
+    /// stored message correctly and uses the supplied time.
+    #[test]
+    fn record_with_message_at_uses_supplied_time() {
+        let mut state = CheckpointState::new();
+        state.record_with_message_at("ckpt".to_string(), Time::from_nanos(7));
+        assert_eq!(state.last_checkpoint, Some(Time::from_nanos(7)));
+        assert_eq!(state.last_message.as_deref(), Some("ckpt"));
+        assert_eq!(state.checkpoint_count, 1);
     }
 }
