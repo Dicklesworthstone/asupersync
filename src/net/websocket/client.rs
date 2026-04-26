@@ -413,17 +413,7 @@ where
     pub async fn send(&mut self, cx: &Cx, msg: Message) -> Result<(), WsError> {
         // Check cancellation
         if cx.checkpoint().is_err() {
-            let timeout_duration = self.close_handshake.close_timeout();
-            let current_time = || {
-                cx.timer_driver()
-                    .map_or_else(crate::time::wall_now, |driver| driver.now())
-            };
-            let _ = crate::time::timeout(
-                current_time(),
-                timeout_duration,
-                self.initiate_close(CloseReason::going_away()),
-            )
-            .await;
+            self.close_after_cancelled_send(cx).await;
             return Err(WsError::Io(io::Error::new(
                 io::ErrorKind::Interrupted,
                 "cancelled",
@@ -452,17 +442,7 @@ where
             Err(WsError::Io(e))
                 if e.kind() == io::ErrorKind::Interrupted && cx.checkpoint().is_err() =>
             {
-                let timeout_duration = self.close_handshake.close_timeout();
-                let current_time = || {
-                    cx.timer_driver()
-                        .map_or_else(crate::time::wall_now, |driver| driver.now())
-                };
-                let _ = crate::time::timeout(
-                    current_time(),
-                    timeout_duration,
-                    self.initiate_close(CloseReason::going_away()),
-                )
-                .await;
+                self.close_after_cancelled_send(cx).await;
                 Err(WsError::Io(io::Error::new(
                     io::ErrorKind::Interrupted,
                     "cancelled",
@@ -696,6 +676,25 @@ where
     /// Internal: initiate close without waiting.
     async fn initiate_close(&mut self, reason: CloseReason) -> Result<(), WsError> {
         self.initiate_close_with_cx(None, reason).await
+    }
+
+    async fn close_after_cancelled_send(&mut self, cx: &Cx) {
+        if self.write_buf.is_empty() {
+            self.close_handshake.force_close(CloseReason::going_away());
+            return;
+        }
+
+        let timeout_duration = self.close_handshake.close_timeout();
+        let current_time = || {
+            cx.timer_driver()
+                .map_or_else(crate::time::wall_now, |driver| driver.now())
+        };
+        let _ = crate::time::timeout(
+            current_time(),
+            timeout_duration,
+            self.initiate_close(CloseReason::going_away()),
+        )
+        .await;
     }
 
     async fn initiate_close_with_cx(
