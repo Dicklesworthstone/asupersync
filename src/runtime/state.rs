@@ -2057,12 +2057,37 @@ impl RuntimeState {
         self.tasks.store_spawned_task(task_id, stored);
     }
 
-    /// Counts live tasks.
+    /// Returns the number of non-terminal tasks.
+    ///
+    /// O(1) — delegates to [`TaskTable::live_task_count`] which keeps
+    /// an incremental sum across `phase_counts` (br-asupersync-afv6z4).
+    /// Pre-fix this method scanned the arena via `tasks_iter()` and
+    /// filtered by `state.is_terminal()` on every call, costing O(N)
+    /// in the arena's high-water-mark size — silently O(N²) when a
+    /// caller (e.g., `LyapunovGovernor::StateSnapshot::from_runtime_state`,
+    /// region-close checks, doctor diagnostics) invokes it inside
+    /// another arena walk. The xxcss5 work
+    /// (1f942f8e0/86d9793a2/665de00fe/adadea72) wired the
+    /// `phase_counts`-backed incremental counter on `TaskTable`
+    /// precisely so this delegation could be O(1); this commit
+    /// closes the gap that work missed.
+    ///
+    /// **Edge cases preserved:**
+    /// - *claim-but-not-spawned*: a task that has been registered
+    ///   in the table but has not yet been admitted to a region
+    ///   (state = `Created`) counts as live. `phase_counts` includes
+    ///   the `Created` phase bucket, so the result matches the
+    ///   pre-fix `!is_terminal()` predicate.
+    /// - *in-flight cancel*: a task in `CancelRequested`,
+    ///   `Draining`, or `Finalizing` is non-terminal. Each of these
+    ///   has its own bucket in `phase_counts`, so they're all
+    ///   counted, again matching the pre-fix filter.
+    /// - The terminal phase (`Completed`) is the only bucket excluded
+    ///   from the sum, mirroring `is_terminal()`.
+    #[inline]
     #[must_use]
     pub fn live_task_count(&self) -> usize {
-        self.tasks_iter()
-            .filter(|(_, t)| !t.state.is_terminal())
-            .count()
+        self.tasks.live_task_count()
     }
 
     /// Counts live regions.
@@ -2401,43 +2426,17 @@ impl RuntimeState {
                 .unwrap_or_else(|| reason.clone());
 
             for &task_id in &task_id_buf {
+                let mut newly_cancelled = false;
+                let mut task_budget_res = crate::types::Budget::INFINITE;
                 let mut tasks_to_cancel_result = None;
+
                 self.update_task(task_id, |task| {
                     let task_budget = task_reason.cleanup_budget();
-                    let newly_cancelled =
+                    task_budget_res = task_budget;
+                    newly_cancelled =
                         task.request_cancel_with_budget(task_reason.clone(), task_budget);
                     let already_cancelling = task.state.is_cancelling();
-                    let cancel_kind = task.cancel_reason().map(|r| r.kind);
-                    #[cfg(not(feature = "tracing-integration"))]
-                    let _ = cancel_kind;
-                    if newly_cancelled {
-                        self.record_task_trace_event(task_id, |seq| {
-                            TraceEvent::cancel_request(seq, now, task_id, rid, task_reason.clone())
-                        });
-                    }
-                    let span = trace_span!(
-                        "cancel_propagate_task",
-                        from_region = ?rid,
-                        to_task = ?task_id,
-                        depth = node.depth,
-                        cancel_kind = ?cancel_kind,
-                        chain_depth = task_reason.chain_depth()
-                    );
-                    span.follows_from(&root_span);
-                    let _guard = span.enter();
-                    trace!(
-                        from_region = ?rid,
-                        to_task = ?task_id,
-                        depth = node.depth,
-                        newly_cancelled,
-                        already_cancelling,
-                        cleanup_poll_quota = task_budget.poll_quota,
-                        cleanup_priority = task_budget.priority,
-                        chain_depth = task_reason.chain_depth(),
-                        root_cause = ?task_reason.root_cause().kind,
-                        "cancel propagated to task with cause chain"
-                    );
-
+                    
                     if newly_cancelled {
                         // Task was newly cancelled, add to list
                         tasks_to_cancel_result = Some((task_id, task_budget.priority));
@@ -2447,9 +2446,28 @@ impl RuntimeState {
                     }
                 });
 
+                if newly_cancelled {
+                    self.record_task_trace_event(task_id, |seq| {
+                        TraceEvent::cancel_request(seq, now, task_id, rid, task_reason.clone())
+                    });
+                }
+
                 if let Some(t) = tasks_to_cancel_result {
                     tasks_to_cancel.push(t);
                 }
+                
+                // Trace log
+                debug!(
+                    from_region = ?rid,
+                    to_task = ?task_id,
+                    depth = node.depth,
+                    newly_cancelled,
+                    cleanup_poll_quota = task_budget_res.poll_quota,
+                    cleanup_priority = task_budget_res.priority,
+                    chain_depth = task_reason.chain_depth(),
+                    root_cause = ?task_reason.root_cause().kind,
+                    "cancel propagated to task with cause chain"
+                );
             }
         }
 
@@ -10095,5 +10113,107 @@ mod tests {
                 prop_assert_eq!(region.cancel_reason(), Some(initial_reason));
             });
         }
+    }
+
+    // br-asupersync-afv6z4: assert the O(1) phase-counts-backed
+    // RuntimeState::live_task_count agrees with the pre-fix O(N)
+    // arena-scan predicate `tasks_iter().filter(|(_,t)|
+    // !t.state.is_terminal()).count()` under realistic churn —
+    // create-task, in-flight cancel, and complete transitions.
+    // Catches a future drift between TaskTable::phase_counts
+    // bookkeeping and TaskState::is_terminal classification (the two
+    // sides of the equation that must agree for the delegation to be
+    // sound).
+    #[test]
+    fn live_task_count_matches_arena_scan_under_churn() {
+        init_test("live_task_count_matches_arena_scan_under_churn");
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+
+        // Helper: O(N) scan equivalent to the pre-fix implementation.
+        // Used as the oracle.
+        fn arena_scan_count(state: &RuntimeState) -> usize {
+            state
+                .tasks_iter()
+                .filter(|(_, t)| !t.state.is_terminal())
+                .count()
+        }
+
+        // Empty arena: both sides agree on 0.
+        crate::assert_with_log!(
+            state.live_task_count() == arena_scan_count(&state),
+            "empty arena: counter matches scan",
+            arena_scan_count(&state),
+            state.live_task_count()
+        );
+
+        // Spawn 32 tasks; at each step assert the two methods agree.
+        let mut spawned: Vec<crate::types::TaskId> = Vec::with_capacity(32);
+        for i in 0..32 {
+            let (id, _h) = state
+                .create_task(root, Budget::INFINITE, async {})
+                .expect("create_task should succeed");
+            spawned.push(id);
+            let counter = state.live_task_count();
+            let scan = arena_scan_count(&state);
+            crate::assert_with_log!(
+                counter == scan,
+                "after spawn N=i+1, counter matches arena scan",
+                scan,
+                counter
+            );
+            // Sanity: the live count grew.
+            crate::assert_with_log!(
+                counter == i + 1,
+                "live count increments by 1 per spawn",
+                i + 1,
+                counter
+            );
+        }
+
+        // Request cancel on every other task — these enter
+        // CancelRequested (still non-terminal). The two methods must
+        // continue to agree across the in-flight cancel transition.
+        for (idx, &task_id) in spawned.iter().enumerate() {
+            if idx.is_multiple_of(2) {
+                let _ = state.cancel_task(task_id, &CancelReason::user("test"));
+            }
+        }
+        crate::assert_with_log!(
+            state.live_task_count() == arena_scan_count(&state),
+            "after partial cancel: counter matches scan",
+            arena_scan_count(&state),
+            state.live_task_count()
+        );
+        // Still 32 — cancel-requested is not terminal.
+        crate::assert_with_log!(
+            state.live_task_count() == 32,
+            "cancel-requested tasks remain live",
+            32usize,
+            state.live_task_count()
+        );
+
+        // Complete each task — drives them to TaskState::Completed
+        // (terminal) and TaskPhase::Completed (excluded from
+        // phase_counts). The two methods must agree at every step
+        // and end at zero.
+        for &task_id in &spawned {
+            let _ = state.complete_task(task_id, Outcome::Ok(()));
+            crate::assert_with_log!(
+                state.live_task_count() == arena_scan_count(&state),
+                "after complete: counter matches scan",
+                arena_scan_count(&state),
+                state.live_task_count()
+            );
+        }
+        crate::assert_with_log!(
+            state.live_task_count() == 0,
+            "all tasks terminal",
+            0usize,
+            state.live_task_count()
+        );
+
+        crate::test_complete!("live_task_count_matches_arena_scan_under_churn");
     }
 }
