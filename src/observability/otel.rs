@@ -2086,12 +2086,14 @@ pub mod span_semantics {
         if key.len() <= MAX_OTEL_ATTRIBUTE_KEY_LEN {
             key.to_string()
         } else {
-            // Truncate by chars, not bytes, to keep the result valid
-            // UTF-8. We still bound by byte length via the
-            // MAX_OTEL_ATTRIBUTE_KEY_LEN char count: 1 KiB of ASCII
-            // is 1 KiB exactly; for non-ASCII a worst-case 4-byte
-            // char yields 4 KiB, still bounded.
-            key.chars().take(MAX_OTEL_ATTRIBUTE_KEY_LEN).collect()
+            // The cap is in bytes, but truncation must still land on
+            // a UTF-8 character boundary so the stored key remains
+            // valid Unicode.
+            let mut cut = MAX_OTEL_ATTRIBUTE_KEY_LEN;
+            while cut > 0 && !key.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            key[..cut].to_string()
         }
     }
 
@@ -3314,6 +3316,23 @@ pub mod span_semantics {
             assert_eq!(stored_keys.len(), 1);
             assert_eq!(stored_keys[0].len(), super::MAX_OTEL_ATTRIBUTE_KEY_LEN);
             // Original oversized key is NOT in the map (it was truncated).
+            assert!(!span.attributes.contains_key(&oversized_key));
+        }
+
+        /// br-asupersync-6ofylg — the 1 KiB cap is byte-based, not
+        /// char-based. Oversized multibyte keys must therefore be
+        /// truncated to <= 1024 bytes while remaining valid UTF-8.
+        #[test]
+        fn test_span_attribute_multibyte_key_is_truncated_by_bytes() {
+            let mut span = TestSpan::new("test", SpanKind::Internal);
+            let oversized_key = "🔒".repeat(400);
+            assert!(oversized_key.len() > super::MAX_OTEL_ATTRIBUTE_KEY_LEN);
+
+            span.set_attribute(&oversized_key, "value");
+
+            let stored_key = span.attributes.keys().next().expect("stored key");
+            assert!(stored_key.len() <= super::MAX_OTEL_ATTRIBUTE_KEY_LEN);
+            assert!(std::str::from_utf8(stored_key.as_bytes()).is_ok());
             assert!(!span.attributes.contains_key(&oversized_key));
         }
 
