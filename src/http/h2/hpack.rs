@@ -10,19 +10,179 @@ use crate::bytes::{Bytes, BytesMut};
 
 use super::error::H2Error;
 
-/// Pre-built Huffman decode index: (code, code_bits) → symbol byte.
-/// Covers codes of 9-30 bits (5-8 bit codes are handled by inline fast paths).
-/// Symbol 256 (EOS) is stored as `None` so the decoder can reject it.
-static HUFFMAN_DECODE_INDEX: LazyLock<HashMap<(u32, u8), Option<u8>>> = LazyLock::new(|| {
-    let mut map = HashMap::with_capacity(257);
-    for (sym, &(code, code_bits)) in HUFFMAN_TABLE.iter().enumerate() {
-        if code_bits >= 9 {
-            let value = if sym == 256 { None } else { Some(sym as u8) };
-            map.insert((code, code_bits), value);
+/// br-asupersync-1tvdlr: 4-bit-stride Huffman decoder state table.
+///
+/// Pre-builds the canonical HPACK decoder table used by nghttp2 / h2:
+/// 256 trie-states × 16 input nibbles × 4 bytes = 16 KiB, fits in L1.
+///
+/// Each input byte is processed as two 4-bit nibbles; per nibble we do a
+/// single array lookup that returns `(next_state, flags, sym)`. This
+/// replaces the prior `HashMap<(u32,u8), Option<u8>>` whose hot-path
+/// decode loop performed a HashMap lookup per code length per symbol —
+/// with up to 22 such probes for the longest codes. Branchless table
+/// lookup is uniformly faster than the prior cascade of 5/6/7/8-bit
+/// `match` fast-paths plus HashMap slow path.
+///
+/// Flags semantics (per nghttp2):
+///   * HUFF_ACCEPTED: ending the decode here is a valid termination
+///     (the resulting state is root, or a 1-7 bit prefix of EOS — the
+///     only valid HPACK paddings per RFC 7541 §5.2).
+///   * HUFF_SYM: the entry decoded a symbol (`sym` field is valid).
+///   * HUFF_FAIL: the input byte sequence is not decodable from this
+///     state (the trie has no such transition, or the EOS symbol was
+///     reached, which RFC 7541 §5.2 forbids).
+const HUFF_ACCEPTED: u8 = 0x01;
+const HUFF_SYM: u8 = 0x02;
+const HUFF_FAIL: u8 = 0x04;
+
+#[derive(Copy, Clone, Default)]
+struct HuffmanDecodeEntry {
+    /// Resulting decoder state (0 = root) after consuming this nibble
+    /// from the starting state. Meaningless when HUFF_FAIL is set.
+    next_state: u8,
+    /// Bitwise OR of HUFF_ACCEPTED, HUFF_SYM, HUFF_FAIL.
+    flags: u8,
+    /// Symbol byte if HUFF_SYM is set; 0 otherwise.
+    sym: u8,
+    /// Padding for natural u32 alignment.
+    _pad: u8,
+}
+
+static HUFFMAN_DECODE_TABLE: LazyLock<Box<[[HuffmanDecodeEntry; 16]; 256]>> =
+    LazyLock::new(build_huffman_decode_table);
+
+#[allow(clippy::too_many_lines)] // Trie + table builder splits would obscure the bit-level semantics.
+fn build_huffman_decode_table() -> Box<[[HuffmanDecodeEntry; 16]; 256]> {
+    // Step 1: build a binary trie from HUFFMAN_TABLE. Bit positions are
+    // walked MSB-first, matching how the encoder packs codes.
+    #[derive(Default, Clone)]
+    struct TrieNode {
+        children: [Option<usize>; 2],
+        sym: Option<u16>,
+    }
+    let mut nodes: Vec<TrieNode> = vec![TrieNode::default()]; // node 0 = root
+    for (sym_idx, &(code, code_bits)) in HUFFMAN_TABLE.iter().enumerate() {
+        let mut cur = 0usize;
+        for bit_pos in (0..code_bits).rev() {
+            let bit = ((code >> bit_pos) & 1) as usize;
+            cur = match nodes[cur].children[bit] {
+                Some(idx) => idx,
+                None => {
+                    let new_idx = nodes.len();
+                    nodes.push(TrieNode::default());
+                    nodes[cur].children[bit] = Some(new_idx);
+                    new_idx
+                }
+            };
+        }
+        nodes[cur].sym = Some(sym_idx as u16);
+    }
+
+    // Step 2: assign u8 state IDs to internal nodes only (HPACK has 257
+    // leaves so the trie has exactly 256 internal nodes — fits in u8).
+    let mut state_of_node: Vec<Option<u8>> = vec![None; nodes.len()];
+    let mut next_state_id: u32 = 0;
+    for (idx, n) in nodes.iter().enumerate() {
+        if n.sym.is_none() {
+            assert!(
+                next_state_id < 256,
+                "HPACK trie exceeded 256 internal nodes"
+            );
+            state_of_node[idx] = Some(next_state_id as u8);
+            next_state_id += 1;
         }
     }
-    map
-});
+    let num_states = next_state_id as usize;
+
+    let mut node_of_state: Vec<usize> = vec![0; num_states];
+    for (idx, &maybe_id) in state_of_node.iter().enumerate() {
+        if let Some(id) = maybe_id {
+            node_of_state[id as usize] = idx;
+        }
+    }
+
+    // Step 3: identify ACCEPTED states. Per RFC 7541 §5.2, valid padding
+    // is 0-7 trailing bits forming a prefix of the EOS code (all 1s).
+    // So accepted states are: root, plus the right-only-edge path of
+    // depth 1..=7. Padding ≥ 8 bits is a decoding error.
+    let mut accepted_state = [false; 256];
+    accepted_state[0] = true;
+    let mut walk = 0usize;
+    for _depth in 1..=7 {
+        match nodes[walk].children[1] {
+            Some(idx) if nodes[idx].sym.is_none() => {
+                let st = state_of_node[idx].expect("EOS prefix node missing state ID");
+                accepted_state[st as usize] = true;
+                walk = idx;
+            }
+            _ => break,
+        }
+    }
+
+    // Step 4: simulate consuming each 4-bit nibble from each starting
+    // state. Per HPACK constraints (5-bit minimum code length) at most
+    // ONE symbol can be emitted within a 4-bit window from any starting
+    // state, so the entry stores at most one `sym`.
+    let mut table: Box<[[HuffmanDecodeEntry; 16]; 256]> =
+        Box::new([[HuffmanDecodeEntry::default(); 16]; 256]);
+    for state in 0..num_states {
+        let start_node = node_of_state[state];
+        for nibble in 0u8..16 {
+            let mut cur_node = start_node;
+            let mut emitted: Option<u8> = None;
+            let mut fail = false;
+            for bit_idx in 0..4u8 {
+                let bit = ((nibble >> (3 - bit_idx)) & 1) as usize;
+                cur_node = match nodes[cur_node].children[bit] {
+                    Some(idx) => idx,
+                    None => {
+                        fail = true;
+                        break;
+                    }
+                };
+                if let Some(sym) = nodes[cur_node].sym {
+                    if sym == 256 {
+                        fail = true; // EOS symbol literal-encoded — RFC 7541 §5.2 forbids.
+                        break;
+                    }
+                    if emitted.is_some() {
+                        // Defensive: HPACK 5-bit minimum precludes two symbols per nibble.
+                        fail = true;
+                        break;
+                    }
+                    emitted = Some(sym as u8);
+                    cur_node = 0; // reset to root after emitting
+                }
+            }
+
+            let entry = if fail {
+                HuffmanDecodeEntry {
+                    next_state: 0,
+                    flags: HUFF_FAIL,
+                    sym: 0,
+                    _pad: 0,
+                }
+            } else {
+                let next_state = state_of_node[cur_node].expect("trie walk landed on a leaf");
+                let mut flags = 0u8;
+                if emitted.is_some() {
+                    flags |= HUFF_SYM;
+                }
+                if accepted_state[next_state as usize] {
+                    flags |= HUFF_ACCEPTED;
+                }
+                HuffmanDecodeEntry {
+                    next_state,
+                    flags,
+                    sym: emitted.unwrap_or(0),
+                    _pad: 0,
+                }
+            };
+            table[state][nibble as usize] = entry;
+        }
+    }
+    table
+}
 
 /// Pre-built index for exact (name, value) → 1-based static table index lookups.
 static STATIC_EXACT_INDEX: LazyLock<HashMap<(&'static str, &'static str), usize>> =
@@ -141,13 +301,67 @@ impl Header {
     }
 }
 
+/// Internal storage entry for the dynamic table (br-asupersync-d04pmz).
+///
+/// Uses `Arc<str>` instead of `String` so cloning an entry — required on
+/// every "indexed header" decode and "literal with incremental indexing"
+/// — is two atomic refcount bumps (~10 ns total) rather than two heap
+/// allocations + memcpy of the name + value bytes (hundreds of ns each
+/// for typical header sizes).
+///
+/// The user-facing `Header` type still uses `String` (preserving the
+/// public API). Conversion happens at the dynamic-table boundary:
+///   * insert: pays the alloc-once cost (Arc::from(String) is one alloc
+///     + one move)
+///   * lookup: returns &DynamicTableEntry, callers Arc::clone to keep
+///     a reference, then convert to Header at their boundary
+///
+/// Pre-fix: `dynamic_table.insert(header.clone())` at decoder.rs:579
+/// allocated TWO Strings per dynamic-table insert (the clone() before
+/// insert) plus another two when the caller built the returned Header.
+/// Post-fix: Arc construction once, refcount bumps thereafter.
+#[derive(Debug, Clone)]
+struct DynamicTableEntry {
+    name: std::sync::Arc<str>,
+    value: std::sync::Arc<str>,
+}
+
+impl DynamicTableEntry {
+    /// Construct from owned Strings, paying the allocation once into Arc.
+    fn from_strings(name: String, value: String) -> Self {
+        Self {
+            name: std::sync::Arc::from(name.into_boxed_str()),
+            value: std::sync::Arc::from(value.into_boxed_str()),
+        }
+    }
+
+    /// Convert back to a public `Header` by allocating fresh Strings.
+    /// (The Arc<str> doesn't satisfy the public API; callers needing a
+    /// Header must allocate. This still saves the dynamic-table-side
+    /// clone — see file header doc.)
+    fn to_header(&self) -> Header {
+        Header {
+            name: self.name.as_ref().to_string(),
+            value: self.value.as_ref().to_string(),
+        }
+    }
+
+    fn size(&self) -> usize {
+        self.name.len() + self.value.len() + 32
+    }
+}
+
 /// Dynamic table for HPACK encoding/decoding.
 ///
 /// Uses `VecDeque` so that front insertion (`push_front`) is O(1) amortized
 /// rather than the O(n) of `Vec::insert(0, ...)`.
+///
+/// br-asupersync-d04pmz: stores `DynamicTableEntry` (Arc<str>) internally
+/// rather than `Header` (String) so post-insert clones cost atomic
+/// refcount bumps instead of full String allocs.
 #[derive(Debug)]
 pub struct DynamicTable {
-    entries: VecDeque<Header>,
+    entries: VecDeque<DynamicTableEntry>,
     size: usize,
     max_size: usize,
 }
@@ -189,7 +403,11 @@ impl DynamicTable {
 
     /// Insert a new entry at the beginning of the table.
     pub fn insert(&mut self, header: Header) {
-        let entry_size = header.size();
+        // br-asupersync-d04pmz: convert at the boundary — pays the
+        // Arc::from(String) alloc ONCE; subsequent table accesses are
+        // refcount bumps.
+        let entry = DynamicTableEntry::from_strings(header.name, header.value);
+        let entry_size = entry.size();
 
         // Evict oldest entries (at back) to make room
         while self.size.saturating_add(entry_size) > self.max_size && !self.entries.is_empty() {
@@ -200,18 +418,23 @@ impl DynamicTable {
 
         // Only insert if it fits
         if entry_size <= self.max_size {
-            self.entries.push_front(header);
+            self.entries.push_front(entry);
             self.size = self.size.saturating_add(entry_size);
         }
     }
 
     /// Get an entry by index (1-indexed, after static table).
+    ///
+    /// br-asupersync-d04pmz: returns an owned Header (allocating fresh
+    /// Strings from the internal Arc<str>). Callers that want to avoid
+    /// this allocation should be migrated to use the index-only path
+    /// or a future Arc<str>-aware accessor.
     #[must_use]
-    pub fn get(&self, index: usize) -> Option<&Header> {
+    pub fn get(&self, index: usize) -> Option<Header> {
         if index == 0 || index > self.entries.len() {
             None
         } else {
-            Some(&self.entries[index - 1])
+            Some(self.entries[index - 1].to_header())
         }
     }
 
@@ -219,7 +442,7 @@ impl DynamicTable {
     #[must_use]
     pub fn find(&self, name: &str, value: &str) -> Option<usize> {
         for (i, entry) in self.entries.iter().enumerate() {
-            if entry.name == name && entry.value == value {
+            if entry.name.as_ref() == name && entry.value.as_ref() == value {
                 return Some(STATIC_TABLE.len() + i + 1);
             }
         }
@@ -230,7 +453,7 @@ impl DynamicTable {
     #[must_use]
     pub fn find_name(&self, name: &str) -> Option<usize> {
         for (i, entry) in self.entries.iter().enumerate() {
-            if entry.name == name {
+            if entry.name.as_ref() == name {
                 return Some(STATIC_TABLE.len() + i + 1);
             }
         }
@@ -641,7 +864,6 @@ impl Decoder {
             let dyn_index = index - STATIC_TABLE.len();
             self.dynamic_table
                 .get(dyn_index)
-                .cloned()
                 .ok_or_else(|| H2Error::compression("invalid dynamic index"))
         }
     }
@@ -662,7 +884,7 @@ impl Decoder {
             let dyn_index = index - STATIC_TABLE.len();
             self.dynamic_table
                 .get(dyn_index)
-                .map(|h| h.name.clone())
+                .map(|h| h.name)
                 .ok_or_else(|| H2Error::compression("invalid dynamic index"))
         }
     }
@@ -1193,206 +1415,61 @@ static HUFFMAN_TABLE: [(u32, u8); 257] = [
 /// scan approach. By grouping codes by bit length and checking shortest first,
 /// the decoder consumes at least 5 bits per iteration, bounding the work per
 /// input byte to a constant factor.
-#[allow(clippy::too_many_lines)] // Huffman decoding table is large; splitting obscures verification.
+/// Decode a Huffman-encoded HPACK string literal per RFC 7541 Appendix B.
+///
+/// br-asupersync-1tvdlr: implements the canonical 4-bit-stride state
+/// machine used by nghttp2 and h2-rs. Each input byte is processed as
+/// two 4-bit nibbles; per nibble we do a single array lookup into
+/// `HUFFMAN_DECODE_TABLE` (16 KiB, fits in L1) that returns the next
+/// state, optional decoded symbol, and a flag indicating whether the
+/// resulting state is a valid termination point.
+///
+/// Replaces the prior decoder which:
+///   * tested for 5/6/7/8-bit codes via cascaded `match` statements
+///     (compile-checked but adds branch misprediction cost);
+///   * fell back to a HashMap probe per-code-length on the long-code
+///     path (up to 22 probes for the longest 30-bit codes).
+///
+/// The table-driven decoder has uniform cost per byte regardless of
+/// code length: 2 array accesses + 2 conditionals.
 fn decode_huffman(src: &Bytes) -> Result<String, H2Error> {
-    // Shortest HPACK Huffman code is 5 bits, so decoded symbols are bounded by
-    // ceil(input_bits / 5). Preallocating to this bound avoids growth reallocs
-    // on the common path where decoded output is larger than encoded bytes.
+    // Shortest HPACK code is 5 bits; preallocate to upper bound to avoid
+    // growth reallocs on the common case where decoded > encoded length.
     let estimated_symbols = src.len().saturating_mul(8).saturating_add(4) / 5;
     let mut result = Vec::with_capacity(estimated_symbols);
-    let mut accumulator: u64 = 0;
-    let mut bits: u32 = 0;
+    let table: &[[HuffmanDecodeEntry; 16]; 256] = &HUFFMAN_DECODE_TABLE;
+    let mut state: u8 = 0;
+    let mut accepted = true;
 
     for &byte in src.iter() {
-        accumulator = (accumulator << 8) | u64::from(byte);
-        bits += 8;
-
-        while bits >= 5 {
-            // Fast path: check 5-bit codes first (most common ASCII symbols).
-            // Codes 0x00-0x09 in 5 bits map to: '0','1','2','a','c','e','i','o','s','t'
-            let high_5 = (accumulator >> (bits - 5)) as u32 & 0x1F;
-            if high_5 < 10 {
-                let sym = match high_5 {
-                    0 => b'0',
-                    1 => b'1',
-                    2 => b'2',
-                    3 => b'a',
-                    4 => b'c',
-                    5 => b'e',
-                    6 => b'i',
-                    7 => b'o',
-                    8 => b's',
-                    9 => b't',
-                    _ => b'0',
-                };
-                result.push(sym);
-                bits -= 5;
-                accumulator &= BIT_MASKS[bits as usize];
-                continue;
-            }
-
-            // Fast path: check 6-bit codes (next most common).
-            if bits >= 6 {
-                let high_6 = (accumulator >> (bits - 6)) as u32 & 0x3F;
-                // 6-bit codes range from 0x14 to 0x2d (symbols: space, %, -, ., /,
-                // 3-9, =, A-Z, _, b, d, f-h, l-p, r, u)
-                let sym_6 = match high_6 {
-                    0x14 => Some(b' '),
-                    0x15 => Some(b'%'),
-                    0x16 => Some(b'-'),
-                    0x17 => Some(b'.'),
-                    0x18 => Some(b'/'),
-                    0x19 => Some(b'3'),
-                    0x1a => Some(b'4'),
-                    0x1b => Some(b'5'),
-                    0x1c => Some(b'6'),
-                    0x1d => Some(b'7'),
-                    0x1e => Some(b'8'),
-                    0x1f => Some(b'9'),
-                    0x20 => Some(b'='),
-                    0x21 => Some(b'A'),
-                    0x22 => Some(b'_'),
-                    0x23 => Some(b'b'),
-                    0x24 => Some(b'd'),
-                    0x25 => Some(b'f'),
-                    0x26 => Some(b'g'),
-                    0x27 => Some(b'h'),
-                    0x28 => Some(b'l'),
-                    0x29 => Some(b'm'),
-                    0x2a => Some(b'n'),
-                    0x2b => Some(b'p'),
-                    0x2c => Some(b'r'),
-                    0x2d => Some(b'u'),
-                    _ => None,
-                };
-                if let Some(s) = sym_6 {
-                    result.push(s);
-                    bits -= 6;
-                    accumulator &= BIT_MASKS[bits as usize];
-                    continue;
-                }
-            }
-
-            // Fast path: check 7-bit codes.
-            if bits >= 7 {
-                let high_7 = (accumulator >> (bits - 7)) as u32 & 0x7F;
-                let sym_7 = match high_7 {
-                    0x5c => Some(b':'),
-                    0x5d => Some(b'B'),
-                    0x5e => Some(b'C'),
-                    0x5f => Some(b'D'),
-                    0x60 => Some(b'E'),
-                    0x61 => Some(b'F'),
-                    0x62 => Some(b'G'),
-                    0x63 => Some(b'H'),
-                    0x64 => Some(b'I'),
-                    0x65 => Some(b'J'),
-                    0x66 => Some(b'K'),
-                    0x67 => Some(b'L'),
-                    0x68 => Some(b'M'),
-                    0x69 => Some(b'N'),
-                    0x6a => Some(b'O'),
-                    0x6b => Some(b'P'),
-                    0x6c => Some(b'Q'),
-                    0x6d => Some(b'R'),
-                    0x6e => Some(b'S'),
-                    0x6f => Some(b'T'),
-                    0x70 => Some(b'U'),
-                    0x71 => Some(b'V'),
-                    0x72 => Some(b'W'),
-                    0x73 => Some(b'Y'),
-                    0x74 => Some(b'j'),
-                    0x75 => Some(b'k'),
-                    0x76 => Some(b'q'),
-                    0x77 => Some(b'v'),
-                    0x78 => Some(b'w'),
-                    0x79 => Some(b'x'),
-                    0x7a => Some(b'y'),
-                    0x7b => Some(b'z'),
-                    _ => None,
-                };
-                if let Some(s) = sym_7 {
-                    result.push(s);
-                    bits -= 7;
-                    accumulator &= BIT_MASKS[bits as usize];
-                    continue;
-                }
-            }
-
-            // Fast path: check 8-bit codes.
-            if bits >= 8 {
-                let high_8 = (accumulator >> (bits - 8)) as u32 & 0xFF;
-                let sym_8 = match high_8 {
-                    0xf8 => Some(b'&'),
-                    0xf9 => Some(b'*'),
-                    0xfa => Some(b','),
-                    0xfb => Some(b';'),
-                    0xfc => Some(b'X'),
-                    0xfd => Some(b'Z'),
-                    _ => None,
-                };
-                if let Some(s) = sym_8 {
-                    result.push(s);
-                    bits -= 8;
-                    accumulator &= BIT_MASKS[bits as usize];
-                    continue;
-                }
-            }
-
-            // Slow path for codes 9-30 bits: O(1) lookup per code length
-            // via pre-built HUFFMAN_DECODE_INDEX instead of scanning 257 entries.
-            let mut decoded = false;
-            for code_len in 9u32..=30 {
-                if bits < code_len {
-                    break;
-                }
-                let shift = bits - code_len;
-                let candidate = (accumulator >> shift) as u32;
-                let mask = (1u32 << code_len) - 1;
-                let candidate = candidate & mask;
-
-                if let Some(sym_opt) = HUFFMAN_DECODE_INDEX.get(&(candidate, code_len as u8)) {
-                    match sym_opt {
-                        None => {
-                            return Err(H2Error::compression("invalid huffman code (EOS symbol)"));
-                        }
-                        Some(sym) => {
-                            result.push(*sym);
-                            bits = shift;
-                            accumulator &= BIT_MASKS[bits as usize];
-                            decoded = true;
-                        }
-                    }
-                    break;
-                }
-            }
-
-            if !decoded {
-                // If we have enough bits for the longest possible Huffman
-                // code (30 bits for EOS) and still couldn't decode, the
-                // input is definitively invalid. Returning early also
-                // prevents `bits` from exceeding 64 on subsequent bytes,
-                // which would cause a shift overflow in the u64 accumulator.
-                if bits >= 30 {
-                    return Err(H2Error::compression("invalid huffman code"));
-                }
-                break;
-            }
+        // High nibble first (MSB-first packing). Intermediate accepted
+        // flag from the high nibble is irrelevant — only the byte's low
+        // nibble determines the post-byte termination state.
+        let entry = table[state as usize][((byte >> 4) & 0x0F) as usize];
+        if entry.flags & HUFF_FAIL != 0 {
+            return Err(H2Error::compression("invalid huffman code"));
         }
+        if entry.flags & HUFF_SYM != 0 {
+            result.push(entry.sym);
+        }
+        state = entry.next_state;
+
+        let entry = table[state as usize][(byte & 0x0F) as usize];
+        if entry.flags & HUFF_FAIL != 0 {
+            return Err(H2Error::compression("invalid huffman code"));
+        }
+        if entry.flags & HUFF_SYM != 0 {
+            result.push(entry.sym);
+        }
+        state = entry.next_state;
+        accepted = entry.flags & HUFF_ACCEPTED != 0;
     }
 
-    if bits >= 8 {
-        return Err(H2Error::compression("invalid huffman padding (overlong)"));
-    }
-
-    // Check remaining bits are valid padding (all 1s) per RFC 7541 Section 5.2
-    if bits > 0 && bits < 8 {
-        let mask = BIT_MASKS[bits as usize];
-        if accumulator != mask {
-            return Err(H2Error::compression(
-                "invalid Huffman padding (must be all 1s)",
-            ));
-        }
+    if !accepted {
+        // Final state is neither root nor a valid 1-7-bit EOS prefix. This
+        // catches both incomplete trailing codes and overlong (≥ 8-bit)
+        // padding per RFC 7541 §5.2.
+        return Err(H2Error::compression("invalid huffman padding"));
     }
 
     String::from_utf8(result).map_err(|_| H2Error::compression("invalid UTF-8 in huffman"))
