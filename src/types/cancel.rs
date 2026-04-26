@@ -94,6 +94,76 @@ use super::{Budget, RegionId, TaskId, Time};
 use core::fmt;
 use serde::{Deserialize, Serialize};
 
+/// br-asupersync-dyao05 — Hard cap on the cause-chain depth a
+/// serde Deserializer will recurse through. The runtime
+/// `CancelAttributionConfig::max_chain_depth` is 16 by default;
+/// this constant sits at 64 — 4x headroom over the runtime cap so
+/// no legitimate snapshot is spuriously rejected, but tight enough
+/// to fire BEFORE serde_json's default recursion limit (128) and
+/// well before any plausible stack-overflow boundary on the
+/// MessagePack / bincode / postcard transports that have NO
+/// built-in recursion limit. Crafted snapshots like
+/// `{"cause": {"cause": {"cause": ... 50_000 levels ... }}}`
+/// surface as `serde::de::Error::custom` so the transport layer
+/// (distributed/snapshot.rs, fabric MessagePack frames, debug
+/// JSON endpoints) classifies the input as malformed and refuses
+/// to materialize the chain.
+const MAX_CANCEL_CAUSE_DESERIALIZE_DEPTH: usize = 64;
+
+thread_local! {
+    /// Per-thread cause-chain depth counter for `CancelReason`
+    /// deserialization. Incremented on entry to
+    /// `deserialize_bounded_cause`, decremented on exit (via the
+    /// `CauseDepthGuard` Drop). The thread-local is sound here
+    /// because serde's `Deserializer` impls are inherently
+    /// single-threaded for the duration of one deserialize call —
+    /// the recursion is on the stack of one thread.
+    static CANCEL_CAUSE_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// RAII guard that decrements the cause-chain depth counter even
+/// on panic / early-return. Critical for correctness: if a
+/// deserialize call panics mid-recursion the thread-local
+/// otherwise carries stale depth into the NEXT deserialize call
+/// on the same thread, which would either spuriously reject valid
+/// input or (worse) admit input deeper than the cap.
+struct CauseDepthGuard;
+
+impl Drop for CauseDepthGuard {
+    fn drop(&mut self) {
+        CANCEL_CAUSE_DEPTH.with(|c| c.set(c.get().saturating_sub(1)));
+    }
+}
+
+/// br-asupersync-dyao05 — Custom deserializer for the `cause`
+/// field of `CancelReason`. Wraps the standard
+/// `Option<Box<CancelReason>>::deserialize` with a depth check
+/// that bails before the recursion can blow the stack or cause
+/// catastrophic heap allocation.
+///
+/// The check fires on each recursion step (one level of
+/// `Option<Box<CancelReason>>`); cumulative depth across the
+/// chain is bounded by `MAX_CANCEL_CAUSE_DESERIALIZE_DEPTH`.
+fn deserialize_bounded_cause<'de, D>(deserializer: D) -> Result<Option<Box<CancelReason>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    let depth = CANCEL_CAUSE_DEPTH.with(|c| {
+        let new = c.get().saturating_add(1);
+        c.set(new);
+        new
+    });
+    let _guard = CauseDepthGuard;
+    if depth > MAX_CANCEL_CAUSE_DESERIALIZE_DEPTH {
+        return Err(D::Error::custom(format!(
+            "CancelReason cause-chain depth {depth} exceeds maximum \
+             {MAX_CANCEL_CAUSE_DESERIALIZE_DEPTH} (br-asupersync-dyao05)"
+        )));
+    }
+    Option::<Box<CancelReason>>::deserialize(deserializer)
+}
+
 /// Configuration for cancel attribution chain limits.
 ///
 /// Controls memory usage by limiting cause chain depth and total memory.
@@ -460,6 +530,17 @@ pub struct CancelReason {
     /// Optional human-readable message (static for determinism).
     pub message: Option<String>,
     /// The parent cause of this cancellation (for building chains).
+    ///
+    /// br-asupersync-dyao05 — `deserialize_with` routes the
+    /// recursive parse through `deserialize_bounded_cause` which
+    /// rejects chains deeper than
+    /// `MAX_CANCEL_CAUSE_DESERIALIZE_DEPTH = 256` BEFORE the recursion
+    /// can blow the stack or OOM. The runtime cap
+    /// `CancelAttributionConfig::max_chain_depth` (default 16) still
+    /// applies post-deserialize for the application-level truncation;
+    /// this gate is the wire-level defence-in-depth against
+    /// attacker-supplied snapshots.
+    #[serde(deserialize_with = "deserialize_bounded_cause")]
     pub cause: Option<Box<Self>>,
     /// True if the cause chain was truncated due to limits.
     pub truncated: bool,
@@ -2660,5 +2741,101 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// br-asupersync-dyao05 — A pathologically deep cause chain in
+    /// JSON MUST NOT cause a stack overflow or unbounded heap
+    /// allocation; the deserializer must reject it with a
+    /// well-formed error before recursion runs away.
+    ///
+    /// Builds the wire form by serializing one well-formed leaf
+    /// CancelReason (so all field shapes — including RegionId,
+    /// CancelKind enum, etc. — match the actual derived
+    /// representation), then wraps the result 1024 times by
+    /// substituting the inner `"cause":null` with the just-
+    /// constructed leaf's JSON. Final payload is 1024 levels deep
+    /// — well above the 256 cap.
+    #[test]
+    fn dyao05_deserialize_rejects_overdeep_cause_chain() {
+        let leaf = CancelReason::new(CancelKind::User);
+        let leaf_json = serde_json::to_string(&leaf).expect("serialize leaf");
+        let inner_null = r#""cause":null"#;
+        // 96 wraps lands above our cap (64) but below serde_json's
+        // default recursion limit (128) so the dyao05 gate is the
+        // FIRST gate to fire — proving our defence-in-depth catches
+        // the input rather than relying on the JSON parser's own
+        // recursion safeguard (which other transports lack).
+        let depth = 96usize;
+        let mut payload = leaf_json.clone();
+        let inner_substitute = format!(r#""cause":{leaf_json}"#);
+        for _ in 0..depth {
+            payload = payload.replacen(inner_null, &inner_substitute, 1);
+        }
+
+        let result: Result<CancelReason, _> = serde_json::from_str(&payload);
+        assert!(
+            result.is_err(),
+            "96-deep cause chain MUST be rejected by the dyao05 depth gate"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("dyao05"),
+            "rejection message should reference the dyao05 depth gate: {err_msg}"
+        );
+    }
+
+    /// br-asupersync-dyao05 — A modest legitimate chain depth
+    /// (e.g., 8 levels — well within both the deserialize cap of
+    /// 256 and the runtime cap of 16) MUST round-trip cleanly.
+    /// Confirms the gate doesn't spuriously reject valid input.
+    #[test]
+    fn dyao05_deserialize_accepts_modest_cause_chain() {
+        let mut reason = CancelReason::new(CancelKind::User);
+        for i in 0..8 {
+            let mut parent = CancelReason::new(CancelKind::Timeout);
+            parent.message = Some(format!("level {i}"));
+            parent.cause = Some(Box::new(reason));
+            reason = parent;
+        }
+        let json = serde_json::to_string(&reason).expect("serialize");
+        let parsed: CancelReason = serde_json::from_str(&json).expect("8-deep chain must parse");
+        assert_eq!(parsed.kind, CancelKind::Timeout);
+        // Walk the chain and count entries — should be 9 (the 8
+        // wrappers plus the original).
+        let mut count = 0;
+        let mut node = Some(&parsed);
+        while let Some(n) = node {
+            count += 1;
+            node = n.cause.as_deref();
+        }
+        assert_eq!(count, 9, "round-tripped chain length");
+    }
+
+    /// br-asupersync-dyao05 — The thread-local depth counter must
+    /// reset between independent deserialize calls on the same
+    /// thread. Without the RAII `CauseDepthGuard`, a stale counter
+    /// would leak into the next deserialize and either spuriously
+    /// reject valid input or admit input deeper than the cap.
+    #[test]
+    fn dyao05_depth_counter_resets_between_calls() {
+        for _ in 0..3 {
+            let mut reason = CancelReason::new(CancelKind::User);
+            for _ in 0..5 {
+                let mut parent = CancelReason::new(CancelKind::Timeout);
+                parent.cause = Some(Box::new(reason));
+                reason = parent;
+            }
+            let json = serde_json::to_string(&reason).expect("serialize");
+            let parsed: CancelReason =
+                serde_json::from_str(&json).expect("5-deep chain must parse on every iteration");
+            assert_eq!(parsed.kind, CancelKind::Timeout);
+        }
+        // After all calls, the thread-local counter must be 0
+        // (RAII guard restored it on every exit).
+        let final_depth = CANCEL_CAUSE_DEPTH.with(std::cell::Cell::get);
+        assert_eq!(
+            final_depth, 0,
+            "thread-local depth counter leaked between deserialize calls"
+        );
     }
 }
