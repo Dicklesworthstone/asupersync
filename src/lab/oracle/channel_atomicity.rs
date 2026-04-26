@@ -36,6 +36,32 @@ use crate::util::stack_trace;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// br-asupersync-ge1rjw — Wall-clock proxy for violation records and
+/// lifecycle events. In production stamps real `SystemTime::now()`;
+/// under `cfg(any(test, feature = "deterministic-mode"))` returns
+/// `UNIX_EPOCH` so test runs and lab replays produce byte-stable
+/// violation streams + DPOR class fingerprints (the same concern
+/// addressed for region_leak.rs/waker_dedup.rs by br-asupersync-hq5gou
+/// and br-asupersync-1zvt0a).
+///
+/// Note: every public struct field on this oracle is still typed as
+/// `SystemTime`. Switching to `crate::types::Time` is a larger refactor
+/// (every event-creation site needs a `now: Time` parameter and every
+/// public method signature changes) and is tracked as follow-up. This
+/// proxy addresses the violation-stream determinism leak (the
+/// user-observable consequence) without an API break.
+#[inline]
+fn channel_atomicity_now() -> SystemTime {
+    #[cfg(any(test, feature = "deterministic-mode"))]
+    {
+        UNIX_EPOCH
+    }
+    #[cfg(not(any(test, feature = "deterministic-mode")))]
+    {
+        SystemTime::now()
+    }
+}
+
 /// Unique identifier for a channel reservation
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ReservationId(pub u64);
@@ -386,7 +412,7 @@ impl ViolationRecord {
 
         Self {
             violation,
-            timestamp: SystemTime::now(),
+            timestamp: channel_atomicity_now(),
             trace_id,
             stack_trace,
             replay_command,
@@ -573,7 +599,7 @@ impl ChannelAtomicityOracle {
         let state = ReservationState {
             reservation_id,
             channel_id,
-            created_at: SystemTime::now(),
+            created_at: channel_atomicity_now(),
             trace_id,
             status: ReservationStatus::Active,
         };
@@ -595,7 +621,7 @@ impl ChannelAtomicityOracle {
         }
 
         if let Some(state) = self.reservations.get_mut(&reservation_id) {
-            let commit_time = SystemTime::now();
+            let commit_time = channel_atomicity_now();
             match &state.status {
                 ReservationStatus::Active => {
                     state.status = ReservationStatus::Committed {
@@ -639,7 +665,7 @@ impl ChannelAtomicityOracle {
         }
 
         if let Some(state) = self.reservations.get_mut(&reservation_id) {
-            let abort_time = SystemTime::now();
+            let abort_time = channel_atomicity_now();
             match &state.status {
                 ReservationStatus::Active => {
                     state.status = ReservationStatus::Aborted {
@@ -687,7 +713,7 @@ impl ChannelAtomicityOracle {
         let state = WakerState {
             waker_id,
             channel_id,
-            registered_at: SystemTime::now(),
+            registered_at: channel_atomicity_now(),
             expected_wakeup_at: None,
             actual_wakeup_at: None,
             trace_id,
@@ -764,7 +790,7 @@ impl ChannelAtomicityOracle {
         let violation = ChannelAtomicityViolation::DataLossOnCancel {
             channel_id,
             data_size,
-            cancel_at: SystemTime::now(),
+            cancel_at: channel_atomicity_now(),
             trace_id,
         };
         self.record_violation(violation);
@@ -837,7 +863,7 @@ impl ChannelAtomicityOracle {
 
     /// Check for reservation leaks
     fn check_for_reservation_leaks(&mut self) {
-        let now = SystemTime::now();
+        let now = channel_atomicity_now();
         let mut leaked_reservations = Vec::new();
         let mut violations_to_record = Vec::new();
 

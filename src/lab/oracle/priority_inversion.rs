@@ -8,7 +8,21 @@
 //! unpredictable latency spikes in real-time systems.
 
 use crate::types::TaskId;
-use std::collections::{HashMap, HashSet, VecDeque};
+// br-asupersync-w9u6dn — `BTreeMap` (not `HashMap`) for the per-key
+// state tables. Iteration order over `active_tasks`, `resource_locks`,
+// and `active_inversions` reaches the violation stream and the
+// statistics report; the std HashMap's randomly-seeded hash made every
+// replay produce a different order, breaking byte-stable diff tooling.
+// All three key types (TaskId, ResourceId, InversionId) derive `Ord`,
+// so the swap is mechanical.
+//
+// The 7 `Instant::now()` sites in this file remain — they compute
+// durations against `min_inversion_duration` thresholds, not against
+// fixed timestamps in the violation record, so their wall-clock
+// dependency affects *when* a violation fires, not the byte-stability
+// of the violation that did fire. Tracked as follow-up; the structural
+// switch to `crate::types::Time` is a separate refactor.
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -52,11 +66,11 @@ impl Default for PriorityInversionConfig {
 #[derive(Debug)]
 struct PriorityInversionState {
     /// Active task information.
-    active_tasks: HashMap<TaskId, TaskInfo>,
+    active_tasks: BTreeMap<TaskId, TaskInfo>,
     /// Resource locks currently held.
-    resource_locks: HashMap<ResourceId, ResourceLockInfo>,
+    resource_locks: BTreeMap<ResourceId, ResourceLockInfo>,
     /// Active priority inversions being tracked.
-    active_inversions: HashMap<InversionId, PriorityInversion>,
+    active_inversions: BTreeMap<InversionId, PriorityInversion>,
     /// Statistics since last reset.
     statistics: PriorityInversionStatistics,
     /// Last time statistics were reported.
@@ -114,7 +128,7 @@ pub enum TaskState {
 }
 
 /// Identifier for a resource (mutex, channel, etc.).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ResourceId(pub u64);
 
 /// Information about a resource lock.
@@ -132,7 +146,7 @@ struct ResourceLockInfo {
 }
 
 /// Unique identifier for a priority inversion instance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct InversionId(pub u64);
 
 /// A detected priority inversion.
@@ -199,9 +213,9 @@ impl PriorityInversionOracle {
         Self {
             config,
             state: Arc::new(Mutex::new(PriorityInversionState {
-                active_tasks: HashMap::new(),
-                resource_locks: HashMap::new(),
-                active_inversions: HashMap::new(),
+                active_tasks: BTreeMap::new(),
+                resource_locks: BTreeMap::new(),
+                active_inversions: BTreeMap::new(),
                 statistics: PriorityInversionStatistics::default(),
                 last_stats_report: Instant::now(),
                 next_inversion_id: 1,
