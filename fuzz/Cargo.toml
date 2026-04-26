@@ -2216,3 +2216,11 @@ path = "fuzz_targets/plan_certificate_hash.rs"
 test = false
 doc = false
 bench = false
+
+# Fuzz coverage gap: transport/sink.rs CollectingSink lifecycle
+[[bin]]
+name = "transport_sink_collecting"
+path = "fuzz_targets/transport_sink_collecting.rs"
+test = false
+doc = false
+bench = false
