@@ -283,6 +283,18 @@ impl DecisionContract for RaptorQDecisionContract {
 
     fn update_posterior(&self, posterior: &mut Posterior, observation: usize) {
         if posterior.len() != state::COUNT {
+            // Silent no-op on a wrong-length posterior would let stale
+            // beliefs drive subsequent choose_action calls. Surface it
+            // via tracing so SREs can diagnose the misuse rather than
+            // silently treating the decision as still-valid
+            // (br-asupersync-raptorq-update-posterior-mismatch).
+            crate::tracing_compat::warn!(
+                expected = state::COUNT,
+                actual = posterior.len(),
+                observation = observation,
+                "raptorq G7 update_posterior: wrong-length posterior — update skipped, \
+                 next choose_action will fall back to the conservative action"
+            );
             return;
         }
         let mut likelihoods = [0.1; state::COUNT];
