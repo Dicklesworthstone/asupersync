@@ -48,13 +48,35 @@
 //! ```
 
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::sync::Arc;
 #[cfg(any(test, feature = "deterministic-mode"))]
 use std::time::UNIX_EPOCH;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::types::{Budget, Outcome, RegionId, TaskId};
 use crate::util::stack_trace;
+
+/// br-asupersync-6yx9iw + br-asupersync-qdcchl: pluggable wall-clock
+/// source for the [`RegionLeakOracle`].
+///
+/// The oracle's threshold checks compare elapsed wall-clock duration
+/// against `RegionLeakConfig::max_*` ceilings. When run inside a lab
+/// harness with virtual time, those checks must come from the harness's
+/// deterministic clock — not `std::time::Instant::now()` — or two
+/// replays of the same scenario produce different violation reports.
+/// `TimeSource` is `Arc<dyn Fn() -> Instant + Send + Sync>` so the lab
+/// harness can install a virtual-clock-backed closure while production
+/// callers keep the default `Instant::now`.
+pub type TimeSource = Arc<dyn Fn() -> Instant + Send + Sync>;
+
+/// Default wall-clock time source — direct `Instant::now()`. Used when
+/// no explicit override is provided. Production deployments retain
+/// wall-clock semantics; lab replay must override via
+/// [`RegionLeakOracle::with_time_source`].
+fn default_time_source() -> TimeSource {
+    Arc::new(Instant::now)
+}
 
 /// br-asupersync-hq5gou — Wall-clock proxy for the violation
 /// `detected_at` field. In production the oracle stamps real
@@ -282,12 +304,18 @@ pub enum TaskLifecycleState {
     Panicked,
 }
 
-/// The main region leak detection oracle
-#[derive(Debug)]
+/// The main region leak detection oracle.
+///
+/// br-asupersync-qdcchl: `regions` and `tasks` are now `BTreeMap`
+/// rather than `HashMap`. Iteration over either map (for violation
+/// scans, snapshot exports, or the eviction logic in
+/// `cleanup_if_needed`) is now sorted by `RegionId` / `TaskId`, so
+/// the oracle's observable output stops depending on
+/// `RandomState`'s per-process hash seed.
 pub struct RegionLeakOracle {
     config: RegionLeakConfig,
-    regions: HashMap<RegionId, RegionState>,
-    tasks: HashMap<TaskId, TaskState>,
+    regions: BTreeMap<RegionId, RegionState>,
+    tasks: BTreeMap<TaskId, TaskState>,
     violations: VecDeque<RegionViolation>,
     start_time: Instant,
     last_check_time: Instant,
@@ -295,17 +323,22 @@ pub struct RegionLeakOracle {
     total_regions_closed: u64,
     total_tasks_spawned: u64,
     total_tasks_completed: u64,
+    /// br-asupersync-6yx9iw: pluggable time source. Default is
+    /// [`Instant::now`]; lab harnesses install a virtual-clock-backed
+    /// closure via [`Self::with_time_source`].
+    time_source: TimeSource,
 }
 
 impl RegionLeakOracle {
     /// Create a new region leak detection oracle with the given configuration
     #[must_use]
     pub fn new(config: RegionLeakConfig) -> Self {
-        let now = Instant::now();
+        let time_source = default_time_source();
+        let now = (time_source)();
         Self {
             config,
-            regions: HashMap::new(),
-            tasks: HashMap::new(),
+            regions: BTreeMap::new(),
+            tasks: BTreeMap::new(),
             violations: VecDeque::new(),
             start_time: now,
             last_check_time: now,
@@ -313,7 +346,34 @@ impl RegionLeakOracle {
             total_regions_closed: 0,
             total_tasks_spawned: 0,
             total_tasks_completed: 0,
+            time_source,
         }
+    }
+
+    /// br-asupersync-6yx9iw: replace the oracle's time source with
+    /// `source`. Lab harnesses use this to route every internal
+    /// `now()` call through a virtual clock so two replays of the
+    /// same scenario produce identical violation timing. Production
+    /// callers do not need to call this — the default
+    /// [`Instant::now`] source is the right shape outside of replay.
+    ///
+    /// The oracle's `start_time` and `last_check_time` are reset to
+    /// the new source's current value so subsequent duration
+    /// computations are consistent with the new clock.
+    pub fn with_time_source(mut self, source: TimeSource) -> Self {
+        let now = (source)();
+        self.start_time = now;
+        self.last_check_time = now;
+        self.time_source = source;
+        self
+    }
+
+    /// Returns the oracle's current view of "now" via the installed
+    /// time source. All internal threshold checks read this value;
+    /// exposing it lets lab tests assert that the mock clock is wired.
+    #[must_use]
+    pub fn now(&self) -> Instant {
+        (self.time_source)()
     }
 
     /// Create oracle with default configuration
@@ -344,7 +404,7 @@ impl RegionLeakOracle {
         context: Option<String>,
         budget: Budget,
     ) {
-        let now = Instant::now();
+        let now = (self.time_source)();
 
         // If this region already exists, that's a violation
         if self.regions.contains_key(&region_id) {
@@ -394,7 +454,7 @@ impl RegionLeakOracle {
     pub fn on_region_activated(&mut self, region_id: RegionId) {
         if let Some(region) = self.regions.get_mut(&region_id) {
             region.state = RegionLifecycleState::Active;
-            region.last_activity = Instant::now();
+            region.last_activity = (self.time_source)();
         }
 
         if self.config.continuous_checking {
@@ -409,7 +469,7 @@ impl RegionLeakOracle {
         region_id: RegionId,
         context: Option<String>,
     ) {
-        let now = Instant::now();
+        let now = (self.time_source)();
 
         // Update region's active task list
         if let Some(region) = self.regions.get_mut(&region_id) {
@@ -441,7 +501,7 @@ impl RegionLeakOracle {
 
     /// Called when a task is polled (shows activity)
     pub fn on_task_polled(&mut self, task_id: TaskId) {
-        let now = Instant::now();
+        let now = (self.time_source)();
 
         if let Some(task) = self.tasks.get_mut(&task_id) {
             task.last_poll_time = Some(now);
@@ -456,7 +516,7 @@ impl RegionLeakOracle {
 
     /// Called when a task completes (success, error, or cancellation)
     pub fn on_task_completed(&mut self, task_id: TaskId, outcome: Outcome<(), String>) {
-        let now = Instant::now();
+        let now = (self.time_source)();
 
         if let Some(task) = self.tasks.get_mut(&task_id) {
             task.state = match outcome {
@@ -485,7 +545,7 @@ impl RegionLeakOracle {
         if let Some(region) = self.regions.get_mut(&region_id) {
             region.state = RegionLifecycleState::Closing;
             region.expected_finalizers = expected_finalizers;
-            region.last_activity = Instant::now();
+            region.last_activity = (self.time_source)();
         }
 
         if self.config.continuous_checking {
@@ -497,7 +557,7 @@ impl RegionLeakOracle {
     pub fn on_finalizer_completed(&mut self, region_id: RegionId) {
         if let Some(region) = self.regions.get_mut(&region_id) {
             region.completed_finalizers += 1;
-            region.last_activity = Instant::now();
+            region.last_activity = (self.time_source)();
 
             // Transition to finalizing if all children done but finalizers remain
             if region.child_regions.is_empty()
@@ -517,7 +577,7 @@ impl RegionLeakOracle {
     pub fn on_region_closed(&mut self, region_id: RegionId) {
         if let Some(region) = self.regions.get_mut(&region_id) {
             region.state = RegionLifecycleState::Closed;
-            region.last_activity = Instant::now();
+            region.last_activity = (self.time_source)();
         }
 
         self.total_regions_closed += 1;
@@ -527,7 +587,7 @@ impl RegionLeakOracle {
         if let Some(parent) = parent_id {
             if let Some(parent_region) = self.regions.get_mut(&parent) {
                 parent_region.child_regions.remove(&region_id);
-                parent_region.last_activity = Instant::now();
+                parent_region.last_activity = (self.time_source)();
             }
         }
 
@@ -538,7 +598,7 @@ impl RegionLeakOracle {
 
     /// Check for region leak violations and return any detected issues
     pub fn check_for_violations(&mut self) -> Result<Vec<RegionViolation>, String> {
-        let now = Instant::now();
+        let now = (self.time_source)();
         self.last_check_time = now;
 
         let mut new_violations = Vec::new();
@@ -607,7 +667,7 @@ impl RegionLeakOracle {
         self.regions.clear();
         self.tasks.clear();
         self.violations.clear();
-        let now = Instant::now();
+        let now = (self.time_source)();
         self.start_time = now;
         self.last_check_time = now;
         self.total_regions_created = 0;
@@ -996,6 +1056,26 @@ mod tests {
 impl Default for RegionLeakOracle {
     fn default() -> Self {
         Self::with_defaults()
+    }
+}
+
+impl std::fmt::Debug for RegionLeakOracle {
+    /// br-asupersync-6yx9iw: manual `Debug` because `TimeSource`
+    /// (an `Arc<dyn Fn() -> Instant + Send + Sync>`) does not
+    /// implement Debug. We elide the closure and surface the
+    /// observable state.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegionLeakOracle")
+            .field("config", &self.config)
+            .field("regions_len", &self.regions.len())
+            .field("tasks_len", &self.tasks.len())
+            .field("violations_len", &self.violations.len())
+            .field("total_regions_created", &self.total_regions_created)
+            .field("total_regions_closed", &self.total_regions_closed)
+            .field("total_tasks_spawned", &self.total_tasks_spawned)
+            .field("total_tasks_completed", &self.total_tasks_completed)
+            .field("time_source", &"<Arc<dyn Fn() -> Instant>>")
+            .finish()
     }
 }
 

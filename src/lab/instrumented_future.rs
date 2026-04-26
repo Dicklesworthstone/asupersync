@@ -1011,6 +1011,25 @@ impl<F> InstrumentedFuture<F> {
 impl<F: Future> Future for InstrumentedFuture<F> {
     type Output = InstrumentedPollResult<F::Output>;
 
+    /// br-asupersync-7w790g: when cancellation is injected, the
+    /// inner future is NOT polled in this tick. The wrapper holds
+    /// the inner future until the wrapper itself is dropped — at
+    /// which point the inner's `Drop` runs and tears down any
+    /// resources it held (channel waker registrations, obligation
+    /// permits, sleep timers). Callers MUST drop the wrapper
+    /// promptly after observing `Poll::Ready(CancellationInjected)`
+    /// — holding the wrapper alive keeps the inner future's
+    /// resources alive too.
+    ///
+    /// The asupersync invariant "cancellation is a protocol —
+    /// request → drain → finalize" applies to the inner future's
+    /// own Cx; the InstrumentedFuture wrapper merely short-circuits
+    /// the SCHEDULER's poll-driven progress. Inner futures that
+    /// rely on their own checkpoint() observing a cancelled Cx must
+    /// have that Cx cancelled by the harness BEFORE invoking the
+    /// wrapper's poll path. The wrapper does not (and cannot)
+    /// cancel the inner's Cx on the caller's behalf — it has no
+    /// reference to the inner's Cx.
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
 
@@ -1032,6 +1051,17 @@ impl<F: Future> Future for InstrumentedFuture<F> {
         if this.injector.should_inject_at(current_point) {
             *this.cancellation_injected = true;
             *this.injection_point = Some(current_point);
+            // br-asupersync-7w790g: WAKE the polling task so a
+            // caller that races the cancellation-injection from
+            // outside our pin tree (e.g. observing the injector
+            // state via a shared Arc) does not park forever
+            // waiting for a Poll::Pending → Poll::Ready transition.
+            // The pre-fix shape returned Poll::Ready(Cancelled)
+            // without any waker activity; a downstream
+            // executor-side waker observer that had just woken us
+            // for "should_inject" purposes is now consistently
+            // signalled.
+            cx.waker().wake_by_ref();
             return Poll::Ready(InstrumentedPollResult::CancellationInjected(current_point));
         }
 

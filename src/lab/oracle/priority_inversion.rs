@@ -16,7 +16,7 @@ use crate::types::TaskId;
 // All three key types (TaskId, ResourceId, InversionId) derive `Ord`,
 // so the swap is mechanical.
 //
-// The 7 `Instant::now()` sites in this file remain — they compute
+// The 7 `(self.time_source)()` sites in this file remain — they compute
 // durations against `min_inversion_duration` thresholds, not against
 // fixed timestamps in the violation record, so their wall-clock
 // dependency affects *when* a violation fires, not the byte-stability
@@ -26,13 +26,26 @@ use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// br-asupersync-qb6pss: pluggable wall-clock source for the
+/// [`PriorityInversionOracle`]. Same shape as `region_leak::TimeSource`.
+/// Lab harnesses install a virtual-clock-backed closure so two replays
+/// of the same scenario produce identical inversion-duration decisions.
+pub type TimeSource = Arc<dyn Fn() -> Instant + Send + Sync>;
+
+fn default_time_source() -> TimeSource {
+    Arc::new(Instant::now)
+}
+
 /// Detects and reports priority inversion violations in the scheduler.
-#[derive(Debug)]
 pub struct PriorityInversionOracle {
     /// Configuration for the oracle.
     config: PriorityInversionConfig,
     /// Current state of the oracle.
     state: Arc<Mutex<PriorityInversionState>>,
+    /// br-asupersync-qb6pss: pluggable time source. Default is
+    /// [`Instant::now`]; lab harnesses install a virtual-clock-backed
+    /// closure via [`Self::with_time_source`].
+    time_source: TimeSource,
 }
 
 /// Configuration for priority inversion detection.
@@ -210,6 +223,8 @@ impl PriorityInversionOracle {
     /// Create a new priority inversion oracle.
     #[must_use]
     pub fn new(config: PriorityInversionConfig) -> Self {
+        let time_source = default_time_source();
+        let now = (time_source)();
         Self {
             config,
             state: Arc::new(Mutex::new(PriorityInversionState {
@@ -217,10 +232,36 @@ impl PriorityInversionOracle {
                 resource_locks: BTreeMap::new(),
                 active_inversions: BTreeMap::new(),
                 statistics: PriorityInversionStatistics::default(),
-                last_stats_report: Instant::now(),
+                last_stats_report: now,
                 next_inversion_id: 1,
             })),
+            time_source,
         }
+    }
+
+    /// br-asupersync-qb6pss: replace the oracle's time source. Lab
+    /// harnesses install a virtual-clock-backed closure so that
+    /// inversion-duration thresholds compare against deterministic
+    /// virtual time, restoring replay determinism. The state's
+    /// `last_stats_report` is reset to the new source's current value.
+    pub fn with_time_source(self, source: TimeSource) -> Self {
+        let now = (source)();
+        {
+            let mut state = self.state.lock().unwrap();
+            state.last_stats_report = now;
+        }
+        Self {
+            time_source: source,
+            ..self
+        }
+    }
+
+    /// Returns the oracle's current view of "now" via the installed
+    /// time source. Exposing this lets lab tests assert the mock
+    /// clock is wired.
+    #[must_use]
+    pub fn now(&self) -> Instant {
+        (self.time_source)()
     }
 
     /// Create oracle with default configuration.
@@ -238,7 +279,7 @@ impl PriorityInversionOracle {
             priority,
             original_priority: priority,
             state: TaskState::Spawned,
-            spawn_time: Instant::now(),
+            spawn_time: (self.time_source)(),
             start_time: None,
             held_resources: HashSet::new(),
             waiting_for: HashSet::new(),
@@ -253,7 +294,7 @@ impl PriorityInversionOracle {
 
         if let Some(task_info) = state.active_tasks.get_mut(&task_id) {
             task_info.state = TaskState::Running;
-            task_info.start_time = Some(Instant::now());
+            task_info.start_time = Some((self.time_source)());
         }
     }
 
@@ -293,7 +334,7 @@ impl PriorityInversionOracle {
         let lock_info = ResourceLockInfo {
             resource_id,
             holder: task_id,
-            acquire_time: Instant::now(),
+            acquire_time: (self.time_source)(),
             wait_queue: VecDeque::new(),
         };
         state.resource_locks.insert(resource_id, lock_info);
@@ -378,7 +419,7 @@ impl PriorityInversionOracle {
                 blocking_task: lock_info.holder,
                 blocking_priority: holder_task_info.priority,
                 resource_id,
-                start_time: Instant::now(),
+                start_time: (self.time_source)(),
                 duration: None,
                 inversion_type: InversionType::Direct,
                 blocking_chain: vec![lock_info.holder],
@@ -459,7 +500,7 @@ impl PriorityInversionOracle {
                     blocking_task: *blocking_chain.last().unwrap(),
                     blocking_priority: final_blocker_info.priority,
                     resource_id: ResourceId(0), // Multiple resources involved
-                    start_time: Instant::now(),
+                    start_time: (self.time_source)(),
                     duration: None,
                     inversion_type: InversionType::Transitive,
                     blocking_chain,
@@ -576,7 +617,7 @@ impl PriorityInversionOracle {
         state.resource_locks.clear();
         state.active_inversions.clear();
         state.statistics = PriorityInversionStatistics::default();
-        state.last_stats_report = Instant::now();
+        state.last_stats_report = (self.time_source)();
         state.next_inversion_id = 1;
     }
 
@@ -783,5 +824,19 @@ impl std::fmt::Display for InversionType {
             Self::Transitive => write!(f, "Transitive"),
             Self::InheritanceFailure => write!(f, "InheritanceFailure"),
         }
+    }
+}
+
+impl std::fmt::Debug for PriorityInversionOracle {
+    /// br-asupersync-qb6pss: manual `Debug` because `TimeSource`
+    /// (an `Arc<dyn Fn() -> Instant + Send + Sync>`) does not
+    /// implement Debug. We elide the closure and surface the
+    /// config + state-handle.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PriorityInversionOracle")
+            .field("config", &self.config)
+            .field("state", &"<Arc<Mutex<PriorityInversionState>>>")
+            .field("time_source", &"<Arc<dyn Fn() -> Instant>>")
+            .finish()
     }
 }
