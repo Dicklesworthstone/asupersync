@@ -371,7 +371,28 @@ impl FuzzHarness {
         lab_config = lab_config.max_steps(self.config.max_steps);
 
         let mut runtime = LabRuntime::new(lab_config);
-        test(&mut runtime);
+
+        // br-asupersync-ipejce: catch panics from the test closure
+        // and convert them into a recorded TestPanic finding so the
+        // campaign keeps searching. Without this, the first panic
+        // (the most interesting outcome of any fuzz campaign)
+        // aborts the whole search budget and attributes the crash
+        // to the harness rather than the asupersync invariant
+        // violation it actually represents.
+        let panic_message = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            test(&mut runtime);
+        }))
+        .err()
+        .map(|payload| {
+            // Extract the canonical &str / String panic payload.
+            if let Some(s) = payload.downcast_ref::<&'static str>() {
+                (*s).to_string()
+            } else if let Some(s) = payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "<unknown panic payload>".to_string()
+            }
+        });
 
         let steps = runtime.steps();
         let certificate_hash = runtime.certificate().hash();
@@ -379,7 +400,10 @@ impl FuzzHarness {
         let normalized = normalize_for_replay(&trace_events);
         let trace_fingerprint =
             crate::trace::canonicalize::trace_fingerprint(&normalized.normalized);
-        let violations = runtime.check_invariants();
+        let mut violations = runtime.check_invariants();
+        if let Some(message) = panic_message {
+            violations.push(InvariantViolation::TestPanic { message });
+        }
 
         SingleRunResult {
             steps,
@@ -460,6 +484,7 @@ fn violation_category(v: &InvariantViolation) -> String {
         InvariantViolation::QuiescenceViolation => "quiescence_violation".to_string(),
         InvariantViolation::Futurelock { .. } => "futurelock".to_string(),
         InvariantViolation::CancellationProtocol { .. } => "cancellation_protocol".to_string(),
+        InvariantViolation::TestPanic { .. } => "test_panic".to_string(),
     }
 }
 
@@ -942,6 +967,51 @@ mod tests {
         assert_eq!(
             promoted[0].identity.seed_plan.entropy_seed_override,
             Some(0xBADA)
+        );
+    }
+
+    #[test]
+    fn ipejce_panicking_test_closure_recorded_as_finding_not_aborting_campaign() {
+        // br-asupersync-ipejce: a fuzz target that panics on input
+        // must show up as a TestPanic finding rather than aborting
+        // the entire campaign. The campaign continues to subsequent
+        // seeds and records each panic separately.
+        let cfg = FuzzConfig {
+            iterations: 4,
+            entropy_seed: 0,
+            worker_count: 1,
+            max_steps: 16,
+        };
+        let campaign = FuzzCampaign::new(cfg);
+        let panic_message = "deliberate test failure";
+        let report = campaign.run(|_runtime: &mut LabRuntime| {
+            panic!("{panic_message}");
+        });
+        // Every iteration panicked → every iteration produced a
+        // finding. The campaign did NOT abort on the first one.
+        assert!(
+            !report.findings.is_empty(),
+            "expected panic findings, got: {report:?}"
+        );
+        let test_panic_count = *report.violation_counts.get("test_panic").unwrap_or(&0);
+        assert!(
+            test_panic_count > 0,
+            "expected at least one test_panic in violation_counts: {:?}",
+            report.violation_counts
+        );
+        // Each finding's violation list should contain a TestPanic
+        // whose message matches the panic payload we threw.
+        let saw_message = report.findings.iter().any(|f| {
+            f.violations.iter().any(|v| {
+                matches!(
+                    v,
+                    InvariantViolation::TestPanic { message } if message.contains(panic_message)
+                )
+            })
+        });
+        assert!(
+            saw_message,
+            "TestPanic.message should preserve the panic payload"
         );
     }
 }

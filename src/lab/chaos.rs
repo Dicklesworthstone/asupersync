@@ -556,8 +556,31 @@ impl ChaosRng {
     }
 
     /// Checks if wakeup storm should be triggered based on config.
+    ///
+    /// `has_open_region` must be `true` only when the lab runtime
+    /// currently has at least one non-terminal region. When all
+    /// regions have closed, no production execution path can deliver
+    /// a spurious wakeup to a task that is no longer scheduled, so
+    /// firing one would invent a trace that production cannot
+    /// reproduce — masking real bugs and producing useless
+    /// minimisation seeds.
+    ///
+    /// br-asupersync-4so3w3: previously this gate did not exist; the
+    /// caller in `inject_post_poll_chaos` invoked the method
+    /// unconditionally. The fix moves the region-open guard *into*
+    /// the chaos surface so that any future caller is forced to
+    /// supply the same liveness signal — and so test scenarios can
+    /// pin the gate's behaviour directly against the chaos RNG
+    /// without standing up a lab runtime.
     #[must_use]
-    pub fn should_inject_wakeup_storm(&mut self, config: &ChaosConfig) -> bool {
+    pub fn should_inject_wakeup_storm(
+        &mut self,
+        config: &ChaosConfig,
+        has_open_region: bool,
+    ) -> bool {
+        if !has_open_region {
+            return false;
+        }
         if !wakeup_range_can_emit_positive(&config.wakeup_storm_count) {
             return false;
         }
@@ -1132,7 +1155,7 @@ mod tests {
         let mut rng = config.rng();
         for _ in 0..32 {
             assert!(
-                !rng.should_inject_wakeup_storm(&config),
+                !rng.should_inject_wakeup_storm(&config, true),
                 "wakeup storms without positive wake counts must never inject"
             );
             assert_eq!(rng.next_wakeup_count(&config), 0);
@@ -1151,7 +1174,7 @@ mod tests {
         let mut rng = config.rng();
         for _ in 0..32 {
             assert!(
-                !rng.should_inject_wakeup_storm(&config),
+                !rng.should_inject_wakeup_storm(&config, true),
                 "wakeup storms with a reversed count range must never inject"
             );
             assert_eq!(rng.next_wakeup_count(&config), 0);
@@ -1169,10 +1192,40 @@ mod tests {
         let mut rng = config.rng();
         for _ in 0..32 {
             assert!(
-                !rng.should_inject_wakeup_storm(&config),
+                !rng.should_inject_wakeup_storm(&config, true),
                 "wakeup storms with an empty count range must never inject"
             );
             assert_eq!(rng.next_wakeup_count(&config), 0);
+        }
+    }
+
+    // br-asupersync-4so3w3: with probability 1.0 and a positive count
+    // range, wakeup_storm must STILL be suppressed when the runtime
+    // reports no open regions. Otherwise the chaos engine fabricates
+    // a wakeup at quiescence — a schedule production cannot produce
+    // and which silently masks the genuine bug a fuzz seed was
+    // chasing.
+    #[test]
+    fn wakeup_storm_is_gated_on_at_least_one_open_region() {
+        let config = ChaosConfig::new(42)
+            .with_wakeup_storm_probability(1.0)
+            .with_wakeup_storm_count(1..5);
+        let mut rng = config.rng();
+
+        // No open region -> never inject, regardless of probability.
+        for _ in 0..64 {
+            assert!(
+                !rng.should_inject_wakeup_storm(&config, false),
+                "wakeup storm must be suppressed when no region is open"
+            );
+        }
+
+        // At least one open region -> probability=1.0 always injects.
+        for _ in 0..64 {
+            assert!(
+                rng.should_inject_wakeup_storm(&config, true),
+                "wakeup storm must fire when a region is open and probability is 1.0"
+            );
         }
     }
 

@@ -1904,12 +1904,19 @@ impl LabRuntime {
             return;
         };
 
-        // Check for spurious wakeup storm
-        let wakeup_count = if chaos_rng.should_inject_wakeup_storm(&chaos_config) {
-            Some(chaos_rng.next_wakeup_count(&chaos_config))
-        } else {
-            None
-        };
+        // br-asupersync-4so3w3: gate wakeup_storm injection on at-least-
+        // one-open-region. After every region has closed, the lab is in
+        // a quiescence state that production reaches via region drop;
+        // injecting a spurious wakeup at that point would synthesize a
+        // schedule that production cannot reproduce, defeating the
+        // whole point of chaos-driven trace minimisation.
+        let has_open_region = self.state.live_region_count() > 0;
+        let wakeup_count =
+            if chaos_rng.should_inject_wakeup_storm(&chaos_config, has_open_region) {
+                Some(chaos_rng.next_wakeup_count(&chaos_config))
+            } else {
+                None
+            };
 
         // Apply the injection (no more borrowing chaos_rng)
         if let Some(count) = wakeup_count {
@@ -2710,6 +2717,15 @@ pub enum InvariantViolation {
         /// The violation description.
         violation: String,
     },
+    /// br-asupersync-ipejce: a fuzz / scenario test closure panicked.
+    /// Recorded so the campaign can keep searching instead of
+    /// aborting on the first finding (the most interesting outcome
+    /// of any fuzz campaign).
+    TestPanic {
+        /// Stringified panic payload (extracted via `Any::downcast`
+        /// of `&str` and `String` — falls back to `<unknown panic>`).
+        message: String,
+    },
 }
 
 /// Diagnostic details for a leaked obligation.
@@ -2756,6 +2772,7 @@ impl std::fmt::Display for InvariantViolation {
             Self::CancellationProtocol { violation } => {
                 write!(f, "cancellation protocol violation: {violation}")
             }
+            Self::TestPanic { message } => write!(f, "test panic: {message}"),
         }
     }
 }

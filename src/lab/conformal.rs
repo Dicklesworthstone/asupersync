@@ -203,23 +203,51 @@ pub struct CalibrationReport {
 
 impl CalibrationReport {
     /// Returns true if all observed coverage rates are above the target.
+    ///
+    /// br-asupersync-9u4ext: tolerance is now alpha-derived (1/5 of
+    /// the configured alpha) rather than a fixed 5-percentage-point
+    /// absolute slack. With the default alpha=0.05 (95% target),
+    /// well-calibrated now means observed rate is at least
+    /// `0.95 - 0.01 = 0.94` rather than the previous `0.95 - 0.05
+    /// = 0.90`. The fixed 0.05 cushion was roughly 5x the alpha
+    /// itself — wide enough that a system whose anomaly rate had
+    /// climbed to 9% was still reported as 'well-calibrated',
+    /// defeating the conformal-prediction guarantee operators
+    /// believe they are getting.
+    ///
+    /// Tolerance derivation: scaling at `alpha / 5` means the slack
+    /// stays proportional to the prediction guarantee — strict
+    /// (alpha=0.01 → 0.2pp slack) and looser (alpha=0.20 → 4pp
+    /// slack) configurations both get a band that's a fixed
+    /// fraction of their stated risk budget. The floor of
+    /// `f64::EPSILON` keeps the comparison strictly correct even
+    /// when alpha is configured to extreme values.
     #[must_use]
     pub fn is_well_calibrated(&self) -> bool {
         if self.overall_coverage.total == 0 {
             return true;
         }
-        // Allow small slack for finite samples.
         let target = 1.0 - self.alpha;
-        self.overall_coverage.rate() >= target - 0.05
+        self.overall_coverage.rate() >= target - self.calibration_tolerance()
+    }
+
+    /// br-asupersync-9u4ext: tolerance band used by
+    /// `is_well_calibrated` and `miscalibrated_invariants`. Exposed so
+    /// operators / harness reports can show the same number that
+    /// drives the pass/fail decision.
+    #[must_use]
+    pub fn calibration_tolerance(&self) -> f64 {
+        (self.alpha / 5.0).max(f64::EPSILON)
     }
 
     /// Invariants whose empirical coverage falls below the target.
     #[must_use]
     pub fn miscalibrated_invariants(&self) -> Vec<String> {
         let target = 1.0 - self.alpha;
+        let tolerance = self.calibration_tolerance();
         self.coverage
             .iter()
-            .filter(|(_, tracker)| tracker.total > 0 && tracker.rate() < target - 0.05)
+            .filter(|(_, tracker)| tracker.total > 0 && tracker.rate() < target - tolerance)
             .map(|(name, _)| name.clone())
             .collect()
     }
@@ -1627,5 +1655,53 @@ mod tests {
         let t2 = t;
         assert_eq!(t2.total, 10);
         assert_eq!(t2.covered, 9);
+    }
+
+    // ===================================================================
+    // br-asupersync-9u4ext: tightened tolerance from 5pp absolute to
+    // alpha/5 (1pp at the default alpha=0.05).
+    // ===================================================================
+
+    fn report_with(alpha: f64, total: u64, covered: u64) -> CalibrationReport {
+        CalibrationReport {
+            prediction_sets: Vec::new(),
+            coverage: BTreeMap::new(),
+            overall_coverage: CoverageTracker { total, covered },
+            alpha,
+            calibration_samples: total as usize,
+        }
+    }
+
+    #[test]
+    fn _9u4ext_tolerance_is_alpha_derived() {
+        let r = report_with(0.05, 1, 1);
+        // alpha=0.05 → tolerance = 0.05/5 = 0.01.
+        assert!((r.calibration_tolerance() - 0.01).abs() < 1e-12);
+        let r = report_with(0.20, 1, 1);
+        // alpha=0.20 → tolerance = 0.04.
+        assert!((r.calibration_tolerance() - 0.04).abs() < 1e-12);
+    }
+
+    #[test]
+    fn _9u4ext_well_calibrated_strict_at_default_alpha() {
+        // 90% coverage with alpha=0.05 (95% target) was historically
+        // accepted (5pp slack). With the tightened tolerance it is
+        // now rejected — operators get the calibration guarantee
+        // they actually requested.
+        let r = report_with(0.05, 100, 90);
+        assert!(
+            !r.is_well_calibrated(),
+            "90% coverage at alpha=0.05 should now be flagged miscalibrated"
+        );
+        // 94% coverage is exactly at target - 0.01 = 0.94.
+        let r = report_with(0.05, 100, 94);
+        assert!(r.is_well_calibrated(), "94% should sit on the new boundary");
+    }
+
+    #[test]
+    fn _9u4ext_well_calibrated_target_met() {
+        // 95% coverage at alpha=0.05 → exactly target, well within.
+        let r = report_with(0.05, 1000, 950);
+        assert!(r.is_well_calibrated());
     }
 }

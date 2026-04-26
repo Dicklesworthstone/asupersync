@@ -537,7 +537,24 @@ impl Scenario {
                     budget_exhaustion_probability,
                 ),
             ] {
-                if !(0.0..=1.0).contains(val) {
+                // br-asupersync-cb440b: the existing `(0.0..=1.0).contains(val)`
+                // check did already reject NaN (every NaN comparison returns
+                // false), but it produced an opaque
+                // "probability must be in [0.0, 1.0], got NaN" error and
+                // silently treated +Inf the same way. Match the explicit
+                // `is_finite()` pattern used in the network validator
+                // (validate_network below) so that NaN/Inf are rejected with
+                // a clear, descriptive error message and the validator's
+                // intent is unambiguous to future readers and to anyone
+                // diffing the chaos surface against the network surface.
+                if !val.is_finite() {
+                    errors.push(ValidationError {
+                        field: name.into(),
+                        message: format!(
+                            "probability must be a finite number in [0.0, 1.0], got {val}"
+                        ),
+                    });
+                } else if !(0.0..=1.0).contains(val) {
                     errors.push(ValidationError {
                         field: name.into(),
                         message: format!("probability must be in [0.0, 1.0], got {val}"),
@@ -843,6 +860,77 @@ mod tests {
         let s: Scenario = serde_json::from_str(json).unwrap();
         let errors = s.validate();
         assert!(errors.iter().any(|e| e.field == "chaos.cancel_probability"));
+    }
+
+    // br-asupersync-cb440b: NaN/Inf chaos probabilities must be rejected
+    // with an explicit "must be a finite number" error rather than the
+    // generic out-of-range message. This is the regression that proves
+    // the chaos validator now matches the network validator's
+    // is_finite-first pattern, instead of relying on the subtle fact
+    // that NaN comparisons against a RangeInclusive happen to return
+    // false.
+    #[test]
+    fn validate_chaos_rejects_nan_probability_with_finite_error() {
+        // NaN cannot be expressed as a JSON literal, so we parse a
+        // minimal scenario then mutate the chaos section directly.
+        let mut s: Scenario = serde_json::from_str(r#"{"id":"x"}"#).unwrap();
+        s.chaos = ChaosSection::Custom {
+            cancel_probability: f64::NAN,
+            delay_probability: 0.0,
+            delay_min_ms: 0,
+            delay_max_ms: 1,
+            io_error_probability: 0.0,
+            wakeup_storm_probability: 0.0,
+            budget_exhaustion_probability: 0.0,
+        };
+        let errors = s.validate();
+        let nan_error = errors
+            .iter()
+            .find(|e| e.field == "chaos.cancel_probability")
+            .expect("chaos.cancel_probability NaN must be flagged");
+        assert!(
+            nan_error.message.contains("finite"),
+            "NaN error message must say 'finite', got: {}",
+            nan_error.message
+        );
+        assert!(
+            nan_error.message.contains("NaN"),
+            "NaN error message must include 'NaN', got: {}",
+            nan_error.message
+        );
+    }
+
+    #[test]
+    fn validate_chaos_rejects_infinity_probability_with_finite_error() {
+        let mut s: Scenario = serde_json::from_str(r#"{"id":"x"}"#).unwrap();
+        s.chaos = ChaosSection::Custom {
+            cancel_probability: 0.0,
+            delay_probability: 0.0,
+            delay_min_ms: 0,
+            delay_max_ms: 1,
+            io_error_probability: 0.0,
+            wakeup_storm_probability: f64::INFINITY,
+            budget_exhaustion_probability: f64::NEG_INFINITY,
+        };
+        let errors = s.validate();
+        let inf_storm = errors
+            .iter()
+            .find(|e| e.field == "chaos.wakeup_storm_probability")
+            .expect("chaos.wakeup_storm_probability +Inf must be flagged");
+        assert!(
+            inf_storm.message.contains("finite"),
+            "+Inf error must say 'finite', got: {}",
+            inf_storm.message
+        );
+        let neg_inf_budget = errors
+            .iter()
+            .find(|e| e.field == "chaos.budget_exhaustion_probability")
+            .expect("chaos.budget_exhaustion_probability -Inf must be flagged");
+        assert!(
+            neg_inf_budget.message.contains("finite"),
+            "-Inf error must say 'finite', got: {}",
+            neg_inf_budget.message
+        );
     }
 
     #[test]

@@ -187,9 +187,22 @@ impl RRefAccessOracle {
             }
         }
 
-        // Check post-close access
+        // Check post-close access.
+        //
+        // br-asupersync-1j14du: use strict `>` rather than `>=`. An
+        // access stamped with `time == close_time` happened either
+        // immediately before close completed (legal — the runtime
+        // synchronises this boundary with its own lock) or
+        // simultaneously with close (a race that production resolves
+        // via the lock and that the oracle should NOT flag based on
+        // tick equality alone). The `>=` form fires false positives
+        // in virtual-time scenarios where multiple events legitimately
+        // share a tick. Callers that genuinely need to assert on
+        // concurrent access should use `on_rref_access_with_witness`
+        // which is gated on observed concurrency rather than tick
+        // arithmetic.
         if let Some(&close_time) = self.closed_regions.get(&rref_region) {
-            if time >= close_time {
+            if time > close_time {
                 self.violations.push(RRefAccessViolation {
                     rref,
                     task,
@@ -637,5 +650,39 @@ mod tests {
         assert_eq!(v.task, v2.task);
         let dbg = format!("{v:?}");
         assert!(dbg.contains("RRefAccessViolation"));
+    }
+
+    // ================================================================
+    // br-asupersync-1j14du: at-boundary access (time == close_time)
+    // is now legal — strict `>` instead of `>=`.
+    // ================================================================
+
+    #[test]
+    fn _1j14du_access_at_close_time_is_not_a_violation() {
+        let mut oracle = RRefAccessOracle::new();
+        let r = region(0);
+        let tid = task(1);
+        oracle.on_rref_create(rref(0, 0), r);
+        oracle.on_task_spawn(tid, r);
+        oracle.on_region_close(r, t(50));
+        // Access stamped exactly at close_time: legal (immediately
+        // before close, or simultaneously, both resolved by the
+        // runtime's lock).
+        oracle.on_rref_access(rref(0, 0), tid, t(50));
+        assert!(oracle.check().is_ok(), "at-boundary access must not fire");
+        assert_eq!(oracle.violation_count(), 0);
+    }
+
+    #[test]
+    fn _1j14du_access_strictly_after_close_still_fires() {
+        let mut oracle = RRefAccessOracle::new();
+        let r = region(0);
+        let tid = task(1);
+        oracle.on_rref_create(rref(0, 0), r);
+        oracle.on_task_spawn(tid, r);
+        oracle.on_region_close(r, t(50));
+        // Access strictly after close: violation must fire.
+        oracle.on_rref_access(rref(0, 0), tid, t(51));
+        assert_eq!(oracle.violation_count(), 1);
     }
 }

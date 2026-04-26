@@ -3256,6 +3256,7 @@ fn promoted_violation_categories(
             InvariantViolation::QuiescenceViolation => "quiescence_violation".to_string(),
             InvariantViolation::Futurelock { .. } => "futurelock".to_string(),
             InvariantViolation::CancellationProtocol { .. } => "cancellation_protocol".to_string(),
+            InvariantViolation::TestPanic { .. } => "test_panic".to_string(),
         })
         .collect();
     categories.sort_unstable();
