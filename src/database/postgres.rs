@@ -2018,6 +2018,21 @@ const DEFAULT_MAX_RESULT_ROWS: usize = 1_000_000;
 /// entry on eviction.
 pub const DEFAULT_MAX_PREPARED_STATEMENTS: usize = 256;
 
+/// br-asupersync-7v80ju: hard cap on the size of the per-connection
+/// deallocate-retry queue. If a server is rejecting CLOSE messages
+/// faster than we can drain them, we mark the connection unhealthy
+/// well before the queue itself grows large enough to leak memory
+/// on the client side.
+pub const DEALLOCATE_RETRY_QUEUE_CAP: usize = 64;
+
+/// br-asupersync-7v80ju: number of consecutive CLOSE failures after
+/// which the connection is marked unhealthy and signalled to the
+/// pool for eviction. Three consecutive failures is a deliberate
+/// trade-off — one transient packet loss is forgiven, but a
+/// systematically-misbehaving server (or a desynchronised wire) is
+/// caught quickly.
+pub const DEALLOCATE_FAILURE_UNHEALTHY_THRESHOLD: u32 = 3;
+
 /// Bounded LRU cache for server-side prepared statements.
 ///
 /// Keyed by SQL string (cheap given typical SQL is < 1 KB and there
@@ -2121,6 +2136,17 @@ struct PgConnectionInner {
     closed: bool,
     /// Whether a rollback is needed before the next operation (orphaned transaction).
     needs_rollback: bool,
+    /// br-asupersync-yl4gu1: whether this connection must NOT be returned
+    /// to a pool. Set when a `PgTransaction` was dropped without commit
+    /// AND the rollback could not be issued synchronously (which is the
+    /// always case in Drop). The pool's return path checks this flag and
+    /// closes the connection instead of recycling it — preventing the
+    /// next tenant from inheriting an `idle_in_transaction` backend with
+    /// locks held. Combined with the existing `needs_rollback` flag,
+    /// callers that DO continue using the same connection (without
+    /// returning to a pool) still get the ROLLBACK on the next op; the
+    /// pool case (drop-then-return) gets a clean conn close instead.
+    needs_discard: bool,
     /// Counter for generating unique prepared statement names.
     next_stmt_id: u32,
     /// Maximum number of rows to accept per result set before closing the
@@ -2133,6 +2159,28 @@ struct PgConnectionInner {
     /// [`DEFAULT_MAX_PREPARED_STATEMENTS`] entries with DEALLOCATE on
     /// eviction. Repeat-SQL prepares hit the fast path (no wire exchange).
     prepared_cache: PreparedStatementCache,
+    /// br-asupersync-7v80ju: server-side prepared statement names that
+    /// were evicted from `prepared_cache` but whose corresponding
+    /// CLOSE message never reached the server (or whose response was
+    /// lost). Pre-fix the eviction was fire-and-forget — a transient
+    /// network blip silently leaked the server-side statement. The
+    /// retry queue is drained at the start of every public query
+    /// method via `flush_pending_deallocates`. Bounded by
+    /// `DEALLOCATE_RETRY_QUEUE_CAP` so a misbehaving server cannot
+    /// itself force unbounded growth on the client.
+    deallocate_retry_queue: VecDeque<String>,
+    /// br-asupersync-7v80ju: number of CONSECUTIVE failed CLOSE
+    /// attempts since the last successful one. Reset to 0 on any
+    /// success; once it crosses
+    /// `DEALLOCATE_FAILURE_UNHEALTHY_THRESHOLD` the connection sets
+    /// `unhealthy = true` so the pool evicts it on next return.
+    consecutive_deallocate_failures: u32,
+    /// br-asupersync-7v80ju: set to true once the connection has
+    /// suffered too many CLOSE failures in a row to be trusted. The
+    /// connection still services in-flight requests but must be
+    /// removed from the pool. Exposed via
+    /// [`PgConnection::is_unhealthy`].
+    unhealthy: bool,
 }
 
 /// Coordinates needed to send a PG `CancelRequest` on a fresh socket.
@@ -2454,9 +2502,13 @@ impl PgConnection {
                 transaction_status: b'I', // Idle
                 closed: false,
                 needs_rollback: false,
+                needs_discard: false,
                 next_stmt_id: 0,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_cache: PreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
+                deallocate_retry_queue: VecDeque::new(),
+                consecutive_deallocate_failures: 0,
+                unhealthy: false,
             },
         };
 
@@ -3564,6 +3616,15 @@ impl PgConnection {
             return Outcome::Err(PgError::ConnectionClosed);
         }
 
+        // br-asupersync-7v80ju: piggy-back any pending DEALLOCATE
+        // retries on this round-trip. flush_pending_deallocates is a
+        // no-op when the queue is empty, so the steady-state cost is
+        // a single VecDeque length check; only when a previous
+        // eviction failed do we incur the per-statement Sync exchange.
+        // Stops at the first failure to avoid hammering a flaky
+        // server, leaving the remainder for the next query.
+        self.flush_pending_deallocates(cx).await;
+
         // br-asupersync-cvkoe9: fast-path for repeat-SQL. Bypasses the
         // Parse/Describe/Sync wire exchange entirely and returns the
         // cached metadata. Touching the entry promotes it to MRU in
@@ -3671,30 +3732,151 @@ impl PgConnection {
             columns,
         };
 
-        // br-asupersync-cvkoe9: insert into the bounded LRU cache. If at
-        // capacity, the cache returns the LRU entry's server-side name
-        // for DEALLOCATE. We send the close best-effort — if the
-        // DEALLOCATE fails (e.g., connection error mid-protocol) the
-        // server-side statement leaks ONE entry rather than the whole
-        // unbounded set; the cache entry on our side is still evicted
-        // so subsequent prepare()s for the same SQL will re-Parse.
+        // br-asupersync-cvkoe9 + br-asupersync-7v80ju: insert into the
+        // bounded LRU cache. If at capacity, the cache returns the LRU
+        // entry's server-side name for DEALLOCATE. Pre-7v80ju the close
+        // was fire-and-forget (`let _ = self.close_statement(...).await`),
+        // so a transient close failure silently leaked the server-side
+        // prepared statement. Now we route the close through
+        // `try_close_or_enqueue_deallocate`, which:
+        //   - on success: clears the connection's consecutive-failure
+        //     counter,
+        //   - on failure: pushes the victim name onto
+        //     `deallocate_retry_queue` for the next query method to
+        //     retry, and bumps the consecutive-failure counter (which
+        //     marks the connection unhealthy at the configured
+        //     threshold).
+        // Either way the client-side cache entry is evicted, so a
+        // repeat prepare() for the same SQL will re-Parse.
         let evicted_name = self
             .inner
             .prepared_cache
             .insert_returning_evicted_name(sql.to_string(), stmt.clone());
         if let Some(victim_name) = evicted_name {
-            // Best-effort: ignore the result (logging would require Cx
-            // tracing infra; the documented eviction-leak floor is
-            // documented in the bead).
-            let victim_stmt = PgStatement {
-                name: victim_name,
-                param_oids: Vec::new(),
-                columns: Vec::new(),
-            };
-            let _ = self.close_statement(cx, &victim_stmt).await;
+            self.try_close_or_enqueue_deallocate(cx, victim_name).await;
         }
 
         Outcome::Ok(stmt)
+    }
+
+    /// br-asupersync-7v80ju: best-effort close of a single server-side
+    /// prepared statement. On any failure path (connection error,
+    /// cancellation, panic), the statement name is enqueued onto
+    /// `deallocate_retry_queue` and the consecutive-failure counter is
+    /// incremented; once the counter reaches
+    /// [`DEALLOCATE_FAILURE_UNHEALTHY_THRESHOLD`] the connection is
+    /// marked unhealthy and the pool will evict it on next return. On
+    /// success the failure counter is reset to zero.
+    async fn try_close_or_enqueue_deallocate(&mut self, cx: &Cx, victim_name: String) {
+        let victim_stmt = PgStatement {
+            name: victim_name.clone(),
+            param_oids: Vec::new(),
+            columns: Vec::new(),
+        };
+        match self.close_statement(cx, &victim_stmt).await {
+            Outcome::Ok(()) => {
+                self.inner.consecutive_deallocate_failures = 0;
+            }
+            Outcome::Err(_) | Outcome::Cancelled(_) | Outcome::Panicked(_) => {
+                self.enqueue_failed_deallocate(victim_name);
+            }
+        }
+    }
+
+    /// br-asupersync-7v80ju: push a failed-deallocate name onto the
+    /// retry queue and bump the consecutive-failure counter. Bounded
+    /// by [`DEALLOCATE_RETRY_QUEUE_CAP`]; when the queue is full the
+    /// oldest pending name is dropped (we'd rather lose a single
+    /// retry slot than leak unbounded memory on the client side).
+    fn enqueue_failed_deallocate(&mut self, name: String) {
+        if self.inner.deallocate_retry_queue.len() >= DEALLOCATE_RETRY_QUEUE_CAP {
+            // Drop oldest to bound memory; the dropped name is now a
+            // permanent server-side leak (1 prepared statement) but
+            // we cap the BLAST RADIUS rather than letting the queue
+            // itself become a leak vector.
+            let _ = self.inner.deallocate_retry_queue.pop_front();
+        }
+        self.inner.deallocate_retry_queue.push_back(name);
+        self.inner.consecutive_deallocate_failures =
+            self.inner.consecutive_deallocate_failures.saturating_add(1);
+        if self.inner.consecutive_deallocate_failures >= DEALLOCATE_FAILURE_UNHEALTHY_THRESHOLD {
+            self.inner.unhealthy = true;
+        }
+    }
+
+    /// br-asupersync-7v80ju: drain the deallocate retry queue,
+    /// retrying each pending CLOSE. Stops at the first failure (so we
+    /// don't hammer a flaky server) and re-enqueues the name plus any
+    /// remaining queue tail. Called at the start of every public
+    /// query method so retries piggy-back on the next round-trip.
+    async fn flush_pending_deallocates(&mut self, cx: &Cx) {
+        // Drain the queue into a local Vec so we can re-enqueue the
+        // remainder if any retry fails. Splitting the borrow this way
+        // avoids holding `&mut self.inner.deallocate_retry_queue`
+        // across the `.await` on close_statement.
+        let pending: Vec<String> = std::mem::take(&mut self.inner.deallocate_retry_queue)
+            .into_iter()
+            .collect();
+        let mut remainder: Vec<String> = Vec::new();
+        let mut break_after_first_failure = false;
+        for name in pending {
+            if break_after_first_failure {
+                remainder.push(name);
+                continue;
+            }
+            let stmt = PgStatement {
+                name: name.clone(),
+                param_oids: Vec::new(),
+                columns: Vec::new(),
+            };
+            match self.close_statement(cx, &stmt).await {
+                Outcome::Ok(()) => {
+                    self.inner.consecutive_deallocate_failures = 0;
+                }
+                Outcome::Err(_) | Outcome::Cancelled(_) | Outcome::Panicked(_) => {
+                    remainder.push(name);
+                    self.inner.consecutive_deallocate_failures =
+                        self.inner.consecutive_deallocate_failures.saturating_add(1);
+                    if self.inner.consecutive_deallocate_failures
+                        >= DEALLOCATE_FAILURE_UNHEALTHY_THRESHOLD
+                    {
+                        self.inner.unhealthy = true;
+                    }
+                    break_after_first_failure = true;
+                }
+            }
+        }
+        // Restore any remainder (capped at CAP; if remainder is huge
+        // due to mass failures, cap it the same way the enqueue path
+        // does).
+        let restore_len = remainder.len().min(DEALLOCATE_RETRY_QUEUE_CAP);
+        let drop_count = remainder.len().saturating_sub(restore_len);
+        if drop_count > 0 {
+            // Drop the oldest entries to honour the CAP (older entries
+            // are most likely to have been stale by now anyway).
+            self.inner
+                .deallocate_retry_queue
+                .extend(remainder.into_iter().skip(drop_count));
+        } else {
+            self.inner.deallocate_retry_queue.extend(remainder);
+        }
+    }
+
+    /// br-asupersync-7v80ju: returns true when the connection has
+    /// suffered enough consecutive deallocate failures to be
+    /// considered untrustworthy. Pool implementations should observe
+    /// this on connection return and evict-rather-than-recycle when
+    /// it is true.
+    #[must_use]
+    pub fn is_unhealthy(&self) -> bool {
+        self.inner.unhealthy
+    }
+
+    /// br-asupersync-7v80ju: number of pending CLOSE retries. Exposed
+    /// for telemetry / pool decisions and for regression tests.
+    #[must_use]
+    pub fn pending_deallocate_count(&self) -> usize {
+        self.inner.deallocate_retry_queue.len()
     }
 
     /// Execute a prepared statement returning rows.
@@ -5011,9 +5193,13 @@ mod tests {
                 transaction_status: b'I',
                 closed: false,
                 needs_rollback: false,
+                needs_discard: false,
                 next_stmt_id: 0,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                 prepared_cache: PreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
+                deallocate_retry_queue: VecDeque::new(),
+                consecutive_deallocate_failures: 0,
+                unhealthy: false,
             },
         }
     }
@@ -5036,9 +5222,13 @@ mod tests {
                     transaction_status: b'I',
                     closed: false,
                     needs_rollback: false,
+                needs_discard: false,
                     next_stmt_id: 0,
                     max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                     prepared_cache: PreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
+                    deallocate_retry_queue: VecDeque::new(),
+                    consecutive_deallocate_failures: 0,
+                    unhealthy: false,
                 },
             },
             peer_stream,

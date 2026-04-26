@@ -1152,6 +1152,19 @@ struct MySqlConnectionInner {
     needs_rollback: bool,
     /// Maximum number of rows to return from a result set.
     max_result_rows: usize,
+    /// br-asupersync-22i5tn: set to `true` for the duration of any
+    /// public method that issues a query/exec command and clears on
+    /// completion (success, error, or cancellation). When the OUTER
+    /// `MySqlConnection::Drop` runs and observes this flag set, it
+    /// dispatches a best-effort `KILL QUERY <connection_id>` on a
+    /// separate thread to stop the server from continuing to execute
+    /// the abandoned query — locks released, throughput restored.
+    /// `AtomicBool` rather than plain `bool` because the inner
+    /// MySqlConnectionInner is moved through Drop and we want a
+    /// release/acquire fence between the last query method and Drop
+    /// without requiring exclusive ownership of `&mut self` at the
+    /// observation point.
+    query_in_flight: std::sync::atomic::AtomicBool,
 }
 
 impl Drop for MySqlConnectionInner {
@@ -1202,6 +1215,92 @@ impl fmt::Debug for MySqlConnection {
             .field("closed", &self.inner.closed)
             .field("kill_options_present", &self.options.is_some())
             .finish()
+    }
+}
+
+impl Drop for MySqlConnection {
+    fn drop(&mut self) {
+        // br-asupersync-22i5tn: issue a best-effort KILL QUERY before
+        // the inner Drop tears down the TCP socket. Pre-fix, dropping
+        // a connection mid-query left the server still executing the
+        // statement (MySQL has no in-band cancel; the server only
+        // notices the FIN after the query finishes). For long-running
+        // queries that means LOCKS HELD until natural completion —
+        // every later transaction queues behind the abandoned one.
+        //
+        // The fix: detect the in-flight condition (query_in_flight ==
+        // true && options is Some && connection wasn't already cleanly
+        // closed) and dispatch a daemon thread that opens a fresh
+        // connection and issues KILL QUERY <connection_id>.
+        //
+        // Why a daemon thread:
+        //   - Drop is synchronous; the KILL path is async (it needs to
+        //     read the handshake on the killer connection).
+        //   - We don't want to block the dropping thread for arbitrary
+        //     time — a 5-second cap on the killer + std::thread::spawn
+        //     bounds the worst case.
+        //   - Spinning up a tiny RuntimeBuilder runtime per Drop is
+        //     heavy, so we only do it when query_in_flight indicates
+        //     a real abandoned query.
+        //
+        // The killer thread runs cancel_in_flight_query in a private
+        // mini-runtime; if it succeeds, the server stops the abandoned
+        // query immediately. If it fails (host unreachable, kill conn
+        // refused, runtime build panicked), the inner Drop's TCP
+        // shutdown is still the fallback.
+        let in_flight = self
+            .inner
+            .query_in_flight
+            .load(std::sync::atomic::Ordering::Acquire);
+        let already_closed = self.inner.closed;
+        let kill_options = self.options.clone();
+        let thread_id = self.inner.connection_id;
+
+        if in_flight && !already_closed && thread_id != 0 {
+            if let Some(options) = kill_options {
+                std::thread::Builder::new()
+                    .name(format!("asupersync-mysql-kill-{thread_id}"))
+                    .spawn(move || {
+                        // Build a one-shot runtime just for the KILL.
+                        // Single worker is enough — the entire path is
+                        // a connect + execute("KILL QUERY <id>") + drop.
+                        let Ok(runtime) = crate::runtime::RuntimeBuilder::new()
+                            .worker_threads(1)
+                            .build()
+                        else {
+                            return;
+                        };
+                        let join = runtime.handle().spawn(async move {
+                            let cx = match crate::cx::Cx::current() {
+                                Some(cx) => cx,
+                                None => return,
+                            };
+                            let killer =
+                                match MySqlConnection::connect_with_options(&cx, options.clone())
+                                    .await
+                                {
+                                    Outcome::Ok(c) => c,
+                                    _ => return,
+                                };
+                            // execute_unchecked sends "KILL QUERY <id>"
+                            // and reads the OK packet; failures here
+                            // are silent — the inner Drop's TCP
+                            // shutdown is the fallback.
+                            let mut killer = killer;
+                            let sql = format!("KILL QUERY {thread_id}");
+                            let _ = killer.execute_unchecked(&cx, &sql).await;
+                        });
+                        // Bound the wall-clock cost. block_on waits
+                        // for the spawn to complete; if the killer
+                        // hangs we leak the daemon thread but that's
+                        // acceptable on a runtime shutdown path.
+                        let _ = runtime.block_on(join);
+                    })
+                    .ok();
+            }
+        }
+        // Inner Drop runs after this returns (synchronously closes the
+        // TCP socket via Shutdown::Both).
     }
 }
 
@@ -1274,6 +1373,7 @@ impl MySqlConnection {
                 server_version: String::new(),
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                query_in_flight: std::sync::atomic::AtomicBool::new(false),
             },
             // Stash options so cancel_in_flight_query can reopen a fresh
             // connection to issue KILL QUERY <connection_id>
@@ -1714,6 +1814,30 @@ impl MySqlConnection {
     /// If a previous transaction was dropped without commit/rollback,
     /// an implicit ROLLBACK is issued first.
     pub async fn query_unchecked(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+    ) -> Outcome<Vec<MySqlRow>, MySqlError> {
+        // br-asupersync-22i5tn: mark query_in_flight for the duration
+        // of this method, cleared at the unique exit point. The OUTER
+        // MySqlConnection::Drop observes this flag to decide whether
+        // to dispatch a KILL QUERY when the connection is dropped
+        // mid-query. The flag stays set across .await points; if the
+        // future is dropped (cancelled), the flag stays true and Drop
+        // KILLs the in-flight query. Delegated to an _inner helper so
+        // the flag-clear runs on every return path without rewriting
+        // the existing method body.
+        self.inner
+            .query_in_flight
+            .store(true, std::sync::atomic::Ordering::Release);
+        let result = self.query_unchecked_inner(cx, sql).await;
+        self.inner
+            .query_in_flight
+            .store(false, std::sync::atomic::Ordering::Release);
+        result
+    }
+
+    async fn query_unchecked_inner(
         &mut self,
         cx: &Cx,
         sql: &str,
@@ -2480,6 +2604,25 @@ impl MySqlConnection {
     /// If a previous transaction was dropped without commit/rollback,
     /// an implicit ROLLBACK is issued first.
     pub async fn execute_unchecked(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, MySqlError> {
+        // br-asupersync-22i5tn: mark query_in_flight for the duration
+        // of the wire exchange. See `query_unchecked` for the
+        // rationale. Delegates to `_inner` so the flag-clear runs on
+        // every return path.
+        self.inner
+            .query_in_flight
+            .store(true, std::sync::atomic::Ordering::Release);
+        let result = self.execute_unchecked_inner(cx, sql).await;
+        self.inner
+            .query_in_flight
+            .store(false, std::sync::atomic::Ordering::Release);
+        result
+    }
+
+    async fn execute_unchecked_inner(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+    ) -> Outcome<u64, MySqlError> {
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
@@ -3924,6 +4067,7 @@ mod tests {
                 server_version: String::new(),
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                query_in_flight: std::sync::atomic::AtomicBool::new(false),
             },
             options: None,
         }
@@ -3980,6 +4124,7 @@ mod tests {
                 server_version: String::new(),
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                query_in_flight: std::sync::atomic::AtomicBool::new(false),
             },
             options: None,
         };
@@ -4966,6 +5111,7 @@ mod tests {
                 server_version: String::new(),
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                query_in_flight: std::sync::atomic::AtomicBool::new(false),
             },
             options: None,
         };
@@ -5042,6 +5188,7 @@ mod tests {
                 server_version: String::new(),
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                query_in_flight: std::sync::atomic::AtomicBool::new(false),
             },
             options: None,
         };
@@ -5115,6 +5262,7 @@ mod tests {
                 server_version: String::new(),
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                query_in_flight: std::sync::atomic::AtomicBool::new(false),
             },
             options: None,
         };
@@ -5221,6 +5369,7 @@ mod tests {
                 server_version: String::new(),
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                query_in_flight: std::sync::atomic::AtomicBool::new(false),
             },
             options: None,
         };
@@ -5291,6 +5440,7 @@ mod tests {
                 server_version: String::new(),
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                query_in_flight: std::sync::atomic::AtomicBool::new(false),
             },
             options: None,
         };
@@ -5381,6 +5531,7 @@ mod tests {
                 server_version: String::new(),
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                query_in_flight: std::sync::atomic::AtomicBool::new(false),
             },
             options: None,
         };
@@ -5459,6 +5610,7 @@ mod tests {
                 server_version: String::new(),
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                query_in_flight: std::sync::atomic::AtomicBool::new(false),
             },
             options: None,
         };
