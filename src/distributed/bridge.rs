@@ -1802,6 +1802,85 @@ mod tests {
         assert_eq!(result2.effective_state, EffectiveState::Closed);
     }
 
+    /// br-asupersync-60rane: regression. complete_close must attempt the
+    /// distributed transition first so a `?`-bail leaves local untouched.
+    /// Without this ordering, `local=Closed, dist=Initializing` is reachable
+    /// and `effective_state()` reports Inconsistent with no rollback path.
+    #[test]
+    fn complete_close_dist_failure_does_not_advance_local() {
+        let mut bridge = create_distributed_bridge();
+        // Bridge starts with dist in Initializing — `complete_close` requires
+        // Closing→Closed and so will fail validate_transition. Local also
+        // starts in Open and has not been driven through begin_close.
+        let local_state_before = bridge.local_state();
+        let dist_state_before = bridge
+            .distributed_state()
+            .expect("distributed bridge has dist record");
+
+        let result = bridge.complete_close(Time::from_secs(0));
+        assert!(
+            result.is_err(),
+            "complete_close on Initializing dist must return Err"
+        );
+        assert_eq!(
+            result.unwrap_err().kind(),
+            ErrorKind::InvalidStateTransition
+        );
+
+        // Atomicity: neither local nor dist may have been mutated.
+        assert_eq!(bridge.local_state(), local_state_before);
+        assert_eq!(
+            bridge.distributed_state(),
+            Some(dist_state_before),
+            "dist state must be untouched on Err"
+        );
+        // sync_pending must NOT have been bumped on a failed transition.
+        assert!(!bridge.sync_state.sync_pending);
+        assert_eq!(bridge.sync_state.pending_ops, 0);
+    }
+
+    /// br-asupersync-60rane: regression. begin_close must attempt the
+    /// distributed transition first so a `?`-bail leaves local untouched.
+    /// The path is dead in practice (the bridge filters Closing/Closed before
+    /// calling dist.begin_close), but the ordering invariant must hold so
+    /// future loosening of validate_transition cannot reintroduce the leak.
+    #[test]
+    fn begin_close_then_complete_close_dist_failure_does_not_advance_local() {
+        // Construct a bridge where begin_close has already moved both into
+        // Closing, then forcibly desync dist back to Active so complete_close
+        // fails on dist (Active→Closed not allowed) — this is the only
+        // scenario in which complete_close's `?` actually fires under the
+        // current state machine.
+        let mut bridge = create_distributed_bridge();
+        if let Some(ref mut dist) = bridge.distributed {
+            let _ = dist.activate(Time::from_secs(0));
+        }
+        // Drive both into Closing via the public API.
+        bridge.begin_close(None, Time::from_secs(1)).unwrap();
+        // Forcibly revert dist to Active to simulate a desync where
+        // complete_close on dist would fail validate_transition.
+        if let Some(ref mut dist) = bridge.distributed {
+            dist.state = DistributedRegionState::Active;
+        }
+        let local_state_before = bridge.local_state();
+
+        let result = bridge.complete_close(Time::from_secs(2));
+        assert!(result.is_err(), "Active→Closed must be rejected");
+        assert_eq!(
+            result.unwrap_err().kind(),
+            ErrorKind::InvalidStateTransition
+        );
+
+        // Local state must be exactly what it was before the call —
+        // no advance to Closed despite the dist failure.
+        assert_eq!(bridge.local_state(), local_state_before);
+        assert_eq!(
+            bridge.distributed_state(),
+            Some(DistributedRegionState::Active),
+            "dist state must be untouched on Err"
+        );
+    }
+
     #[test]
     fn close_with_cancel_reason() {
         let mut bridge = create_local_bridge();
