@@ -702,8 +702,20 @@ impl JetStreamContext {
         Self::parse_pub_ack(&response.payload)
     }
 
-    /// Publish with a message ID for deduplication.
-    pub fn publish_with_id(
+    /// Publish with a message ID for server-side deduplication.
+    ///
+    /// JetStream uses the `Nats-Msg-Id` header to detect duplicate publishes
+    /// within the stream's `duplicate_window`. Two publishes with the same
+    /// `msg_id` to the same stream within that window are coalesced — the
+    /// second response carries the original sequence number and a flag
+    /// indicating it was a duplicate. This is the runtime's path to
+    /// dedup / exactly-once-style delivery on top of JetStream's underlying
+    /// at-least-once contract (br-asupersync-byc2d1).
+    ///
+    /// Requires the connected NATS server to advertise `headers:true` in
+    /// its INFO frame (NATS 2.2+); older brokers cause an immediate
+    /// `Protocol` error rather than a silent duplicate.
+    pub async fn publish_with_id(
         &mut self,
         cx: &Cx,
         subject: &str,
@@ -712,12 +724,18 @@ impl JetStreamContext {
     ) -> Result<PubAck, JsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
-        // JetStream dedup requires the Nats-Msg-Id header on a normal publish.
-        // Our NATS client does not support headers yet, so fail fast.
-        Err(JsError::InvalidConfig(format!(
-            "publish_with_id requires NATS headers (Nats-Msg-Id); subject={subject} msg_id={msg_id} payload_len={}",
-            payload.len()
-        )))
+        if msg_id.is_empty() {
+            return Err(JsError::InvalidConfig(
+                "publish_with_id: msg_id must be non-empty".to_string(),
+            ));
+        }
+
+        let headers: [(&str, &[u8]); 1] = [("Nats-Msg-Id", msg_id.as_bytes())];
+        let response = self
+            .client
+            .request_with_headers(cx, subject, &headers, payload)
+            .await?;
+        Self::parse_pub_ack(&response.payload)
     }
 
     /// Create a consumer on a stream.
@@ -1062,32 +1080,27 @@ impl JsMessage {
     /// Acknowledge the message (marks as processed).
     ///
     /// Returns `Err(JsError::AlreadyAcknowledged)` if the message was
-    /// previously acknowledged, nacked, or terminated.
+    /// previously acknowledged, nacked, or terminated. On a transient
+    /// publish failure the message is **not** marked acknowledged, so
+    /// the caller can retry (br-asupersync-vl5agi).
     pub async fn ack(&self, client: &mut NatsClient, cx: &Cx) -> Result<(), JsError> {
-        cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
-        if self.acked.swap(true, Ordering::AcqRel) {
-            return Err(JsError::AlreadyAcknowledged);
-        }
-
-        client.publish(cx, &self.reply_subject, b"+ACK").await?;
-        Ok(())
+        self.publish_terminal_ack(client, cx, b"+ACK").await
     }
 
     /// Negative acknowledge (request redelivery).
     ///
     /// Returns `Err(JsError::AlreadyAcknowledged)` if the message was
-    /// previously acknowledged, nacked, or terminated.
+    /// previously acknowledged, nacked, or terminated. On a transient
+    /// publish failure the message is **not** marked acknowledged.
+    /// (br-asupersync-vl5agi)
     pub async fn nack(&self, client: &mut NatsClient, cx: &Cx) -> Result<(), JsError> {
-        cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
-        if self.acked.swap(true, Ordering::AcqRel) {
-            return Err(JsError::AlreadyAcknowledged);
-        }
-
-        client.publish(cx, &self.reply_subject, b"-NAK").await?;
-        Ok(())
+        self.publish_terminal_ack(client, cx, b"-NAK").await
     }
 
     /// Acknowledge in progress (extend ack deadline).
+    ///
+    /// Does **not** transition the terminal ack state — `+WPI` is a
+    /// keepalive, multiple in-progress signals per message are legal.
     pub async fn in_progress(&self, client: &mut NatsClient, cx: &Cx) -> Result<(), JsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
@@ -1098,15 +1111,60 @@ impl JsMessage {
     /// Terminate processing (do not redeliver).
     ///
     /// Returns `Err(JsError::AlreadyAcknowledged)` if the message was
-    /// previously acknowledged, nacked, or terminated.
+    /// previously acknowledged, nacked, or terminated. On a transient
+    /// publish failure the message is **not** marked acknowledged.
+    /// (br-asupersync-vl5agi)
     pub async fn term(&self, client: &mut NatsClient, cx: &Cx) -> Result<(), JsError> {
+        self.publish_terminal_ack(client, cx, b"+TERM").await
+    }
+
+    /// Shared body for `ack` / `nack` / `term`.
+    ///
+    /// Reserves the terminal-ack slot via `compare_exchange(false -> true)`,
+    /// publishes the ack frame, and rolls the slot back to `false` on
+    /// publish failure so the caller can retry. Previously the ack flag
+    /// was set unconditionally before publish, which meant a transient
+    /// `client.publish` error left the message permanently \"acked\" with
+    /// no path back. (br-asupersync-vl5agi)
+    ///
+    /// Concurrency note: `JsMessage` is not designed for concurrent
+    /// terminal acks from multiple threads. The CAS here makes the
+    /// double-ack diagnostic correct (one of the two callers will see
+    /// `AlreadyAcknowledged`), but in the rare case where a concurrent
+    /// ack observes the optimistic `true` between our CAS and a
+    /// publish-failure rollback, that observer will see
+    /// `AlreadyAcknowledged` even though the slot is rolled back. This
+    /// matches the pre-fix behavior on the success path and is strictly
+    /// better on the failure path.
+    async fn publish_terminal_ack(
+        &self,
+        client: &mut NatsClient,
+        cx: &Cx,
+        payload: &[u8],
+    ) -> Result<(), JsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
-        if self.acked.swap(true, Ordering::AcqRel) {
+
+        // Reserve the terminal slot. compare_exchange is the right primitive
+        // here — `swap(true)` would clobber a prior terminal-ack and return
+        // it without distinguishing.
+        if self
+            .acked
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
             return Err(JsError::AlreadyAcknowledged);
         }
 
-        client.publish(cx, &self.reply_subject, b"+TERM").await?;
-        Ok(())
+        match client.publish(cx, &self.reply_subject, payload).await {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                // Roll back the optimistic claim so the caller can retry.
+                // Release ordering pairs with the Acquire load on the next
+                // ack/nack/term attempt.
+                self.acked.store(false, Ordering::Release);
+                Err(JsError::Nats(err))
+            }
+        }
     }
 }
 
