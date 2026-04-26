@@ -5132,6 +5132,129 @@ mod hex {
     }
 }
 
+/// Reference [`AsyncConnectionManager`] implementation for
+/// [`PgConnection`]. Wraps a [`PgConnectOptions`] used to mint new
+/// connections; the pool calls [`Self::connect`] to add a connection
+/// and [`Self::release_check`] on every return-to-pool to decide
+/// whether the connection is safe to reuse.
+///
+/// br-asupersync-a1x452 + br-asupersync-t4wfzb: pre-fix, no
+/// PgConnection-specific manager existed. Pool consumers either rolled
+/// their own (e.g. test harnesses at tests/database_e2e.rs:317) and
+/// inherited the default `release_check` that returns `true`
+/// unconditionally — meaning a connection flagged with
+/// `needs_discard()=true` (PgTransaction dropped without commit, leaving
+/// the backend in idle_in_transaction with locks held) OR
+/// `is_unhealthy()=true` (consecutive DEALLOCATE failures from
+/// br-asupersync-7v80ju) was returned to the pool and handed to the
+/// next caller. The next caller observed:
+///   - **a1x452**: poisoned `idle_in_transaction` connection with the
+///     prior tenant's locks still held. Subsequent queries either
+///     blocked on the locks or executed inside the dangling
+///     transaction.
+///   - **t4wfzb**: a connection that had failed to deallocate prepared
+///     statements, leaking server-side prepared statement names and
+///     potentially returning stale results from cached statement
+///     handles.
+///
+/// This manager's [`Self::release_check`] returns `false` if EITHER
+/// flag is set, signalling the pool to drop rather than reuse the
+/// connection. The pool then closes the connection (via
+/// [`Self::disconnect`]) and constructs a fresh one on next demand —
+/// the structurally-correct shape per the documented contract at
+/// `pool.rs::ConnectionManager::release_check` and the asupersync
+/// "no obligation leaks" invariant.
+pub struct PgConnectionManager {
+    /// Options used to mint each new connection.
+    options: PgConnectOptions,
+}
+
+impl fmt::Debug for PgConnectionManager {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PgConnectionManager")
+            .field("options", &self.options)
+            .finish()
+    }
+}
+
+impl PgConnectionManager {
+    /// Create a new manager that mints connections using `options`.
+    #[must_use]
+    pub fn new(options: PgConnectOptions) -> Self {
+        Self { options }
+    }
+
+    /// Returns the options the manager uses to mint connections.
+    #[must_use]
+    pub fn options(&self) -> &PgConnectOptions {
+        &self.options
+    }
+}
+
+impl crate::database::pool::AsyncConnectionManager for PgConnectionManager {
+    type Connection = PgConnection;
+    type Error = PgError;
+
+    async fn connect(&self, cx: &Cx) -> crate::types::Outcome<Self::Connection, Self::Error> {
+        // Pass through verbatim — the underlying constructor already
+        // returns Outcome<PgConnection, PgError>; the explicit match
+        // would only round-trip the data through itself.
+        PgConnection::connect_with_options(cx, self.options.clone()).await
+    }
+
+    async fn is_valid(&self, _cx: &Cx, conn: &mut Self::Connection) -> bool {
+        // A connection is valid for reuse iff it is open, not in a
+        // transaction, not flagged for discard, and not unhealthy. The
+        // is_valid hook may run async queries (e.g. SELECT 1) but for
+        // the cheap check here we use the locally-tracked flags; the
+        // pool's separate health-check path is responsible for
+        // periodic SELECT 1 probes.
+        !conn.inner.closed
+            && !conn.in_transaction()
+            && !conn.needs_discard()
+            && !conn.is_unhealthy()
+    }
+
+    /// br-asupersync-a1x452 + br-asupersync-t4wfzb: refuse to recycle
+    /// a connection that is in any of these states:
+    ///   * `needs_discard()=true` — PgTransaction dropped without
+    ///     commit; backend is in `idle_in_transaction` with locks
+    ///     held. Recycling would expose the next tenant to the prior
+    ///     tenant's transaction state.
+    ///   * `is_unhealthy()=true` — consecutive DEALLOCATE failures
+    ///     marked the connection as untrusted (br-asupersync-7v80ju).
+    ///     Recycling would let the next tenant inherit the broken
+    ///     prepared-statement state.
+    ///   * `in_transaction()=true` — defensive check: even without
+    ///     the explicit needs_discard flag, a connection still inside
+    ///     a transaction must not be returned to the pool.
+    ///   * inner stream already closed — defensive check.
+    ///
+    /// Returning `false` signals the pool to drop the connection via
+    /// [`Self::disconnect`] rather than enqueue it for reuse.
+    fn release_check(&self, conn: &mut Self::Connection) -> bool {
+        if conn.inner.closed {
+            return false;
+        }
+        if conn.needs_discard() {
+            return false;
+        }
+        if conn.is_unhealthy() {
+            return false;
+        }
+        if conn.in_transaction() {
+            return false;
+        }
+        true
+    }
+
+    fn disconnect(&self, _conn: Self::Connection) {
+        // PgConnectionInner::Drop handles the wire-level close
+        // (br-asupersync-1wygbs sends Terminate before TCP shutdown).
+        // Dropping here triggers that path.
+    }
+}
+
 #[cfg(test)]
 #[allow(
     clippy::approx_constant,
@@ -8430,5 +8553,70 @@ mod tests {
         // 'connection-scoped memory footprint' calculation needs
         // revalidating.
         assert_eq!(DEFAULT_MAX_PREPARED_STATEMENTS, 256);
+    }
+
+    /// br-asupersync-a1x452: PgConnectionManager::release_check must
+    /// return false when the connection has needs_discard=true (set
+    /// by PgTransaction::drop without commit, leaving the backend in
+    /// idle_in_transaction). Pre-fix, the default release_check
+    /// (returns true) recycled the poisoned connection silently.
+    #[test]
+    fn a1x452_release_check_rejects_needs_discard() {
+        use crate::database::pool::AsyncConnectionManager;
+        let mgr = PgConnectionManager::new(PgConnectOptions::new());
+        let mut conn = make_test_connection();
+
+        // Healthy out of the gate.
+        assert!(mgr.release_check(&mut conn));
+
+        // Simulate PgTransaction::drop (br-asupersync-yl4gu1 path).
+        conn.inner.needs_discard = true;
+        assert!(!mgr.release_check(&mut conn), "needs_discard must reject");
+    }
+
+    /// br-asupersync-t4wfzb: PgConnectionManager::release_check must
+    /// return false when the connection is flagged unhealthy (via
+    /// br-asupersync-7v80ju consecutive DEALLOCATE failures).
+    #[test]
+    fn t4wfzb_release_check_rejects_unhealthy() {
+        use crate::database::pool::AsyncConnectionManager;
+        let mgr = PgConnectionManager::new(PgConnectOptions::new());
+        let mut conn = make_test_connection();
+
+        assert!(mgr.release_check(&mut conn));
+        conn.inner.unhealthy = true;
+        assert!(!mgr.release_check(&mut conn), "is_unhealthy must reject");
+    }
+
+    /// br-asupersync-a1x452 + br-asupersync-t4wfzb: defensive check
+    /// — a connection still inside a transaction (transaction_status
+    /// = 'T' or 'E') must not be returned to the pool even without
+    /// the explicit needs_discard flag set.
+    #[test]
+    fn release_check_rejects_in_transaction() {
+        use crate::database::pool::AsyncConnectionManager;
+        let mgr = PgConnectionManager::new(PgConnectOptions::new());
+        let mut conn = make_test_connection();
+
+        assert!(mgr.release_check(&mut conn));
+        // Set the backend transaction-status byte to 'T' (in tx).
+        conn.inner.transaction_status = b'T';
+        assert!(!mgr.release_check(&mut conn), "in_transaction must reject");
+    }
+
+    /// br-asupersync-a1x452 + br-asupersync-t4wfzb: a closed
+    /// connection must never be returned to the pool — the inner
+    /// stream has been shutdown (br-asupersync-1wygbs Terminate sent
+    /// already).
+    #[test]
+    fn release_check_rejects_closed_connection() {
+        use crate::database::pool::AsyncConnectionManager;
+        let mgr = PgConnectionManager::new(PgConnectOptions::new());
+        let mut conn = make_test_connection();
+        conn.inner.closed = true;
+        assert!(
+            !mgr.release_check(&mut conn),
+            "closed connection must reject"
+        );
     }
 }
