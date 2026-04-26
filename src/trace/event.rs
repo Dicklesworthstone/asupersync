@@ -6,7 +6,7 @@
 use crate::monitor::DownReason;
 use crate::record::{ObligationAbortReason, ObligationKind, ObligationState};
 use crate::trace::distributed::LogicalTime;
-use crate::types::{CancelReason, ObligationId, RegionId, TaskId, Time};
+use crate::types::{CancelReason, ObligationId, PanicPayload, RegionId, TaskId, Time};
 use core::fmt;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -734,30 +734,243 @@ pub fn decode_browser_trace_schema(payload: &str) -> Result<BrowserTraceSchema, 
 }
 
 /// Returns redacted trace event suitable for browser diagnostics.
+///
+/// br-asupersync-92qzak: pre-fix this function only redacted
+/// `UserTrace::Message` and `ChaosInjection::Chaos.detail`, leaving
+/// every other TraceData variant's free-form String fields
+/// (Cancel.reason.message, RegionCancel.reason.message,
+/// Worker.worker_id, Down.reason / Exit.reason payload strings)
+/// unredacted. Production browser-trace exporters that bypass this
+/// function entirely (the only caller in the repo was a single test)
+/// shipped raw events to less-trusted destinations — sensitive
+/// strings (CancelReasons containing stack-frame paths or user
+/// tags, IoError payloads, panic payloads) leaked to whatever
+/// collector the browser surface forwarded to.
+///
+/// The post-fix function is EXHAUSTIVE — `match` over every
+/// TraceData variant with NO `_ =>` fallthrough — so any future
+/// variant addition is a compile error until the redactor declares
+/// its policy. Variants carrying potentially sensitive String
+/// fields (Cancel, RegionCancel, Worker, Down, Exit) have their
+/// strings rewritten to `"<redacted>"` while structural fields
+/// (TaskId, RegionId, sequence numbers) are preserved so causality
+/// can still be reconstructed by browser-side debug tooling.
 #[must_use]
 pub fn redact_browser_trace_event(event: &TraceEvent) -> TraceEvent {
     let mut redacted = event.clone();
-    match (&event.kind, &event.data) {
-        (TraceEventKind::UserTrace, TraceData::Message(_)) => {
-            redacted.data = TraceData::Message("<redacted>".to_string());
-        }
-        (
-            TraceEventKind::ChaosInjection,
-            TraceData::Chaos {
-                kind,
-                task,
-                detail: _,
-            },
-        ) => {
-            redacted.data = TraceData::Chaos {
-                kind: kind.clone(),
-                task: *task,
-                detail: "<redacted>".to_string(),
-            };
-        }
-        _ => {}
+    redacted.data = redact_browser_trace_data(&event.data);
+    redacted
+}
+
+/// br-asupersync-92qzak: variant-exhaustive redactor for TraceData.
+/// Returns a copy with every free-form String field replaced by
+/// `"<redacted>"` (or the equivalent in nested types). Structural
+/// identifiers (TaskId, RegionId, ObligationId, u64 sequence
+/// numbers, ObligationKind, ObligationState, ObligationAbortReason,
+/// CancelKind enum variant, ErrorKind discriminants) are preserved
+/// so causality and lifecycle reconstruction stay possible
+/// browser-side without leaking the message payloads.
+///
+/// The match has NO `_ => {}` fallthrough: every variant must
+/// declare its redaction policy explicitly so the next addition
+/// to TraceData is a compile-time prompt to think about
+/// confidentiality.
+fn redact_browser_trace_data(data: &TraceData) -> TraceData {
+    match data {
+        TraceData::None => TraceData::None,
+        TraceData::Task { task, region } => TraceData::Task {
+            task: *task,
+            region: *region,
+        },
+        TraceData::Region { region, parent } => TraceData::Region {
+            region: *region,
+            parent: *parent,
+        },
+        TraceData::Obligation {
+            obligation,
+            task,
+            region,
+            kind,
+            state,
+            duration_ns,
+            abort_reason,
+        } => TraceData::Obligation {
+            obligation: *obligation,
+            task: *task,
+            region: *region,
+            kind: *kind,
+            state: *state,
+            duration_ns: *duration_ns,
+            abort_reason: *abort_reason,
+        },
+        TraceData::Cancel {
+            task,
+            region,
+            reason,
+        } => TraceData::Cancel {
+            task: *task,
+            region: *region,
+            reason: redact_cancel_reason(reason),
+        },
+        TraceData::Worker {
+            worker_id: _,
+            job_id,
+            decision_seq,
+            replay_hash,
+            task,
+            region,
+            obligation,
+        } => TraceData::Worker {
+            worker_id: "<redacted>".to_string(),
+            job_id: *job_id,
+            decision_seq: *decision_seq,
+            replay_hash: *replay_hash,
+            task: *task,
+            region: *region,
+            obligation: *obligation,
+        },
+        TraceData::RegionCancel { region, reason } => TraceData::RegionCancel {
+            region: *region,
+            reason: redact_cancel_reason(reason),
+        },
+        TraceData::Time { old, new } => TraceData::Time {
+            old: *old,
+            new: *new,
+        },
+        TraceData::Timer { timer_id, deadline } => TraceData::Timer {
+            timer_id: *timer_id,
+            deadline: *deadline,
+        },
+        TraceData::IoRequested { token, interest } => TraceData::IoRequested {
+            token: *token,
+            interest: *interest,
+        },
+        TraceData::IoReady { token, readiness } => TraceData::IoReady {
+            token: *token,
+            readiness: *readiness,
+        },
+        TraceData::IoResult { token, bytes } => TraceData::IoResult {
+            token: *token,
+            bytes: *bytes,
+        },
+        TraceData::IoError { token, kind } => TraceData::IoError {
+            token: *token,
+            kind: *kind,
+        },
+        TraceData::RngSeed { seed } => TraceData::RngSeed { seed: *seed },
+        TraceData::RngValue { value } => TraceData::RngValue { value: *value },
+        TraceData::Checkpoint {
+            sequence,
+            active_tasks,
+            active_regions,
+        } => TraceData::Checkpoint {
+            sequence: *sequence,
+            active_tasks: *active_tasks,
+            active_regions: *active_regions,
+        },
+        TraceData::Futurelock {
+            task,
+            region,
+            idle_steps,
+            held,
+        } => TraceData::Futurelock {
+            task: *task,
+            region: *region,
+            idle_steps: *idle_steps,
+            held: held.clone(),
+        },
+        TraceData::Monitor {
+            monitor_ref,
+            watcher,
+            watcher_region,
+            monitored,
+        } => TraceData::Monitor {
+            monitor_ref: *monitor_ref,
+            watcher: *watcher,
+            watcher_region: *watcher_region,
+            monitored: *monitored,
+        },
+        TraceData::Down {
+            monitor_ref,
+            watcher,
+            monitored,
+            completion_vt,
+            reason,
+        } => TraceData::Down {
+            monitor_ref: *monitor_ref,
+            watcher: *watcher,
+            monitored: *monitored,
+            completion_vt: *completion_vt,
+            reason: redact_down_reason(reason),
+        },
+        TraceData::Link {
+            link_ref,
+            task_a,
+            region_a,
+            task_b,
+            region_b,
+        } => TraceData::Link {
+            link_ref: *link_ref,
+            task_a: *task_a,
+            region_a: *region_a,
+            task_b: *task_b,
+            region_b: *region_b,
+        },
+        TraceData::Exit {
+            link_ref,
+            from,
+            to,
+            failure_vt,
+            reason,
+        } => TraceData::Exit {
+            link_ref: *link_ref,
+            from: *from,
+            to: *to,
+            failure_vt: *failure_vt,
+            reason: redact_down_reason(reason),
+        },
+        TraceData::Message(_) => TraceData::Message("<redacted>".to_string()),
+        TraceData::Chaos {
+            kind,
+            task,
+            detail: _,
+        } => TraceData::Chaos {
+            kind: kind.clone(),
+            task: *task,
+            detail: "<redacted>".to_string(),
+        },
+    }
+}
+
+/// Replace any free-form payload inside a CancelReason with a fixed
+/// sentinel; preserve the kind enum (which is finite and non-secret).
+fn redact_cancel_reason(reason: &CancelReason) -> CancelReason {
+    let mut redacted = reason.clone();
+    if redacted.message.is_some() {
+        redacted.message = Some("<redacted>".to_string());
     }
     redacted
+}
+
+/// Replace free-form String fields inside a DownReason with sentinels.
+/// `Normal` carries no payload; `Error(String)`, `Cancelled(CancelReason)`,
+/// and `Panicked(PanicPayload)` all do.
+fn redact_down_reason(reason: &DownReason) -> DownReason {
+    match reason {
+        DownReason::Normal => DownReason::Normal,
+        DownReason::Error(_) => DownReason::Error("<redacted>".to_string()),
+        DownReason::Cancelled(cr) => DownReason::Cancelled(redact_cancel_reason(cr)),
+        DownReason::Panicked(payload) => {
+            DownReason::Panicked(redact_panic_payload(payload))
+        }
+    }
+}
+
+/// Replace any String inside a PanicPayload with the redaction
+/// sentinel. PanicPayload's message field is private, so we
+/// construct a fresh payload via the public constructor.
+fn redact_panic_payload(_payload: &PanicPayload) -> PanicPayload {
+    PanicPayload::new("<redacted>")
 }
 
 fn default_browser_capture_metadata(event: &TraceEvent) -> BrowserCaptureMetadata {
@@ -1081,6 +1294,16 @@ pub fn browser_trace_log_fields_with_capture(
     validation_failure_category: Option<&str>,
     capture_metadata: Option<&BrowserCaptureMetadata>,
 ) -> BTreeMap<String, String> {
+    // br-asupersync-92qzak: every public browser-trace export now
+    // routes through the redactor before any payload-field
+    // serialization. Pre-fix this function read event.data verbatim,
+    // bypassing redact_browser_trace_event entirely (the redactor
+    // had only a single test caller). Post-fix the redacted variant
+    // is the *only* event passed to insert_browser_trace_payload_fields,
+    // so any free-form String inside event.data (cancel reasons,
+    // worker IDs, panic payloads, error strings) lands as
+    // `<redacted>` in the exported log fields.
+    let event = &redact_browser_trace_event(event);
     let capture = capture_metadata
         .cloned()
         .unwrap_or_else(|| default_browser_capture_metadata(event));
@@ -3772,6 +3995,136 @@ mod tests {
                 TraceData::Message("<redacted>".to_string())
             )
         );
+    }
+
+    // br-asupersync-92qzak: redact_browser_trace_event must scrub
+    // free-form String payloads inside Cancel.reason.message,
+    // RegionCancel.reason.message, Worker.worker_id, Down.reason
+    // (Error / Cancelled / Panicked variants), and Exit.reason.
+    // Pre-fix only UserTrace and ChaosInjection were redacted; this
+    // test pins the new total coverage.
+    #[test]
+    fn redact_scrubs_cancel_reason_message_92qzak() {
+        let task = TaskId::new_for_test(0, 1);
+        let region = RegionId::new_for_test(0, 1);
+        let reason = crate::types::CancelReason::user("invalid token sk_live_ABC123");
+        let mut event = TraceEvent::new(
+            1,
+            Time::ZERO,
+            TraceEventKind::CancelRequest,
+            TraceData::Cancel {
+                task,
+                region,
+                reason,
+            },
+        );
+        // Touch the field so the warning about "_ unused" doesn't bite.
+        event.seq = 1;
+        let redacted = redact_browser_trace_event(&event);
+        match &redacted.data {
+            TraceData::Cancel { reason, .. } => {
+                assert_eq!(reason.message.as_deref(), Some("<redacted>"));
+            }
+            other => panic!("expected redacted Cancel, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn redact_scrubs_region_cancel_reason_message_92qzak() {
+        let region = RegionId::new_for_test(0, 1);
+        let reason = crate::types::CancelReason::user("internal-secret");
+        let event = TraceEvent::new(
+            1,
+            Time::ZERO,
+            TraceEventKind::RegionCancelled,
+            TraceData::RegionCancel { region, reason },
+        );
+        let redacted = redact_browser_trace_event(&event);
+        match &redacted.data {
+            TraceData::RegionCancel { reason, .. } => {
+                assert_eq!(reason.message.as_deref(), Some("<redacted>"));
+            }
+            other => panic!("expected redacted RegionCancel, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn redact_scrubs_worker_id_92qzak() {
+        let task = TaskId::new_for_test(0, 1);
+        let region = RegionId::new_for_test(0, 1);
+        let obligation = ObligationId::new_for_test(0, 1);
+        let event = TraceEvent::new(
+            1,
+            Time::ZERO,
+            TraceEventKind::ChaosInjection,
+            TraceData::Worker {
+                worker_id: "worker-with-secret-suffix-token-abc".to_string(),
+                job_id: 42,
+                decision_seq: 7,
+                replay_hash: 0xdeadbeef,
+                task,
+                region,
+                obligation,
+            },
+        );
+        let redacted = redact_browser_trace_event(&event);
+        match &redacted.data {
+            TraceData::Worker { worker_id, .. } => assert_eq!(worker_id, "<redacted>"),
+            other => panic!("expected redacted Worker, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn redact_scrubs_down_reason_error_string_92qzak() {
+        let watcher = TaskId::new_for_test(0, 1);
+        let monitored = TaskId::new_for_test(0, 2);
+        let event = TraceEvent::new(
+            1,
+            Time::ZERO,
+            TraceEventKind::ChaosInjection,
+            TraceData::Down {
+                monitor_ref: 1,
+                watcher,
+                monitored,
+                completion_vt: Time::ZERO,
+                reason: crate::monitor::DownReason::Error(
+                    "/etc/secret_path:42 panicked with bearer eyJ...".to_string(),
+                ),
+            },
+        );
+        let redacted = redact_browser_trace_event(&event);
+        match &redacted.data {
+            TraceData::Down { reason, .. } => match reason {
+                crate::monitor::DownReason::Error(msg) => assert_eq!(msg, "<redacted>"),
+                other => panic!("expected Error variant, got {other:?}"),
+            },
+            other => panic!("expected redacted Down, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn redact_preserves_structural_identifiers_92qzak() {
+        // Structural fields (TaskId, RegionId, sequence, kinds) MUST
+        // be preserved so causality reconstruction is still possible
+        // browser-side after redaction.
+        let task = TaskId::new_for_test(0, 1);
+        let region = RegionId::new_for_test(0, 1);
+        let event = TraceEvent::new(
+            42,
+            Time::from_nanos(1234),
+            TraceEventKind::Spawn,
+            TraceData::Task { task, region },
+        );
+        let redacted = redact_browser_trace_event(&event);
+        assert_eq!(redacted.seq, 42);
+        assert_eq!(redacted.time, Time::from_nanos(1234));
+        match &redacted.data {
+            TraceData::Task { task: t, region: r } => {
+                assert_eq!(*t, task);
+                assert_eq!(*r, region);
+            }
+            other => panic!("expected Task data, got {other:?}"),
+        }
     }
 
     #[test]

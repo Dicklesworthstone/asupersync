@@ -201,8 +201,55 @@ impl SymbolSpan {
     }
 
     /// Sets an attribute on the span.
+    ///
+    /// br-asupersync-65gy5c: every attribute write is bounded and
+    /// redacted before storage. The pre-fix surface accepted
+    /// arbitrary `impl Into<String>` for both key and value with NO
+    /// length cap, NO sensitive-keyword denylist, NO control-character
+    /// scrubbing, and NO cardinality cap on the per-span attribute
+    /// map — sufficient for an attacker who can influence ANY string
+    /// reaching set_attribute (HTTP header values, SQL bodies,
+    /// cancel reasons containing stack frame paths) to exfiltrate
+    /// sensitive bytes through every downstream span consumer
+    /// (crashpacks, distributed bridges, OTEL collectors).
+    ///
+    /// The fix routes the value through [`sanitize_span_value`] (caps
+    /// to [`MAX_SPAN_ATTRIBUTE_VALUE_LEN`] = 1024 bytes; replaces
+    /// values whose key matches the [`SENSITIVE_KEY_DENYLIST`] with
+    /// `"<redacted>"` regardless of length; scrubs control bytes to
+    /// `_`) and gates the insert on
+    /// [`MAX_SPAN_ATTRIBUTES_PER_SPAN`] = 64 — overflow inserts land
+    /// in a single sentinel key
+    /// `_overflow_<count>` so the cardinality DoS surface is closed.
     pub fn set_attribute(&mut self, key: impl Into<String>, value: impl Into<String>) {
-        self.attributes.insert(key.into(), value.into());
+        let key = key.into();
+        let value = value.into();
+        let sanitized = sanitize_span_value(&key, value);
+
+        if self.attributes.contains_key(&key) {
+            // Replacing an existing attribute does not change
+            // cardinality — apply the new (sanitized) value directly.
+            self.attributes.insert(key, sanitized);
+            return;
+        }
+
+        if self.attributes.len() >= MAX_SPAN_ATTRIBUTES_PER_SPAN {
+            // Cardinality cap reached. Aggregate further inserts into
+            // a single overflow bucket rather than refusing the call
+            // (callers should not silently lose telemetry, but they
+            // should also not be able to drive the BTreeMap to
+            // arbitrary size).
+            let overflow_key = "_overflow_attributes";
+            let entry = self
+                .attributes
+                .entry(overflow_key.to_string())
+                .or_insert_with(|| "0".to_string());
+            let n: u64 = entry.parse::<u64>().unwrap_or(0).saturating_add(1);
+            *entry = n.to_string();
+            return;
+        }
+
+        self.attributes.insert(key, sanitized);
     }
 
     /// Returns attributes.
@@ -243,6 +290,95 @@ impl SymbolSpan {
     }
 }
 
+/// br-asupersync-65gy5c: hard cap on the value bytes stored per
+/// span attribute. Values longer than this are truncated and
+/// suffixed with a stable hash so diagnostic continuity is
+/// preserved without leaking the entire payload.
+pub const MAX_SPAN_ATTRIBUTE_VALUE_LEN: usize = 1024;
+
+/// br-asupersync-65gy5c: cardinality cap on the per-span attribute
+/// map. Subsequent set_attribute calls for new keys are aggregated
+/// into a single `_overflow_attributes` counter rather than
+/// growing the BTreeMap unboundedly.
+pub const MAX_SPAN_ATTRIBUTES_PER_SPAN: usize = 64;
+
+/// br-asupersync-65gy5c: case-insensitive substring matches that
+/// trigger replacement of the attribute value with `<redacted>`
+/// regardless of length. This catches the common
+/// HTTP-header / SQL / config-secret shapes that operators
+/// frequently splice into spans without realising the trace path
+/// crosses trust boundaries.
+const SENSITIVE_KEY_DENYLIST: &[&str] = &[
+    "authorization",
+    "auth_token",
+    "auth-token",
+    "cookie",
+    "set-cookie",
+    "session",
+    "password",
+    "passwd",
+    "secret",
+    "private_key",
+    "private-key",
+    "api_key",
+    "api-key",
+    "x-api-key",
+    "x-amz-security-token",
+    "credentials",
+    "bearer",
+    "token",
+];
+
+/// br-asupersync-65gy5c: sanitize a single span-attribute value:
+///   1. If the key matches any entry in [`SENSITIVE_KEY_DENYLIST`]
+///      (case-insensitive substring), replace with `<redacted>`.
+///   2. Replace any control byte (b < 0x20 except tab) and DEL
+///      (0x7F) with `_`. These bytes are log-injection vectors
+///      downstream.
+///   3. Truncate at [`MAX_SPAN_ATTRIBUTE_VALUE_LEN`] bytes; append a
+///      `…#hash` suffix so consumers can deduplicate identical
+///      values that were truncated to the same prefix.
+fn sanitize_span_value(key: &str, value: String) -> String {
+    if is_sensitive_key(key) {
+        return "<redacted>".to_string();
+    }
+
+    let mut scrubbed = String::with_capacity(value.len());
+    for c in value.chars() {
+        let needs_scrub = (c.is_ascii_control() && c != '\t') || c == '\u{7f}';
+        scrubbed.push(if needs_scrub { '_' } else { c });
+    }
+
+    if scrubbed.len() <= MAX_SPAN_ATTRIBUTE_VALUE_LEN {
+        return scrubbed;
+    }
+
+    let hash = stable_attribute_hash(scrubbed.as_bytes());
+    let suffix = format!("…#{:016x}", hash);
+    let mut cut = MAX_SPAN_ATTRIBUTE_VALUE_LEN.saturating_sub(suffix.len());
+    while cut > 0 && !scrubbed.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let mut out = scrubbed[..cut].to_string();
+    out.push_str(&suffix);
+    out
+}
+
+fn is_sensitive_key(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    SENSITIVE_KEY_DENYLIST.iter().any(|&needle| lower.contains(needle))
+}
+
+fn stable_attribute_hash(bytes: &[u8]) -> u64 {
+    // FNV-1a — deterministic, no_std-friendly, sufficient for diagnostic dedup.
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for &b in bytes {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
+    }
+    hash
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -257,6 +393,113 @@ mod tests {
     use crate::trace::distributed::context::{RegionTag, SymbolTraceContext};
     use crate::trace::distributed::id::{DistTraceId, SymbolSpanId};
     use crate::util::DetRng;
+
+    fn fresh_span() -> SymbolSpan {
+        let mut rng = DetRng::new(42);
+        let ctx = SymbolTraceContext::new_for_encoding(
+            DistTraceId::new_for_test(1),
+            SymbolSpanId::NIL,
+            RegionTag::new("test"),
+            &mut rng,
+        );
+        SymbolSpan::new_encode(ctx, ObjectId::new_for_test(1), Time::from_millis(0))
+    }
+
+    // br-asupersync-65gy5c: sensitive-keyword denylist — values
+    // whose key matches any denylist entry (case-insensitive
+    // substring) are stored as <redacted>.
+    #[test]
+    fn set_attribute_redacts_authorization_header_65gy5c() {
+        let mut span = fresh_span();
+        span.set_attribute("Authorization", "Bearer sk_live_ABC123_secret");
+        assert_eq!(span.attributes().get("Authorization").map(String::as_str), Some("<redacted>"));
+    }
+
+    #[test]
+    fn set_attribute_redacts_cookie_x_api_key_password_65gy5c() {
+        for key in &["cookie", "Set-Cookie", "x-api-key", "X-Api-Key", "password", "PASSWORD", "session"] {
+            let mut span = fresh_span();
+            span.set_attribute(*key, "sensitive-value-that-must-not-leak");
+            assert_eq!(
+                span.attributes().get(*key).map(String::as_str),
+                Some("<redacted>"),
+                "key {key} should be redacted"
+            );
+        }
+    }
+
+    #[test]
+    fn set_attribute_truncates_long_value_65gy5c() {
+        let mut span = fresh_span();
+        let big = "A".repeat(MAX_SPAN_ATTRIBUTE_VALUE_LEN * 2);
+        span.set_attribute("blob", big.clone());
+        let stored = span.attributes().get("blob").expect("stored");
+        assert!(
+            stored.len() <= MAX_SPAN_ATTRIBUTE_VALUE_LEN,
+            "stored len {} exceeds cap {}",
+            stored.len(),
+            MAX_SPAN_ATTRIBUTE_VALUE_LEN,
+        );
+        // Truncation must include a stable hash suffix so two
+        // truncated values from the same input compare equal.
+        assert!(stored.contains('…'));
+        assert!(stored.contains('#'));
+    }
+
+    #[test]
+    fn set_attribute_scrubs_control_bytes_65gy5c() {
+        let mut span = fresh_span();
+        // Newlines + NULs in the value would enable log-injection
+        // downstream; they must be replaced with '_'.
+        span.set_attribute("path", "/api/v1\n\rINJECTED: HEADER\0\u{1b}[31m");
+        let stored = span.attributes().get("path").expect("stored");
+        assert!(!stored.contains('\n'));
+        assert!(!stored.contains('\r'));
+        assert!(!stored.contains('\0'));
+        assert!(!stored.contains('\u{1b}'));
+        assert!(stored.contains('_'));
+    }
+
+    #[test]
+    fn set_attribute_caps_cardinality_at_64_65gy5c() {
+        let mut span = fresh_span();
+        // Insert 100 distinct keys; only the first 64 should occupy
+        // their own slots, the rest land in _overflow_attributes.
+        for i in 0..100 {
+            span.set_attribute(format!("key_{i}"), format!("v_{i}"));
+        }
+        // Per-key cap is 64; overflow bucket adds 1 more (so total
+        // distinct keys is at most 65).
+        assert!(
+            span.attributes().len() <= MAX_SPAN_ATTRIBUTES_PER_SPAN + 1,
+            "cardinality leak: {} attributes",
+            span.attributes().len()
+        );
+        let overflow = span
+            .attributes()
+            .get("_overflow_attributes")
+            .expect("overflow bucket present");
+        let n: u64 = overflow.parse().expect("overflow is numeric");
+        assert!(n >= 36, "overflow count too low: {n}");
+    }
+
+    #[test]
+    fn set_attribute_replacing_existing_key_does_not_count_against_cardinality_65gy5c() {
+        let mut span = fresh_span();
+        // Fill exactly to cap.
+        for i in 0..MAX_SPAN_ATTRIBUTES_PER_SPAN {
+            span.set_attribute(format!("key_{i}"), "v");
+        }
+        let len_before = span.attributes().len();
+        // Replacing key_0 with a new value must NOT push us into the
+        // overflow path even though we're at cap.
+        span.set_attribute("key_0", "new_value");
+        assert_eq!(span.attributes().len(), len_before);
+        assert_eq!(
+            span.attributes().get("key_0").map(String::as_str),
+            Some("new_value")
+        );
+    }
 
     #[test]
     fn span_duration_calculates() {
