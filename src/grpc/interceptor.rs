@@ -443,7 +443,58 @@ fn copy_metadata_value(
     }
 }
 
+/// Constant-time byte-equality comparison.
+///
+/// Returns `true` iff the two slices have the same length AND the same
+/// bytes. The comparison is data-independent: every byte is processed
+/// regardless of where the first mismatch (if any) occurs, defeating the
+/// timing-side-channel attack in which an attacker recovers a secret
+/// byte-by-byte by measuring response latency.
+///
+/// **Length is not treated as secret**: returning early when `a.len() !=
+/// b.len()` is acceptable because the attacker can already observe the
+/// length they sent, and the legitimate token's length is fixed at
+/// configuration time. What the attacker MUST NOT learn is which prefix
+/// of their guess agrees with the secret — this function provides that
+/// guarantee.
+///
+/// `std::hint::black_box` wraps the accumulator to prevent the optimiser
+/// from short-circuiting once it can prove the result; without the
+/// barrier, an aggressive optimiser could in principle convert the
+/// constant-time loop into an early-exit comparison.
+#[inline]
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (&x, &y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    std::hint::black_box(diff) == 0
+}
+
 /// Interceptor that validates bearer tokens on incoming requests.
+///
+/// # Timing safety (br-asupersync-2dro05)
+///
+/// Two construction paths exist:
+///
+/// * [`BearerAuthValidator::with_token`] — **safe by default.** The
+///   expected token is held inside the validator and compared against
+///   the supplied token via [`constant_time_eq`], which never
+///   short-circuits on the first byte difference. Use this whenever the
+///   accept-set is a fixed set of tokens.
+///
+/// * [`BearerAuthValidator::new`] — **caller responsibility.** Takes a
+///   user-supplied closure `Fn(&str) -> bool`. The closure body is
+///   opaque to the library; if it uses Rust string equality (`==`) on
+///   the bearer token, an attacker can recover the secret byte-by-byte
+///   from response-latency timing (reduces token recovery from
+///   O(256^N) to O(256·N) for an ASCII secret of length N). The
+///   library cannot fix this from outside the closure. **Callers MUST
+///   either** (a) use `with_token`, or (b) implement the closure with
+///   [`constant_time_eq`] / `subtle::ConstantTimeEq`.
 #[derive(Debug)]
 pub struct BearerAuthValidator<F> {
     validator: F,
@@ -453,8 +504,32 @@ impl<F> BearerAuthValidator<F>
 where
     F: Fn(&str) -> bool + Send + Sync,
 {
-    /// Create a new bearer auth validator.
+    /// Create a bearer auth validator from a user-supplied closure.
+    ///
+    /// **Warning**: the closure's comparison must be constant-time. See
+    /// the type-level docs for context. Prefer
+    /// [`BearerAuthValidator::with_token`] when the accept-set is a
+    /// known secret string.
     pub fn new(validator: F) -> Self {
+        Self { validator }
+    }
+}
+
+impl BearerAuthValidator<Box<dyn Fn(&str) -> bool + Send + Sync>> {
+    /// Create a bearer auth validator that accepts exactly the supplied
+    /// `expected_token`, comparing in constant time.
+    ///
+    /// The token is moved into the closure and held for the lifetime of
+    /// the validator. The comparison runs through [`constant_time_eq`],
+    /// so an attacker cannot recover the token via response-latency
+    /// timing.
+    #[must_use]
+    pub fn with_token(expected_token: impl Into<String>) -> Self {
+        let expected = expected_token.into();
+        let validator: Box<dyn Fn(&str) -> bool + Send + Sync> =
+            Box::new(move |presented: &str| {
+                constant_time_eq(presented.as_bytes(), expected.as_bytes())
+            });
         Self { validator }
     }
 }
@@ -487,12 +562,26 @@ where
     }
 }
 
-/// Create an interceptor that validates bearer tokens.
+/// Create an interceptor that validates bearer tokens against a
+/// user-supplied closure.
+///
+/// **Prefer [`auth_validator_with_token`]** for the common case of
+/// matching a single fixed token; that variant uses constant-time
+/// comparison internally and is timing-side-channel safe by default.
 pub fn auth_validator<F>(validator: F) -> BearerAuthValidator<F>
 where
     F: Fn(&str) -> bool + Send + Sync,
 {
     BearerAuthValidator::new(validator)
+}
+
+/// Create an interceptor that accepts exactly `expected_token`, with
+/// constant-time comparison (br-asupersync-2dro05).
+#[must_use]
+pub fn auth_validator_with_token(
+    expected_token: impl Into<String>,
+) -> BearerAuthValidator<Box<dyn Fn(&str) -> bool + Send + Sync>> {
+    BearerAuthValidator::with_token(expected_token)
 }
 
 /// Metadata propagation interceptor.
@@ -857,6 +946,131 @@ mod tests {
         let ok = matches!(auth, MetadataValue::Ascii(s) if s == "Bearer my-token");
         crate::assert_with_log!(ok, "auth header", true, ok);
         crate::test_complete!("bearer_auth_interceptor");
+    }
+
+    #[test]
+    fn constant_time_eq_correctness() {
+        // br-asupersync-2dro05: the timing-safe byte comparison must
+        // return the same boolean as ordinary equality for *any* input
+        // shape — equal-length differing-first-byte, equal-length
+        // differing-last-byte, mismatched lengths, empty inputs, the
+        // identical-pointer case. This test pins the *correctness*
+        // surface; timing-side-channel resistance is a property of the
+        // algorithm (no early-exit) and the `black_box` barrier rather
+        // than something a unit test can measure directly.
+        init_test("constant_time_eq_correctness");
+        // Identical content.
+        crate::assert_with_log!(
+            super::constant_time_eq(b"hello", b"hello"),
+            "identical",
+            true,
+            super::constant_time_eq(b"hello", b"hello")
+        );
+        // Differing first byte (would short-circuit fastest under naive ==).
+        crate::assert_with_log!(
+            !super::constant_time_eq(b"Xello", b"hello"),
+            "first-byte differ",
+            false,
+            super::constant_time_eq(b"Xello", b"hello")
+        );
+        // Differing last byte (would short-circuit slowest under naive ==).
+        crate::assert_with_log!(
+            !super::constant_time_eq(b"hellX", b"hello"),
+            "last-byte differ",
+            false,
+            super::constant_time_eq(b"hellX", b"hello")
+        );
+        // Mismatched lengths: length is not secret; early-return is OK.
+        crate::assert_with_log!(
+            !super::constant_time_eq(b"hello", b"hellos"),
+            "length mismatch (longer)",
+            false,
+            super::constant_time_eq(b"hello", b"hellos")
+        );
+        crate::assert_with_log!(
+            !super::constant_time_eq(b"hello", b"hell"),
+            "length mismatch (shorter)",
+            false,
+            super::constant_time_eq(b"hello", b"hell")
+        );
+        // Both empty.
+        crate::assert_with_log!(
+            super::constant_time_eq(b"", b""),
+            "both empty",
+            true,
+            super::constant_time_eq(b"", b"")
+        );
+        // One empty, one not.
+        crate::assert_with_log!(
+            !super::constant_time_eq(b"", b"x"),
+            "empty vs non-empty",
+            false,
+            super::constant_time_eq(b"", b"x")
+        );
+        // Black-box wrapping: a hostile optimiser cannot fold the
+        // comparison into a constant when both sides are computed at
+        // runtime. We exercise that with `std::hint::black_box`-wrapped
+        // inputs.
+        let a = std::hint::black_box(b"super-secret-bearer-token-abcdefg".to_vec());
+        let b = std::hint::black_box(b"super-secret-bearer-token-XXXXXXX".to_vec());
+        crate::assert_with_log!(
+            !super::constant_time_eq(&a, &b),
+            "differing tail under black_box",
+            false,
+            super::constant_time_eq(&a, &b)
+        );
+        let c = std::hint::black_box(b"super-secret-bearer-token-abcdefg".to_vec());
+        crate::assert_with_log!(
+            super::constant_time_eq(&a, &c),
+            "matching under black_box",
+            true,
+            super::constant_time_eq(&a, &c)
+        );
+        crate::test_complete!("constant_time_eq_correctness");
+    }
+
+    #[test]
+    fn bearer_auth_validator_with_token_accepts_correct_token() {
+        // br-asupersync-2dro05: the constant-time `with_token`
+        // constructor accepts the exact configured token.
+        init_test("bearer_auth_validator_with_token_accepts_correct_token");
+        let interceptor = auth_validator_with_token("super-secret-token");
+        let mut request = Request::new(Bytes::new());
+        request
+            .metadata_mut()
+            .insert("authorization", "Bearer super-secret-token");
+        let ok = interceptor.intercept_request(&mut request).is_ok();
+        crate::assert_with_log!(ok, "with_token accepts correct", true, ok);
+        crate::test_complete!("bearer_auth_validator_with_token_accepts_correct_token");
+    }
+
+    #[test]
+    fn bearer_auth_validator_with_token_rejects_wrong_token_at_any_position() {
+        // br-asupersync-2dro05: with_token must reject every
+        // wrong-token shape — first-byte differ, last-byte differ,
+        // shorter, longer — without ever returning `Ok`. The
+        // *correctness* surface mirrors what an attacker would probe;
+        // timing equivalence across these shapes is the security
+        // property `constant_time_eq` provides.
+        init_test("bearer_auth_validator_with_token_rejects_wrong_token_at_any_position");
+        let interceptor = auth_validator_with_token("super-secret-token");
+        for wrong in [
+            "Xuper-secret-token",  // first-byte differ
+            "super-secret-tokeX",  // last-byte differ
+            "super-secret-toke",   // shorter
+            "super-secret-tokens", // longer
+            "totally-different",   // unrelated
+            "",                    // empty
+        ] {
+            let mut request = Request::new(Bytes::new());
+            let header = format!("Bearer {wrong}");
+            request.metadata_mut().insert("authorization", &header);
+            let err = interceptor.intercept_request(&mut request).is_err();
+            crate::assert_with_log!(err, "with_token rejects wrong token", true, err);
+        }
+        crate::test_complete!(
+            "bearer_auth_validator_with_token_rejects_wrong_token_at_any_position"
+        );
     }
 
     #[test]
