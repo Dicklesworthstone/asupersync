@@ -6,9 +6,11 @@
 //! against formal specifications (RFCs) and reference implementations.
 
 pub mod aggregator_flush;
+pub mod codec_round_trip;
+pub mod cx_capability_semantics;
 // pub mod codec_framing;
-pub mod h1_rfc9112;
 pub mod h1_request_target;
+pub mod h1_rfc9112;
 pub mod h2_alpn_negotiation_rfc7540;
 pub mod h2_connect;
 pub mod h2_priority;
