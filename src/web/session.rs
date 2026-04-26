@@ -21,16 +21,48 @@ use std::collections::HashMap;
 use std::fmt;
 use std::fmt::Write as _;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::extract::Request;
 use super::handler::Handler;
-use super::response::Response;
+use super::response::{Response, StatusCode};
 
 /// Default session cookie name.
 const DEFAULT_COOKIE_NAME: &str = "session_id";
 
 /// Session ID length in hex characters (16 bytes = 32 hex chars).
 const SESSION_ID_HEX_LEN: usize = 32;
+
+/// Reserved key under which the per-session CSRF token is stored inside
+/// `SessionData`. Stored alongside user data so the existing
+/// `SessionStore::save` / `load` contracts don't need a schema change
+/// (br-asupersync-7udumi).
+const CSRF_TOKEN_KEY: &str = "__asupersync.csrf_token";
+
+/// Reserved key under which the last-accessed unix timestamp (seconds)
+/// is stored inside `SessionData`. Used by the server-side idle-TTL
+/// expiration check (br-asupersync-7udumi).
+const LAST_ACCESSED_KEY: &str = "__asupersync.last_accessed_unix_secs";
+
+/// HTTP request methods that mutate server-side state. CSRF validation
+/// is required on these methods only — safe methods (GET/HEAD/OPTIONS)
+/// are exempt per the OWASP CSRF Prevention Cheat Sheet.
+fn is_state_changing_method(method: &str) -> bool {
+    matches!(
+        method.to_ascii_uppercase().as_str(),
+        "POST" | "PUT" | "PATCH" | "DELETE"
+    )
+}
+
+/// Returns the current unix-epoch time in seconds. Used for idle-TTL
+/// bookkeeping. Falls back to 0 if the system clock is somehow before
+/// the epoch (defensive — production clocks always exceed 1970).
+fn now_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 
 // ─── SessionStore trait ─────────────────────────────────────────────────────
 
@@ -243,6 +275,30 @@ pub enum SameSite {
     None,
 }
 
+/// Configuration error produced by [`SessionConfig::validate`].
+/// (br-asupersync-7udumi)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionConfigError {
+    /// `SameSite::None` was set without `secure = true`. Modern browsers
+    /// silently drop such cookies; we reject the configuration loudly so
+    /// the misconfiguration is visible at startup, not at the first
+    /// inexplicable session loss.
+    SameSiteNoneWithoutSecure,
+}
+
+impl fmt::Display for SessionConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SameSiteNoneWithoutSecure => write!(
+                f,
+                "session: SameSite=None requires Secure (browsers reject cross-site cookies otherwise)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SessionConfigError {}
+
 /// Session cookie configuration.
 #[derive(Debug, Clone)]
 pub struct SessionConfig {
@@ -252,12 +308,26 @@ pub struct SessionConfig {
     pub cookie_path: String,
     /// Cookie `HttpOnly` attribute.
     pub http_only: bool,
-    /// Cookie `Secure` attribute.
+    /// Cookie `Secure` attribute. **Default: `true`.** Production sites
+    /// MUST serve over HTTPS; flipping this to `false` is only sane in
+    /// dev. (br-asupersync-7udumi)
     pub secure: bool,
     /// Cookie `SameSite` attribute.
     pub same_site: SameSite,
     /// Optional cookie `Max-Age` in seconds.
     pub max_age: Option<u64>,
+    /// Server-side idle timeout in seconds. When `Some(n)` and a session
+    /// has not been accessed for more than `n` seconds, the next request
+    /// treats it as expired (server-side delete + new session id) even if
+    /// the client cookie is still valid. `None` disables the idle check.
+    /// (br-asupersync-7udumi)
+    pub idle_ttl_seconds: Option<u64>,
+    /// Whether to require a CSRF token on state-changing requests
+    /// (POST / PUT / PATCH / DELETE). The token is bound to the session,
+    /// stored under [`CSRF_TOKEN_KEY`] inside `SessionData`, and must be
+    /// supplied by the client as the `X-CSRF-Token` request header.
+    /// **Default: `true`.** (br-asupersync-7udumi)
+    pub csrf_protection: bool,
 }
 
 impl Default for SessionConfig {
@@ -266,10 +336,28 @@ impl Default for SessionConfig {
             cookie_name: DEFAULT_COOKIE_NAME.to_string(),
             cookie_path: "/".to_string(),
             http_only: true,
-            secure: false,
+            // br-asupersync-7udumi: default-secure. Anything else is a
+            // dev convenience that should require an explicit opt-out.
+            secure: true,
             same_site: SameSite::Lax,
             max_age: None,
+            idle_ttl_seconds: None,
+            csrf_protection: true,
         }
+    }
+}
+
+impl SessionConfig {
+    /// Validate the configuration. Currently rejects the
+    /// `SameSite::None && !secure` combination, which browsers silently
+    /// drop. Called from [`SessionLayer::new`] (where it panics on
+    /// failure) and available for explicit pre-flight checks.
+    /// (br-asupersync-7udumi)
+    pub fn validate(&self) -> Result<(), SessionConfigError> {
+        if self.same_site == SameSite::None && !self.secure {
+            return Err(SessionConfigError::SameSiteNoneWithoutSecure);
+        }
+        Ok(())
     }
 }
 
@@ -286,10 +374,20 @@ pub struct SessionLayer<S: SessionStore> {
 
 impl<S: SessionStore> SessionLayer<S> {
     /// Create a new session layer with the given store.
+    ///
+    /// The default configuration is production-safe: `HttpOnly`, `Secure`,
+    /// `SameSite=Lax`, CSRF protection enabled. Customise via the builder
+    /// methods. (br-asupersync-7udumi)
     pub fn new(store: S) -> Self {
+        let config = SessionConfig::default();
+        // Default config is always valid; this expect() is a guard for
+        // future maintainers who change the default — they'll see the
+        // panic at startup rather than discovering broken cookies in
+        // prod.
+        config.validate().expect("default SessionConfig must validate");
         Self {
             store: Arc::new(store),
-            config: SessionConfig::default(),
+            config,
         }
     }
 
@@ -322,9 +420,16 @@ impl<S: SessionStore> SessionLayer<S> {
     }
 
     /// Set the SameSite attribute.
+    ///
+    /// **Panics** if `SameSite::None` is set while `secure = false` —
+    /// browsers silently drop such cookies, so we surface the
+    /// misconfiguration loudly. (br-asupersync-7udumi)
     #[must_use]
     pub fn same_site(mut self, value: SameSite) -> Self {
         self.config.same_site = value;
+        self.config
+            .validate()
+            .expect("SessionConfig validation failed (SameSite=None requires Secure)");
         self
     }
 
@@ -335,8 +440,31 @@ impl<S: SessionStore> SessionLayer<S> {
         self
     }
 
+    /// Set the server-side idle TTL (seconds). Sessions older than this
+    /// since their last access are treated as expired on the next
+    /// request. (br-asupersync-7udumi)
+    #[must_use]
+    pub fn idle_ttl_seconds(mut self, seconds: u64) -> Self {
+        self.config.idle_ttl_seconds = Some(seconds);
+        self
+    }
+
+    /// Toggle CSRF protection. Default is enabled — disable only for
+    /// API-only endpoints that authenticate every request via a bearer
+    /// token unrelated to the session cookie. (br-asupersync-7udumi)
+    #[must_use]
+    pub fn csrf_protection(mut self, enabled: bool) -> Self {
+        self.config.csrf_protection = enabled;
+        self
+    }
+
     /// Wrap a handler with session management.
     pub fn wrap<H: Handler>(self, inner: H) -> SessionMiddleware<S, H> {
+        // Final validation gate — catches manual mutations to
+        // self.config that bypassed the builder's setters.
+        self.config
+            .validate()
+            .expect("SessionConfig validation failed before wrap");
         SessionMiddleware {
             inner,
             store: self.store,
@@ -375,16 +503,72 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
 
         // 2. Load existing session data.
         //    If the client-supplied ID is not in the store, regenerate to
-        //    prevent session-fixation attacks.
+        //    prevent session-fixation attacks. Also: if an idle TTL is
+        //    configured and the session's last_accessed is too old,
+        //    server-side delete + new id (br-asupersync-7udumi).
         let mut session_data = if is_new {
             SessionData::new()
         } else if let Some(data) = self.store.load(&session_id) {
-            data
+            if self.is_idle_expired(&data) {
+                self.store.delete(&session_id);
+                session_id = generate_session_id();
+                is_new = true;
+                SessionData::new()
+            } else {
+                data
+            }
         } else {
             session_id = generate_session_id();
             is_new = true;
             SessionData::new()
         };
+
+        // 2b. Touch the session (refresh last-accessed timestamp). Marks
+        //     the session as modified so the touch is persisted to the
+        //     store on this request. (br-asupersync-7udumi)
+        session_data.insert(LAST_ACCESSED_KEY, now_unix_secs().to_string());
+
+        // 2c. Ensure a CSRF token exists. New sessions get one on first
+        //     touch; existing sessions that pre-date this commit get one
+        //     lazily on first access. (br-asupersync-7udumi)
+        if self.config.csrf_protection
+            && session_data.get(CSRF_TOKEN_KEY).is_none()
+        {
+            session_data.insert(CSRF_TOKEN_KEY, generate_session_id());
+        }
+
+        // 2d. CSRF validation — state-changing requests must present the
+        //     X-CSRF-Token header matching the session's stored token.
+        //     Constant-time comparison prevents timing oracles.
+        //     (br-asupersync-7udumi)
+        if self.config.csrf_protection && is_state_changing_method(&req.method) {
+            // Brand-new sessions on the first request can't have shipped
+            // a token to the client yet, so we don't reject them — but
+            // they have no authenticated state either, so the CSRF
+            // window is empty anyway. Reject only when the session was
+            // loaded from storage (i.e. the client should know the
+            // token).
+            if !is_new {
+                let header_token = req
+                    .headers
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("x-csrf-token"))
+                    .map(|(_, v)| v.as_str())
+                    .unwrap_or("");
+                let session_token = session_data
+                    .get(CSRF_TOKEN_KEY)
+                    .unwrap_or("");
+                if !constant_time_eq_str(header_token, session_token)
+                    || session_token.is_empty()
+                {
+                    return Response::new(
+                        StatusCode::FORBIDDEN,
+                        crate::bytes::Bytes::from_static(b"CSRF token missing or invalid"),
+                    )
+                    .header("content-type", "text/plain; charset=utf-8");
+                }
+            }
+        }
 
         // 3. Inject session data into request extensions.
         //    We use a shared Arc<Mutex<SessionData>> so the handler can modify it.
@@ -434,6 +618,43 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
     }
 }
 
+impl<S: SessionStore, H: Handler> SessionMiddleware<S, H> {
+    /// Returns true if the configured idle TTL has elapsed since the
+    /// session's `LAST_ACCESSED_KEY` timestamp. Sessions without the
+    /// timestamp (pre-7udumi sessions) are treated as fresh on the
+    /// first access; the next request will populate the timestamp.
+    fn is_idle_expired(&self, data: &SessionData) -> bool {
+        let Some(ttl) = self.config.idle_ttl_seconds else {
+            return false;
+        };
+        let Some(last_str) = data.get(LAST_ACCESSED_KEY) else {
+            return false;
+        };
+        let Ok(last) = last_str.parse::<u64>() else {
+            return false;
+        };
+        let now = now_unix_secs();
+        now.saturating_sub(last) > ttl
+    }
+}
+
+/// Constant-time string equality. Used for CSRF-token comparison so a
+/// per-byte timing oracle cannot leak the session's token. Falls back
+/// to `false` immediately on length mismatch — the length is not
+/// secret, so this is acceptable.
+fn constant_time_eq_str(a: &str, b: &str) -> bool {
+    let ab = a.as_bytes();
+    let bb = b.as_bytes();
+    if ab.len() != bb.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in ab.iter().zip(bb.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 // ─── Session handle ─────────────────────────────────────────────────────────
 
 /// Handle to the current session, stored in request extensions.
@@ -469,6 +690,16 @@ impl Session {
     #[must_use]
     pub fn contains(&self, key: &str) -> bool {
         self.0.lock().get(key).is_some()
+    }
+
+    /// Returns the per-session CSRF token if one is set. Handlers should
+    /// echo this into response payloads (HTML form fields, response
+    /// headers, JSON envelopes) so JS clients can replay it as the
+    /// `X-CSRF-Token` header on state-changing requests.
+    /// (br-asupersync-7udumi)
+    #[must_use]
+    pub fn csrf_token(&self) -> Option<String> {
+        self.0.lock().get(CSRF_TOKEN_KEY).map(ToString::to_string)
     }
 }
 
