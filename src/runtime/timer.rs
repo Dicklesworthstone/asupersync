@@ -2,8 +2,38 @@
 //!
 //! This module provides a small min-heap of `(deadline, task)` pairs to support
 //! deadline-driven wakeups.
+//!
+//! # Per-task cancel + dedup (br-asupersync-40mcc2)
+//!
+//! The heap supports per-task cancellation and reschedule-dedup via a
+//! lazy-deletion scheme backed by a per-task generation map:
+//!
+//! * Each `(task, deadline)` heap entry carries the generation number
+//!   that was assigned to the task when the entry was pushed.
+//! * `current_gen[task]` records the most-recently-issued generation
+//!   for that task.
+//! * On `pop_expired_into`, an entry is **live** iff its generation
+//!   matches `current_gen[entry.task]`. Stale entries (entries whose
+//!   `task` was rescheduled or cancelled after the entry was pushed)
+//!   are silently skipped.
+//! * On `cancel(task)`, we bump `current_gen[task]` so all in-flight
+//!   heap entries for that task become stale immediately. The entries
+//!   themselves stay in the heap until naturally popped, but they
+//!   never fire a wakeup.
+//! * On `insert(task, deadline)` we ALSO bump `current_gen[task]` —
+//!   meaning any prior entry for the task is implicitly cancelled by
+//!   the reschedule. This is the dedup behaviour: only the
+//!   most-recently-inserted entry for a task is live.
+//!
+//! Pre-fix the heap had no per-task index at all — a task that
+//! rescheduled N times before its deadline accumulated N entries; on
+//! cancel, the entry stayed live until its deadline arrived and then
+//! fired a spurious wake on the (now-zombie) task. After-fix memory
+//! is bounded by `live_timers + zombie_entries_pending_pop`; the
+//! zombie count is bounded by the heap's pop rate × max-deadline.
 
 use crate::types::{TaskId, Time};
+use crate::util::DetHashMap;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
@@ -41,6 +71,11 @@ impl PartialOrd for TimerEntry {
 pub struct TimerHeap {
     heap: BinaryHeap<TimerEntry>,
     next_generation: u64,
+    /// Most-recently-issued generation per task. An entry in the heap
+    /// is "live" iff its `generation` field equals the value here.
+    /// Tasks not present in this map have no live timer.
+    /// br-asupersync-40mcc2.
+    current_gen: DetHashMap<TaskId, u64>,
 }
 
 impl TimerHeap {
@@ -52,10 +87,31 @@ impl TimerHeap {
     }
 
     /// Returns the number of timers in the heap.
+    ///
+    /// **Note**: this reflects the underlying storage, including
+    /// stale-but-not-yet-popped entries. For the count of LIVE timers
+    /// (entries that will actually fire a wakeup), use
+    /// [`live_len`](Self::live_len).
     #[inline]
     #[must_use]
     pub fn len(&self) -> usize {
         self.heap.len()
+    }
+
+    /// Returns the number of LIVE timers — entries whose generation
+    /// still matches `current_gen[task]`. A live timer will fire a
+    /// wakeup when its deadline elapses; a stale timer will be
+    /// silently dropped on pop.
+    ///
+    /// br-asupersync-40mcc2: this is O(N) over the heap because
+    /// BinaryHeap doesn't expose internal traversal cheaply. Use
+    /// it for diagnostics, not the hot path.
+    #[must_use]
+    pub fn live_len(&self) -> usize {
+        self.heap
+            .iter()
+            .filter(|e| self.current_gen.get(&e.task) == Some(&e.generation))
+            .count()
     }
 
     /// Returns true if the heap is empty.
@@ -66,10 +122,18 @@ impl TimerHeap {
     }
 
     /// Adds a timer for a task with the given deadline.
+    ///
+    /// br-asupersync-40mcc2: bumps the per-task generation so any
+    /// PRIOR entry for this task in the heap becomes stale and will
+    /// be silently dropped on the next pop. Only the most-recently-
+    /// inserted entry for a given task is live.
     #[inline]
     pub fn insert(&mut self, task: TaskId, deadline: Time) {
         let generation = self.next_generation;
         self.next_generation = self.next_generation.wrapping_add(1);
+        // Bump current_gen[task] so any prior entry is implicitly
+        // cancelled by this reschedule.
+        self.current_gen.insert(task, generation);
         self.heap.push(TimerEntry {
             deadline,
             task,
@@ -77,7 +141,29 @@ impl TimerHeap {
         });
     }
 
-    /// Returns the earliest deadline, if any.
+    /// Cancel any pending timer for `task`.
+    ///
+    /// br-asupersync-40mcc2: bumps the per-task generation so all
+    /// in-flight heap entries for this task become stale. The entries
+    /// themselves remain in the heap until naturally popped, but they
+    /// will not fire a wakeup. Returns `true` if a timer was active
+    /// (i.e. the task had an entry in `current_gen`); `false`
+    /// otherwise.
+    pub fn cancel(&mut self, task: TaskId) -> bool {
+        if self.current_gen.remove(&task).is_none() {
+            return false;
+        }
+        // Note: we deliberately do NOT walk the heap to remove the
+        // stale entry. BinaryHeap doesn't support O(log n) remove-by-
+        // key; lazy deletion is the standard pattern. The entry
+        // stays in the heap (consuming O(1) memory) until its
+        // deadline arrives and pop_expired_into discovers it stale.
+        true
+    }
+
+    /// Returns the earliest deadline, if any. May reflect a stale
+    /// (cancelled or rescheduled) entry — use [`Self::pop_expired_into`]
+    /// to drain stale-and-expired entries.
     #[inline]
     #[must_use]
     pub fn peek_deadline(&self) -> Option<Time> {
@@ -88,18 +174,37 @@ impl TimerHeap {
     ///
     /// The buffer is cleared before use. Using a reusable buffer avoids a heap
     /// allocation on every tick when no timers have expired.
+    ///
+    /// br-asupersync-40mcc2: stale entries (those whose generation no
+    /// longer matches `current_gen[task]`) are silently skipped — they
+    /// represent cancelled or rescheduled timers and must NOT fire a
+    /// wakeup. Pre-fix the heap had no per-task index, so cancelled
+    /// tasks fired spurious wakes that polluted scheduler stats and
+    /// wasted reactor dispatch cycles.
     pub fn pop_expired_into(&mut self, now: Time, expired: &mut Vec<TaskId>) {
         expired.clear();
         while let Some(entry) = self.heap.peek() {
-            if entry.deadline <= now {
-                if let Some(entry) = self.heap.pop() {
-                    expired.push(entry.task);
-                } else {
-                    break;
-                }
-            } else {
+            if entry.deadline > now {
                 break;
             }
+            // Pop the head; check liveness AFTER popping so we don't
+            // leave a stale-but-expired entry blocking a live entry
+            // behind it.
+            let entry = match self.heap.pop() {
+                Some(e) => e,
+                None => break,
+            };
+            let is_live = self
+                .current_gen
+                .get(&entry.task)
+                .map_or(false, |gen| *gen == entry.generation);
+            if is_live {
+                // Fired — remove the per-task tracking so a later
+                // insert() starts fresh.
+                self.current_gen.remove(&entry.task);
+                expired.push(entry.task);
+            }
+            // If !is_live, silently drop the stale entry and continue.
         }
     }
 
@@ -116,6 +221,7 @@ impl TimerHeap {
     /// Clears all timers.
     pub fn clear(&mut self) {
         self.heap.clear();
+        self.current_gen.clear();
     }
 }
 
@@ -531,5 +637,175 @@ mod tests {
                 "late-only noise should remain strictly after the earlier frontier",
             );
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // br-asupersync-40mcc2 — per-task cancel + reschedule dedup
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Reschedule MUST dedup the prior entry. Pre-fix every insert
+    /// added a new heap entry without invalidating the previous one;
+    /// long-lived tasks accumulated O(reschedules) entries. Post-fix
+    /// the per-task generation is bumped on insert, so only the
+    /// most-recently-inserted entry is live.
+    #[test]
+    fn reschedule_dedups_prior_entry() {
+        let mut heap = TimerHeap::new();
+        let t = task(1);
+
+        // Insert N times with monotonically increasing deadlines.
+        // Pre-fix this would fire N wakeups; post-fix only the latest.
+        heap.insert(t, Time::from_millis(10));
+        heap.insert(t, Time::from_millis(20));
+        heap.insert(t, Time::from_millis(30));
+
+        // live_len reports just 1 — the latest insert won.
+        assert_eq!(
+            heap.live_len(),
+            1,
+            "reschedule must dedup: only the latest entry is live (got {} live, raw heap size {})",
+            heap.live_len(),
+            heap.len()
+        );
+
+        // Drain past the latest deadline. Should fire exactly ONCE.
+        let fired = heap.pop_expired(Time::from_millis(100));
+        assert_eq!(
+            fired,
+            vec![t],
+            "reschedule must fire wakeup exactly once (the latest)"
+        );
+
+        // Heap is now empty (live entry popped, stale entries silently
+        // dropped during the same drain).
+        assert!(heap.is_empty(), "drain leaves heap empty");
+    }
+
+    /// Cancel makes all prior entries for the task stale; subsequent
+    /// pop_expired_into must NOT include the task. Pre-fix the
+    /// heap had no cancel API and entries fired spurious wakes on
+    /// dropped/cancelled tasks.
+    #[test]
+    fn cancel_drops_pending_wakeup() {
+        let mut heap = TimerHeap::new();
+        let t = task(1);
+
+        heap.insert(t, Time::from_millis(10));
+        assert_eq!(heap.live_len(), 1);
+
+        let did_cancel = heap.cancel(t);
+        assert!(did_cancel, "cancel of an active timer returns true");
+        assert_eq!(
+            heap.live_len(),
+            0,
+            "cancel makes the entry stale — live_len drops to 0"
+        );
+
+        // The stale entry is still in the underlying heap (lazy
+        // deletion) but pop_expired_into MUST NOT include it.
+        let fired = heap.pop_expired(Time::from_millis(100));
+        assert!(
+            fired.is_empty(),
+            "cancelled task must NOT fire a wakeup; got {fired:?}"
+        );
+        assert!(heap.is_empty(), "stale entry drained during pop");
+
+        // Cancel of an already-cancelled (or never-set) timer returns
+        // false — gives callers an idempotent path without panic.
+        let did_recancel = heap.cancel(t);
+        assert!(!did_recancel, "second cancel of same task returns false");
+    }
+
+    /// Cancel + immediate reschedule must establish the new timer
+    /// cleanly — the new insert wins, and ONLY it fires.
+    #[test]
+    fn cancel_then_insert_establishes_new_timer_cleanly() {
+        let mut heap = TimerHeap::new();
+        let t = task(1);
+
+        heap.insert(t, Time::from_millis(10));
+        assert!(heap.cancel(t));
+        heap.insert(t, Time::from_millis(50));
+
+        let fired_at_20 = heap.pop_expired(Time::from_millis(20));
+        assert!(
+            fired_at_20.is_empty(),
+            "rescheduled timer at t=50 must NOT fire at t=20"
+        );
+
+        let fired_at_100 = heap.pop_expired(Time::from_millis(100));
+        assert_eq!(
+            fired_at_100,
+            vec![t],
+            "rescheduled timer fires at the new (later) deadline"
+        );
+    }
+
+    /// Memory-bound regression: N reschedules of the SAME task should
+    /// leave at most N raw heap entries pre-pop, and exactly 0 after
+    /// a drain past the latest deadline. live_len stays at 1 across
+    /// the reschedule sequence (only the latest is live).
+    #[test]
+    fn reschedule_storm_memory_bounded_by_drain() {
+        let mut heap = TimerHeap::new();
+        let t = task(1);
+
+        const N: u64 = 1000;
+        for i in 1..=N {
+            heap.insert(t, Time::from_millis(i * 10));
+        }
+
+        // Raw heap size is N (lazy deletion); live_len is 1.
+        assert_eq!(heap.len(), N as usize);
+        assert_eq!(
+            heap.live_len(),
+            1,
+            "across N reschedules, only the latest entry is live"
+        );
+
+        // Drain past the latest deadline.
+        let fired = heap.pop_expired(Time::from_millis(N * 10 + 1000));
+        assert_eq!(
+            fired,
+            vec![t],
+            "reschedule storm fires the task exactly ONCE (the latest)"
+        );
+        assert!(
+            heap.is_empty(),
+            "drain past the latest deadline reclaims all stale entries"
+        );
+    }
+
+    /// Multiple tasks rescheduling independently: each task fires
+    /// only at its OWN latest deadline; cancellations of one task
+    /// don't affect others.
+    #[test]
+    fn multiple_tasks_independent_dedup_and_cancel() {
+        let mut heap = TimerHeap::new();
+        let t1 = task(1);
+        let t2 = task(2);
+        let t3 = task(3);
+
+        // t1 reschedules; t2 cancels; t3 single insert.
+        heap.insert(t1, Time::from_millis(10));
+        heap.insert(t1, Time::from_millis(20));
+        heap.insert(t2, Time::from_millis(15));
+        heap.cancel(t2);
+        heap.insert(t3, Time::from_millis(25));
+
+        assert_eq!(
+            heap.live_len(),
+            2,
+            "t1 latest + t3 = 2 live; t1 stale + t2 cancelled = 0 extra"
+        );
+
+        let mut fired = heap.pop_expired(Time::from_millis(100));
+        fired.sort();
+        let expected = vec![t1, t3];
+        assert_eq!(
+            fired, expected,
+            "t1 fires once at its latest, t3 fires once, t2 silenced by cancel"
+        );
+        assert!(heap.is_empty());
     }
 }

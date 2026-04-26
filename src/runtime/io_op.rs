@@ -102,9 +102,24 @@ impl IoOp {
                 Ok(duration)
             }
             Err(err) => {
-                if err.kind() == ErrorKind::ObligationAlreadyResolved {
-                    self.resolved = true;
-                }
+                // br-asupersync-bg1fil: any error from resolve means we
+                // ATTEMPTED resolution. Pre-fix only ObligationAlready-
+                // Resolved disarmed the handle; every other error kind
+                // (transient lock-busy, runtime in-shutdown, etc.) left
+                // self.resolved = false, so Drop would panic — even
+                // though the obligation was either already in a terminal
+                // state (lock-busy implies someone else is finishing it)
+                // OR the runtime is going down anyway.
+                //
+                // Disarm on EVERY error kind. The Err return still
+                // surfaces the failure to the caller, who can decide
+                // whether to retry via a new IoOp (the obligation has
+                // either been finished by another agent or will be
+                // reaped by the runtime's GC/timeout sweep). Drop's
+                // panic is preserved for the actual safety case it was
+                // designed for: developer forgot to call complete() /
+                // cancel() / abort() / into_raw() entirely.
+                self.resolved = true;
                 Err(err)
             }
         }
@@ -547,5 +562,61 @@ mod tests {
         );
         crate::assert_with_log!(op.is_resolved(), "handle disarmed", true, op.is_resolved());
         crate::test_complete!("already_resolved_state_disarms_io_op_handle");
+    }
+
+    /// br-asupersync-bg1fil regression: any resolve error (not just
+    /// ObligationAlreadyResolved) MUST disarm the IoOp handle so Drop
+    /// doesn't panic. Pre-fix only AlreadyResolved was tolerated;
+    /// transient errors (e.g. an obligation id that can't be located
+    /// because the table was reset, or a non-existent slot) left
+    /// self.resolved = false and Drop panicked, blocking shutdown
+    /// recovery on a runtime that was already mid-shutdown.
+    ///
+    /// We exercise this by producing a transient error from the
+    /// resolve closure directly via the internal resolve_with helper
+    /// — passing a closure that always returns a non-AlreadyResolved
+    /// error. After that call, the handle MUST be disarmed and Drop
+    /// MUST NOT panic.
+    #[test]
+    fn resolve_with_transient_error_disarms_handle() {
+        init_test("resolve_with_transient_error_disarms_handle");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let task_id = create_task(&mut state, root);
+
+        let mut op = IoOp::submit(&mut state, task_id, root, Some("transient err".into()))
+            .expect("submit");
+
+        // Inject a transient error via the private resolve_with helper.
+        // The closure ignores the obligation and synthesizes a non-
+        // AlreadyResolved error (use TaskNotOwned as a representative
+        // transient/non-terminal error kind).
+        let err = op
+            .resolve_with(&mut state, |_state, _obl| {
+                Err(Error::new(ErrorKind::TaskNotOwned)
+                    .with_message("synthetic transient error"))
+            })
+            .expect_err("synthetic resolve must fail");
+
+        crate::assert_with_log!(
+            err.kind() == ErrorKind::TaskNotOwned,
+            "transient error kind preserved",
+            ErrorKind::TaskNotOwned,
+            err.kind()
+        );
+        crate::assert_with_log!(
+            op.is_resolved(),
+            "br-bg1fil: handle disarmed after non-AlreadyResolved error",
+            true,
+            op.is_resolved()
+        );
+
+        // Now reap the obligation so Drop has nothing dangling, then
+        // explicitly Drop op to confirm no panic. (If the disarm logic
+        // were broken, this Drop would panic and fail the test.)
+        let _ = state.abort_obligation(op.id(), ObligationAbortReason::Cancel);
+        drop(op);
+
+        crate::test_complete!("resolve_with_transient_error_disarms_handle");
     }
 }
