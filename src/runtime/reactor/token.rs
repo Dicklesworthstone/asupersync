@@ -236,8 +236,8 @@ impl TokenSlab {
             let index = self.entries.len() as u32;
             #[cfg(target_pointer_width = "32")]
             assert!(
-                index < 0xFF_FFFF,
-                "TokenSlab capacity exceeded 16.7M entries on 32-bit platform"
+                self.entries.len() <= SlabToken::MAX_INDEX as usize,
+                "TokenSlab capacity exceeded 32-bit packed token index capacity"
             );
             #[cfg(target_pointer_width = "64")]
             assert!(
@@ -528,7 +528,7 @@ mod tests {
         #[cfg(target_pointer_width = "64")]
         let max_index = u32::MAX - 1;
         #[cfg(target_pointer_width = "32")]
-        let max_index = 0xFF_FFFF - 1;
+        let max_index = SlabToken::MAX_INDEX;
 
         let token = SlabToken::new(max_index, SlabToken::MAX_GENERATION);
         let packed = token.to_usize();

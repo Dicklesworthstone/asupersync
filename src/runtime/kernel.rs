@@ -796,11 +796,11 @@ impl ControllerRegistry {
                 }),
         );
         controller.last_action_label.clone_from(&decision.label);
-        controller.decisions_this_epoch += 1;
         let within_budget = controller.decisions_this_epoch
-            <= controller.registration.budget.max_decisions_per_epoch;
+            < controller.registration.budget.max_decisions_per_epoch;
+        controller.decisions_this_epoch = controller.decisions_this_epoch.saturating_add(1);
         if !within_budget {
-            controller.budget_overruns += 1;
+            controller.budget_overruns = controller.budget_overruns.saturating_add(1);
         }
 
         self.record_ledger_entry(
@@ -2042,6 +2042,42 @@ mod tests {
         registry.record_decision(&decision);
         registry.record_decision(&decision);
         assert_eq!(registry.budget_overruns(id), Some(2));
+    }
+
+    #[test]
+    fn decision_counters_saturate_without_wrapping() {
+        let mut registry = ControllerRegistry::new();
+        let id = registry
+            .register(test_registration("saturating-counters"))
+            .unwrap();
+        let snap_id = registry.next_snapshot_id();
+        let decision = ControllerDecision {
+            controller_id: id,
+            snapshot_id: snap_id,
+            label: "spam".to_string(),
+            payload: serde_json::Value::Null,
+            confidence: 0.9,
+            fallback_label: "noop".to_string(),
+        };
+
+        let controller = registry
+            .controllers
+            .get_mut(&id)
+            .expect("controller must exist");
+        controller.registration.budget.max_decisions_per_epoch = u32::MAX;
+        controller.decisions_this_epoch = u32::MAX;
+        controller.budget_overruns = u32::MAX;
+
+        assert!(
+            !registry.record_decision(&decision),
+            "a saturated decision counter must stay over-budget instead of wrapping back in-budget"
+        );
+        let controller = registry
+            .controllers
+            .get(&id)
+            .expect("controller must exist");
+        assert_eq!(controller.decisions_this_epoch, u32::MAX);
+        assert_eq!(controller.budget_overruns, u32::MAX);
     }
 
     #[test]

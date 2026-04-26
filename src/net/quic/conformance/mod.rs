@@ -17,7 +17,7 @@
 //! Each test maps to a specific RFC requirement with structured results.
 
 use crate::cx::test_cx;
-use crate::net::quic::{endpoint::QuicEndpoint, config::QuicConfig};
+use crate::net::quic::{config::QuicConfig, endpoint::QuicEndpoint};
 use crate::tls::RootCertStore;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -76,7 +76,6 @@ pub const RFC9000_HANDSHAKE_CASES: &[ConformanceCase] = &[
         description: "QUIC MUST use TLS 1.3 or later for cryptographic handshake",
         test_fn: test_tls_version_requirement,
     },
-
     ConformanceCase {
         id: "RFC9000-7.2",
         section: "7",
@@ -84,7 +83,6 @@ pub const RFC9000_HANDSHAKE_CASES: &[ConformanceCase] = &[
         description: "QUIC endpoints MUST support ALPN and include at least one protocol",
         test_fn: test_alpn_support_requirement,
     },
-
     ConformanceCase {
         id: "RFC9000-7.3",
         section: "7",
@@ -92,7 +90,6 @@ pub const RFC9000_HANDSHAKE_CASES: &[ConformanceCase] = &[
         description: "Client MUST verify server certificate unless explicitly disabled",
         test_fn: test_certificate_verification_requirement,
     },
-
     ConformanceCase {
         id: "RFC9000-7.4",
         section: "7",
@@ -100,7 +97,6 @@ pub const RFC9000_HANDSHAKE_CASES: &[ConformanceCase] = &[
         description: "Endpoints SHOULD support certificate-based client authentication",
         test_fn: test_client_certificate_support,
     },
-
     // Section 4: Connection Establishment
     ConformanceCase {
         id: "RFC9000-4.1",
@@ -109,7 +105,6 @@ pub const RFC9000_HANDSHAKE_CASES: &[ConformanceCase] = &[
         description: "Connection IDs MUST be generated uniquely per connection",
         test_fn: test_connection_id_uniqueness,
     },
-
     ConformanceCase {
         id: "RFC9000-4.2",
         section: "4",
@@ -117,7 +112,6 @@ pub const RFC9000_HANDSHAKE_CASES: &[ConformanceCase] = &[
         description: "Handshake MUST complete before application data transmission",
         test_fn: test_handshake_completion_ordering,
     },
-
     // Section 6: Version Negotiation
     ConformanceCase {
         id: "RFC9000-6.1",
@@ -126,7 +120,6 @@ pub const RFC9000_HANDSHAKE_CASES: &[ConformanceCase] = &[
         description: "Endpoints MUST handle version negotiation correctly",
         test_fn: test_version_negotiation_support,
     },
-
     // Section 18: Transport Parameters
     ConformanceCase {
         id: "RFC9000-18.1",
@@ -135,7 +128,6 @@ pub const RFC9000_HANDSHAKE_CASES: &[ConformanceCase] = &[
         description: "Endpoints MUST exchange transport parameters during handshake",
         test_fn: test_transport_parameter_exchange,
     },
-
     ConformanceCase {
         id: "RFC9000-18.2",
         section: "18",
@@ -143,7 +135,6 @@ pub const RFC9000_HANDSHAKE_CASES: &[ConformanceCase] = &[
         description: "Invalid transport parameters MUST cause handshake failure",
         test_fn: test_invalid_transport_parameters,
     },
-
     // Section 17: Packet Format
     ConformanceCase {
         id: "RFC9000-17.1",
@@ -152,7 +143,6 @@ pub const RFC9000_HANDSHAKE_CASES: &[ConformanceCase] = &[
         description: "Initial packets MUST be handled according to packet format rules",
         test_fn: test_initial_packet_handling,
     },
-
     // Section 12: Error Handling
     ConformanceCase {
         id: "RFC9000-12.1",
@@ -190,10 +180,12 @@ fn test_alpn_support_requirement() -> ConformanceResult {
 
     // Test 1: Empty ALPN should be allowed (quinn will use default)
     match QuicEndpoint::client(&cx, &config) {
-        Ok(_) => {},
-        Err(e) => return ConformanceResult::Fail {
-            reason: format!("Client creation failed with empty ALPN: {}", e),
-        },
+        Ok(_) => {}
+        Err(e) => {
+            return ConformanceResult::Fail {
+                reason: format!("Client creation failed with empty ALPN: {}", e),
+            };
+        }
     }
 
     // Test 2: Custom ALPN should be supported
@@ -212,10 +204,12 @@ fn test_certificate_verification_requirement() -> ConformanceResult {
 
     // Test 1: Normal certificate verification should be enabled by default
     match QuicEndpoint::client(&cx, &config) {
-        Ok(_) => {},
-        Err(e) => return ConformanceResult::Fail {
-            reason: format!("Default client creation failed: {}", e),
-        },
+        Ok(_) => {}
+        Err(e) => {
+            return ConformanceResult::Fail {
+                reason: format!("Default client creation failed: {}", e),
+            };
+        }
     }
 
     // Test 2: When insecure_skip_verify is enabled, verification should be skipped
@@ -330,16 +324,26 @@ pub fn run_conformance_tests() -> ConformanceReport {
         }
 
         match &result {
-            ConformanceResult::Pass => stats.passing += 1,
+            ConformanceResult::Pass => {
+                stats.passing += 1;
+                match case.level {
+                    RequirementLevel::Must => stats.must_passing += 1,
+                    RequirementLevel::Should => stats.should_passing += 1,
+                    RequirementLevel::May => stats.may_passing += 1,
+                }
+            }
             ConformanceResult::Fail { .. } => stats.failing += 1,
             ConformanceResult::Skipped { .. } => stats.skipped += 1,
             ConformanceResult::ExpectedFailure { .. } => stats.expected_failures += 1,
         }
 
-        results.insert(case.id.to_string(), ConformanceTestResult {
-            case: case.clone(),
-            result,
-        });
+        results.insert(
+            case.id.to_string(),
+            ConformanceTestResult {
+                case: case.clone(),
+                result,
+            },
+        );
     }
 
     ConformanceReport { results, stats }
@@ -351,6 +355,9 @@ pub struct ConformanceStats {
     pub must_total: usize,
     pub should_total: usize,
     pub may_total: usize,
+    pub must_passing: usize,
+    pub should_passing: usize,
+    pub may_passing: usize,
     pub passing: usize,
     pub failing: usize,
     pub skipped: usize,
@@ -362,8 +369,7 @@ impl ConformanceStats {
         if self.must_total == 0 {
             return 1.0;
         }
-        let must_passing = self.passing.min(self.must_total);
-        must_passing as f64 / self.must_total as f64
+        self.must_passing as f64 / self.must_total as f64
     }
 
     pub fn overall_score(&self) -> f64 {
@@ -407,10 +413,18 @@ impl ConformanceReport {
              - **Failing:** {}\n\
              - **Skipped:** {}\n\
              - **Expected failures:** {}\n\n",
-            self.stats.passing.min(self.stats.must_total), self.stats.must_total, self.stats.must_score() * 100.0,
-            self.stats.passing.min(self.stats.should_total), self.stats.should_total,
-            if self.stats.should_total > 0 { self.stats.passing.min(self.stats.should_total) as f64 / self.stats.should_total as f64 * 100.0 } else { 100.0 },
-            self.stats.passing.min(self.stats.may_total), self.stats.may_total,
+            self.stats.must_passing,
+            self.stats.must_total,
+            self.stats.must_score() * 100.0,
+            self.stats.should_passing,
+            self.stats.should_total,
+            if self.stats.should_total > 0 {
+                self.stats.should_passing as f64 / self.stats.should_total as f64 * 100.0
+            } else {
+                100.0
+            },
+            self.stats.may_passing,
+            self.stats.may_total,
             self.stats.overall_score() * 100.0,
             self.stats.passing,
             self.stats.failing,
@@ -450,7 +464,8 @@ impl ConformanceReport {
         // Compliance verdict
         if self.stats.must_score() >= 0.95 {
             report.push_str("## ✅ CONFORMANCE VERDICT: COMPLIANT\n\n");
-            report.push_str("This implementation meets RFC 9000 MUST requirements (≥95% passing).\n");
+            report
+                .push_str("This implementation meets RFC 9000 MUST requirements (≥95% passing).\n");
         } else {
             report.push_str("## ❌ CONFORMANCE VERDICT: NON-COMPLIANT\n\n");
             report.push_str(&format!(
@@ -465,7 +480,14 @@ impl ConformanceReport {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
 
     #[test]
@@ -489,10 +511,13 @@ mod tests {
 
     #[test]
     fn conformance_stats_calculation() {
-        let mut stats = ConformanceStats {
+        let stats = ConformanceStats {
             must_total: 10,
             should_total: 5,
             may_total: 2,
+            must_passing: 10,
+            should_passing: 2,
+            may_passing: 0,
             passing: 12,
             failing: 2,
             skipped: 3,
@@ -501,5 +526,9 @@ mod tests {
 
         assert_eq!(stats.must_score(), 1.0); // All MUST tests passing
         assert_eq!(stats.overall_score(), 12.0 / 17.0); // 12 passing out of 17 total
+        assert_eq!(
+            stats.should_passing as f64 / stats.should_total as f64,
+            2.0 / 5.0
+        );
     }
 }
