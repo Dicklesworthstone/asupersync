@@ -848,6 +848,17 @@ impl Connection {
     }
 
     /// Decode accumulated headers for a stream.
+    ///
+    /// br-asupersync-vqpx88: applies RFC 9113 §8.3 / §8.3.1 / §8.3.2
+    /// pseudo-header structural validation to the HPACK-decoded
+    /// header block. Direction is inferred from `self.is_client`:
+    /// when we are a server, incoming HEADERS frames carry requests
+    /// (validated against §8.3.1); when we are a client, incoming
+    /// HEADERS frames carry responses (validated against §8.3.2).
+    /// Per RFC 9113 §8.1.1 a malformed message is a stream error of
+    /// type `PROTOCOL_ERROR` — *not* a connection error — so the
+    /// rejection is scoped to the offending stream and the
+    /// connection survives to serve other peers.
     fn decode_headers(
         &mut self,
         stream_id: u32,
@@ -877,6 +888,14 @@ impl Connection {
         // Decode headers
         let mut src = combined.freeze();
         let headers = self.hpack_decoder.decode(&mut src)?;
+
+        // br-asupersync-vqpx88: RFC 9113 §8.3.1/§8.3.2 pseudo-header
+        // structural validation. Server-side (we are not a client)
+        // sees requests; client-side sees responses.
+        let is_request = !self.is_client;
+        if let Err(why) = validate_h2_pseudo_headers(&headers, is_request) {
+            return Err(H2Error::stream(stream_id, ErrorCode::ProtocolError, why));
+        }
 
         Ok(Some(ReceivedFrame::Headers {
             stream_id,
@@ -917,6 +936,21 @@ impl Connection {
 
         let mut src = combined.freeze();
         let headers = self.hpack_decoder.decode(&mut src)?;
+
+        // br-asupersync-vqpx88: PUSH_PROMISE carries request semantics
+        // (RFC 9113 §8.4 — server-pushed request that the server
+        // promises to fulfil). The pseudo-header set is validated as
+        // a request regardless of our local role; per §8.4 a client
+        // receiving an invalid PUSH_PROMISE MUST treat it as a
+        // stream error of type PROTOCOL_ERROR scoped to the
+        // promised stream (not the associated stream).
+        if let Err(why) = validate_h2_pseudo_headers(&headers, /* is_request = */ true) {
+            return Err(H2Error::stream(
+                promised_stream_id,
+                ErrorCode::ProtocolError,
+                why,
+            ));
+        }
 
         Ok(Some(ReceivedFrame::PushPromise {
             stream_id: associated_stream_id,
@@ -1509,6 +1543,185 @@ pub enum ReceivedFrame {
         error_code: ErrorCode,
         debug_data: Bytes,
     },
+}
+
+/// RFC 9113 §8.3 / §8.3.1 / §8.3.2 pseudo-header structural validation
+/// for an HPACK-decoded header block.
+///
+/// Returns `Err(reason)` on any malformed shape so the caller can map it
+/// to `ErrorCode::ProtocolError`. The first failure short-circuits.
+///
+/// **What this validates** (the §8.3 structural rules):
+///
+/// 1. **Sequencing**: every pseudo-header (a header whose name starts
+///    with `:`) MUST appear *before* any regular header. Once a
+///    regular header is seen, encountering a pseudo-header is malformed
+///    (RFC 9113 §8.3, last paragraph).
+/// 2. **No duplicates**: any given pseudo-header MUST appear at most
+///    once (RFC 9113 §8.3.1, §8.3.2). HPACK can compress repeats but
+///    the validation runs on the decoded list, so duplicates are
+///    rejected.
+/// 3. **No unknown pseudo-headers**: only `:method`, `:scheme`,
+///    `:path`, `:authority`, `:status`, `:protocol` (the last for
+///    extended CONNECT, RFC 8441) are defined. Anything else with a
+///    leading `:` is malformed (RFC 9113 §8.3).
+/// 4. **Direction-specific required/forbidden sets**:
+///    - **request** (`is_request == true`, server receiving HEADERS):
+///      MUST have `:method`. Non-CONNECT requests MUST also have
+///      `:scheme` and `:path`. CONNECT requests MUST have `:authority`
+///      and MUST NOT have `:scheme` or `:path` (RFC 9113 §8.5). Must
+///      NOT have `:status`.
+///    - **response** (`is_request == false`, client receiving HEADERS):
+///      MUST have `:status` and MUST NOT have `:method`/`:scheme`/
+///      `:path`/`:authority`/`:protocol` (RFC 9113 §8.3.2).
+/// 5. **Regular header name lower-case**: regular header names MUST
+///    NOT contain uppercase ASCII (RFC 9113 §8.2.1). Pseudo-headers
+///    are exempt.
+///
+/// **What this does NOT validate** (deeper §8.3.1 value-syntax checks
+/// — path-form, scheme syntax, authority form, status range, method
+/// token, header-value byte set): those are the depth implemented in
+/// `crate::http::h3_native::validate_request_pseudo_headers_with_settings`
+/// and represent a follow-up. The structural rules above are the ones
+/// flagged by the bead and are the highest-value subset because they
+/// catch the entire class of confusion attacks where a peer smuggles
+/// a `:method`/`:authority`/`:status` *after* a regular header to bypass
+/// upstream filters that only inspect the first header pair.
+fn validate_h2_pseudo_headers(headers: &[Header], is_request: bool) -> Result<(), &'static str> {
+    let mut seen_regular = false;
+    let mut seen_method = false;
+    let mut seen_scheme = false;
+    let mut seen_path = false;
+    let mut seen_authority = false;
+    let mut seen_status = false;
+    let mut seen_protocol = false;
+    let mut method_value: Option<&[u8]> = None;
+
+    for h in headers {
+        let name = h.name.as_bytes();
+        if name.is_empty() {
+            return Err("empty header name");
+        }
+        if name.first().copied() == Some(b':') {
+            // Pseudo-header.
+            if seen_regular {
+                return Err("pseudo-header field appears after a regular header field \
+                     (RFC 9113 §8.3 — header-block ordering violation)");
+            }
+            match name {
+                b":method" => {
+                    if seen_method {
+                        return Err("duplicate :method pseudo-header");
+                    }
+                    seen_method = true;
+                    method_value = Some(h.value.as_bytes());
+                }
+                b":scheme" => {
+                    if seen_scheme {
+                        return Err("duplicate :scheme pseudo-header");
+                    }
+                    seen_scheme = true;
+                }
+                b":path" => {
+                    if seen_path {
+                        return Err("duplicate :path pseudo-header");
+                    }
+                    seen_path = true;
+                }
+                b":authority" => {
+                    if seen_authority {
+                        return Err("duplicate :authority pseudo-header");
+                    }
+                    seen_authority = true;
+                }
+                b":status" => {
+                    if seen_status {
+                        return Err("duplicate :status pseudo-header");
+                    }
+                    seen_status = true;
+                }
+                b":protocol" => {
+                    if seen_protocol {
+                        return Err("duplicate :protocol pseudo-header");
+                    }
+                    seen_protocol = true;
+                }
+                _ => {
+                    return Err("unknown pseudo-header field \
+                         (RFC 9113 §8.3 — only :method/:scheme/:path/:authority/:status \
+                         and :protocol for extended CONNECT are defined)");
+                }
+            }
+        } else {
+            // Regular header. Once we've seen one, no further pseudo-
+            // headers may appear.
+            seen_regular = true;
+            // RFC 9113 §8.2.1: regular header names MUST NOT contain
+            // uppercase ASCII characters.
+            if name.iter().any(|b| b.is_ascii_uppercase()) {
+                return Err("regular header field name contains uppercase ASCII \
+                     (RFC 9113 §8.2.1 violation)");
+            }
+        }
+    }
+
+    // Direction-specific required/forbidden checks.
+    if is_request {
+        if seen_status {
+            return Err("request must not include :status pseudo-header");
+        }
+        if !seen_method {
+            return Err("request missing required :method pseudo-header");
+        }
+        let is_connect = method_value == Some(b"CONNECT");
+        if is_connect {
+            if !seen_authority {
+                return Err("CONNECT request missing required :authority pseudo-header");
+            }
+            // RFC 9113 §8.5: CONNECT requests MUST NOT include :scheme
+            // or :path. Extended CONNECT (RFC 8441 / :protocol) is
+            // the documented exception, allowed only when negotiated
+            // via SETTINGS_ENABLE_CONNECT_PROTOCOL — that negotiation
+            // is not represented in the structural validation here,
+            // so we follow the conservative §8.5 rule. A future
+            // pass that wires SETTINGS_ENABLE_CONNECT_PROTOCOL
+            // through to this validator should relax this branch
+            // (and align with h3_native's
+            // `validate_request_pseudo_headers_with_settings`).
+            if seen_protocol && (seen_scheme || seen_path) {
+                // Tolerate :protocol presence for the extended-CONNECT
+                // case (the deeper :protocol value validation lives
+                // in the follow-up). Fall through.
+            } else if seen_scheme || seen_path {
+                return Err("CONNECT request must not include :scheme or :path \
+                     (RFC 9113 §8.5)");
+            }
+        } else {
+            if !seen_scheme {
+                return Err("non-CONNECT request missing required :scheme pseudo-header");
+            }
+            if !seen_path {
+                return Err("non-CONNECT request missing required :path pseudo-header");
+            }
+            if seen_protocol {
+                return Err(
+                    ":protocol pseudo-header is only valid for extended CONNECT \
+                     (RFC 8441) and was sent on a non-CONNECT request",
+                );
+            }
+        }
+    } else {
+        // Response.
+        if !seen_status {
+            return Err("response missing required :status pseudo-header");
+        }
+        if seen_method || seen_scheme || seen_path || seen_authority || seen_protocol {
+            return Err("response must not include request pseudo-headers \
+                 (:method/:scheme/:path/:authority/:protocol — RFC 9113 §8.3.2)");
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -3787,5 +4000,272 @@ mod tests {
         conn.process_frame(headers).unwrap();
         assert!(conn.send_stream_window_update(1, 4096).is_ok());
         assert!(conn.has_pending_frames());
+    }
+
+    // =====================================================================
+    // br-asupersync-vqpx88: RFC 9113 §8.3 / §8.3.1 / §8.3.2 / §8.5
+    // pseudo-header structural validation tests for `validate_h2_pseudo_headers`.
+    // =====================================================================
+
+    fn h(name: &str, value: &str) -> Header {
+        Header::new(name, value)
+    }
+
+    #[test]
+    fn vqpx88_request_minimum_valid_get() {
+        let headers = vec![
+            h(":method", "GET"),
+            h(":scheme", "https"),
+            h(":path", "/"),
+            h(":authority", "example.com"),
+            h("user-agent", "asupersync"),
+        ];
+        assert!(validate_h2_pseudo_headers(&headers, true).is_ok());
+    }
+
+    #[test]
+    fn vqpx88_response_minimum_valid_200() {
+        let headers = vec![h(":status", "200"), h("content-type", "text/plain")];
+        assert!(validate_h2_pseudo_headers(&headers, false).is_ok());
+    }
+
+    #[test]
+    fn vqpx88_pseudo_after_regular_rejected() {
+        let headers = vec![
+            h(":method", "GET"),
+            h(":scheme", "https"),
+            h("host", "example.com"),
+            h(":path", "/"),
+            h(":authority", "example.com"),
+        ];
+        let err = validate_h2_pseudo_headers(&headers, true).unwrap_err();
+        assert!(err.contains("after a regular header"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn vqpx88_duplicate_method_rejected() {
+        let headers = vec![
+            h(":method", "GET"),
+            h(":method", "POST"),
+            h(":scheme", "https"),
+            h(":path", "/"),
+            h(":authority", "example.com"),
+        ];
+        let err = validate_h2_pseudo_headers(&headers, true).unwrap_err();
+        assert!(err.contains("duplicate :method"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn vqpx88_duplicate_scheme_rejected() {
+        let headers = vec![
+            h(":method", "GET"),
+            h(":scheme", "https"),
+            h(":scheme", "http"),
+            h(":path", "/"),
+            h(":authority", "example.com"),
+        ];
+        let err = validate_h2_pseudo_headers(&headers, true).unwrap_err();
+        assert!(err.contains("duplicate :scheme"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn vqpx88_duplicate_status_rejected() {
+        let headers = vec![h(":status", "200"), h(":status", "404")];
+        let err = validate_h2_pseudo_headers(&headers, false).unwrap_err();
+        assert!(err.contains("duplicate :status"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn vqpx88_unknown_pseudo_rejected() {
+        let headers = vec![
+            h(":method", "GET"),
+            h(":weird", "value"),
+            h(":scheme", "https"),
+            h(":path", "/"),
+            h(":authority", "example.com"),
+        ];
+        let err = validate_h2_pseudo_headers(&headers, true).unwrap_err();
+        assert!(err.contains("unknown pseudo-header"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn vqpx88_response_with_method_rejected() {
+        let headers = vec![h(":status", "200"), h(":method", "GET")];
+        let err = validate_h2_pseudo_headers(&headers, false).unwrap_err();
+        assert!(
+            err.contains("must not include request pseudo-headers"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn vqpx88_request_missing_method_rejected() {
+        let headers = vec![
+            h(":scheme", "https"),
+            h(":path", "/"),
+            h(":authority", "example.com"),
+        ];
+        let err = validate_h2_pseudo_headers(&headers, true).unwrap_err();
+        assert!(
+            err.contains("missing required :method"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn vqpx88_request_missing_scheme_rejected() {
+        let headers = vec![
+            h(":method", "GET"),
+            h(":path", "/"),
+            h(":authority", "example.com"),
+        ];
+        let err = validate_h2_pseudo_headers(&headers, true).unwrap_err();
+        assert!(
+            err.contains("missing required :scheme"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn vqpx88_request_missing_path_rejected() {
+        let headers = vec![
+            h(":method", "GET"),
+            h(":scheme", "https"),
+            h(":authority", "example.com"),
+        ];
+        let err = validate_h2_pseudo_headers(&headers, true).unwrap_err();
+        assert!(err.contains("missing required :path"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn vqpx88_response_missing_status_rejected() {
+        let headers = vec![h("content-type", "text/plain")];
+        let err = validate_h2_pseudo_headers(&headers, false).unwrap_err();
+        assert!(
+            err.contains("missing required :status"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn vqpx88_request_with_status_rejected() {
+        let headers = vec![
+            h(":method", "GET"),
+            h(":status", "200"),
+            h(":scheme", "https"),
+            h(":path", "/"),
+            h(":authority", "example.com"),
+        ];
+        let err = validate_h2_pseudo_headers(&headers, true).unwrap_err();
+        assert!(
+            err.contains("must not include :status"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn vqpx88_connect_with_scheme_rejected() {
+        let headers = vec![
+            h(":method", "CONNECT"),
+            h(":scheme", "https"),
+            h(":authority", "example.com:443"),
+        ];
+        let err = validate_h2_pseudo_headers(&headers, true).unwrap_err();
+        assert!(
+            err.contains("CONNECT request must not include :scheme or :path"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn vqpx88_connect_with_path_rejected() {
+        let headers = vec![
+            h(":method", "CONNECT"),
+            h(":path", "/"),
+            h(":authority", "example.com:443"),
+        ];
+        let err = validate_h2_pseudo_headers(&headers, true).unwrap_err();
+        assert!(
+            err.contains("CONNECT request must not include :scheme or :path"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn vqpx88_connect_missing_authority_rejected() {
+        let headers = vec![h(":method", "CONNECT")];
+        let err = validate_h2_pseudo_headers(&headers, true).unwrap_err();
+        assert!(
+            err.contains("CONNECT request missing required :authority"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn vqpx88_connect_valid_minimum() {
+        let headers = vec![h(":method", "CONNECT"), h(":authority", "example.com:443")];
+        assert!(validate_h2_pseudo_headers(&headers, true).is_ok());
+    }
+
+    #[test]
+    fn vqpx88_uppercase_regular_header_rejected() {
+        let headers = vec![
+            h(":method", "GET"),
+            h(":scheme", "https"),
+            h(":path", "/"),
+            h(":authority", "example.com"),
+            h("X-Custom", "v"),
+        ];
+        let err = validate_h2_pseudo_headers(&headers, true).unwrap_err();
+        assert!(err.contains("uppercase ASCII"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn vqpx88_protocol_on_non_connect_rejected() {
+        let headers = vec![
+            h(":method", "GET"),
+            h(":scheme", "https"),
+            h(":path", "/"),
+            h(":authority", "example.com"),
+            h(":protocol", "websocket"),
+        ];
+        let err = validate_h2_pseudo_headers(&headers, true).unwrap_err();
+        assert!(
+            err.contains(":protocol pseudo-header is only valid"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn vqpx88_extended_connect_with_protocol_ok() {
+        // RFC 8441 extended-CONNECT carries :protocol with :scheme/:path
+        // when SETTINGS_ENABLE_CONNECT_PROTOCOL has been negotiated. The
+        // structural validator tolerates this combination; the deeper
+        // settings-aware check lives in the follow-up parity pass.
+        let headers = vec![
+            h(":method", "CONNECT"),
+            h(":protocol", "websocket"),
+            h(":scheme", "https"),
+            h(":path", "/chat"),
+            h(":authority", "example.com"),
+        ];
+        assert!(validate_h2_pseudo_headers(&headers, true).is_ok());
+    }
+
+    #[test]
+    fn vqpx88_empty_header_name_rejected() {
+        let headers = vec![Header::new("", "value")];
+        let err = validate_h2_pseudo_headers(&headers, true).unwrap_err();
+        assert!(err.contains("empty"), "unexpected: {err}");
+    }
+
+    #[test]
+    fn vqpx88_response_with_authority_rejected() {
+        let headers = vec![h(":status", "200"), h(":authority", "example.com")];
+        let err = validate_h2_pseudo_headers(&headers, false).unwrap_err();
+        assert!(
+            err.contains("must not include request pseudo-headers"),
+            "unexpected: {err}"
+        );
     }
 }
