@@ -686,18 +686,64 @@ fn sanitize_prometheus_label_name(name: &str) -> Option<String> {
     Some(out)
 }
 
-/// Escape a Prometheus label value per the exposition format spec:
-/// `\` → `\\`, `\n` → `\n`, `"` → `\"`. All other bytes pass through
-/// unchanged (the format permits any UTF-8).
+/// Escape a Prometheus label value per the exposition format spec.
+///
+/// br-asupersync-pdu7wg — Extended escape set. The Prometheus
+/// exposition format strictly requires only `\` → `\\`, `\n` → `\n`,
+/// and `"` → `\"`, but a label value flowing into a structured log,
+/// a downstream log forwarder, a JSON envelope, or a terminal can
+/// inject lines / control sequences if it carries any of:
+///
+///   * `\r` (CR) — splits a log line in any reader that treats CRLF
+///     as a record separator (most do).
+///   * `\t` (HTAB) — survives most log paths but breaks
+///     space-delimited Prometheus exposition rendering.
+///   * NUL (`\x00`) — terminates strings in C-extracted parsers
+///     (e.g. systemd-journald, syslog ABI).
+///   * U+2028 LINE SEPARATOR / U+2029 PARAGRAPH SEPARATOR — recognised
+///     as line terminators by the EcmaScript JSON parser and many
+///     downstream log viewers; Unicode-aware injection vector
+///     specifically targeted by the asupersync-pdu7wg bead.
+///   * Other C0 (0x01..=0x1F except already-handled \n/\r/\t) and DEL
+///     (0x7F) — terminals interpret as escape / cursor sequences;
+///     C1 controls (0x80..=0x9F) flow through some legacy log paths
+///     as additional terminator-equivalents.
+///
+/// Each control byte is escaped to its `\xHH` form (using lowercase
+/// hex for stability across snapshots). Multi-byte Unicode separators
+/// are emitted as `\u{...}` so the output remains a valid UTF-8
+/// string while losing its line-terminator semantics in every
+/// downstream parser.
 fn escape_prometheus_label_value(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for c in value.chars() {
         match c {
+            // Spec-required escapes (must produce backslash-escaped
+            // sequences, not \xHH, so the Prometheus client itself
+            // unescapes them correctly).
             '\\' => out.push_str(r"\\"),
             '\n' => out.push_str(r"\n"),
             '"' => {
                 out.push('\\');
                 out.push('"');
+            }
+            // br-asupersync-pdu7wg — CR + Unicode line separators +
+            // NUL + remaining C0/C1 controls.
+            '\r' => out.push_str(r"\r"),
+            '\t' => out.push_str(r"\t"),
+            '\u{0000}' => out.push_str(r"\x00"),
+            '\u{2028}' => out.push_str(r"\u{2028}"),
+            '\u{2029}' => out.push_str(r"\u{2029}"),
+            // C0 controls (excluding already-handled \t \n \r) and DEL.
+            c if (c as u32) < 0x20 || c == '\u{007F}' => {
+                use std::fmt::Write;
+                let _ = write!(&mut out, "\\x{:02x}", c as u32);
+            }
+            // C1 controls (0x80..=0x9F) — also unsafe in legacy log
+            // paths.
+            c if (0x80..=0x9F).contains(&(c as u32)) => {
+                use std::fmt::Write;
+                let _ = write!(&mut out, "\\x{:02x}", c as u32);
             }
             _ => out.push(c),
         }
@@ -2463,10 +2509,66 @@ mod tests {
             escape_prometheus_label_value("a\\b\nc\"d e"),
             r#"a\\b\nc\"d e"#
         );
-        // Carriage return, tab, NUL pass through (spec only requires
-        // escaping the three above; other control bytes are a Prometheus
-        // text-format peculiarity but do not break the parser).
-        assert_eq!(escape_prometheus_label_value("a\tb"), "a\tb");
+    }
+
+    /// br-asupersync-pdu7wg — Carriage return must be escaped (was the
+    /// pre-fix injection vector that split a label value across two
+    /// log lines in any reader treating CRLF as a record separator).
+    #[test]
+    fn pdu7wg_escape_label_value_escapes_carriage_return() {
+        assert_eq!(escape_prometheus_label_value("a\rb"), r"a\rb");
+    }
+
+    /// br-asupersync-pdu7wg — Tab is escaped (breaks space-delimited
+    /// Prometheus exposition rendering otherwise).
+    #[test]
+    fn pdu7wg_escape_label_value_escapes_tab() {
+        assert_eq!(escape_prometheus_label_value("a\tb"), r"a\tb");
+    }
+
+    /// br-asupersync-pdu7wg — NUL byte is escaped (terminates strings
+    /// in C-extracted parsers like systemd-journald / syslog ABI).
+    #[test]
+    fn pdu7wg_escape_label_value_escapes_nul() {
+        assert_eq!(escape_prometheus_label_value("a\0b"), r"a\x00b");
+    }
+
+    /// br-asupersync-pdu7wg — U+2028 LINE SEPARATOR and U+2029
+    /// PARAGRAPH SEPARATOR are escaped (recognised as line
+    /// terminators by EcmaScript JSON parsers and many log viewers,
+    /// despite passing through naively as 3-byte UTF-8 in the input).
+    #[test]
+    fn pdu7wg_escape_label_value_escapes_unicode_line_separators() {
+        assert_eq!(
+            escape_prometheus_label_value("a\u{2028}b"),
+            r"a\u{2028}b"
+        );
+        assert_eq!(
+            escape_prometheus_label_value("a\u{2029}b"),
+            r"a\u{2029}b"
+        );
+    }
+
+    /// br-asupersync-pdu7wg — C0 controls (0x01..=0x1F) other than
+    /// the spec-required \n and the explicitly-handled \r/\t pass
+    /// through as `\xHH`. DEL (0x7F) and C1 controls (0x80..=0x9F)
+    /// likewise.
+    #[test]
+    fn pdu7wg_escape_label_value_escapes_c0_c1_and_del() {
+        assert_eq!(escape_prometheus_label_value("\x01"), r"\x01");
+        assert_eq!(escape_prometheus_label_value("\x07"), r"\x07"); // BEL
+        assert_eq!(escape_prometheus_label_value("\x1b"), r"\x1b"); // ESC
+        assert_eq!(escape_prometheus_label_value("\x7f"), r"\x7f"); // DEL
+        // C1 control example: 0x9b (CSI).
+        assert_eq!(escape_prometheus_label_value("\u{009b}"), r"\x9b");
+    }
+
+    /// br-asupersync-pdu7wg — Regression guard: ASCII-printable
+    /// content is unaffected by the extended escape set.
+    #[test]
+    fn pdu7wg_escape_label_value_does_not_change_printable_ascii() {
+        let printable = "hello, world! 123 @#$%^&*()_+-={}[]|;':,./<>?";
+        assert_eq!(escape_prometheus_label_value(printable), printable);
     }
 
     #[test]
