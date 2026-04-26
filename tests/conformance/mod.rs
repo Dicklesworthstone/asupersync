@@ -9,8 +9,8 @@ pub mod aggregator_flush;
 pub mod codec_framing_properties;
 pub mod codec_round_trip;
 pub mod cx_capability_semantics;
-pub mod tls_handshake;
 pub mod messaging_broker_parity;
+pub mod tls_handshake;
 // pub mod codec_framing;
 // codec_framing.rs would collide with the codec_framing/ directory;
 // the new exhaustive-properties suite lives in codec_framing_properties.rs.
