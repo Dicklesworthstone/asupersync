@@ -2267,7 +2267,11 @@ mod tests {
                 BTreeMap::new(),
             ),
         );
-        assert!(state.assigned_partitions.contains(&("topic_a".to_string(), 1)));
+        assert!(
+            state
+                .assigned_partitions
+                .contains(&("topic_a".to_string(), 1))
+        );
         let pre_gen = state.rebalance_generation;
 
         // Simulate: blocking thread captured a record for ("topic_a", 1)

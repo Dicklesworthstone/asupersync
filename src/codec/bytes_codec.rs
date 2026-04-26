@@ -175,10 +175,12 @@ mod tests {
             // Full byte range as a single 256-byte payload.
             (0u8..=255).collect::<Vec<u8>>(),
             // Non-trivial random-looking binary.
-            (0u16..1024).flat_map(|i| {
-                let n = (i.wrapping_mul(0x9E37) ^ i) as u8;
-                std::iter::repeat(n).take(((n % 7) + 1) as usize)
-            }).collect::<Vec<_>>(),
+            (0u16..1024)
+                .flat_map(|i| {
+                    let n = (i.wrapping_mul(0x9E37) ^ i) as u8;
+                    std::iter::repeat(n).take(((n % 7) + 1) as usize)
+                })
+                .collect::<Vec<_>>(),
         ];
 
         for (i, payload) in edge_cases.iter().enumerate() {

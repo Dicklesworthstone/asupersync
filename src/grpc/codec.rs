@@ -1181,12 +1181,7 @@ mod tests {
             Bytes::new(),
             Bytes::from_static(b"a"),
             Bytes::from(vec![0x42u8; 1024]),
-            Bytes::from(
-                (0u8..=255)
-                    .cycle()
-                    .take(64 * 1024)
-                    .collect::<Vec<u8>>(),
-            ),
+            Bytes::from((0u8..=255).cycle().take(64 * 1024).collect::<Vec<u8>>()),
         ];
 
         // Algo 1: identity (always available).
@@ -1219,11 +1214,7 @@ mod tests {
                 .decode_message(&mut buf)
                 .unwrap_or_else(|e| panic!("gzip decode case {i}: {e}"))
                 .unwrap_or_else(|| panic!("gzip decode case {i} yielded None"));
-            assert_eq!(
-                &decoded[..],
-                &payload[..],
-                "gzip round-trip drift case {i}"
-            );
+            assert_eq!(&decoded[..], &payload[..], "gzip round-trip drift case {i}");
         }
     }
 }

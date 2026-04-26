@@ -19,7 +19,7 @@ use std::convert::TryFrom;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Identifier for a scheduler worker.
 pub type WorkerId = usize;
@@ -708,10 +708,8 @@ impl Worker {
             .timer_driver
             .as_ref()
             .map_or_else(crate::time::wall_now, TimerDriverHandle::now);
-        self.metrics.scheduler_tick(
-            1,
-            Duration::from_nanos(poll_end.duration_since(poll_start)),
-        );
+        self.metrics
+            .scheduler_tick(1, Duration::from_nanos(poll_end.duration_since(poll_start)));
     }
 
     fn schedule_ready_finalizers(&self) -> bool {

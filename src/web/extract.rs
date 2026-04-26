@@ -674,9 +674,9 @@ impl<T: serde::de::DeserializeOwned> FromRequest for Json<T> {
         // The detailed `e` is recorded via tracing for operator forensics.
         serde_json::from_slice(req.body.as_ref())
             .map(Json)
-            .map_err(|e| {
+            .map_err(|_err| {
                 crate::tracing_compat::warn!(
-                    error = %e,
+                    error = %_err,
                     "web/extract: Json deserialization failed"
                 );
                 ExtractionError::unprocessable("invalid JSON body")

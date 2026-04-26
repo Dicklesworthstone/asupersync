@@ -132,7 +132,7 @@ mod tests {
     }
 
     fn structured_filter_snapshot() -> (String, u32, u128) {
-        let timestamp_nanos = super::replayable_system_time()
+        let timestamp_nanos = crate::observability::replayable_system_time()
             .duration_since(UNIX_EPOCH)
             .expect("system time after unix epoch")
             .as_nanos();

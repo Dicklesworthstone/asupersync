@@ -553,8 +553,10 @@ impl LoadBalancer {
                 // endpoint is healthy'. Consistent hashing remaps
                 // only ~K/N keys when N changes, preserving stickiness
                 // for the vast majority of object_ids.
-                let healthy: Vec<&Arc<Endpoint>> =
-                    endpoints.iter().filter(|e| e.state().can_receive()).collect();
+                let healthy: Vec<&Arc<Endpoint>> = endpoints
+                    .iter()
+                    .filter(|e| e.state().can_receive())
+                    .collect();
                 if healthy.is_empty() {
                     return None;
                 }

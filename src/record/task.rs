@@ -23,6 +23,7 @@ use std::task::Waker;
 /// The concrete outcome type stored in task records (Phase 0).
 pub type TaskOutcome = Outcome<(), crate::error::Error>;
 
+// Incremental Lyapunov counters (br-asupersync-xxcss5)
 /// The state of a task in its lifecycle.
 #[derive(Debug, Clone)]
 pub enum TaskState {
@@ -52,7 +53,7 @@ pub enum TaskState {
         cleanup_budget: Budget,
     },
     /// Terminal state.
-    Completed(crate::types::Outcome<()>),
+    Completed(TaskOutcome),
 }
 
 /// Coarse-grained task phase for cross-thread reads.
@@ -712,7 +713,7 @@ impl TaskRecord {
     ///
     /// Returns true if the state changed.
     #[allow(clippy::used_underscore_binding, clippy::no_effect_underscore_binding)]
-    pub fn complete(&mut self, outcome: crate::types::Outcome<()>) -> bool {
+    pub fn complete(&mut self, outcome: TaskOutcome) -> bool {
         if self.state.is_terminal() {
             return false;
         }

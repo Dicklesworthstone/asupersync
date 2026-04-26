@@ -941,15 +941,17 @@ mod tests {
         assert!(json.contains("RegionId"));
 
         // Round-trip back to the original type works.
-        let region_back: RegionId =
-            serde_json::from_str(&json).expect("RegionId round-trip");
+        let region_back: RegionId = serde_json::from_str(&json).expect("RegionId round-trip");
         assert_eq!(region_back, region);
 
         // Cross-type deserialisation must fail.
         let task_err = serde_json::from_str::<TaskId>(&json);
         assert!(task_err.is_err(), "TaskId must reject RegionId payload");
         let obl_err = serde_json::from_str::<ObligationId>(&json);
-        assert!(obl_err.is_err(), "ObligationId must reject RegionId payload");
+        assert!(
+            obl_err.is_err(),
+            "ObligationId must reject RegionId payload"
+        );
     }
 
     /// br-asupersync-o2oa4l — TaskId / ObligationId must each reject
@@ -960,8 +962,7 @@ mod tests {
         let task_json = serde_json::to_string(&task).expect("serialise TaskId");
         assert!(serde_json::from_str::<RegionId>(&task_json).is_err());
         assert!(serde_json::from_str::<ObligationId>(&task_json).is_err());
-        let task_back: TaskId =
-            serde_json::from_str(&task_json).expect("TaskId round-trip");
+        let task_back: TaskId = serde_json::from_str(&task_json).expect("TaskId round-trip");
         assert_eq!(task_back, task);
 
         let obl = ObligationId::from_arena(ArenaIndex::new(11, 2));

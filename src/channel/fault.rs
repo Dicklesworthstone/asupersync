@@ -606,9 +606,7 @@ impl<T: Clone> FaultSender<T> {
             messages_reordered: self.stat_messages_reordered.load(Ordering::Relaxed),
             messages_duplicated: self.stat_messages_duplicated.load(Ordering::Relaxed),
             reorder_flushes: self.stat_reorder_flushes.load(Ordering::Relaxed),
-            reorder_cancel_residue: self
-                .stat_reorder_cancel_residue
-                .load(Ordering::Relaxed),
+            reorder_cancel_residue: self.stat_reorder_cancel_residue.load(Ordering::Relaxed),
         }
     }
 

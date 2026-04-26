@@ -1067,13 +1067,13 @@ impl<S: GenServer> GenServerHandle<S> {
                         // 3. Preserve the existing `cx.trace(...)` breadcrumb when
                         //    a Cx IS available so structured-trace replay continues
                         //    to attribute the eviction to a region/task.
-                        let evicted = self
+                        let _evicted_total = self
                             .evicted_count
                             .fetch_add(1, Ordering::Relaxed)
                             .saturating_add(1);
                         crate::tracing_compat::warn!(
                             actor_id = ?self.actor_id,
-                            evicted_total = evicted,
+                            evicted_total = _evicted_total,
                             "gen_server::cast_evicted_oldest"
                         );
                         if let Some(cx) = Cx::current() {

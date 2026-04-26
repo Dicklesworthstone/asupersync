@@ -84,6 +84,7 @@ pub enum OriginPolicy {
     Disabled,
 }
 
+/// Builder returned by the WebSocket extractor after validating an upgrade request.
 #[derive(Debug, Clone)]
 pub struct WebSocketUpgrade {
     /// Computed Sec-WebSocket-Accept value.
@@ -313,8 +314,7 @@ impl WebSocketUpgrade {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        self.origin_policy =
-            OriginPolicy::AllowList(origins.into_iter().map(Into::into).collect());
+        self.origin_policy = OriginPolicy::AllowList(origins.into_iter().map(Into::into).collect());
         self
     }
 
@@ -338,7 +338,10 @@ impl WebSocketUpgrade {
             (OriginPolicy::Disabled, _) => Ok(()),
             (_, None) => Ok(()),
             (OriginPolicy::AllowList(list), Some(origin)) => {
-                if list.iter().any(|allowed| allowed.eq_ignore_ascii_case(origin)) {
+                if list
+                    .iter()
+                    .any(|allowed| allowed.eq_ignore_ascii_case(origin))
+                {
                     Ok(())
                 } else {
                     Err("Origin not in allowlist")

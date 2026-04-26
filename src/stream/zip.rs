@@ -123,8 +123,7 @@ where
             upper2.map(|upper| upper.saturating_add(queued2)),
         ) {
             (Some(a), Some(b)) => Some(a.min(b)),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
+            (bound @ Some(_), None) | (None, bound @ Some(_)) => bound,
             (None, None) => None,
         };
 

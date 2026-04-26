@@ -1012,10 +1012,10 @@ mod tests {
         cx.set_cancel_requested(true);
         let result = tx.reserve(&cx);
         crate::assert_with_log!(
-            matches!(result, Err(SendError::Cancelled)),
+            matches!(result.as_ref(), Err(SendError::Cancelled)),
             "reserve under cancel must return Cancelled",
             "Err(Cancelled)",
-            format!("{:?}", result.map(|_| "Ok(permit)"))
+            format!("{:?}", result.as_ref().map(|_| "Ok(permit)"))
         );
 
         // Sanity: clearing the cancel restores normal behavior.

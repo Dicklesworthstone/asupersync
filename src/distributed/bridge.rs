@@ -896,15 +896,17 @@ impl RegionBridge {
             .last_applied_inbound_sequence
             .saturating_add(1);
         if snapshot.sequence > expected_sequence {
-            return Err(Error::new(ErrorKind::CoordinationFailed).with_message(format!(
-                "snapshot sequence gap: expected {expected_sequence}, got {} \
+            return Err(
+                Error::new(ErrorKind::CoordinationFailed).with_message(format!(
+                    "snapshot sequence gap: expected {expected_sequence}, got {} \
                  (gap of {} frames); resync required",
-                snapshot.sequence,
-                snapshot
-                    .sequence
-                    .saturating_sub(expected_sequence)
-                    .saturating_add(1),
-            )));
+                    snapshot.sequence,
+                    snapshot
+                        .sequence
+                        .saturating_sub(expected_sequence)
+                        .saturating_add(1),
+                )),
+            );
         }
 
         // Reconstruct Budget

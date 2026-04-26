@@ -12,11 +12,11 @@ use crate::decoding::{DecodingConfig, DecodingPipeline, RejectReason, SymbolAcce
 use crate::encoding::{EncodingPipeline, max_object_size};
 use crate::error::{Error, ErrorKind};
 use crate::observability::Metrics;
+use crate::raptorq::systematic::SystematicParams;
 use crate::security::{AuthenticatedSymbol, SecurityContext};
 use crate::transport::error::StreamError;
 use crate::transport::sink::SymbolSink;
 use crate::transport::stream::SymbolStream;
-use crate::raptorq::systematic::SystematicParams;
 use crate::types::resource::{PoolConfig, SymbolPool};
 use crate::types::symbol::{ObjectId, ObjectParams};
 

@@ -2856,11 +2856,7 @@ mod tests {
     fn apply_distributed_snapshot_is_commutative_and_associative() {
         use std::collections::BTreeSet;
 
-        fn snapshot_apply(
-            r: &RegionRecord,
-            children: Vec<RegionId>,
-            tasks: Vec<TaskId>,
-        ) {
+        fn snapshot_apply(r: &RegionRecord, children: Vec<RegionId>, tasks: Vec<TaskId>) {
             r.apply_distributed_snapshot(
                 RegionState::Open,
                 Budget::INFINITE,
@@ -2877,18 +2873,9 @@ mod tests {
         let rid = |n: u32| RegionId::from_arena(ArenaIndex::new(n, 0));
         let tid = |n: u32| TaskId::from_arena(ArenaIndex::new(n, 0));
 
-        let snap_a = (
-            vec![rid(101), rid(102)],
-            vec![tid(201), tid(202)],
-        );
-        let snap_b = (
-            vec![rid(103), rid(104)],
-            vec![tid(203), tid(204)],
-        );
-        let snap_c = (
-            vec![rid(105), rid(106)],
-            vec![tid(205), tid(206)],
-        );
+        let snap_a = (vec![rid(101), rid(102)], vec![tid(201), tid(202)]);
+        let snap_b = (vec![rid(103), rid(104)], vec![tid(203), tid(204)]);
+        let snap_c = (vec![rid(105), rid(106)], vec![tid(205), tid(206)]);
 
         // ── Commutativity: merge(A, B) == merge(B, A) ──
         let region_ab = RegionRecord::new(test_region_id(), None, Budget::INFINITE);
@@ -2967,10 +2954,12 @@ mod tests {
 
         let local_children = ids_set(region_local.child_ids());
         let local_tasks = ids_set(region_local.task_ids());
-        let expected_children: BTreeSet<_> =
-            [rid(101), rid(102), rid(103), rid(104)].into_iter().collect();
-        let expected_tasks: BTreeSet<_> =
-            [tid(201), tid(202), tid(203), tid(204)].into_iter().collect();
+        let expected_children: BTreeSet<_> = [rid(101), rid(102), rid(103), rid(104)]
+            .into_iter()
+            .collect();
+        let expected_tasks: BTreeSet<_> = [tid(201), tid(202), tid(203), tid(204)]
+            .into_iter()
+            .collect();
         assert_eq!(
             local_children, expected_children,
             "remote snapshot must NOT silently drop local children (silent-loss regression)"

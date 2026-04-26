@@ -501,10 +501,9 @@ where
             // handler never sees the request, eliminating the host-
             // injection attack surface for absolute-URL emission /
             // OAuth redirect_uri / cache-key computation.
-            if let Err(rejected_host) = validate_host_header(
-                &req.headers,
-                self.config.allowed_hosts.as_deref(),
-            ) {
+            if let Err(rejected_host) =
+                validate_host_header(&req.headers, self.config.allowed_hosts.as_deref())
+            {
                 state.phase = ConnectionPhase::Writing;
                 let body_msg = if rejected_host.is_empty() {
                     "Missing required Host header".to_string()

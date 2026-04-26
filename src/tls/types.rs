@@ -664,8 +664,7 @@ impl CertificatePinSet {
                     // the set or which candidates were derivable.
                     let stored_bytes = stored.hash_bytes();
                     let zero = [0u8; 32];
-                    let _ =
-                        std::hint::black_box(constant_time_eq(stored_bytes, &zero));
+                    let _ = std::hint::black_box(constant_time_eq(stored_bytes, &zero));
                 }
             }
         }
@@ -946,8 +945,7 @@ Lru15URJw9pE1Uae8IuzyzHiF1fnn45swnvW3Szb
         // A cert that does NOT match any pin must yield PinMismatch.
         let mut decoy_only = CertificatePinSet::new();
         for byte in 0u8..16u8 {
-            decoy_only
-                .add(CertificatePin::spki_sha256(vec![byte; 32]).unwrap());
+            decoy_only.add(CertificatePin::spki_sha256(vec![byte; 32]).unwrap());
         }
         let err = decoy_only.validate(&cert).unwrap_err();
         assert!(matches!(err, TlsError::PinMismatch { .. }));

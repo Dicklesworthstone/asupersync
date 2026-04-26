@@ -364,8 +364,10 @@ impl CancellationDebtMonitor {
         let work_id = self.next_work_id.fetch_add(1, Ordering::Relaxed);
         let now = super::replayable_system_time();
 
-        let cancel_reason_text =
-            truncate_to_bytes(&format!("{cancel_reason}"), self.config.max_cancel_reason_bytes);
+        let cancel_reason_text = truncate_to_bytes(
+            &format!("{cancel_reason}"),
+            self.config.max_cancel_reason_bytes,
+        );
         let work = PendingWork {
             work_id,
             work_type,
@@ -379,9 +381,8 @@ impl CancellationDebtMonitor {
         };
 
         // Update memory usage estimate
-        let work_size = std::mem::size_of::<PendingWork>()
-            + work.entity_id.len()
-            + work.cancel_reason.len();
+        let work_size =
+            std::mem::size_of::<PendingWork>() + work.entity_id.len() + work.cancel_reason.len();
         self.memory_usage_bytes
             .fetch_add(work_size, Ordering::Relaxed);
 

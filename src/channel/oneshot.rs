@@ -835,7 +835,9 @@ mod tests {
         let (send_ok, disconnected_value, recv_state, recv_value) = match scenario {
             SendScenario::LiveNoWaiter => {
                 let send_result = if reserve_first {
-                    tx.reserve(&cx).expect("cx not cancelled in test").send(value)
+                    tx.reserve(&cx)
+                        .expect("cx not cancelled in test")
+                        .send(value)
                 } else {
                     tx.send(&cx, value)
                 };
@@ -857,7 +859,9 @@ mod tests {
                 assert!(matches!(fut.as_mut().poll(&mut task_cx), Poll::Pending));
 
                 let send_result = if reserve_first {
-                    tx.reserve(&cx).expect("cx not cancelled in test").send(value)
+                    tx.reserve(&cx)
+                        .expect("cx not cancelled in test")
+                        .send(value)
                 } else {
                     tx.send(&cx, value)
                 };
@@ -878,7 +882,9 @@ mod tests {
             SendScenario::ReceiverDropped => {
                 drop(rx);
                 let send_result = if reserve_first {
-                    tx.reserve(&cx).expect("cx not cancelled in test").send(value)
+                    tx.reserve(&cx)
+                        .expect("cx not cancelled in test")
+                        .send(value)
                 } else {
                     tx.send(&cx, value)
                 };
@@ -969,7 +975,9 @@ mod tests {
         cx.cancel_with(crate::types::CancelKind::User, Some("test cancel"));
         let (tx, mut rx) = channel::<i32>();
 
-        let err = tx.reserve(&cx).expect_err("cancelled cx must reject reserve");
+        let err = tx
+            .reserve(&cx)
+            .expect_err("cancelled cx must reject reserve");
         crate::assert_with_log!(
             matches!(err, SendError::Cancelled(())),
             "reserve must surface SendError::Cancelled on cancelled cx",

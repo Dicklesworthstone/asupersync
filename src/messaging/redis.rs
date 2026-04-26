@@ -258,7 +258,12 @@ pub enum RespValue {
     BigNumber(String),
     /// RESP3 verbatim string with a 3-byte format prefix and ':' separator
     /// (`=15\r\ntxt:Some text\r\n`). The tuple is `(format, payload)`.
-    Verbatim { format: String, payload: Vec<u8> },
+    Verbatim {
+        /// Three-byte RESP3 verbatim format marker, for example `txt`.
+        format: String,
+        /// Raw payload bytes after the format marker and `:` separator.
+        payload: Vec<u8>,
+    },
     /// RESP3 binary error (`!21\r\nSYNTAX invalid syntax\r\n`).
     BlobError(Vec<u8>),
     /// RESP3 map (`%N\r\n` followed by N key-value pairs).
@@ -512,7 +517,9 @@ impl RespValue {
                         return Ok(Some(end + 2));
                     }
                     if n < 0 {
-                        return Err(RedisError::Protocol(format!("invalid aggregate length: {n}")));
+                        return Err(RedisError::Protocol(format!(
+                            "invalid aggregate length: {n}"
+                        )));
                     }
                     let n = usize::try_from(n).map_err(|_| {
                         RedisError::Protocol(format!("invalid aggregate length: {n}"))
@@ -523,7 +530,11 @@ impl RespValue {
                             limits.max_array_len
                         )));
                     }
-                    let children = if matches!(buf[i], b'%' | b'|') { n * 2 } else { n };
+                    let children = if matches!(buf[i], b'%' | b'|') {
+                        n * 2
+                    } else {
+                        n
+                    };
                     i = end + 2;
                     for _ in 0..children {
                         match check_complete(buf, i, depth + 1, limits)? {
@@ -650,7 +661,9 @@ impl RespValue {
                         });
                     }
                     if n < 0 {
-                        return Err(RedisError::Protocol(format!("invalid aggregate length: {n}")));
+                        return Err(RedisError::Protocol(format!(
+                            "invalid aggregate length: {n}"
+                        )));
                     }
                     let n = usize::try_from(n).map_err(|_| {
                         RedisError::Protocol(format!("invalid aggregate length: {n}"))
@@ -690,7 +703,9 @@ impl RespValue {
                     };
                     let n = parse_i64_ascii(&buf[i + 1..end])?;
                     if n < 0 {
-                        return Err(RedisError::Protocol(format!("invalid aggregate length: {n}")));
+                        return Err(RedisError::Protocol(format!(
+                            "invalid aggregate length: {n}"
+                        )));
                     }
                     let n = usize::try_from(n).map_err(|_| {
                         RedisError::Protocol(format!("invalid aggregate length: {n}"))
@@ -829,7 +844,9 @@ impl RespValue {
                         ));
                     }
                     let format = std::str::from_utf8(&body[..3])
-                        .map_err(|_| RedisError::Protocol("invalid UTF-8 in verbatim format".into()))?
+                        .map_err(|_| {
+                            RedisError::Protocol("invalid UTF-8 in verbatim format".into())
+                        })?
                         .to_string();
                     let payload = body[4..].to_vec();
                     Ok(Decoded::Ok {
@@ -1938,10 +1955,7 @@ impl Pipeline<'_> {
     /// (write, flush, framing read, EOF) which DO invalidate the
     /// connection — those discard the pooled connection because its
     /// protocol state is no longer reliable. (br-asupersync-pr32li)
-    pub async fn exec(
-        self,
-        cx: &Cx,
-    ) -> Result<Vec<Result<RespValue, RedisError>>, RedisError> {
+    pub async fn exec(self, cx: &Cx) -> Result<Vec<Result<RespValue, RedisError>>, RedisError> {
         let mut conn = DiscardOnDropGuard::new(self.client.acquire(cx).await?);
 
         // Ensure AUTH/SELECT have been run on this connection.
@@ -3899,9 +3913,7 @@ mod tests {
             // EXEC — server returns array with the SET's reply.
             let exec = read_resp_frame(&mut stream);
             assert_resp_command(exec, &[b"EXEC"]);
-            stream
-                .write_all(b"*1\r\n+OK\r\n")
-                .expect("write EXEC ack");
+            stream.write_all(b"*1\r\n+OK\r\n").expect("write EXEC ack");
             stream.flush().expect("flush EXEC ack");
         });
 
@@ -4048,9 +4060,7 @@ mod tests {
             // results[1] = Err(RedisError::Redis("something went wrong"))
             match &results[1] {
                 Err(RedisError::Redis(msg)) if msg.contains("something went wrong") => {}
-                other => panic!(
-                    "results[1] expected Err(RedisError::Redis(...)), got {other:?}"
-                ),
+                other => panic!("results[1] expected Err(RedisError::Redis(...)), got {other:?}"),
             }
 
             // results[2] = Ok(BulkString(third))

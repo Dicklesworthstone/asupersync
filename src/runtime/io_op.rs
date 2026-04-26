@@ -584,8 +584,8 @@ mod tests {
         let root = state.create_root_region(Budget::INFINITE);
         let task_id = create_task(&mut state, root);
 
-        let mut op = IoOp::submit(&mut state, task_id, root, Some("transient err".into()))
-            .expect("submit");
+        let mut op =
+            IoOp::submit(&mut state, task_id, root, Some("transient err".into())).expect("submit");
 
         // Inject a transient error via the private resolve_with helper.
         // The closure ignores the obligation and synthesizes a non-
@@ -593,8 +593,7 @@ mod tests {
         // transient/non-terminal error kind).
         let err = op
             .resolve_with(&mut state, |_state, _obl| {
-                Err(Error::new(ErrorKind::TaskNotOwned)
-                    .with_message("synthetic transient error"))
+                Err(Error::new(ErrorKind::TaskNotOwned).with_message("synthetic transient error"))
             })
             .expect_err("synthetic resolve must fail");
 

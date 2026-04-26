@@ -62,7 +62,7 @@ use crate::runtime::stored_task::AnyStoredTask;
 use crate::runtime::{RuntimeState, TaskTable};
 use crate::sync::ContendedMutex;
 use crate::time::TimerDriverHandle;
-use crate::tracing_compat::{error, trace, warn};
+use crate::tracing_compat::{error, trace};
 use crate::types::{CxInner, TaskId, Time};
 use crate::util::{CachePadded, DetHasher, DetRng};
 use parking_lot::Mutex;
@@ -1389,9 +1389,9 @@ impl ThreeLaneScheduler {
             //    intent (spawn vs wake) — see `ScheduleIntent` for the exact
             //    text the original split functions emitted.
             let assert_msg = intent.local_route_failure_assert(task);
-            let error_msg = intent.local_route_failure_log();
+            let _error_msg = intent.local_route_failure_log();
             debug_assert!(false, "{}", assert_msg);
-            error!(?task, "{}", error_msg);
+            error!(?task, "{}", _error_msg);
             return;
         }
 

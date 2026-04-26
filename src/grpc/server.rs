@@ -1516,8 +1516,7 @@ mod tests {
         init_test("server_config_default_caps_metadata_at_8_kib");
         let cfg = ServerConfig::default();
         assert_eq!(
-            cfg.max_metadata_size,
-            DEFAULT_MAX_METADATA_SIZE,
+            cfg.max_metadata_size, DEFAULT_MAX_METADATA_SIZE,
             "default max_metadata_size must equal DEFAULT_MAX_METADATA_SIZE (8 KiB)"
         );
         assert_eq!(cfg.max_metadata_size, 8 * 1024);
@@ -1560,9 +1559,9 @@ mod tests {
                     "error message must mention the limit, got: {msg}"
                 );
             }
-            Ok(()) => panic!(
-                "16 KiB metadata must be rejected by 8 KiB cap, but enforcement passed"
-            ),
+            Ok(()) => {
+                panic!("16 KiB metadata must be rejected by 8 KiB cap, but enforcement passed")
+            }
         }
         crate::test_complete!(
             "enforce_metadata_size_limit_rejects_over_cap_with_resource_exhausted"

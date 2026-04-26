@@ -244,9 +244,7 @@ impl SignalDispatcher {
     #[allow(unsafe_code)] // signal_hook::low_level::register + Win32 FFI
     fn start() -> io::Result<Self> {
         use std::ptr;
-        use windows_sys::Win32::Foundation::{
-            CloseHandle, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
-        };
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE, WAIT_OBJECT_0};
         use windows_sys::Win32::System::Threading::{
             CreateEventW, INFINITE, SetEvent, WaitForMultipleObjects,
         };
@@ -289,9 +287,7 @@ impl SignalDispatcher {
             return Err(io::Error::last_os_error());
         }
         let signal_pending_event_raw = unsafe { CreateEventW(ptr::null(), 0, 0, ptr::null()) };
-        if signal_pending_event_raw.is_null()
-            || signal_pending_event_raw == INVALID_HANDLE_VALUE
-        {
+        if signal_pending_event_raw.is_null() || signal_pending_event_raw == INVALID_HANDLE_VALUE {
             // Don't leak the first handle if the second fails.
             unsafe {
                 let _ = CloseHandle(shutdown_event_raw);
@@ -351,10 +347,8 @@ impl SignalDispatcher {
         let poller_handle = thread::Builder::new()
             .name("asupersync-signal-poll-win".to_string())
             .spawn(move || {
-                let handles: [windows_sys::Win32::Foundation::HANDLE; 2] = [
-                    poller_shutdown_handle.0,
-                    poller_pending_handle.0,
-                ];
+                let handles: [windows_sys::Win32::Foundation::HANDLE; 2] =
+                    [poller_shutdown_handle.0, poller_pending_handle.0];
                 let mut last_seen: Vec<u64> = vec![0; poller_slots.len()];
                 loop {
                     // SAFETY: handles array contains two valid event
@@ -363,9 +357,7 @@ impl SignalDispatcher {
                     // (closed only by SignalDispatcher::Drop AFTER
                     // join). bWaitAll = FALSE so the call returns as
                     // soon as ANY handle is signaled.
-                    let rc = unsafe {
-                        WaitForMultipleObjects(2, handles.as_ptr(), 0, INFINITE)
-                    };
+                    let rc = unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, INFINITE) };
                     match rc {
                         SHUTDOWN_INDEX => break,
                         SIGNAL_PENDING_INDEX => {

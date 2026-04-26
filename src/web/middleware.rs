@@ -1062,9 +1062,7 @@ fn truncate_request_id(id: &str, max: usize) -> String {
     // `end` now holds the byte index of the LAST kept char; advance past it
     // by walking one more char_indices step or using char_indices().nth.
     let mut iter = id.char_indices().skip(max);
-    let cutoff = iter
-        .next()
-        .map_or(id.len(), |(idx, _)| idx);
+    let cutoff = iter.next().map_or(id.len(), |(idx, _)| idx);
     let _ = end;
     id[..cutoff].to_string()
 }
@@ -2744,8 +2742,8 @@ mod tests {
             ..CorsPolicy::with_exact_origins(vec!["https://allowed.example".to_string()])
         };
         let mw = CorsMiddleware::new(FnHandler::new(ok_handler), policy);
-        let resp = mw
-            .call(Request::new("GET", "/cors").with_header("Origin", "https://attacker.example"));
+        let resp =
+            mw.call(Request::new("GET", "/cors").with_header("Origin", "https://attacker.example"));
 
         assert_eq!(resp.status, StatusCode::OK, "inner handler still runs");
         assert!(
@@ -2753,7 +2751,9 @@ mod tests {
             "non-allowlisted origin must not receive Allow-Origin"
         );
         assert!(
-            !resp.headers.contains_key("access-control-allow-credentials"),
+            !resp
+                .headers
+                .contains_key("access-control-allow-credentials"),
             "non-allowlisted origin must not receive Allow-Credentials"
         );
     }
@@ -2785,7 +2785,9 @@ mod tests {
                 "Any+credentials must not echo any origin (saw {origin})"
             );
             assert!(
-                !resp.headers.contains_key("access-control-allow-credentials"),
+                !resp
+                    .headers
+                    .contains_key("access-control-allow-credentials"),
                 "Any+credentials must not emit Allow-Credentials (saw {origin})"
             );
         }
@@ -3219,8 +3221,8 @@ mod tests {
     #[test]
     fn request_id_with_max_length_zero_falls_back_to_default() {
         // 0 is rejected (would silently disable the cap); coerced to default.
-        let mw = RequestIdMiddleware::new(FnHandler::new(ok_handler), "x-request-id")
-            .with_max_length(0);
+        let mw =
+            RequestIdMiddleware::new(FnHandler::new(ok_handler), "x-request-id").with_max_length(0);
         let huge = "C".repeat(4 * 1024);
         let req = make_request().with_header("x-request-id", &huge);
         let resp = mw.call(req);

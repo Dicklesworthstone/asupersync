@@ -2084,9 +2084,9 @@ mod tests {
                     assert!(server_required, "server_required must be true");
                     assert!(!client_required, "client_required must be false here");
                 }
-                other => panic!(
-                    "expected NatsError::TlsRequired, got {other:?} — gate did not fire"
-                ),
+                other => {
+                    panic!("expected NatsError::TlsRequired, got {other:?} — gate did not fire")
+                }
             }
         });
 
@@ -2138,7 +2138,13 @@ mod tests {
             let result = NatsClient::connect_with_config(&cx, config).await;
             let err = result.expect_err("connect MUST fail closed when client requires TLS");
             assert!(
-                matches!(err, NatsError::TlsRequired { client_required: true, .. }),
+                matches!(
+                    err,
+                    NatsError::TlsRequired {
+                        client_required: true,
+                        ..
+                    }
+                ),
                 "expected NatsError::TlsRequired with client_required=true, got {err:?}"
             );
         });

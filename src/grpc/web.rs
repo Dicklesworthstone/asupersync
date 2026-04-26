@@ -1602,8 +1602,7 @@ mod tests {
         match result {
             Err(GrpcError::Protocol(msg)) => {
                 assert!(
-                    msg.contains("malformed grpc-status")
-                        && msg.contains("br-asupersync-6qwzl0"),
+                    msg.contains("malformed grpc-status") && msg.contains("br-asupersync-6qwzl0"),
                     "must surface as protocol error: {msg}"
                 );
             }
@@ -1673,7 +1672,10 @@ mod tests {
         // 5 bytes → 8 base64 chars with "=" padding
         let payload: &[u8] = b"hello";
         let encoded = base64_encode(payload);
-        assert!(encoded.ends_with('='), "5-byte payload must encode with padding");
+        assert!(
+            encoded.ends_with('='),
+            "5-byte payload must encode with padding"
+        );
 
         let mut decoder = Base64StreamDecoder::new();
         let decoded = decoder.push(encoded.as_bytes()).unwrap();
@@ -1706,7 +1708,10 @@ mod tests {
         init_test("_37svtb_split_at_quartet_boundary_unpadded");
         let payload: &[u8] = b"abcdef"; // 6 bytes → 8 chars no padding
         let encoded = base64_encode(payload);
-        assert!(!encoded.contains('='), "6-byte payload must encode without padding");
+        assert!(
+            !encoded.contains('='),
+            "6-byte payload must encode without padding"
+        );
 
         // Split as 3 + 5: first chunk leaves 3 chars pending, second
         // chunk completes one quartet (3+1=4) and leaves 4 chars

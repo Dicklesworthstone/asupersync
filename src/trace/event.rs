@@ -960,9 +960,7 @@ fn redact_down_reason(reason: &DownReason) -> DownReason {
         DownReason::Normal => DownReason::Normal,
         DownReason::Error(_) => DownReason::Error("<redacted>".to_string()),
         DownReason::Cancelled(cr) => DownReason::Cancelled(redact_cancel_reason(cr)),
-        DownReason::Panicked(payload) => {
-            DownReason::Panicked(redact_panic_payload(payload))
-        }
+        DownReason::Panicked(payload) => DownReason::Panicked(redact_panic_payload(payload)),
     }
 }
 

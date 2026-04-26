@@ -492,20 +492,19 @@ impl TlsConnectorBuilder {
         };
 
         let mut reader = std::io::BufReader::new(&pem_data[..]);
-        let der_certs: Vec<Vec<u8>> = match rustls_pemfile::certs(&mut reader)
-            .collect::<Result<Vec<_>, _>>()
-        {
-            Ok(certs) => certs.into_iter().map(|c| c.to_vec()).collect(),
-            Err(_e) => {
-                #[cfg(feature = "tracing-integration")]
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %_e,
-                    "TLS: PEM bundle parse failed; skipping file (br-asupersync-0owoem)"
-                );
-                return (0, 0);
-            }
-        };
+        let der_certs: Vec<Vec<u8>> =
+            match rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, _>>() {
+                Ok(certs) => certs.into_iter().map(|c| c.to_vec()).collect(),
+                Err(_e) => {
+                    #[cfg(feature = "tracing-integration")]
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %_e,
+                        "TLS: PEM bundle parse failed; skipping file (br-asupersync-0owoem)"
+                    );
+                    return (0, 0);
+                }
+            };
 
         let mut loaded = 0usize;
         let mut rejected = 0usize;
@@ -520,11 +519,7 @@ impl TlsConnectorBuilder {
                 );
                 continue;
             }
-            if self
-                .root_certs
-                .add(&Certificate::from_der(der))
-                .is_ok()
-            {
+            if self.root_certs.add(&Certificate::from_der(der)).is_ok() {
                 loaded += 1;
             }
         }

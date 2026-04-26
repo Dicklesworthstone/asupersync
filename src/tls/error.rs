@@ -523,9 +523,7 @@ mod tests {
 
     #[test]
     fn display_invalid_dns_name_with_control_chars_sanitized() {
-        let err = TlsError::InvalidDnsName(
-            "evil.com\r\n\x00\x07ROOT_PROMPT$".to_string(),
-        );
+        let err = TlsError::InvalidDnsName("evil.com\r\n\x00\x07ROOT_PROMPT$".to_string());
         let display = err.to_string();
         assert!(!display.contains('\r'));
         assert!(!display.contains('\n'));

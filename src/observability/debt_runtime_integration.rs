@@ -10,7 +10,7 @@ use crate::observability::cancellation_debt_monitor::{
 use crate::types::{CancelKind, CancelReason, RegionId, TaskId};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 /// br-asupersync-b4ocgc: pluggable sleep abstraction for the background
 /// monitoring loop.

@@ -252,6 +252,7 @@ impl WaiterChain {
     /// whether the future's previously-allocated id is still queued
     /// (vs popped by `unlock` and granted).
     #[inline]
+    #[allow(dead_code)]
     fn contains(&self, id: usize) -> bool {
         self.slots.contains(id)
     }

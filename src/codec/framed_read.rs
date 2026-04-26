@@ -241,10 +241,7 @@ where
                         // ever allocated. A max_buffer_len of 0
                         // disables enforcement.
                         if this.max_buffer_len > 0 {
-                            let projected = this
-                                .buffer
-                                .len()
-                                .saturating_add(filled.len());
+                            let projected = this.buffer.len().saturating_add(filled.len());
                             if projected > this.max_buffer_len {
                                 let cap = this.max_buffer_len;
                                 let buffered = this.buffer.len();
@@ -618,9 +615,7 @@ mod tests {
                     "error message must include the cap, got: {msg}"
                 );
             }
-            other => panic!(
-                "expected InvalidData from max_buffer_len enforcement, got {other:?}"
-            ),
+            other => panic!("expected InvalidData from max_buffer_len enforcement, got {other:?}"),
         }
         // The buffer must NOT have crossed the cap — the check is
         // pre-append, so we never allocate over-the-cap memory.
@@ -669,10 +664,7 @@ mod tests {
         type Item = ();
         type Error = io::Error;
 
-        fn decode(
-            &mut self,
-            _src: &mut BytesMut,
-        ) -> Result<Option<Self::Item>, Self::Error> {
+        fn decode(&mut self, _src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
             Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "always-fail decoder",
@@ -688,17 +680,11 @@ mod tests {
         type Item = ();
         type Error = io::Error;
 
-        fn decode(
-            &mut self,
-            _src: &mut BytesMut,
-        ) -> Result<Option<Self::Item>, Self::Error> {
+        fn decode(&mut self, _src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
             Ok(None)
         }
 
-        fn decode_eof(
-            &mut self,
-            _src: &mut BytesMut,
-        ) -> Result<Option<Self::Item>, Self::Error> {
+        fn decode_eof(&mut self, _src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
             Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "eof-fail decoder",

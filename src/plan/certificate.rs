@@ -2385,15 +2385,9 @@ mod tests {
         // Capture fingerprints as stable golden artifacts.
         // br-asupersync-eyb1s5: 64-character hex digest replaces the
         // u64 16-char hex format. Snapshot files must be regenerated.
-        insta::assert_snapshot!(
-            "plan_certificate_join_fingerprint",
-            fingerprint1.to_hex()
-        );
+        insta::assert_snapshot!("plan_certificate_join_fingerprint", fingerprint1.to_hex());
 
-        insta::assert_snapshot!(
-            "plan_certificate_race_fingerprint",
-            fingerprint2.to_hex()
-        );
+        insta::assert_snapshot!("plan_certificate_race_fingerprint", fingerprint2.to_hex());
 
         assert_ne!(
             fingerprint1, fingerprint2,

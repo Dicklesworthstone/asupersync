@@ -761,7 +761,9 @@ impl CancelCorrectnessOracle {
         self.violations_detected.fetch_add(1, Ordering::Relaxed);
 
         let panic_msg = if self.config.panic_on_violation {
-            Some(format!("Cancel-correctness violation detected: {violation}"))
+            Some(format!(
+                "Cancel-correctness violation detected: {violation}"
+            ))
         } else {
             None
         };

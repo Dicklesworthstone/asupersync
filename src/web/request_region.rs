@@ -555,7 +555,10 @@ mod tests {
         });
 
         // Completed work survives the cancel race.
-        assert!(outcome.is_ok(), "completed Response must survive cancel race");
+        assert!(
+            outcome.is_ok(),
+            "completed Response must survive cancel race"
+        );
         let resp = outcome.into_response();
         assert_eq!(resp.status, StatusCode::OK);
         assert_eq!(resp.body.as_ref(), b"ok");
@@ -647,7 +650,10 @@ mod tests {
             Ok(Response::new(StatusCode::OK, b"ok".to_vec()))
         });
 
-        assert!(outcome.is_ok(), "completed Ok Response must survive cancel race");
+        assert!(
+            outcome.is_ok(),
+            "completed Ok Response must survive cancel race"
+        );
         let resp = outcome.into_response();
         assert_eq!(resp.status, StatusCode::OK);
         assert_eq!(resp.body.as_ref(), b"ok");

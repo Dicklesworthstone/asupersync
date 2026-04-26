@@ -842,13 +842,14 @@ mod tests {
         // Whether or not the debug assertion fired, the operation either
         // panicked OR completed without re-adding the slot to the free list.
         match val {
-            Ok(Some(7)) => {
+            Ok(Some(v)) if v == 7 => {
                 // Release-style behavior: slot was removed and retired.
                 assert_eq!(
                     arena.free_head, prev_free_head,
                     "retired slot must not be added to the free list"
                 );
             }
+            Ok(Some(v)) => panic!("expected 7, got {v}"),
             Ok(None) => panic!("expected to remove the value"),
             Err(_) => {
                 // Debug-style behavior: debug_assert fired. Acceptable.

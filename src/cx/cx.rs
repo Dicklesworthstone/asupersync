@@ -1499,10 +1499,10 @@ impl<Caps> Cx<Caps> {
             // we don't replay PII into the same log pipeline we're
             // trying to protect. This is enough for the developer to
             // recognise the misuse without echoing user_ids verbatim.
-            let preview: String = task_type.chars().take(16).collect();
+            let _preview: String = task_type.chars().take(16).collect();
             warn!(
                 rejected_len = task_type.len(),
-                rejected_preview = %preview,
+                rejected_preview = %_preview,
                 "set_task_type: rejected high-cardinality / PII-shaped value \
                  (br-9vpwpc; must match [A-Za-z][A-Za-z0-9_.:-]{{0,63}})"
             );

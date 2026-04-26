@@ -643,9 +643,7 @@ impl CancelDebtOracle {
         self.violations_detected.fetch_add(1, Ordering::Relaxed);
 
         let panic_msg = if self.config.panic_on_violation {
-            Some(format!(
-                "Cancellation debt violation detected: {violation}"
-            ))
+            Some(format!("Cancellation debt violation detected: {violation}"))
         } else {
             None
         };

@@ -205,9 +205,9 @@ impl HealthService {
     /// rejection, use [`Self::try_set_status`] which returns a typed
     /// [`HealthError`].
     pub fn set_status(&self, service: impl Into<String>, status: ServingStatus) {
-        if let Err(err) = self.try_set_status(service, status) {
+        if let Err(_err) = self.try_set_status(service, status) {
             crate::tracing_compat::warn!(
-                error = %err,
+                error = %_err,
                 "gRPC health: rejecting set_status call"
             );
         }
@@ -453,7 +453,9 @@ impl HealthService {
             // the Ok/Err discriminator, which existed). The Ok/Err split is
             // required by the gRPC health spec, but the error message is
             // not — it is now a fixed string with no per-request payload.
-            Err(Status::not_found("service not registered for health checking"))
+            Err(Status::not_found(
+                "service not registered for health checking",
+            ))
         }
     }
 

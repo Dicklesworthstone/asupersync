@@ -511,11 +511,8 @@ mod tests {
                     RegionTag::new("us-east-1"),
                     &mut rng,
                 );
-                let span = SymbolSpan::new_encode(
-                    ctx,
-                    ObjectId::new_for_test(id),
-                    Time::from_millis(0),
-                );
+                let span =
+                    SymbolSpan::new_encode(ctx, ObjectId::new_for_test(id), Time::from_millis(0));
                 collector.record_span(&span, Time::from_millis(0));
             }
             // get_traces returns iteration of all keys.

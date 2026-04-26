@@ -173,23 +173,44 @@ impl SamplingConfig {
 }
 
 /// Tracks cardinality per metric to prevent explosion.
-#[derive(Debug, Default)]
+///
+/// br-asupersync-bs92bg — `hasher_seed` is a per-instance
+/// `RandomState` (per-process random SipHash key). Switched from the
+/// previously-used `DetHasher` (fixed seed) because the cardinality
+/// tracker's keyspace is attacker-influenced — label values arrive
+/// from external sources via every metric path. With a fixed seed,
+/// an attacker who knows the hash function parameters can pre-compute
+/// label values that collide on a single bucket, exhausting the
+/// per-metric `max_cardinality` cap with one collision class and
+/// effectively suppressing every legitimate label combination
+/// thereafter (or, depending on call order, evicting legitimate
+/// labels from the seen-set so they re-trigger the overflow path on
+/// every subsequent record). RandomState's per-process seed defeats
+/// the pre-compute: an attacker cannot know the local hasher's key
+/// at startup, so they cannot construct a collision class.
+#[derive(Debug)]
 struct CardinalityTracker {
     /// Map of metric name -> set of label combination hashes.
     seen: RwLock<HashMap<String, HashSet<u64>>>,
     /// Number of times cardinality limit was hit.
     overflow_count: AtomicU64,
+    /// Per-instance random hash seed (br-asupersync-bs92bg).
+    hasher_seed: std::collections::hash_map::RandomState,
 }
 
 impl CardinalityTracker {
     fn new() -> Self {
-        Self::default()
+        Self {
+            seen: RwLock::new(HashMap::new()),
+            overflow_count: AtomicU64::new(0),
+            hasher_seed: std::collections::hash_map::RandomState::new(),
+        }
     }
 
     /// Check if recording this label combination would exceed the limit.
     #[cfg(test)]
     fn would_exceed(&self, metric: &str, labels: &[KeyValue], max_cardinality: usize) -> bool {
-        let hash = Self::hash_labels(labels);
+        let hash = self.hash_labels(labels);
         let seen = self.seen.read();
 
         if max_cardinality == 0 {
@@ -208,7 +229,7 @@ impl CardinalityTracker {
 
     /// Record a label combination.
     fn record(&self, metric: &str, labels: &[KeyValue]) {
-        let hash = Self::hash_labels(labels);
+        let hash = self.hash_labels(labels);
         let mut seen = self.seen.write();
         seen.entry(metric.to_string()).or_default().insert(hash);
     }
@@ -219,7 +240,7 @@ impl CardinalityTracker {
     /// Returns `true` when the limit would be exceeded and the label set was
     /// not recorded.
     fn check_and_record(&self, metric: &str, labels: &[KeyValue], max_cardinality: usize) -> bool {
-        let hash = Self::hash_labels(labels);
+        let hash = self.hash_labels(labels);
         let mut seen = self.seen.write();
         let set = seen.entry(metric.to_string()).or_default();
 
@@ -245,9 +266,16 @@ impl CardinalityTracker {
     }
 
     /// Hash labels for tracking.
-    fn hash_labels(labels: &[KeyValue]) -> u64 {
-        use crate::util::DetHasher;
-        use std::hash::{Hash, Hasher};
+    ///
+    /// br-asupersync-bs92bg — uses the per-instance `RandomState`
+    /// seed instead of `DetHasher`. The seed is randomised at
+    /// `CardinalityTracker::new()` and never observable to a remote
+    /// attacker, defeating the pre-computed-collision DoS that the
+    /// fixed-seed `DetHasher` would have permitted.
+    fn hash_labels(&self, labels: &[KeyValue]) -> u64 {
+        use std::collections::hash_map::RandomState;
+        use std::hash::{BuildHasher, Hash, Hasher};
+        let _ = std::marker::PhantomData::<RandomState>;
 
         // Treat label sets as order-insensitive. Different construction order of
         // equivalent labels should map to the same cardinality bucket.
@@ -259,7 +287,7 @@ impl CardinalityTracker {
             a_key.cmp(b_key).then_with(|| a_val.cmp(b_val))
         });
 
-        let mut hasher = DetHasher::default();
+        let mut hasher = self.hasher_seed.build_hasher();
         for (key, value) in normalized {
             key.hash(&mut hasher);
             value.hash(&mut hasher);
@@ -1335,6 +1363,56 @@ mod tests {
         );
 
         provider.shutdown().expect("shutdown");
+    }
+
+    /// br-asupersync-bs92bg — Pre-computed-collision DoS mitigation.
+    /// Each `CardinalityTracker::new()` instance gets a fresh
+    /// `RandomState` seed, so the same label set hashes to a
+    /// different bucket in two trackers. An attacker who knows the
+    /// hash function shape (which is public — it's std SipHash) but
+    /// not the per-process seed cannot pre-compute label values that
+    /// collide on the local tracker's buckets.
+    ///
+    /// The strict assertion below ("at least one of N pairs differs")
+    /// allows for the tiny probability that two random seeds happen
+    /// to map a single label set to the same 64-bit bucket; with N
+    /// distinct labels the probability of all-N collisions is
+    /// approximately N * 2^-64, indistinguishable from impossible.
+    #[test]
+    fn hash_labels_uses_per_instance_random_seed() {
+        let tracker_a = CardinalityTracker::new();
+        let tracker_b = CardinalityTracker::new();
+
+        let mut differ = false;
+        for i in 0..16u32 {
+            let labels = [KeyValue::new("id", i.to_string())];
+            let h_a = tracker_a.hash_labels(&labels);
+            let h_b = tracker_b.hash_labels(&labels);
+            if h_a != h_b {
+                differ = true;
+                break;
+            }
+        }
+        assert!(
+            differ,
+            "br-asupersync-bs92bg: two CardinalityTracker instances must hash labels under different seeds"
+        );
+    }
+
+    /// br-asupersync-bs92bg — Within a single tracker, hashing the
+    /// same label set twice must produce the same bucket (the
+    /// cardinality contract: identical labels deduplicate). The
+    /// per-instance seed is stable for the tracker's lifetime.
+    #[test]
+    fn hash_labels_is_stable_within_one_tracker() {
+        let tracker = CardinalityTracker::new();
+        let labels = [KeyValue::new("outcome", "ok")];
+        let h1 = tracker.hash_labels(&labels);
+        let h2 = tracker.hash_labels(&labels);
+        assert_eq!(
+            h1, h2,
+            "same labels must hash equally within one tracker (cardinality dedup contract)"
+        );
     }
 
     #[test]

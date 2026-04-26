@@ -2567,10 +2567,12 @@ impl DecisionContract for ConsumerPullDecisionContract {
             });
         }
         if observation >= 4 {
-            return Err(franken_decision::UpdatePosteriorError::ObservationOutOfRange {
-                observation,
-                state_count: 4,
-            });
+            return Err(
+                franken_decision::UpdatePosteriorError::ObservationOutOfRange {
+                    observation,
+                    state_count: 4,
+                },
+            );
         }
         let mut likelihoods = [0.1; 4];
         likelihoods[observation] = 0.9;
@@ -2715,10 +2717,12 @@ impl DecisionContract for ConsumerOverflowDecisionContract {
             });
         }
         if observation >= 4 {
-            return Err(franken_decision::UpdatePosteriorError::ObservationOutOfRange {
-                observation,
-                state_count: 4,
-            });
+            return Err(
+                franken_decision::UpdatePosteriorError::ObservationOutOfRange {
+                    observation,
+                    state_count: 4,
+                },
+            );
         }
         let mut likelihoods = [0.1; 4];
         likelihoods[observation] = 0.9;
@@ -2850,10 +2854,12 @@ impl DecisionContract for ConsumerRedeliveryDecisionContract {
             });
         }
         if observation >= 3 {
-            return Err(franken_decision::UpdatePosteriorError::ObservationOutOfRange {
-                observation,
-                state_count: 3,
-            });
+            return Err(
+                franken_decision::UpdatePosteriorError::ObservationOutOfRange {
+                    observation,
+                    state_count: 3,
+                },
+            );
         }
         let mut likelihoods = [0.1; 3];
         likelihoods[observation] = 0.9;

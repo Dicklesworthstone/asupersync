@@ -49,9 +49,9 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::time::{Duration, Instant, SystemTime};
 #[cfg(any(test, feature = "deterministic-mode"))]
 use std::time::UNIX_EPOCH;
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::types::{Budget, Outcome, RegionId, TaskId};
 use crate::util::stack_trace;

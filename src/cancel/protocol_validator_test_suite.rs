@@ -822,7 +822,11 @@ impl FalsePositiveTestHarness {
         self.validator.register_task(grandchild_task, grandchild);
 
         // Activate + spawn each region's task.
-        for (rid, parent_of_rid) in [(parent, None), (child, Some(parent)), (grandchild, Some(child))] {
+        for (rid, parent_of_rid) in [
+            (parent, None),
+            (child, Some(parent)),
+            (grandchild, Some(child)),
+        ] {
             PerformanceTestHarness::ensure_valid(self.validator.validate_region_transition(
                 rid,
                 RegionEvent::Activate,
@@ -848,7 +852,11 @@ impl FalsePositiveTestHarness {
 
         // Cancel propagates parent → child → grandchild. Each region
         // observes its own Cancel transition.
-        for (rid, parent_of_rid) in [(parent, None), (child, Some(parent)), (grandchild, Some(child))] {
+        for (rid, parent_of_rid) in [
+            (parent, None),
+            (child, Some(parent)),
+            (grandchild, Some(child)),
+        ] {
             PerformanceTestHarness::ensure_valid(self.validator.validate_region_transition(
                 rid,
                 RegionEvent::Cancel {

@@ -272,7 +272,7 @@ impl StateSnapshot {
         let now = state.now;
 
         // -- Task counters (O(1), br-asupersync-xxcss5) --
-        let live_tasks = state.tasks.live_tasks() as u32;
+        let live_tasks = state.tasks.live_task_count() as u32;
         let cancel_requested_tasks = state.tasks.count_in_phase(TaskPhase::CancelRequested) as u32;
         let cancelling_tasks = state.tasks.count_in_phase(TaskPhase::Cancelling) as u32;
         let finalizing_tasks = state.tasks.count_in_phase(TaskPhase::Finalizing) as u32;
@@ -285,7 +285,7 @@ impl StateSnapshot {
         let deadline_pressure = if tasks_with_deadline > 0 {
             let deadline_sum_ns = state.tasks.deadline_sum_ns();
             let now_ns = u128::from(now.as_nanos());
-            
+
             #[allow(clippy::cast_precision_loss)]
             let count = tasks_with_deadline as f64;
             #[allow(clippy::cast_precision_loss)]

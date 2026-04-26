@@ -406,8 +406,8 @@ impl Stream {
         // the malformed-trailer case on the server-receives-request
         // direction (where 1xx informational is impossible — only
         // SERVERS send 1xx, never clients).
-        let is_trailer_attempt =
-            self.headers_complete && matches!(self.state, StreamState::Open | StreamState::HalfClosedLocal);
+        let is_trailer_attempt = self.headers_complete
+            && matches!(self.state, StreamState::Open | StreamState::HalfClosedLocal);
         if is_trailer_attempt && !end_stream {
             // Server side (is_client=false): the only legitimate HEADERS-
             // after-headers-complete is request trailers, which MUST have
@@ -1317,13 +1317,7 @@ mod tests {
         let err = stream
             .recv_headers(false, true, false)
             .expect_err("server must reject trailing HEADERS without END_STREAM");
-        match err {
-            H2Error::Stream {
-                error_code: ErrorCode::ProtocolError,
-                ..
-            } => {}
-            other => panic!("expected stream PROTOCOL_ERROR, got {other:?}"),
-        }
+        assert_eq!(err.code, ErrorCode::ProtocolError);
 
         // State must be unchanged: the rejection happens BEFORE state
         // mutation (validation-first pattern).

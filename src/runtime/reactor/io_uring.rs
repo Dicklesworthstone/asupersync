@@ -1585,10 +1585,7 @@ mod imp {
             reactor
                 .poll(&mut events, Some(Duration::from_millis(50)))
                 .expect("subsequent poll should observe the wake");
-            assert!(
-                events.is_empty(),
-                "wake completion must remain non-event"
-            );
+            assert!(events.is_empty(), "wake completion must remain non-event");
             // Final invariant: a fresh wake must always be deliverable.
             reactor.wake().expect("final wake should succeed");
             events.clear();
