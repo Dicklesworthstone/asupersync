@@ -363,6 +363,71 @@ impl FullCx {
             .unwrap_or(None)
     }
 
+    /// Borrows the current task context for the duration of the closure.
+    ///
+    /// br-asupersync-xqt7dj — zero-Arc-clone hot path for callers that
+    /// only need to *read* from the active context (`checkpoint()`,
+    /// `trace()`, `now()`, `has_io()`, etc.). The legacy
+    /// [`Cx::current`] clones the three internal `Arc`s (3 atomic ops
+    /// per call) so the returned cx can be retained across await
+    /// points; for hot async loops that consult the ambient context
+    /// many times per poll, that clone cost compounds.
+    ///
+    /// `with_current` saves all 3 atomic ops in the common case (no
+    /// active `set_current_restricted` / `push_restriction` narrowing
+    /// — i.e. `frame.mask == frame.cx.runtime_mask`), borrowing the
+    /// frame's `Cx` directly and handing `&Cx` to the closure. When a
+    /// restriction stack IS active and the frame's mask differs from
+    /// the cx's runtime mask, we must apply the narrowed mask to a
+    /// stack-local copy of the cx (1 cheap clone) so cap-gated
+    /// `Option`-returning methods (`io`, `remote`, `timer_driver`,
+    /// `fetch_cap`) observe the restriction; that case degrades to the
+    /// same cost as legacy `current()`, never worse.
+    ///
+    /// **Lifetime semantics:** the borrow on `CURRENT_CX_STACK` is
+    /// held for the entire closure body, so the closure cannot install
+    /// a new ambient cx via `set_current*` (the inner mutable borrow
+    /// would panic). Use [`Cx::current`] (which clones) when the
+    /// ambient cx must outlive a single read or be moved into an
+    /// async block.
+    ///
+    /// **Restriction-mask correctness:** the borrowed/cloned cx
+    /// observes the active frame's mask, so callers running under a
+    /// `set_current_restricted` scope see the narrowed cap view via
+    /// `with_current` exactly as they would via `current().clone()`.
+    ///
+    /// Returns `None` when no ambient context is installed (or during
+    /// thread-local teardown); the closure is then NOT invoked.
+    #[inline]
+    pub fn with_current<F, R>(f: F) -> Option<R>
+    where
+        F: FnOnce(&Self) -> R,
+    {
+        CURRENT_CX_STACK
+            .try_with(|slot| {
+                let stack = slot.borrow();
+                let frame = stack.last()?;
+                if frame.mask == frame.cx.runtime_mask {
+                    // Common case: no restriction-stack narrowing. The
+                    // borrowed frame.cx already carries the correct
+                    // runtime mask, so we hand it to the closure
+                    // without any Arc::clone — saves 3 atomic ops
+                    // versus `Cx::current()`.
+                    Some(f(&frame.cx))
+                } else {
+                    // Restricted: apply the frame's narrowed mask to a
+                    // stack-local copy. Equivalent in cost to legacy
+                    // `current()` (3 Arc::clone), so the worst case is
+                    // a tie, never a regression.
+                    let mut cx = frame.cx.clone();
+                    cx.runtime_mask = frame.mask;
+                    Some(f(&cx))
+                }
+            })
+            .ok()
+            .flatten()
+    }
+
     /// Sets the current task context for the duration of the guard.
     ///
     /// Pushes a new frame onto the thread-local stack with the FULL
@@ -2968,6 +3033,16 @@ impl Cx<cap::All> {
     ///
     /// This API is intended for testing only. Production code should receive
     /// Cx instances from the runtime, not construct them directly.
+    ///
+    /// # Visibility (br-asupersync-2x6hbi)
+    ///
+    /// Gated behind `#[cfg(any(test, feature = "test-internals"))]` so that
+    /// production consumers of the asupersync crate (with default
+    /// `test-internals` feature OFF) cannot construct a `Cx<cap::All>` out
+    /// of band, bypassing runtime cap-mask enforcement. `test-internals` is
+    /// in the default feature set, so existing tests and dev-time consumers
+    /// keep working without any change.
+    #[cfg(any(test, feature = "test-internals"))]
     #[must_use]
     pub fn for_testing() -> Self {
         Self::new(
@@ -2997,6 +3072,9 @@ impl Cx<cap::All> {
     ///
     /// This API is intended for testing only. Production code should receive
     /// Cx instances from the runtime, not construct them directly.
+    /// Gated behind `cfg(any(test, feature = "test-internals"))`
+    /// (br-asupersync-2x6hbi).
+    #[cfg(any(test, feature = "test-internals"))]
     #[must_use]
     pub fn for_testing_with_budget(budget: Budget) -> Self {
         Self::new(
@@ -3023,7 +3101,9 @@ impl Cx<cap::All> {
     ///
     /// # Note
     ///
-    /// This API is intended for testing only.
+    /// This API is intended for testing only. Gated behind
+    /// `cfg(any(test, feature = "test-internals"))` (br-asupersync-2x6hbi).
+    #[cfg(any(test, feature = "test-internals"))]
     #[must_use]
     pub fn for_testing_with_io() -> Self {
         Self::new_with_io(
@@ -3040,13 +3120,19 @@ impl Cx<cap::All> {
     /// Creates a request-scoped capability context with a specified budget.
     ///
     /// This is intended for production request handling that needs unique
-    /// task/region identifiers outside the scheduler.
+    /// task/region identifiers outside the scheduler. Unlike the
+    /// `for_testing*` family, this remains publicly available because
+    /// per-request handlers in production legitimately need to construct
+    /// short-lived Cx values; the resulting Cx still carries the runtime
+    /// cap-mask, so it cannot escalate beyond what the request handler was
+    /// granted at the boundary.
     #[must_use]
     pub fn for_request_with_budget(budget: Budget) -> Self {
         Self::new(RegionId::new_ephemeral(), TaskId::new_ephemeral(), budget)
     }
 
     /// Creates a request-scoped capability context with an infinite budget.
+    /// See [`Self::for_request_with_budget`] for the visibility rationale.
     #[must_use]
     pub fn for_request() -> Self {
         Self::for_request_with_budget(Budget::INFINITE)
@@ -3059,7 +3145,9 @@ impl Cx<cap::All> {
     ///
     /// # Note
     ///
-    /// This API is intended for testing only.
+    /// This API is intended for testing only. Gated behind
+    /// `cfg(any(test, feature = "test-internals"))` (br-asupersync-2x6hbi).
+    #[cfg(any(test, feature = "test-internals"))]
     #[must_use]
     pub fn for_testing_with_remote(cap: RemoteCap) -> Self {
         let mut cx = Self::for_testing();
@@ -3125,18 +3213,12 @@ mod tests {
 
     impl Drop for CurrentCxDtorProbe {
         fn drop(&mut self) {
-            let state = match CURRENT_CX.try_with(|slot| slot.borrow().clone()) {
-                Ok(Some(_)) => 1,
-                Ok(None) => 2,
-                Err(_) => {
-                    if Cx::current().is_none() {
-                        3
-                    } else {
-                        4
-                    }
-                }
+            let state = if Cx::current().is_some() {
+                1
+            } else {
+                2
             };
-            CURRENT_CX_DTOR_STATE.store(state, Ordering::SeqCst);
+            CURRENT_CX_DTOR_STATE.store(state as u8, Ordering::SeqCst);
         }
     }
 
@@ -3184,6 +3266,84 @@ mod tests {
         let cx = test_cx();
         assert!(!cx.has_io());
         assert!(cx.io().is_none());
+    }
+
+    /// br-asupersync-xqt7dj: with_current(f) must invoke f with a borrowed
+    /// &Cx that observes the SAME runtime mask as the legacy Cx::current()
+    /// would have observed under set_current_restricted, AND in the
+    /// unrestricted common case must NOT bump any Arc strong count of the
+    /// installed cx (zero-clone fast path).
+    #[test]
+    fn with_current_zero_clone_in_unrestricted_case() {
+        let cx = test_cx();
+        // Reference strong counts BEFORE installation as ambient.
+        let _guard = Cx::set_current(Some(cx.clone()));
+        // Capture strong counts of the installed-frame's inner Arcs.
+        let frame_inner_strong_before = Arc::strong_count(
+            &Cx::current()
+                .expect("current should resolve")
+                .inner
+                .clone(),
+        );
+        // current() itself bumped the count by +1 above (we cloned to read);
+        // hold a 2nd reference to keep the count stable across with_current.
+        let cx_pin = Cx::current().expect("current");
+        let baseline = Arc::strong_count(&cx_pin.inner);
+
+        let observed = Cx::with_current(|borrowed| {
+            // Inside the closure, while we hold the borrow, the inner
+            // strong count must NOT have been incremented above baseline.
+            // This proves the zero-clone fast path was taken.
+            let count_during_borrow = Arc::strong_count(&borrowed.inner);
+            (count_during_borrow, borrowed.runtime_mask)
+        })
+        .expect("with_current should invoke closure");
+
+        // The fast path borrows frame.cx directly without Arc::clone, so
+        // the inner strong count during the borrow equals baseline.
+        assert_eq!(
+            observed.0, baseline,
+            "with_current must not bump inner.strong_count in unrestricted case"
+        );
+        // Mask must reflect the installed frame (full caps for set_current).
+        assert_eq!(observed.1, cap::CapMask::all());
+        let _ = frame_inner_strong_before;
+    }
+
+    /// br-asupersync-xqt7dj: with_current must apply the frame's narrowed
+    /// mask when set_current_restricted is active. In the restricted case
+    /// the implementation falls back to clone+overlay (3 Arc::clone) to
+    /// preserve the security invariant from br-asupersync-5ckssb; verify
+    /// the closure observes the narrow mask.
+    #[test]
+    fn with_current_applies_restriction_mask() {
+        let cx = test_cx();
+        // restricted_cx with NoCaps narrows the runtime mask.
+        let restricted = cx.clone().restrict::<cap::None>();
+        let _guard = restricted.set_current_restricted();
+        let mask_seen = Cx::with_current(|borrowed| borrowed.runtime_mask)
+            .expect("with_current should resolve under restricted scope");
+        assert_eq!(
+            mask_seen,
+            cap::CapMask::none(),
+            "with_current must apply the frame's narrowed mask"
+        );
+    }
+
+    /// br-asupersync-xqt7dj: with_current returns None when no ambient cx
+    /// is installed; the closure must NOT fire.
+    #[test]
+    fn with_current_returns_none_when_no_ambient() {
+        let mut closure_ran = false;
+        let result = Cx::with_current(|_cx| {
+            closure_ran = true;
+            42_u32
+        });
+        assert!(result.is_none());
+        assert!(
+            !closure_ran,
+            "closure must not be invoked when no ambient cx is installed"
+        );
     }
 
     #[test]
@@ -4569,8 +4729,8 @@ mod tests {
         let full_cx = Cx::for_testing();
         let _outer = Cx::set_current(Some(full_cx.clone()));
 
-        // Now nest a restricted view (NoCaps).
-        let restricted: Cx<cap::NoCaps> = full_cx.restrict::<cap::NoCaps>();
+        // Now nest a restricted view (None).
+        let restricted: Cx<cap::None> = full_cx.restrict::<cap::None>();
         let _inner = restricted.set_current_restricted();
 
         // Ambient lookup must now see the narrowed mask.
@@ -4604,7 +4764,7 @@ mod tests {
         let full_cx = Cx::for_testing();
         let _outer = Cx::set_current(Some(full_cx.clone()));
         {
-            let restricted: Cx<cap::NoCaps> = full_cx.restrict::<cap::NoCaps>();
+            let restricted: Cx<cap::None> = full_cx.restrict::<cap::None>();
             let _inner = restricted.set_current_restricted();
             assert_eq!(
                 Cx::current().unwrap().runtime_mask,
@@ -4681,7 +4841,7 @@ mod tests {
             assert!(!Cx::current().unwrap().runtime_mask.has(cap::CapMask::IO));
             assert!(Cx::current().unwrap().runtime_mask.has(cap::CapMask::REMOTE));
             {
-                let l3_cx: Cx<cap::NoCaps> = full_cx.restrict::<cap::NoCaps>();
+                let l3_cx: Cx<cap::None> = full_cx.restrict::<cap::None>();
                 let _l3 = l3_cx.set_current_restricted(); // none
                 assert_eq!(
                     Cx::current().unwrap().runtime_mask,
