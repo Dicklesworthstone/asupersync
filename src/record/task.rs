@@ -13,8 +13,12 @@ use smallvec::SmallVec;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::task::Waker;
-#[cfg(feature = "tracing-integration")]
-use std::time::Instant;
+// br-asupersync-1w9aot: removed `use std::time::Instant`. The
+// `created_instant` field (production; tracing-integration only) is now
+// `crate::types::Time` sampled via `crate::time::wall_now()` so replay
+// determinism is preserved when a virtual clock is installed via the
+// runtime's existing `wall_now` indirection. Mirrors the
+// br-asupersync-qdkyqs precedent on `scheduler/worker.rs::poll_start`.
 
 /// The concrete outcome type stored in task records (Phase 0).
 pub type TaskOutcome = Outcome<(), crate::error::Error>;
@@ -48,7 +52,7 @@ pub enum TaskState {
         cleanup_budget: Budget,
     },
     /// Terminal state.
-    Completed(TaskOutcome),
+    Completed(crate::types::Outcome<()>),
 }
 
 /// Coarse-grained task phase for cross-thread reads.
@@ -331,15 +335,31 @@ pub struct TaskRecord {
     pub cx: Option<Cx>,
     /// Logical time when the task was created.
     pub created_at: Time,
+    /// The task's current deadline (cached from cx_inner).
+    pub deadline: Option<Time>,
 
     /// Number of polls remaining (for budget tracking).
     pub polls_remaining: u32,
     /// Total number of polls executed (for completion metrics).
     pub total_polls: u64,
-    /// Wall-clock instant when the task was created (for duration tracking).
+    /// Replayable creation timestamp used by the `tracing-integration`
+    /// duration metric.
+    ///
+    /// br-asupersync-1w9aot: previously a `std::time::Instant` sampled
+    /// via `Instant::now()`, which baked wall-clock time into the
+    /// metric and broke lab-replay determinism (the same lab seed
+    /// produced different `duration_us` values across runs). The field
+    /// is now `crate::types::Time` sampled through
+    /// `crate::time::wall_now()` — which the lab runtime overrides
+    /// with its `TimerDriverHandle`-backed virtual clock when present
+    /// — so replays are byte-identical. The `serde(skip)` marker is
+    /// preserved so the test-internals JSON snapshots that already
+    /// scrub `created_instant` to `[INSTANT]` continue to round-trip.
+    /// Mirrors the br-asupersync-qdkyqs fix on
+    /// `scheduler/worker.rs::poll_start`.
     #[cfg(feature = "tracing-integration")]
     #[cfg_attr(feature = "test-internals", serde(skip))]
-    pub created_instant: Instant,
+    pub created_instant: Time,
     /// Lab-only: last step this task was polled (for futurelock detection).
     pub last_polled_step: u64,
     /// Tasks waiting for this task to complete.
@@ -399,10 +419,14 @@ impl TaskRecord {
             cx_inner: None, // Must be set via set_cx_inner or similar
             cx: None,
             created_at,
+            deadline: budget.deadline,
             polls_remaining: budget.poll_quota,
             total_polls: 0,
+            // br-asupersync-1w9aot: route through wall_now() so the
+            // lab runtime's virtual clock can intercept; production
+            // unchanged.
             #[cfg(feature = "tracing-integration")]
-            created_instant: Instant::now(),
+            created_instant: crate::time::wall_now(),
             last_polled_step: 0,
             waiters: SmallVec::new(),
             cached_waker: None,
@@ -429,6 +453,7 @@ impl TaskRecord {
     /// Sets the shared CxInner.
     #[inline]
     pub fn set_cx_inner(&mut self, inner: Arc<RwLock<CxInner>>) {
+        self.deadline = inner.read().budget.deadline;
         self.cx_inner = Some(inner);
     }
 
@@ -687,7 +712,7 @@ impl TaskRecord {
     ///
     /// Returns true if the state changed.
     #[allow(clippy::used_underscore_binding, clippy::no_effect_underscore_binding)]
-    pub fn complete(&mut self, outcome: TaskOutcome) -> bool {
+    pub fn complete(&mut self, outcome: crate::types::Outcome<()>) -> bool {
         if self.state.is_terminal() {
             return false;
         }
@@ -722,11 +747,14 @@ impl TaskRecord {
                 Outcome::Cancelled(_) => "Cancelled",
                 Outcome::Panicked(_) => "Panicked",
             };
-            let duration_us = self
-                .created_instant
-                .elapsed()
-                .as_micros()
-                .min(u128::from(u64::MAX)) as u64;
+            // br-asupersync-1w9aot: sample "now" through wall_now()
+            // (replayable when the lab runtime installs a virtual
+            // clock) and compute the elapsed nanos via Time
+            // arithmetic. `Time::duration_since` is saturating, so a
+            // backward clock step (NTP slew, Time::ZERO default) can
+            // never produce a negative or wrap-around duration.
+            let now: Time = crate::time::wall_now();
+            let duration_us = now.duration_since(self.created_instant) / 1000;
             let total_polls = self.total_polls;
             crate::tracing_compat::debug!(
                 task_id = ?self.id,
@@ -863,11 +891,10 @@ impl TaskRecord {
         let budget = *cleanup_budget;
         #[cfg(feature = "tracing-integration")]
         {
-            let duration_us = self
-                .created_instant
-                .elapsed()
-                .as_micros()
-                .min(u128::from(u64::MAX)) as u64;
+            // br-asupersync-1w9aot: same wall_now-routed Time
+            // arithmetic as the success-path trace site above.
+            let now: Time = crate::time::wall_now();
+            let duration_us = now.duration_since(self.created_instant) / 1000;
             let total_polls = self.total_polls;
             crate::tracing_compat::debug!(
                 task_id = ?self.id,
@@ -1031,9 +1058,11 @@ impl crate::util::Recyclable for TaskRecord {
         self.created_at = Time::ZERO;
         self.polls_remaining = 0;
         self.total_polls = 0;
+        // br-asupersync-1w9aot: reset path also routes through
+        // wall_now() so the lab runtime can intercept on replay.
         #[cfg(feature = "tracing-integration")]
         {
-            self.created_instant = std::time::Instant::now();
+            self.created_instant = crate::time::wall_now();
         }
         self.last_polled_step = 0;
 

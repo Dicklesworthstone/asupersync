@@ -181,13 +181,6 @@ impl TaskTable {
         }
     }
 
-    /// Returns the total number of non-terminal (live) tasks.
-    #[must_use]
-    #[inline]
-    pub fn live_tasks(&self) -> usize {
-        self.phase_counts.iter().sum()
-    }
-
     /// Returns the sum of deadlines for all live tasks.
     #[must_use]
     #[inline]
@@ -303,9 +296,13 @@ impl TaskTable {
         record.owner = owner;
         record.created_at = created_at;
         record.polls_remaining = budget.poll_quota;
+        // br-asupersync-1w9aot: route through wall_now() so the lab
+        // runtime's virtual clock can intercept on replay; production
+        // unchanged. The field's type was `std::time::Instant` before
+        // the bead fix; it is now `crate::types::Time`.
         #[cfg(feature = "tracing-integration")]
         {
-            record.created_instant = std::time::Instant::now();
+            record.created_instant = crate::time::wall_now();
         }
 
         self.insert(record)
@@ -453,11 +450,13 @@ impl TaskTable {
         taken
     }
 
-    /// Returns the number of live tasks (tasks in the arena).
+    /// Returns the number of live tasks (non-terminal).
+    ///
+    /// O(1) — maintained incrementally for Lyapunov snapshots.
     #[must_use]
     #[inline]
     pub fn live_task_count(&self) -> usize {
-        self.tasks.len()
+        self.phase_counts.iter().sum()
     }
 
     /// Returns the number of stored futures.
