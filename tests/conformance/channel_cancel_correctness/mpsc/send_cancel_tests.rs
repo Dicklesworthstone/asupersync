@@ -187,7 +187,7 @@ impl MpscSendCancelTest {
         (true, ProtocolViolation::CancelNotPropagated {
             channel_type: ChannelType::Mpsc,
             scenario: CancelScenario::SendCancel,
-            details: "placeholder".to_string(),
+            details: "send blocked under backpressure observed the cancel signal and exited without committing".to_string(),
         })
     }
 
@@ -237,7 +237,10 @@ impl MpscSendCancelTest {
             (true, ProtocolViolation::CancelNotPropagated {
                 channel_type: ChannelType::Mpsc,
                 scenario: CancelScenario::SendCancel,
-                details: "placeholder".to_string(),
+                details: format!(
+                    "concurrent senders observed {} cancellations across {} ops (~1/3 with 25% tolerance)",
+                    cancelled, total
+                ),
             })
         } else {
             (false, ProtocolViolation::CancelNotPropagated {
@@ -290,7 +293,10 @@ impl MpscSendCancelTest {
             (true, ProtocolViolation::CancelNotPropagated {
                 channel_type: ChannelType::Mpsc,
                 scenario: CancelScenario::SendCancel,
-                details: "placeholder".to_string(),
+                details: format!(
+                    "two-phase reserve/commit closed the loop: {} reserves resolved into {} commits + {} cancels (no leaked reservations)",
+                    total_reserves, total_commits, total_cancels
+                ),
             })
         } else {
             (false, ProtocolViolation::StateInconsistency {
@@ -366,7 +372,7 @@ impl MpscSendCleanupTest {
             (true, ProtocolViolation::CancelNotPropagated {
                 channel_type: ChannelType::Mpsc,
                 scenario: CancelScenario::SendCancel,
-                details: "placeholder".to_string(),
+                details: "registered waker count returned to baseline after cancelled send (no waker leak in send_wakers queue)".to_string(),
             })
         } else {
             (false, ProtocolViolation::ResourceLeak {
@@ -387,7 +393,7 @@ impl MpscSendCleanupTest {
         (true, ProtocolViolation::CancelNotPropagated {
             channel_type: ChannelType::Mpsc,
             scenario: CancelScenario::SendCancel,
-            details: "placeholder".to_string(),
+            details: "reserve dropped without commit released its permit back to channel capacity and woke the next reserver (no permit leak)".to_string(),
         })
     }
 }
@@ -487,7 +493,13 @@ impl MpscSendContentionTest {
             (true, ProtocolViolation::CancelNotPropagated {
                 channel_type: ChannelType::Mpsc,
                 scenario: CancelScenario::SendCancel,
-                details: "placeholder".to_string(),
+                details: format!(
+                    "cancellation success rate {:.1}% >= 80% threshold under {}-way contention ({} succeeded, {} lost the race)",
+                    success_rate * 100.0,
+                    config.concurrency_level,
+                    successful,
+                    failed
+                ),
             })
         } else {
             (false, ProtocolViolation::SlowCancellation {
