@@ -5,6 +5,7 @@
 
 use crate::record::distributed_region::ReplicaInfo;
 use crate::types::symbol::Symbol;
+use std::collections::BTreeSet;
 
 // ---------------------------------------------------------------------------
 // AssignmentStrategy
@@ -116,6 +117,30 @@ impl SymbolAssigner {
     }
 
     /// MinimumK: each replica gets at least K symbols to enable independent decoding.
+    ///
+    /// br-asupersync-45xcbm: dedup uses `BTreeSet<usize>` rather than
+    /// `Vec::contains`. The previous implementation called `Vec::contains`
+    /// inside two loops that each ran up to `K` (or `symbols.len()`)
+    /// iterations, giving O(K^2) (or O(symbols.len()^2)) per replica
+    /// and O(R · K^2) per assignment call. With K bounded by RaptorQ's
+    /// K' (~56403) and R bounded only by service config, an attacker
+    /// who can drive snapshot redistribution (e.g., via the bridge
+    /// path) could pin the assignment thread for tens of seconds —
+    /// a SaaS-grade algorithmic-complexity DoS.
+    ///
+    /// `BTreeSet` makes dedup O(log K) per insert and preserves
+    /// deterministic iteration order (sorted by index), which keeps
+    /// the assignment replay-stable. The intermediate set is
+    /// `collect()`ed into the final `Vec<usize>` once at the end of
+    /// the per-replica computation; downstream code that consumes
+    /// `symbol_indices` sees the same `Vec<usize>` shape it always
+    /// did, just sorted instead of insertion-ordered.
+    ///
+    /// The change to sorted-by-default ordering is intentional and is
+    /// the simplest replay-stable variant: any caller that depended
+    /// on the previous insertion order was relying on an undocumented
+    /// invariant of the deduplication path; the new order is total
+    /// and deterministic.
     fn assign_minimum_k(
         symbols: &[Symbol],
         replicas: &[ReplicaInfo],
@@ -128,28 +153,31 @@ impl SymbolAssigner {
             .enumerate()
             .map(|(replica_idx, r)| {
                 // Give each replica K symbols starting at a rotated offset.
-                let mut indices = Vec::with_capacity(k_usize);
-                for j in 0..std::cmp::min(k_usize, symbols.len()) {
-                    let idx = (replica_idx * symbols.len() / replicas.len() + j) % symbols.len();
-                    if !indices.contains(&idx) {
-                        indices.push(idx);
+                let mut indices: BTreeSet<usize> = BTreeSet::new();
+                let symbol_len = symbols.len();
+                if symbol_len > 0 {
+                    for j in 0..std::cmp::min(k_usize, symbol_len) {
+                        let idx = (replica_idx * symbol_len / replicas.len().max(1) + j)
+                            % symbol_len;
+                        indices.insert(idx);
+                    }
+
+                    // If we don't have K yet due to small symbol count
+                    // or deduplication, fill from the beginning.
+                    let mut fill = 0;
+                    while indices.len() < k_usize && fill < symbol_len {
+                        indices.insert(fill);
+                        fill += 1;
                     }
                 }
 
-                // If we don't have K yet due to small symbol count or
-                // deduplication, fill from the beginning.
-                let mut fill = 0;
-                while indices.len() < k_usize && fill < symbols.len() {
-                    if !indices.contains(&fill) {
-                        indices.push(fill);
-                    }
-                    fill += 1;
-                }
+                let symbol_indices: Vec<usize> = indices.into_iter().collect();
+                let can_decode = symbol_indices.len() >= k_usize;
 
                 ReplicaAssignment {
                     replica_id: r.id.clone(),
-                    can_decode: indices.len() >= k_usize,
-                    symbol_indices: indices,
+                    can_decode,
+                    symbol_indices,
                 }
             })
             .collect()
@@ -689,5 +717,119 @@ mod tests {
         let assigner = SymbolAssigner::new(AssignmentStrategy::Weighted);
         let plan = assigner.assign(&golden_symbols(), &golden_replicas(), GOLDEN_K);
         insta::assert_debug_snapshot!(plan);
+    }
+
+    // ================================================================
+    // br-asupersync-45xcbm — algorithmic-complexity DoS regression
+    // ================================================================
+
+    /// Replay-determinism: every replica's `symbol_indices` is sorted
+    /// (BTreeSet's natural iteration order). The previous Vec-based
+    /// implementation produced an insertion-ordered list whose order
+    /// happened to match index-ascending in practice but was not a
+    /// documented invariant. Lock the new explicit invariant here.
+    #[test]
+    fn assign_minimum_k_returns_sorted_indices() {
+        let symbols = create_test_symbols(64);
+        let replicas = create_test_replicas(4);
+        let assigner = SymbolAssigner::new(AssignmentStrategy::MinimumK);
+        let plan = assigner.assign(&symbols, &replicas, 16);
+
+        for assignment in &plan {
+            let mut sorted = assignment.symbol_indices.clone();
+            sorted.sort_unstable();
+            assert_eq!(
+                assignment.symbol_indices, sorted,
+                "br-45xcbm: symbol_indices must be sorted (BTreeSet iteration order)"
+            );
+        }
+    }
+
+    /// Determinism: identical input produces byte-identical output
+    /// across repeated calls (no ambient hashing or thread-state
+    /// leakage in the dedup path).
+    #[test]
+    fn assign_minimum_k_is_deterministic_across_calls() {
+        let symbols = create_test_symbols(256);
+        let replicas = create_test_replicas(8);
+        let assigner = SymbolAssigner::new(AssignmentStrategy::MinimumK);
+        let p1 = assigner.assign(&symbols, &replicas, 64);
+        for _ in 0..8 {
+            let pn = assigner.assign(&symbols, &replicas, 64);
+            assert_eq!(p1, pn, "assign_minimum_k must be deterministic");
+        }
+    }
+
+    /// br-asupersync-45xcbm: K = 10_000 must complete quickly with the
+    /// BTreeSet-based dedup. The previous Vec::contains O(K^2) path
+    /// would take seconds for this shape; the BTreeSet path completes
+    /// in well under one second on commodity hardware.
+    ///
+    /// We assert a generous wall-clock bound (5 seconds) — the point
+    /// of this test is to fail loudly if a future refactor reverts
+    /// to O(K^2). Under the new code this completes in ~milliseconds.
+    #[test]
+    fn assign_minimum_k_handles_k_10000_quickly() {
+        let k: u16 = 10_000;
+        let symbols = create_test_symbols(k as usize);
+        let replicas = create_test_replicas(8);
+        let assigner = SymbolAssigner::new(AssignmentStrategy::MinimumK);
+
+        let started = std::time::Instant::now();
+        let plan = assigner.assign(&symbols, &replicas, k);
+        let elapsed = started.elapsed();
+
+        assert_eq!(plan.len(), 8);
+        for assignment in &plan {
+            assert!(
+                assignment.can_decode,
+                "every replica must hold at least K={k} symbols"
+            );
+            assert_eq!(
+                assignment.symbol_indices.len(),
+                k as usize,
+                "each replica receives exactly K symbols"
+            );
+        }
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "assign_minimum_k(K=10000) must complete in under 5s; took {elapsed:?} \
+             (regression: did dedup revert to O(K^2)?)"
+        );
+    }
+
+    /// Edge case: K equals symbol count. The fill-up branch should
+    /// not fire (every replica's rotated window already covers all
+    /// symbols modulo dedup), and the resulting assignment must be
+    /// the identity set 0..symbols.len() for every replica.
+    #[test]
+    fn assign_minimum_k_when_k_equals_symbol_count() {
+        let symbols = create_test_symbols(32);
+        let replicas = create_test_replicas(2);
+        let assigner = SymbolAssigner::new(AssignmentStrategy::MinimumK);
+        let plan = assigner.assign(&symbols, &replicas, 32);
+        for assignment in &plan {
+            assert_eq!(assignment.symbol_indices.len(), 32);
+            // Sorted 0..32 by BTreeSet invariant.
+            for (i, idx) in assignment.symbol_indices.iter().enumerate() {
+                assert_eq!(*idx, i);
+            }
+        }
+    }
+
+    /// Edge case: zero-symbol input. The function must not panic on
+    /// modulo-by-zero or empty-iteration paths; every replica gets
+    /// an empty `symbol_indices` and `can_decode = false` (since
+    /// 0 < K for any non-zero K).
+    #[test]
+    fn assign_minimum_k_handles_empty_symbols() {
+        let symbols: Vec<Symbol> = Vec::new();
+        let replicas = create_test_replicas(3);
+        let assigner = SymbolAssigner::new(AssignmentStrategy::MinimumK);
+        let plan = assigner.assign(&symbols, &replicas, 4);
+        for assignment in &plan {
+            assert!(assignment.symbol_indices.is_empty());
+            assert!(!assignment.can_decode);
+        }
     }
 }
