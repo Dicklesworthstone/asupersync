@@ -4,6 +4,54 @@
 //! and responses. Interceptors can be used for authentication, logging,
 //! tracing, metrics, and other cross-cutting concerns.
 //!
+//! # Cross-interceptor state: `AuthContext`
+//!
+//! When an authentication interceptor (e.g. [`AuthInterceptor`] or a
+//! custom one) parses a bearer token, it MUST share the resulting
+//! identity with downstream interceptors (rate-limit per-tenant,
+//! authorization, audit logging) and the eventual handler. Two patterns
+//! are wrong here:
+//!
+//! 1. Stuffing the parsed user id into a custom metadata header
+//!    (`x-asupersync-user`). This LEAKS the server-side identity onto
+//!    the wire — visible to downstream microservices, log scrapers, and
+//!    potentially echoed back in responses.
+//! 2. Maintaining a thread-local "current user" register. This violates
+//!    the asupersync I7 invariant (no ambient authority).
+//!
+//! The right pattern is [`AuthContext`] in `request.extensions_mut()`:
+//!
+//! ```ignore
+//! use asupersync::grpc::interceptor::AuthContext;
+//! use asupersync::grpc::server::Interceptor;
+//!
+//! struct MyAuthInterceptor;
+//! impl Interceptor for MyAuthInterceptor {
+//!     fn intercept_request(&self, req: &mut Request<Bytes>) -> Result<(), Status> {
+//!         let token = req.metadata().get("authorization")
+//!             .ok_or_else(|| Status::unauthenticated("missing token"))?;
+//!         let (user_id, scopes) = parse_jwt(token)?;
+//!         let auth = AuthContext::with_principal(user_id).with_scopes(scopes);
+//!         req.extensions_mut().insert_typed(auth);
+//!         Ok(())
+//!     }
+//!     fn intercept_response(&self, _r: &mut Response<Bytes>) -> Result<(), Status> {
+//!         Ok(())
+//!     }
+//! }
+//!
+//! // A downstream interceptor or handler reads:
+//! fn handler(req: &Request<Bytes>) -> Result<Response<Bytes>, Status> {
+//!     let auth = req.extensions().get_typed::<AuthContext>()
+//!         .ok_or_else(|| Status::unauthenticated("no auth context"))?;
+//!     if !auth.has_scope("write:users") {
+//!         return Err(Status::permission_denied("requires write:users"));
+//!     }
+//!     // ... use auth.principal ...
+//!     Ok(Response::new(Bytes::new()))
+//! }
+//! ```
+//!
 //! # Example
 //!
 //! ```ignore
@@ -18,6 +66,7 @@
 //! let request = interceptor.intercept_request(request)?;
 //! ```
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -27,6 +76,96 @@ use crate::bytes::Bytes;
 use super::server::{Interceptor, format_grpc_timeout, parse_grpc_timeout};
 use super::status::Status;
 use super::streaming::{MetadataValue, Request, Response};
+
+// ─── AuthContext ───────────────────────────────────────────────────────────
+
+/// Authenticated principal + scopes + claims, threaded through an
+/// interceptor chain via [`Request::extensions_mut`].
+///
+/// The asupersync gRPC interceptor chain has no implicit auth flow —
+/// each interceptor is independent. When an authentication interceptor
+/// validates credentials, it inserts an `AuthContext` into the request's
+/// typed extensions; downstream interceptors and handlers read it via
+/// `request.extensions().get_typed::<AuthContext>()`.
+///
+/// This avoids two anti-patterns:
+///   * leaking parsed identity into wire metadata (the metadata
+///     round-trips to client; downstream services see it),
+///   * maintaining a thread-local "current user" (violates the no-ambient-
+///     authority invariant).
+///
+/// Resolves bead asupersync-z719f7.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AuthContext {
+    /// The authenticated principal id (user id, sub claim, service
+    /// account name, etc.). Empty string means anonymous (typically
+    /// not inserted at all in that case).
+    pub principal: String,
+    /// OAuth-style scopes / permissions granted to the principal.
+    pub scopes: Vec<String>,
+    /// Optional request id for correlation across services. Independent
+    /// of the principal — useful for tracing even when unauthenticated.
+    pub request_id: Option<String>,
+    /// Additional claims (e.g. JWT custom claims, tenant id, role).
+    /// Use sparingly — typed first-class fields above are preferred.
+    pub claims: HashMap<String, String>,
+}
+
+impl AuthContext {
+    /// Construct an empty AuthContext (anonymous, no scopes).
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Construct an AuthContext for the given principal id.
+    #[must_use]
+    pub fn with_principal(principal: impl Into<String>) -> Self {
+        Self {
+            principal: principal.into(),
+            ..Self::default()
+        }
+    }
+
+    /// Set the OAuth-style scopes.
+    #[must_use]
+    pub fn with_scopes(mut self, scopes: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.scopes = scopes.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Set the request id for tracing/correlation.
+    #[must_use]
+    pub fn with_request_id(mut self, request_id: impl Into<String>) -> Self {
+        self.request_id = Some(request_id.into());
+        self
+    }
+
+    /// Insert an additional claim.
+    #[must_use]
+    pub fn with_claim(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.claims.insert(key.into(), value.into());
+        self
+    }
+
+    /// Returns true if the principal holds the named scope.
+    #[must_use]
+    pub fn has_scope(&self, scope: &str) -> bool {
+        self.scopes.iter().any(|s| s == scope)
+    }
+
+    /// Returns true if the principal holds ALL of the named scopes.
+    #[must_use]
+    pub fn has_all_scopes(&self, scopes: &[&str]) -> bool {
+        scopes.iter().all(|needed| self.has_scope(needed))
+    }
+
+    /// Returns true if the AuthContext is anonymous (empty principal).
+    #[must_use]
+    pub fn is_anonymous(&self) -> bool {
+        self.principal.is_empty()
+    }
+}
 
 /// A composable layer of interceptors.
 ///

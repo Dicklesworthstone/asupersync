@@ -6,11 +6,13 @@
 //! - Client streaming: stream of requests, single response
 //! - Bidirectional streaming: stream of requests and responses
 
+use std::any::{Any, TypeId};
 use std::borrow::Cow;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 use crate::bytes::Bytes;
@@ -24,6 +26,9 @@ pub struct Request<T> {
     metadata: Metadata,
     /// The request message.
     message: T,
+    /// Server-side typed extensions populated by interceptors. Not on
+    /// the wire; cleared between independent requests.
+    extensions: Extensions,
 }
 
 impl<T> Request<T> {
@@ -33,13 +38,18 @@ impl<T> Request<T> {
         Self {
             metadata: Metadata::new(),
             message,
+            extensions: Extensions::new(),
         }
     }
 
     /// Create a request with metadata.
     #[must_use]
     pub fn with_metadata(message: T, metadata: Metadata) -> Self {
-        Self { metadata, message }
+        Self {
+            metadata,
+            message,
+            extensions: Extensions::new(),
+        }
     }
 
     /// Get a reference to the request metadata.
@@ -50,6 +60,22 @@ impl<T> Request<T> {
     /// Get a mutable reference to the request metadata.
     pub fn metadata_mut(&mut self) -> &mut Metadata {
         &mut self.metadata
+    }
+
+    /// Get a reference to the typed server-side extensions.
+    ///
+    /// Extensions are populated by interceptors and read by downstream
+    /// interceptors / handlers. Unlike metadata, extensions are NOT
+    /// transmitted on the wire — use them for capabilities like
+    /// `AuthContext` that downstream code needs but the peer must not
+    /// see (br-asupersync-z719f7).
+    pub fn extensions(&self) -> &Extensions {
+        &self.extensions
+    }
+
+    /// Get a mutable reference to the typed server-side extensions.
+    pub fn extensions_mut(&mut self) -> &mut Extensions {
+        &mut self.extensions
     }
 
     /// Get a reference to the request message.
@@ -68,7 +94,7 @@ impl<T> Request<T> {
         self.message
     }
 
-    /// Map the message type.
+    /// Map the message type. Extensions and metadata are preserved.
     pub fn map<F, U>(self, f: F) -> Request<U>
     where
         F: FnOnce(T) -> U,
@@ -76,7 +102,106 @@ impl<T> Request<T> {
         Request {
             metadata: self.metadata,
             message: f(self.message),
+            extensions: self.extensions,
         }
+    }
+}
+
+// ─── Extensions ──────────────────────────────────────────────────────────────
+
+/// Server-side typed extension map for interceptor-injected data.
+///
+/// Lets earlier interceptors share typed values (e.g. an `AuthContext`)
+/// with downstream interceptors and handlers WITHOUT routing the value
+/// through `Metadata` (which is on the wire and could leak server-side
+/// state to the peer or upstream services).
+///
+/// Stores values keyed by `TypeId`, so each concrete type T has at most
+/// one entry. Insert another value of the same T to replace it.
+///
+/// # Example
+///
+/// ```ignore
+/// use asupersync::grpc::interceptor::AuthContext;
+/// use asupersync::grpc::server::Interceptor;
+///
+/// struct AuthInterceptor;
+/// impl Interceptor for AuthInterceptor {
+///     fn intercept_request(&self, req: &mut Request<Bytes>) -> Result<(), Status> {
+///         let token = req.metadata().get("authorization").ok_or_else(|| {
+///             Status::unauthenticated("missing authorization")
+///         })?;
+///         let auth = AuthContext::with_principal(parse_user_id(token));
+///         req.extensions_mut().insert_typed(auth);
+///         Ok(())
+///     }
+/// }
+///
+/// // Downstream interceptor reads:
+/// fn handle(req: &Request<Bytes>) {
+///     if let Some(auth) = req.extensions().get_typed::<AuthContext>() {
+///         tracing::info!(principal = %auth.principal, "authenticated");
+///     }
+/// }
+/// ```
+#[derive(Clone, Default)]
+pub struct Extensions {
+    typed_data: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
+}
+
+impl std::fmt::Debug for Extensions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Extensions")
+            .field("typed_count", &self.typed_data.len())
+            .finish()
+    }
+}
+
+impl Extensions {
+    /// Create an empty extensions map.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Insert a typed value. Replaces any previous value of the same type.
+    pub fn insert_typed<T>(&mut self, value: T)
+    where
+        T: Send + Sync + 'static,
+    {
+        self.typed_data.insert(TypeId::of::<T>(), Arc::new(value));
+    }
+
+    /// Get a typed value by reference.
+    #[must_use]
+    pub fn get_typed<T>(&self) -> Option<&T>
+    where
+        T: Send + Sync + 'static,
+    {
+        self.typed_data
+            .get(&TypeId::of::<T>())
+            .and_then(|value| value.as_ref().downcast_ref::<T>())
+    }
+
+    /// Get a clone of a typed value if present.
+    #[must_use]
+    pub fn get_typed_cloned<T>(&self) -> Option<T>
+    where
+        T: Clone + Send + Sync + 'static,
+    {
+        self.get_typed::<T>().cloned()
+    }
+
+    /// Returns the number of distinct typed entries.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.typed_data.len()
+    }
+
+    /// Returns `true` if no extensions are stored.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.typed_data.is_empty()
     }
 }
 

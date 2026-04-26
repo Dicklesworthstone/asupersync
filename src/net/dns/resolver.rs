@@ -962,6 +962,26 @@ pub fn parse_resolv_conf_nameservers_for_test(contents: &str) -> Vec<SocketAddr>
     parse_resolv_conf_nameservers(contents)
 }
 
+#[cfg(any(test, feature = "test-internals"))]
+#[allow(dead_code)]
+/// Test-internals hook exposing the binary DNS-response parser. Returns
+/// only Ok/Err for the parse outcome (the parsed response itself is a
+/// private type). Intended for fuzz targets that need the
+/// no-panic + typed-error + no-infinite-loop oracle on attacker-controlled
+/// DNS wire bytes (label compression pointer loops, oversized labels,
+/// truncated headers, malformed RR).
+pub fn parse_dns_response_for_fuzz(packet: &[u8], expected_id: u16) -> Result<(), DnsError> {
+    parse_dns_response(packet, expected_id).map(|_| ())
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[allow(dead_code)]
+/// Test-internals hook for the DNS name decoder (label-pointer bomb
+/// surface). Same fuzz purpose as parse_dns_response_for_fuzz.
+pub fn decode_dns_name_for_fuzz(packet: &[u8], offset: &mut usize) -> Result<String, DnsError> {
+    decode_dns_name(packet, offset)
+}
+
 fn build_dns_query(name: &str, query_type: DnsQueryType, id: u16) -> Result<Vec<u8>, DnsError> {
     let mut query = Vec::with_capacity(512);
     query.extend_from_slice(&id.to_be_bytes());
