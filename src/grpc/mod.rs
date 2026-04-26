@@ -104,6 +104,7 @@ pub use streaming::{
     Streaming, StreamingRequest,
 };
 pub use web::{
-    ContentType as WebContentType, TrailerFrame, WebFrame, WebFrameCodec, base64_decode,
-    base64_encode, decode_trailers, encode_trailers, is_grpc_web_request, is_text_mode,
+    Base64StreamDecoder, ContentType as WebContentType, TrailerFrame, WebFrame, WebFrameCodec,
+    base64_decode, base64_encode, decode_trailers, encode_trailers, is_grpc_web_request,
+    is_text_mode,
 };

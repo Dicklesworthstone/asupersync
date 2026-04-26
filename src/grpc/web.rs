@@ -433,11 +433,194 @@ pub fn base64_encode(binary: &[u8]) -> String {
 }
 
 /// Decode base64 text mode data back to binary frames.
+///
+/// **Whole-input decoder.** This expects the COMPLETE base64 stream
+/// in one call and rejects partial input. For chunked HTTP body
+/// streams (where each chunk may end mid-base64-quartet), use
+/// [`Base64StreamDecoder`] instead — it holds 0–3 chars of partial-
+/// quartet across `push` calls so chunked input can be decoded
+/// incrementally without buffering the entire body in memory first.
 pub fn base64_decode(text: &str) -> Result<Vec<u8>, GrpcError> {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD
         .decode(text)
         .map_err(|e| GrpcError::protocol(format!("invalid base64 in grpc-web-text: {e}")))
+}
+
+/// Streaming gRPC-Web text-mode (`application/grpc-web-text`) base64
+/// decoder.
+///
+/// Holds incomplete base64 quartets across HTTP body chunks so a
+/// chunked body can be decoded incrementally without buffering the
+/// entire stream in memory before decode. Padding (`=`) is interpreted
+/// as the stream-end marker — once observed, the decoder is sealed
+/// and all subsequent `push` calls fail. Callers that omit padding
+/// (the gRPC-Web spec permits unpadded base64 since the binary stream
+/// length is independently known from `content-length` /
+/// chunked-encoding terminator) finalize via [`Self::finish`].
+///
+/// # Example
+///
+/// ```ignore
+/// use asupersync::grpc::web::Base64StreamDecoder;
+///
+/// let mut decoder = Base64StreamDecoder::new();
+/// for chunk in body_chunks {
+///     let decoded = decoder.push(chunk.as_bytes())?;
+///     if !decoded.is_empty() { handle_binary(&decoded); }
+/// }
+/// let trailing = decoder.finish()?;
+/// if !trailing.is_empty() { handle_binary(&trailing); }
+/// ```
+///
+/// # Padding semantics
+///
+/// gRPC-Web text mode uses RFC 4648 STANDARD base64. STANDARD
+/// requires padding when the binary length is not a multiple of 3,
+/// but the gRPC-Web spec is permissive: many clients omit padding.
+/// `Base64StreamDecoder` accepts both:
+///
+/// - Padded streams: `=` chars in any `push` chunk cause that chunk
+///   to be treated as the FINAL chunk, the entire combined buffer is
+///   decoded with strict STANDARD validation (which rejects
+///   misplaced padding), and the decoder is sealed. Subsequent
+///   `push` calls fail; `finish` is a no-op.
+/// - Unpadded streams: complete quartets decode in `push`, the
+///   trailing 0–3 chars are buffered, and `finish` decodes them
+///   without padding. A 1-char trailing remainder is invalid base64
+///   and surfaces as `Err`.
+///
+/// (br-asupersync-37svtb)
+#[derive(Debug, Default)]
+pub struct Base64StreamDecoder {
+    /// Buffered partial-quartet input (0–3 ASCII bytes).
+    pending: Vec<u8>,
+    /// True once `finish()` has run or padding has been observed in
+    /// `push()`. Sealed decoders reject further `push` calls and
+    /// `finish` becomes a no-op.
+    sealed: bool,
+}
+
+impl Base64StreamDecoder {
+    /// Create a fresh streaming decoder.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            pending: Vec::with_capacity(3),
+            sealed: false,
+        }
+    }
+
+    /// Returns true once the decoder has been sealed by either
+    /// observing padding in `push` or by an explicit `finish` call.
+    #[must_use]
+    pub fn is_sealed(&self) -> bool {
+        self.sealed
+    }
+
+    /// Push a chunk of base64 text. Returns the decoded bytes.
+    ///
+    /// Decodes all complete quartets formed by joining the previous
+    /// partial-quartet residue with this chunk; the trailing 0–3
+    /// chars are buffered for the next `push`. If the chunk contains
+    /// padding (`=`), the chunk is treated as the FINAL one — the
+    /// combined buffer is decoded with strict STANDARD validation
+    /// and the decoder is sealed.
+    pub fn push(&mut self, chunk: &[u8]) -> Result<Vec<u8>, GrpcError> {
+        if self.sealed {
+            return Err(GrpcError::protocol(
+                "base64 stream decoder is sealed — cannot push after \
+                 finish() or after padding has been observed \
+                 (br-asupersync-37svtb)",
+            ));
+        }
+        if chunk.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut combined = Vec::with_capacity(self.pending.len() + chunk.len());
+        combined.extend_from_slice(&self.pending);
+        combined.extend_from_slice(chunk);
+
+        // Padding must only appear in the FINAL quartet of the
+        // entire stream. If we see it, treat the combined buffer as
+        // the complete final input and let STANDARD validate that
+        // the padding is well-formed (correct count, correct offset,
+        // no trailing bytes after).
+        if combined.contains(&b'=') {
+            use base64::Engine;
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(&combined)
+                .map_err(|e| {
+                    GrpcError::protocol(format!(
+                        "invalid base64 in grpc-web-text final chunk: {e} \
+                         (br-asupersync-37svtb)"
+                    ))
+                })?;
+            self.pending.clear();
+            self.sealed = true;
+            return Ok(decoded);
+        }
+
+        // No padding — decode all complete quartets, retain trailing
+        // partial group (0–3 chars) for the next push.
+        let complete_len = combined.len() - (combined.len() % 4);
+        let to_decode = &combined[..complete_len];
+
+        use base64::Engine;
+        let decoded = base64::engine::general_purpose::STANDARD_NO_PAD
+            .decode(to_decode)
+            .map_err(|e| {
+                GrpcError::protocol(format!(
+                    "invalid base64 in grpc-web-text chunk: {e} \
+                     (br-asupersync-37svtb)"
+                ))
+            })?;
+
+        self.pending.clear();
+        self.pending.extend_from_slice(&combined[complete_len..]);
+        Ok(decoded)
+    }
+
+    /// Finalize the stream. Decodes any 2–3 char trailing partial
+    /// quartet without padding (STANDARD_NO_PAD permits unpadded
+    /// 2- or 3-char tails since the binary stream length is
+    /// independently known). A single trailing char is invalid base64
+    /// and surfaces as `Err`. Idempotent: calling `finish` again
+    /// after the decoder has been sealed (by either prior `finish`
+    /// or in-band padding) returns `Ok(Vec::new())`.
+    pub fn finish(&mut self) -> Result<Vec<u8>, GrpcError> {
+        if self.sealed {
+            return Ok(Vec::new());
+        }
+        self.sealed = true;
+
+        if self.pending.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        if self.pending.len() == 1 {
+            let byte = self.pending[0];
+            self.pending.clear();
+            return Err(GrpcError::protocol(format!(
+                "trailing single base64 character at stream end is invalid: \
+                 0x{byte:02x} (a complete base64 group is at least 2 chars; \
+                 br-asupersync-37svtb)"
+            )));
+        }
+
+        use base64::Engine;
+        let decoded = base64::engine::general_purpose::STANDARD_NO_PAD
+            .decode(&self.pending)
+            .map_err(|e| {
+                GrpcError::protocol(format!(
+                    "invalid base64 trailing data at stream end: {e} \
+                     (br-asupersync-37svtb)"
+                ))
+            })?;
+        self.pending.clear();
+        Ok(decoded)
+    }
 }
 
 // ── Request/Response Detection ───────────────────────────────────────
@@ -1454,5 +1637,250 @@ mod tests {
         let body = b"grpc-status: 5\r\n";
         let trailer = decode_trailers(body).unwrap();
         assert_eq!(trailer.status.code().as_i32(), 5);
+    }
+
+    // ── br-asupersync-37svtb: streaming base64 decoder ────────────────
+    //
+    // The reference implementation strategy across these tests:
+    // (1) build a known-good binary payload, (2) base64-encode it
+    // with the STANDARD engine, (3) feed the resulting text to the
+    // streaming decoder in various chunk-boundary partitions, and
+    // (4) assert that concatenated push outputs + finish output
+    // equal the original payload. Padding edge cases get explicit
+    // tests separately.
+
+    fn _37svtb_decode_via_chunks(text: &str, chunk_sizes: &[usize]) -> Vec<u8> {
+        let bytes = text.as_bytes();
+        let mut decoder = Base64StreamDecoder::new();
+        let mut out = Vec::new();
+        let mut offset = 0;
+        for &size in chunk_sizes {
+            let end = (offset + size).min(bytes.len());
+            let chunk = &bytes[offset..end];
+            out.extend(decoder.push(chunk).unwrap());
+            offset = end;
+        }
+        if offset < bytes.len() {
+            out.extend(decoder.push(&bytes[offset..]).unwrap());
+        }
+        out.extend(decoder.finish().unwrap());
+        out
+    }
+
+    #[test]
+    fn _37svtb_whole_input_in_one_push_padded() {
+        init_test("_37svtb_whole_input_in_one_push_padded");
+        // 5 bytes → 8 base64 chars with "=" padding
+        let payload: &[u8] = b"hello";
+        let encoded = base64_encode(payload);
+        assert!(encoded.ends_with('='), "5-byte payload must encode with padding");
+
+        let mut decoder = Base64StreamDecoder::new();
+        let decoded = decoder.push(encoded.as_bytes()).unwrap();
+        assert_eq!(decoded, payload);
+        assert!(decoder.is_sealed(), "padding in push must seal the decoder");
+
+        // finish() after seal is a no-op returning empty.
+        let trailing = decoder.finish().unwrap();
+        assert!(trailing.is_empty());
+    }
+
+    #[test]
+    fn _37svtb_split_at_every_byte_boundary_padded() {
+        // Encode 7 bytes (which produces "...=" padding) and split
+        // into single-byte chunks to exercise the partial-quartet
+        // buffering through every offset.
+        init_test("_37svtb_split_at_every_byte_boundary_padded");
+        let payload: &[u8] = b"asupers"; // 7 bytes, requires "=" padding
+        let encoded = base64_encode(payload);
+        let chunk_sizes: Vec<usize> = (0..encoded.len()).map(|_| 1).collect();
+        let decoded = _37svtb_decode_via_chunks(&encoded, &chunk_sizes);
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn _37svtb_split_at_quartet_boundary_unpadded() {
+        // Encode 6 bytes (no padding needed: 6*8/6 = 8 base64 chars,
+        // a multiple of 4) and split mid-quartet to exercise the
+        // unpadded-finish() path.
+        init_test("_37svtb_split_at_quartet_boundary_unpadded");
+        let payload: &[u8] = b"abcdef"; // 6 bytes → 8 chars no padding
+        let encoded = base64_encode(payload);
+        assert!(!encoded.contains('='), "6-byte payload must encode without padding");
+
+        // Split as 3 + 5: first chunk leaves 3 chars pending, second
+        // chunk completes one quartet (3+1=4) and leaves 4 chars
+        // forming a complete quartet → 0 pending. finish() returns
+        // empty.
+        let mut decoder = Base64StreamDecoder::new();
+        let mut decoded = Vec::new();
+        decoded.extend(decoder.push(&encoded.as_bytes()[..3]).unwrap());
+        decoded.extend(decoder.push(&encoded.as_bytes()[3..]).unwrap());
+        decoded.extend(decoder.finish().unwrap());
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn _37svtb_unpadded_3char_tail_decoded_via_finish() {
+        // 4 bytes → ceil(4*8/6) = 6 base64 chars. STANDARD encodes
+        // as "AAAA<2>==" with 2 padding. STANDARD_NO_PAD-style
+        // emission would be 6 unpadded chars → decoder needs to
+        // accept the 2-char trailing remainder via finish().
+        init_test("_37svtb_unpadded_3char_tail_decoded_via_finish");
+        let payload: &[u8] = b"asup"; // 4 bytes
+        let unpadded = base64_encode(payload).trim_end_matches('=').to_string();
+        assert_eq!(unpadded.len(), 6);
+
+        let mut decoder = Base64StreamDecoder::new();
+        let mid = decoder.push(unpadded.as_bytes()).unwrap();
+        // 4 chars decode to 3 bytes; 2 chars remain in pending.
+        assert_eq!(mid.len(), 3);
+        assert!(!decoder.is_sealed(), "no padding seen yet");
+
+        let trailing = decoder.finish().unwrap();
+        assert_eq!(trailing.len(), 1);
+        assert!(decoder.is_sealed());
+
+        let mut full = mid;
+        full.extend(trailing);
+        assert_eq!(full, payload);
+    }
+
+    #[test]
+    fn _37svtb_padding_in_push_seals_and_rejects_subsequent_push() {
+        // Once padding has been observed, the decoder is sealed.
+        // Any subsequent push must return Err so the caller can't
+        // accidentally feed more bytes after the stream end.
+        init_test("_37svtb_padding_in_push_seals_and_rejects_subsequent_push");
+        let mut decoder = Base64StreamDecoder::new();
+        let _ = decoder.push(b"aGVsbG8=").unwrap();
+        assert!(decoder.is_sealed());
+
+        let result = decoder.push(b"ZXh0cmE=");
+        match result {
+            Err(GrpcError::Protocol(msg)) => {
+                assert!(msg.contains("sealed") && msg.contains("br-asupersync-37svtb"));
+            }
+            other => panic!("expected Protocol error after seal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn _37svtb_trailing_single_char_at_finish_is_invalid() {
+        // 1 trailing char is ambiguous — base64 needs at least 2
+        // chars to encode 1 byte. Surface as Err.
+        init_test("_37svtb_trailing_single_char_at_finish_is_invalid");
+        let mut decoder = Base64StreamDecoder::new();
+        // 5 chars: 4 form one complete quartet, 1 char left over.
+        let _ = decoder.push(b"AAAAB").unwrap();
+        let result = decoder.finish();
+        match result {
+            Err(GrpcError::Protocol(msg)) => {
+                assert!(msg.contains("trailing single base64 character"));
+                assert!(msg.contains("br-asupersync-37svtb"));
+            }
+            other => panic!("expected Protocol error for 1-char tail, got {other:?}"),
+        }
+        // Decoder must still be sealed even after the error finish.
+        assert!(decoder.is_sealed());
+    }
+
+    #[test]
+    fn _37svtb_empty_stream_is_well_formed() {
+        // Zero pushes + finish() returns empty without error.
+        init_test("_37svtb_empty_stream_is_well_formed");
+        let mut decoder = Base64StreamDecoder::new();
+        let trailing = decoder.finish().unwrap();
+        assert!(trailing.is_empty());
+        assert!(decoder.is_sealed());
+    }
+
+    #[test]
+    fn _37svtb_empty_chunk_pushes_are_no_ops() {
+        init_test("_37svtb_empty_chunk_pushes_are_no_ops");
+        let mut decoder = Base64StreamDecoder::new();
+        for _ in 0..5 {
+            let out = decoder.push(b"").unwrap();
+            assert!(out.is_empty());
+        }
+        assert!(!decoder.is_sealed(), "empty pushes must not seal");
+        let _ = decoder.push(b"AAAA").unwrap();
+        let trailing = decoder.finish().unwrap();
+        assert!(trailing.is_empty());
+    }
+
+    #[test]
+    fn _37svtb_idempotent_finish_after_seal() {
+        // Calling finish() on a sealed decoder (via padding in push)
+        // must return Ok(empty) and not error.
+        init_test("_37svtb_idempotent_finish_after_seal");
+        let mut decoder = Base64StreamDecoder::new();
+        let _ = decoder.push(b"aGVsbG8=").unwrap();
+        assert!(decoder.is_sealed());
+
+        let first = decoder.finish().unwrap();
+        assert!(first.is_empty());
+        let second = decoder.finish().unwrap();
+        assert!(second.is_empty());
+    }
+
+    #[test]
+    fn _37svtb_invalid_base64_char_in_push_surfaces_as_protocol_error() {
+        // Non-alphabet characters (e.g. CR/LF, '!', '*') must be
+        // rejected by the underlying STANDARD engine and surface as
+        // GrpcError::Protocol — gRPC-Web text mode forbids
+        // whitespace.
+        init_test("_37svtb_invalid_base64_char_in_push_surfaces_as_protocol_error");
+        let mut decoder = Base64StreamDecoder::new();
+        let result = decoder.push(b"AA\nAA");
+        match result {
+            Err(GrpcError::Protocol(msg)) => {
+                assert!(msg.contains("invalid base64") && msg.contains("br-asupersync-37svtb"));
+            }
+            other => panic!("expected Protocol error for whitespace, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn _37svtb_long_payload_split_into_many_chunks_round_trips() {
+        // 256-byte payload, encoded, split at varied chunk boundaries
+        // (1, 2, 3, 4, 5, 7, 11, 13 char chunks repeating). Decoded
+        // output must equal the original payload. Exercises every
+        // (pending_len, chunk_len) interaction with pending.
+        init_test("_37svtb_long_payload_split_into_many_chunks_round_trips");
+        let payload: Vec<u8> = (0..=255u8).collect();
+        let encoded = base64_encode(&payload);
+        let chunk_sizes = vec![1, 2, 3, 4, 5, 7, 11, 13];
+        let mut sizes = Vec::new();
+        let mut total = 0;
+        let mut idx = 0;
+        while total < encoded.len() {
+            let s = chunk_sizes[idx % chunk_sizes.len()];
+            sizes.push(s);
+            total += s;
+            idx += 1;
+        }
+        let decoded = _37svtb_decode_via_chunks(&encoded, &sizes);
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn _37svtb_padding_at_quartet_boundary_in_split_chunks() {
+        // Final chunk arrives split such that '=' lands at the
+        // start of a chunk. Decoder must still recognize it and
+        // seal correctly. Encode 4 bytes → 8 chars ending in "==".
+        init_test("_37svtb_padding_at_quartet_boundary_in_split_chunks");
+        let payload: &[u8] = b"asup"; // 4 bytes → "YXN1cA=="
+        let encoded = base64_encode(payload);
+        assert!(encoded.ends_with("=="));
+        let split = encoded.len() - 2; // split right before "=="
+        let mut decoder = Base64StreamDecoder::new();
+        let mut out = decoder.push(&encoded.as_bytes()[..split]).unwrap();
+        // No padding seen → not sealed yet, partial quartet may exist.
+        assert!(!decoder.is_sealed());
+        out.extend(decoder.push(&encoded.as_bytes()[split..]).unwrap());
+        assert!(decoder.is_sealed(), "padding in second chunk must seal");
+        out.extend(decoder.finish().unwrap());
+        assert_eq!(out, payload);
     }
 }
