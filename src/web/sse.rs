@@ -199,11 +199,30 @@ impl fmt::Display for SseEvent {
 ///     .keep_alive()
 /// }
 /// ```
+/// Default cap on serialized SSE response size — 16 MiB.
+///
+/// Defends against a misbehaving handler that derives event count or
+/// per-event payload from attacker-controlled input. Override with
+/// [`Sse::max_total_bytes`] for legitimate use cases that need larger
+/// responses; the cap is per-response, not per-connection. (The single-shot
+/// non-streaming serialization in [`IntoResponse`] is documented as a
+/// deliberate simplification — true streaming SSE is a follow-up;
+/// br-asupersync-tamnew tracks the architectural change.)
+pub const DEFAULT_SSE_MAX_TOTAL_BYTES: usize = 16 * 1024 * 1024;
+
+/// Default cap on event count per response — 100 000. Same defensive
+/// rationale as [`DEFAULT_SSE_MAX_TOTAL_BYTES`].
+pub const DEFAULT_SSE_MAX_EVENTS: usize = 100_000;
+
+/// SSE response: a list of events serialized to the SSE wire format and
+/// emitted as a single HTTP response body (see module-header for limits).
 #[derive(Debug, Clone)]
 pub struct Sse {
     events: Vec<SseEvent>,
     keep_alive: bool,
     last_event_id: Option<String>,
+    max_events: usize,
+    max_total_bytes: usize,
 }
 
 impl Sse {
@@ -214,6 +233,8 @@ impl Sse {
             events,
             keep_alive: false,
             last_event_id: None,
+            max_events: DEFAULT_SSE_MAX_EVENTS,
+            max_total_bytes: DEFAULT_SSE_MAX_TOTAL_BYTES,
         }
     }
 
@@ -246,6 +267,25 @@ impl Sse {
         if !id.contains('\0') {
             self.last_event_id = Some(id);
         }
+        self
+    }
+
+    /// Override the per-response cap on event count (default
+    /// [`DEFAULT_SSE_MAX_EVENTS`]). Exceeding the cap on response yields
+    /// `413 Payload Too Large` instead of a serialized stream
+    /// (br-asupersync-tamnew).
+    #[must_use]
+    pub fn max_events(mut self, max: usize) -> Self {
+        self.max_events = max;
+        self
+    }
+
+    /// Override the per-response cap on serialized byte size (default
+    /// [`DEFAULT_SSE_MAX_TOTAL_BYTES`]). Exceeding the cap yields
+    /// `413 Payload Too Large` (br-asupersync-tamnew).
+    #[must_use]
+    pub fn max_total_bytes(mut self, max: usize) -> Self {
+        self.max_total_bytes = max;
         self
     }
 
@@ -291,7 +331,34 @@ impl Sse {
 
 impl IntoResponse for Sse {
     fn into_response(self) -> Response {
+        // Defensive caps — see DEFAULT_SSE_MAX_EVENTS / DEFAULT_SSE_MAX_TOTAL_BYTES
+        // (br-asupersync-tamnew). Exceeding either cap yields 413 Payload
+        // Too Large with a brief error body.
+        if self.events.len() > self.max_events {
+            return Response::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!(
+                    "SSE response exceeds max_events ({} > {})",
+                    self.events.len(),
+                    self.max_events
+                )
+                .into_bytes(),
+            )
+            .header("content-type", "text/plain");
+        }
         let body = self.to_body();
+        if body.len() > self.max_total_bytes {
+            return Response::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!(
+                    "SSE response body exceeds max_total_bytes ({} > {})",
+                    body.len(),
+                    self.max_total_bytes
+                )
+                .into_bytes(),
+            )
+            .header("content-type", "text/plain");
+        }
         Response::new(StatusCode::OK, body.into_bytes())
             .header("content-type", "text/event-stream")
             .header("cache-control", "no-cache")
@@ -608,5 +675,60 @@ mod tests {
         assert!(body.contains("retry:5000"));
         assert!(body.contains(":reconnect hint"));
         assert!(body.contains("event:heartbeat"));
+    }
+
+    // ─── br-asupersync-tamnew bounds ─────────────────────────────────
+
+    #[test]
+    fn sse_max_events_cap_returns_413() {
+        // br-asupersync-tamnew: per-response event count cap rejects with
+        // 413 Payload Too Large when exceeded.
+        let events: Vec<SseEvent> = (0..6)
+            .map(|i| SseEvent::default().data(format!("e{i}")))
+            .collect();
+        let sse = Sse::new(events).max_events(5);
+        let resp = sse.into_response();
+        assert_eq!(resp.status, StatusCode::PAYLOAD_TOO_LARGE);
+        let body = std::str::from_utf8(&resp.body).unwrap();
+        assert!(
+            body.contains("max_events"),
+            "body should mention the cap, got {body:?}"
+        );
+    }
+
+    #[test]
+    fn sse_max_events_cap_at_limit_serves_normally() {
+        // Exactly at the cap = OK (off-by-one regression guard).
+        let events: Vec<SseEvent> = (0..5)
+            .map(|i| SseEvent::default().data(format!("e{i}")))
+            .collect();
+        let sse = Sse::new(events).max_events(5);
+        let resp = sse.into_response();
+        assert_eq!(resp.status, StatusCode::OK);
+    }
+
+    #[test]
+    fn sse_max_total_bytes_cap_returns_413() {
+        // br-asupersync-tamnew: per-response body byte cap rejects with 413.
+        // Each event body includes "data:e<i>\n\n" overhead too.
+        let events = vec![SseEvent::default().data("a".repeat(1024))];
+        let sse = Sse::new(events).max_total_bytes(100);
+        let resp = sse.into_response();
+        assert_eq!(resp.status, StatusCode::PAYLOAD_TOO_LARGE);
+        let body = std::str::from_utf8(&resp.body).unwrap();
+        assert!(
+            body.contains("max_total_bytes"),
+            "body should mention the cap, got {body:?}"
+        );
+    }
+
+    #[test]
+    fn sse_default_caps_allow_typical_response() {
+        // Smoke: default caps (100k events / 16 MiB) easily allow normal use.
+        let events: Vec<SseEvent> = (0..10)
+            .map(|i| SseEvent::default().data(format!("event-{i}")))
+            .collect();
+        let resp = Sse::new(events).into_response();
+        assert_eq!(resp.status, StatusCode::OK);
     }
 }

@@ -269,17 +269,29 @@ impl FromRequest for Multipart {
 
 // ─── Parsing ────────────────────────────────────────────────────────────────
 
+/// Maximum multipart boundary length per RFC 2046 §5.1.1.
+///
+/// RFC 2046 specifies boundaries are 1..=70 characters. Defending against
+/// the ReDoS-like O(body * boundary) substring search a malicious peer
+/// could trigger by declaring a very long boundary and sending a large
+/// body — see br-asupersync-tamnew.
+pub const MAX_BOUNDARY_LEN: usize = 70;
+
 /// Extract the boundary parameter from a Content-Type header value.
+///
+/// Returns `None` if the boundary is missing, empty, or longer than
+/// [`MAX_BOUNDARY_LEN`] (RFC 2046 §5.1.1 cap; oversize values are
+/// rejected to avoid O(body * boundary) substring search amplification).
 fn extract_boundary(content_type: &str) -> Option<String> {
     // Look for boundary=... (possibly quoted)
     let lower = content_type.to_ascii_lowercase();
     let idx = lower.find("boundary=")?;
     let after = &content_type[idx + "boundary=".len()..];
 
-    if let Some(stripped) = after.strip_prefix('"') {
+    let boundary = if let Some(stripped) = after.strip_prefix('"') {
         // Quoted boundary
         let end = stripped.find('"')?;
-        Some(stripped[..end].to_string())
+        stripped[..end].to_string()
     } else {
         // Unquoted — take until whitespace or semicolon
         let end = after
@@ -287,11 +299,17 @@ fn extract_boundary(content_type: &str) -> Option<String> {
             .unwrap_or(after.len());
         let b = after[..end].trim();
         if b.is_empty() {
-            None
-        } else {
-            Some(b.to_string())
+            return None;
         }
+        b.to_string()
+    };
+
+    // RFC 2046 §5.1.1: boundary length must be 1..=70. Reject
+    // pathological lengths that would amplify substring search cost.
+    if boundary.is_empty() || boundary.len() > MAX_BOUNDARY_LEN {
+        return None;
     }
+    Some(boundary)
 }
 
 /// Parse multipart body given a boundary string.
@@ -665,6 +683,32 @@ mod tests {
     fn extract_boundary_with_extra_params() {
         let ct = "multipart/form-data; boundary=abc; charset=utf-8";
         assert_eq!(extract_boundary(ct).unwrap(), "abc");
+    }
+
+    #[test]
+    fn extract_boundary_at_70_char_rfc_max_accepted() {
+        // br-asupersync-tamnew: RFC 2046 §5.1.1 caps boundary at 70 chars.
+        // Exactly 70 chars must still be accepted.
+        let boundary_70 = "a".repeat(70);
+        let ct = format!("multipart/form-data; boundary={boundary_70}");
+        assert_eq!(extract_boundary(&ct).unwrap(), boundary_70);
+    }
+
+    #[test]
+    fn extract_boundary_above_70_char_rfc_max_rejected() {
+        // br-asupersync-tamnew: 71-char boundary MUST be rejected to
+        // prevent O(body * boundary) substring search amplification.
+        let boundary_71 = "a".repeat(71);
+        let ct = format!("multipart/form-data; boundary={boundary_71}");
+        assert_eq!(extract_boundary(&ct), None);
+    }
+
+    #[test]
+    fn extract_boundary_pathological_1mb_rejected() {
+        // br-asupersync-tamnew: 1 MiB boundary MUST be rejected fast.
+        let boundary_huge = "x".repeat(1_048_576);
+        let ct = format!("multipart/form-data; boundary={boundary_huge}");
+        assert_eq!(extract_boundary(&ct), None);
     }
 
     // ================================================================
