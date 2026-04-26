@@ -283,6 +283,26 @@ impl CancelWitness {
         }
     }
 
+    /// br-asupersync-9fjaqe / -f1zjwu — Centralized validator for the
+    /// initial witness in a per-task witness stream. Both the witness-
+    /// based oracle (`cancel_correctness`) and the event-based oracle
+    /// (`cancellation_protocol`, via its `on_cancel_witness` hook)
+    /// route through this method so two oracles wired to the same
+    /// witness stream cannot disagree on whether the initial witness
+    /// is well-formed.
+    ///
+    /// The first observed witness must use a non-zero epoch. Epoch 0
+    /// is reserved for the "no cancel ever requested" sentinel, and a
+    /// witness carrying epoch 0 indicates a runtime that emitted a
+    /// witness for a task that was never actually cancelled — a
+    /// protocol violation.
+    pub fn validate_initial(&self) -> Result<(), CancelWitnessError> {
+        if self.epoch == 0 {
+            return Err(CancelWitnessError::InitialEpochZero);
+        }
+        Ok(())
+    }
+
     /// Validates a transition between two witnesses.
     ///
     /// Invariants:
@@ -322,6 +342,10 @@ impl CancelWitness {
 /// Errors when validating cancellation witnesses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CancelWitnessError {
+    /// Initial witness used cancellation epoch 0. Epoch 0 is the
+    /// "no cancel" sentinel; the first witness emitted for a task
+    /// must use a non-zero epoch (br-asupersync-9fjaqe / -f1zjwu).
+    InitialEpochZero,
     /// Task identifiers do not match.
     TaskMismatch,
     /// Region identifiers do not match.

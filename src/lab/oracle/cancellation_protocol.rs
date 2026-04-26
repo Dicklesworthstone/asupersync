@@ -58,7 +58,10 @@
 
 use crate::record::task::TaskState;
 use crate::runtime::RuntimeState;
-use crate::types::{CancelKind, CancelReason, RegionId, TaskId, Time};
+use crate::types::{
+    CancelKind, CancelPhase, CancelReason, CancelWitness, CancelWitnessError, RegionId, TaskId,
+    Time,
+};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -296,6 +299,39 @@ pub enum CancellationProtocolViolation {
         /// When the unmatched exit was observed.
         time: Time,
     },
+
+    /// br-asupersync-9fjaqe / -f1zjwu — Initial witness for a task
+    /// failed [`CancelWitness::validate_initial`] (e.g., used the
+    /// reserved epoch 0 sentinel). Surfaced when the protocol oracle
+    /// is wired to a witness stream via `on_cancel_witness`; the
+    /// matching variant in the cancel-correctness oracle is
+    /// `InvalidInitialWitness`. Both oracles route through the same
+    /// shared validator so they cannot disagree.
+    InvalidInitialWitnessEpoch {
+        /// The task whose initial witness was rejected.
+        task: TaskId,
+        /// The (invalid) epoch carried by the initial witness.
+        epoch: u64,
+        /// The witness phase observed.
+        phase: CancelPhase,
+        /// When the witness was observed.
+        time: Time,
+    },
+
+    /// br-asupersync-9fjaqe / -f1zjwu — A subsequent witness in a
+    /// per-task stream failed [`CancelWitness::validate_transition`]
+    /// (epoch mismatch, phase regression, reason weakened, or
+    /// task/region mismatch). Routed through the same shared
+    /// validator the cancel-correctness oracle uses, so the two
+    /// oracles agree on transition validity.
+    InvalidWitnessTransition {
+        /// The task whose witness transition was rejected.
+        task: TaskId,
+        /// The specific transition error reported by the validator.
+        error: CancelWitnessError,
+        /// When the offending witness was observed.
+        time: Time,
+    },
 }
 
 impl fmt::Display for CancellationProtocolViolation {
@@ -380,6 +416,24 @@ impl fmt::Display for CancellationProtocolViolation {
                     f,
                     "Task {task} observed mask_exit while mask_depth=0 at {time} \
                      (more mask_exit calls than mask_enter — protocol violation)"
+                )
+            }
+            Self::InvalidInitialWitnessEpoch {
+                task,
+                epoch,
+                phase,
+                time,
+            } => {
+                write!(
+                    f,
+                    "Task {task} initial witness invalid: epoch {epoch} phase {phase:?} \
+                     at {time} (epoch 0 is the no-cancel sentinel and may not appear in a witness)"
+                )
+            }
+            Self::InvalidWitnessTransition { task, error, time } => {
+                write!(
+                    f,
+                    "Task {task} witness transition rejected at {time}: {error:?}"
                 )
             }
         }
@@ -476,6 +530,13 @@ struct TaskProtocolRecord {
     transitions: Vec<(TaskStateKind, TaskStateKind, Time)>,
     /// Current mask depth (0 = unmasked).
     mask_depth: u32,
+    /// br-asupersync-9fjaqe / -f1zjwu — Last cancellation witness
+    /// observed via `on_cancel_witness`. Used to validate per-task
+    /// witness transitions through the same `CancelWitness` validator
+    /// the cancel-correctness oracle uses, so the two oracles agree
+    /// on epoch / phase / reason invariants when wired to the same
+    /// witness stream.
+    last_witness: Option<CancelWitness>,
 }
 
 impl TaskProtocolRecord {
@@ -485,6 +546,7 @@ impl TaskProtocolRecord {
             cancel_request: None,
             transitions: Vec::new(),
             mask_depth: 0,
+            last_witness: None,
         }
     }
 }
@@ -782,6 +844,70 @@ impl CancellationProtocolOracle {
     /// and for conformance tests that model region close events.
     pub fn on_region_close(&mut self, _region: RegionId, _time: Time) {}
 
+    /// br-asupersync-9fjaqe / -f1zjwu — Cross-oracle witness hook.
+    ///
+    /// Routes through the canonical [`CancelWitness::validate_initial`]
+    /// and [`CancelWitness::validate_transition`] entry points, which
+    /// the witness-based [`crate::lab::oracle::cancel_correctness`]
+    /// oracle also uses. With both oracles wired to the same witness
+    /// stream, they cannot disagree on epoch / phase / reason
+    /// invariants — the disagreement that motivated this bead.
+    ///
+    /// Invariants enforced (delegated to `CancelWitness`):
+    /// - Initial witness must use a non-zero epoch (epoch 0 is the
+    ///   "no-cancel" sentinel).
+    /// - Successive witnesses for the same task must agree on
+    ///   task_id / region_id / epoch, advance phase monotonically,
+    ///   and never weaken the cancellation reason.
+    ///
+    /// On violation, a `InvalidInitialWitnessEpoch` or
+    /// `InvalidWitnessTransition` is recorded; the offending witness
+    /// is *not* stored as the new "last witness" so subsequent
+    /// transitions are validated against the last well-formed witness.
+    pub fn on_cancel_witness(&mut self, witness: CancelWitness, time: Time) {
+        let task_id = witness.task_id;
+        let phase = witness.phase;
+        let epoch = witness.epoch;
+
+        let record = self
+            .tasks
+            .entry(task_id)
+            .or_insert_with(TaskProtocolRecord::new);
+
+        if let Some(prev) = record.last_witness.as_ref() {
+            match CancelWitness::validate_transition(Some(prev), &witness) {
+                Ok(()) => {
+                    record.last_witness = Some(witness);
+                }
+                Err(error) => {
+                    self.record_violation(
+                        CancellationProtocolViolation::InvalidWitnessTransition {
+                            task: task_id,
+                            error,
+                            time,
+                        },
+                    );
+                }
+            }
+        } else {
+            match witness.validate_initial() {
+                Ok(()) => {
+                    record.last_witness = Some(witness);
+                }
+                Err(_) => {
+                    self.record_violation(
+                        CancellationProtocolViolation::InvalidInitialWitnessEpoch {
+                            task: task_id,
+                            epoch,
+                            phase,
+                            time,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
     /// Rebuilds oracle state from a runtime snapshot.
     ///
     /// This snapshot path is intentionally conservative: it captures the
@@ -850,6 +976,7 @@ impl CancellationProtocolOracle {
                     }),
                     transitions: Vec::new(),
                     mask_depth,
+                    last_witness: None,
                 },
             );
             self.task_regions.insert(task, region);
@@ -2392,5 +2519,214 @@ mod tests {
         let has_depth = display.contains("depth=2");
         crate::assert_with_log!(has_depth, "contains depth", true, has_depth);
         crate::test_complete!("cancel_ack_masked_violation_display");
+    }
+
+    /// br-asupersync-9fjaqe / -f1zjwu — Two oracles wired to the same
+    /// witness stream must produce equivalent epoch verdicts. The
+    /// witness-based `CancelCorrectnessOracle` and the event-based
+    /// `CancellationProtocolOracle` (via its `on_cancel_witness` hook)
+    /// must both reject an initial witness using the reserved epoch 0.
+    #[test]
+    fn on_cancel_witness_rejects_zero_epoch_initial_witness() {
+        init_test("on_cancel_witness_rejects_zero_epoch_initial_witness");
+        let mut oracle = CancellationProtocolOracle::with_config(CancelCorrectnessConfig {
+            enforcement: EnforcementMode::Collect,
+            ..CancelCorrectnessConfig::default()
+        });
+        let task = task_id(7);
+        let region = region_id(1);
+        let witness = CancelWitness::new(
+            task,
+            region,
+            0,
+            CancelPhase::Requested,
+            CancelReason::new(CancelKind::User),
+        );
+
+        oracle.on_cancel_witness(witness, Time::from_nanos(0));
+
+        let violations = oracle.all_violations();
+        assert_eq!(
+            violations.len(),
+            1,
+            "expected one violation, got {violations:?}"
+        );
+        match &violations[0] {
+            CancellationProtocolViolation::InvalidInitialWitnessEpoch {
+                task: t,
+                epoch,
+                phase,
+                ..
+            } => {
+                assert_eq!(*t, task);
+                assert_eq!(*epoch, 0);
+                assert_eq!(*phase, CancelPhase::Requested);
+            }
+            other => panic!("expected InvalidInitialWitnessEpoch, got {other:?}"),
+        }
+        crate::test_complete!("on_cancel_witness_rejects_zero_epoch_initial_witness");
+    }
+
+    /// br-asupersync-9fjaqe / -f1zjwu — Phase regression in the
+    /// witness stream must surface as `InvalidWitnessTransition`,
+    /// keeping the protocol oracle's verdict aligned with the
+    /// canonical `CancelWitness::validate_transition` rules used by
+    /// `cancel_correctness`.
+    #[test]
+    fn on_cancel_witness_rejects_phase_regression() {
+        init_test("on_cancel_witness_rejects_phase_regression");
+        let mut oracle = CancellationProtocolOracle::with_config(CancelCorrectnessConfig {
+            enforcement: EnforcementMode::Collect,
+            ..CancelCorrectnessConfig::default()
+        });
+        let task = task_id(11);
+        let region = region_id(2);
+        let reason = CancelReason::new(CancelKind::User);
+        let w1 = CancelWitness::new(task, region, 5, CancelPhase::Cancelling, reason.clone());
+        let w2 = CancelWitness::new(task, region, 5, CancelPhase::Requested, reason);
+
+        oracle.on_cancel_witness(w1, Time::from_nanos(10));
+        oracle.on_cancel_witness(w2, Time::from_nanos(20));
+
+        let violations = oracle.all_violations();
+        assert_eq!(
+            violations.len(),
+            1,
+            "expected one violation, got {violations:?}"
+        );
+        match &violations[0] {
+            CancellationProtocolViolation::InvalidWitnessTransition { task: t, error, .. } => {
+                assert_eq!(*t, task);
+                assert!(
+                    matches!(error, CancelWitnessError::PhaseRegression { .. }),
+                    "expected PhaseRegression, got {error:?}"
+                );
+            }
+            other => panic!("expected InvalidWitnessTransition, got {other:?}"),
+        }
+        crate::test_complete!("on_cancel_witness_rejects_phase_regression");
+    }
+
+    /// br-asupersync-9fjaqe / -f1zjwu — Epoch mismatch between
+    /// successive witnesses for the same task must be flagged. The
+    /// scenario from the bead (epoch 5 then epoch 3) is rejected with
+    /// `EpochMismatch`, keeping the protocol oracle's verdict
+    /// consistent with `cancel_correctness::validate_transition`.
+    #[test]
+    fn on_cancel_witness_rejects_epoch_regression() {
+        init_test("on_cancel_witness_rejects_epoch_regression");
+        let mut oracle = CancellationProtocolOracle::with_config(CancelCorrectnessConfig {
+            enforcement: EnforcementMode::Collect,
+            ..CancelCorrectnessConfig::default()
+        });
+        let task = task_id(13);
+        let region = region_id(2);
+        let reason = CancelReason::new(CancelKind::User);
+        let w1 = CancelWitness::new(task, region, 5, CancelPhase::Requested, reason.clone());
+        let w2 = CancelWitness::new(task, region, 3, CancelPhase::Cancelling, reason);
+
+        oracle.on_cancel_witness(w1, Time::from_nanos(10));
+        oracle.on_cancel_witness(w2, Time::from_nanos(20));
+
+        let violations = oracle.all_violations();
+        assert_eq!(
+            violations.len(),
+            1,
+            "expected one violation, got {violations:?}"
+        );
+        match &violations[0] {
+            CancellationProtocolViolation::InvalidWitnessTransition { error, .. } => {
+                assert!(
+                    matches!(error, CancelWitnessError::EpochMismatch),
+                    "expected EpochMismatch, got {error:?}"
+                );
+            }
+            other => panic!("expected InvalidWitnessTransition, got {other:?}"),
+        }
+        crate::test_complete!("on_cancel_witness_rejects_epoch_regression");
+    }
+
+    /// br-asupersync-9fjaqe / -f1zjwu — Cross-oracle agreement test.
+    /// The witness-based `CancelCorrectnessOracle` and the event-based
+    /// `CancellationProtocolOracle` (via `on_cancel_witness`) must both
+    /// reject the same epoch-0 initial witness and both accept the
+    /// same well-formed witness stream — the oracle-composition
+    /// disagreement that motivated this bead.
+    #[test]
+    fn cancel_oracles_agree_on_epoch_invariants() {
+        init_test("cancel_oracles_agree_on_epoch_invariants");
+        use crate::lab::oracle::cancel_correctness::CancelCorrectnessOracle;
+
+        // Case 1: epoch 0 initial witness — both reject.
+        let bad = CancelWitness::new(
+            task_id(21),
+            region_id(3),
+            0,
+            CancelPhase::Requested,
+            CancelReason::new(CancelKind::User),
+        );
+
+        let cc = CancelCorrectnessOracle::default();
+        cc.notify_cancel_witness(bad.clone(), Time::from_nanos(0));
+        let cc_stats = cc.get_statistics();
+        assert!(
+            cc_stats.violations_detected >= 1,
+            "cancel_correctness should reject epoch=0 initial witness, stats={cc_stats:?}"
+        );
+
+        let mut cp = CancellationProtocolOracle::with_config(CancelCorrectnessConfig {
+            enforcement: EnforcementMode::Collect,
+            ..CancelCorrectnessConfig::default()
+        });
+        cp.on_cancel_witness(bad, Time::from_nanos(0));
+        let cp_violations = cp.all_violations();
+        assert!(
+            !cp_violations.is_empty(),
+            "cancellation_protocol should reject epoch=0 initial witness"
+        );
+
+        // Case 2: well-formed stream — both accept.
+        let good_task = task_id(22);
+        let good_region = region_id(4);
+        let reason = CancelReason::new(CancelKind::User);
+        let stream = [
+            CancelWitness::new(
+                good_task,
+                good_region,
+                7,
+                CancelPhase::Requested,
+                reason.clone(),
+            ),
+            CancelWitness::new(
+                good_task,
+                good_region,
+                7,
+                CancelPhase::Cancelling,
+                reason.clone(),
+            ),
+            CancelWitness::new(good_task, good_region, 7, CancelPhase::Finalizing, reason),
+        ];
+
+        let cc2 = CancelCorrectnessOracle::default();
+        let mut cp2 = CancellationProtocolOracle::with_config(CancelCorrectnessConfig {
+            enforcement: EnforcementMode::Collect,
+            ..CancelCorrectnessConfig::default()
+        });
+        for (i, w) in stream.iter().enumerate() {
+            cc2.notify_cancel_witness(w.clone(), Time::from_nanos((i as u64 + 1) * 10));
+            cp2.on_cancel_witness(w.clone(), Time::from_nanos((i as u64 + 1) * 10));
+        }
+
+        let cc2_stats = cc2.get_statistics();
+        assert_eq!(
+            cc2_stats.violations_detected, 0,
+            "cancel_correctness should accept well-formed stream, stats={cc2_stats:?}"
+        );
+        let cp2_violations = cp2.all_violations();
+        assert!(
+            cp2_violations.is_empty(),
+            "cancellation_protocol should accept well-formed stream, got {cp2_violations:?}"
+        );
+        crate::test_complete!("cancel_oracles_agree_on_epoch_invariants");
     }
 }

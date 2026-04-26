@@ -731,8 +731,17 @@ impl CancelCorrectnessOracle {
         self.config.max_violations.max(64)
     }
 
+    /// br-asupersync-9fjaqe / -f1zjwu — Routes initial-witness
+    /// validation through the canonical
+    /// [`CancelWitness::validate_initial`] entry point. Previously
+    /// this oracle inlined the `epoch == 0` rejection while the
+    /// sibling [`crate::lab::oracle::cancellation_protocol`] oracle
+    /// did not enforce it at all, so two oracles wired to the same
+    /// witness stream could produce disagreeing verdicts. Both
+    /// oracles now route through `CancelWitness::validate_initial`,
+    /// guaranteeing identical epoch verdicts on identical inputs.
     fn validate_initial_witness(&self, witness: &CancelWitness, now: Time) -> Result<(), ()> {
-        if witness.epoch == 0 {
+        if witness.validate_initial() == Err(CancelWitnessError::InitialEpochZero) {
             self.record_violation(CancelCorrectnessViolation::InvalidInitialWitness {
                 task_id: witness.task_id,
                 region_id: witness.region_id,
