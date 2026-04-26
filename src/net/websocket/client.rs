@@ -1053,8 +1053,7 @@ async fn read_http_response<IO: AsyncRead + Unpin>(io: &mut IO) -> io::Result<(V
 
         let split_at = match (crlf_pos, lf_pos) {
             (Some(c), Some(l)) => Some(std::cmp::min(c, l)),
-            (Some(c), None) => Some(c),
-            (None, Some(l)) => Some(l),
+            (pos @ Some(_), None) | (None, pos @ Some(_)) => pos,
             (None, None) => None,
         };
 
