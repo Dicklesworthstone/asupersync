@@ -173,6 +173,18 @@ pub struct TlsAcceptorBuilder {
     alpn_required: bool,
     max_fragment_size: Option<usize>,
     handshake_timeout: Option<std::time::Duration>,
+    /// br-asupersync-q5i0bz: minimum negotiated TLS protocol version. When
+    /// either `min_protocol` or `max_protocol` is set, `build()` filters
+    /// `rustls::ALL_VERSIONS` to the requested range; otherwise the rustls
+    /// safe-default-protocol-versions path is used (TLS 1.2 + TLS 1.3 with
+    /// rustls 0.23 today; future rustls versions may relax that, which is
+    /// exactly why this setter exists — operators who need to pin a
+    /// stricter floor should not depend on the upstream default).
+    #[cfg(feature = "tls")]
+    min_protocol: Option<rustls::ProtocolVersion>,
+    /// br-asupersync-q5i0bz: maximum negotiated TLS protocol version.
+    #[cfg(feature = "tls")]
+    max_protocol: Option<rustls::ProtocolVersion>,
 }
 
 impl TlsAcceptorBuilder {
@@ -186,6 +198,10 @@ impl TlsAcceptorBuilder {
             alpn_required: false,
             max_fragment_size: None,
             handshake_timeout: None,
+            #[cfg(feature = "tls")]
+            min_protocol: None,
+            #[cfg(feature = "tls")]
+            max_protocol: None,
         }
     }
 
@@ -291,6 +307,37 @@ impl TlsAcceptorBuilder {
         self
     }
 
+    /// Set the minimum TLS protocol version the acceptor will negotiate.
+    ///
+    /// br-asupersync-q5i0bz: mirrors `TlsConnectorBuilder::min_protocol_version`.
+    /// When either this or [`max_protocol_version`](Self::max_protocol_version)
+    /// is set, `build()` filters `rustls::ALL_VERSIONS` to the requested
+    /// range and rejects connections whose negotiated version falls
+    /// outside it. Without these setters the acceptor relies on rustls'
+    /// safe-default-protocol-versions, which today excludes TLS 1.0/1.1
+    /// but is not a contract operators can pin against.
+    ///
+    /// Pin to `TLSv1_3` to require TLS 1.3 and eliminate downgrade
+    /// attacks plus TLS 1.2 cipher-suite-negotiation pitfalls. Pin to
+    /// `TLSv1_2` only as the floor when interoperating with TLS-1.2-only
+    /// clients you control.
+    #[cfg(feature = "tls")]
+    pub fn min_protocol_version(mut self, version: rustls::ProtocolVersion) -> Self {
+        self.min_protocol = Some(version);
+        self
+    }
+
+    /// Set the maximum TLS protocol version the acceptor will negotiate.
+    ///
+    /// br-asupersync-q5i0bz: mirrors `TlsConnectorBuilder::max_protocol_version`.
+    /// See [`min_protocol_version`](Self::min_protocol_version) for the
+    /// version-filtering semantics.
+    #[cfg(feature = "tls")]
+    pub fn max_protocol_version(mut self, version: rustls::ProtocolVersion) -> Self {
+        self.max_protocol = Some(version);
+        self
+    }
+
     /// Build the `TlsAcceptor`.
     ///
     /// # Errors
@@ -307,10 +354,65 @@ impl TlsAcceptorBuilder {
             ));
         }
 
-        // Create the config builder with the crypto provider
-        let builder = ServerConfig::builder_with_provider(Arc::new(default_provider()))
-            .with_safe_default_protocol_versions()
-            .map_err(|e| TlsError::Configuration(e.to_string()))?;
+        // Create the config builder with the crypto provider and
+        // protocol-version filtering. br-asupersync-q5i0bz: mirrors the
+        // connector's range-filter pattern so operators can pin a
+        // narrower protocol range than the rustls safe defaults (e.g.,
+        // TLS 1.3 only to eliminate downgrade-attack surface and TLS
+        // 1.2 cipher-suite negotiation pitfalls).
+        let builder = ServerConfig::builder_with_provider(Arc::new(default_provider()));
+        let builder = if self.min_protocol.is_some() || self.max_protocol.is_some() {
+            // Convert protocol versions to the wire ordinals so the
+            // range comparison works regardless of the
+            // `rustls::ProtocolVersion` enum's Rust-level Ord (which
+            // has no documented stability guarantee).
+            // TLS 1.2 = 0x0303, TLS 1.3 = 0x0304.
+            fn version_ordinal(v: rustls::ProtocolVersion) -> u16 {
+                match v {
+                    rustls::ProtocolVersion::TLSv1_2 => 0x0303,
+                    rustls::ProtocolVersion::TLSv1_3 => 0x0304,
+                    // Unknown / future versions sort high so they're
+                    // excluded by an explicit floor.
+                    _ => 0xFFFF,
+                }
+            }
+
+            let min = self.min_protocol.map(version_ordinal);
+            let max = self.max_protocol.map(version_ordinal);
+
+            if let (Some(min_ord), Some(max_ord)) = (min, max) {
+                if min_ord > max_ord {
+                    return Err(TlsError::Configuration(
+                        "min_protocol_version is greater than max_protocol_version".into(),
+                    ));
+                }
+            }
+
+            let versions: Vec<&'static rustls::SupportedProtocolVersion> = rustls::ALL_VERSIONS
+                .iter()
+                .filter(|v| {
+                    let ordinal = version_ordinal(v.version);
+                    let within_min = min.is_none_or(|m| ordinal >= m);
+                    let within_max = max.is_none_or(|m| ordinal <= m);
+                    within_min && within_max
+                })
+                .copied()
+                .collect();
+
+            if versions.is_empty() {
+                return Err(TlsError::Configuration(
+                    "no supported TLS protocol versions within requested range".into(),
+                ));
+            }
+
+            builder
+                .with_protocol_versions(&versions)
+                .map_err(|e| TlsError::Configuration(e.to_string()))?
+        } else {
+            builder
+                .with_safe_default_protocol_versions()
+                .map_err(|e| TlsError::Configuration(e.to_string()))?
+        };
 
         // Configure client auth
         let builder = match self.client_auth {
@@ -1117,5 +1219,131 @@ SrXuVI5uunTgPWuOtJOP+KM=
         let key = PrivateKey::from_pkcs8_der(vec![]);
         let result = TlsAcceptorBuilder::new(chain, key).build();
         assert!(result.is_err());
+    }
+
+    // --- br-asupersync-q5i0bz: protocol-version pinning ----------------
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_min_protocol_version_inverted_range_rejected_at_build() {
+        // Setting min > max must fail config validation, not silently
+        // disable the filter or pick one side. Symmetric with the
+        // connector's same validation.
+        let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+        let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+        let err = TlsAcceptorBuilder::new(chain, key)
+            .min_protocol_version(rustls::ProtocolVersion::TLSv1_3)
+            .max_protocol_version(rustls::ProtocolVersion::TLSv1_2)
+            .build()
+            .expect_err("inverted protocol-version range must be rejected");
+        match err {
+            TlsError::Configuration(msg) => {
+                assert!(
+                    msg.contains("greater than max_protocol_version"),
+                    "expected inverted-range error, got: {msg}"
+                );
+            }
+            other => panic!("expected Configuration error, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_min_protocol_tls13_pin_builds_and_handshakes_with_matching_client() {
+        // Positive control: when both ends are pinned to TLS 1.3, the
+        // handshake succeeds and the negotiated protocol_version on
+        // the server is TLSv1_3. This pins the success path that the
+        // version-mismatch test below contrasts against.
+        use crate::net::tcp::VirtualTcpStream;
+        use crate::test_utils::run_test_with_cx;
+        use futures_lite::future::zip;
+
+        run_test_with_cx(|_cx| async move {
+            let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+            let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+            let acceptor = TlsAcceptorBuilder::new(chain, key)
+                .min_protocol_version(rustls::ProtocolVersion::TLSv1_3)
+                .max_protocol_version(rustls::ProtocolVersion::TLSv1_3)
+                .build()
+                .expect("TLS-1.3-only acceptor builds");
+
+            let certs = Certificate::from_pem(TEST_CERT_PEM).unwrap();
+            let connector = crate::tls::TlsConnectorBuilder::new()
+                .add_root_certificates(certs)
+                .min_protocol_version(rustls::ProtocolVersion::TLSv1_3)
+                .max_protocol_version(rustls::ProtocolVersion::TLSv1_3)
+                .build()
+                .expect("TLS-1.3-only connector builds");
+
+            let (client_io, server_io) = VirtualTcpStream::pair(
+                "127.0.0.1:5160".parse().unwrap(),
+                "127.0.0.1:5161".parse().unwrap(),
+            );
+
+            let (client_res, server_res) = zip(
+                connector.connect("localhost", client_io),
+                acceptor.accept(server_io),
+            )
+            .await;
+
+            assert!(
+                client_res.is_ok() && server_res.is_ok(),
+                "TLS-1.3-only handshake must succeed (client={:?}, server={:?})",
+                client_res.is_ok(),
+                server_res.is_ok()
+            );
+        });
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_acceptor_pinned_above_client_max_rejects_handshake() {
+        // Negative control: acceptor pins floor at TLS 1.3 (rejects
+        // anything below), client pins ceiling at TLS 1.2. No version
+        // overlap — the handshake must fail. This is the analogue of
+        // the bead's "min=TLS 1.2 rejects TLS 1.0" requirement: rustls
+        // 0.23 doesn't even support TLS 1.0, so we exercise the same
+        // defense by demonstrating that an acceptor pinned to a
+        // higher floor than the client's ceiling rejects the
+        // connection. With the previous (asymmetric) acceptor builder
+        // this test could not have been written at all — there was
+        // no API surface to pin the floor.
+        use crate::net::tcp::VirtualTcpStream;
+        use crate::test_utils::run_test_with_cx;
+        use futures_lite::future::zip;
+
+        run_test_with_cx(|_cx| async move {
+            let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+            let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+            let acceptor = TlsAcceptorBuilder::new(chain, key)
+                .min_protocol_version(rustls::ProtocolVersion::TLSv1_3)
+                .build()
+                .expect("acceptor pinned to TLS 1.3 builds");
+
+            let certs = Certificate::from_pem(TEST_CERT_PEM).unwrap();
+            let connector = crate::tls::TlsConnectorBuilder::new()
+                .add_root_certificates(certs)
+                .max_protocol_version(rustls::ProtocolVersion::TLSv1_2)
+                .build()
+                .expect("connector capped at TLS 1.2 builds");
+
+            let (client_io, server_io) = VirtualTcpStream::pair(
+                "127.0.0.1:5170".parse().unwrap(),
+                "127.0.0.1:5171".parse().unwrap(),
+            );
+
+            let (client_res, server_res) = zip(
+                connector.connect("localhost", client_io),
+                acceptor.accept(server_io),
+            )
+            .await;
+
+            assert!(
+                client_res.is_err() || server_res.is_err(),
+                "version-mismatched handshake must fail (client_ok={}, server_ok={})",
+                client_res.is_ok(),
+                server_res.is_ok()
+            );
+        });
     }
 }
