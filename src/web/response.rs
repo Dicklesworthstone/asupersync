@@ -451,18 +451,44 @@ impl std::error::Error for RedirectError {}
 /// **Allowlist mode (`allowed_hosts` is `Some(&[...])`):**
 /// - Same rules as strict mode for relative paths, OR
 /// - Absolute http(s) URI whose host appears in `allowed_hosts`
-fn validate_redirect_uri(
-    uri: &str,
-    allowed_hosts: Option<&[&str]>,
-) -> Result<(), RedirectError> {
+fn validate_redirect_uri(uri: &str, allowed_hosts: Option<&[&str]>) -> Result<(), RedirectError> {
     if uri.is_empty() {
         return Err(RedirectError::EmptyUri);
+    }
+    // br-asupersync-oms1b7: reject any byte outside the
+    // authority/path-allowed printable-ASCII set. RFC 3986 §3 caps
+    // URI bytes at the unreserved + reserved + percent-encoded
+    // alphabet, all of which fall in 0x21..=0x7E. Leading whitespace,
+    // CR/LF, NUL, and control bytes are all rejected here so that
+    // the protocol-relative `//` check downstream cannot be
+    // sidestepped by `\u{0009}//attacker.com`,
+    // `\u{0020}//attacker.com`, `\r\n//attacker.com`, etc.
+    if uri.bytes().any(|b| !(0x21..=0x7E).contains(&b)) {
+        return Err(RedirectError::ProtocolRelative);
     }
     if uri.contains('\\') {
         return Err(RedirectError::BackslashInPath);
     }
     if uri.starts_with("//") {
         return Err(RedirectError::ProtocolRelative);
+    }
+    // br-asupersync-oms1b7: also reject single-slash forms that some
+    // browsers historically interpreted as protocol-relative when
+    // the second character was unusual (`/\\attacker.com` is already
+    // rejected by the BackslashInPath check above; this guards
+    // against the `/%2f`-style encoded variant). The strictest
+    // posture: a relative redirect must be `/` followed by a
+    // non-`/`, non-`%2f`, non-`%5C` character.
+    if let Some(rest) = uri.strip_prefix('/') {
+        let lower_first = rest.bytes().next().map(|b| b.to_ascii_lowercase());
+        if rest.starts_with("%2f")
+            || rest.starts_with("%2F")
+            || rest.starts_with("%5c")
+            || rest.starts_with("%5C")
+            || lower_first == Some(b'\\')
+        {
+            return Err(RedirectError::ProtocolRelative);
+        }
     }
     if uri.starts_with('/') {
         // Relative path — accepted under both strict and allowlist modes.
@@ -484,12 +510,11 @@ fn validate_redirect_uri(
     // http(s) URI: extract host from `//host[:port]/path` form.
     let after_slashes = rest.strip_prefix("//").ok_or_else(|| {
         // http(s) URI must have `://` — without it, treat as bad.
-        RedirectError::SchemeNotAllowed { scheme: scheme.clone() }
+        RedirectError::SchemeNotAllowed {
+            scheme: scheme.clone(),
+        }
     })?;
-    let host_with_port = after_slashes
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or("");
+    let host_with_port = after_slashes.split(['/', '?', '#']).next().unwrap_or("");
     let host = host_with_port
         .rsplit_once(':')
         .map_or(host_with_port, |(h, _)| h);
@@ -641,16 +666,57 @@ impl IntoResponse for Redirect {
 
 // ─── Header Sanitization ─────────────────────────────────────────────────────
 
-/// Strip CR and LF from a header value to prevent CRLF injection attacks.
+/// Strip every byte that RFC 9110 §5.5 forbids inside a `field-value`
+/// from a header value (br-asupersync-5jtjo0).
 ///
-/// HTTP response headers are delimited by CRLF; allowing raw CR/LF in values
-/// lets attackers inject arbitrary headers or split responses.
+/// RFC 9110 §5.5 defines `field-value = *( field-vchar [ 1*( SP / HTAB
+/// / field-vchar ) field-vchar ] )` where `field-vchar = VCHAR /
+/// obs-text` and `VCHAR = %x21-7E`. The legal byte set is therefore
+///
+///    HTAB (0x09), SP (0x20), VCHAR (0x21..=0x7E), obs-text (0x80..=0xFF)
+///
+/// EVERY OTHER byte (NUL 0x00, the C0 controls 0x01..=0x08,
+/// 0x0A=LF, 0x0B=VT, 0x0C=FF, 0x0D=CR, 0x0E..=0x1F, DEL 0x7F) is a
+/// header-value-syntax violation. The previous implementation only
+/// stripped CR and LF — leaving NUL, BS, VT, FF, ESC, etc. to flow
+/// through unfiltered. Embedded NUL is the highest-impact case: a
+/// downstream proxy / WAF / log collector that scans the wire format
+/// with C string semantics treats NUL as end-of-line and may parse a
+/// fake additional header from whatever follows. VT/FF likewise smuggle
+/// past tools that only look for CRLF.
+///
+/// Allowlist semantics: the function preserves HTAB / SP / printable
+/// ASCII / obs-text and replaces every other byte with nothing
+/// (deletion, not substitution — substitution would leak length
+/// information that could be used as a covert channel). Empty result
+/// is acceptable; it produces an empty header value, which the
+/// wire-format codec serialises as `name:` with no value (RFC 9110 §5.5
+/// allows empty field-values).
 fn sanitize_header_value(value: String) -> String {
-    if value.bytes().any(|b| b == b'\r' || b == b'\n') {
-        value.replace(['\r', '\n'], "")
-    } else {
-        value
+    if value.bytes().all(is_valid_header_value_byte) {
+        return value;
     }
+    // Filter byte-by-byte. We only ever drop bytes <= 0x7F that fail
+    // the allowlist (NUL, the C0 controls except HTAB, DEL); UTF-8
+    // lead bytes (0xC0..=0xFD) and continuation bytes (0x80..=0xBF)
+    // are all >= 0x80 and pass through. Multi-byte UTF-8 sequences
+    // therefore stay intact byte-for-byte, so the resulting Vec<u8>
+    // is still valid UTF-8 and `from_utf8` succeeds. The infallible
+    // `expect` documents the invariant; if it ever fires, the
+    // allowlist function above changed in a way that broke UTF-8.
+    let bytes: Vec<u8> = value
+        .bytes()
+        .filter(|&b| is_valid_header_value_byte(b))
+        .collect();
+    String::from_utf8(bytes)
+        .expect("filter only drops ASCII control bytes that are not UTF-8 leads/conts")
+}
+
+/// br-asupersync-5jtjo0: byte-level allowlist for header-value syntax.
+/// HTAB, SP, printable ASCII, and obs-text are accepted.
+#[inline]
+const fn is_valid_header_value_byte(b: u8) -> bool {
+    b == 0x09 || (b >= 0x20 && b <= 0x7E) || b >= 0x80
 }
 
 /// Strip CR and LF from a header name to prevent CRLF injection attacks.
@@ -827,9 +893,7 @@ mod tests {
         let allowed = &["example.com", "auth.example.com"];
 
         // Listed host — accepted.
-        assert!(
-            Redirect::to_with_allowed_hosts("https://example.com/path", allowed).is_ok()
-        );
+        assert!(Redirect::to_with_allowed_hosts("https://example.com/path", allowed).is_ok());
         assert!(
             Redirect::to_with_allowed_hosts(
                 "https://auth.example.com/oauth/callback?code=xyz",
@@ -838,25 +902,22 @@ mod tests {
             .is_ok()
         );
         // Case-insensitive host matching.
-        assert!(
-            Redirect::to_with_allowed_hosts("HTTPS://EXAMPLE.COM/", allowed).is_ok()
-        );
+        assert!(Redirect::to_with_allowed_hosts("HTTPS://EXAMPLE.COM/", allowed).is_ok());
         // Relative path always accepted.
         assert!(Redirect::to_with_allowed_hosts("/local-path", allowed).is_ok());
 
         // Unlisted host — rejected.
-        let err = Redirect::to_with_allowed_hosts("https://attacker.com/phish", allowed)
-            .unwrap_err();
+        let err =
+            Redirect::to_with_allowed_hosts("https://attacker.com/phish", allowed).unwrap_err();
         assert!(matches!(err, RedirectError::HostNotAllowed { .. }));
 
         // Subdomain not in allowlist — rejected (allowlist is exact match).
-        let err = Redirect::to_with_allowed_hosts("https://evil.example.com/", allowed)
-            .unwrap_err();
+        let err =
+            Redirect::to_with_allowed_hosts("https://evil.example.com/", allowed).unwrap_err();
         assert!(matches!(err, RedirectError::HostNotAllowed { .. }));
 
         // Protocol-relative even with allowlist — still rejected.
-        let err =
-            Redirect::to_with_allowed_hosts("//example.com/path", allowed).unwrap_err();
+        let err = Redirect::to_with_allowed_hosts("//example.com/path", allowed).unwrap_err();
         assert!(matches!(err, RedirectError::ProtocolRelative));
     }
 
@@ -1109,5 +1170,120 @@ mod tests {
         assert!(dbg2.contains("Html"), "{dbg2}");
         let hc = h.clone();
         assert_eq!(format!("{hc:?}"), dbg2);
+    }
+
+    // ====================================================================
+    // br-asupersync-5jtjo0: header-value sanitiser allowlist tests
+    // ====================================================================
+
+    #[test]
+    fn _5jtjo0_strips_nul_byte_from_header_value() {
+        let raw = String::from("alice\u{0000}fake-header: value");
+        let cleaned = sanitize_header_value(raw);
+        assert!(!cleaned.contains('\u{0000}'));
+        assert_eq!(cleaned, "alicefake-header: value");
+    }
+
+    #[test]
+    fn _5jtjo0_strips_c0_control_bytes() {
+        // 0x01-0x08, 0x0B, 0x0C, 0x0E-0x1F all rejected.
+        let raw: String = (0x01u8..=0x1F)
+            .filter(|b| *b != 0x09) // HTAB stays
+            .map(|b| b as char)
+            .collect::<String>()
+            + "trailing";
+        let cleaned = sanitize_header_value(raw);
+        // Only "trailing" survives — every C0 control was stripped.
+        assert_eq!(cleaned, "trailing");
+    }
+
+    #[test]
+    fn _5jtjo0_preserves_htab_space_printable_ascii() {
+        let raw = String::from("\tHello, World! 123 -_+=()[];,./?\\:");
+        let cleaned = sanitize_header_value(raw.clone());
+        assert_eq!(cleaned, raw);
+    }
+
+    #[test]
+    fn _5jtjo0_preserves_obs_text_utf8_passthrough() {
+        // UTF-8 codepoints whose bytes are >= 0x80 survive intact
+        // (allowlist accepts 0x80..=0xFF as obs-text).
+        let raw = String::from("café résumé日本語");
+        let cleaned = sanitize_header_value(raw.clone());
+        assert_eq!(cleaned, raw);
+    }
+
+    #[test]
+    fn _5jtjo0_strips_crlf_legacy_behavior_preserved() {
+        let raw = String::from("first\r\nfake-header: bad");
+        let cleaned = sanitize_header_value(raw);
+        assert_eq!(cleaned, "firstfake-header: bad");
+    }
+
+    #[test]
+    fn _5jtjo0_strips_del_byte() {
+        let raw = String::from("hello\u{007F}world");
+        let cleaned = sanitize_header_value(raw);
+        assert_eq!(cleaned, "helloworld");
+    }
+
+    // ====================================================================
+    // br-asupersync-oms1b7: redirect protocol-relative + bypass tests
+    // ====================================================================
+
+    #[test]
+    fn oms1b7_rejects_protocol_relative() {
+        let err = Redirect::to("//attacker.com/path").unwrap_err();
+        assert!(matches!(err, RedirectError::ProtocolRelative));
+    }
+
+    #[test]
+    fn oms1b7_rejects_leading_whitespace_then_protocol_relative() {
+        // Without the byte-level prefilter, ` //attacker.com` could
+        // bypass the `starts_with("//")` check on lenient browsers.
+        let err = Redirect::to(" //attacker.com").unwrap_err();
+        assert!(matches!(err, RedirectError::ProtocolRelative), "{err:?}");
+    }
+
+    #[test]
+    fn oms1b7_rejects_leading_tab_then_protocol_relative() {
+        let err = Redirect::to("\t//attacker.com").unwrap_err();
+        assert!(matches!(err, RedirectError::ProtocolRelative), "{err:?}");
+    }
+
+    #[test]
+    fn oms1b7_rejects_leading_crlf() {
+        let err = Redirect::to("\r\n//attacker.com").unwrap_err();
+        assert!(matches!(err, RedirectError::ProtocolRelative), "{err:?}");
+    }
+
+    #[test]
+    fn oms1b7_rejects_percent_encoded_double_slash() {
+        // /%2fattacker.com would be normalised by some browsers to
+        // //attacker.com after percent-decoding. Reject up front.
+        let err = Redirect::to("/%2fattacker.com").unwrap_err();
+        assert!(matches!(err, RedirectError::ProtocolRelative), "{err:?}");
+        let err = Redirect::to("/%2Fattacker.com").unwrap_err();
+        assert!(matches!(err, RedirectError::ProtocolRelative), "{err:?}");
+    }
+
+    #[test]
+    fn oms1b7_rejects_percent_encoded_backslash_after_slash() {
+        let err = Redirect::to("/%5cattacker.com").unwrap_err();
+        assert!(matches!(err, RedirectError::ProtocolRelative), "{err:?}");
+    }
+
+    #[test]
+    fn oms1b7_accepts_legitimate_relative_paths() {
+        assert!(Redirect::to("/login").is_ok());
+        assert!(Redirect::to("/api/v1/foo?x=1&y=2").is_ok());
+        assert!(Redirect::to("/path#anchor").is_ok());
+    }
+
+    #[test]
+    fn oms1b7_rejects_null_byte_in_uri() {
+        let err = Redirect::to("/safe\u{0000}//attacker.com").unwrap_err();
+        // NUL is outside 0x21..=0x7E so caught by the byte prefilter.
+        assert!(matches!(err, RedirectError::ProtocolRelative), "{err:?}");
     }
 }
