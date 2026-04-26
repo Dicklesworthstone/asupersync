@@ -13,7 +13,7 @@ fn roundtrip_sign_then_verify_with_shared_key() {
     init_test_logging();
     test_phase!("roundtrip_sign_then_verify_with_shared_key");
     let key = AuthKey::from_seed(77);
-    let sender = SecurityContext::new(key);
+    let sender = SecurityContext::new(key.clone());
     let receiver = SecurityContext::new(key);
 
     let symbol = symbol_with(&[10, 20, 30]);
@@ -40,7 +40,7 @@ fn tampered_symbol_fails_in_strict_mode() {
     init_test_logging();
     test_phase!("tampered_symbol_fails_in_strict_mode");
     let key = AuthKey::from_seed(77);
-    let sender = SecurityContext::new(key);
+    let sender = SecurityContext::new(key.clone());
     let receiver = SecurityContext::new(key).with_mode(AuthMode::Strict);
 
     let symbol = symbol_with(&[1, 2, 3, 4]);
@@ -71,7 +71,7 @@ fn tampered_symbol_allowed_in_permissive_mode() {
     init_test_logging();
     test_phase!("tampered_symbol_allowed_in_permissive_mode");
     let key = AuthKey::from_seed(77);
-    let sender = SecurityContext::new(key);
+    let sender = SecurityContext::new(key.clone());
     let receiver = SecurityContext::new(key).with_mode(AuthMode::Permissive);
 
     let symbol = symbol_with(&[1, 2, 3, 4]);

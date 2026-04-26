@@ -72,12 +72,8 @@ impl MockNatsServer {
                     return;
                 }
             };
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .ok();
-            stream
-                .set_write_timeout(Some(Duration::from_secs(5)))
-                .ok();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+            stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
 
             // 1. Send INFO. `headers:false` because this mock does not
             // implement HMSG dispatch.

@@ -31,14 +31,14 @@
 //! SO_REUSEPORT enables multiple sockets to bind to same address/port,
 //! with kernel distributing incoming connections across the sockets.
 
-use asupersync::net::tcp::socket::TcpSocket;
 use asupersync::net::tcp::listener::TcpListener;
+use asupersync::net::tcp::socket::TcpSocket;
+use std::collections::HashSet;
 use std::io::{Error, ErrorKind};
 use std::net::{SocketAddr, TcpStream as StdTcpStream};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
 
 /// Test result for conformance verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,7 +111,9 @@ fn test_so_reuseaddr_allows_time_wait_rebinds() {
             // If bind succeeds, try listen (might fail there)
             match socket2.listen(128) {
                 Ok(_) => {
-                    println!("Warning: Bind without REUSEADDR succeeded (OS might have fast cleanup)");
+                    println!(
+                        "Warning: Bind without REUSEADDR succeeded (OS might have fast cleanup)"
+                    );
                 }
                 Err(e) => {
                     println!("Listen failed as expected without REUSEADDR: {}", e);
@@ -131,7 +133,10 @@ fn test_so_reuseaddr_allows_time_wait_rebinds() {
 
     // Verify we can actually use the listener
     let bound_addr3 = listener3.local_addr().expect("get bound addr");
-    assert_eq!(bound_addr, bound_addr3, "REUSEADDR listener bound to correct address");
+    assert_eq!(
+        bound_addr, bound_addr3,
+        "REUSEADDR listener bound to correct address"
+    );
 
     // Test that we can connect to the new listener
     let _client2 = StdTcpStream::connect(bound_addr3).expect("connect to REUSEADDR listener");
@@ -152,24 +157,33 @@ fn test_so_reuseport_load_balancing() {
 
     // Create first listener with REUSEPORT
     let socket1 = TcpSocket::new_v4().expect("create socket1");
-    socket1.set_reuseport(true).expect("set REUSEPORT on socket1");
+    socket1
+        .set_reuseport(true)
+        .expect("set REUSEPORT on socket1");
     socket1.bind(base_addr).expect("bind socket1");
     let listener1 = socket1.listen(128).expect("listen socket1");
     let bound_addr = listener1.local_addr().expect("get local addr");
 
     // Create second listener with REUSEPORT on same address
     let socket2 = TcpSocket::new_v4().expect("create socket2");
-    socket2.set_reuseport(true).expect("set REUSEPORT on socket2");
+    socket2
+        .set_reuseport(true)
+        .expect("set REUSEPORT on socket2");
     socket2.bind(bound_addr).expect("bind socket2 to same addr");
     let listener2 = socket2.listen(128).expect("listen socket2");
 
     // Verify both listeners are bound to the same address
     let bound_addr2 = listener2.local_addr().expect("get bound addr2");
-    assert_eq!(bound_addr, bound_addr2, "Both REUSEPORT listeners bound to same address");
+    assert_eq!(
+        bound_addr, bound_addr2,
+        "Both REUSEPORT listeners bound to same address"
+    );
 
     // Create third listener with REUSEPORT
     let socket3 = TcpSocket::new_v4().expect("create socket3");
-    socket3.set_reuseport(true).expect("set REUSEPORT on socket3");
+    socket3
+        .set_reuseport(true)
+        .expect("set REUSEPORT on socket3");
     socket3.bind(bound_addr).expect("bind socket3 to same addr");
     let listener3 = socket3.listen(128).expect("listen socket3");
 
@@ -201,7 +215,9 @@ fn test_backlog_parameter_honored() {
         socket.bind(addr).expect("bind socket");
 
         // The listen call should succeed with any reasonable backlog value
-        let listener = socket.listen(backlog).expect(&format!("listen with backlog {}", backlog));
+        let listener = socket
+            .listen(backlog)
+            .expect(&format!("listen with backlog {}", backlog));
         let bound_addr = listener.local_addr().expect("get local addr");
 
         // Verify the listener is functional
@@ -240,17 +256,26 @@ fn test_bind_port_zero_returns_os_assigned_port() {
         socket.bind(addr).expect(&format!("bind socket {}", i));
         let listener = socket.listen(128).expect(&format!("listen socket {}", i));
 
-        let bound_addr = listener.local_addr().expect(&format!("get local addr {}", i));
+        let bound_addr = listener
+            .local_addr()
+            .expect(&format!("get local addr {}", i));
 
         // Verify port was assigned (not 0)
         assert_ne!(bound_addr.port(), 0, "OS should assign non-zero port");
 
         // Verify address is localhost
-        assert_eq!(bound_addr.ip().to_string(), "127.0.0.1", "Address should be localhost");
+        assert_eq!(
+            bound_addr.ip().to_string(),
+            "127.0.0.1",
+            "Address should be localhost"
+        );
 
         // Collect assigned ports to verify uniqueness
         let port = bound_addr.port();
-        assert!(!assigned_ports.contains(&port), "OS should assign unique ports");
+        assert!(
+            !assigned_ports.contains(&port),
+            "OS should assign unique ports"
+        );
         assigned_ports.insert(port);
 
         // Verify the listener is functional
@@ -264,7 +289,10 @@ fn test_bind_port_zero_returns_os_assigned_port() {
 
     // Verify ports are in reasonable ephemeral range (typically 32768-65535 on Linux)
     for port in &assigned_ports {
-        assert!(*port > 1024, "Assigned port should be > 1024 (ephemeral range)");
+        assert!(
+            *port > 1024,
+            "Assigned port should be > 1024 (ephemeral range)"
+        );
         println!("  Port {} in ephemeral range", port);
     }
 }
@@ -341,13 +369,20 @@ fn test_double_bind_exclusive_socket_fails() {
 fn assert_addr_in_use_error(error: &Error) {
     let is_addr_in_use = error.kind() == ErrorKind::AddrInUse
         || error.kind() == ErrorKind::PermissionDenied
-        || error.to_string().to_lowercase().contains("address already in use")
+        || error
+            .to_string()
+            .to_lowercase()
+            .contains("address already in use")
         || error.to_string().to_lowercase().contains("bind")
         || error.raw_os_error() == Some(98); // EADDRINUSE on Linux
 
-    assert!(is_addr_in_use,
+    assert!(
+        is_addr_in_use,
         "Expected address-in-use error, got: {} (kind: {:?}, raw: {:?})",
-        error, error.kind(), error.raw_os_error());
+        error,
+        error.kind(),
+        error.raw_os_error()
+    );
 }
 
 /// Mixed scenarios test: Combines multiple socket options
@@ -393,7 +428,10 @@ fn test_mixed_socket_option_scenarios() {
     assert!(bound_addr6.is_ipv6(), "Should be IPv6 address");
     assert_ne!(bound_addr6.port(), 0, "IPv6 should get assigned port");
 
-    println!("✓ IPv6 socket with REUSEADDR works, port: {}", bound_addr6.port());
+    println!(
+        "✓ IPv6 socket with REUSEADDR works, port: {}",
+        bound_addr6.port()
+    );
 }
 
 /// Comprehensive test runner for all TCP listener conformance tests
@@ -411,7 +449,7 @@ fn test_tcp_listener_rfc_conformance_comprehensive() {
             println!("✓ PASS");
             results.push(TcpListenerTestResult::pass(
                 "rfc-793-6056-test1",
-                "SO_REUSEADDR allows TIME_WAIT rebinds"
+                "SO_REUSEADDR allows TIME_WAIT rebinds",
             ));
         }
         Err(e) => {
@@ -419,7 +457,7 @@ fn test_tcp_listener_rfc_conformance_comprehensive() {
             results.push(TcpListenerTestResult::fail(
                 "rfc-793-6056-test1",
                 "SO_REUSEADDR allows TIME_WAIT rebinds",
-                &format!("Test panicked: {:?}", e)
+                &format!("Test panicked: {:?}", e),
             ));
         }
     }
@@ -433,7 +471,7 @@ fn test_tcp_listener_rfc_conformance_comprehensive() {
                 println!("✓ PASS");
                 results.push(TcpListenerTestResult::pass(
                     "linux-reuseport-test2",
-                    "SO_REUSEPORT load-balances on Linux"
+                    "SO_REUSEPORT load-balances on Linux",
                 ));
             }
             Err(e) => {
@@ -441,7 +479,7 @@ fn test_tcp_listener_rfc_conformance_comprehensive() {
                 results.push(TcpListenerTestResult::fail(
                     "linux-reuseport-test2",
                     "SO_REUSEPORT load-balances on Linux",
-                    &format!("Test panicked: {:?}", e)
+                    &format!("Test panicked: {:?}", e),
                 ));
             }
         }
@@ -452,7 +490,7 @@ fn test_tcp_listener_rfc_conformance_comprehensive() {
         println!("Test 2: SO_REUSEPORT load-balancing... ⊘ SKIPPED (Linux only)");
         results.push(TcpListenerTestResult::pass(
             "linux-reuseport-test2",
-            "SO_REUSEPORT load-balances on Linux (skipped on non-Linux)"
+            "SO_REUSEPORT load-balances on Linux (skipped on non-Linux)",
         ));
     }
 
@@ -463,7 +501,7 @@ fn test_tcp_listener_rfc_conformance_comprehensive() {
             println!("✓ PASS");
             results.push(TcpListenerTestResult::pass(
                 "tcp-backlog-test3",
-                "Backlog parameter honored"
+                "Backlog parameter honored",
             ));
         }
         Err(e) => {
@@ -471,7 +509,7 @@ fn test_tcp_listener_rfc_conformance_comprehensive() {
             results.push(TcpListenerTestResult::fail(
                 "tcp-backlog-test3",
                 "Backlog parameter honored",
-                &format!("Test panicked: {:?}", e)
+                &format!("Test panicked: {:?}", e),
             ));
         }
     }
@@ -483,7 +521,7 @@ fn test_tcp_listener_rfc_conformance_comprehensive() {
             println!("✓ PASS");
             results.push(TcpListenerTestResult::pass(
                 "posix-port-zero-test4",
-                "Bind to 0 returns OS-assigned port"
+                "Bind to 0 returns OS-assigned port",
             ));
         }
         Err(e) => {
@@ -491,7 +529,7 @@ fn test_tcp_listener_rfc_conformance_comprehensive() {
             results.push(TcpListenerTestResult::fail(
                 "posix-port-zero-test4",
                 "Bind to 0 returns OS-assigned port",
-                &format!("Test panicked: {:?}", e)
+                &format!("Test panicked: {:?}", e),
             ));
         }
     }
@@ -503,7 +541,7 @@ fn test_tcp_listener_rfc_conformance_comprehensive() {
             println!("✓ PASS");
             results.push(TcpListenerTestResult::pass(
                 "addr-conflict-test5",
-                "Double-bind to same exclusive socket fails"
+                "Double-bind to same exclusive socket fails",
             ));
         }
         Err(e) => {
@@ -511,7 +549,7 @@ fn test_tcp_listener_rfc_conformance_comprehensive() {
             results.push(TcpListenerTestResult::fail(
                 "addr-conflict-test5",
                 "Double-bind to same exclusive socket fails",
-                &format!("Test panicked: {:?}", e)
+                &format!("Test panicked: {:?}", e),
             ));
         }
     }
@@ -523,7 +561,7 @@ fn test_tcp_listener_rfc_conformance_comprehensive() {
             println!("✓ PASS");
             results.push(TcpListenerTestResult::pass(
                 "mixed-scenarios-test6",
-                "Mixed socket option scenarios"
+                "Mixed socket option scenarios",
             ));
         }
         Err(e) => {
@@ -531,7 +569,7 @@ fn test_tcp_listener_rfc_conformance_comprehensive() {
             results.push(TcpListenerTestResult::fail(
                 "mixed-scenarios-test6",
                 "Mixed socket option scenarios",
-                &format!("Test panicked: {:?}", e)
+                &format!("Test panicked: {:?}", e),
             ));
         }
     }
@@ -544,7 +582,11 @@ fn test_tcp_listener_rfc_conformance_comprehensive() {
     println!("Passed: {}/{}", passed, total);
 
     for result in &results {
-        let status = if result.passed { "✓ PASS" } else { "✗ FAIL" };
+        let status = if result.passed {
+            "✓ PASS"
+        } else {
+            "✗ FAIL"
+        };
         println!("{}: {} - {}", status, result.test_id, result.description);
         if let Some(ref error) = result.error_message {
             println!("    Error: {}", error);
@@ -552,7 +594,10 @@ fn test_tcp_listener_rfc_conformance_comprehensive() {
     }
 
     // Ensure all tests passed
-    assert_eq!(passed, total, "All TCP listener conformance tests must pass");
+    assert_eq!(
+        passed, total,
+        "All TCP listener conformance tests must pass"
+    );
 }
 
 #[cfg(test)]

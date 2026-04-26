@@ -165,21 +165,29 @@ mod tls_key_share_tests {
 
         /// Generate test certificates and keys for testing.
         #[allow(dead_code)]
-        fn generate_test_cert_and_key() -> Result<(asupersync::tls::CertificateChain, asupersync::tls::PrivateKey), TlsError> {
+        fn generate_test_cert_and_key() -> Result<
+            (
+                asupersync::tls::CertificateChain,
+                asupersync::tls::PrivateKey,
+            ),
+            TlsError,
+        > {
             // For testing, we'll create a minimal self-signed certificate
             // In a real implementation, this would use a proper test certificate
             // For now, we'll use dummy data that represents a valid cert structure
 
             // This is a minimal test certificate in DER format (self-signed)
             let test_cert_der = vec![
-                0x30, 0x82, 0x01, 0x00, // SEQUENCE, length
-                // Certificate content would go here
-                // For testing purposes, we'll create a minimal structure
+                0x30, 0x82, 0x01,
+                0x00, // SEQUENCE, length
+                     // Certificate content would go here
+                     // For testing purposes, we'll create a minimal structure
             ];
 
             let test_key_der = vec![
-                0x30, 0x82, 0x01, 0x00, // SEQUENCE, length
-                // Private key content would go here
+                0x30, 0x82, 0x01,
+                0x00, // SEQUENCE, length
+                     // Private key content would go here
             ];
 
             let cert = asupersync::tls::Certificate::from_der(test_cert_der);
@@ -191,7 +199,14 @@ mod tls_key_share_tests {
 
         /// Run a single conformance test and capture the result.
         #[allow(dead_code)]
-        fn run_test<F>(&self, test_id: &str, category: TestCategory, requirement_level: RequirementLevel, description: &str, test_fn: F) -> ConformanceTestResult
+        fn run_test<F>(
+            &self,
+            test_id: &str,
+            category: TestCategory,
+            requirement_level: RequirementLevel,
+            description: &str,
+            test_fn: F,
+        ) -> ConformanceTestResult
         where
             F: FnOnce() -> Result<(), TlsError>,
         {
@@ -556,17 +571,38 @@ mod tls_key_share_tests {
         #[allow(dead_code)]
         pub fn new(results: Vec<ConformanceTestResult>) -> Self {
             let total_tests = results.len();
-            let passed = results.iter().filter(|r| r.verdict == TestVerdict::Pass).count();
-            let failed = results.iter().filter(|r| r.verdict == TestVerdict::Fail).count();
-            let skipped = results.iter().filter(|r| r.verdict == TestVerdict::Skip).count();
+            let passed = results
+                .iter()
+                .filter(|r| r.verdict == TestVerdict::Pass)
+                .count();
+            let failed = results
+                .iter()
+                .filter(|r| r.verdict == TestVerdict::Fail)
+                .count();
+            let skipped = results
+                .iter()
+                .filter(|r| r.verdict == TestVerdict::Skip)
+                .count();
 
-            let must_results: Vec<_> = results.iter().filter(|r| r.requirement_level == RequirementLevel::Must).collect();
+            let must_results: Vec<_> = results
+                .iter()
+                .filter(|r| r.requirement_level == RequirementLevel::Must)
+                .collect();
             let must_requirements_total = must_results.len();
-            let must_requirements_passed = must_results.iter().filter(|r| r.verdict == TestVerdict::Pass).count();
+            let must_requirements_passed = must_results
+                .iter()
+                .filter(|r| r.verdict == TestVerdict::Pass)
+                .count();
 
-            let should_results: Vec<_> = results.iter().filter(|r| r.requirement_level == RequirementLevel::Should).collect();
+            let should_results: Vec<_> = results
+                .iter()
+                .filter(|r| r.requirement_level == RequirementLevel::Should)
+                .collect();
             let should_requirements_total = should_results.len();
-            let should_requirements_passed = should_results.iter().filter(|r| r.verdict == TestVerdict::Pass).count();
+            let should_requirements_passed = should_results
+                .iter()
+                .filter(|r| r.verdict == TestVerdict::Pass)
+                .count();
 
             // Compliance score: MUST requirements are weighted 100%, SHOULD are weighted 50%
             let must_score = if must_requirements_total > 0 {
@@ -621,8 +657,13 @@ mod tls_key_share_tests {
             // All tests should pass or be marked as not implemented
             for result in &results {
                 assert!(
-                    matches!(result.verdict, TestVerdict::Pass | TestVerdict::NotImplemented),
-                    "Test {} failed: {:?}", result.test_id, result.error_message
+                    matches!(
+                        result.verdict,
+                        TestVerdict::Pass | TestVerdict::NotImplemented
+                    ),
+                    "Test {} failed: {:?}",
+                    result.test_id,
+                    result.error_message
                 );
             }
         }
@@ -638,8 +679,12 @@ mod tls_key_share_tests {
             // HelloRetryRequest tests are fundamental to TLS 1.3
             for result in &results {
                 if result.requirement_level == RequirementLevel::Must {
-                    assert_eq!(result.verdict, TestVerdict::Pass,
-                        "MUST requirement failed: {}", result.test_id);
+                    assert_eq!(
+                        result.verdict,
+                        TestVerdict::Pass,
+                        "MUST requirement failed: {}",
+                        result.test_id
+                    );
                 }
             }
         }
@@ -654,8 +699,12 @@ mod tls_key_share_tests {
 
             // Empty key share handling is mandatory
             for result in &results {
-                assert_eq!(result.verdict, TestVerdict::Pass,
-                    "Empty key share test failed: {}", result.test_id);
+                assert_eq!(
+                    result.verdict,
+                    TestVerdict::Pass,
+                    "Empty key share test failed: {}",
+                    result.test_id
+                );
             }
         }
 
@@ -668,8 +717,12 @@ mod tls_key_share_tests {
             assert!(!results.is_empty());
 
             for result in &results {
-                assert_eq!(result.verdict, TestVerdict::Pass,
-                    "Unknown group handling failed: {}", result.test_id);
+                assert_eq!(
+                    result.verdict,
+                    TestVerdict::Pass,
+                    "Unknown group handling failed: {}",
+                    result.test_id
+                );
             }
         }
 
@@ -684,8 +737,13 @@ mod tls_key_share_tests {
             // PSK + DH combination is complex but important
             for result in &results {
                 assert!(
-                    matches!(result.verdict, TestVerdict::Pass | TestVerdict::NotImplemented),
-                    "PSK+DH test failed: {} - {:?}", result.test_id, result.error_message
+                    matches!(
+                        result.verdict,
+                        TestVerdict::Pass | TestVerdict::NotImplemented
+                    ),
+                    "PSK+DH test failed: {} - {:?}",
+                    result.test_id,
+                    result.error_message
                 );
             }
         }
@@ -700,17 +758,26 @@ mod tls_key_share_tests {
             assert!(report.must_requirements_total > 0);
 
             // Should have high compliance for basic implementation
-            assert!(report.compliance_score >= 80.0,
-                "Compliance score too low: {:.1}%", report.compliance_score);
+            assert!(
+                report.compliance_score >= 80.0,
+                "Compliance score too low: {:.1}%",
+                report.compliance_score
+            );
 
             println!("TLS 1.3 Key Share Conformance Report:");
             println!("Total tests: {}", report.total_tests);
-            println!("Passed: {}, Failed: {}, Skipped: {}",
-                report.passed, report.failed, report.skipped);
-            println!("MUST requirements: {}/{}",
-                report.must_requirements_passed, report.must_requirements_total);
-            println!("SHOULD requirements: {}/{}",
-                report.should_requirements_passed, report.should_requirements_total);
+            println!(
+                "Passed: {}, Failed: {}, Skipped: {}",
+                report.passed, report.failed, report.skipped
+            );
+            println!(
+                "MUST requirements: {}/{}",
+                report.must_requirements_passed, report.must_requirements_total
+            );
+            println!(
+                "SHOULD requirements: {}/{}",
+                report.should_requirements_passed, report.should_requirements_total
+            );
             println!("Compliance score: {:.1}%", report.compliance_score);
             println!("RFC 8446 compliant: {}", report.is_compliant());
         }

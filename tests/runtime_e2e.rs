@@ -1837,7 +1837,7 @@ fn e2e_obligation_tracked_oneshot_abort() {
         .state
         .create_task(root, Budget::INFINITE, async move {
             let cx = Cx::current().expect("cx");
-            let permit = tx.reserve(&cx);
+            let permit = tx.reserve(&cx).expect("reserve");
             let proof = permit.abort();
             *proof_kind_clone.lock() = Some(proof.kind());
         })

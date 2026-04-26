@@ -126,7 +126,7 @@ fn pl_09_output_async_convenience_method() {
     let output = futures_lite::future::block_on(async {
         Command::new("echo")
             .arg("async_lifecycle")
-            .output_async()
+            .output_async(&current_cx())
             .await
     })
     .expect("output_async");
@@ -136,9 +136,10 @@ fn pl_09_output_async_convenience_method() {
 
 #[test]
 fn pl_10_status_async_convenience() {
-    let status =
-        futures_lite::future::block_on(async { Command::new("true").status_async().await })
-            .expect("status_async");
+    let status = futures_lite::future::block_on(async {
+        Command::new("true").status_async(&current_cx()).await
+    })
+    .expect("status_async");
     assert!(status.success());
 }
 

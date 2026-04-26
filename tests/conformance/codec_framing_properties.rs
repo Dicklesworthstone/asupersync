@@ -107,10 +107,12 @@ fn ld_round_trip_across_widths_and_endianness() {
             let mut buf = BytesMut::new();
             codec
                 .encode(BytesMut::from(&payload[..]), &mut buf)
-                .unwrap_or_else(|e| panic!("encode width={width} len={payload_len} BE={big_endian}: {e}"));
-            let decoded = codec
-                .decode(&mut buf)
-                .unwrap_or_else(|e| panic!("decode width={width} len={payload_len} BE={big_endian}: {e}"));
+                .unwrap_or_else(|e| {
+                    panic!("encode width={width} len={payload_len} BE={big_endian}: {e}")
+                });
+            let decoded = codec.decode(&mut buf).unwrap_or_else(|e| {
+                panic!("decode width={width} len={payload_len} BE={big_endian}: {e}")
+            });
             let frame = decoded.unwrap_or_else(|| {
                 panic!("expected Some frame for width={width} len={payload_len} BE={big_endian}")
             });
@@ -220,9 +222,15 @@ fn ld_decoder_garbage_shorter_than_header_yields_none() {
     let mut codec = ld_be(4, 1024);
     // 2 bytes (less than 4-byte header) → need more.
     let mut partial = BytesMut::from(&b"\x00\x05"[..]);
-    let r = codec.decode(&mut partial).expect("must not error on partial");
+    let r = codec
+        .decode(&mut partial)
+        .expect("must not error on partial");
     assert!(r.is_none(), "partial header must yield Ok(None)");
-    assert_eq!(partial.len(), 2, "decoder must NOT consume bytes on Ok(None)");
+    assert_eq!(
+        partial.len(),
+        2,
+        "decoder must NOT consume bytes on Ok(None)"
+    );
 }
 
 // ─── 4. Multi-frame buffers split correctly ────────────────────────────────
@@ -297,7 +305,11 @@ fn ld_byte_by_byte_streaming_converges() {
         }
     }
     let frame = frame.expect("decoder must yield exactly one frame after full feed");
-    assert_eq!(&frame[..], b"hello world!", "streaming-decoded frame must match");
+    assert_eq!(
+        &frame[..],
+        b"hello world!",
+        "streaming-decoded frame must match"
+    );
 }
 
 // ─── 6. Decoder recovery after error ───────────────────────────────────────
@@ -336,7 +348,9 @@ fn lines_decoder_recovers_after_invalid_utf8_with_buffer_reset() {
     // After the error, the decoder MUST be in a state where a subsequent
     // valid line parses. (LinesCodec splits the bad line off the buffer
     // before erroring, so buf is now empty.)
-    let r = codec.decode(&mut buf).expect("decode must not error on empty");
+    let r = codec
+        .decode(&mut buf)
+        .expect("decode must not error on empty");
     assert!(r.is_none(), "empty buffer must yield Ok(None)");
 
     buf.put_slice(b"valid line\n");
@@ -364,7 +378,10 @@ fn lines_crlf_terminator_strips_cr() {
     let mut codec = LinesCodec::new();
     let mut buf = BytesMut::from(&b"crlf-line\r\n"[..]);
     let line = codec.decode(&mut buf).unwrap().expect("line present");
-    assert_eq!(line, "crlf-line", "CRLF terminator must strip both CR and LF");
+    assert_eq!(
+        line, "crlf-line",
+        "CRLF terminator must strip both CR and LF"
+    );
 }
 
 #[test]
@@ -402,7 +419,10 @@ fn bytes_codec_drains_entire_buffer_in_one_decode_call() {
         initial_len,
         "BytesCodec must drain the entire buffer in one call"
     );
-    assert!(buf.is_empty(), "buffer must be empty after BytesCodec drain");
+    assert!(
+        buf.is_empty(),
+        "buffer must be empty after BytesCodec drain"
+    );
     let r = codec.decode(&mut buf).unwrap();
     assert!(r.is_none(), "second decode on empty must yield None");
 }

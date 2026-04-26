@@ -7,7 +7,7 @@
 
 mod common;
 
-use asupersync::trace::distributed::id::{SymbolSpanId, TraceId};
+use asupersync::trace::distributed::id::{DistTraceId as TraceId, SymbolSpanId};
 use asupersync::util::DetRng;
 use common::{init_test_logging, test_proptest_config};
 use proptest::prelude::*;

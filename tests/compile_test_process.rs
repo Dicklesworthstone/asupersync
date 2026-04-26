@@ -31,7 +31,8 @@ fn process_output_async_echoes_stdout() {
     let output = futures_lite::future::block_on(async {
         let mut cmd = Command::new("echo");
         cmd.arg("hello");
-        cmd.output_async().await
+        let cx = current_cx();
+        cmd.output_async(&cx).await
     })
     .expect("output_async should succeed");
 
@@ -44,7 +45,8 @@ fn process_status_async_reports_nonzero_exit() {
     let status = futures_lite::future::block_on(async {
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg("exit 42");
-        cmd.status_async().await
+        let cx = current_cx();
+        cmd.status_async(&cx).await
     })
     .expect("status_async should succeed");
 

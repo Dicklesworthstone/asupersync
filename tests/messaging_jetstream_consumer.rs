@@ -105,12 +105,8 @@ impl MockJsServer {
                 Ok(p) => p,
                 Err(_) => return,
             };
-            stream
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .ok();
-            stream
-                .set_write_timeout(Some(Duration::from_secs(5)))
-                .ok();
+            stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+            stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
 
             // 1. Send INFO. headers:true so JetStream's
             // publish_with_id path also works if the test ever
@@ -177,22 +173,17 @@ impl MockJsServer {
                 // Find the first scripted reply whose subject-match
                 // substring is contained in the PUB subject. If none
                 // matches, send a generic empty body on the inbox.
-                let reply_payload =
-                    match replies_rx.try_recv() {
-                        Ok((substring, body))
-                            if substring.is_empty() || pub_subject.contains(&substring) =>
-                        {
-                            body
-                        }
-                        Ok(_) => Vec::new(),
-                        Err(_) => Vec::new(),
-                    };
+                let reply_payload = match replies_rx.try_recv() {
+                    Ok((substring, body))
+                        if substring.is_empty() || pub_subject.contains(&substring) =>
+                    {
+                        body
+                    }
+                    Ok(_) => Vec::new(),
+                    Err(_) => Vec::new(),
+                };
 
-                let header = format!(
-                    "MSG {} 1 {}\r\n",
-                    inbox_subject,
-                    reply_payload.len()
-                );
+                let header = format!("MSG {} 1 {}\r\n", inbox_subject, reply_payload.len());
                 if stream.write_all(header.as_bytes()).is_err() {
                     return;
                 }
@@ -238,11 +229,7 @@ fn parse_pub(line: &str) -> Option<(String, String, usize)> {
     let rest = line.strip_prefix("PUB ")?;
     let parts: Vec<&str> = rest.split_whitespace().collect();
     match parts.len() {
-        2 => Some((
-            parts[0].to_string(),
-            String::new(),
-            parts[1].parse().ok()?,
-        )),
+        2 => Some((parts[0].to_string(), String::new(), parts[1].parse().ok()?)),
         3 => Some((
             parts[0].to_string(),
             parts[1].to_string(),
@@ -352,7 +339,10 @@ fn jetstream_pull_request_carries_batch_and_expires_in_nanos_vu86e3() {
     // batch and exits the receive loop without waiting forever
     // because timeout_at fires).
     replies_tx
-        .send(("CONSUMER.CREATE".to_string(), br#"{"name":"payments"}"#.to_vec()))
+        .send((
+            "CONSUMER.CREATE".to_string(),
+            br#"{"name":"payments"}"#.to_vec(),
+        ))
         .expect("script create reply");
     replies_tx
         .send(("CONSUMER.MSG.NEXT".to_string(), Vec::new()))
@@ -393,7 +383,8 @@ fn jetstream_pull_request_carries_batch_and_expires_in_nanos_vu86e3() {
         .expect("a CONSUMER.MSG.NEXT pull PUB must be captured");
 
     assert!(
-        pull.subject.starts_with("$JS.API.CONSUMER.MSG.NEXT.ORDERS.payments"),
+        pull.subject
+            .starts_with("$JS.API.CONSUMER.MSG.NEXT.ORDERS.payments"),
         "pull subject must address the durable consumer by stream + name, got: {}",
         pull.subject
     );

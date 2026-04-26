@@ -119,13 +119,13 @@ fn redis_e2e_get_set_incr_and_pipeline() {
         let responses = pipe.exec(&cx).await.expect("pipeline exec");
         assert_eq!(responses.len(), 2);
         assert_eq!(
-            responses[0],
-            RespValue::SimpleString("PONG".to_string()),
+            responses[0].as_ref().unwrap(),
+            &RespValue::SimpleString("PONG".to_string()),
             "PING"
         );
         assert_eq!(
-            responses[1],
-            RespValue::BulkString(Some(b"hi".to_vec())),
+            responses[1].as_ref().unwrap(),
+            &RespValue::BulkString(Some(b"hi".to_vec())),
             "ECHO"
         );
     });

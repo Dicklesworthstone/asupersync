@@ -94,7 +94,10 @@ fn validate_domain_accepts_simple_dns_name() {
 #[test]
 fn validate_domain_accepts_subdomain_chain() {
     let r = TlsConnector::validate_domain("a.b.c.example.com");
-    assert!(r.is_ok(), "valid multi-label DNS name must be accepted, got {r:?}");
+    assert!(
+        r.is_ok(),
+        "valid multi-label DNS name must be accepted, got {r:?}"
+    );
 }
 
 #[test]
@@ -288,7 +291,11 @@ fn client_auth_variants_are_all_constructible() {
         ClientAuth::Optional(RootCertStore::empty()),
         ClientAuth::Required(RootCertStore::empty()),
     ];
-    assert_eq!(modes.len(), 3, "ClientAuth must have exactly 3 documented variants");
+    assert_eq!(
+        modes.len(),
+        3,
+        "ClientAuth must have exactly 3 documented variants"
+    );
 }
 
 // ─── 8. RootCertStore add/empty semantics ──────────────────────────────────

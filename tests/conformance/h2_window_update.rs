@@ -6,11 +6,13 @@
 //! Validates flow control window management, increment validation, overflow detection,
 //! and per-stream/connection window separation.
 
+use asupersync::bytes::Bytes;
 use asupersync::http::h2::connection::{Connection, DEFAULT_CONNECTION_WINDOW_SIZE};
 use asupersync::http::h2::error::{ErrorCode, H2Error};
-use asupersync::http::h2::frame::{DataFrame, Frame, HeadersFrame, SettingsFrame, WindowUpdateFrame};
-use asupersync::http::h2::settings::{Setting, Settings, DEFAULT_INITIAL_WINDOW_SIZE};
-use asupersync::bytes::Bytes;
+use asupersync::http::h2::frame::{
+    DataFrame, Frame, HeadersFrame, SettingsFrame, WindowUpdateFrame,
+};
+use asupersync::http::h2::settings::{DEFAULT_INITIAL_WINDOW_SIZE, Setting, Settings};
 
 #[cfg(test)]
 mod conformance_window_update {
@@ -61,15 +63,13 @@ mod conformance_window_update {
 
         // Verify the constant matches RFC requirement
         assert_eq!(
-            DEFAULT_CONNECTION_WINDOW_SIZE,
-            65535,
+            DEFAULT_CONNECTION_WINDOW_SIZE, 65535,
             "DEFAULT_CONNECTION_WINDOW_SIZE must be 65535 per RFC 9113"
         );
 
         // Verify stream initial window size also defaults to 65535
         assert_eq!(
-            DEFAULT_INITIAL_WINDOW_SIZE,
-            65535,
+            DEFAULT_INITIAL_WINDOW_SIZE, 65535,
             "Default initial window size for streams must be 65535"
         );
 
@@ -93,12 +93,20 @@ mod conformance_window_update {
         let zero_connection_update = Frame::WindowUpdate(WindowUpdateFrame::new(0, 0));
         let result = conn.process_frame(zero_connection_update);
 
-        assert!(result.is_err(), "Zero increment on connection window must be rejected");
+        assert!(
+            result.is_err(),
+            "Zero increment on connection window must be rejected"
+        );
         let err = result.unwrap_err();
-        assert_eq!(err.code, ErrorCode::ProtocolError,
-            "Zero increment on connection window must cause PROTOCOL_ERROR");
-        assert!(err.message.contains("zero increment"),
-            "Error message must mention zero increment");
+        assert_eq!(
+            err.code,
+            ErrorCode::ProtocolError,
+            "Zero increment on connection window must cause PROTOCOL_ERROR"
+        );
+        assert!(
+            err.message.contains("zero increment"),
+            "Error message must mention zero increment"
+        );
 
         // Reset connection for next test
         let mut conn = Connection::server(Settings::default());
@@ -111,12 +119,20 @@ mod conformance_window_update {
         let zero_stream_update = Frame::WindowUpdate(WindowUpdateFrame::new(1, 0));
         let result = conn.process_frame(zero_stream_update);
 
-        assert!(result.is_err(), "Zero increment on stream window must be rejected");
+        assert!(
+            result.is_err(),
+            "Zero increment on stream window must be rejected"
+        );
         let err = result.unwrap_err();
-        assert_eq!(err.code, ErrorCode::ProtocolError,
-            "Zero increment on stream window must cause PROTOCOL_ERROR");
-        assert!(err.message.contains("zero increment"),
-            "Error message must mention zero increment");
+        assert_eq!(
+            err.code,
+            ErrorCode::ProtocolError,
+            "Zero increment on stream window must cause PROTOCOL_ERROR"
+        );
+        assert!(
+            err.message.contains("zero increment"),
+            "Error message must mention zero increment"
+        );
 
         // MR2c: Positive increments must be accepted
         let mut conn = Connection::server(Settings::default());
@@ -125,11 +141,17 @@ mod conformance_window_update {
 
         let valid_connection_update = Frame::WindowUpdate(WindowUpdateFrame::new(0, 1000));
         let result = conn.process_frame(valid_connection_update);
-        assert!(result.is_ok(), "Positive increment on connection window must be accepted");
+        assert!(
+            result.is_ok(),
+            "Positive increment on connection window must be accepted"
+        );
 
         let valid_stream_update = Frame::WindowUpdate(WindowUpdateFrame::new(1, 500));
         let result = conn.process_frame(valid_stream_update);
-        assert!(result.is_ok(), "Positive increment on stream window must be accepted");
+        assert!(
+            result.is_ok(),
+            "Positive increment on stream window must be accepted"
+        );
 
         asupersync::test_complete!("mr2_window_update_increment_must_be_positive");
     }
@@ -152,7 +174,8 @@ mod conformance_window_update {
         // We need to manipulate internal state; use the window update API to get close
         let large_increment = (near_max - DEFAULT_CONNECTION_WINDOW_SIZE) as u32;
         let large_update = Frame::WindowUpdate(WindowUpdateFrame::new(0, large_increment));
-        conn.process_frame(large_update).expect("large increment should succeed");
+        conn.process_frame(large_update)
+            .expect("large increment should succeed");
 
         // Now try to overflow with another increment
         let overflow_increment = 2000u32; // This will cause overflow
@@ -161,10 +184,15 @@ mod conformance_window_update {
 
         assert!(result.is_err(), "Window overflow must be rejected");
         let err = result.unwrap_err();
-        assert_eq!(err.code, ErrorCode::FlowControlError,
-            "Window overflow must cause FLOW_CONTROL_ERROR");
-        assert!(err.message.contains("overflow"),
-            "Error message must mention overflow");
+        assert_eq!(
+            err.code,
+            ErrorCode::FlowControlError,
+            "Window overflow must cause FLOW_CONTROL_ERROR"
+        );
+        assert!(
+            err.message.contains("overflow"),
+            "Error message must mention overflow"
+        );
 
         // MR3b: Stream window overflow
         let mut conn = Connection::server(Settings::default());
@@ -172,8 +200,10 @@ mod conformance_window_update {
         conn.process_frame(headers).expect("should process headers");
 
         // Try to cause stream window overflow
-        let large_stream_increment = (i32::MAX as u64 - DEFAULT_INITIAL_WINDOW_SIZE as u64 + 1) as u32;
-        let overflow_stream_update = Frame::WindowUpdate(WindowUpdateFrame::new(1, large_stream_increment));
+        let large_stream_increment =
+            (i32::MAX as u64 - DEFAULT_INITIAL_WINDOW_SIZE as u64 + 1) as u32;
+        let overflow_stream_update =
+            Frame::WindowUpdate(WindowUpdateFrame::new(1, large_stream_increment));
         let result = conn.process_frame(overflow_stream_update);
 
         // Stream overflow should be handled at the stream level
@@ -184,10 +214,17 @@ mod conformance_window_update {
         let max_valid_increment = (i32::MAX - DEFAULT_CONNECTION_WINDOW_SIZE) as u32;
         let max_update = Frame::WindowUpdate(WindowUpdateFrame::new(0, max_valid_increment));
         let result = conn.process_frame(max_update);
-        assert!(result.is_ok(), "Maximum valid window increment should be accepted");
+        assert!(
+            result.is_ok(),
+            "Maximum valid window increment should be accepted"
+        );
 
         // Window should now be at maximum
-        assert_eq!(conn.send_window(), i32::MAX, "Window should be at maximum value");
+        assert_eq!(
+            conn.send_window(),
+            i32::MAX,
+            "Window should be at maximum value"
+        );
 
         asupersync::test_complete!("mr3_window_overflow_triggers_flow_control_error");
     }
@@ -207,8 +244,10 @@ mod conformance_window_update {
         // Create multiple streams
         let headers1 = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
         let headers2 = Frame::Headers(HeadersFrame::new(3, Bytes::new(), false, true));
-        conn.process_frame(headers1).expect("should process headers for stream 1");
-        conn.process_frame(headers2).expect("should process headers for stream 3");
+        conn.process_frame(headers1)
+            .expect("should process headers for stream 1");
+        conn.process_frame(headers2)
+            .expect("should process headers for stream 3");
 
         let initial_conn_send = conn.send_window();
         let initial_conn_recv = conn.recv_window();
@@ -216,7 +255,8 @@ mod conformance_window_update {
         // MR4a: Connection-level WINDOW_UPDATE affects connection window only
         let conn_increment = 1000u32;
         let conn_update = Frame::WindowUpdate(WindowUpdateFrame::new(0, conn_increment));
-        conn.process_frame(conn_update).expect("connection window update should succeed");
+        conn.process_frame(conn_update)
+            .expect("connection window update should succeed");
 
         assert_eq!(
             conn.send_window(),
@@ -235,7 +275,8 @@ mod conformance_window_update {
         // MR4b: Stream-level WINDOW_UPDATE affects only that stream
         let stream1_increment = 500u32;
         let stream1_update = Frame::WindowUpdate(WindowUpdateFrame::new(1, stream1_increment));
-        conn.process_frame(stream1_update).expect("stream 1 window update should succeed");
+        conn.process_frame(stream1_update)
+            .expect("stream 1 window update should succeed");
 
         // Connection window should be unchanged
         assert_eq!(
@@ -258,7 +299,8 @@ mod conformance_window_update {
         let data_frame = Frame::Data(DataFrame::new(1, data_payload, false));
 
         // Process data frame (should affect both windows)
-        conn.process_frame(data_frame).expect("should process data frame");
+        conn.process_frame(data_frame)
+            .expect("should process data frame");
 
         // Connection recv window should be decremented
         assert_eq!(
@@ -303,19 +345,24 @@ mod conformance_window_update {
         // Create streams and consume some window credit
         let headers1 = Frame::Headers(HeadersFrame::new(1, Bytes::new(), false, true));
         let headers2 = Frame::Headers(HeadersFrame::new(3, Bytes::new(), false, true));
-        conn.process_frame(headers1).expect("should process headers for stream 1");
-        conn.process_frame(headers2).expect("should process headers for stream 3");
+        conn.process_frame(headers1)
+            .expect("should process headers for stream 1");
+        conn.process_frame(headers2)
+            .expect("should process headers for stream 3");
 
         // Consume some credit on stream 1 by sending data
         let data_size = 10000u32;
         let data_payload = Bytes::from(vec![0u8; data_size as usize]);
         let data_frame = Frame::Data(DataFrame::new(1, data_payload, false));
-        conn.process_frame(data_frame).expect("should process data frame");
+        conn.process_frame(data_frame)
+            .expect("should process data frame");
 
         let stream1_window_after_data = conn.stream(1).unwrap().recv_window();
         let expected_after_data = DEFAULT_INITIAL_WINDOW_SIZE - data_size as i32;
-        assert_eq!(stream1_window_after_data, expected_after_data,
-            "Stream 1 window should be reduced after data");
+        assert_eq!(
+            stream1_window_after_data, expected_after_data,
+            "Stream 1 window should be reduced after data"
+        );
 
         // Stream 3 should still have full window
         assert_eq!(
@@ -326,11 +373,13 @@ mod conformance_window_update {
 
         // MR5a: Increase SETTINGS_INITIAL_WINDOW_SIZE - streams gain credit
         let new_larger_window = DEFAULT_INITIAL_WINDOW_SIZE + 16384;
-        let settings_increase = Frame::Settings(SettingsFrame::new(vec![
-            Setting::InitialWindowSize(new_larger_window)
-        ]));
+        let settings_increase =
+            Frame::Settings(SettingsFrame::new(vec![Setting::InitialWindowSize(
+                new_larger_window,
+            )]));
 
-        conn.process_frame(settings_increase).expect("should process settings increase");
+        conn.process_frame(settings_increase)
+            .expect("should process settings increase");
 
         // Both streams should have their windows adjusted by the delta
         let delta = new_larger_window - DEFAULT_INITIAL_WINDOW_SIZE;
@@ -350,11 +399,13 @@ mod conformance_window_update {
 
         // MR5b: Decrease SETTINGS_INITIAL_WINDOW_SIZE - streams lose credit
         let new_smaller_window = DEFAULT_INITIAL_WINDOW_SIZE - 8192;
-        let settings_decrease = Frame::Settings(SettingsFrame::new(vec![
-            Setting::InitialWindowSize(new_smaller_window)
-        ]));
+        let settings_decrease =
+            Frame::Settings(SettingsFrame::new(vec![Setting::InitialWindowSize(
+                new_smaller_window,
+            )]));
 
-        conn.process_frame(settings_decrease).expect("should process settings decrease");
+        conn.process_frame(settings_decrease)
+            .expect("should process settings decrease");
 
         // Windows should be adjusted downward
         let decrease_delta = new_smaller_window - new_larger_window; // negative value
@@ -374,15 +425,19 @@ mod conformance_window_update {
 
         // MR5c: Invalid SETTINGS_INITIAL_WINDOW_SIZE (> 2^31-1) is rejected
         let invalid_window_size = 0x8000_0000u32; // 2^31, which exceeds 2^31-1
-        let invalid_settings = Frame::Settings(SettingsFrame::new(vec![
-            Setting::InitialWindowSize(invalid_window_size)
-        ]));
+        let invalid_settings =
+            Frame::Settings(SettingsFrame::new(vec![Setting::InitialWindowSize(
+                invalid_window_size,
+            )]));
 
         let result = conn.process_frame(invalid_settings);
         assert!(result.is_err(), "Invalid window size should be rejected");
         let err = result.unwrap_err();
-        assert_eq!(err.code, ErrorCode::FlowControlError,
-            "Invalid window size should cause FLOW_CONTROL_ERROR");
+        assert_eq!(
+            err.code,
+            ErrorCode::FlowControlError,
+            "Invalid window size should cause FLOW_CONTROL_ERROR"
+        );
 
         asupersync::test_complete!("mr5_settings_initial_window_size_rebalances");
     }
@@ -409,46 +464,65 @@ mod conformance_window_update {
         let large_data = Bytes::from(vec![0u8; large_data_size as usize]);
         let large_data_frame = Frame::Data(DataFrame::new(1, large_data, false));
 
-        conn.process_frame(large_data_frame).expect("should process large data");
+        conn.process_frame(large_data_frame)
+            .expect("should process large data");
 
         // Should trigger connection-level window update
-        assert!(conn.has_pending_frames(), "Should have pending window updates");
+        assert!(
+            conn.has_pending_frames(),
+            "Should have pending window updates"
+        );
 
         let mut found_conn_window_update = false;
         while let Some(frame) = conn.next_frame() {
             if let Frame::WindowUpdate(wu) = frame {
                 if wu.stream_id == 0 {
                     found_conn_window_update = true;
-                    assert!(wu.increment > 0, "Window update increment should be positive");
+                    assert!(
+                        wu.increment > 0,
+                        "Window update increment should be positive"
+                    );
                 }
             }
         }
-        assert!(found_conn_window_update, "Should generate connection window update");
+        assert!(
+            found_conn_window_update,
+            "Should generate connection window update"
+        );
 
         // 2. Manual window updates
         let manual_conn_update = Frame::WindowUpdate(WindowUpdateFrame::new(0, 5000));
         let manual_stream_update = Frame::WindowUpdate(WindowUpdateFrame::new(1, 3000));
 
-        conn.process_frame(manual_conn_update).expect("manual connection update should work");
-        conn.process_frame(manual_stream_update).expect("manual stream update should work");
+        conn.process_frame(manual_conn_update)
+            .expect("manual connection update should work");
+        conn.process_frame(manual_stream_update)
+            .expect("manual stream update should work");
 
         // 3. Change window size via settings
         let new_window_size = DEFAULT_INITIAL_WINDOW_SIZE * 2;
-        let settings_frame = Frame::Settings(SettingsFrame::new(vec![
-            Setting::InitialWindowSize(new_window_size)
-        ]));
+        let settings_frame = Frame::Settings(SettingsFrame::new(vec![Setting::InitialWindowSize(
+            new_window_size,
+        )]));
 
-        conn.process_frame(settings_frame).expect("settings should work");
+        conn.process_frame(settings_frame)
+            .expect("settings should work");
 
         // 4. Verify all windows are in expected state
-        assert!(conn.send_window() > DEFAULT_CONNECTION_WINDOW_SIZE,
-            "Connection send window should be increased");
-        assert!(conn.recv_window() >= 0,
-            "Connection recv window should be non-negative");
+        assert!(
+            conn.send_window() > DEFAULT_CONNECTION_WINDOW_SIZE,
+            "Connection send window should be increased"
+        );
+        assert!(
+            conn.recv_window() >= 0,
+            "Connection recv window should be non-negative"
+        );
 
         let stream1 = conn.stream(1).expect("stream 1 should exist");
-        assert!(stream1.send_window() > DEFAULT_INITIAL_WINDOW_SIZE,
-            "Stream 1 send window should reflect new settings");
+        assert!(
+            stream1.send_window() > DEFAULT_INITIAL_WINDOW_SIZE,
+            "Stream 1 send window should reflect new settings"
+        );
 
         asupersync::test_complete!("integration_combined_flow_control_scenarios");
     }
@@ -467,20 +541,28 @@ mod conformance_window_update {
         // Maximum increment value that won't cause overflow
         let max_increment = 1u32; // Start small to avoid overflow in initial state
         let max_update = Frame::WindowUpdate(WindowUpdateFrame::new(0, max_increment));
-        assert!(conn.process_frame(max_update).is_ok(),
-            "Maximum valid increment should be accepted");
+        assert!(
+            conn.process_frame(max_update).is_ok(),
+            "Maximum valid increment should be accepted"
+        );
 
         // Test window update on non-existent stream
         let nonexistent_stream_update = Frame::WindowUpdate(WindowUpdateFrame::new(999, 1000));
         let result = conn.process_frame(nonexistent_stream_update);
         // Should be handled gracefully (stream might be closed/pruned)
-        assert!(result.is_ok(), "Window update on non-existent stream should be handled gracefully");
+        assert!(
+            result.is_ok(),
+            "Window update on non-existent stream should be handled gracefully"
+        );
 
         // Test multiple rapid window updates
         for i in 1..=10 {
             let rapid_update = Frame::WindowUpdate(WindowUpdateFrame::new(1, 100));
-            assert!(conn.process_frame(rapid_update).is_ok(),
-                "Rapid window update {} should succeed", i);
+            assert!(
+                conn.process_frame(rapid_update).is_ok(),
+                "Rapid window update {} should succeed",
+                i
+            );
         }
 
         asupersync::test_complete!("edge_cases_boundary_conditions");

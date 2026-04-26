@@ -16,7 +16,7 @@
 #[cfg(feature = "tls")]
 mod tls_sni_conformance_tests {
     use asupersync::cx::Cx;
-    use asupersync::tls::{TlsError, TlsConnector, TlsConnectorBuilder};
+    use asupersync::tls::{TlsConnector, TlsConnectorBuilder, TlsError};
     use asupersync::types::{Budget, RegionId, TaskId};
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
@@ -241,7 +241,11 @@ mod tls_sni_conformance_tests {
                     category: SniTestCategory::ServerNameExtension,
                     requirement_level: RequirementLevel::Must,
                     description: format!("SNI extension present for {}: {}", description, hostname),
-                    verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                    verdict: if result.is_ok() {
+                        TestVerdict::Pass
+                    } else {
+                        TestVerdict::Fail
+                    },
                     error_message: result.err().map(|e| e.to_string()),
                     duration_ms: test_start.elapsed().as_millis() as u64,
                 });
@@ -250,7 +254,10 @@ mod tls_sni_conformance_tests {
 
         /// Validate that SNI extension is present in ClientHello.
         #[allow(dead_code)]
-        fn validate_sni_extension_presence(&self, hostname: &str) -> Result<SniExtensionState, TlsError> {
+        fn validate_sni_extension_presence(
+            &self,
+            hostname: &str,
+        ) -> Result<SniExtensionState, TlsError> {
             // Create connector with SNI enabled
             let connector = TlsConnectorBuilder::new()
                 .build()
@@ -292,7 +299,11 @@ mod tls_sni_conformance_tests {
                 category: SniTestCategory::HostnameNameType,
                 requirement_level: RequirementLevel::Must,
                 description: "HostName name_type 0x00 accepted".to_string(),
-                verdict: if valid_result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                verdict: if valid_result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                },
                 error_message: valid_result.err().map(|e| e.to_string()),
                 duration_ms: test_start.elapsed().as_millis() as u64,
             });
@@ -305,7 +316,11 @@ mod tls_sni_conformance_tests {
                     category: SniTestCategory::HostnameNameType,
                     requirement_level: RequirementLevel::Must,
                     description: format!("Invalid name_type 0x{:02X} rejected", invalid_type),
-                    verdict: if invalid_result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                    verdict: if invalid_result.is_ok() {
+                        TestVerdict::Pass
+                    } else {
+                        TestVerdict::Fail
+                    },
                     error_message: invalid_result.err().map(|e| e.to_string()),
                     duration_ms: test_start.elapsed().as_millis() as u64,
                 });
@@ -331,7 +346,9 @@ mod tls_sni_conformance_tests {
             // In practice, rustls handles this internally and would reject
             // malformed SNI extensions during handshake
             if name_type == 0x00 {
-                Err(TlsError::Configuration("Expected rejection of invalid name_type".to_string()))
+                Err(TlsError::Configuration(
+                    "Expected rejection of invalid name_type".to_string(),
+                ))
             } else {
                 // Simulate rejection of invalid name types
                 Ok(())
@@ -365,13 +382,28 @@ mod tls_sni_conformance_tests {
                     test_id: format!("{}-{}", test_id, hostname.replace(['.', ' '], "_")),
                     category: SniTestCategory::HostnameEncoding,
                     requirement_level: RequirementLevel::Must,
-                    description: format!("Hostname encoding validation: {} ({})", description, hostname),
-                    verdict: if passed { TestVerdict::Pass } else { TestVerdict::Fail },
+                    description: format!(
+                        "Hostname encoding validation: {} ({})",
+                        description, hostname
+                    ),
+                    verdict: if passed {
+                        TestVerdict::Pass
+                    } else {
+                        TestVerdict::Fail
+                    },
                     error_message: if !passed {
-                        Some(format!("Expected {}, got {}",
-                            if *should_succeed { "success" } else { "failure" },
-                            if result.is_ok() { "success" } else { "failure" }))
-                    } else { None },
+                        Some(format!(
+                            "Expected {}, got {}",
+                            if *should_succeed {
+                                "success"
+                            } else {
+                                "failure"
+                            },
+                            if result.is_ok() { "success" } else { "failure" }
+                        ))
+                    } else {
+                        None
+                    },
                     duration_ms: test_start.elapsed().as_millis() as u64,
                 });
             }
@@ -392,12 +424,16 @@ mod tls_sni_conformance_tests {
             }
 
             if hostname.contains("..") {
-                return Err(TlsError::InvalidDnsName("Double dots not allowed".to_string()));
+                return Err(TlsError::InvalidDnsName(
+                    "Double dots not allowed".to_string(),
+                ));
             }
 
             // Check for valid UTF-8 (Rust strings are UTF-8 by default)
             if !hostname.is_ascii() && !Self::is_valid_punycode(hostname) {
-                return Err(TlsError::InvalidDnsName("Invalid UTF-8 or punycode".to_string()));
+                return Err(TlsError::InvalidDnsName(
+                    "Invalid UTF-8 or punycode".to_string(),
+                ));
             }
 
             Ok(())
@@ -421,7 +457,7 @@ mod tls_sni_conformance_tests {
             // Test that international domains are handled appropriately
             let international_result = self.validate_international_domain_handling(
                 domains.international_domain,
-                domains.punycode_domain
+                domains.punycode_domain,
             );
 
             self.test_results.push(ConformanceTestResult {
@@ -429,7 +465,11 @@ mod tls_sni_conformance_tests {
                 category: SniTestCategory::HostnameEncoding,
                 requirement_level: RequirementLevel::Must,
                 description: "International domain punycode conversion".to_string(),
-                verdict: if international_result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                verdict: if international_result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                },
                 error_message: international_result.err().map(|e| e.to_string()),
                 duration_ms: test_start.elapsed().as_millis() as u64,
             });
@@ -437,7 +477,11 @@ mod tls_sni_conformance_tests {
 
         /// Validate international domain handling.
         #[allow(dead_code)]
-        fn validate_international_domain_handling(&self, _international: &str, punycode: &str) -> Result<(), TlsError> {
+        fn validate_international_domain_handling(
+            &self,
+            _international: &str,
+            punycode: &str,
+        ) -> Result<(), TlsError> {
             // In practice, applications should convert international domains to punycode
             // before passing to TLS libraries. Test the punycode form.
             TlsConnector::validate_domain(punycode)
@@ -457,20 +501,45 @@ mod tls_sni_conformance_tests {
 
             // Test scenarios with duplicates
             let test_cases = [
-                (vec![domains.ascii_hostname, domains.ascii_hostname], "Exact duplicates"),
-                (vec![domains.ascii_hostname, domains.punycode_domain, domains.ascii_hostname], "Duplicate with different in between"),
-                (vec![domains.deep_subdomain, domains.ascii_hostname, domains.deep_subdomain], "Duplicate subdomains"),
+                (
+                    vec![domains.ascii_hostname, domains.ascii_hostname],
+                    "Exact duplicates",
+                ),
+                (
+                    vec![
+                        domains.ascii_hostname,
+                        domains.punycode_domain,
+                        domains.ascii_hostname,
+                    ],
+                    "Duplicate with different in between",
+                ),
+                (
+                    vec![
+                        domains.deep_subdomain,
+                        domains.ascii_hostname,
+                        domains.deep_subdomain,
+                    ],
+                    "Duplicate subdomains",
+                ),
             ];
 
             for (duplicate_hostnames, description) in &test_cases {
                 let result = self.validate_duplicate_sni_rejection(duplicate_hostnames);
 
                 self.test_results.push(ConformanceTestResult {
-                    test_id: format!("{}-{}", test_id, description.replace(' ', "-").to_lowercase()),
+                    test_id: format!(
+                        "{}-{}",
+                        test_id,
+                        description.replace(' ', "-").to_lowercase()
+                    ),
                     category: SniTestCategory::DuplicateEntries,
                     requirement_level: RequirementLevel::Must,
                     description: format!("Duplicate SNI entries rejected: {}", description),
-                    verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                    verdict: if result.is_ok() {
+                        TestVerdict::Pass
+                    } else {
+                        TestVerdict::Fail
+                    },
                     error_message: result.err().map(|e| e.to_string()),
                     duration_ms: test_start.elapsed().as_millis() as u64,
                 });
@@ -488,7 +557,11 @@ mod tls_sni_conformance_tests {
                 category: SniTestCategory::DuplicateEntries,
                 requirement_level: RequirementLevel::Must,
                 description: "Unique SNI entries allowed".to_string(),
-                verdict: if unique_result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                verdict: if unique_result.is_ok() {
+                    TestVerdict::Pass
+                } else {
+                    TestVerdict::Fail
+                },
                 error_message: unique_result.err().map(|e| e.to_string()),
                 duration_ms: test_start.elapsed().as_millis() as u64,
             });
@@ -506,7 +579,9 @@ mod tls_sni_conformance_tests {
                     return Ok(()); // Test passes because we detected the duplicate
                 }
             }
-            Err(TlsError::Configuration("Expected duplicate detection".to_string()))
+            Err(TlsError::Configuration(
+                "Expected duplicate detection".to_string(),
+            ))
         }
 
         /// Validate that unique SNI entries are allowed.
@@ -538,21 +613,48 @@ mod tls_sni_conformance_tests {
 
             // Test scenarios that should trigger unrecognized_name
             let mismatch_cases = [
-                (domains.ascii_hostname, "wrong-server.com", "Completely different domain"),
-                (domains.ascii_hostname, "subdomain.example.com", "Subdomain mismatch"),
-                ("specific.example.com", domains.ascii_hostname, "Reverse subdomain mismatch"),
-                (domains.punycode_domain, domains.ascii_hostname, "Encoding mismatch"),
+                (
+                    domains.ascii_hostname,
+                    "wrong-server.com",
+                    "Completely different domain",
+                ),
+                (
+                    domains.ascii_hostname,
+                    "subdomain.example.com",
+                    "Subdomain mismatch",
+                ),
+                (
+                    "specific.example.com",
+                    domains.ascii_hostname,
+                    "Reverse subdomain mismatch",
+                ),
+                (
+                    domains.punycode_domain,
+                    domains.ascii_hostname,
+                    "Encoding mismatch",
+                ),
             ];
 
             for (requested_name, server_cert_name, description) in &mismatch_cases {
                 let result = self.validate_sni_mismatch_handling(requested_name, server_cert_name);
 
                 self.test_results.push(ConformanceTestResult {
-                    test_id: format!("{}-{}", test_id, description.replace(' ', "-").to_lowercase()),
+                    test_id: format!(
+                        "{}-{}",
+                        test_id,
+                        description.replace(' ', "-").to_lowercase()
+                    ),
                     category: SniTestCategory::ServerNameMismatch,
                     requirement_level: RequirementLevel::Must,
-                    description: format!("SNI mismatch alert: {} vs {}", requested_name, server_cert_name),
-                    verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                    description: format!(
+                        "SNI mismatch alert: {} vs {}",
+                        requested_name, server_cert_name
+                    ),
+                    verdict: if result.is_ok() {
+                        TestVerdict::Pass
+                    } else {
+                        TestVerdict::Fail
+                    },
                     error_message: result.err().map(|e| e.to_string()),
                     duration_ms: test_start.elapsed().as_millis() as u64,
                 });
@@ -560,19 +662,38 @@ mod tls_sni_conformance_tests {
 
             // Test valid matches
             let match_cases = [
-                (domains.ascii_hostname, domains.ascii_hostname, "Exact match"),
-                (domains.punycode_domain, domains.punycode_domain, "Punycode match"),
+                (
+                    domains.ascii_hostname,
+                    domains.ascii_hostname,
+                    "Exact match",
+                ),
+                (
+                    domains.punycode_domain,
+                    domains.punycode_domain,
+                    "Punycode match",
+                ),
             ];
 
             for (requested_name, server_cert_name, description) in &match_cases {
                 let result = self.validate_sni_match_success(requested_name, server_cert_name);
 
                 self.test_results.push(ConformanceTestResult {
-                    test_id: format!("{}-match-{}", test_id, description.replace(' ', "-").to_lowercase()),
+                    test_id: format!(
+                        "{}-match-{}",
+                        test_id,
+                        description.replace(' ', "-").to_lowercase()
+                    ),
                     category: SniTestCategory::ServerNameMismatch,
                     requirement_level: RequirementLevel::Must,
-                    description: format!("SNI match success: {} == {}", requested_name, server_cert_name),
-                    verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                    description: format!(
+                        "SNI match success: {} == {}",
+                        requested_name, server_cert_name
+                    ),
+                    verdict: if result.is_ok() {
+                        TestVerdict::Pass
+                    } else {
+                        TestVerdict::Fail
+                    },
                     error_message: result.err().map(|e| e.to_string()),
                     duration_ms: test_start.elapsed().as_millis() as u64,
                 });
@@ -581,7 +702,11 @@ mod tls_sni_conformance_tests {
 
         /// Validate SNI mismatch handling.
         #[allow(dead_code)]
-        fn validate_sni_mismatch_handling(&self, requested_name: &str, server_cert_name: &str) -> Result<(), TlsError> {
+        fn validate_sni_mismatch_handling(
+            &self,
+            requested_name: &str,
+            server_cert_name: &str,
+        ) -> Result<(), TlsError> {
             // Validate the requested name format
             TlsConnector::validate_domain(requested_name)?;
             TlsConnector::validate_domain(server_cert_name)?;
@@ -599,7 +724,11 @@ mod tls_sni_conformance_tests {
 
         /// Validate SNI match success.
         #[allow(dead_code)]
-        fn validate_sni_match_success(&self, requested_name: &str, server_cert_name: &str) -> Result<(), TlsError> {
+        fn validate_sni_match_success(
+            &self,
+            requested_name: &str,
+            server_cert_name: &str,
+        ) -> Result<(), TlsError> {
             TlsConnector::validate_domain(requested_name)?;
             TlsConnector::validate_domain(server_cert_name)?;
 
@@ -623,18 +752,35 @@ mod tls_sni_conformance_tests {
 
             // Test extension format requirements from RFC 6066
             let format_tests = [
-                ("Extension length validation", self.validate_sni_extension_length()),
-                ("Server name list format", self.validate_server_name_list_format()),
-                ("Hostname length validation", self.validate_hostname_length_limits()),
+                (
+                    "Extension length validation",
+                    self.validate_sni_extension_length(),
+                ),
+                (
+                    "Server name list format",
+                    self.validate_server_name_list_format(),
+                ),
+                (
+                    "Hostname length validation",
+                    self.validate_hostname_length_limits(),
+                ),
             ];
 
             for (description, result) in format_tests {
                 self.test_results.push(ConformanceTestResult {
-                    test_id: format!("{}-{}", test_id, description.replace(' ', "-").to_lowercase()),
+                    test_id: format!(
+                        "{}-{}",
+                        test_id,
+                        description.replace(' ', "-").to_lowercase()
+                    ),
                     category: SniTestCategory::ExtensionFormat,
                     requirement_level: RequirementLevel::Must,
                     description: description.to_string(),
-                    verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                    verdict: if result.is_ok() {
+                        TestVerdict::Pass
+                    } else {
+                        TestVerdict::Fail
+                    },
                     error_message: result.err().map(|e| e.to_string()),
                     duration_ms: test_start.elapsed().as_millis() as u64,
                 });
@@ -648,18 +794,35 @@ mod tls_sni_conformance_tests {
             let test_id = "sni-protocol-violations";
 
             let violation_tests = [
-                ("SNI disabled handling", self.validate_sni_disabled_behavior()),
-                ("Malformed extension rejection", self.validate_malformed_extension_rejection()),
-                ("Empty server name list", self.validate_empty_server_name_list()),
+                (
+                    "SNI disabled handling",
+                    self.validate_sni_disabled_behavior(),
+                ),
+                (
+                    "Malformed extension rejection",
+                    self.validate_malformed_extension_rejection(),
+                ),
+                (
+                    "Empty server name list",
+                    self.validate_empty_server_name_list(),
+                ),
             ];
 
             for (description, result) in violation_tests {
                 self.test_results.push(ConformanceTestResult {
-                    test_id: format!("{}-{}", test_id, description.replace(' ', "-").to_lowercase()),
+                    test_id: format!(
+                        "{}-{}",
+                        test_id,
+                        description.replace(' ', "-").to_lowercase()
+                    ),
                     category: SniTestCategory::ProtocolViolation,
                     requirement_level: RequirementLevel::Must,
                     description: description.to_string(),
-                    verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+                    verdict: if result.is_ok() {
+                        TestVerdict::Pass
+                    } else {
+                        TestVerdict::Fail
+                    },
                     error_message: result.err().map(|e| e.to_string()),
                     duration_ms: test_start.elapsed().as_millis() as u64,
                 });
@@ -704,9 +867,7 @@ mod tls_sni_conformance_tests {
 
         fn validate_sni_disabled_behavior(&self) -> Result<(), TlsError> {
             // Test connector with SNI disabled
-            let connector_result = TlsConnectorBuilder::new()
-                .disable_sni()
-                .build();
+            let connector_result = TlsConnectorBuilder::new().disable_sni().build();
 
             match connector_result {
                 Ok(_connector) => {
@@ -747,7 +908,8 @@ mod tls_sni_conformance_tests {
         // Verify all tests passed
         for result in harness.results() {
             if result.verdict == TestVerdict::Fail {
-                panic!("SNI conformance test failed: {} - {}",
+                panic!(
+                    "SNI conformance test failed: {} - {}",
                     result.test_id,
                     result.error_message.as_deref().unwrap_or("Unknown error")
                 );
@@ -763,7 +925,8 @@ mod tls_sni_conformance_tests {
 
         for result in harness.results() {
             if result.verdict == TestVerdict::Fail {
-                panic!("SNI hostname name_type test failed: {} - {}",
+                panic!(
+                    "SNI hostname name_type test failed: {} - {}",
                     result.test_id,
                     result.error_message.as_deref().unwrap_or("Unknown error")
                 );
@@ -779,7 +942,8 @@ mod tls_sni_conformance_tests {
 
         for result in harness.results() {
             if result.verdict == TestVerdict::Fail {
-                panic!("SNI hostname encoding test failed: {} - {}",
+                panic!(
+                    "SNI hostname encoding test failed: {} - {}",
                     result.test_id,
                     result.error_message.as_deref().unwrap_or("Unknown error")
                 );
@@ -795,7 +959,8 @@ mod tls_sni_conformance_tests {
 
         for result in harness.results() {
             if result.verdict == TestVerdict::Fail {
-                panic!("SNI duplicate entries test failed: {} - {}",
+                panic!(
+                    "SNI duplicate entries test failed: {} - {}",
                     result.test_id,
                     result.error_message.as_deref().unwrap_or("Unknown error")
                 );
@@ -811,7 +976,8 @@ mod tls_sni_conformance_tests {
 
         for result in harness.results() {
             if result.verdict == TestVerdict::Fail {
-                panic!("SNI mismatch alert test failed: {} - {}",
+                panic!(
+                    "SNI mismatch alert test failed: {} - {}",
                     result.test_id,
                     result.error_message.as_deref().unwrap_or("Unknown error")
                 );
@@ -828,9 +994,18 @@ mod tls_sni_conformance_tests {
         // Generate summary report
         let results = harness.results();
         let total = results.len();
-        let passed = results.iter().filter(|r| r.verdict == TestVerdict::Pass).count();
-        let failed = results.iter().filter(|r| r.verdict == TestVerdict::Fail).count();
-        let skipped = results.iter().filter(|r| r.verdict == TestVerdict::Skip).count();
+        let passed = results
+            .iter()
+            .filter(|r| r.verdict == TestVerdict::Pass)
+            .count();
+        let failed = results
+            .iter()
+            .filter(|r| r.verdict == TestVerdict::Fail)
+            .count();
+        let skipped = results
+            .iter()
+            .filter(|r| r.verdict == TestVerdict::Skip)
+            .count();
 
         println!("SNI Conformance Test Summary:");
         println!("  Total: {}", total);
@@ -842,14 +1017,23 @@ mod tls_sni_conformance_tests {
             println!("\nFailed tests:");
             for result in results {
                 if result.verdict == TestVerdict::Fail {
-                    println!("  {} - {}", result.test_id,
-                        result.error_message.as_deref().unwrap_or("No error message"));
+                    println!(
+                        "  {} - {}",
+                        result.test_id,
+                        result
+                            .error_message
+                            .as_deref()
+                            .unwrap_or("No error message")
+                    );
                 }
             }
         }
 
         // Ensure core RFC 6066 requirements pass
-        assert_eq!(failed, 0, "SNI conformance tests must pass for RFC 6066 compliance");
+        assert_eq!(
+            failed, 0,
+            "SNI conformance tests must pass for RFC 6066 compliance"
+        );
     }
 }
 

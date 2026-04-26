@@ -150,8 +150,14 @@ fn snapshot_record(r: &RegionRecord) -> (RegionState, usize, usize, bool) {
 fn close_region_no_drain(table: &RegionTable, id: RegionId) {
     let r = table.get(id.arena_index()).expect("region must exist");
     assert!(r.begin_close(None), "begin_close must succeed on Open");
-    assert!(r.begin_finalize(), "begin_finalize must succeed from Closing");
-    assert!(r.complete_close(), "complete_close must succeed when quiescent");
+    assert!(
+        r.begin_finalize(),
+        "begin_finalize must succeed from Closing"
+    );
+    assert!(
+        r.complete_close(),
+        "complete_close must succeed when quiescent"
+    );
     assert_eq!(r.state(), RegionState::Closed);
 }
 
@@ -168,7 +174,14 @@ fn close_and_remove(table: &mut RegionTable, id: RegionId) {
 fn mr_identity_create_then_close_round_trips_to_initial_state() {
     let mut table = RegionTable::new();
     let pre = snapshot(&table);
-    assert_eq!(pre, TableSnapshot { len: 0, is_empty: true, draining: 0 });
+    assert_eq!(
+        pre,
+        TableSnapshot {
+            len: 0,
+            is_empty: true,
+            draining: 0
+        }
+    );
 
     let r = table.create_root(Budget::default(), Time::ZERO);
     assert_eq!(table.len(), 1);
@@ -197,7 +210,11 @@ fn mr_identity_repeated_create_close_remains_idempotent() {
         let r = table.create_root(Budget::default(), Time::ZERO);
         close_and_remove(&mut table, r);
     }
-    assert_eq!(snapshot(&table), pre, "MR-IDENTITY: 16 rounds must return to initial");
+    assert_eq!(
+        snapshot(&table),
+        pre,
+        "MR-IDENTITY: 16 rounds must return to initial"
+    );
 }
 
 // ─── MR-LINEAR ───────────────────────────────────────────────────────────────
@@ -236,7 +253,14 @@ fn mr_linear_child_close_then_parent_close_equals_parent_alone() {
         snapshot(&table_b),
         "MR-LINEAR: child-then-parent close ≡ parent-alone close on table state"
     );
-    assert_eq!(snapshot(&table_a), TableSnapshot { len: 0, is_empty: true, draining: 0 });
+    assert_eq!(
+        snapshot(&table_a),
+        TableSnapshot {
+            len: 0,
+            is_empty: true,
+            draining: 0
+        }
+    );
 }
 
 #[test]
@@ -318,7 +342,11 @@ fn mr_drain_table_draining_count_tracks_in_flight_drain() {
     let r1 = table.create_root(Budget::default(), Time::ZERO);
     let r2 = table.create_root(Budget::default(), Time::ZERO);
     let r3 = table.create_root(Budget::default(), Time::ZERO);
-    assert_eq!(table.draining_region_count(), 0, "no regions are draining yet");
+    assert_eq!(
+        table.draining_region_count(),
+        0,
+        "no regions are draining yet"
+    );
 
     {
         let r = table.get(r1.arena_index()).unwrap();

@@ -43,8 +43,8 @@
 
 use asupersync::bytes::Bytes;
 use asupersync::http::h2::error::{ErrorCode, H2Error};
-use asupersync::http::h2::stream::{Stream, StreamState};
 use asupersync::http::h2::settings::DEFAULT_INITIAL_WINDOW_SIZE;
+use asupersync::http::h2::stream::{Stream, StreamState};
 
 // Test constants matching production defaults
 const TEST_INITIAL_WINDOW: u32 = DEFAULT_INITIAL_WINDOW_SIZE;
@@ -74,7 +74,9 @@ fn test_idle_to_open_on_send_headers_without_end_stream() {
     assert_eq!(stream.state(), StreamState::Idle);
 
     // Send HEADERS without END_STREAM
-    stream.send_headers(false).expect("HEADERS should succeed from IDLE");
+    stream
+        .send_headers(false)
+        .expect("HEADERS should succeed from IDLE");
     assert_eq!(stream.state(), StreamState::Open);
 }
 
@@ -85,7 +87,9 @@ fn test_idle_to_open_on_recv_headers_without_end_stream() {
     assert_eq!(stream.state(), StreamState::Idle);
 
     // Receive HEADERS without END_STREAM
-    stream.recv_headers(false, true).expect("HEADERS should succeed to IDLE");
+    stream
+        .recv_headers(false, true)
+        .expect("HEADERS should succeed to IDLE");
     assert_eq!(stream.state(), StreamState::Open);
 }
 
@@ -96,7 +100,9 @@ fn test_idle_to_half_closed_local_on_send_headers_with_end_stream() {
     assert_eq!(stream.state(), StreamState::Idle);
 
     // Send HEADERS with END_STREAM
-    stream.send_headers(true).expect("HEADERS+ES should succeed from IDLE");
+    stream
+        .send_headers(true)
+        .expect("HEADERS+ES should succeed from IDLE");
     assert_eq!(stream.state(), StreamState::HalfClosedLocal);
 }
 
@@ -107,7 +113,9 @@ fn test_idle_to_half_closed_remote_on_recv_headers_with_end_stream() {
     assert_eq!(stream.state(), StreamState::Idle);
 
     // Receive HEADERS with END_STREAM
-    stream.recv_headers(true, true).expect("HEADERS+ES should succeed to IDLE");
+    stream
+        .recv_headers(true, true)
+        .expect("HEADERS+ES should succeed to IDLE");
     assert_eq!(stream.state(), StreamState::HalfClosedRemote);
 }
 
@@ -125,7 +133,9 @@ fn test_open_to_half_closed_local_on_send_data_with_end_stream() {
     assert_eq!(stream.state(), StreamState::Open);
 
     // Send DATA with END_STREAM
-    stream.send_data(true).expect("DATA+ES should succeed from OPEN");
+    stream
+        .send_data(true)
+        .expect("DATA+ES should succeed from OPEN");
     assert_eq!(stream.state(), StreamState::HalfClosedLocal);
 }
 
@@ -135,11 +145,15 @@ fn test_open_to_half_closed_remote_on_recv_data_with_end_stream() {
     let mut stream = new_idle_stream(TEST_STREAM_ID);
 
     // Transition to OPEN
-    stream.recv_headers(false, true).expect("transition to OPEN");
+    stream
+        .recv_headers(false, true)
+        .expect("transition to OPEN");
     assert_eq!(stream.state(), StreamState::Open);
 
     // Receive DATA with END_STREAM
-    stream.recv_data(100, true).expect("DATA+ES should succeed from OPEN");
+    stream
+        .recv_data(100, true)
+        .expect("DATA+ES should succeed from OPEN");
     assert_eq!(stream.state(), StreamState::HalfClosedRemote);
 }
 
@@ -163,11 +177,15 @@ fn test_open_to_half_closed_remote_on_recv_headers_with_end_stream() {
     let mut stream = new_idle_stream(TEST_STREAM_ID);
 
     // Transition to OPEN
-    stream.recv_headers(false, true).expect("transition to OPEN");
+    stream
+        .recv_headers(false, true)
+        .expect("transition to OPEN");
     assert_eq!(stream.state(), StreamState::Open);
 
     // Receive additional HEADERS with END_STREAM (e.g., trailers)
-    stream.recv_headers(true, true).expect("trailers with END_STREAM");
+    stream
+        .recv_headers(true, true)
+        .expect("trailers with END_STREAM");
     assert_eq!(stream.state(), StreamState::HalfClosedRemote);
 }
 
@@ -185,7 +203,9 @@ fn test_half_closed_local_to_closed_on_recv_data_with_end_stream() {
     assert_eq!(stream.state(), StreamState::HalfClosedLocal);
 
     // Receive DATA with END_STREAM from counterparty
-    stream.recv_data(50, true).expect("counterparty DATA+ES should close stream");
+    stream
+        .recv_data(50, true)
+        .expect("counterparty DATA+ES should close stream");
     assert_eq!(stream.state(), StreamState::Closed);
 }
 
@@ -200,7 +220,9 @@ fn test_half_closed_local_to_closed_on_recv_headers_with_end_stream() {
     assert_eq!(stream.state(), StreamState::HalfClosedLocal);
 
     // Receive HEADERS with END_STREAM from counterparty
-    stream.recv_headers(true, true).expect("counterparty HEADERS+ES should close stream");
+    stream
+        .recv_headers(true, true)
+        .expect("counterparty HEADERS+ES should close stream");
     assert_eq!(stream.state(), StreamState::Closed);
 }
 
@@ -210,11 +232,15 @@ fn test_half_closed_remote_to_closed_on_send_data_with_end_stream() {
     let mut stream = new_idle_stream(TEST_STREAM_ID);
 
     // Transition to HALF_CLOSED_REMOTE
-    stream.recv_headers(true, true).expect("IDLE → HALF_CLOSED_REMOTE");
+    stream
+        .recv_headers(true, true)
+        .expect("IDLE → HALF_CLOSED_REMOTE");
     assert_eq!(stream.state(), StreamState::HalfClosedRemote);
 
     // Send DATA with END_STREAM to counterparty
-    stream.send_data(true).expect("our DATA+ES should close stream");
+    stream
+        .send_data(true)
+        .expect("our DATA+ES should close stream");
     assert_eq!(stream.state(), StreamState::Closed);
 }
 
@@ -225,11 +251,15 @@ fn test_half_closed_remote_to_closed_on_send_headers_with_end_stream() {
 
     // Transition to OPEN then HALF_CLOSED_REMOTE
     stream.send_headers(false).expect("IDLE → OPEN");
-    stream.recv_data(100, true).expect("OPEN → HALF_CLOSED_REMOTE");
+    stream
+        .recv_data(100, true)
+        .expect("OPEN → HALF_CLOSED_REMOTE");
     assert_eq!(stream.state(), StreamState::HalfClosedRemote);
 
     // Send HEADERS with END_STREAM
-    stream.send_headers(true).expect("our HEADERS+ES should close stream");
+    stream
+        .send_headers(true)
+        .expect("our HEADERS+ES should close stream");
     assert_eq!(stream.state(), StreamState::Closed);
 }
 
@@ -282,7 +312,9 @@ fn test_half_closed_remote_to_closed_on_rst_stream() {
     let mut stream = new_idle_stream(TEST_STREAM_ID);
 
     // Transition to HALF_CLOSED_REMOTE
-    stream.recv_headers(true, true).expect("IDLE → HALF_CLOSED_REMOTE");
+    stream
+        .recv_headers(true, true)
+        .expect("IDLE → HALF_CLOSED_REMOTE");
     assert_eq!(stream.state(), StreamState::HalfClosedRemote);
 
     stream.reset(ErrorCode::RefusedStream);
@@ -331,7 +363,10 @@ fn test_closed_stream_rejects_send_headers() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     match err {
-        H2Error::StreamError { error_code: ErrorCode::StreamClosed, .. } => {},
+        H2Error::StreamError {
+            error_code: ErrorCode::StreamClosed,
+            ..
+        } => {}
         _ => panic!("Expected StreamClosed error, got: {:?}", err),
     }
 }
@@ -350,7 +385,10 @@ fn test_closed_stream_rejects_recv_headers() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     match err {
-        H2Error::StreamError { error_code: ErrorCode::StreamClosed, .. } => {},
+        H2Error::StreamError {
+            error_code: ErrorCode::StreamClosed,
+            ..
+        } => {}
         _ => panic!("Expected StreamClosed error, got: {:?}", err),
     }
 }
@@ -369,7 +407,10 @@ fn test_closed_stream_rejects_send_data() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     match err {
-        H2Error::StreamError { error_code: ErrorCode::StreamClosed, .. } => {},
+        H2Error::StreamError {
+            error_code: ErrorCode::StreamClosed,
+            ..
+        } => {}
         _ => panic!("Expected StreamClosed error, got: {:?}", err),
     }
 }
@@ -388,7 +429,10 @@ fn test_closed_stream_rejects_recv_data() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     match err {
-        H2Error::StreamError { error_code: ErrorCode::StreamClosed, .. } => {},
+        H2Error::StreamError {
+            error_code: ErrorCode::StreamClosed,
+            ..
+        } => {}
         _ => panic!("Expected StreamClosed error, got: {:?}", err),
     }
 }
@@ -407,7 +451,10 @@ fn test_half_closed_local_rejects_send_data() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     match err {
-        H2Error::StreamError { error_code: ErrorCode::StreamClosed, .. } => {},
+        H2Error::StreamError {
+            error_code: ErrorCode::StreamClosed,
+            ..
+        } => {}
         _ => panic!("Expected StreamClosed error, got: {:?}", err),
     }
 }
@@ -418,7 +465,9 @@ fn test_half_closed_remote_rejects_recv_data() {
     let mut stream = new_idle_stream(TEST_STREAM_ID);
 
     // Transition to HALF_CLOSED_REMOTE (peer sent END_STREAM)
-    stream.recv_headers(true, true).expect("IDLE → HALF_CLOSED_REMOTE");
+    stream
+        .recv_headers(true, true)
+        .expect("IDLE → HALF_CLOSED_REMOTE");
     assert_eq!(stream.state(), StreamState::HalfClosedRemote);
 
     // Attempt to receive DATA (illegal - peer already sent END_STREAM)
@@ -426,7 +475,10 @@ fn test_half_closed_remote_rejects_recv_data() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     match err {
-        H2Error::StreamError { error_code: ErrorCode::StreamClosed, .. } => {},
+        H2Error::StreamError {
+            error_code: ErrorCode::StreamClosed,
+            ..
+        } => {}
         _ => panic!("Expected StreamClosed error, got: {:?}", err),
     }
 }
@@ -464,7 +516,10 @@ fn test_reserved_remote_rejects_recv_data() {
     assert!(result.is_err());
     let err = result.unwrap_err();
     match err {
-        H2Error::StreamError { error_code: ErrorCode::StreamClosed, .. } => {},
+        H2Error::StreamError {
+            error_code: ErrorCode::StreamClosed,
+            ..
+        } => {}
         _ => panic!("Expected StreamClosed error, got: {:?}", err),
     }
 }
@@ -480,7 +535,9 @@ fn test_reserved_remote_to_half_closed_local_on_send_headers() {
     assert_eq!(stream.state(), StreamState::ReservedRemote);
 
     // Send HEADERS without END_STREAM (activates the promised stream)
-    stream.send_headers(false).expect("activate reserved(remote) with HEADERS");
+    stream
+        .send_headers(false)
+        .expect("activate reserved(remote) with HEADERS");
     assert_eq!(stream.state(), StreamState::HalfClosedLocal);
 }
 
@@ -491,7 +548,9 @@ fn test_reserved_remote_to_closed_on_send_headers_with_end_stream() {
     assert_eq!(stream.state(), StreamState::ReservedRemote);
 
     // Send HEADERS with END_STREAM (activates and immediately closes)
-    stream.send_headers(true).expect("activate and close reserved(remote)");
+    stream
+        .send_headers(true)
+        .expect("activate and close reserved(remote)");
     assert_eq!(stream.state(), StreamState::Closed);
 }
 
@@ -502,7 +561,9 @@ fn test_reserved_remote_to_half_closed_remote_on_recv_headers() {
     assert_eq!(stream.state(), StreamState::ReservedRemote);
 
     // Receive HEADERS without END_STREAM
-    stream.recv_headers(false, true).expect("recv HEADERS on reserved(remote)");
+    stream
+        .recv_headers(false, true)
+        .expect("recv HEADERS on reserved(remote)");
     assert_eq!(stream.state(), StreamState::HalfClosedRemote);
 }
 
@@ -513,7 +574,9 @@ fn test_reserved_remote_to_closed_on_recv_headers_with_end_stream() {
     assert_eq!(stream.state(), StreamState::ReservedRemote);
 
     // Receive HEADERS with END_STREAM
-    stream.recv_headers(true, true).expect("recv HEADERS+ES on reserved(remote)");
+    stream
+        .recv_headers(true, true)
+        .expect("recv HEADERS+ES on reserved(remote)");
     assert_eq!(stream.state(), StreamState::Closed);
 }
 
@@ -559,26 +622,48 @@ fn test_stream_state_is_active_semantics() {
     // Test that is_active() returns true for states that count toward max_concurrent_streams
 
     let idle_stream = new_idle_stream(TEST_STREAM_ID);
-    assert!(!idle_stream.state().is_active(), "IDLE streams should not be active");
+    assert!(
+        !idle_stream.state().is_active(),
+        "IDLE streams should not be active"
+    );
 
     let reserved_remote = new_reserved_remote_stream(TEST_STREAM_ID);
-    assert!(reserved_remote.state().is_active(), "RESERVED streams should be active");
+    assert!(
+        reserved_remote.state().is_active(),
+        "RESERVED streams should be active"
+    );
 
     let mut open_stream = new_idle_stream(TEST_STREAM_ID + 1);
     open_stream.send_headers(false).expect("transition to OPEN");
-    assert!(open_stream.state().is_active(), "OPEN streams should be active");
+    assert!(
+        open_stream.state().is_active(),
+        "OPEN streams should be active"
+    );
 
     let mut half_closed_local = new_idle_stream(TEST_STREAM_ID + 2);
-    half_closed_local.send_headers(true).expect("transition to HALF_CLOSED_LOCAL");
-    assert!(half_closed_local.state().is_active(), "HALF_CLOSED_LOCAL streams should be active");
+    half_closed_local
+        .send_headers(true)
+        .expect("transition to HALF_CLOSED_LOCAL");
+    assert!(
+        half_closed_local.state().is_active(),
+        "HALF_CLOSED_LOCAL streams should be active"
+    );
 
     let mut half_closed_remote = new_idle_stream(TEST_STREAM_ID + 3);
-    half_closed_remote.recv_headers(true, true).expect("transition to HALF_CLOSED_REMOTE");
-    assert!(half_closed_remote.state().is_active(), "HALF_CLOSED_REMOTE streams should be active");
+    half_closed_remote
+        .recv_headers(true, true)
+        .expect("transition to HALF_CLOSED_REMOTE");
+    assert!(
+        half_closed_remote.state().is_active(),
+        "HALF_CLOSED_REMOTE streams should be active"
+    );
 
     let mut closed_stream = new_idle_stream(TEST_STREAM_ID + 4);
     closed_stream.reset(ErrorCode::Cancel);
-    assert!(!closed_stream.state().is_active(), "CLOSED streams should not be active");
+    assert!(
+        !closed_stream.state().is_active(),
+        "CLOSED streams should not be active"
+    );
 }
 
 #[test]
@@ -610,7 +695,9 @@ fn test_data_frames_preserve_state_without_end_stream() {
     assert_eq!(stream.state(), StreamState::Open);
 
     // Send another DATA without END_STREAM
-    stream.send_data(false).expect("another DATA without END_STREAM");
+    stream
+        .send_data(false)
+        .expect("another DATA without END_STREAM");
     assert_eq!(stream.state(), StreamState::Open);
 }
 
@@ -621,7 +708,9 @@ fn test_bidirectional_half_closed_transitions() {
 
     // Start with OPEN state
     stream.send_headers(false).expect("IDLE → OPEN");
-    stream.recv_headers(false, true).expect("establish bidirectional OPEN");
+    stream
+        .recv_headers(false, true)
+        .expect("establish bidirectional OPEN");
     assert_eq!(stream.state(), StreamState::Open);
 
     // Local side sends END_STREAM first
@@ -629,7 +718,9 @@ fn test_bidirectional_half_closed_transitions() {
     assert_eq!(stream.state(), StreamState::HalfClosedLocal);
 
     // Remote side can still send data
-    stream.recv_data(50, false).expect("remote data after local END_STREAM");
+    stream
+        .recv_data(50, false)
+        .expect("remote data after local END_STREAM");
     assert_eq!(stream.state(), StreamState::HalfClosedLocal);
 
     // Remote side sends END_STREAM

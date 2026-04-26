@@ -226,6 +226,12 @@ impl<T: Send + Clone + 'static> BroadcastSender<T> for BroadcastSenderWrapper<T>
         let cx = current_cx();
         self.0.send(&cx, value).map_err(|e| match e {
             broadcast::SendError::Closed(v) => v,
+            broadcast::SendError::Cancelled => {
+                // If cancelled, we don't have the value to return in the error
+                // so we just panic or return a placeholder if T allows.
+                // Given the trait definition, we must return T.
+                panic!("Send cancelled: value lost");
+            }
         })
     }
 

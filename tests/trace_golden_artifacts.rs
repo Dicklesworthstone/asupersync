@@ -91,8 +91,7 @@ fn fixture_divergence_report() -> DivergenceReport {
         explanation: "expected task 7 to be scheduled next, but task 8 was scheduled \
                       instead (work-stealer raced)"
             .to_string(),
-        suggestion: "re-run with --deterministic-stealer or pin worker count to 1"
-            .to_string(),
+        suggestion: "re-run with --deterministic-stealer or pin worker count to 1".to_string(),
         context_before: vec![
             EventSummary {
                 index: 15,

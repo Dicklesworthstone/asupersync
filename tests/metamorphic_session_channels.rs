@@ -365,10 +365,12 @@ proptest! {
 
         // Both oneshot error paths must be identical
         match (err3, err4) {
-            (oneshot::SendError::Disconnected(v3), oneshot::SendError::Disconnected(v4)) => {
+            (oneshot::SendError::Disconnected(v3), oneshot::SendError::Disconnected(v4))
+            | (oneshot::SendError::Cancelled(v3), oneshot::SendError::Cancelled(v4)) => {
                 prop_assert_eq!(v3, v4, "Oneshot error value preservation violated");
                 prop_assert_eq!(v3, value, "Oneshot error must return original value");
             },
+            _ => prop_assert!(false, "Mismatched oneshot error paths: {:?} vs {:?}", err3, err4),
         }
     }
 }

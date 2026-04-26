@@ -34,16 +34,15 @@
 //! - Unknown identifiers: MUST be ignored
 //! - Invalid values: MUST trigger appropriate errors
 
-use asupersync::bytes::{Bytes, BytesMut, BufMut};
+use asupersync::bytes::{BufMut, Bytes, BytesMut};
 use asupersync::http::h2::{
-    connection::{Connection, ConnectionState, CLIENT_PREFACE},
+    connection::{CLIENT_PREFACE, Connection, ConnectionState},
     error::{ErrorCode, H2Error},
     frame::{
-        Frame, FrameHeader, FrameType, Setting, SettingsFrame, parse_frame,
-        settings_flags, FRAME_HEADER_SIZE, DEFAULT_MAX_FRAME_SIZE,
-        MIN_MAX_FRAME_SIZE, MAX_FRAME_SIZE,
+        DEFAULT_MAX_FRAME_SIZE, FRAME_HEADER_SIZE, Frame, FrameHeader, FrameType, MAX_FRAME_SIZE,
+        MIN_MAX_FRAME_SIZE, Setting, SettingsFrame, parse_frame, settings_flags,
     },
-    settings::{Settings, MAX_INITIAL_WINDOW_SIZE},
+    settings::{MAX_INITIAL_WINDOW_SIZE, Settings},
 };
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};
@@ -337,27 +336,27 @@ fn test_unknown_settings_ids_ignored() -> Result<(), Box<dyn std::error::Error>>
     let mut buf = BytesMut::new();
 
     // Known setting: SETTINGS_ENABLE_PUSH (0x2)
-    buf.put_u16(0x2);  // SETTINGS_ENABLE_PUSH
-    buf.put_u32(0);    // Disable push
+    buf.put_u16(0x2); // SETTINGS_ENABLE_PUSH
+    buf.put_u32(0); // Disable push
 
     // Unknown setting: 0x9999 (non-standard)
-    buf.put_u16(0x9999);  // Unknown setting ID
-    buf.put_u32(12345);   // Arbitrary value
+    buf.put_u16(0x9999); // Unknown setting ID
+    buf.put_u32(12345); // Arbitrary value
 
     // Another known setting: SETTINGS_MAX_FRAME_SIZE (0x5)
-    buf.put_u16(0x5);    // SETTINGS_MAX_FRAME_SIZE
-    buf.put_u32(32768);  // 32KB
+    buf.put_u16(0x5); // SETTINGS_MAX_FRAME_SIZE
+    buf.put_u32(32768); // 32KB
 
     // Another unknown setting: 0x7777 (non-standard)
-    buf.put_u16(0x7777);  // Unknown setting ID
-    buf.put_u32(98765);   // Arbitrary value
+    buf.put_u16(0x7777); // Unknown setting ID
+    buf.put_u32(98765); // Arbitrary value
 
     // Parse frame header and payload
     let frame_len = buf.len();
     let mut header_buf = BytesMut::new();
-    header_buf.put_u24(frame_len as u32);  // Length
-    header_buf.put_u8(FrameType::Settings as u8);  // Type
-    header_buf.put_u8(0);  // Flags (no ACK)
+    header_buf.put_u24(frame_len as u32); // Length
+    header_buf.put_u8(FrameType::Settings as u8); // Type
+    header_buf.put_u8(0); // Flags (no ACK)
     header_buf.put_u32(0); // Stream ID (connection-level)
 
     // Combine header and payload
@@ -373,8 +372,8 @@ fn test_unknown_settings_ids_ignored() -> Result<(), Box<dyn std::error::Error>>
 
         // Verify only known settings were applied
         let applied_settings = conn.last_settings.unwrap();
-        assert!(!applied_settings.enable_push);  // From known setting
-        assert_eq!(applied_settings.max_frame_size, 32768);  // From known setting
+        assert!(!applied_settings.enable_push); // From known setting
+        assert_eq!(applied_settings.max_frame_size, 32768); // From known setting
 
         // Unknown settings should not cause errors
         assert!(conn.settings_ack_received);
@@ -394,7 +393,8 @@ fn test_unknown_settings_ids_ignored() -> Result<(), Box<dyn std::error::Error>>
 /// treated as a connection error of type FLOW_CONTROL_ERROR.
 #[test]
 #[allow(dead_code)]
-fn test_invalid_settings_initial_window_size_flow_control_error() -> Result<(), Box<dyn std::error::Error>> {
+fn test_invalid_settings_initial_window_size_flow_control_error()
+-> Result<(), Box<dyn std::error::Error>> {
     let start_time = Instant::now();
 
     let mut conn = MockH2Connection::new();
@@ -434,7 +434,10 @@ fn test_invalid_settings_initial_window_size_flow_control_error() -> Result<(), 
     assert_eq!(result.unwrap_err().code, ErrorCode::FlowControlError);
 
     let duration = start_time.elapsed().as_millis() as u64;
-    println!("✓ Invalid SETTINGS_INITIAL_WINDOW_SIZE validation in {}ms", duration);
+    println!(
+        "✓ Invalid SETTINGS_INITIAL_WINDOW_SIZE validation in {}ms",
+        duration
+    );
 
     Ok(())
 }
@@ -455,7 +458,10 @@ fn test_settings_max_frame_size_bounds() -> Result<(), Box<dyn std::error::Error
     let min_valid_frame = SettingsFrame::new(min_valid_settings);
 
     assert!(conn1.process_settings_frame(min_valid_frame).is_ok());
-    assert_eq!(conn1.last_settings.unwrap().max_frame_size, MIN_MAX_FRAME_SIZE);
+    assert_eq!(
+        conn1.last_settings.unwrap().max_frame_size,
+        MIN_MAX_FRAME_SIZE
+    );
 
     // Test maximum valid frame size (16,777,215)
     let mut conn2 = MockH2Connection::new();
@@ -487,11 +493,11 @@ fn test_settings_max_frame_size_bounds() -> Result<(), Box<dyn std::error::Error
 
     // Test edge case values
     let valid_sizes = [
-        MIN_MAX_FRAME_SIZE,     // 16,384
-        32768,                  // 32KB
-        65536,                  // 64KB
-        131072,                 // 128KB
-        MAX_FRAME_SIZE,         // 16,777,215
+        MIN_MAX_FRAME_SIZE, // 16,384
+        32768,              // 32KB
+        65536,              // 64KB
+        131072,             // 128KB
+        MAX_FRAME_SIZE,     // 16,777,215
     ];
 
     for size in valid_sizes {
@@ -503,7 +509,10 @@ fn test_settings_max_frame_size_bounds() -> Result<(), Box<dyn std::error::Error
     }
 
     let duration = start_time.elapsed().as_millis() as u64;
-    println!("✓ SETTINGS_MAX_FRAME_SIZE bounds validated in {}ms", duration);
+    println!(
+        "✓ SETTINGS_MAX_FRAME_SIZE bounds validated in {}ms",
+        duration
+    );
 
     Ok(())
 }
@@ -533,7 +542,7 @@ fn test_settings_ack_flag_rejects_payload() -> Result<(), Box<dyn std::error::Er
 
     // Create invalid SETTINGS frame with ACK flag and payload
     let mut invalid_ack_frame = SettingsFrame::new(vec![Setting::EnablePush(false)]);
-    invalid_ack_frame.ack = true;  // Set ACK flag but keep payload
+    invalid_ack_frame.ack = true; // Set ACK flag but keep payload
 
     // Should fail with FRAME_SIZE_ERROR
     let result = conn2.process_settings_frame(invalid_ack_frame);
@@ -552,7 +561,7 @@ fn test_settings_ack_flag_rejects_payload() -> Result<(), Box<dyn std::error::Er
         Setting::MaxFrameSize(32768),
         Setting::InitialWindowSize(65536),
     ]);
-    multiple_settings_ack.ack = true;  // Invalid: ACK with payload
+    multiple_settings_ack.ack = true; // Invalid: ACK with payload
 
     let result = conn3.process_settings_frame(multiple_settings_ack);
     assert!(result.is_err());
@@ -578,21 +587,21 @@ fn test_complete_settings_negotiation_handshake() -> Result<(), Box<dyn std::err
 
     // Step 1: Client sends initial SETTINGS
     let client_initial_settings = vec![
-        Setting::EnablePush(false),           // Clients typically disable push
-        Setting::MaxConcurrentStreams(100),   // Client's concurrency limit
-        Setting::InitialWindowSize(32768),    // Client's preferred window
-        Setting::MaxFrameSize(24576),         // Client's frame size preference
+        Setting::EnablePush(false),         // Clients typically disable push
+        Setting::MaxConcurrentStreams(100), // Client's concurrency limit
+        Setting::InitialWindowSize(32768),  // Client's preferred window
+        Setting::MaxFrameSize(24576),       // Client's frame size preference
     ];
 
     client.send_initial_settings(client_initial_settings.clone())?;
 
     // Step 2: Server sends initial SETTINGS
     let server_initial_settings = vec![
-        Setting::EnablePush(true),             // Server may support push
-        Setting::MaxConcurrentStreams(256),    // Server's capacity
-        Setting::InitialWindowSize(65536),     // Server's preferred window
-        Setting::MaxFrameSize(32768),          // Server's frame size limit
-        Setting::MaxHeaderListSize(8192),      // Server's header limit
+        Setting::EnablePush(true),          // Server may support push
+        Setting::MaxConcurrentStreams(256), // Server's capacity
+        Setting::InitialWindowSize(65536),  // Server's preferred window
+        Setting::MaxFrameSize(32768),       // Server's frame size limit
+        Setting::MaxHeaderListSize(8192),   // Server's header limit
     ];
 
     server.send_initial_settings(server_initial_settings.clone())?;
@@ -603,30 +612,33 @@ fn test_complete_settings_negotiation_handshake() -> Result<(), Box<dyn std::err
     // Client processes server settings
     let server_settings_frame = SettingsFrame::new(server_initial_settings);
     client.process_settings_frame(server_settings_frame)?;
-    assert!(client.settings_ack_received);  // Client sent ACK
+    assert!(client.settings_ack_received); // Client sent ACK
 
     // Server processes client settings
     let client_settings_frame = SettingsFrame::new(client_initial_settings);
     server.process_settings_frame(client_settings_frame)?;
-    assert!(server.settings_ack_received);  // Server sent ACK
+    assert!(server.settings_ack_received); // Server sent ACK
 
     // Step 4: Verify settings were applied correctly
     let client_applied = client.last_settings.unwrap();
-    assert!(client_applied.enable_push);  // Server's setting
-    assert_eq!(client_applied.max_concurrent_streams, 256);  // Server's setting
-    assert_eq!(client_applied.initial_window_size, 65536);   // Server's setting
+    assert!(client_applied.enable_push); // Server's setting
+    assert_eq!(client_applied.max_concurrent_streams, 256); // Server's setting
+    assert_eq!(client_applied.initial_window_size, 65536); // Server's setting
 
     let server_applied = server.last_settings.unwrap();
-    assert!(!server_applied.enable_push);  // Client's setting
-    assert_eq!(server_applied.max_concurrent_streams, 100);  // Client's setting
-    assert_eq!(server_applied.initial_window_size, 32768);   // Client's setting
+    assert!(!server_applied.enable_push); // Client's setting
+    assert_eq!(server_applied.max_concurrent_streams, 100); // Client's setting
+    assert_eq!(server_applied.initial_window_size, 32768); // Client's setting
 
     // Step 5: Verify connection states
     assert_eq!(client.state, ConnectionState::Open);
     assert_eq!(server.state, ConnectionState::Open);
 
     let duration = start_time.elapsed().as_millis() as u64;
-    println!("✓ Complete SETTINGS negotiation handshake in {}ms", duration);
+    println!(
+        "✓ Complete SETTINGS negotiation handshake in {}ms",
+        duration
+    );
 
     Ok(())
 }
@@ -665,12 +677,18 @@ fn test_settings_processing_performance() -> Result<(), Box<dyn std::error::Erro
     assert_eq!(final_settings.max_frame_size, 16384 + (999 * 16));
 
     let duration = start_time.elapsed();
-    println!("✓ Processed 1000 SETTINGS frames in {}ms (avg {:.2}μs per frame)",
-             duration.as_millis(),
-             duration.as_micros() as f64 / 1000.0);
+    println!(
+        "✓ Processed 1000 SETTINGS frames in {}ms (avg {:.2}μs per frame)",
+        duration.as_millis(),
+        duration.as_micros() as f64 / 1000.0
+    );
 
     // Performance threshold: should process 1000 frames in < 100ms
-    assert!(duration.as_millis() < 100, "SETTINGS processing too slow: {}ms", duration.as_millis());
+    assert!(
+        duration.as_millis() < 100,
+        "SETTINGS processing too slow: {}ms",
+        duration.as_millis()
+    );
 
     Ok(())
 }

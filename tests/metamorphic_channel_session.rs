@@ -246,7 +246,7 @@ fn mr_proof_type_preservation() {
                 // Test oneshot abort proof type
                 let (sender4, _receiver4) = oneshot::channel::<()>();
                 let tracked_sender4 = TrackedOneshotSender::new(sender4);
-                let permit = tracked_sender4.reserve(&cx);
+                let permit = tracked_sender4.reserve(&cx).expect("reserve 4");
                 let proof = permit.abort();
                 let _: AbortedProof<SendPermit> = proof;
             }

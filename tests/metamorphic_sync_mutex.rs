@@ -176,7 +176,10 @@ fn mr_mutual_exclusion_one_holder_at_a_time() {
         .expect("B's lock must succeed after release");
     let _ = res_b;
     // B's guard dropped here (let _) — mutex now unlocked.
-    assert!(!mutex.is_locked(), "mutex must be unlocked after both drops");
+    assert!(
+        !mutex.is_locked(),
+        "mutex must be unlocked after both drops"
+    );
 }
 
 /// MR-CANCEL-SAFETY: cancelling a queued waiter does not corrupt the
@@ -245,7 +248,9 @@ fn mr_cancel_safety_cancelled_waiter_does_not_corrupt_queue() {
 #[test]
 fn mr_fifo_fairness_three_waiter_chain() {
     let mutex = Arc::new(Mutex::new(0u32));
-    let ctxs: Vec<Cx> = (0..4).map(|i| create_test_context(300 + i, 300 + i)).collect();
+    let ctxs: Vec<Cx> = (0..4)
+        .map(|i| create_test_context(300 + i, 300 + i))
+        .collect();
 
     // A acquires.
     let mut fut_a = mutex.lock(&ctxs[0]);
