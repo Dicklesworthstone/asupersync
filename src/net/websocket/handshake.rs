@@ -92,8 +92,7 @@ fn split_http_header_block(data: &[u8]) -> Result<(&[u8], &[u8]), HandshakeError
 
     let split_at = match (crlf_pos, lf_pos) {
         (Some(c), Some(l)) => Some(std::cmp::min(c, l)),
-        (Some(c), None) => Some(c),
-        (None, Some(l)) => Some(l),
+        (pos @ Some(_), None) | (None, pos @ Some(_)) => pos,
         (None, None) => None,
     };
 
