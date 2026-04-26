@@ -149,7 +149,21 @@ impl NatsError {
 }
 
 /// Configuration for NATS client.
-#[derive(Debug, Clone)]
+///
+/// br-asupersync-5in552: [`Debug`] is implemented MANUALLY (not
+/// derived) to redact credential fields (`password`, `token`,
+/// `user`). Pre-fix the derived Debug impl printed the cleartext
+/// values verbatim — and a NatsConfig is routinely surfaced through
+/// [`fmt::Debug`] by panic backtraces, structured-logging frameworks
+/// that include `format!("{:?}", ...)` of context structs,
+/// observability spans that capture connection state, and lab
+/// crashpacks that serialize the runtime's connect history. Every
+/// such surface leaked the password / token to whatever destination
+/// the surface flowed into (logs, traces, panic backtraces shipped
+/// to APM collectors). The redacted Debug impl substitutes the
+/// sentinel `<redacted>` for any present credential and `None` for
+/// absent ones.
+#[derive(Clone)]
 pub struct NatsConfig {
     /// Host address.
     pub host: String,
@@ -189,6 +203,37 @@ pub struct NatsConfig {
     /// stream type), but until then we MUST refuse to send credentials
     /// in cleartext when TLS is required by either side.
     pub require_tls: bool,
+}
+
+/// br-asupersync-5in552: redact credentials in Debug output.
+/// Replaces every `Some(secret)` with `Some("<redacted>")` so panic
+/// backtraces, structured logs, and trace spans that format the
+/// config via `{:?}` cannot leak the cleartext password / token /
+/// user to downstream destinations.
+impl fmt::Debug for NatsConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Helper: render Option<String> as Some("<redacted>") | None
+        // without exposing the underlying value's length (a
+        // length-leak side channel would be visible if we used
+        // Some(value.len()) or similar).
+        fn redact(opt: &Option<String>) -> Option<&'static str> {
+            opt.as_ref().map(|_| "<redacted>")
+        }
+        f.debug_struct("NatsConfig")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("user", &redact(&self.user))
+            .field("password", &redact(&self.password))
+            .field("token", &redact(&self.token))
+            .field("name", &self.name)
+            .field("verbose", &self.verbose)
+            .field("pedantic", &self.pedantic)
+            .field("request_timeout", &self.request_timeout)
+            .field("max_payload", &self.max_payload)
+            .field("max_read_buffer", &self.max_read_buffer)
+            .field("require_tls", &self.require_tls)
+            .finish()
+    }
 }
 
 impl Default for NatsConfig {
@@ -1965,6 +2010,84 @@ mod tests {
         assert_eq!(config.port, 4222);
         assert_eq!(config.user, Some("user".to_string()));
         assert_eq!(config.password, Some("pass".to_string()));
+    }
+
+    // br-asupersync-5in552: NatsConfig's Debug output MUST NOT
+    // contain cleartext credentials. The manual Debug impl
+    // substitutes "<redacted>" for any present user / password /
+    // token. This test pins the redaction so a future refactor
+    // that re-derives Debug (or adds a new credential field
+    // without updating the manual impl) is caught immediately.
+    #[test]
+    fn test_natsconfig_debug_redacts_credentials_5in552() {
+        let config = NatsConfig::from_url(
+            "nats://alice:supersecret123@nats.internal:4222",
+        )
+        .unwrap();
+        let debug_output = format!("{config:?}");
+
+        // Cleartext credential strings MUST NOT appear anywhere in
+        // the Debug output.
+        assert!(
+            !debug_output.contains("supersecret123"),
+            "Debug output leaked password: {debug_output}"
+        );
+        assert!(
+            !debug_output.contains("alice"),
+            "Debug output leaked username: {debug_output}"
+        );
+
+        // The redaction sentinel SHOULD appear for the present fields
+        // so operators reading logs can see that credentials WERE
+        // configured (not silently absent).
+        assert!(
+            debug_output.contains("<redacted>"),
+            "Debug output should mark redacted credentials with sentinel: {debug_output}"
+        );
+
+        // Non-sensitive fields (host, port) are still visible.
+        assert!(debug_output.contains("nats.internal"));
+        assert!(debug_output.contains("4222"));
+    }
+
+    #[test]
+    fn test_natsconfig_debug_redacts_token_5in552() {
+        let mut config = NatsConfig::default();
+        config.token = Some("eyJhbGciOiJIUzI1NiJ9.payload.signature".to_string());
+        let debug_output = format!("{config:?}");
+
+        assert!(
+            !debug_output.contains("eyJhbGciOiJIUzI1NiJ9"),
+            "Debug output leaked token: {debug_output}"
+        );
+        assert!(
+            !debug_output.contains("signature"),
+            "Debug output leaked token tail: {debug_output}"
+        );
+        assert!(
+            debug_output.contains("<redacted>"),
+            "Debug output should mark redacted token: {debug_output}"
+        );
+    }
+
+    #[test]
+    fn test_natsconfig_debug_unset_credentials_show_none_5in552() {
+        let config = NatsConfig::default();
+        let debug_output = format!("{config:?}");
+
+        // Default config has None for user/password/token. Debug
+        // output should show None for those fields, NOT <redacted>
+        // (so operators can distinguish 'no credential configured'
+        // from 'credential configured but redacted').
+        assert!(
+            !debug_output.contains("<redacted>"),
+            "Default config should not show <redacted>; got: {debug_output}"
+        );
+        // The fields must still appear in the output as None for
+        // diagnostic clarity.
+        assert!(debug_output.contains("user: None"));
+        assert!(debug_output.contains("password: None"));
+        assert!(debug_output.contains("token: None"));
     }
 
     #[test]
