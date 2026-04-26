@@ -222,8 +222,8 @@ mod tests {
         let malicious_discharge = MacaroonToken::mint(&service_b_key, "auth-check", "service-a")
             .add_caveat(CaveatPredicate::ResourceScope("data/**".to_string())); // Broader access
 
-        let bound_legit = root_token.bind_for_request(&discharge_a);
-        let bound_malicious = root_token.bind_for_request(&malicious_discharge);
+        let bound_legit = root_token.bind_for_request(&discharge_a).unwrap();
+        let bound_malicious = root_token.bind_for_request(&malicious_discharge).unwrap();
 
         let ctx = VerificationContext::new()
             .with_time(5000)

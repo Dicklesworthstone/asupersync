@@ -50,7 +50,8 @@ pub use cap::{
 };
 pub use cx::{Cx, SpanGuard};
 pub use macaroon::{
-    CaveatPredicate, MacaroonKeyRing, MacaroonToken, VerificationContext, VerificationError,
+    BindError, CaveatPredicate, MacaroonKeyRing, MacaroonToken, VerificationContext,
+    VerificationError,
 };
 pub use registry::{
     NameLease, NameLeaseError, NameRegistry, RegistryCap, RegistryEvent, RegistryHandle,

@@ -88,7 +88,7 @@ fn test_third_party_binding_integrity() {
     let discharge = MacaroonToken::mint(&caveat_key, "check", "tp");
 
     // Bind to t1
-    let bound1 = t1.bind_for_request(&discharge);
+    let bound1 = t1.bind_for_request(&discharge).unwrap();
 
     // Verifying t1 with bound1 should pass
     assert!(
@@ -125,14 +125,15 @@ fn test_macaroon_layering_deep_nesting() {
     // Layer 3: Final discharge
     let d3 = MacaroonToken::mint(&k3, "id3", "loc3").add_caveat(CaveatPredicate::MaxUses(1));
 
-    // Binding chain
-    let bd1 = t0.bind_for_request(&d1);
-    let bd2 = d1.bind_for_request(&d2); // Regression check: should d1 or t0 be the binder?
-    // According to Birgisson et al., it's the signature of the macaroon containing the caveat.
-    // In our impl: `let binding_key = AuthKey::from_bytes(*self.signature.as_bytes());`
-    // So d1 should bind d2.
-
-    let bd3 = d2.bind_for_request(&d3);
+    // br-asupersync-bst7yx: per Birgisson 2014 §3.5 ("the binding is
+    // an HMAC of the discharge's signature, keyed by the original
+    // macaroon's signature"), ALL discharges in the bundle bind to
+    // the AUTH macaroon's unbound_sig — never to a parent
+    // discharge. Pre-fix this test bound bd2 with d1 and bd3 with
+    // d2; post-fix every discharge binds with t0.
+    let bd1 = t0.bind_for_request(&d1).unwrap();
+    let bd2 = t0.bind_for_request(&d2).unwrap();
+    let bd3 = t0.bind_for_request(&d3).unwrap();
 
     let ctx = VerificationContext::new().with_use_count(1);
     let discharges = vec![bd1, bd2, bd3];
@@ -187,7 +188,7 @@ fn test_third_party_bad_signature_rejection() {
     );
 
     let discharge = MacaroonToken::mint(&caveat_key, "check", "tp");
-    let bound = token.bind_for_request(&discharge);
+    let bound = token.bind_for_request(&discharge).unwrap();
 
     // Tamper with bound signature
     let mut binary = bound.to_binary();
@@ -214,7 +215,7 @@ fn test_third_party_wrong_id_rejection() {
 
     // Discharge has wrong identifier
     let discharge = MacaroonToken::mint(&caveat_key, "WRONG_ID", "tp");
-    let bound = token.bind_for_request(&discharge);
+    let bound = token.bind_for_request(&discharge).unwrap();
 
     let ctx = VerificationContext::new();
     let result = token.verify_with_discharges(&root_key, &ctx, &[bound]);

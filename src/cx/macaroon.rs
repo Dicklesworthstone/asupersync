@@ -486,16 +486,28 @@ impl MacaroonKeyRing {
     ///
     /// Constant-time comparison is inherited from [`MacaroonSignature`]'s
     /// `PartialEq` impl, which XORs the full 32 bytes regardless of the
-    /// position of the first differing byte.
+    /// position of the first differing byte. (br-asupersync-y4fpfl) The
+    /// retired slot is also compared against in EVERY call (using a
+    /// zero-filled placeholder when `retired` is `None`) so wall-clock
+    /// timing does not depend on rotation state — an attacker who can
+    /// time-stamp many `verify` calls cannot distinguish between
+    /// "rotation window open" and "rotation window closed" by the
+    /// bimodal cost of one-vs-two comparisons.
     #[must_use]
     pub fn verify(&self, candidate: &MacaroonSignature) -> bool {
-        if self.active == *candidate {
-            return true;
-        }
-        match &self.retired {
-            Some(retired) => retired == candidate,
-            None => false,
-        }
+        let active_match = self.active == *candidate;
+        // br-asupersync-y4fpfl: ALWAYS compare against the retired
+        // slot, even when it's None, to keep verify wall-clock time
+        // independent of rotation state. The placeholder zero-sig
+        // comparison cannot match a legitimate HMAC output (which
+        // would require the attacker to find an HMAC-SHA256 preimage
+        // for the all-zeros output — infeasible).
+        let placeholder = MacaroonSignature::from_bytes([0u8; AUTH_KEY_SIZE]);
+        let retired_ref = self.retired.as_ref().unwrap_or(&placeholder);
+        let retired_match = retired_ref.constant_time_eq(candidate);
+        // OR-fold without short-circuit so the boolean combine itself
+        // is also constant-time.
+        u8::from(active_match) | u8::from(retired_match) != 0
     }
 }
 
@@ -518,12 +530,37 @@ pub struct MacaroonToken {
     caveats: Vec<Caveat>,
     /// HMAC chain signature (over identifier + all caveats).
     signature: MacaroonSignature,
+    /// br-asupersync-00ze7h: in-memory marker that this token has
+    /// been through `bind_for_request`. A second bind would compute
+    /// `HMAC(auth_sig, HMAC(auth_sig, unbound_sig))` instead of the
+    /// expected `HMAC(auth_sig, unbound_sig)` — the resulting token
+    /// silently fails verification and the holder cannot tell why.
+    /// This flag lets `bind_for_request` reject the double-bind
+    /// explicitly via [`BindError::AlreadyBound`]. NOT serialized
+    /// (the binary schema is unchanged): if a holder serializes a
+    /// bound token and then deserializes it the flag is lost — by
+    /// convention, serialized macaroons are treated as unbound and
+    /// callers must not re-bind across a serialize/deserialize
+    /// round-trip.
+    bound: bool,
 }
 
 struct ThirdPartyVerification<'a> {
     context: &'a VerificationContext,
     discharges: &'a [MacaroonToken],
-    unbound_signature: &'a MacaroonSignature,
+    /// br-asupersync-bst7yx: the AUTH (root authorizing) macaroon's
+    /// unbound signature. Used as the binding key for ALL nested
+    /// discharge verifications, regardless of how deeply nested.
+    /// Per the Macaroon spec (Birgisson 2014) and the dominant
+    /// reference implementations (libmacaroons, pymacaroons,
+    /// go-macaroons), every discharge in a request bundle binds to
+    /// the SAME auth unbound_sig — never to a parent discharge's
+    /// sig. This field replaces the previous `unbound_signature`
+    /// (which was the CURRENT token's unbound sig and incorrectly
+    /// flowed into the nested binding check, producing
+    /// bind-to-parent semantics that contradicted the spec and the
+    /// `bind_for_request` docstring).
+    auth_unbound_signature: &'a MacaroonSignature,
     active_discharges: &'a mut Vec<usize>,
 }
 
@@ -540,7 +577,17 @@ impl MacaroonToken {
             location: location.to_string(),
             caveats: Vec::new(),
             signature: MacaroonSignature::from_bytes(*sig.as_bytes()),
+            bound: false,
         }
+    }
+
+    /// Returns true if this token has been bound to an authorizing
+    /// macaroon via [`Self::bind_for_request`]. Bound tokens cannot be
+    /// re-bound (the second bind would silently produce an
+    /// unverifiable token). (br-asupersync-00ze7h)
+    #[must_use]
+    pub fn is_bound(&self) -> bool {
+        self.bound
     }
 
     /// Add a first-party caveat to the token.
@@ -595,16 +642,28 @@ impl MacaroonToken {
     /// The discharge's signature is replaced with
     /// `HMAC-SHA256(auth_sig, discharge_sig)`, preventing reuse of
     /// the discharge with a different authorizing token.
-    #[must_use]
-    pub fn bind_for_request(&self, discharge: &Self) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BindError::AlreadyBound`] when `discharge` has
+    /// already been bound. Pre-fix a double-bind silently produced a
+    /// token whose signature was `HMAC(auth, HMAC(auth, unbound))`
+    /// instead of `HMAC(auth, unbound)`, which then failed
+    /// verification with a generic `InvalidSignature` and no
+    /// indication of the cause. (br-asupersync-00ze7h)
+    pub fn bind_for_request(&self, discharge: &Self) -> Result<Self, BindError> {
+        if discharge.bound {
+            return Err(BindError::AlreadyBound);
+        }
         let binding_key = AuthKey::from_bytes(*self.signature.as_bytes());
         let bound_sig = hmac_compute(&binding_key, discharge.signature.as_bytes());
-        Self {
+        Ok(Self {
             identifier: discharge.identifier.clone(),
             location: discharge.location.clone(),
             caveats: discharge.caveats.clone(),
             signature: MacaroonSignature::from_bytes(*bound_sig.as_bytes()),
-        }
+            bound: true,
+        })
     }
 
     /// Verify the token's HMAC chain against the root key.
@@ -674,6 +733,7 @@ impl MacaroonToken {
             context,
             discharges,
             None,
+            None,
             &mut active_discharges,
         )
         .map(|_| ())
@@ -701,6 +761,7 @@ impl MacaroonToken {
             context,
             discharges,
             None,
+            None,
             &mut active_discharges,
         )
         .map(|_| ())
@@ -710,12 +771,28 @@ impl MacaroonToken {
     /// Prevents stack overflow from deeply nested (but acyclic) discharge chains.
     const MAX_DISCHARGE_DEPTH: usize = 32;
 
+    /// Recursive verification driver.
+    ///
+    /// `binding_signature`: the AUTH (root authorizing) macaroon's
+    /// unbound signature, used as the HMAC key for the discharge's
+    /// binding-signature check. `None` at the top level (the auth
+    /// itself isn't bound to anything); `Some(auth_unbound)` for
+    /// every nested discharge level.
+    ///
+    /// `auth_unbound_signature`: the SAME auth unbound_sig propagated
+    /// down the recursion so nested third-party caveats can pass it
+    /// to their own recursive verifications. `None` at the top level
+    /// (the auth's own unbound is computed inside this call and
+    /// becomes `auth_unbound` for any first-level discharges);
+    /// `Some(...)` from the first nested level onward.
+    /// (br-asupersync-bst7yx)
     fn verify_with_discharges_inner(
         &self,
         root_key: &AuthKey,
         context: &VerificationContext,
         discharges: &[Self],
         binding_signature: Option<&MacaroonSignature>,
+        auth_unbound_signature: Option<&MacaroonSignature>,
         active_discharges: &mut Vec<usize>,
     ) -> Result<MacaroonSignature, VerificationError> {
         if active_discharges.len() >= Self::MAX_DISCHARGE_DEPTH {
@@ -730,12 +807,19 @@ impl MacaroonToken {
         }
         active_discharges.push(self_ptr);
 
+        // br-asupersync-bst7yx: at the top level we just computed the
+        // AUTH macaroon's unbound_sig — it becomes the
+        // auth_unbound_signature for ALL nested discharges. At
+        // nested levels we propagate the auth's unbound unchanged so
+        // every depth binds to the SAME root, per the Macaroon spec.
+        let effective_auth_unbound = auth_unbound_signature.unwrap_or(&unbound_signature);
+
         let result = self
             .verify_caveat_chain(
                 root_key,
                 context,
                 discharges,
-                &unbound_signature,
+                effective_auth_unbound,
                 active_discharges,
             )
             .map(|()| unbound_signature);
@@ -771,14 +855,14 @@ impl MacaroonToken {
         root_key: &AuthKey,
         context: &VerificationContext,
         discharges: &[Self],
-        unbound_signature: &MacaroonSignature,
+        auth_unbound_signature: &MacaroonSignature,
         active_discharges: &mut Vec<usize>,
     ) -> Result<(), VerificationError> {
         let mut sig = hmac_compute(root_key, self.identifier.as_bytes());
         let mut third_party = ThirdPartyVerification {
             context,
             discharges,
-            unbound_signature,
+            auth_unbound_signature,
             active_discharges,
         };
         for (index, caveat) in self.caveats.iter().enumerate() {
@@ -838,12 +922,17 @@ impl MacaroonToken {
             return Err(Self::discharge_invalid(index, tp_id));
         }
 
+        // br-asupersync-bst7yx: bind ALL nested discharges to the
+        // ROOT authorizing macaroon's unbound_sig (not the parent
+        // discharge's). This matches the Macaroon spec and the
+        // bind_for_request docstring.
         discharge
             .verify_with_discharges_inner(
                 &caveat_key,
                 verification.context,
                 verification.discharges,
-                Some(verification.unbound_signature),
+                Some(verification.auth_unbound_signature),
+                Some(verification.auth_unbound_signature),
                 verification.active_discharges,
             )
             .map_err(|err| Self::map_discharge_error(index, tp_id, err))?;
@@ -1068,6 +1157,11 @@ impl MacaroonToken {
             location,
             caveats,
             signature,
+            // br-asupersync-00ze7h: deserialized tokens are treated as
+            // unbound — the binary schema does not carry the bound
+            // flag, so callers must not re-bind across a serialize /
+            // deserialize round-trip.
+            bound: false,
         })
     }
 
@@ -1261,6 +1355,38 @@ impl fmt::Display for VerificationError {
 }
 
 impl std::error::Error for VerificationError {}
+
+// ---------------------------------------------------------------------------
+// BindError — br-asupersync-00ze7h
+// ---------------------------------------------------------------------------
+
+/// Error returned when [`MacaroonToken::bind_for_request`] cannot
+/// proceed safely.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BindError {
+    /// The discharge has already been bound to an authorizing
+    /// macaroon. A second bind would compute
+    /// `HMAC(auth_sig, HMAC(auth_sig, unbound))` instead of the
+    /// expected `HMAC(auth_sig, unbound)`, silently producing a
+    /// token that fails verification with `InvalidSignature` — and
+    /// the holder cannot tell why. (br-asupersync-00ze7h)
+    AlreadyBound,
+}
+
+impl fmt::Display for BindError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AlreadyBound => write!(
+                f,
+                "macaroon discharge has already been bound; a second bind \
+                 would silently produce an unverifiable token \
+                 (br-asupersync-00ze7h)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for BindError {}
 
 // ---------------------------------------------------------------------------
 // HMAC-SHA256 computation
@@ -1935,7 +2061,7 @@ mod tests {
         let discharge = MacaroonToken::mint(&caveat_key, "user_check", "https://auth.example");
 
         // Holder binds the discharge to the authorizing token.
-        let bound_discharge = token.bind_for_request(&discharge);
+        let bound_discharge = token.bind_for_request(&discharge).unwrap();
 
         // Verifier checks everything.
         let ctx = VerificationContext::new().with_time(1000);
@@ -1978,7 +2104,7 @@ mod tests {
 
         // Discharge minted with wrong key.
         let bad_discharge = MacaroonToken::mint(&wrong_key, "check_id", "tp");
-        let bound = token.bind_for_request(&bad_discharge);
+        let bound = token.bind_for_request(&bad_discharge).unwrap();
 
         let ctx = VerificationContext::new();
         let err = token
@@ -2022,7 +2148,7 @@ mod tests {
         // Discharge has its own first-party caveats.
         let discharge = MacaroonToken::mint(&caveat_key, "auth_check", "tp")
             .add_caveat(CaveatPredicate::MaxUses(10));
-        let bound = token.bind_for_request(&discharge);
+        let bound = token.bind_for_request(&discharge).unwrap();
 
         let ctx = VerificationContext::new();
         assert!(
@@ -2046,7 +2172,7 @@ mod tests {
 
         let discharge = MacaroonToken::mint(&caveat_key, "auth_check", "tp")
             .add_caveat(CaveatPredicate::TimeBefore(1000));
-        let bound = token.bind_for_request(&discharge);
+        let bound = token.bind_for_request(&discharge).unwrap();
 
         // At time=500 — passes (discharge caveat satisfied).
         let ctx_ok = VerificationContext::new().with_time(500);
@@ -2080,7 +2206,7 @@ mod tests {
 
         let discharge = MacaroonToken::mint(&caveat_key, "auth_check", "tp")
             .add_caveat(CaveatPredicate::MaxUses(5));
-        let bound = token.bind_for_request(&discharge);
+        let bound = token.bind_for_request(&discharge).unwrap();
 
         let ctx_ok = VerificationContext::new().with_use_count(3);
         assert!(
@@ -2136,8 +2262,8 @@ mod tests {
 
         let d1 = MacaroonToken::mint(&ck1, "check1", "tp1");
         let d2 = MacaroonToken::mint(&ck2, "check2", "tp2");
-        let bd1 = token.bind_for_request(&d1);
-        let bd2 = token.bind_for_request(&d2);
+        let bd1 = token.bind_for_request(&d1).unwrap();
+        let bd2 = token.bind_for_request(&d2).unwrap();
 
         let ctx = VerificationContext::new().with_time(5000).with_region(42);
         assert!(
@@ -2154,8 +2280,12 @@ mod tests {
                     &root_key,
                     &bad_ctx,
                     &[
-                        token.bind_for_request(&MacaroonToken::mint(&ck1, "check1", "tp1")),
-                        token.bind_for_request(&MacaroonToken::mint(&ck2, "check2", "tp2")),
+                        token
+                            .bind_for_request(&MacaroonToken::mint(&ck1, "check1", "tp1"))
+                            .unwrap(),
+                        token
+                            .bind_for_request(&MacaroonToken::mint(&ck2, "check2", "tp2"))
+                            .unwrap(),
                     ]
                 )
                 .is_err()
@@ -2164,6 +2294,12 @@ mod tests {
 
     #[test]
     fn nested_third_party_discharges_verify_recursively() {
+        // br-asupersync-bst7yx: ALL discharges in the bundle bind to
+        // the AUTH (root authorizing) macaroon's unbound_sig — never
+        // to a parent discharge. Pre-fix this test bound the inner
+        // discharge to the outer discharge, which the impl
+        // (incorrectly) accepted; the spec-compliant fix requires
+        // both bindings to use `token.bind_for_request(...)`.
         let root_key = test_root_key();
         let outer_key = AuthKey::from_seed(880);
         let inner_key = AuthKey::from_seed(881);
@@ -2179,8 +2315,8 @@ mod tests {
         let inner_discharge = MacaroonToken::mint(&inner_key, "inner_check", "inner")
             .add_caveat(CaveatPredicate::TimeBefore(1000));
 
-        let bound_inner = outer_discharge.bind_for_request(&inner_discharge);
-        let bound_outer = token.bind_for_request(&outer_discharge);
+        let bound_inner = token.bind_for_request(&inner_discharge).unwrap();
+        let bound_outer = token.bind_for_request(&outer_discharge).unwrap();
 
         let ctx = VerificationContext::new().with_time(500);
         assert!(
@@ -2188,6 +2324,107 @@ mod tests {
                 .verify_with_discharges(&root_key, &ctx, &[bound_outer, bound_inner])
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn bst7yx_nested_discharge_bound_to_parent_is_now_rejected() {
+        // br-asupersync-bst7yx regression: the prior bind-to-parent
+        // semantic must now FAIL verification. Holders MUST bind
+        // every discharge — including nested ones — to the root auth
+        // token; binding a nested discharge to its parent discharge
+        // is a spec violation that the verifier now catches.
+        let root_key = test_root_key();
+        let outer_key = AuthKey::from_seed(7770);
+        let inner_key = AuthKey::from_seed(7771);
+
+        let token = MacaroonToken::mint(&root_key, "cap", "svc").add_third_party_caveat(
+            "outer",
+            "outer_check",
+            &outer_key,
+        );
+
+        let outer_discharge = MacaroonToken::mint(&outer_key, "outer_check", "outer")
+            .add_third_party_caveat("inner", "inner_check", &inner_key);
+        let inner_discharge = MacaroonToken::mint(&inner_key, "inner_check", "inner");
+
+        // WRONG (bind-to-parent — spec violation):
+        let wrongly_bound_inner = outer_discharge.bind_for_request(&inner_discharge).unwrap();
+        let bound_outer = token.bind_for_request(&outer_discharge).unwrap();
+
+        let err = token
+            .verify_with_discharges(
+                &root_key,
+                &VerificationContext::new(),
+                &[bound_outer, wrongly_bound_inner],
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, VerificationError::DischargeInvalid { .. }),
+            "bind-to-parent must surface as DischargeInvalid post-fix, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn bst7yx_nested_discharge_bound_to_root_auth_succeeds() {
+        // br-asupersync-bst7yx regression: positive case — both
+        // outer and inner bound to the AUTH token verifies.
+        let root_key = test_root_key();
+        let outer_key = AuthKey::from_seed(7780);
+        let inner_key = AuthKey::from_seed(7781);
+
+        let token = MacaroonToken::mint(&root_key, "cap", "svc").add_third_party_caveat(
+            "outer",
+            "outer_check",
+            &outer_key,
+        );
+
+        let outer_discharge = MacaroonToken::mint(&outer_key, "outer_check", "outer")
+            .add_third_party_caveat("inner", "inner_check", &inner_key);
+        let inner_discharge = MacaroonToken::mint(&inner_key, "inner_check", "inner");
+
+        // CORRECT (bind-to-root for every discharge):
+        let bound_inner = token.bind_for_request(&inner_discharge).unwrap();
+        let bound_outer = token.bind_for_request(&outer_discharge).unwrap();
+
+        token
+            .verify_with_discharges(
+                &root_key,
+                &VerificationContext::new(),
+                &[bound_outer, bound_inner],
+            )
+            .expect("bind-to-auth at every depth must verify cleanly");
+    }
+
+    #[test]
+    fn bst7yx_three_level_nested_discharge_chain_binds_to_root() {
+        // br-asupersync-bst7yx: three-level chain (auth -> A -> B -> C)
+        // exercises the auth_unbound propagation through 2 nesting
+        // levels. C must bind to AUTH, not to B.
+        let root_key = test_root_key();
+        let key_a = AuthKey::from_seed(7790);
+        let key_b = AuthKey::from_seed(7791);
+        let key_c = AuthKey::from_seed(7792);
+
+        let token = MacaroonToken::mint(&root_key, "cap", "svc")
+            .add_third_party_caveat("a-loc", "discharge_a", &key_a);
+
+        let discharge_a = MacaroonToken::mint(&key_a, "discharge_a", "a-loc")
+            .add_third_party_caveat("b-loc", "discharge_b", &key_b);
+        let discharge_b = MacaroonToken::mint(&key_b, "discharge_b", "b-loc")
+            .add_third_party_caveat("c-loc", "discharge_c", &key_c);
+        let discharge_c = MacaroonToken::mint(&key_c, "discharge_c", "c-loc");
+
+        let bound_a = token.bind_for_request(&discharge_a).unwrap();
+        let bound_b = token.bind_for_request(&discharge_b).unwrap();
+        let bound_c = token.bind_for_request(&discharge_c).unwrap();
+
+        token
+            .verify_with_discharges(
+                &root_key,
+                &VerificationContext::new(),
+                &[bound_a, bound_b, bound_c],
+            )
+            .expect("three-level chain bound-to-auth must verify");
     }
 
     #[test]
@@ -2205,7 +2442,7 @@ mod tests {
         let outer_discharge = MacaroonToken::mint(&outer_key, "outer_check", "outer")
             .add_third_party_caveat("inner", "inner_check", &inner_key);
         let unbound_inner = MacaroonToken::mint(&inner_key, "inner_check", "inner");
-        let bound_outer = token.bind_for_request(&outer_discharge);
+        let bound_outer = token.bind_for_request(&outer_discharge).unwrap();
 
         let err = token
             .verify_with_discharges(
@@ -2857,7 +3094,7 @@ mod tests {
         let discharge = MacaroonToken::mint(&auth_key, "user_auth", "auth-svc");
 
         // Holder binds discharge.
-        let bound = token.bind_for_request(&discharge);
+        let bound = token.bind_for_request(&discharge).unwrap();
 
         // Verify the full chain.
         let ctx = VerificationContext::new().with_time(5000).with_region(1);
@@ -2881,7 +3118,7 @@ mod tests {
         // Fail: wrong discharge key.
         let wrong_key = AuthKey::from_seed(9999);
         let bad_discharge = MacaroonToken::mint(&wrong_key, "user_auth", "auth-svc");
-        let bad_bound = token.bind_for_request(&bad_discharge);
+        let bad_bound = token.bind_for_request(&bad_discharge).unwrap();
         assert!(
             token
                 .verify_with_discharges(&root_key, &ctx, &[bad_bound])
@@ -2934,5 +3171,79 @@ mod tests {
         let mut set = HashSet::new();
         set.insert(a);
         assert!(set.contains(&b));
+    }
+
+    // --- br-asupersync-00ze7h: bind_for_request idempotence ---
+
+    #[test]
+    fn _00ze7h_freshly_minted_token_is_unbound() {
+        let token = MacaroonToken::mint(&test_root_key(), "cap", "loc");
+        assert!(!token.is_bound(), "fresh mint must not be bound");
+    }
+
+    #[test]
+    fn _00ze7h_first_bind_marks_token_as_bound() {
+        let root_key = test_root_key();
+        let caveat_key = AuthKey::from_seed(900);
+        let token = MacaroonToken::mint(&root_key, "cap", "loc")
+            .add_third_party_caveat("tp", "check", &caveat_key);
+        let discharge = MacaroonToken::mint(&caveat_key, "check", "tp");
+
+        assert!(!discharge.is_bound());
+        let bound = token.bind_for_request(&discharge).unwrap();
+        assert!(bound.is_bound(), "bind_for_request output must be marked bound");
+    }
+
+    #[test]
+    fn _00ze7h_double_bind_returns_already_bound_err() {
+        // The actual bug guard: feeding an already-bound discharge
+        // to bind_for_request must surface BindError::AlreadyBound,
+        // not silently produce a doubly-bound (unverifiable) token.
+        let root_key = test_root_key();
+        let caveat_key = AuthKey::from_seed(901);
+        let token = MacaroonToken::mint(&root_key, "cap", "loc")
+            .add_third_party_caveat("tp", "check", &caveat_key);
+        let discharge = MacaroonToken::mint(&caveat_key, "check", "tp");
+
+        let bound_once = token.bind_for_request(&discharge).unwrap();
+        let bound_twice = token.bind_for_request(&bound_once);
+        assert_eq!(
+            bound_twice,
+            Err(BindError::AlreadyBound),
+            "second bind on an already-bound discharge must return AlreadyBound"
+        );
+    }
+
+    #[test]
+    fn _00ze7h_double_bind_err_message_references_the_bead() {
+        // Display impl should include the bead id so log readers can
+        // locate the design doc.
+        let err = BindError::AlreadyBound;
+        let msg = format!("{err}");
+        assert!(msg.contains("br-asupersync-00ze7h"), "got: {msg}");
+        assert!(msg.contains("already been bound"));
+    }
+
+    #[test]
+    fn _00ze7h_deserialized_token_is_treated_as_unbound() {
+        // The binary schema does NOT carry the bound flag (by design,
+        // to avoid a wire-format bump). A serialize/deserialize
+        // round-trip clears the flag — callers must not re-bind
+        // across that boundary, but the type system can't enforce it
+        // alone. This test pins the documented behavior.
+        let root_key = test_root_key();
+        let caveat_key = AuthKey::from_seed(902);
+        let token = MacaroonToken::mint(&root_key, "cap", "loc")
+            .add_third_party_caveat("tp", "check", &caveat_key);
+        let discharge = MacaroonToken::mint(&caveat_key, "check", "tp");
+        let bound = token.bind_for_request(&discharge).unwrap();
+        assert!(bound.is_bound());
+
+        let bytes = bound.to_binary();
+        let recovered = MacaroonToken::from_binary(&bytes).expect("roundtrip");
+        assert!(
+            !recovered.is_bound(),
+            "deserialized tokens are treated as unbound — see br-asupersync-00ze7h"
+        );
     }
 }
