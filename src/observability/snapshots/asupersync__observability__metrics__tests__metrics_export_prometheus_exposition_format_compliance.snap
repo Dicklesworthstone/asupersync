@@ -4,20 +4,20 @@ expression: metrics.export_prometheus()
 ---
 # TYPE bytes_processed_total counter
 bytes_processed_total 18446744073709551615
-# TYPE errors_total{status="404"} counter
-errors_total{status="404"} 42
+# TYPE errors_total_status__404__ counter
+errors_total_status__404__ 42
 # TYPE http_requests_total counter
 http_requests_total 0
-# TYPE metric.with.dots counter
-metric.with.dots 7
+# TYPE metric_with_dots counter
+metric_with_dots 7
 # TYPE metric_with_1234_numbers counter
 metric_with_1234_numbers 1
 # TYPE requests_with_underscore_name_total counter
 requests_with_underscore_name_total 123
 # TYPE CamelCaseMetric gauge
 CamelCaseMetric 42
-# TYPE cpu_usage_percent{cpu="0"} gauge
-cpu_usage_percent{cpu="0"} 99
+# TYPE cpu_usage_percent_cpu__0__ gauge
+cpu_usage_percent_cpu__0__ 99
 # TYPE memory_usage_bytes gauge
 memory_usage_bytes 0
 # TYPE offset_microseconds gauge
@@ -35,13 +35,13 @@ http_request_duration_seconds_bucket{le="10"} 5
 http_request_duration_seconds_bucket{le="+Inf"} 6
 http_request_duration_seconds_sum 55.5555
 http_request_duration_seconds_count 6
-# TYPE request_size_bytes{endpoint="/api/v1/data"} histogram
-request_size_bytes{endpoint="/api/v1/data"}_bucket{le="100"} 2
-request_size_bytes{endpoint="/api/v1/data"}_bucket{le="1000"} 3
-request_size_bytes{endpoint="/api/v1/data"}_bucket{le="10000"} 4
-request_size_bytes{endpoint="/api/v1/data"}_bucket{le="+Inf"} 5
-request_size_bytes{endpoint="/api/v1/data"}_sum 105550
-request_size_bytes{endpoint="/api/v1/data"}_count 5
+# TYPE request_size_bytes_endpoint___api_v1_data__ histogram
+request_size_bytes_endpoint___api_v1_data___bucket{le="100"} 2
+request_size_bytes_endpoint___api_v1_data___bucket{le="1000"} 3
+request_size_bytes_endpoint___api_v1_data___bucket{le="10000"} 4
+request_size_bytes_endpoint___api_v1_data___bucket{le="+Inf"} 5
+request_size_bytes_endpoint___api_v1_data___sum 105550
+request_size_bytes_endpoint___api_v1_data___count 5
 # TYPE empty_metric_summary summary
 empty_metric_summary_sum 0
 empty_metric_summary_count 0
@@ -51,9 +51,9 @@ response_latency_summary{quantile="0.9"} 100
 response_latency_summary{quantile="0.99"} 200
 response_latency_summary_sum 395
 response_latency_summary_count 10
-# TYPE throughput_ops_per_second{worker="primary"} summary
-throughput_ops_per_second{worker="primary"}{quantile="0.5"} 1000
-throughput_ops_per_second{worker="primary"}{quantile="0.9"} 1000
-throughput_ops_per_second{worker="primary"}{quantile="0.99"} 1000
-throughput_ops_per_second{worker="primary"}_sum 1000
-throughput_ops_per_second{worker="primary"}_count 1
+# TYPE throughput_ops_per_second_worker__primary__ summary
+throughput_ops_per_second_worker__primary__{quantile="0.5"} 1000
+throughput_ops_per_second_worker__primary__{quantile="0.9"} 1000
+throughput_ops_per_second_worker__primary__{quantile="0.99"} 1000
+throughput_ops_per_second_worker__primary___sum 1000
+throughput_ops_per_second_worker__primary___count 1

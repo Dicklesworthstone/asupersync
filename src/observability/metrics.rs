@@ -507,10 +507,7 @@ impl Metrics {
         if Self::cap_would_reject(self.cardinality_cap, self.histograms.len(), name, contains) {
             self.overflow_rejections_histogram
                 .fetch_add(1, Ordering::Relaxed);
-            if !self
-                .overflow_warned_histogram
-                .swap(true, Ordering::Relaxed)
-            {
+            if !self.overflow_warned_histogram.swap(true, Ordering::Relaxed) {
                 crate::tracing_compat::warn!(
                     "metrics: histogram cardinality cap ({}) reached; \
                      subsequent fresh names route to '{}' bucket. \
@@ -558,22 +555,40 @@ impl Metrics {
     }
 
     /// Exports metrics in a simple text format (Prometheus-like).
+    ///
+    /// br-asupersync-aog3fz: every metric name is sanitized through
+    /// [`sanitize_prometheus_metric_name`] and every label value through
+    /// [`escape_prometheus_label_value`] before being written to the
+    /// exposition output. A name that does not match the
+    /// `[a-zA-Z_:][a-zA-Z0-9_:]*` Prometheus regex would otherwise let
+    /// any caller of `Metrics::counter("foo\nbad_metric{job=\"x\"} 999")`
+    /// inject arbitrary forged samples into the scrape output by smuggling
+    /// `\n` / `{` / `"` through the format string.
     #[must_use]
     pub fn export_prometheus(&self) -> String {
         use std::fmt::Write;
         let mut output = String::new();
 
         for (name, counter) in &self.counters {
+            let Some(name) = sanitize_prometheus_metric_name(name) else {
+                continue;
+            };
             let _ = writeln!(output, "# TYPE {name} counter");
             let _ = writeln!(output, "{name} {}", counter.get());
         }
 
         for (name, gauge) in &self.gauges {
+            let Some(name) = sanitize_prometheus_metric_name(name) else {
+                continue;
+            };
             let _ = writeln!(output, "# TYPE {name} gauge");
             let _ = writeln!(output, "{name} {}", gauge.get());
         }
 
         for (name, hist) in &self.histograms {
+            let Some(name) = sanitize_prometheus_metric_name(name) else {
+                continue;
+            };
             let _ = writeln!(output, "# TYPE {name} histogram");
             let mut cumulative = 0;
             for (i, count) in hist.counts.iter().enumerate() {
@@ -584,6 +599,12 @@ impl Metrics {
                 } else {
                     "+Inf".to_string()
                 };
+                // f64::to_string and the literal "+Inf" cannot contain
+                // backslash / newline / double-quote, so the escape is
+                // an inexpensive no-op for the values currently emitted.
+                // Calling it anyway keeps the contract robust if future
+                // code paths route user-supplied label values here.
+                let le = escape_prometheus_label_value(&le);
                 let _ = writeln!(output, "{name}_bucket{{le=\"{le}\"}} {cumulative}");
             }
             let _ = writeln!(output, "{name}_sum {}", hist.sum());
@@ -591,10 +612,14 @@ impl Metrics {
         }
 
         for (name, summary) in &self.summaries {
+            let Some(name) = sanitize_prometheus_metric_name(name) else {
+                continue;
+            };
             let _ = writeln!(output, "# TYPE {name} summary");
             for quantile in [0.5, 0.9, 0.99] {
                 if let Some(value) = summary.quantile(quantile) {
-                    let _ = writeln!(output, "{name}{{quantile=\"{quantile}\"}} {value}");
+                    let q = escape_prometheus_label_value(&quantile.to_string());
+                    let _ = writeln!(output, "{name}{{quantile=\"{q}\"}} {value}");
                 }
             }
             let _ = writeln!(output, "{name}_sum {}", summary.sum());
@@ -603,6 +628,81 @@ impl Metrics {
 
         output
     }
+}
+
+/// Sanitize a Prometheus metric name to match `[a-zA-Z_:][a-zA-Z0-9_:]*`.
+///
+/// br-asupersync-aog3fz: the Prometheus exposition format treats `\n`,
+/// `{`, `}`, and `"` as structural delimiters. A metric name that
+/// contains any of those characters can be used to forge additional
+/// samples in the scrape output (the classic exposition-format injection
+/// — analogous to log injection or HTTP header injection). The fix is
+/// to validate against the spec regex before writing the name to the
+/// output. We *sanitize* (replace each disallowed byte with `_`) rather
+/// than reject, so a caller that names a metric with a `.` or `-`
+/// (common in legacy code) still produces a usable scrape; only the
+/// empty-string corner case is rejected (returns `None`) since there is
+/// no meaningful sanitization for it.
+///
+/// Returns `None` only for the empty input. Any non-empty input is
+/// rewritten to a name that matches `[a-zA-Z_:][a-zA-Z0-9_:]*` — the
+/// first character is guaranteed to be a letter, `_`, or `:` (any
+/// other leading byte is replaced with `_`).
+fn sanitize_prometheus_metric_name(name: &str) -> Option<String> {
+    if name.is_empty() {
+        return None;
+    }
+    let mut out = String::with_capacity(name.len());
+    for (i, b) in name.bytes().enumerate() {
+        let allowed = if i == 0 {
+            b.is_ascii_alphabetic() || b == b'_' || b == b':'
+        } else {
+            b.is_ascii_alphanumeric() || b == b'_' || b == b':'
+        };
+        out.push(if allowed { b as char } else { '_' });
+    }
+    Some(out)
+}
+
+/// Sanitize a Prometheus label name to match `[a-zA-Z_][a-zA-Z0-9_]*`.
+///
+/// Mirrors [`sanitize_prometheus_metric_name`] but excludes `:` from
+/// the allowed set (label names reserve `:` for metric names per the
+/// exposition format). Returns `None` only for the empty input.
+#[allow(dead_code)] // exposed for future label-bearing exporters
+fn sanitize_prometheus_label_name(name: &str) -> Option<String> {
+    if name.is_empty() {
+        return None;
+    }
+    let mut out = String::with_capacity(name.len());
+    for (i, b) in name.bytes().enumerate() {
+        let allowed = if i == 0 {
+            b.is_ascii_alphabetic() || b == b'_'
+        } else {
+            b.is_ascii_alphanumeric() || b == b'_'
+        };
+        out.push(if allowed { b as char } else { '_' });
+    }
+    Some(out)
+}
+
+/// Escape a Prometheus label value per the exposition format spec:
+/// `\` → `\\`, `\n` → `\n`, `"` → `\"`. All other bytes pass through
+/// unchanged (the format permits any UTF-8).
+fn escape_prometheus_label_value(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str(r"\\"),
+            '\n' => out.push_str(r"\n"),
+            '"' => {
+                out.push('\\');
+                out.push('"');
+            }
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// A wrapper enum for metric values.
@@ -2209,5 +2309,174 @@ mod tests {
             "metrics_export_prometheus_exposition_format_compliance",
             metrics.export_prometheus()
         );
+    }
+
+    // ===================================================================
+    // br-asupersync-aog3fz: exposition-format injection tests for the
+    // metric-name / label-name / label-value sanitizers introduced to
+    // close the Prometheus exposition-format injection vector.
+    // ===================================================================
+
+    #[test]
+    fn aog3fz_metric_name_injection_via_newlines_sanitized() {
+        // A caller (or untrusted upstream that names metrics from user
+        // input) attempts to forge an extra metric line by smuggling
+        // \n + a complete fake exposition record into the metric name.
+        let mut metrics = Metrics::new();
+        let crafted = "real_metric\n# TYPE forged_metric counter\nforged_metric 999";
+        metrics.counter(crafted).add(1);
+        let exported = metrics.export_prometheus();
+        // The sanitized output must NOT contain the forged line — every
+        // newline-and-control-character in the crafted name was replaced
+        // with `_`, so the only `\n` chars left are the legitimate
+        // line-terminators that writeln! emits between the # TYPE and
+        // value lines for a single metric.
+        assert!(
+            !exported.contains("forged_metric 999"),
+            "injection bypassed sanitization: {exported}"
+        );
+        assert!(
+            !exported.contains("# TYPE forged_metric counter"),
+            "injection bypassed sanitization: {exported}"
+        );
+        // The legitimate metric is still emitted with a sanitized name
+        // — every `\n`, `#`, ` `, `\t` is replaced with `_`.
+        assert!(
+            exported.contains("real_metric_"),
+            "expected sanitized real_metric_ prefix in: {exported}"
+        );
+    }
+
+    #[test]
+    fn aog3fz_metric_name_with_curly_brace_injection_sanitized() {
+        // Smuggle fake labels by closing the metric name with `{` and
+        // injecting a label clause before the value.
+        let mut metrics = Metrics::new();
+        metrics.counter("evil{job=\"hacker\"}").add(1);
+        let exported = metrics.export_prometheus();
+        assert!(
+            !exported.contains("evil{job=\"hacker\"}"),
+            "raw injected name leaked: {exported}"
+        );
+        // Sanitized form: { = " and } all become _.
+        assert!(
+            exported.contains("evil_job__hacker__"),
+            "expected sanitized form in: {exported}"
+        );
+    }
+
+    #[test]
+    fn aog3fz_sanitize_metric_name_first_char_constraints() {
+        // First char must be in `[a-zA-Z_:]`. Digits and other punctuation
+        // get rewritten to `_`.
+        assert_eq!(
+            sanitize_prometheus_metric_name("0bad").as_deref(),
+            Some("_bad")
+        );
+        assert_eq!(
+            sanitize_prometheus_metric_name("-bad").as_deref(),
+            Some("_bad")
+        );
+        assert_eq!(
+            sanitize_prometheus_metric_name(":valid").as_deref(),
+            Some(":valid")
+        );
+        assert_eq!(
+            sanitize_prometheus_metric_name("_valid").as_deref(),
+            Some("_valid")
+        );
+        assert_eq!(
+            sanitize_prometheus_metric_name("Valid").as_deref(),
+            Some("Valid")
+        );
+    }
+
+    #[test]
+    fn aog3fz_sanitize_metric_name_continuation_constraints() {
+        assert_eq!(
+            sanitize_prometheus_metric_name("a:b_c").as_deref(),
+            Some("a:b_c")
+        );
+        assert_eq!(
+            sanitize_prometheus_metric_name("a-b.c d").as_deref(),
+            Some("a_b_c_d")
+        );
+        assert_eq!(
+            sanitize_prometheus_metric_name("a\nb").as_deref(),
+            Some("a_b")
+        );
+        // Tabs, CR, NUL, all sanitized.
+        assert_eq!(
+            sanitize_prometheus_metric_name("a\tb\rc\0d").as_deref(),
+            Some("a_b_c_d")
+        );
+    }
+
+    #[test]
+    fn aog3fz_sanitize_metric_name_empty_returns_none() {
+        assert_eq!(sanitize_prometheus_metric_name(""), None);
+    }
+
+    #[test]
+    fn aog3fz_sanitize_label_name_excludes_colon() {
+        // Label names per spec are `[a-zA-Z_][a-zA-Z0-9_]*` — `:` is
+        // reserved for metric names and must NOT be allowed in labels.
+        assert_eq!(
+            sanitize_prometheus_label_name("a:b").as_deref(),
+            Some("a_b")
+        );
+        assert_eq!(
+            sanitize_prometheus_label_name(":start").as_deref(),
+            Some("_start")
+        );
+        assert_eq!(
+            sanitize_prometheus_label_name("0digit").as_deref(),
+            Some("_digit")
+        );
+        assert_eq!(
+            sanitize_prometheus_label_name("valid_name").as_deref(),
+            Some("valid_name")
+        );
+        assert_eq!(sanitize_prometheus_label_name(""), None);
+    }
+
+    #[test]
+    fn aog3fz_escape_label_value_handles_all_three_specials() {
+        // Per spec: \ → \\, \n → \n, " → \".
+        assert_eq!(escape_prometheus_label_value("plain"), "plain");
+        assert_eq!(escape_prometheus_label_value(r"a\b"), r"a\\b");
+        assert_eq!(escape_prometheus_label_value("a\nb"), r"a\nb");
+        assert_eq!(escape_prometheus_label_value(r#"a"b"#), r#"a\"b"#);
+        // All three combined plus passthrough of other UTF-8.
+        assert_eq!(
+            escape_prometheus_label_value("a\\b\nc\"d e"),
+            r#"a\\b\nc\"d e"#
+        );
+        // Carriage return, tab, NUL pass through (spec only requires
+        // escaping the three above; other control bytes are a Prometheus
+        // text-format peculiarity but do not break the parser).
+        assert_eq!(escape_prometheus_label_value("a\tb"), "a\tb");
+    }
+
+    #[test]
+    fn aog3fz_export_prometheus_output_has_no_control_characters() {
+        // Strong invariant: after sanitization, every byte of the
+        // output is either ASCII-printable, a single `\n` line break,
+        // or a space. This is the security property that defeats
+        // injection: the output is structurally constrained regardless
+        // of input.
+        let mut metrics = Metrics::new();
+        metrics.counter("evil\n{}\"\\\r\t\0").add(1);
+        metrics.gauge("\x07ring\x08").set(1);
+        metrics
+            .histogram("\x1b[31mansi\x1b[0m", vec![1.0])
+            .observe(0.5);
+        let exported = metrics.export_prometheus();
+        for b in exported.bytes() {
+            assert!(
+                b == b'\n' || (b'\x20'..=b'\x7e').contains(&b),
+                "control byte {b:#04x} in exported output: {exported:?}"
+            );
+        }
     }
 }
