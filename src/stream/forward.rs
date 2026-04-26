@@ -49,6 +49,19 @@ pub fn into_sink<T>(sender: mpsc::Sender<T>) -> SinkStream<T> {
 }
 
 /// Forward stream to channel.
+///
+/// # Cancel semantics
+///
+/// On a successful `stream.next().await`, this function checks `cx` BEFORE
+/// the `sender.send`. If `cx` has been cancelled, the in-flight item is
+/// returned to the caller via `Err(SendError::Cancelled(item))` — the
+/// stream will NOT see this item again on a subsequent call to
+/// `stream.next()`. Callers that must not lose items on cancellation are
+/// responsible for handling `SendError::Cancelled` and either re-feeding
+/// the value into a fresh `forward` invocation or persisting it to a
+/// recovery queue. Dropping the returned error variant silently drops
+/// the value. (Pass-3 / cancel-correctness invariant — re-stated here
+/// after the /multi-pass-bug-hunting re-audit, batch-363 SOUND.)
 #[inline]
 pub async fn forward<S, T>(
     cx: &Cx,
