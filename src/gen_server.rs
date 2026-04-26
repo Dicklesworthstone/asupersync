@@ -663,7 +663,22 @@ impl<R> Drop for Reply<R> {
             // Preserve the original panic instead of detonating the reply
             // drop-bomb during unwind.
             let _ = permit.abort();
+        } else if self.cx.is_cancel_requested() {
+            // Async cancellation: the handler future is being dropped
+            // because cx was cancelled mid-handler (e.g. parent region
+            // closing). Abort the obligation explicitly so the linearity
+            // invariant is satisfied — letting the permit drop here would
+            // panic via TrackedOneshotPermit's drop-bomb, the panic would
+            // be caught by the run-loop's CatchUnwind, and the supervisor
+            // would see JoinError::Panicked for what is actually a clean
+            // cancellation. The caller's recv future observes the same
+            // RecvError::Closed it would have seen on Reply::abort().
+            self.cx.trace("gen_server::reply_aborted_on_cancel");
+            let _ = permit.abort();
         } else {
+            // Genuine programmer bug: handler returned without send/abort
+            // while the cx was healthy. Let the linearity drop-bomb fire
+            // so the supervisor surfaces the leak.
             drop(permit);
         }
     }
@@ -4034,6 +4049,57 @@ mod tests {
         let _ = reply.send(42);
 
         crate::test_complete!("reply_debug_format");
+    }
+
+    /// Regression test for br-asupersync-9f8o36.
+    ///
+    /// When a long-running handler future is dropped because its `Cx` got
+    /// cancelled mid-handler, `Reply::Drop` must abort the obligation
+    /// rather than letting the linearity drop-bomb fire. A panic here
+    /// would be caught by the run-loop's `CatchUnwind` and surfaced to
+    /// the supervisor as `JoinError::Panicked` for what is actually
+    /// clean cancellation.
+    #[test]
+    fn reply_drop_under_cancel_aborts_without_panic() {
+        init_test("reply_drop_under_cancel_aborts_without_panic");
+
+        let cx = Cx::for_testing();
+        let (tx, mut rx) = session::tracked_oneshot::<u64>();
+        let permit = tx.reserve(&cx);
+        let reply = Reply::new(&cx, permit);
+
+        // Mid-handler async cancellation arrives. The handler future is
+        // about to be dropped along with its `Reply<R>`.
+        cx.set_cancel_requested(true);
+
+        // This must not panic — that is the whole bug.
+        drop(reply);
+
+        // Caller observes the same RecvError::Closed it would see on an
+        // explicit Reply::abort().
+        let recv_outcome = rx.try_recv();
+        assert!(
+            matches!(recv_outcome, Err(crate::channel::oneshot::TryRecvError::Closed)),
+            "receiver should observe Closed after cancel-aborted reply, got {recv_outcome:?}"
+        );
+
+        crate::test_complete!("reply_drop_under_cancel_aborts_without_panic");
+    }
+
+    /// Negative companion to `reply_drop_under_cancel_aborts_without_panic`:
+    /// a handler that drops the `Reply` while `cx` is healthy is a genuine
+    /// programmer bug and the linearity drop-bomb must still fire.
+    #[test]
+    #[should_panic]
+    fn reply_drop_without_cancel_still_panics_on_linearity_violation() {
+        let cx = Cx::for_testing();
+        let (tx, _rx) = session::tracked_oneshot::<u64>();
+        let permit = tx.reserve(&cx);
+        let reply = Reply::new(&cx, permit);
+
+        // No cancel — the handler is silently dropping its Reply. This is
+        // the leak the obligation system is designed to catch.
+        drop(reply);
     }
 
     #[test]
