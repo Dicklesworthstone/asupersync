@@ -1054,7 +1054,16 @@ impl Http1Codec {
                         uri,
                         version,
                         headers,
-                        body: body_bytes.to_vec(),
+                        // br-asupersync-i5w8lh: into_vec consumes the
+                        // BytesMut and moves out the underlying Vec<u8>
+                        // with zero memcpy and zero allocation. The
+                        // previous to_vec() copied the body again on top
+                        // of the copy split_to() already paid (split_to
+                        // is O(n) in the current Vec<u8>-backed BytesMut
+                        // — see bytes_mut.rs split_to doc). Eliminating
+                        // this second memcpy halves the per-request body
+                        // copy cost on the HTTP/1 receive hot path.
+                        body: body_bytes.into_vec(),
                         trailers: Vec::new(),
                         peer_addr: None,
                     }));

@@ -102,6 +102,31 @@ impl BytesMut {
         Bytes::from(self.data)
     }
 
+    /// Consume `self` and return the underlying `Vec<u8>` WITHOUT copying.
+    ///
+    /// br-asupersync-i5w8lh: this is the zero-copy escape hatch for
+    /// callers that have a `BytesMut` and need a `Vec<u8>` (e.g. the
+    /// HTTP/1 codec building a `Request { body: Vec<u8> }`). The
+    /// previous canonical idiom `body_bytes.to_vec()` allocates a fresh
+    /// `Vec<u8>` and memcpy's the contents — pointless when we already
+    /// own a uniquely-referenced `Vec<u8>` inside this `BytesMut`.
+    /// `into_vec` simply moves the inner `data` field out of `self`,
+    /// which is one move + zero allocations + zero memcpy.
+    ///
+    /// Note: in the current `Vec<u8>`-backed `BytesMut` representation,
+    /// every `BytesMut` exclusively owns its underlying `Vec<u8>` (no
+    /// shared backing — see `split_to` doc), so this conversion is
+    /// always safe and zero-cost. If a future refactor introduces
+    /// shared backing storage for `BytesMut` (mirroring `Bytes`), this
+    /// method may need to clone in the shared case to preserve the
+    /// `Vec<u8>` exclusive-ownership contract — but the API contract
+    /// remains "consume self, return owned Vec<u8>".
+    #[inline]
+    #[must_use]
+    pub fn into_vec(self) -> Vec<u8> {
+        self.data
+    }
+
     /// Reserve at least `additional` more bytes of capacity.
     ///
     /// # Examples
@@ -480,6 +505,59 @@ mod tests {
         let len = b.len();
         crate::assert_with_log!(len == 0, "len", 0, len);
         crate::test_complete!("test_bytes_mut_new");
+    }
+
+    /// br-asupersync-i5w8lh: into_vec moves out the underlying Vec<u8>
+    /// without copying. Verify the returned Vec contains exactly the
+    /// bytes that were in the BytesMut, including for non-trivial
+    /// payloads (binary, embedded nulls, large) that would catch any
+    /// wrong-slice or truncation regression.
+    #[test]
+    fn into_vec_returns_underlying_bytes_unchanged() {
+        let mut b = BytesMut::new();
+        b.put_slice(b"hello world");
+        let v = b.into_vec();
+        assert_eq!(v.as_slice(), b"hello world");
+        assert_eq!(v.len(), 11);
+
+        // Non-trivial payload: binary data with embedded nulls.
+        let mut b = BytesMut::new();
+        b.put_slice(&[0x00, 0xFF, 0x42, 0x00, 0x99, 0x00]);
+        let v = b.into_vec();
+        assert_eq!(v.as_slice(), &[0x00, 0xFF, 0x42, 0x00, 0x99, 0x00]);
+
+        // Empty BytesMut -> empty Vec, no allocation surprises.
+        let b = BytesMut::new();
+        let v = b.into_vec();
+        assert!(v.is_empty());
+
+        // Large payload: 1 MiB of patterned bytes — verify the move
+        // preserves every byte (catches off-by-one slice bugs).
+        let mut b = BytesMut::with_capacity(1024 * 1024);
+        for i in 0..(1024 * 1024) {
+            b.put_u8((i & 0xFF) as u8);
+        }
+        let v = b.into_vec();
+        assert_eq!(v.len(), 1024 * 1024);
+        for i in 0..(1024 * 1024) {
+            assert_eq!(v[i], (i & 0xFF) as u8, "mismatch at byte {i}");
+        }
+    }
+
+    /// br-asupersync-i5w8lh: into_vec preserves bytes even after
+    /// split_to. The HTTP/1 codec hot path exercises split_to followed
+    /// by into_vec on the resulting BytesMut; this test mirrors that
+    /// flow directly to lock in the contract.
+    #[test]
+    fn into_vec_after_split_to_preserves_payload_slice() {
+        let mut buf = BytesMut::new();
+        buf.put_slice(b"head\x00\x01\x02tail");
+        // Split off the first 7 bytes (b"head\x00\x01\x02").
+        let head = buf.split_to(7);
+        let v = head.into_vec();
+        assert_eq!(v.as_slice(), b"head\x00\x01\x02");
+        // The remaining buf should hold the suffix unchanged.
+        assert_eq!(&buf[..], b"tail");
     }
 
     #[test]

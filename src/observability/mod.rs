@@ -148,9 +148,8 @@ pub use task_inspector::{
 /// process. Subsequent installation attempts are no-ops (the first
 /// installation wins). This matches the singleton lifetime of a
 /// process-wide deterministic time source.
-static GLOBAL_OBSERVABILITY_CLOCK: std::sync::OnceLock<
-    fn() -> std::time::SystemTime,
-> = std::sync::OnceLock::new();
+static GLOBAL_OBSERVABILITY_CLOCK: std::sync::OnceLock<fn() -> std::time::SystemTime> =
+    std::sync::OnceLock::new();
 
 /// Latch (br-asupersync-z5ge0x) ensuring the ambient-fallback warning
 /// fires at most once per process. Without this, observability emitted
@@ -243,6 +242,9 @@ pub(crate) fn replayable_system_time() -> std::time::SystemTime {
 /// ambient-fallback warning — the absent-source signal is given to the
 /// caller via `None`.
 #[must_use]
+#[allow(dead_code)] // br-asupersync-z5ge0x: API surface for callers that want
+// the strict-no-fallback semantic; in-tree callers haven't migrated yet,
+// but the API needs to be in place so they can.
 pub(crate) fn try_replayable_system_time() -> Option<std::time::SystemTime> {
     if let Some(cx) = crate::cx::Cx::current() {
         let nanos = cx.now_for_observability().as_nanos();
@@ -592,7 +594,6 @@ mod tests {
             "with the global clock populated, try_replayable_system_time must return Some"
         );
     }
-
 
     #[test]
     fn config_builder() {
