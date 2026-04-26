@@ -63,6 +63,17 @@ pub enum NatsError {
     SubscriptionNotFound(u64),
     /// Connection not established.
     NotConnected,
+    /// TLS upgrade required by the server INFO frame OR mandated by
+    /// the client config (`require_tls = true`), but this client does
+    /// NOT yet implement the NATS TLS upgrade handshake. The client
+    /// fails closed before sending CONNECT to avoid leaking
+    /// credentials in cleartext (br-asupersync-2kmc12).
+    TlsRequired {
+        /// True if the server's INFO frame set `tls_required`.
+        server_required: bool,
+        /// True if the client config set `require_tls`.
+        client_required: bool,
+    },
 }
 
 impl fmt::Display for NatsError {
@@ -76,6 +87,16 @@ impl fmt::Display for NatsError {
             Self::Closed => write!(f, "NATS connection closed"),
             Self::SubscriptionNotFound(sid) => write!(f, "NATS subscription not found: {sid}"),
             Self::NotConnected => write!(f, "NATS not connected"),
+            Self::TlsRequired {
+                server_required,
+                client_required,
+            } => write!(
+                f,
+                "NATS TLS upgrade required (server_required={server_required}, \
+                 client_required={client_required}) but the client TLS upgrade \
+                 handshake is not yet implemented; refusing to send CONNECT in \
+                 cleartext to avoid credential exposure (br-asupersync-2kmc12)"
+            ),
         }
     }
 }
@@ -155,6 +176,19 @@ pub struct NatsConfig {
     /// Prevents unbounded memory growth if the server sends data faster
     /// than the client can consume. Also limits individual MSG payload size.
     pub max_read_buffer: usize,
+    /// br-asupersync-2kmc12: client-side intent to require TLS before
+    /// sending CONNECT. Default `false` for backward compatibility.
+    ///
+    /// When `true`, OR when the server's INFO frame sets
+    /// `tls_required = true`, [`NatsClient::connect_with_config`]
+    /// fails closed with [`NatsError::TlsRequired`] BEFORE sending
+    /// CONNECT, preventing the client from transmitting `user`/`pass`/
+    /// `auth_token` in cleartext over a plain TCP socket. This is the
+    /// secure default policy: TLS upgrade itself is a follow-up
+    /// (the asupersync TLS connector needs to be wired into the
+    /// stream type), but until then we MUST refuse to send credentials
+    /// in cleartext when TLS is required by either side.
+    pub require_tls: bool,
 }
 
 impl Default for NatsConfig {
@@ -171,6 +205,7 @@ impl Default for NatsConfig {
             request_timeout: Duration::from_secs(10),
             max_payload: 1_048_576, // 1MB
             max_read_buffer: DEFAULT_MAX_READ_BUFFER,
+            require_tls: false,
         }
     }
 }
@@ -713,6 +748,38 @@ impl NatsClient {
         // Read initial INFO from server
         let info = client.read_info(cx).await?;
 
+        // br-asupersync-2kmc12: enforce TLS-required gate BEFORE
+        // sending CONNECT (which would carry user/pass/token in
+        // cleartext). The previous implementation read info.tls_required
+        // into ServerInfo but never consulted it — credentials would
+        // leak in cleartext to any plaintext NATS server that advertised
+        // tls_required=true (or to any MitM that interposed on a
+        // plaintext socket). Until the NATS client implements a real
+        // TLS upgrade (post-INFO STARTTLS-style handshake into the
+        // asupersync TLS connector), we MUST fail closed.
+        //
+        // Two trigger sources:
+        //   1. Client config require_tls = true → operator policy says
+        //      "this connection must be TLS, period".
+        //   2. Server INFO advertises tls_required = true → the server
+        //      will reject (or worse, silently ignore) a plaintext
+        //      CONNECT.
+        // Either trigger short-circuits before send_connect.
+        //
+        // Aborting here drops `client` (which closes the TcpStream via
+        // its Drop impl) so no CONNECT bytes ever hit the wire.
+        if info.tls_required || client.config.require_tls {
+            cx.trace(&format!(
+                "nats: TLS required (server={}, client={}); refusing to \
+                 send CONNECT in cleartext",
+                info.tls_required, client.config.require_tls
+            ));
+            return Err(NatsError::TlsRequired {
+                server_required: info.tls_required,
+                client_required: client.config.require_tls,
+            });
+        }
+
         // Enforce the server's max_payload if it is smaller than the client's.
         // This prevents the client from sending payloads that the server will reject.
         if info.max_payload > 0 && info.max_payload < client.config.max_payload {
@@ -721,7 +788,8 @@ impl NatsClient {
 
         *client.state.server_info.lock() = Some(info.clone());
 
-        // Send CONNECT command
+        // Send CONNECT command (now safe — TLS-required has been
+        // verified false on both sides).
         client.send_connect(cx).await?;
         client.connected = true;
 
@@ -1220,8 +1288,7 @@ impl NatsClient {
             .unwrap_or(false);
         if !server_supports_headers {
             return Err(NatsError::Protocol(
-                "server did not advertise headers:true in INFO; HPUB is not allowed"
-                    .to_string(),
+                "server did not advertise headers:true in INFO; HPUB is not allowed".to_string(),
             ));
         }
 
@@ -1284,12 +1351,8 @@ impl NatsClient {
             .publish_request_with_headers(cx, subject, &inbox, headers, payload)
             .await
         {
-            self.cleanup_request_subscription(
-                cx,
-                sub.sid(),
-                "publish_request_with_headers_failed",
-            )
-            .await;
+            self.cleanup_request_subscription(cx, sub.sid(), "publish_request_with_headers_failed")
+                .await;
             return Err(err);
         }
 
@@ -1933,6 +1996,154 @@ mod tests {
         assert_eq!(config.password.as_deref(), Some("pa@ss"));
         assert_eq!(config.host, "localhost");
         assert_eq!(config.port, 4222);
+    }
+
+    /// br-asupersync-2kmc12: when the server's INFO frame advertises
+    /// `tls_required = true`, NatsClient::connect_with_config MUST
+    /// fail closed with NatsError::TlsRequired BEFORE sending the
+    /// CONNECT command. This is the credential-leak defense: the
+    /// previous implementation read tls_required into ServerInfo but
+    /// never consulted it, sending CONNECT (with user/pass/token in
+    /// cleartext) to a server that claimed to require TLS.
+    ///
+    /// The mock server scripts the wire exchange:
+    ///   1. Accept the TCP connection.
+    ///   2. Write an INFO frame with tls_required = true.
+    ///   3. Read whatever the client sends. Assert the client closed
+    ///      WITHOUT sending CONNECT — ANY bytes received here means
+    ///      the credential-leak bug is back.
+    #[test]
+    fn connect_aborts_without_sending_connect_when_server_requires_tls() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let server = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = listener.accept().expect("accept test client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+
+            // 1. Send INFO with tls_required=true.
+            let info = b"INFO {\"server_id\":\"test\",\"server_name\":\"test\",\"version\":\"2.9.0\",\"proto\":1,\"max_payload\":1048576,\"tls_required\":true}\r\n";
+            stream.write_all(info).expect("write INFO");
+            stream.flush().expect("flush INFO");
+
+            // 2. Read whatever the client sends. The client MUST close
+            //    without sending CONNECT — any bytes here would be
+            //    plaintext credentials, the very leak we're guarding
+            //    against.
+            let mut buf = [0u8; 1024];
+            match stream.read(&mut buf) {
+                Ok(0) => {
+                    // Clean EOF — client closed without writing. Correct.
+                }
+                Ok(n) => {
+                    let leaked = String::from_utf8_lossy(&buf[..n]);
+                    panic!(
+                        "br-asupersync-2kmc12 REGRESSION: client sent {n} bytes \
+                         after server INFO advertised tls_required=true; \
+                         payload starts with: {leaked:?}. \
+                         Credentials leaked in cleartext."
+                    );
+                }
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    panic!(
+                        "client did NOT close after server signalled tls_required; \
+                         it appears to be waiting on something. \
+                         The fail-closed gate may be missing or broken."
+                    );
+                }
+                Err(_) => {
+                    // Connection-reset / broken pipe — also acceptable;
+                    // the client closed its side, OS reports the reset.
+                }
+            }
+        });
+
+        run_test_with_cx(|cx| async move {
+            let config = NatsConfig {
+                host: addr.ip().to_string(),
+                port: addr.port(),
+                user: Some("alice".into()),
+                password: Some("secret".into()),
+                ..Default::default()
+            };
+            let result = NatsClient::connect_with_config(&cx, config).await;
+            let err = result.expect_err("connect MUST fail closed when server requires TLS");
+            match err {
+                NatsError::TlsRequired {
+                    server_required,
+                    client_required,
+                } => {
+                    assert!(server_required, "server_required must be true");
+                    assert!(!client_required, "client_required must be false here");
+                }
+                other => panic!(
+                    "expected NatsError::TlsRequired, got {other:?} — gate did not fire"
+                ),
+            }
+        });
+
+        server.join().expect("server thread join");
+    }
+
+    /// br-asupersync-2kmc12: when the client config sets
+    /// require_tls = true, the same fail-closed gate fires regardless
+    /// of what the server advertises.
+    #[test]
+    fn connect_aborts_without_sending_connect_when_client_requires_tls() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let server = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut stream, _) = listener.accept().expect("accept test client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+
+            // Server advertises tls_required=false (legacy plaintext NATS).
+            // Client config still mandates TLS so the gate must fire.
+            let info = b"INFO {\"server_id\":\"test\",\"server_name\":\"test\",\"version\":\"2.9.0\",\"proto\":1,\"max_payload\":1048576,\"tls_required\":false}\r\n";
+            stream.write_all(info).expect("write INFO");
+            stream.flush().expect("flush INFO");
+
+            let mut buf = [0u8; 1024];
+            if let Ok(n) = stream.read(&mut buf) {
+                if n > 0 {
+                    let leaked = String::from_utf8_lossy(&buf[..n]);
+                    panic!(
+                        "br-asupersync-2kmc12 REGRESSION: client sent {n} bytes \
+                         despite client require_tls=true; payload: {leaked:?}"
+                    );
+                }
+            }
+        });
+
+        run_test_with_cx(|cx| async move {
+            let config = NatsConfig {
+                host: addr.ip().to_string(),
+                port: addr.port(),
+                user: Some("alice".into()),
+                password: Some("secret".into()),
+                require_tls: true,
+                ..Default::default()
+            };
+            let result = NatsClient::connect_with_config(&cx, config).await;
+            let err = result.expect_err("connect MUST fail closed when client requires TLS");
+            assert!(
+                matches!(err, NatsError::TlsRequired { client_required: true, .. }),
+                "expected NatsError::TlsRequired with client_required=true, got {err:?}"
+            );
+        });
+
+        server.join().expect("server thread join");
     }
 
     #[test]
