@@ -373,6 +373,145 @@ impl IntoResponse for Html<&'static str> {
 
 // ─── Redirect ────────────────────────────────────────────────────────────────
 
+/// Why a redirect URI was rejected by the safe-by-default validators
+/// (`Redirect::to`, `Redirect::permanent`, `Redirect::temporary`).
+///
+/// br-asupersync-0hj233: this enum surfaces the open-redirect defense
+/// as an explicit error type so callers either (a) handle the error
+/// (return 400 to the user) or (b) opt into the explicit
+/// `Redirect::external_unchecked` escape hatch when they truly need
+/// to redirect to an external host (OAuth callbacks, payment-gateway
+/// hand-offs, etc.).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RedirectError {
+    /// URI is empty.
+    EmptyUri,
+    /// URI starts with `//` — protocol-relative, browser switches host
+    /// to whatever follows the slashes. Trivial open-redirect vector
+    /// that defeats naive `starts_with("/")` defenses.
+    ProtocolRelative,
+    /// URI contains a backslash (`\`). Some HTTP intermediaries and
+    /// browsers normalize `\` → `/`, so `/\\attacker.com/x` becomes
+    /// `//attacker.com/x` — the protocol-relative attack via a
+    /// different parser quirk.
+    BackslashInPath,
+    /// URI has a scheme other than `http` or `https` (e.g.,
+    /// `javascript:`, `data:`, `file:`, `ftp:`). javascript: redirects
+    /// in Location headers were historically followed by some browsers
+    /// and remain a source of XSS.
+    SchemeNotAllowed {
+        /// The rejected scheme (e.g., `"javascript"`).
+        scheme: String,
+    },
+    /// URI has an absolute http(s) URL but its host is not in the
+    /// caller-provided `allowed_hosts` allowlist.
+    HostNotAllowed {
+        /// The host that was rejected.
+        host: String,
+    },
+}
+
+impl fmt::Display for RedirectError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyUri => write!(f, "redirect URI is empty"),
+            Self::ProtocolRelative => write!(
+                f,
+                "redirect URI starts with '//' (protocol-relative — defeats naive same-origin checks)"
+            ),
+            Self::BackslashInPath => write!(
+                f,
+                "redirect URI contains a backslash (intermediaries may normalize to '/' creating a protocol-relative URL)"
+            ),
+            Self::SchemeNotAllowed { scheme } => write!(
+                f,
+                "redirect URI scheme '{scheme}' not allowed (only 'http' and 'https')"
+            ),
+            Self::HostNotAllowed { host } => write!(
+                f,
+                "redirect URI host '{host}' not in the allowed-hosts allowlist"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RedirectError {}
+
+/// br-asupersync-0hj233: validate a candidate redirect URI for
+/// open-redirect safety. Used by [`Redirect::to`] /
+/// [`Redirect::permanent`] / [`Redirect::temporary`] (relative-only
+/// strict mode) and [`Redirect::to_with_allowed_hosts`] (allowlist
+/// mode).
+///
+/// **Strict mode (`allowed_hosts` is `None` or empty):**
+/// - URI MUST start with `/`
+/// - URI MUST NOT start with `//` (protocol-relative)
+/// - URI MUST NOT contain backslash (`\`)
+///
+/// **Allowlist mode (`allowed_hosts` is `Some(&[...])`):**
+/// - Same rules as strict mode for relative paths, OR
+/// - Absolute http(s) URI whose host appears in `allowed_hosts`
+fn validate_redirect_uri(
+    uri: &str,
+    allowed_hosts: Option<&[&str]>,
+) -> Result<(), RedirectError> {
+    if uri.is_empty() {
+        return Err(RedirectError::EmptyUri);
+    }
+    if uri.contains('\\') {
+        return Err(RedirectError::BackslashInPath);
+    }
+    if uri.starts_with("//") {
+        return Err(RedirectError::ProtocolRelative);
+    }
+    if uri.starts_with('/') {
+        // Relative path — accepted under both strict and allowlist modes.
+        return Ok(());
+    }
+    // Not a relative path. Must be an absolute URI with a recognised scheme.
+    let (scheme, rest) = match uri.split_once(':') {
+        Some((scheme, rest)) => (scheme.to_ascii_lowercase(), rest),
+        None => {
+            // No scheme separator AND not relative — reject as malformed.
+            return Err(RedirectError::SchemeNotAllowed {
+                scheme: String::new(),
+            });
+        }
+    };
+    if scheme != "http" && scheme != "https" {
+        return Err(RedirectError::SchemeNotAllowed { scheme });
+    }
+    // http(s) URI: extract host from `//host[:port]/path` form.
+    let after_slashes = rest.strip_prefix("//").ok_or_else(|| {
+        // http(s) URI must have `://` — without it, treat as bad.
+        RedirectError::SchemeNotAllowed { scheme: scheme.clone() }
+    })?;
+    let host_with_port = after_slashes
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("");
+    let host = host_with_port
+        .rsplit_once(':')
+        .map_or(host_with_port, |(h, _)| h);
+    let host = host.trim_start_matches('[').trim_end_matches(']'); // IPv6 brackets
+    if host.is_empty() {
+        return Err(RedirectError::HostNotAllowed {
+            host: String::new(),
+        });
+    }
+    let allowed_hosts = allowed_hosts.unwrap_or(&[]);
+    if allowed_hosts
+        .iter()
+        .any(|allowed| allowed.eq_ignore_ascii_case(host))
+    {
+        Ok(())
+    } else {
+        Err(RedirectError::HostNotAllowed {
+            host: host.to_string(),
+        })
+    }
+}
+
 /// HTTP redirect response.
 #[derive(Debug, Clone)]
 pub struct Redirect {
@@ -382,26 +521,107 @@ pub struct Redirect {
 
 impl Redirect {
     /// 302 Found redirect.
+    ///
+    /// # Safe-by-default validation (br-asupersync-0hj233)
+    ///
+    /// Returns `Err(RedirectError)` for any URI that is not a
+    /// site-relative path (`/foo`). Specifically rejects:
+    /// - empty strings,
+    /// - protocol-relative URIs (`//attacker.com/...`),
+    /// - URIs containing backslash (`/\\attacker.com/...`),
+    /// - any URI with a scheme (`javascript:`, `https://attacker.com/`, ...).
+    ///
+    /// For redirects that legitimately point at an external host (OAuth
+    /// callbacks, payment hand-offs), use [`Self::to_with_allowed_hosts`]
+    /// (validated against an allowlist) or [`Self::external_unchecked`]
+    /// (caller asserts the URI is trustworthy).
+    pub fn to(uri: impl Into<String>) -> Result<Self, RedirectError> {
+        let uri = uri.into();
+        validate_redirect_uri(&uri, None)?;
+        Ok(Self {
+            status: StatusCode::FOUND,
+            location: uri,
+        })
+    }
+
+    /// 301 Moved Permanently redirect. Same safe-by-default validation
+    /// as [`Self::to`]; see that method for details.
+    pub fn permanent(uri: impl Into<String>) -> Result<Self, RedirectError> {
+        let uri = uri.into();
+        validate_redirect_uri(&uri, None)?;
+        Ok(Self {
+            status: StatusCode::MOVED_PERMANENTLY,
+            location: uri,
+        })
+    }
+
+    /// 307 Temporary Redirect (preserves method). Same safe-by-default
+    /// validation as [`Self::to`]; see that method for details.
+    pub fn temporary(uri: impl Into<String>) -> Result<Self, RedirectError> {
+        let uri = uri.into();
+        validate_redirect_uri(&uri, None)?;
+        Ok(Self {
+            status: StatusCode::TEMPORARY_REDIRECT,
+            location: uri,
+        })
+    }
+
+    /// 302 Found redirect with an explicit allowed-hosts allowlist
+    /// (br-asupersync-0hj233).
+    ///
+    /// Accepts site-relative paths AND absolute http(s) URIs whose
+    /// host appears (case-insensitive) in `allowed_hosts`. Use this
+    /// for redirect flows whose target host space is
+    /// statically-known (OAuth providers, payment gateways).
+    pub fn to_with_allowed_hosts(
+        uri: impl Into<String>,
+        allowed_hosts: &[&str],
+    ) -> Result<Self, RedirectError> {
+        let uri = uri.into();
+        validate_redirect_uri(&uri, Some(allowed_hosts))?;
+        Ok(Self {
+            status: StatusCode::FOUND,
+            location: uri,
+        })
+    }
+
+    /// **Unchecked** 302 Found redirect — caller asserts the URI is
+    /// trustworthy (br-asupersync-0hj233).
+    ///
+    /// This bypasses the open-redirect validation in [`Self::to`].
+    /// Use ONLY when the URI is genuinely controlled by the
+    /// application (a hard-coded constant, a value derived from
+    /// trusted server-side state, or an OAuth provider URL whose
+    /// host is independently verified). NEVER pass user-supplied
+    /// strings (URL parameters, form fields, request body) to this
+    /// constructor — that's the canonical phishing vector this bead
+    /// is defending against.
+    ///
+    /// The CRLF stripping in the wire-format step (see
+    /// `into_response`) still applies — this only bypasses the
+    /// scheme/host validation.
     #[must_use]
-    pub fn to(uri: impl Into<String>) -> Self {
+    pub fn external_unchecked(uri: impl Into<String>) -> Self {
         Self {
             status: StatusCode::FOUND,
             location: uri.into(),
         }
     }
 
-    /// 301 Moved Permanently redirect.
+    /// **Unchecked** 301 Moved Permanently redirect; see
+    /// [`Self::external_unchecked`] for the safety contract.
     #[must_use]
-    pub fn permanent(uri: impl Into<String>) -> Self {
+    pub fn external_unchecked_permanent(uri: impl Into<String>) -> Self {
         Self {
             status: StatusCode::MOVED_PERMANENTLY,
             location: uri.into(),
         }
     }
 
-    /// 307 Temporary Redirect (preserves method).
+    /// **Unchecked** 307 Temporary Redirect; see
+    /// [`Self::external_unchecked`] for the safety contract.
     #[must_use]
-    pub fn temporary(uri: impl Into<String>) -> Self {
+    pub fn external_unchecked_temporary(uri: impl Into<String>) -> Self {
         Self {
             status: StatusCode::TEMPORARY_REDIRECT,
             location: uri.into(),
@@ -501,9 +721,161 @@ mod tests {
 
     #[test]
     fn redirect_into_response() {
-        let resp = Redirect::to("/login").into_response();
+        let resp = Redirect::to("/login")
+            .expect("relative path must validate")
+            .into_response();
         assert_eq!(resp.status, StatusCode::FOUND);
         assert_eq!(resp.headers.get("location").unwrap(), "/login");
+    }
+
+    /// br-asupersync-0hj233: Redirect::to MUST reject external URIs by
+    /// default; only relative paths and URIs in an explicit allow-list
+    /// (via to_with_allowed_hosts) are accepted. external_unchecked is
+    /// the explicit escape hatch.
+    #[test]
+    fn redirect_to_rejects_external_uri_by_default() {
+        // External http URL with arbitrary attacker host — REJECTED.
+        let err = Redirect::to("https://attacker.com/phish").unwrap_err();
+        assert!(
+            matches!(err, RedirectError::HostNotAllowed { .. }),
+            "external https URL must be rejected, got {err:?}"
+        );
+
+        // External http URL — REJECTED.
+        let err = Redirect::to("http://attacker.com").unwrap_err();
+        assert!(matches!(err, RedirectError::HostNotAllowed { .. }));
+
+        // Same for permanent and temporary.
+        assert!(Redirect::permanent("https://attacker.com").is_err());
+        assert!(Redirect::temporary("https://attacker.com").is_err());
+    }
+
+    /// br-asupersync-0hj233: protocol-relative URLs '//attacker.com'
+    /// are the canonical bypass for naive starts_with('/') defenses
+    /// and MUST be rejected with the dedicated ProtocolRelative error
+    /// so the failure mode is debuggable.
+    #[test]
+    fn redirect_to_rejects_protocol_relative_url() {
+        let err = Redirect::to("//attacker.com/phish").unwrap_err();
+        assert!(
+            matches!(err, RedirectError::ProtocolRelative),
+            "//... URL must be rejected as ProtocolRelative, got {err:?}"
+        );
+    }
+
+    /// br-asupersync-0hj233: backslash variant of the protocol-relative
+    /// bypass — some intermediaries normalize '\\' to '/' producing
+    /// '//attacker.com'. Reject the backslash form too.
+    #[test]
+    fn redirect_to_rejects_backslash_path() {
+        let err = Redirect::to("/\\attacker.com/phish").unwrap_err();
+        assert!(
+            matches!(err, RedirectError::BackslashInPath),
+            "backslash in path must be rejected, got {err:?}"
+        );
+    }
+
+    /// br-asupersync-0hj233: javascript: / data: / file: schemes MUST
+    /// be rejected. Some browsers historically followed javascript:
+    /// URLs in Location headers, enabling stored-XSS-via-redirect.
+    #[test]
+    fn redirect_to_rejects_non_http_schemes() {
+        for uri in &[
+            "javascript:alert(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "file:///etc/passwd",
+            "ftp://attacker.com/",
+        ] {
+            let err = Redirect::to(*uri).unwrap_err();
+            assert!(
+                matches!(err, RedirectError::SchemeNotAllowed { .. }),
+                "{uri} must be rejected as SchemeNotAllowed, got {err:?}"
+            );
+        }
+    }
+
+    /// br-asupersync-0hj233: empty URI is invalid.
+    #[test]
+    fn redirect_to_rejects_empty_uri() {
+        let err = Redirect::to("").unwrap_err();
+        assert!(matches!(err, RedirectError::EmptyUri));
+    }
+
+    /// br-asupersync-0hj233: relative paths with various edge-case
+    /// shapes are accepted.
+    #[test]
+    fn redirect_to_accepts_well_formed_relative_paths() {
+        for uri in &[
+            "/",
+            "/login",
+            "/path/with/multiple/segments",
+            "/path?with=query",
+            "/path#fragment",
+            "/path?next=/another",
+        ] {
+            assert!(
+                Redirect::to(*uri).is_ok(),
+                "relative path {uri} must validate"
+            );
+        }
+    }
+
+    /// br-asupersync-0hj233: to_with_allowed_hosts accepts absolute
+    /// URIs whose host is allow-listed and rejects others.
+    #[test]
+    fn redirect_to_with_allowed_hosts_accepts_listed_rejects_others() {
+        let allowed = &["example.com", "auth.example.com"];
+
+        // Listed host — accepted.
+        assert!(
+            Redirect::to_with_allowed_hosts("https://example.com/path", allowed).is_ok()
+        );
+        assert!(
+            Redirect::to_with_allowed_hosts(
+                "https://auth.example.com/oauth/callback?code=xyz",
+                allowed
+            )
+            .is_ok()
+        );
+        // Case-insensitive host matching.
+        assert!(
+            Redirect::to_with_allowed_hosts("HTTPS://EXAMPLE.COM/", allowed).is_ok()
+        );
+        // Relative path always accepted.
+        assert!(Redirect::to_with_allowed_hosts("/local-path", allowed).is_ok());
+
+        // Unlisted host — rejected.
+        let err = Redirect::to_with_allowed_hosts("https://attacker.com/phish", allowed)
+            .unwrap_err();
+        assert!(matches!(err, RedirectError::HostNotAllowed { .. }));
+
+        // Subdomain not in allowlist — rejected (allowlist is exact match).
+        let err = Redirect::to_with_allowed_hosts("https://evil.example.com/", allowed)
+            .unwrap_err();
+        assert!(matches!(err, RedirectError::HostNotAllowed { .. }));
+
+        // Protocol-relative even with allowlist — still rejected.
+        let err =
+            Redirect::to_with_allowed_hosts("//example.com/path", allowed).unwrap_err();
+        assert!(matches!(err, RedirectError::ProtocolRelative));
+    }
+
+    /// br-asupersync-0hj233: external_unchecked is the explicit escape
+    /// hatch for callers that genuinely need external redirects without
+    /// an allowlist (e.g., dynamic OAuth providers). Verifies the API
+    /// is reachable AND honors the URI verbatim.
+    #[test]
+    fn redirect_external_unchecked_accepts_arbitrary_uri() {
+        // The whole point: NO validation — caller asserts trust.
+        let r = Redirect::external_unchecked("https://anywhere.example/path?q=1");
+        assert_eq!(r.status, StatusCode::FOUND);
+        assert_eq!(r.location, "https://anywhere.example/path?q=1");
+
+        let r = Redirect::external_unchecked_permanent("https://moved.example/");
+        assert_eq!(r.status, StatusCode::MOVED_PERMANENTLY);
+
+        let r = Redirect::external_unchecked_temporary("https://temp.example/");
+        assert_eq!(r.status, StatusCode::TEMPORARY_REDIRECT);
     }
 
     #[test]
@@ -614,7 +986,7 @@ mod tests {
 
     #[test]
     fn redirect_debug_clone() {
-        let r = Redirect::to("/home");
+        let r = Redirect::to("/home").expect("relative path must validate");
         let dbg = format!("{r:?}");
         assert!(dbg.contains("Redirect"), "{dbg}");
         let cloned = r;
