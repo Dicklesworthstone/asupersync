@@ -222,10 +222,12 @@ impl RaptorQDecisionContract {
             / 10) as u16;
         let fallback_reason =
             deterministic_fallback_reason(snapshot, posterior_permille, preliminary_confidence);
+        let clamped_fallback_confidence = preliminary_confidence.min(250);
+        let clamped_fallback_uncertainty = 1000u16.saturating_sub(clamped_fallback_confidence);
         let confidence_score = if fallback_reason == "none" {
             preliminary_confidence
         } else {
-            preliminary_confidence.min(250)
+            clamped_fallback_confidence
         };
         let uncertainty_score = 1000u16.saturating_sub(confidence_score);
         let ctx = eval_context(snapshot, confidence_score, uncertainty_score);
@@ -242,8 +244,8 @@ impl RaptorQDecisionContract {
                     state_posterior_permille: posterior_permille,
                     expected_loss_terms,
                     chosen_action: action_label(action::CONTINUE),
-                    confidence_score,
-                    uncertainty_score,
+                    confidence_score: clamped_fallback_confidence,
+                    uncertainty_score: clamped_fallback_uncertainty,
                     deterministic_fallback_triggered: true,
                     deterministic_fallback_reason: "contract_action_out_of_range",
                     replay_ref: G7_DECISION_REPLAY_REF,
@@ -251,6 +253,13 @@ impl RaptorQDecisionContract {
                 };
             }
         };
+
+        let (confidence_score, uncertainty_score) =
+            if outcome.fallback_active && fallback_reason == "none" {
+                (clamped_fallback_confidence, clamped_fallback_uncertainty)
+            } else {
+                (confidence_score, uncertainty_score)
+            };
 
         GovernanceTelemetry {
             state_posterior_permille: posterior_permille,
@@ -581,7 +590,24 @@ fn eval_context(
     confidence_score.hash(&mut hasher);
     uncertainty_score.hash(&mut hasher);
     let fingerprint = u128::from(hasher.finish());
-    let ts_unix_ms = ((snapshot.n_rows as u64) << 32) | ((snapshot.n_cols as u64) & 0xFFFF_FFFF);
+    // br-asupersync-s2jxu0 — derive ts_unix_ms from a stable
+    // DetHasher mix over the full bit width of n_rows + n_cols
+    // rather than the prior bit-pack
+    //   ((n_rows as u64) << 32) | ((n_cols as u64) & 0xFFFF_FFFF)
+    // which silently truncated bits >= 32 of either dimension on
+    // 64-bit targets, producing colliding ts_unix_ms (and hence
+    // colliding DecisionId / TraceId) for distinct (n_rows, n_cols)
+    // pairs differing only in those bits — a violation of the
+    // unique-decision invariant the contract relies on for replay
+    // and dedup. DetHasher.write_usize covers every bit of usize on
+    // both 32- and 64-bit targets; the domain tag prevents this
+    // mix from colliding with `fingerprint` (which already covers
+    // the snapshot via snapshot.hash but with a different schema).
+    let mut ts_hasher = DetHasher::default();
+    ts_hasher.write_u64(0x7333_3273_6a78_7530); // domain tag "s2sjxu0"
+    ts_hasher.write_usize(snapshot.n_rows);
+    ts_hasher.write_usize(snapshot.n_cols);
+    let ts_unix_ms = ts_hasher.finish();
     let e_process = 1.0
         + f64::from(
             snapshot
@@ -861,6 +887,15 @@ mod tests {
         assert_eq!(
             telemetry.deterministic_fallback_reason, FALLBACK_REASON_UNCLASSIFIED,
             "fallback-active telemetry must never report reason=none"
+        );
+        assert!(
+            telemetry.confidence_score <= 250,
+            "fallback-active telemetry must clamp surfaced confidence even when the reason is synthesized"
+        );
+        assert_eq!(
+            telemetry.confidence_score + telemetry.uncertainty_score,
+            1000,
+            "fallback-active telemetry must keep confidence/uncertainty normalized after clamping"
         );
     }
 
@@ -1535,5 +1570,80 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// br-asupersync-s2jxu0 — DecisionId / TraceId derived from
+    /// (n_rows, n_cols) must NOT collide for distinct dimension
+    /// pairs. The previous bit-pack
+    ///   `(n_rows as u64) << 32 | (n_cols as u64) & 0xFFFF_FFFF`
+    /// silently truncated bits >= 32 of either dimension on 64-bit
+    /// targets, producing identical IDs for distinct pairs that
+    /// differed only in those bits. The fix derives ts_unix_ms from
+    /// a DetHasher mix that covers every bit of usize.
+    #[test]
+    fn s2jxu0_decision_id_distinct_for_distinct_dimensions() {
+        fn snapshot_with(n_rows: usize, n_cols: usize) -> GovernanceSnapshot {
+            GovernanceSnapshot {
+                n_rows,
+                n_cols,
+                density_permille: 0,
+                rank_deficit_permille: 0,
+                inactivation_pressure_permille: 0,
+                overhead_ratio_permille: 0,
+                budget_exhausted: false,
+                baseline_loss: 0,
+                high_support_loss: 0,
+                block_schur_loss: 0,
+            }
+        }
+
+        // Value pair from the bead instructions: u32::MAX vs u32::MAX-1.
+        let a = eval_context(&snapshot_with(u32::MAX as usize, (u32::MAX - 1) as usize), 500, 500);
+        let b = eval_context(&snapshot_with((u32::MAX - 1) as usize, u32::MAX as usize), 500, 500);
+        assert_ne!(
+            a.decision_id, b.decision_id,
+            "swapping (n_rows, n_cols) must yield distinct DecisionIds"
+        );
+        assert_ne!(
+            a.trace_id, b.trace_id,
+            "swapping (n_rows, n_cols) must yield distinct TraceIds"
+        );
+
+        // 64-bit-only collision pair: differs only in bits >= 32 of
+        // n_rows. Under the old shift-truncating logic these would
+        // produce the same ts_unix_ms; under the fix they must
+        // differ.
+        #[cfg(target_pointer_width = "64")]
+        {
+            let small = eval_context(&snapshot_with(1, 1), 500, 500);
+            // n_rows = 1 + (1 << 32); on the OLD `(n_rows as u64) << 32`
+            // path, the bit at index 32 shifts out of u64 and the low
+            // bit ends up at position 32 — the same as the small
+            // snapshot's encoding. After the fix, full-bit-width
+            // hashing makes them distinct.
+            let big = eval_context(&snapshot_with(1 + (1usize << 32), 1), 500, 500);
+            assert_ne!(
+                small.decision_id, big.decision_id,
+                "(1,1) and (1+2^32,1) must NOT collide after s2jxu0 fix"
+            );
+            assert_ne!(
+                small.trace_id, big.trace_id,
+                "(1,1) and (1+2^32,1) must NOT collide after s2jxu0 fix"
+            );
+        }
+
+        // Stress: 100 distinct dimension pairs all produce distinct
+        // ts_unix_ms surrogates.
+        let mut seen = std::collections::HashSet::new();
+        for r in 0..10usize {
+            for c in 0..10usize {
+                let ctx = eval_context(&snapshot_with(r, c), 500, 500);
+                assert!(
+                    seen.insert(ctx.ts_unix_ms),
+                    "duplicate ts_unix_ms for ({r},{c})"
+                );
+            }
+        }
+        assert_eq!(seen.len(), 100);
     }
 }
