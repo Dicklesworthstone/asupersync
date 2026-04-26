@@ -2082,8 +2082,42 @@ impl H3RequestStreamState {
                 self.saw_data = true;
                 Ok(())
             }
+            H3Frame::Datagram { .. } => {
+                // br-asupersync-8w9naj: per RFC 9297 §2, DATAGRAM
+                // frames are allowed on bidirectional request streams
+                // as an alternative framing for streamed payloads —
+                // notably CONNECT-UDP (RFC 9298 §3) and CONNECT-IP
+                // (RFC 9484) which carry their tunnelled UDP/IP
+                // datagrams via H3 DATAGRAM frames keyed by the
+                // quarter-stream-id derived from the stream's ID.
+                //
+                // The project's own allow-list at
+                // `validate_bidirectional_frame` (this file, line ~618)
+                // and the bidi dispatch at line ~578 both correctly
+                // permit `H3Frame::Datagram { .. }` on bidi streams.
+                // The previous implementation of on_frame's catch-all
+                // contradicted them by rejecting all non-HEADERS/DATA
+                // frames — silently breaking RFC 9297/9298 interop
+                // for any client that opened an Extended-CONNECT
+                // session.
+                //
+                // DATAGRAM frames do NOT participate in the HEADERS +
+                // DATA* + TRAILERS sequence — they're an out-of-band
+                // sidecar for the same stream. We therefore neither
+                // advance `header_blocks_seen` nor set `saw_data`;
+                // we only require that the initial HEADERS frame
+                // arrived first, which establishes the stream's
+                // semantic identity (request method, protocol target,
+                // capsule protocol negotiation per RFC 9297 §2.2).
+                if self.header_blocks_seen == 0 {
+                    return Err(H3NativeError::ControlProtocol(
+                        "DATAGRAM before initial HEADERS on request stream",
+                    ));
+                }
+                Ok(())
+            }
             _ => Err(H3NativeError::ControlProtocol(
-                "only HEADERS/DATA are valid on request streams",
+                "only HEADERS/DATA/DATAGRAM are valid on request streams",
             )),
         }
     }
@@ -3308,8 +3342,88 @@ mod tests {
             .expect_err("must fail");
         assert_eq!(
             err,
-            H3NativeError::ControlProtocol("only HEADERS/DATA are valid on request streams")
+            H3NativeError::ControlProtocol("only HEADERS/DATA/DATAGRAM are valid on request streams")
         );
+    }
+
+    /// br-asupersync-8w9naj: H3RequestStreamState::on_frame must
+    /// accept H3Frame::Datagram on a bidirectional request stream
+    /// after the initial HEADERS, per RFC 9297 §2 and the project's
+    /// own validate_bidirectional_frame allow-list. Pre-fix the
+    /// catch-all `_` arm rejected DATAGRAM with a "only HEADERS/DATA"
+    /// error, breaking RFC 9298 CONNECT-UDP interop on the per-
+    /// stream state machine path.
+    #[test]
+    fn request_stream_accepts_datagram_after_headers() {
+        let mut st = H3RequestStreamState::new();
+        // HEADERS first establishes the stream's identity.
+        st.on_frame(&H3Frame::Headers(vec![0x80])).expect("headers");
+        // DATAGRAM is allowed at any point after HEADERS, before or
+        // interleaved with DATA. Multiple DATAGRAMs are allowed.
+        st.on_frame(&H3Frame::Datagram {
+            quarter_stream_id: 0,
+            payload: vec![1, 2, 3],
+        })
+        .expect("datagram-after-headers");
+        st.on_frame(&H3Frame::Data(vec![10])).expect("data ok");
+        st.on_frame(&H3Frame::Datagram {
+            quarter_stream_id: 0,
+            payload: vec![4, 5, 6],
+        })
+        .expect("datagram-between-headers-and-trailers");
+        st.on_frame(&H3Frame::Headers(vec![0x81]))
+            .expect("trailers headers");
+        // DATAGRAM is also allowed after trailers (the stream's
+        // datagram flow can outlive the request body — RFC 9297
+        // imposes no upper bound from the HEADERS+DATA*+TRAILERS
+        // sequence).
+        st.on_frame(&H3Frame::Datagram {
+            quarter_stream_id: 0,
+            payload: vec![7, 8, 9],
+        })
+        .expect("datagram-after-trailers");
+    }
+
+    /// br-asupersync-8w9naj: DATAGRAM before the initial HEADERS is
+    /// still a protocol error — the stream's identity (method,
+    /// :protocol, capsule negotiation) is established by HEADERS,
+    /// and a DATAGRAM with no preceding HEADERS has nothing to
+    /// associate with.
+    #[test]
+    fn request_stream_rejects_datagram_before_headers() {
+        let mut st = H3RequestStreamState::new();
+        let err = st
+            .on_frame(&H3Frame::Datagram {
+                quarter_stream_id: 0,
+                payload: vec![1, 2, 3],
+            })
+            .expect_err("must fail before HEADERS");
+        assert_eq!(
+            err,
+            H3NativeError::ControlProtocol("DATAGRAM before initial HEADERS on request stream")
+        );
+    }
+
+    /// br-asupersync-8w9naj: DATAGRAM frames do NOT advance the
+    /// HEADERS+DATA*+TRAILERS state machine — they're an out-of-
+    /// band sidecar. Receiving DATAGRAMs between HEADERS and DATA
+    /// must NOT cause subsequent DATA to be rejected (which would
+    /// happen if DATAGRAM accidentally bumped header_blocks_seen).
+    #[test]
+    fn request_stream_datagram_does_not_advance_state_machine() {
+        let mut st = H3RequestStreamState::new();
+        st.on_frame(&H3Frame::Headers(vec![0x80])).expect("headers");
+        st.on_frame(&H3Frame::Datagram {
+            quarter_stream_id: 0,
+            payload: vec![1],
+        })
+        .expect("datagram");
+        // DATA after a DATAGRAM still works — DATAGRAM did not
+        // advance to "trailers" state.
+        st.on_frame(&H3Frame::Data(vec![2])).expect("data after datagram");
+        // Trailers still allowed.
+        st.on_frame(&H3Frame::Headers(vec![0x81]))
+            .expect("trailers after data after datagram");
     }
 
     #[test]
