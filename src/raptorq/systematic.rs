@@ -330,10 +330,22 @@ pub struct ConstraintMatrix {
 
 impl ConstraintMatrix {
     /// Create a zero matrix.
+    ///
+    /// br-asupersync-p9i0gh — `rows * cols` is now checked. Pre-fix
+    /// the multiplication was unguarded; on a 32-bit target a
+    /// malformed FEC-OTI that survived to this constructor with
+    /// `rows * cols > usize::MAX` would silently truncate, return
+    /// a wrong-size Vec, and let subsequent indexing read/write
+    /// adjacent memory. `decoder.rs:1971` already used `checked_mul`
+    /// for the same dense-allocation pattern; this brings
+    /// `ConstraintMatrix::zeros` into line.
     #[must_use]
     pub fn zeros(rows: usize, cols: usize) -> Self {
+        let n = rows
+            .checked_mul(cols)
+            .expect("ConstraintMatrix::zeros: rows*cols overflow (br-asupersync-p9i0gh)");
         Self {
-            data: vec![Gf256::ZERO; rows * cols],
+            data: vec![Gf256::ZERO; n],
             rows,
             cols,
         }

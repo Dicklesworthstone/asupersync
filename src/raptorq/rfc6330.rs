@@ -407,32 +407,34 @@ pub fn repair_indices_for_esi(
 /// - `W..W+P` are PI symbols
 #[must_use]
 pub fn tuple_indices(tuple: LtTuple, w: usize, p: usize, p1: usize) -> Vec<usize> {
-    assert!(w > 1, "W must be > 1");
-    assert!(p > 0, "P must be > 0");
-    assert!(p1 >= p, "P1 must be >= P");
+    // br-asupersync-hiimy9 — Pre-fix every invariant violation here
+    // was an `assert!` that panicked the receiver. For a network-
+    // receivable FEC code that is the wrong shape: a hostile peer
+    // sending a malformed FEC-OTI that routed to this function
+    // could DoS the receiver via a crash. The fix downgrades the
+    // assertions to `debug_assert!` (development-time signal only)
+    // AND adds an early-return-empty-Vec at the top of the
+    // function for any input that violates the documented
+    // pre-conditions. The caller (encoder/decoder) sees an empty
+    // schedule and naturally surfaces an "invalid encoding" error
+    // up the public boundary instead of crashing the process.
     let expected_p1 = next_prime_ge(p);
-    assert!(
-        p1 == expected_p1,
-        "P1 must equal smallest prime >= P (expected {expected_p1}, got {p1})"
-    );
-    assert!(
-        (1..=RFC6330_MAX_LT_DEGREE).contains(&tuple.d),
-        "LT degree must satisfy 1 <= d <= {RFC6330_MAX_LT_DEGREE}"
-    );
-    assert!(
-        matches!(tuple.d1, 2 | 3),
-        "PI degree must satisfy d1 in {{2, 3}}"
-    );
-    assert!(
-        tuple.a > 0 && tuple.a < w,
-        "LT step must satisfy 1 <= a < W"
-    );
-    assert!(
-        tuple.a1 > 0 && tuple.a1 < p1,
-        "PI step must satisfy 1 <= a1 < P1"
-    );
-    assert!(tuple.b < w, "LT start must be < W");
-    assert!(tuple.b1 < p1, "PI start must be < P1");
+    let valid = w > 1
+        && p > 0
+        && p1 >= p
+        && p1 == expected_p1
+        && (1..=RFC6330_MAX_LT_DEGREE).contains(&tuple.d)
+        && matches!(tuple.d1, 2 | 3)
+        && tuple.a > 0
+        && tuple.a < w
+        && tuple.a1 > 0
+        && tuple.a1 < p1
+        && tuple.b < w
+        && tuple.b1 < p1;
+    debug_assert!(valid, "tuple_indices: malformed input — check FEC-OTI validation");
+    if !valid {
+        return Vec::new();
+    }
 
     let mut out = Vec::with_capacity(tuple.d + tuple.d1);
 

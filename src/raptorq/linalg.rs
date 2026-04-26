@@ -115,6 +115,22 @@ impl DenseRow {
         Gf256::new(self.data[index])
     }
 
+    /// br-asupersync-tda3x0 — Fallible variant of [`Self::get`] that
+    /// returns `None` on out-of-range index instead of panicking.
+    /// Production code paths driven by network-supplied schedules
+    /// (where a malformed FEC-OTI could route an out-of-range
+    /// column index here) MUST use this variant and surface the
+    /// rejection as a decoder-level error, instead of letting the
+    /// process panic on adversarial input. The infallible
+    /// [`Self::get`] is retained for code paths whose bounds are
+    /// statically guaranteed (test code, internal arithmetic that
+    /// has already validated the index).
+    #[inline]
+    #[must_use]
+    pub fn try_get(&self, index: usize) -> Option<Gf256> {
+        self.data.get(index).copied().map(Gf256::new)
+    }
+
     /// Sets the element at the given index.
     ///
     /// # Panics
@@ -128,6 +144,20 @@ impl DenseRow {
             self.data.len()
         );
         self.data[index] = value.raw();
+    }
+
+    /// br-asupersync-tda3x0 — Fallible variant of [`Self::set`].
+    /// Returns `Err(())` on out-of-range index. Same rationale as
+    /// [`Self::try_get`].
+    #[inline]
+    pub fn try_set(&mut self, index: usize, value: Gf256) -> Result<(), ()> {
+        match self.data.get_mut(index) {
+            Some(slot) => {
+                *slot = value.raw();
+                Ok(())
+            }
+            None => Err(()),
+        }
     }
 
     /// Returns true if the row is all zeros.

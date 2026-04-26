@@ -2146,13 +2146,25 @@ impl InactivationDecoder {
             break;
         }
 
-        // Extract solutions: move RHS vectors instead of cloning
+        // br-asupersync-cz5b0u — Pre-fix the else-branch silently
+        // emitted `vec![0u8; symbol_size]` when `pivot_row[dense_col]
+        // >= n_rows`, masking a rank-deficient elimination as a
+        // valid all-zeros decode. An attacker crafting a symbol
+        // stream where `select_pivot_row` failed to update
+        // `pivot_row` for a column (but `elimination_error`
+        // remained None due to a defensive code path not firing)
+        // would receive a successful decode whose intermediate
+        // symbols were attacker-influenced zero blocks. Now any
+        // unfilled pivot row surfaces as
+        // `DecodeError::SingularMatrix { row: dense_col }`,
+        // matching the same error the explicit elimination_error
+        // path raises elsewhere.
         for (dense_col, &col) in dense_cols.iter().enumerate() {
             let prow = pivot_row[dense_col];
             if prow < n_rows {
                 state.solved[col] = Some(std::mem::take(&mut b[prow]));
             } else {
-                state.solved[col] = Some(vec![0u8; symbol_size]);
+                return Err(DecodeError::SingularMatrix { row: dense_col });
             }
         }
 
@@ -2446,13 +2458,25 @@ impl InactivationDecoder {
             break;
         }
 
-        // Extract solutions: move RHS vectors instead of cloning
+        // br-asupersync-cz5b0u — Pre-fix the else-branch silently
+        // emitted `vec![0u8; symbol_size]` when `pivot_row[dense_col]
+        // >= n_rows`, masking a rank-deficient elimination as a
+        // valid all-zeros decode. An attacker crafting a symbol
+        // stream where `select_pivot_row` failed to update
+        // `pivot_row` for a column (but `elimination_error`
+        // remained None due to a defensive code path not firing)
+        // would receive a successful decode whose intermediate
+        // symbols were attacker-influenced zero blocks. Now any
+        // unfilled pivot row surfaces as
+        // `DecodeError::SingularMatrix { row: dense_col }`,
+        // matching the same error the explicit elimination_error
+        // path raises elsewhere.
         for (dense_col, &col) in dense_cols.iter().enumerate() {
             let prow = pivot_row[dense_col];
             if prow < n_rows {
                 state.solved[col] = Some(std::mem::take(&mut b[prow]));
             } else {
-                state.solved[col] = Some(vec![0u8; symbol_size]);
+                return Err(DecodeError::SingularMatrix { row: dense_col });
             }
         }
 
@@ -2528,17 +2552,48 @@ fn rebuild_dense_matrix_from_equations(
 ) {
     a.fill(Gf256::ZERO);
     for (row, &eq_idx) in dense_rows.iter().enumerate() {
-        let row_off = row * n_cols;
+        // br-asupersync-lw16f6 — Bounds-check `row_off + dense_col`
+        // against `a.len()` before the write. Pre-fix the offset
+        // arithmetic was unguarded and a malformed schedule that
+        // produced a `row >= dense_rows.len()` (off-by-one) OR a
+        // `dense_col >= n_cols` (col_to_dense corrupt) would index
+        // out of bounds — silent OOB-write in release, panic in
+        // debug. The dense matrix is sized at decoder.rs:1971 via
+        // `checked_mul` so the buffer is correctly sized for
+        // legitimate inputs; this guard makes the loop fail closed
+        // on malformed inputs that bypass the upstream sizing.
+        let row_off = row.checked_mul(n_cols).expect(
+            "rebuild_dense_matrix: row*n_cols overflow (br-asupersync-lw16f6)",
+        );
         for &(col, coef) in &equations[eq_idx].terms {
             if let Some(dense_col) = dense_col_index(col_to_dense, col) {
-                a[row_off + dense_col] = coef;
+                let off = row_off
+                    .checked_add(dense_col)
+                    .filter(|&o| o < a.len())
+                    .expect(
+                        "rebuild_dense_matrix: row_off+dense_col out of bounds (br-asupersync-lw16f6)",
+                    );
+                a[off] = coef;
             }
         }
     }
 }
 
 fn snapshot_dense_rhs(rows: &[Vec<u8>], symbol_size: usize) -> Vec<u8> {
-    let mut snapshot = vec![0u8; rows.len().saturating_mul(symbol_size)];
+    // br-asupersync-n47w54 — Pre-fix used `saturating_mul` for the
+    // total snapshot size. saturation is the wrong shape for an
+    // alloc: if `rows.len() * symbol_size` saturates to usize::MAX,
+    // the alloc either panics in `vec!` with capacity-overflow
+    // anyway, OR (more dangerously) the loop below uses unsaturated
+    // arithmetic for `off = row_idx * symbol_size` and indexes
+    // PAST the saturated buffer end. Switching to `checked_mul +
+    // expect` makes the overflow fail loud and immediately rather
+    // than silently mis-sizing the buffer.
+    let total = rows
+        .len()
+        .checked_mul(symbol_size)
+        .expect("snapshot_dense_rhs: rows.len() * symbol_size overflows usize (br-asupersync-n47w54)");
+    let mut snapshot = vec![0u8; total];
     for (row_idx, row) in rows.iter().enumerate() {
         debug_assert_eq!(row.len(), symbol_size);
         let off = row_idx * symbol_size;
