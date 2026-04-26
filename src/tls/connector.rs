@@ -240,6 +240,11 @@ pub struct TlsConnectorBuilder {
     max_protocol: Option<rustls::ProtocolVersion>,
     #[cfg(feature = "tls")]
     resumption: Option<rustls::client::Resumption>,
+    /// br-asupersync-y0gm5q: TLS 1.3 0-RTT (early data) opt-in on
+    /// the client side. Defaults to `false` (matches rustls default
+    /// and prevents accidental replay-vulnerable 0-RTT). See
+    /// [`Self::enable_early_data`] for the explicit opt-in.
+    early_data_enabled: bool,
 }
 
 impl TlsConnectorBuilder {
@@ -268,6 +273,9 @@ impl TlsConnectorBuilder {
             max_protocol: None,
             #[cfg(feature = "tls")]
             resumption: None,
+            // br-asupersync-y0gm5q: secure-by-default. 0-RTT off
+            // until the operator opts in via enable_early_data(true).
+            early_data_enabled: false,
         }
     }
 
@@ -701,6 +709,38 @@ impl TlsConnectorBuilder {
         self
     }
 
+    /// **DANGEROUS**: send TLS 1.3 0-RTT (early data) on resumed
+    /// handshakes when the server's resumption ticket allows it.
+    ///
+    /// br-asupersync-y0gm5q: 0-RTT is OFF by default on the
+    /// client side — rustls's `enable_early_data` defaults to
+    /// `false` and we leave it that way unless the operator opts
+    /// in via this method. The corresponding acceptor-side
+    /// opt-in is [`crate::tls::TlsAcceptorBuilder::enable_early_data`].
+    ///
+    /// # Replay vulnerability (RFC 8446 §8)
+    ///
+    /// 0-RTT data is replay-vulnerable BY SPEC. An attacker who
+    /// captures the early-data record can replay it to the same
+    /// server within the ticket window; the server has no
+    /// transport-level mechanism to detect or reject the replay.
+    /// Even read-only requests can leak — a replayed GET hits the
+    /// origin (and any downstream metering / rate-limit / audit
+    /// log) again. Only enable on the client when:
+    ///
+    /// 1. The application enforces idempotency for every
+    ///    request that could carry early data, AND
+    /// 2. The server side has a corresponding anti-replay store
+    ///    bound to the resumption ticket.
+    ///
+    /// Pass `false` to explicitly disable (the default).
+    #[cfg(feature = "tls")]
+    #[must_use]
+    pub fn enable_early_data(mut self, enabled: bool) -> Self {
+        self.early_data_enabled = enabled;
+        self
+    }
+
     /// Add a PEM-encoded Certificate Revocation List
     /// (br-asupersync-p7369s).
     ///
@@ -887,10 +927,19 @@ impl TlsConnectorBuilder {
             config.resumption = resumption;
         }
 
+        // br-asupersync-y0gm5q: explicit early-data write. rustls's
+        // own default is `false` (0-RTT off) but we set it
+        // explicitly so a future rustls API change cannot silently
+        // flip the default to "on" without us noticing. The value
+        // here is the operator's choice from `enable_early_data(...)`
+        // (default false).
+        config.enable_early_data = self.early_data_enabled;
+
         #[cfg(feature = "tracing-integration")]
         tracing::debug!(
             alpn = ?config.alpn_protocols,
             sni = config.enable_sni,
+            enable_early_data = config.enable_early_data,
             "TlsConnector built"
         );
 
@@ -1400,6 +1449,51 @@ mod tests {
             matches!(result, Ok(false)),
             "report-only mismatched pin must return Ok(false) (not Err); \
              got {result:?}"
+        );
+    }
+
+    // ── br-asupersync-y0gm5q: 0-RTT secure-by-default ────────────────
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn y0gm5q_default_connector_disables_0rtt_early_data() {
+        let connector = TlsConnectorBuilder::new()
+            .add_root_certificate(&Certificate::from_der(TEST_CERT_PEM.to_vec()))
+            .build()
+            .expect("build default connector");
+        assert!(
+            !connector.config.enable_early_data,
+            "default connector must have enable_early_data=false \
+             (TLS 1.3 0-RTT disabled — replay defense)"
+        );
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn y0gm5q_enable_early_data_opt_in_sets_flag() {
+        let connector = TlsConnectorBuilder::new()
+            .add_root_certificate(&Certificate::from_der(TEST_CERT_PEM.to_vec()))
+            .enable_early_data(true)
+            .build()
+            .expect("build with early data enabled");
+        assert!(
+            connector.config.enable_early_data,
+            "enable_early_data(true) must propagate to ClientConfig"
+        );
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn y0gm5q_enable_early_data_false_disables_flag() {
+        let connector = TlsConnectorBuilder::new()
+            .add_root_certificate(&Certificate::from_der(TEST_CERT_PEM.to_vec()))
+            .enable_early_data(true)
+            .enable_early_data(false)
+            .build()
+            .expect("build with early data toggled off");
+        assert!(
+            !connector.config.enable_early_data,
+            "enable_early_data(false) must reset enable_early_data flag"
         );
     }
 }

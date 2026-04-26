@@ -185,6 +185,14 @@ pub struct TlsAcceptorBuilder {
     /// br-asupersync-q5i0bz: maximum negotiated TLS protocol version.
     #[cfg(feature = "tls")]
     max_protocol: Option<rustls::ProtocolVersion>,
+    /// br-asupersync-y0gm5q: TLS 1.3 0-RTT (early data) max size in
+    /// bytes. `0` means 0-RTT is DISABLED (the secure default — see
+    /// the doc on [`Self::enable_early_data`] for why). Non-zero
+    /// allows the server to accept early data up to this many bytes
+    /// per connection. Operators that opt in MUST also implement an
+    /// idempotency / anti-replay layer at the application level
+    /// because TLS 1.3 0-RTT is by-spec replay-vulnerable.
+    early_data_max_bytes: u32,
 }
 
 impl TlsAcceptorBuilder {
@@ -202,7 +210,64 @@ impl TlsAcceptorBuilder {
             min_protocol: None,
             #[cfg(feature = "tls")]
             max_protocol: None,
+            // br-asupersync-y0gm5q: secure-by-default. 0-RTT is
+            // off until the operator explicitly opts in via
+            // `enable_early_data(...)` — see that method's doc for
+            // the replay-attack tradeoff.
+            early_data_max_bytes: 0,
         }
+    }
+
+    /// **DANGEROUS**: enable TLS 1.3 0-RTT (early data) on this acceptor.
+    ///
+    /// br-asupersync-y0gm5q: 0-RTT is disabled by default. This
+    /// method is the explicit opt-in required to accept it.
+    ///
+    /// # Replay vulnerability
+    ///
+    /// TLS 1.3 0-RTT is **by-spec replay-vulnerable** (RFC 8446
+    /// §8). An attacker who captures a 0-RTT request can replay
+    /// it within the ticket's validity window and the server has
+    /// no transport-level mechanism to detect or reject the
+    /// replay. The handshake authenticates the client (via the
+    /// resumption ticket) but cannot authenticate the FRESHNESS
+    /// of the data carried alongside the ClientHello.
+    ///
+    /// The application layer MUST implement at least one of:
+    ///
+    /// 1. Idempotency keys on every state-changing request
+    ///    (REST: `Idempotency-Key` header). The server records
+    ///    completed keys and refuses replayed requests.
+    /// 2. A per-request nonce + bounded-window anti-replay store
+    ///    (e.g. Redis with the ticket lifetime as the TTL).
+    /// 3. Restriction of 0-RTT to GET / HEAD or other genuinely
+    ///    safe methods at the routing layer.
+    ///
+    /// If you cannot implement one of the above, do NOT enable
+    /// 0-RTT — the latency win is not worth the silent
+    /// duplicate-write attack surface.
+    ///
+    /// # Argument
+    ///
+    /// `max_bytes` caps how much early data the server will
+    /// accept per connection. A reasonable starting point is
+    /// `16384` (16 KiB) which fits a typical HTTP request line +
+    /// headers but excludes most uploads. `0` re-disables.
+    #[must_use]
+    pub fn enable_early_data(mut self, max_bytes: u32) -> Self {
+        self.early_data_max_bytes = max_bytes;
+        self
+    }
+
+    /// Disable TLS 1.3 0-RTT (early data). This is the default.
+    /// Provided as an explicit setter for symmetry with
+    /// [`Self::enable_early_data`] so config-driven builders
+    /// (TOML / YAML) can round-trip the choice.
+    /// (br-asupersync-y0gm5q.)
+    #[must_use]
+    pub fn disable_early_data(mut self) -> Self {
+        self.early_data_max_bytes = 0;
+        self
     }
 
     /// Create a builder by loading certificate chain and key from PEM files.
@@ -446,9 +511,18 @@ impl TlsAcceptorBuilder {
             config.max_fragment_size = Some(size);
         }
 
+        // br-asupersync-y0gm5q: explicit max_early_data_size write.
+        // rustls's own default is 0 (0-RTT off) but we set it
+        // explicitly so a future rustls API change cannot silently
+        // flip the default to "on" without us noticing. The value
+        // here is the operator's choice from
+        // `enable_early_data(max_bytes)` (default 0).
+        config.max_early_data_size = self.early_data_max_bytes;
+
         #[cfg(feature = "tracing-integration")]
         tracing::debug!(
             alpn = ?config.alpn_protocols,
+            max_early_data_size = config.max_early_data_size,
             "TlsAcceptor built"
         );
 
@@ -1345,5 +1419,56 @@ SrXuVI5uunTgPWuOtJOP+KM=
                 server_res.is_ok()
             );
         });
+    }
+
+    // ── br-asupersync-y0gm5q: 0-RTT secure-by-default ───────────────
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn y0gm5q_default_acceptor_disables_0rtt_early_data() {
+        let acceptor = TlsAcceptorBuilder::new(
+            CertificateChain::from_pem(TEST_CERT_PEM).unwrap(),
+            PrivateKey::from_pem(TEST_KEY_PEM).unwrap(),
+        )
+        .build()
+        .expect("build default acceptor");
+        assert_eq!(
+            acceptor.config.max_early_data_size, 0,
+            "default acceptor must have max_early_data_size=0 \
+             (TLS 1.3 0-RTT disabled — replay defense)"
+        );
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn y0gm5q_enable_early_data_opt_in_sets_max_size() {
+        let acceptor = TlsAcceptorBuilder::new(
+            CertificateChain::from_pem(TEST_CERT_PEM).unwrap(),
+            PrivateKey::from_pem(TEST_KEY_PEM).unwrap(),
+        )
+        .enable_early_data(16384)
+        .build()
+        .expect("build with early data enabled");
+        assert_eq!(
+            acceptor.config.max_early_data_size, 16384,
+            "enable_early_data(N) must propagate N to ServerConfig"
+        );
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn y0gm5q_disable_early_data_resets_to_zero() {
+        let acceptor = TlsAcceptorBuilder::new(
+            CertificateChain::from_pem(TEST_CERT_PEM).unwrap(),
+            PrivateKey::from_pem(TEST_KEY_PEM).unwrap(),
+        )
+        .enable_early_data(16384)
+        .disable_early_data()
+        .build()
+        .expect("build with early data toggled off");
+        assert_eq!(
+            acceptor.config.max_early_data_size, 0,
+            "disable_early_data must reset max_early_data_size=0"
+        );
     }
 }
