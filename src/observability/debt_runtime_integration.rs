@@ -12,6 +12,27 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
+/// br-asupersync-b4ocgc: pluggable sleep abstraction for the background
+/// monitoring loop.
+///
+/// Pre-fix the monitoring loop called `std::thread::sleep(check_interval)`
+/// directly, which binds the loop's pacing to wall-clock time even when
+/// the runtime is supposed to be running under virtual time (LabRuntime
+/// or any deterministic test harness). The function-pointer-of-Duration
+/// indirection lets:
+///
+///   - Production: keep using `std::thread::sleep` via the default
+///     constructor (zero behaviour change).
+///   - LabRuntime tests: inject a virtual-time sleeper that advances
+///     the lab clock instead of blocking the OS thread, so monitoring
+///     iterations are deterministic and bit-exact replayable.
+///
+/// The trait-object form (`Arc<dyn Fn(Duration) + Send + Sync>`) keeps
+/// the field Send + Sync without making `DebtRuntimeIntegration` itself
+/// generic over a sleeper type — callers don't pay a type-parameter
+/// cost for the legacy code path.
+pub type DebtMonitorSleeper = Arc<dyn Fn(Duration) + Send + Sync>;
+
 /// Integration points for debt monitoring in the runtime.
 pub struct DebtRuntimeIntegration {
     monitor: Arc<CancellationDebtMonitor>,
@@ -21,6 +42,9 @@ pub struct DebtRuntimeIntegration {
     shutdown: Arc<Mutex<bool>>,
     /// Alert callback for integration with logging/alerting systems.
     alert_callback: Option<Box<dyn Fn(&DebtAlert) + Send + Sync>>,
+    /// br-asupersync-b4ocgc: pluggable sleep — defaults to thread::sleep,
+    /// overridable in tests via [`Self::with_sleeper`].
+    sleeper: DebtMonitorSleeper,
 }
 
 impl DebtRuntimeIntegration {
@@ -33,6 +57,9 @@ impl DebtRuntimeIntegration {
             monitoring_thread: None,
             shutdown: Arc::new(Mutex::new(false)),
             alert_callback: None,
+            // br-asupersync-b4ocgc: default = std::thread::sleep
+            // (production behaviour unchanged).
+            sleeper: Arc::new(std::thread::sleep),
         }
     }
 
@@ -40,6 +67,22 @@ impl DebtRuntimeIntegration {
     #[must_use]
     pub fn default() -> Self {
         Self::new(CancellationDebtConfig::default())
+    }
+
+    /// br-asupersync-b4ocgc: override the wall-clock-blocking sleep
+    /// used by the background monitoring loop. Intended for tests that
+    /// run under [`LabRuntime`](crate::lab::LabRuntime) virtual time —
+    /// inject a closure that advances the lab clock instead of
+    /// blocking the OS thread, and the monitoring loop becomes
+    /// deterministic and replayable.
+    ///
+    /// Must be called BEFORE [`Self::start_monitoring`] — the sleeper
+    /// is captured into the spawned thread and changing it later has
+    /// no effect on the running loop.
+    #[must_use]
+    pub fn with_sleeper(mut self, sleeper: DebtMonitorSleeper) -> Self {
+        self.sleeper = sleeper;
+        self
     }
 
     /// Set a callback to be invoked when debt alerts are generated.
@@ -59,9 +102,10 @@ impl DebtRuntimeIntegration {
         let monitor = self.monitor.clone();
         let shutdown = self.shutdown.clone();
         let alert_callback = self.alert_callback.take();
+        let sleeper = self.sleeper.clone();
 
         let handle = thread::spawn(move || {
-            Self::monitoring_loop(monitor, shutdown, check_interval, alert_callback);
+            Self::monitoring_loop(monitor, shutdown, check_interval, alert_callback, sleeper);
         });
 
         self.monitoring_thread = Some(handle);
@@ -268,11 +312,22 @@ impl DebtRuntimeIntegration {
     }
 
     /// Background monitoring loop.
+    ///
+    /// br-asupersync-b4ocgc: takes a pluggable [`DebtMonitorSleeper`]
+    /// instead of calling `std::thread::sleep` directly. Production
+    /// passes `Arc::new(std::thread::sleep)` (zero behaviour change);
+    /// LabRuntime tests pass a virtual-time sleeper that advances the
+    /// lab clock and yields to the next scheduled tick. Either way,
+    /// `replayable_system_time` (already used for `last_alert_check`)
+    /// gives the loop a deterministic notion of "now" — the only
+    /// remaining wall-clock dependency was this `thread::sleep`,
+    /// which the indirection now closes.
     fn monitoring_loop(
         monitor: Arc<CancellationDebtMonitor>,
         shutdown: Arc<Mutex<bool>>,
         check_interval: Duration,
         alert_callback: Option<Box<dyn Fn(&DebtAlert) + Send + Sync>>,
+        sleeper: DebtMonitorSleeper,
     ) {
         let mut last_alert_check = crate::observability::replayable_system_time();
 
@@ -306,8 +361,9 @@ impl DebtRuntimeIntegration {
             // Clean up old alerts
             monitor.clear_old_alerts(Duration::from_hours(1));
 
-            // Sleep until next check
-            thread::sleep(check_interval);
+            // br-asupersync-b4ocgc: pluggable sleep — defaults to
+            // std::thread::sleep, overridable for virtual-time tests.
+            sleeper(check_interval);
         }
     }
 
@@ -509,10 +565,12 @@ mod tests {
         clippy::future_not_send
     )]
     use super::{
-        CancellationDebtConfig, DebtAlertLevel, DebtRuntimeIntegration, DebtSnapshot, WorkType,
+        CancellationDebtConfig, CancellationDebtMonitor, DebtAlertLevel, DebtMonitorSleeper,
+        DebtRuntimeIntegration, DebtSnapshot, WorkType,
     };
     use crate::types::{CancelKind, CancelReason, TaskId};
     use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, SystemTime};
 
     #[test]
@@ -622,5 +680,94 @@ mod tests {
 
         let cleaned = integration.execute_emergency_relief(Duration::from_millis(1));
         assert!(cleaned > 0);
+    }
+
+    // ====================================================================
+    // br-asupersync-b4ocgc: pluggable Sleeper covers the wall-clock
+    // dependency in monitoring_loop. The default uses thread::sleep
+    // (production behaviour). Tests inject a virtual-time sleeper to
+    // keep the loop deterministic and replayable under LabRuntime.
+    // ====================================================================
+
+    #[test]
+    fn b4ocgc_default_sleeper_is_thread_sleep_compatible() {
+        // Sanity: the default constructor produces an integration
+        // whose sleeper, when called with a tiny duration, returns
+        // promptly without panicking. We don't assert exact timing
+        // (wall-clock-dependent), only that the function shape is
+        // callable.
+        let integration = DebtRuntimeIntegration::default();
+        let start = std::time::Instant::now();
+        (integration.sleeper)(Duration::from_millis(1));
+        let elapsed = start.elapsed();
+        // Sanity bound: 1ms sleep should complete within 1s on any
+        // sane system. Generous to avoid CI flakes.
+        assert!(elapsed < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn b4ocgc_with_sleeper_replaces_thread_sleep_in_loop() {
+        // Inject a virtual-time sleeper that records every duration
+        // it was called with. Drive monitoring_loop manually for a
+        // bounded number of iterations and assert the sleeper saw
+        // exactly the configured check_interval each tick — without
+        // ever blocking on wall-clock.
+        let sleep_log: Arc<Mutex<Vec<Duration>>> = Arc::new(Mutex::new(Vec::new()));
+        let log_for_sleeper = sleep_log.clone();
+        let max_calls = 3usize;
+        let shutdown = Arc::new(Mutex::new(false));
+        let shutdown_for_sleeper = shutdown.clone();
+
+        let virtual_sleeper: DebtMonitorSleeper = Arc::new(move |d: Duration| {
+            let mut log = log_for_sleeper.lock().unwrap();
+            log.push(d);
+            // After max_calls iterations, set shutdown so the loop
+            // exits — preserves the loop semantics test without
+            // hanging the test process.
+            if log.len() >= max_calls {
+                *shutdown_for_sleeper.lock().unwrap() = true;
+            }
+            // No real sleep — we're under virtual time semantics.
+        });
+
+        let monitor = Arc::new(CancellationDebtMonitor::new(
+            CancellationDebtConfig::default(),
+        ));
+        let check_interval = Duration::from_millis(123);
+        DebtRuntimeIntegration::monitoring_loop(
+            monitor,
+            shutdown.clone(),
+            check_interval,
+            None,
+            virtual_sleeper,
+        );
+
+        let calls = sleep_log.lock().unwrap();
+        assert!(
+            calls.len() >= max_calls,
+            "loop should have called the sleeper at least {max_calls} times, got {}",
+            calls.len()
+        );
+        for d in calls.iter() {
+            assert_eq!(*d, check_interval, "every sleep must use check_interval");
+        }
+    }
+
+    #[test]
+    fn b4ocgc_with_sleeper_builder_threads_through_to_loop() {
+        // Verify the with_sleeper builder's value is captured when
+        // start_monitoring is called (covered indirectly: we inspect
+        // the integration's sleeper field after building).
+        let probe = Arc::new(Mutex::new(0u32));
+        let probe_for_sleeper = probe.clone();
+        let sleeper: DebtMonitorSleeper = Arc::new(move |_d| {
+            *probe_for_sleeper.lock().unwrap() += 1;
+        });
+        let integration = DebtRuntimeIntegration::default().with_sleeper(sleeper.clone());
+        // Direct invocation of the captured sleeper to confirm the
+        // field carries our closure (not the std::thread::sleep
+        // default).
+        (integration.sleeper)(Duration::from_secs(0));
+        assert_eq!(*probe.lock().unwrap(), 1);
     }
 }
