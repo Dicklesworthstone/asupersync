@@ -7,12 +7,30 @@ use crate::util::det_hash::DetHasher;
 use std::collections::BTreeSet;
 use std::hash::{Hash, Hasher};
 
-/// A deterministic consistent hash ring with virtual nodes.
+/// A consistent hash ring with virtual nodes.
+///
+/// br-asupersync-rnybb1: vnode placement is salted with a per-ring
+/// `seed`. Pre-fix the ring used `DetHasher::default()` (FNV-1a with
+/// a publicly-known fixed seed) for both vnode placement and key
+/// hashing — an attacker who could control any portion of the
+/// hashed key space could compute keys that all hashed into the
+/// same vnode bucket and pin the entire load to one replica
+/// (load-pinning DoS). Post-fix, every hash is salted with the
+/// `seed` field which production callers populate from
+/// [`crate::util::OsEntropy`] (per-deployment random) and tests /
+/// lab callers populate with a fixed value for replay determinism.
 #[derive(Debug, Clone)]
 pub struct HashRing {
     vnodes_per_node: usize,
     nodes: BTreeSet<String>,
     ring: Vec<VirtualNode>,
+    /// br-asupersync-rnybb1: per-ring hash salt. Mixed into every
+    /// `vnode_hash` and `hash_value` call so that an attacker who
+    /// reverse-engineers the FNV-1a algorithm cannot pre-compute
+    /// colliding keys without ALSO knowing this seed. Production
+    /// rings should source it from `OsEntropy::next_u64()` at
+    /// construction time; tests / lab use a fixed value.
+    seed: u64,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -23,14 +41,45 @@ struct VirtualNode {
 }
 
 impl HashRing {
-    /// Create a new hash ring with the given number of virtual nodes per node.
+    /// Create a new hash ring with the given number of virtual nodes
+    /// per node and an explicit hash salt.
+    ///
+    /// br-asupersync-rnybb1: `seed` SHOULD be unique per deployment
+    /// (e.g., sourced from [`crate::util::OsEntropy::next_u64`] at
+    /// startup) so that an attacker cannot pre-compute keys that
+    /// collide on a known seed. Tests, lab runs, and any caller that
+    /// requires byte-for-byte ring reproducibility should pass a
+    /// fixed seed (e.g., `0`) — the security gate is only meaningful
+    /// when keys are attacker-influenced.
     #[must_use]
-    pub fn new(vnodes_per_node: usize) -> Self {
+    pub fn new(vnodes_per_node: usize, seed: u64) -> Self {
         Self {
             vnodes_per_node,
             nodes: BTreeSet::new(),
             ring: Vec::new(),
+            seed,
         }
+    }
+
+    /// Construct a HashRing seeded from OS entropy. Equivalent to
+    /// `HashRing::new(vnodes_per_node, OsEntropy.next_u64())`.
+    /// Production-grade default for new rings; tests should use
+    /// `HashRing::new(vnodes_per_node, fixed_seed)` for determinism.
+    ///
+    /// br-asupersync-rnybb1.
+    #[must_use]
+    pub fn with_os_entropy(vnodes_per_node: usize) -> Self {
+        use crate::util::EntropySource;
+        let seed = crate::util::OsEntropy.next_u64();
+        Self::new(vnodes_per_node, seed)
+    }
+
+    /// Returns the hash salt used by this ring. Exposed for diagnostics
+    /// and replay-stability assertions; do not log this value
+    /// alongside attacker-influenced keys.
+    #[must_use]
+    pub fn seed(&self) -> u64 {
+        self.seed
     }
 
     /// Returns the number of registered nodes.
@@ -64,7 +113,7 @@ impl HashRing {
         }
 
         for vnode in 0..self.vnodes_per_node {
-            let hash = vnode_hash(&node_id, vnode as u32);
+            let hash = vnode_hash(self.seed, &node_id, vnode as u32);
             self.ring.push(VirtualNode {
                 hash,
                 node_id: node_id.clone(),
@@ -97,7 +146,7 @@ impl HashRing {
         if self.ring.is_empty() {
             return None;
         }
-        let key_hash = hash_value(key);
+        let key_hash = hash_value(self.seed, key);
         let idx = self.ring.partition_point(|vn| vn.hash < key_hash);
         let idx = if idx == self.ring.len() { 0 } else { idx };
         Some(self.ring[idx].node_id.as_str())
@@ -109,15 +158,24 @@ impl HashRing {
     }
 }
 
-fn vnode_hash(node_id: &str, vnode: u32) -> u64 {
+/// br-asupersync-rnybb1: salted vnode placement hash. The `seed` is
+/// hashed FIRST so that two HashRings with different seeds produce
+/// disjoint vnode placements even for identical (node_id, vnode)
+/// inputs. This defeats pre-computed collision attacks against the
+/// known FNV-1a default seed.
+fn vnode_hash(seed: u64, node_id: &str, vnode: u32) -> u64 {
     let mut hasher = DetHasher::default();
+    seed.hash(&mut hasher);
     node_id.hash(&mut hasher);
     vnode.hash(&mut hasher);
     hasher.finish()
 }
 
-fn hash_value<T: Hash>(value: &T) -> u64 {
+/// br-asupersync-rnybb1: salted key hash. Mirrors `vnode_hash` so
+/// that key-to-vnode mapping uses the same salt domain.
+fn hash_value<T: Hash>(seed: u64, value: &T) -> u64 {
     let mut hasher = DetHasher::default();
+    seed.hash(&mut hasher);
     value.hash(&mut hasher);
     hasher.finish()
 }
@@ -135,7 +193,10 @@ mod tests {
     use super::*;
 
     fn build_ring(node_count: usize, vnodes_per_node: usize) -> HashRing {
-        let mut ring = HashRing::new(vnodes_per_node);
+        // br-asupersync-rnybb1: tests use a fixed seed (0) for
+        // deterministic ring placement; production callers should use
+        // `HashRing::with_os_entropy` instead.
+        let mut ring = HashRing::new(vnodes_per_node, 0);
         for i in 0..node_count {
             ring.add_node(format!("node-{i}"));
         }
@@ -172,7 +233,7 @@ mod tests {
 
     #[test]
     fn key_lookup_returns_expected_node() {
-        let mut ring = HashRing::new(8);
+        let mut ring = HashRing::new(8, 0);
         assert!(ring.node_for_key(&"alpha").is_none());
         ring.add_node("a");
         ring.add_node("b");
@@ -293,7 +354,7 @@ mod tests {
 
     #[test]
     fn zero_vnodes_yields_empty_ring() {
-        let mut ring = HashRing::new(0);
+        let mut ring = HashRing::new(0, 0);
         ring.add_node("a");
         assert_eq!(ring.vnode_count(), 0);
         assert!(ring.node_for_key(&"key").is_none());
@@ -303,7 +364,7 @@ mod tests {
     /// vnode_count must not change on the second add.
     #[test]
     fn duplicate_add_node_is_idempotent() {
-        let mut ring = HashRing::new(16);
+        let mut ring = HashRing::new(16, 0);
         assert!(ring.add_node("a"));
         assert_eq!(ring.node_count(), 1);
         assert_eq!(ring.vnode_count(), 16);
@@ -318,7 +379,7 @@ mod tests {
     /// where node_for_key returns None.
     #[test]
     fn single_node_add_remove_leaves_empty_ring() {
-        let mut ring = HashRing::new(8);
+        let mut ring = HashRing::new(8, 0);
         ring.add_node("only-node");
         assert_eq!(ring.node_count(), 1);
         assert!(ring.node_for_key(&42u64).is_some());
@@ -338,7 +399,7 @@ mod tests {
     #[test]
     fn deterministic_assignment_across_builds() {
         let build = || {
-            let mut ring = HashRing::new(32);
+            let mut ring = HashRing::new(32, 0);
             for name in &["alpha", "beta", "gamma"] {
                 ring.add_node(*name);
             }
@@ -370,7 +431,7 @@ mod tests {
         ];
 
         let assignments_for = |order: &[&str; 4]| {
-            let mut ring = HashRing::new(32);
+            let mut ring = HashRing::new(32, 0);
             for node in order {
                 assert!(ring.add_node(*node), "duplicate node in MR fixture");
             }
@@ -392,7 +453,7 @@ mod tests {
 
     #[test]
     fn nodes_iterator_is_sorted() {
-        let mut ring = HashRing::new(8);
+        let mut ring = HashRing::new(8, 0);
         ring.add_node("node-z");
         ring.add_node("node-a");
         ring.add_node("node-m");

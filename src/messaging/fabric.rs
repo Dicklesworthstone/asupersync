@@ -1019,10 +1019,12 @@ impl DecisionContract for StaticActionDecisionContract {
             });
         }
         if observation >= self.states.len() {
-            return Err(franken_decision::UpdatePosteriorError::ObservationOutOfRange {
-                observation,
-                state_count: self.states.len(),
-            });
+            return Err(
+                franken_decision::UpdatePosteriorError::ObservationOutOfRange {
+                    observation,
+                    state_count: self.states.len(),
+                },
+            );
         }
         let mut likelihoods = vec![0.1; self.states.len()];
         likelihoods[observation] = 0.9;
@@ -3378,7 +3380,10 @@ impl PlacementPolicy {
             .max(self.target_steward_count(temperature))
             .min(eligible.len());
 
-        let mut ring = HashRing::new(self.vnodes_per_node.max(1));
+        // br-asupersync-rnybb1: use OS-entropy-seeded ring so the
+        // load-pinning DoS surface (attacker computes keys colliding
+        // on the publicly-known FNV-1a default seed) is closed.
+        let mut ring = HashRing::with_os_entropy(self.vnodes_per_node.max(1));
         let mut by_node = BTreeMap::new();
         for candidate in &eligible {
             let key = candidate.node_id.as_str().to_string();

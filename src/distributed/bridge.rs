@@ -552,8 +552,7 @@ impl RegionBridge {
                     sync_timeout: max_lag,
                     ..Default::default()
                 };
-                let distributed =
-                    DistributedRegionRecord::new(id, dist_config, parent, budget);
+                let distributed = DistributedRegionRecord::new(id, dist_config, parent, budget);
                 Self {
                     local: RegionRecord::new(id, parent, budget),
                     distributed: Some(distributed),
@@ -870,6 +869,42 @@ impl RegionBridge {
         // `last_applied_inbound_sequence` only.
         if snapshot.sequence <= self.sync_state.last_applied_inbound_sequence {
             return Ok(());
+        }
+
+        // br-asupersync-yppplg: GAP DETECTION. Pre-fix the gate above
+        // accepted ANY snapshot.sequence that exceeded
+        // `last_applied_inbound_sequence`, including arbitrarily
+        // large gaps. That left a replay-attack surface: an attacker
+        // who captured a legitimate snapshot frame at sequence=N
+        // (e.g., from a long-running peer) could replay it against a
+        // victim peer whose state was at sequence=K << N, and the
+        // victim would silently jump to N — skipping every
+        // intermediate state and accepting whatever the captured
+        // snapshot encoded as if every intermediate snapshot had
+        // been processed.
+        //
+        // The fix: enforce strict in-order delivery by rejecting any
+        // snapshot whose sequence is more than 1 ahead of the
+        // already-applied watermark. Cross-cluster reordering may
+        // momentarily deliver out-of-order frames, but those should
+        // be re-fetched / re-delivered in order rather than
+        // accepted with a gap. Callers that observe this error
+        // should re-sync from a known-good ancestor (or from
+        // sequence 0 for a fresh peer).
+        let expected_sequence = self
+            .sync_state
+            .last_applied_inbound_sequence
+            .saturating_add(1);
+        if snapshot.sequence > expected_sequence {
+            return Err(Error::new(ErrorKind::CoordinationFailed).with_message(format!(
+                "snapshot sequence gap: expected {expected_sequence}, got {} \
+                 (gap of {} frames); resync required",
+                snapshot.sequence,
+                snapshot
+                    .sequence
+                    .saturating_sub(expected_sequence)
+                    .saturating_add(1),
+            )));
         }
 
         // Reconstruct Budget

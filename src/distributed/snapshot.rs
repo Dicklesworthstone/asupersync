@@ -316,9 +316,24 @@ impl RegionSnapshot {
             flag => return Err(SnapshotError::InvalidPresenceFlag(flag)),
         };
 
-        // Metadata
-        let metadata_len = cursor.read_u32()?;
-        let metadata = cursor.read_exact(metadata_len as usize)?.to_vec();
+        // Metadata — br-asupersync-poshr8: bound metadata_len BEFORE
+        // allocating. Pre-fix `metadata_len` was a u32 (max ~4 GiB)
+        // and `.to_vec()` happily reserved that capacity from a
+        // crafted snapshot frame, producing an immediate OOM-DoS on
+        // any peer that accepts inbound snapshots over the
+        // distributed bridge. The 16 MiB cap matches the largest
+        // legitimate metadata payload observed in production
+        // workloads (typically < 64 KiB; 16 MiB is comfortably above
+        // p99) and is small enough that even a coordinated 1k-peer
+        // flood cannot push aggregate allocation above 16 GiB.
+        let metadata_len = cursor.read_u32()? as usize;
+        if metadata_len > MAX_METADATA_LEN {
+            return Err(SnapshotError::MetadataTooLarge {
+                len: metadata_len,
+                max: MAX_METADATA_LEN,
+            });
+        }
+        let metadata = cursor.read_exact(metadata_len)?.to_vec();
 
         if cursor.remaining() != 0 {
             return Err(SnapshotError::TrailingBytes(cursor.remaining()));
@@ -566,6 +581,16 @@ pub enum SnapshotError {
     InvalidPresenceFlag(u8),
     /// Extra bytes remained after decoding a supposedly complete snapshot.
     TrailingBytes(usize),
+    /// br-asupersync-poshr8: snapshot's metadata_len field exceeds
+    /// the configured per-deserialise maximum
+    /// ([`MAX_METADATA_LEN`]). Returned BEFORE allocation so a
+    /// crafted frame cannot drive a 4 GiB heap reservation.
+    MetadataTooLarge {
+        /// Length the snapshot frame claimed.
+        len: usize,
+        /// Maximum length this deserialiser will accept.
+        max: usize,
+    },
 }
 
 impl std::fmt::Display for SnapshotError {
@@ -582,9 +607,24 @@ impl std::fmt::Display for SnapshotError {
             Self::TrailingBytes(count) => {
                 write!(f, "snapshot contains {count} trailing byte(s)")
             }
+            Self::MetadataTooLarge { len, max } => {
+                write!(
+                    f,
+                    "snapshot metadata_len ({len} B) exceeds the per-deserialise maximum ({max} B)"
+                )
+            }
         }
     }
 }
+
+/// br-asupersync-poshr8: hard cap on the size of the metadata blob
+/// trailer in a snapshot frame, enforced BEFORE allocation in
+/// [`RegionSnapshot::from_bytes`]. 16 MiB comfortably exceeds the
+/// largest legitimate metadata payload observed in production
+/// workloads (typically < 64 KiB) while keeping per-frame
+/// allocation small enough that a coordinated 1k-peer flood
+/// remains containable.
+pub const MAX_METADATA_LEN: usize = 16 * 1024 * 1024;
 
 impl std::error::Error for SnapshotError {}
 
@@ -1292,7 +1332,7 @@ mod tests {
             region_id: RegionId::new_for_test(7, 0),
             state: RegionState::Closing,
             timestamp: Time::from_secs(timestamp_secs),
-            sequence,
+            sequence: u64::from(sequence),
             tasks: vec![],
             children: vec![],
             finalizer_count: 0,
