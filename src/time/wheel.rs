@@ -494,6 +494,9 @@ impl TimerWheel {
                 deadline = current.saturating_add_nanos(self.max_timer_duration_ns);
             }
         }
+        // br-asupersync-ifq7c5: We already have `current`, but `try_register`
+        // would call it again. Since we know the deadline is now validated
+        // (clamped above), we call `insert_validated` directly.
         self.insert_validated(deadline, waker)
     }
 
@@ -506,7 +509,6 @@ impl TimerWheel {
         deadline: Time,
         waker: Waker,
     ) -> Result<TimerHandle, TimerDurationExceeded> {
-        // Validate duration against configured maximum
         let current = self.current_time();
         if deadline > current {
             let duration_ns = deadline.as_nanos().saturating_sub(current.as_nanos());
