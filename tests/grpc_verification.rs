@@ -1508,7 +1508,10 @@ fn grpc_verify_047_reflection_registry_core_flow() {
     let reflection = ReflectionService::new();
     reflection.register_descriptor(&DESC);
 
-    let services = reflection.list_services();
+    // br-asupersync-3tzd9v: list_services now returns Result<...> so the
+    // optional auth callback can reject. With no callback installed
+    // (default), it always Oks.
+    let services = reflection.list_services().expect("default = no auth, no rejection");
     assert_eq!(services, vec!["pkg.Echo".to_string()]);
 
     let service = reflection

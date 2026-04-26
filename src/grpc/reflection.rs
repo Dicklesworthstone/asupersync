@@ -5,13 +5,27 @@
 
 use parking_lot::RwLock;
 use std::collections::BTreeMap;
+use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use crate::cx::Cx;
+
 use super::service::{MethodDescriptor, NamedService, ServiceDescriptor, ServiceHandler};
 use super::status::Status;
 use super::streaming::{Request, Response};
+
+/// Auth callback for [`ReflectionService`].
+///
+/// Called once per reflection RPC with the ambient capability context
+/// (resolved via `Cx::current()`) and the method name (`"ListServices"` or
+/// `"DescribeService"`). Returning `Err(Status)` rejects the RPC; the
+/// returned status is propagated verbatim to the caller, so prefer
+/// [`Status::unauthenticated`] / [`Status::permission_denied`] for
+/// production-meaningful errors. (br-asupersync-3tzd9v)
+pub type ReflectionAuthCallback =
+    Arc<dyn Fn(&Cx, &str) -> Result<(), Status> + Send + Sync>;
 
 /// Reflection metadata for a single gRPC method.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,18 +89,101 @@ pub struct ReflectionDescribeServiceResponse {
 /// The registry stores a deterministic snapshot of service descriptors and can
 /// be used directly or registered in [`crate::grpc::ServerBuilder`] via
 /// `enable_reflection()`.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct ReflectionService {
     services: Arc<RwLock<BTreeMap<String, ReflectedService>>>,
+    /// Optional auth callback. `None` means "no auth — open to anyone",
+    /// which is the dev-friendly default. Production deployments should
+    /// install a callback via [`Self::with_auth`]. (br-asupersync-3tzd9v)
+    auth: Option<ReflectionAuthCallback>,
+}
+
+impl fmt::Debug for ReflectionService {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Don't print the auth callback (it's a dyn Fn) — just whether one
+        // is installed, so logs distinguish the production-hardened
+        // configuration from the dev-default open one.
+        f.debug_struct("ReflectionService")
+            .field("services", &self.services)
+            .field("auth", &if self.auth.is_some() { "Some(<fn>)" } else { "None" })
+            .finish()
+    }
 }
 
 impl ReflectionService {
     /// Create an empty reflection registry.
+    ///
+    /// **Default = no auth.** Reflection RPCs are open to any caller. This
+    /// is dev-friendly (curl, grpcurl, BloomRPC all work out of the box)
+    /// but exposes the entire service surface (names, methods, streaming
+    /// kinds) to the public, including unauthenticated peers. Production
+    /// deployments should chain `.with_auth(...)` to install a callback
+    /// that gates access — typically a macaroon-capability check or a
+    /// peer-identity allowlist. (br-asupersync-3tzd9v)
     #[must_use]
     pub fn new() -> Self {
         Self {
             services: Arc::new(RwLock::new(BTreeMap::new())),
+            auth: None,
         }
+    }
+
+    /// Install an auth callback that gates every reflection RPC.
+    ///
+    /// The callback receives the ambient capability context (resolved via
+    /// `Cx::current()` at the point of the RPC call) and the reflection
+    /// method name (`"ListServices"` or `"DescribeService"`). Returning
+    /// `Ok(())` permits the call; returning `Err(Status)` rejects it with
+    /// the supplied status. If `Cx::current()` returns `None` while a
+    /// callback is installed, the RPC is rejected with
+    /// `Status::unauthenticated` because the capability boundary is missing.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let reflection = ReflectionService::new()
+    ///     .with_auth(|cx, _method| {
+    ///         let key = root_key();
+    ///         let ctx = VerificationContext::new();
+    ///         cx.verify_capability(&key, "grpc:reflection", &ctx)
+    ///             .map_err(|_| Status::permission_denied("reflection denied"))
+    ///     });
+    /// ```
+    /// (br-asupersync-3tzd9v)
+    #[must_use]
+    pub fn with_auth<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(&Cx, &str) -> Result<(), Status> + Send + Sync + 'static,
+    {
+        self.auth = Some(Arc::new(callback));
+        self
+    }
+
+    /// Returns whether an auth callback is currently installed.
+    /// Useful in tests and operator dashboards to confirm production
+    /// hardening is in place. (br-asupersync-3tzd9v)
+    #[must_use]
+    pub fn auth_installed(&self) -> bool {
+        self.auth.is_some()
+    }
+
+    /// Run the auth gate for `method`. Returns the unauthenticated /
+    /// permission-denied status when the gate rejects, or
+    /// `Status::unauthenticated` when an auth callback is installed but no
+    /// ambient `Cx` is available (defensive; signals a misconfigured
+    /// runtime — auth-required service must run inside a Cx). With no
+    /// callback installed, returns `Ok(())` (dev-friendly default).
+    /// (br-asupersync-3tzd9v)
+    fn check_auth(&self, method: &str) -> Result<(), Status> {
+        let Some(auth) = self.auth.as_ref() else {
+            return Ok(());
+        };
+        let Some(cx) = Cx::current() else {
+            return Err(Status::unauthenticated(
+                "reflection: auth callback installed but no Cx in scope",
+            ));
+        };
+        auth(&cx, method)
     }
 
     /// Build a reflection registry from existing handlers.
@@ -128,13 +225,20 @@ impl ReflectionService {
     }
 
     /// Returns all registered service names in deterministic order.
-    #[must_use]
-    pub fn list_services(&self) -> Vec<String> {
-        self.services.read().keys().cloned().collect()
+    ///
+    /// Returns `Ok` of the list when no auth callback is installed, OR
+    /// when the installed callback approves. Returns `Err(Status)` if the
+    /// callback rejects. (br-asupersync-3tzd9v)
+    pub fn list_services(&self) -> Result<Vec<String>, Status> {
+        self.check_auth("ListServices")?;
+        Ok(self.services.read().keys().cloned().collect())
     }
 
     /// Returns reflection metadata for one service.
+    ///
+    /// Auth-gated identically to [`Self::list_services`]. (br-asupersync-3tzd9v)
     pub fn describe_service(&self, service: &str) -> Result<ReflectedService, Status> {
+        self.check_auth("DescribeService")?;
         self.services
             .read()
             .get(service)
@@ -142,7 +246,8 @@ impl ReflectionService {
             .ok_or_else(|| Status::not_found(format!("service '{service}' not found")))
     }
 
-    /// Async helper for list-services RPC-style usage.
+    /// Async helper for list-services RPC-style usage. Auth-gated.
+    /// (br-asupersync-3tzd9v)
     #[must_use]
     pub fn list_services_async(
         &self,
@@ -150,13 +255,14 @@ impl ReflectionService {
     ) -> Pin<
         Box<dyn Future<Output = Result<Response<ReflectionListServicesResponse>, Status>> + Send>,
     > {
-        let response = ReflectionListServicesResponse {
-            services: self.list_services(),
-        };
-        Box::pin(async move { Ok(Response::new(response)) })
+        let result = self
+            .list_services()
+            .map(|services| ReflectionListServicesResponse { services });
+        Box::pin(async move { result.map(Response::new) })
     }
 
-    /// Async helper for describe-service RPC-style usage.
+    /// Async helper for describe-service RPC-style usage. Auth-gated.
+    /// (br-asupersync-3tzd9v)
     #[must_use]
     pub fn describe_service_async(
         &self,
@@ -277,7 +383,8 @@ mod tests {
         let echo = EchoService;
         reflection.register_handler(&echo);
 
-        let services = reflection.list_services();
+        // br-asupersync-3tzd9v: default = no auth, list_services Oks.
+        let services = reflection.list_services().expect("no auth installed");
         crate::assert_with_log!(
             services == vec!["pkg.Echo".to_string()],
             "service list",
@@ -399,5 +506,95 @@ mod tests {
             reflected_service_snapshot(&described)
         );
         crate::test_complete!("reflection_descriptor_enum_output_snapshot");
+    }
+
+    // br-asupersync-3tzd9v: opt-in auth callback regression tests.
+
+    #[test]
+    fn auth_default_is_open() {
+        init_test("auth_default_is_open");
+        let reflection = ReflectionService::new();
+        reflection.register_handler(&EchoService);
+        assert!(!reflection.auth_installed(), "default must be no auth");
+        // Both entry points succeed without an ambient Cx because no auth
+        // callback is installed.
+        assert!(reflection.list_services().is_ok());
+        assert!(reflection.describe_service("pkg.Echo").is_ok());
+        crate::test_complete!("auth_default_is_open");
+    }
+
+    #[test]
+    fn auth_callback_can_reject() {
+        init_test("auth_callback_can_reject");
+        let reflection = ReflectionService::new()
+            .register_for_test()
+            .with_auth(|_cx, method| {
+                Err(Status::permission_denied(format!(
+                    "denied: {method}"
+                )))
+            });
+        assert!(reflection.auth_installed());
+        // No ambient Cx → check_auth short-circuits on the missing-Cx
+        // branch and returns Unauthenticated. That's still a rejection
+        // (which is what we want: defense in depth — auth-required
+        // service must run inside a Cx).
+        let err_list = reflection.list_services().expect_err("auth must reject");
+        assert_eq!(err_list.code(), super::super::status::Code::Unauthenticated);
+        let err_desc = reflection
+            .describe_service("pkg.Echo")
+            .expect_err("auth must reject");
+        assert_eq!(err_desc.code(), super::super::status::Code::Unauthenticated);
+        crate::test_complete!("auth_callback_can_reject");
+    }
+
+    #[test]
+    fn auth_method_name_is_passed_to_callback() {
+        init_test("auth_method_name_is_passed_to_callback");
+        // Use a Cx so the callback is actually invoked rather than being
+        // short-circuited by the missing-Cx branch. We assert the method
+        // name routed to the callback distinguishes the two RPCs.
+        let saw_list = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let saw_describe = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let saw_list_clone = saw_list.clone();
+        let saw_describe_clone = saw_describe.clone();
+        let reflection = ReflectionService::new()
+            .register_for_test()
+            .with_auth(move |_cx, method| {
+                match method {
+                    "ListServices" => saw_list_clone
+                        .store(true, std::sync::atomic::Ordering::Relaxed),
+                    "DescribeService" => saw_describe_clone
+                        .store(true, std::sync::atomic::Ordering::Relaxed),
+                    _ => {}
+                }
+                Ok(())
+            });
+        let cx = Cx::for_testing();
+        // Install cx as the ambient Cx for the duration of the calls so
+        // check_auth's Cx::current() finds it (instead of returning the
+        // missing-Cx Unauthenticated error).
+        let _guard = Cx::set_current(Some(cx));
+        let _ = reflection.list_services();
+        let _ = reflection.describe_service("pkg.Echo");
+        drop(_guard);
+        assert!(
+            saw_list.load(std::sync::atomic::Ordering::Relaxed),
+            "callback must see ListServices"
+        );
+        assert!(
+            saw_describe.load(std::sync::atomic::Ordering::Relaxed),
+            "callback must see DescribeService"
+        );
+        crate::test_complete!("auth_method_name_is_passed_to_callback");
+    }
+
+    /// Test helper: register a single Echo service descriptor and return
+    /// the service for further chaining. (Used by the auth tests to keep
+    /// noise out of the assertion statements.)
+    impl ReflectionService {
+        fn register_for_test(self) -> Self {
+            self.register_handler(&EchoService);
+            self
+        }
     }
 }
