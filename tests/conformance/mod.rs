@@ -39,6 +39,7 @@ pub mod h2_priority;
 pub mod h2_rst_stream_ping_rfc9113;
 pub mod h2_settings;
 pub mod h2_settings_flow_continuation;
+pub mod h2_must_reject_vectors;
 pub mod h2_stream_state;
 pub mod h2_window_update;
 pub mod hpack_table_size;
