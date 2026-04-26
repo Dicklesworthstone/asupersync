@@ -14,6 +14,8 @@ use rustls::ServerConfig;
 use rustls::ServerConnection;
 
 #[cfg(feature = "tls")]
+use std::collections::BTreeMap;
+#[cfg(feature = "tls")]
 use std::future::poll_fn;
 use std::path::Path;
 use std::sync::Arc;
@@ -38,6 +40,21 @@ pub struct TlsAcceptor {
     config: Arc<ServerConfig>,
     handshake_timeout: Option<std::time::Duration>,
     alpn_required: bool,
+    /// br-asupersync-vu10zb — when true, `accept()` requires the
+    /// client's ClientHello to carry an SNI extension. SNI-less
+    /// connections fail the handshake before any application bytes
+    /// flow. Multi-tenant servers MUST set this so a probing
+    /// attacker cannot reach the default-cert tenant.
+    require_sni: bool,
+    /// br-asupersync-i4n46s — optional per-SNI ALPN allow-list. When
+    /// `Some`, after the handshake `accept()` checks that the
+    /// negotiated ALPN protocol is in the allow-list for the
+    /// observed SNI hostname. A SNI hostname not present in the map
+    /// (case-insensitive) fails the handshake (strict allow-list
+    /// semantics — silent accept of an unknown tenant is the bug
+    /// this fix exists to close).
+    #[cfg(feature = "tls")]
+    sni_alpn_allow_list: Option<Arc<BTreeMap<String, Vec<Vec<u8>>>>>,
     #[cfg(not(feature = "tls"))]
     _marker: std::marker::PhantomData<()>,
 }
@@ -50,6 +67,8 @@ impl TlsAcceptor {
             config: Arc::new(config),
             handshake_timeout: None,
             alpn_required: false,
+            require_sni: false,
+            sni_alpn_allow_list: None,
         }
     }
 
@@ -124,6 +143,55 @@ impl TlsAcceptor {
             }
         }
 
+        // br-asupersync-vu10zb — require SNI when configured. Multi-
+        // tenant servers MUST reject SNI-less connections so the
+        // default-cert tenant is not reachable via probing.
+        if self.require_sni && stream.sni_hostname().is_none() {
+            return Err(TlsError::Configuration(
+                "client did not send SNI but require_sni() is set".into(),
+            ));
+        }
+
+        // br-asupersync-i4n46s — SNI/ALPN consistency check. When the
+        // operator has configured a per-SNI ALPN allow-list, the
+        // negotiated ALPN MUST be one of the protocols allowed for
+        // the observed SNI hostname. Without this check, a
+        // multi-tenant server that routes by ALPN OR by SNI but
+        // trusts the other dimension to constrain the choice can be
+        // bypassed (cross-protocol smuggling per RFC 7301 §5).
+        if let Some(allow_list) = &self.sni_alpn_allow_list {
+            let sni = stream.sni_hostname().map(str::to_ascii_lowercase);
+            let alpn = stream.alpn_protocol().map(<[u8]>::to_vec);
+            // SNI absent: require_sni() is the orthogonal gate; if
+            // the operator opted into a SNI/ALPN map without also
+            // requiring SNI, treat absence as a config error.
+            let Some(sni) = sni else {
+                return Err(TlsError::Configuration(
+                    "sni_alpn_allow_list configured but client sent no SNI \
+                     (also call require_sni() to make this explicit)"
+                        .into(),
+                ));
+            };
+            match allow_list.get(&sni) {
+                None => {
+                    return Err(TlsError::Configuration(format!(
+                        "SNI hostname {sni:?} is not in the configured \
+                         sni_alpn_allow_list"
+                    )));
+                }
+                Some(allowed) => {
+                    let alpn_ref = alpn.as_deref();
+                    let ok = alpn_ref.is_some_and(|p| allowed.iter().any(|a| a.as_slice() == p));
+                    if !ok {
+                        return Err(TlsError::AlpnNegotiationFailed {
+                            expected: allowed.clone(),
+                            negotiated: alpn,
+                        });
+                    }
+                }
+            }
+        }
+
         Ok(stream)
     }
 
@@ -193,6 +261,22 @@ pub struct TlsAcceptorBuilder {
     /// idempotency / anti-replay layer at the application level
     /// because TLS 1.3 0-RTT is by-spec replay-vulnerable.
     early_data_max_bytes: u32,
+    /// br-asupersync-vu10zb — when `true`, `build()`-produced
+    /// acceptors reject SNI-less ClientHellos. See
+    /// [`Self::require_sni`].
+    require_sni: bool,
+    /// br-asupersync-i4n46s — per-SNI ALPN allow-list. See
+    /// [`Self::sni_alpn_allow_list`].
+    #[cfg(feature = "tls")]
+    sni_alpn_allow_list: Option<BTreeMap<String, Vec<Vec<u8>>>>,
+    /// br-asupersync-58ixk6 — when `true`, `build()` rejects
+    /// certificate chains of length < 2 (i.e., a leaf with no
+    /// accompanying intermediates). The default is permissive
+    /// because tests routinely use single self-signed certs; set
+    /// this in production deployments to force the operator to
+    /// supply the full chain that pinning libraries downstream
+    /// expect.
+    require_full_chain: bool,
 }
 
 impl TlsAcceptorBuilder {
@@ -215,7 +299,74 @@ impl TlsAcceptorBuilder {
             // `enable_early_data(...)` — see that method's doc for
             // the replay-attack tradeoff.
             early_data_max_bytes: 0,
+            // br-asupersync-vu10zb: SNI-less connections are accepted
+            // by default for backward compat; multi-tenant servers
+            // MUST opt into `require_sni()`.
+            require_sni: false,
+            #[cfg(feature = "tls")]
+            sni_alpn_allow_list: None,
+            // br-asupersync-58ixk6: permissive default for testing
+            // workflows that use single self-signed certs.
+            require_full_chain: false,
         }
+    }
+
+    /// br-asupersync-vu10zb — require that incoming ClientHello
+    /// messages carry the SNI extension. Connections that omit SNI
+    /// are rejected after the rustls handshake completes (so the
+    /// connection state is fully established before
+    /// fail-closed) — necessary in multi-tenant deployments where
+    /// SNI is the disambiguation primitive for which tenant's
+    /// certificate / configuration applies. Without `require_sni()`
+    /// a probing attacker reaches the default-cert tenant.
+    #[must_use]
+    pub fn require_sni(mut self) -> Self {
+        self.require_sni = true;
+        self
+    }
+
+    /// br-asupersync-i4n46s — set a per-SNI ALPN allow-list. After
+    /// the handshake, the negotiated ALPN protocol must be one of
+    /// the protocols allowed for the observed SNI hostname (case-
+    /// insensitive lookup). A SNI hostname not present in the map
+    /// fails the handshake (strict allow-list semantics).
+    ///
+    /// Pass an empty map to clear a previously-configured allow-list.
+    /// Combine with [`Self::require_sni`] to also reject SNI-less
+    /// connections (recommended — without `require_sni`, a SNI-less
+    /// ClientHello yields a configuration error rather than silently
+    /// passing). Pair with [`Self::require_alpn`] to also reject
+    /// peers that omit ALPN entirely.
+    ///
+    /// Closes the cross-protocol smuggling vector where a multi-
+    /// tenant server that routes by ALPN OR by SNI but trusts the
+    /// other dimension to constrain the choice could be bypassed
+    /// (RFC 7301 §5).
+    #[cfg(feature = "tls")]
+    #[must_use]
+    pub fn sni_alpn_allow_list(mut self, allow_list: BTreeMap<String, Vec<Vec<u8>>>) -> Self {
+        let normalised: BTreeMap<String, Vec<Vec<u8>>> = allow_list
+            .into_iter()
+            .map(|(k, v)| (k.to_ascii_lowercase(), v))
+            .collect();
+        self.sni_alpn_allow_list = if normalised.is_empty() {
+            None
+        } else {
+            Some(normalised)
+        };
+        self
+    }
+
+    /// br-asupersync-58ixk6 — require a full certificate chain
+    /// (leaf + at least one intermediate). When set, `build()`
+    /// rejects single-cert chains. Production deployments where
+    /// downstream pinning libraries expect the leaf + intermediates
+    /// MUST set this; the default is permissive because test
+    /// fixtures routinely use single self-signed certs.
+    #[must_use]
+    pub fn require_full_chain(mut self) -> Self {
+        self.require_full_chain = true;
+        self
     }
 
     /// **DANGEROUS**: enable TLS 1.3 0-RTT (early data) on this acceptor.
@@ -419,6 +570,42 @@ impl TlsAcceptorBuilder {
             ));
         }
 
+        // br-asupersync-58ixk6 — reject empty cert chains and, when
+        // require_full_chain is set, single-cert chains. rustls's
+        // `with_single_cert` will not surface either condition as a
+        // typed error reliably enough for downstream callers, so we
+        // surface the misconfiguration here before any handshake
+        // attempt.
+        if self.cert_chain.is_empty() {
+            return Err(TlsError::Configuration(
+                "with_single_cert called with empty certificate chain".into(),
+            ));
+        }
+        if self.require_full_chain && self.cert_chain.len() < 2 {
+            return Err(TlsError::Configuration(format!(
+                "require_full_chain set but certificate chain has only {} cert(s); \
+                 expected leaf plus at least one intermediate",
+                self.cert_chain.len()
+            )));
+        }
+
+        // br-asupersync-i4n46s — sanity-check that any per-SNI ALPN
+        // allow-list aligns with the configured `alpn_protocols`.
+        // If the operator provides an allow-list whose protocols are
+        // not advertised, no client can ever satisfy the gate.
+        if let Some(allow_list) = self.sni_alpn_allow_list.as_ref() {
+            for (sni, allowed) in allow_list {
+                for protocol in allowed {
+                    if !self.alpn_protocols.iter().any(|p| p == protocol) {
+                        return Err(TlsError::Configuration(format!(
+                            "sni_alpn_allow_list entry {sni:?} permits ALPN \
+                             protocol {protocol:?} that is not in alpn_protocols"
+                        )));
+                    }
+                }
+            }
+        }
+
         // Create the config builder with the crypto provider and
         // protocol-version filtering. br-asupersync-q5i0bz: mirrors the
         // connector's range-filter pattern so operators can pin a
@@ -530,6 +717,8 @@ impl TlsAcceptorBuilder {
             config: Arc::new(config),
             handshake_timeout: self.handshake_timeout,
             alpn_required: self.alpn_required,
+            require_sni: self.require_sni,
+            sni_alpn_allow_list: self.sni_alpn_allow_list.map(Arc::new),
         })
     }
 
@@ -1469,6 +1658,109 @@ SrXuVI5uunTgPWuOtJOP+KM=
         assert_eq!(
             acceptor.config.max_early_data_size, 0,
             "disable_early_data must reset max_early_data_size=0"
+        );
+    }
+
+    /// br-asupersync-58ixk6 — empty cert chain rejected by build().
+    #[cfg(feature = "tls")]
+    #[test]
+    fn build_rejects_empty_cert_chain() {
+        let chain: CertificateChain = Vec::<Certificate>::new().into();
+        let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+        let err = TlsAcceptorBuilder::new(chain, key)
+            .build()
+            .expect_err("empty cert chain must be rejected");
+        match err {
+            TlsError::Configuration(msg) => assert!(
+                msg.contains("empty certificate chain"),
+                "unexpected error message: {msg}"
+            ),
+            other => panic!("expected Configuration error, got {other:?}"),
+        }
+    }
+
+    /// br-asupersync-58ixk6 — require_full_chain rejects single-cert
+    /// chains (the most common pinning misconfiguration).
+    #[cfg(feature = "tls")]
+    #[test]
+    fn build_with_require_full_chain_rejects_single_cert() {
+        let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+        let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+        let err = TlsAcceptorBuilder::new(chain, key)
+            .require_full_chain()
+            .build()
+            .expect_err("single-cert chain with require_full_chain must be rejected");
+        match err {
+            TlsError::Configuration(msg) => assert!(
+                msg.contains("require_full_chain"),
+                "unexpected error message: {msg}"
+            ),
+            other => panic!("expected Configuration error, got {other:?}"),
+        }
+    }
+
+    /// br-asupersync-vu10zb — `require_sni()` flips the corresponding
+    /// builder flag and propagates to the produced acceptor.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn require_sni_propagates_to_acceptor() {
+        let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+        let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+        let acceptor = TlsAcceptorBuilder::new(chain, key)
+            .require_sni()
+            .build()
+            .expect("build should succeed");
+        assert!(
+            acceptor.require_sni,
+            "require_sni() must flip the acceptor's flag"
+        );
+    }
+
+    /// br-asupersync-i4n46s — sni_alpn_allow_list whose protocols are
+    /// not advertised must be rejected at build() rather than
+    /// silently failing every connection.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn build_rejects_sni_alpn_allow_list_without_advertised_protocol() {
+        let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+        let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+        let mut allow = std::collections::BTreeMap::new();
+        allow.insert("api.example.com".to_string(), vec![b"h2".to_vec()]);
+        let err = TlsAcceptorBuilder::new(chain, key)
+            .alpn_protocols_required(vec![b"http/1.1".to_vec()])
+            .sni_alpn_allow_list(allow)
+            .build()
+            .expect_err("allow-list with non-advertised protocol must be rejected");
+        match err {
+            TlsError::Configuration(msg) => assert!(
+                msg.contains("not in alpn_protocols"),
+                "unexpected error message: {msg}"
+            ),
+            other => panic!("expected Configuration error, got {other:?}"),
+        }
+    }
+
+    /// br-asupersync-i4n46s — sni_alpn_allow_list with consistent
+    /// protocols builds successfully and propagates to the acceptor.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn build_accepts_sni_alpn_allow_list_consistent_with_protocols() {
+        let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+        let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+        let mut allow = std::collections::BTreeMap::new();
+        allow.insert("Api.Example.Com".to_string(), vec![b"h2".to_vec()]);
+        let acceptor = TlsAcceptorBuilder::new(chain, key)
+            .alpn_protocols_required(vec![b"h2".to_vec(), b"http/1.1".to_vec()])
+            .sni_alpn_allow_list(allow)
+            .build()
+            .expect("build should succeed");
+        let list = acceptor
+            .sni_alpn_allow_list
+            .as_ref()
+            .expect("allow-list must propagate");
+        assert!(
+            list.contains_key("api.example.com"),
+            "allow-list keys must be normalised to lowercase"
         );
     }
 }

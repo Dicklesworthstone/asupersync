@@ -245,6 +245,23 @@ pub struct TlsConnectorBuilder {
     /// and prevents accidental replay-vulnerable 0-RTT). See
     /// [`Self::enable_early_data`] for the explicit opt-in.
     early_data_enabled: bool,
+    /// br-asupersync-h41wya — operator acknowledgement that combining
+    /// session resumption with 0-RTT exposes the application to
+    /// replay attacks on the early-data payload. When `false`,
+    /// `build()` rejects the combination of `early_data_enabled =
+    /// true` + non-disabled session resumption so a misconfiguration
+    /// cannot ship by accident. The operator must call
+    /// [`Self::acknowledge_zero_rtt_replay_risk`] to opt in,
+    /// signalling that the application layer enforces idempotency
+    /// for every request that could carry early data.
+    acknowledge_zero_rtt_replay_risk: bool,
+    /// br-asupersync-sx6j9y — when `true`, `add_root_certificate` and
+    /// `add_root_certificates` apply the same `BasicConstraints
+    /// CA:TRUE` gate that `enable_env_cert_loading` uses, instead of
+    /// admitting any cert into the trust store. Set via
+    /// [`Self::with_strict_ca_validation`]; automatically set as a
+    /// side effect of [`Self::enable_env_cert_loading`].
+    validate_ca_constraints: bool,
 }
 
 impl TlsConnectorBuilder {
@@ -276,6 +293,17 @@ impl TlsConnectorBuilder {
             // br-asupersync-y0gm5q: secure-by-default. 0-RTT off
             // until the operator opts in via enable_early_data(true).
             early_data_enabled: false,
+            // br-asupersync-h41wya: 0-RTT replay risk is unacknowledged
+            // by default; build() rejects 0-RTT + resumption until the
+            // operator calls acknowledge_zero_rtt_replay_risk().
+            acknowledge_zero_rtt_replay_risk: false,
+            // br-asupersync-sx6j9y: BasicConstraints CA:TRUE gate is
+            // off by default for backward compat (tests use self-
+            // signed leaf certs as roots). Production callers should
+            // chain with_strict_ca_validation(); enable_env_cert_loading
+            // also sets it as a side effect because env-loaded certs
+            // are unconditionally CA-gated by br-asupersync-0owoem.
+            validate_ca_constraints: false,
         }
     }
 
@@ -383,6 +411,52 @@ impl TlsConnectorBuilder {
     #[must_use]
     pub fn enable_env_cert_loading(mut self) -> Self {
         self.enable_env_certs = true;
+        // br-asupersync-sx6j9y — env-loaded certs are unconditionally
+        // CA-gated (br-asupersync-0owoem). Mirror that gate to all
+        // other root-cert insertion paths so the operator who opted
+        // into env-cert loading also gets the same protection on
+        // direct add_root_certificate / add_root_certificates calls.
+        self.validate_ca_constraints = true;
+        self
+    }
+
+    /// br-asupersync-sx6j9y — turn on the `BasicConstraints CA:TRUE`
+    /// gate for all root-cert insertion paths. With this flag set,
+    /// `add_root_certificate` and `add_root_certificates` skip any
+    /// cert that does not assert `cA=TRUE`. Without it, the gate is
+    /// applied only to env-loaded certs (the legacy behavior),
+    /// leaving direct `add_root_certificate(<leaf>)` as a silent
+    /// trust bypass — exactly the failure mode this method exists to
+    /// close. Set as a side effect of
+    /// [`Self::enable_env_cert_loading`]. Production callers SHOULD
+    /// set this explicitly. Use
+    /// [`Self::insecure_add_root_certificate`] for the rare cases
+    /// where you intentionally want a non-CA cert in the trust
+    /// store (e.g., pinning a self-signed test cert in a sandbox).
+    #[must_use]
+    pub fn with_strict_ca_validation(mut self) -> Self {
+        self.validate_ca_constraints = true;
+        self
+    }
+
+    /// br-asupersync-h41wya — explicitly acknowledge the 0-RTT
+    /// (early data) replay-attack risk. TLS 1.3 0-RTT is by-spec
+    /// replay-vulnerable (RFC 8446 §8): an attacker who captures the
+    /// early-data wire bytes can replay them to the same server
+    /// within the resumption ticket window, and rustls's in-memory
+    /// session store provides no anti-replay window. The application
+    /// layer MUST enforce idempotency for every request that could
+    /// carry early data (idempotency keys, per-request nonces, or
+    /// restriction of 0-RTT to safe HTTP methods).
+    ///
+    /// `build()` rejects the combination of `enable_early_data(true)`
+    /// + non-disabled session resumption when this acknowledgement
+    /// has not been made — preventing a misconfiguration from
+    /// shipping silently. Call this only after wiring up the
+    /// application-level idempotency layer.
+    #[must_use]
+    pub fn acknowledge_zero_rtt_replay_risk(mut self) -> Self {
+        self.acknowledge_zero_rtt_replay_risk = true;
         self
     }
 
@@ -558,7 +632,24 @@ impl TlsConnectorBuilder {
     }
 
     /// Add a single root certificate.
+    ///
+    /// br-asupersync-sx6j9y — when [`Self::with_strict_ca_validation`]
+    /// is set (or has been set as a side effect of
+    /// [`Self::enable_env_cert_loading`]), the cert is gated by the
+    /// `BasicConstraints CA:TRUE` predicate. A cert without that
+    /// extension — most commonly a self-signed leaf — is rejected
+    /// (logged at warn) and **not** inserted. This closes the
+    /// silent-trust-bypass vector where a misconfigured operator
+    /// adds their own server's leaf cert to the trust store.
+    ///
+    /// Use [`Self::insecure_add_root_certificate`] to bypass the
+    /// gate when you intentionally want a non-CA cert in the trust
+    /// store (rare; only legitimate for pinning a self-signed test
+    /// cert in a sandbox).
     pub fn add_root_certificate(mut self, cert: &Certificate) -> Self {
+        if !self.admit_root_certificate(cert) {
+            return self;
+        }
         if let Err(e) = self.root_certs.add(cert) {
             #[cfg(feature = "tracing-integration")]
             tracing::warn!(error = %e, "Failed to add root certificate");
@@ -568,8 +659,15 @@ impl TlsConnectorBuilder {
     }
 
     /// Add multiple root certificates.
+    ///
+    /// br-asupersync-sx6j9y — each cert is independently gated; see
+    /// the doc on [`Self::add_root_certificate`] for the gate
+    /// semantics.
     pub fn add_root_certificates(mut self, certs: impl IntoIterator<Item = Certificate>) -> Self {
         for cert in certs {
+            if !self.admit_root_certificate(&cert) {
+                continue;
+            }
             if let Err(e) = self.root_certs.add(&cert) {
                 #[cfg(feature = "tracing-integration")]
                 tracing::warn!(error = %e, "Failed to add root certificate");
@@ -577,6 +675,56 @@ impl TlsConnectorBuilder {
             }
         }
         self
+    }
+
+    /// br-asupersync-sx6j9y — bypass the `BasicConstraints CA:TRUE`
+    /// gate and insert the cert into the trust store unconditionally.
+    /// Reserved for the rare cases where a non-CA cert is
+    /// intentionally trusted as a root (e.g., pinning a self-signed
+    /// test cert in a sandbox). Logs a warning so the deviation is
+    /// visible in production logs.
+    pub fn insecure_add_root_certificate(mut self, cert: &Certificate) -> Self {
+        #[cfg(feature = "tracing-integration")]
+        tracing::warn!(
+            "TLS: insecure_add_root_certificate called — \
+             BasicConstraints CA:TRUE gate bypassed (br-asupersync-sx6j9y)"
+        );
+        if let Err(e) = self.root_certs.add(cert) {
+            #[cfg(feature = "tracing-integration")]
+            tracing::warn!(error = %e, "Failed to add root certificate");
+            let _ = e;
+        }
+        self
+    }
+
+    /// br-asupersync-sx6j9y — apply the strict-CA gate when the
+    /// builder has opted in. Returns `true` to admit the cert,
+    /// `false` to reject it. Always emits a warn-level log on
+    /// rejection so a silent trust bypass cannot occur even when
+    /// the gate fires invisibly.
+    #[cfg(feature = "tls")]
+    fn admit_root_certificate(&self, cert: &Certificate) -> bool {
+        if !self.validate_ca_constraints {
+            return true;
+        }
+        let der = cert.as_der();
+        if is_ca_certificate(der) {
+            return true;
+        }
+        #[cfg(feature = "tracing-integration")]
+        tracing::warn!(
+            "TLS: rejecting non-CA cert from add_root_certificate / \
+             add_root_certificates — basicConstraints CA:TRUE missing or \
+             absent (br-asupersync-sx6j9y; with_strict_ca_validation is on)"
+        );
+        false
+    }
+
+    /// Stub for the `tls`-disabled build — strict-CA gate is a no-op
+    /// because there is no x509 parser available.
+    #[cfg(not(feature = "tls"))]
+    fn admit_root_certificate(&self, _cert: &Certificate) -> bool {
+        true
     }
 
     /// Set client certificate for mutual TLS (mTLS).
@@ -801,6 +949,27 @@ impl TlsConnectorBuilder {
             return Err(TlsError::Certificate(
                 "no root certificates configured — server certificates cannot be verified"
                     .to_string(),
+            ));
+        }
+
+        // br-asupersync-h41wya — fail-closed on the silent
+        // 0-RTT-replay misconfiguration. Combining session
+        // resumption (client default: in-memory store of 256
+        // sessions) with TLS 1.3 0-RTT exposes the application to
+        // replay attacks on the early-data payload (RFC 8446 §8).
+        // The operator must explicitly acknowledge the risk by
+        // calling acknowledge_zero_rtt_replay_risk(); otherwise
+        // build() rejects the combination so it cannot ship by
+        // accident.
+        if self.early_data_enabled && !self.acknowledge_zero_rtt_replay_risk {
+            return Err(TlsError::Configuration(
+                "enable_early_data(true) requires \
+                 acknowledge_zero_rtt_replay_risk() — TLS 1.3 0-RTT is replay-vulnerable \
+                 by spec (RFC 8446 §8) and rustls's in-memory session store provides \
+                 no anti-replay window. Wire up application-level idempotency for every \
+                 request that could carry early data, then call \
+                 acknowledge_zero_rtt_replay_risk() to confirm"
+                    .into(),
             ));
         }
 
@@ -1489,6 +1658,96 @@ mod tests {
         assert!(
             !connector.config.enable_early_data,
             "enable_early_data(false) must reset enable_early_data flag"
+        );
+    }
+
+    /// br-asupersync-h41wya — `enable_early_data(true)` without
+    /// `acknowledge_zero_rtt_replay_risk()` MUST cause `build()` to
+    /// return a Configuration error.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn build_rejects_zero_rtt_without_risk_acknowledgement() {
+        let certs = Certificate::from_pem(TEST_CERT_PEM).unwrap();
+        let err = TlsConnectorBuilder::new()
+            .insecure_add_root_certificate(&certs[0])
+            .enable_early_data(true)
+            .build()
+            .expect_err("0-RTT without risk ack must be rejected");
+        match err {
+            TlsError::Configuration(msg) => assert!(
+                msg.contains("acknowledge_zero_rtt_replay_risk"),
+                "unexpected error message: {msg}"
+            ),
+            other => panic!("expected Configuration error, got {other:?}"),
+        }
+    }
+
+    /// br-asupersync-h41wya — once acknowledged, 0-RTT enables
+    /// successfully on the produced connector.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn build_accepts_zero_rtt_with_risk_acknowledgement() {
+        let certs = Certificate::from_pem(TEST_CERT_PEM).unwrap();
+        let connector = TlsConnectorBuilder::new()
+            .insecure_add_root_certificate(&certs[0])
+            .enable_early_data(true)
+            .acknowledge_zero_rtt_replay_risk()
+            .build()
+            .expect("build should succeed once risk is acknowledged");
+        assert!(
+            connector.config.enable_early_data,
+            "0-RTT must be enabled when both flags are set"
+        );
+    }
+
+    /// br-asupersync-sx6j9y — `with_strict_ca_validation` rejects a
+    /// non-CA leaf cert from `add_root_certificate`. Without the
+    /// flag, the same cert is accepted (legacy behavior preserved).
+    #[cfg(feature = "tls")]
+    #[test]
+    fn add_root_certificate_strict_ca_rejects_self_signed_leaf() {
+        let leaf_certs = Certificate::from_pem(TEST_CERT_PEM).unwrap();
+        let leaf = leaf_certs.into_iter().next().unwrap();
+
+        // Strict mode: rejected.
+        let strict = TlsConnectorBuilder::new()
+            .with_strict_ca_validation()
+            .add_root_certificate(&leaf);
+        assert!(
+            strict.root_certs.is_empty(),
+            "strict-CA mode must reject the self-signed leaf"
+        );
+
+        // Permissive default: accepted (legacy).
+        let permissive = TlsConnectorBuilder::new().add_root_certificate(&leaf);
+        assert_eq!(
+            permissive.root_certs.len(),
+            1,
+            "permissive default must still accept the cert"
+        );
+
+        // Insecure bypass: accepted even in strict mode.
+        let bypassed = TlsConnectorBuilder::new()
+            .with_strict_ca_validation()
+            .insecure_add_root_certificate(&leaf);
+        assert_eq!(
+            bypassed.root_certs.len(),
+            1,
+            "insecure_add_root_certificate must bypass the strict gate"
+        );
+    }
+
+    /// br-asupersync-sx6j9y — `enable_env_cert_loading` flips the
+    /// strict-CA gate as a side effect, so the operator who opts
+    /// into env-cert loading does NOT silently leave the direct
+    /// add_root_certificate path ungated.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn enable_env_cert_loading_implies_strict_ca_validation() {
+        let builder = TlsConnectorBuilder::new().enable_env_cert_loading();
+        assert!(
+            builder.validate_ca_constraints,
+            "enable_env_cert_loading must set validate_ca_constraints=true"
         );
     }
 }
