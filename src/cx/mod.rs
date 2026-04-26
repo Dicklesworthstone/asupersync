@@ -49,7 +49,9 @@ pub use cap::{
     SubsetOf,
 };
 pub use cx::{Cx, SpanGuard};
-pub use macaroon::{CaveatPredicate, MacaroonToken, VerificationContext, VerificationError};
+pub use macaroon::{
+    CaveatPredicate, MacaroonKeyRing, MacaroonToken, VerificationContext, VerificationError,
+};
 pub use registry::{
     NameLease, NameLeaseError, NameRegistry, RegistryCap, RegistryEvent, RegistryHandle,
 };

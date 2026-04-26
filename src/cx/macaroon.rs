@@ -424,6 +424,82 @@ impl fmt::Debug for MacaroonSignature {
 }
 
 // ---------------------------------------------------------------------------
+// MacaroonKeyRing — overlap window for signature rotation (br-asupersync-bp985e)
+// ---------------------------------------------------------------------------
+
+/// Two-slot [`MacaroonSignature`] holder enabling zero-downtime signature
+/// rotation. Mirror of [`crate::security::KeyRing`] for the macaroon-binding
+/// path: when a token's binding signature is rotated (e.g., after a discharge
+/// re-issuance) the prior signature stays acceptable for an operator-defined
+/// overlap window so in-flight tokens carrying the old binding still verify.
+///
+/// Operational lifecycle:
+///
+/// 1. `MacaroonKeyRing::new(active)` — only the new signature is accepted.
+/// 2. `ring.rotate(new_sig)` — prior signature moves to the retired slot.
+/// 3. `ring.retire()` — discard the retired slot once in-flight tokens have
+///    drained.
+///
+/// [`verify`](Self::verify) compares the candidate against the active slot
+/// first via constant-time equality (inherited from
+/// [`MacaroonSignature::PartialEq`]); if that fails and a retired signature
+/// is present, it compares against the retired slot. The active-first
+/// ordering keeps the steady-state cost at one comparison.
+#[derive(Clone, Debug)]
+pub struct MacaroonKeyRing {
+    /// The currently-active binding signature. New tokens MUST bind under
+    /// this signature; verification tries it first.
+    pub active: MacaroonSignature,
+    /// The previously-active binding signature, retained to validate
+    /// in-flight tokens issued before the most recent rotation. `None`
+    /// outside a rotation window.
+    pub retired: Option<MacaroonSignature>,
+}
+
+impl MacaroonKeyRing {
+    /// Construct a fresh ring with `active` as the only signature.
+    #[must_use]
+    pub fn new(active: MacaroonSignature) -> Self {
+        Self {
+            active,
+            retired: None,
+        }
+    }
+
+    /// Rotate the ring: the prior active signature moves to the retired
+    /// slot, and `new` becomes active. Any signature already in the retired
+    /// slot is overwritten.
+    pub fn rotate(&mut self, new: MacaroonSignature) {
+        let prior = std::mem::replace(&mut self.active, new);
+        self.retired = Some(prior);
+    }
+
+    /// End the rotation window by discarding the retired signature.
+    /// Idempotent.
+    pub fn retire(&mut self) {
+        self.retired = None;
+    }
+
+    /// Verify a candidate signature against the active slot first, then the
+    /// retired slot if present. Returns `true` if EITHER slot matches the
+    /// candidate in constant time.
+    ///
+    /// Constant-time comparison is inherited from [`MacaroonSignature`]'s
+    /// `PartialEq` impl, which XORs the full 32 bytes regardless of the
+    /// position of the first differing byte.
+    #[must_use]
+    pub fn verify(&self, candidate: &MacaroonSignature) -> bool {
+        if self.active == *candidate {
+            return true;
+        }
+        match &self.retired {
+            Some(retired) => retired == candidate,
+            None => false,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // MacaroonToken
 // ---------------------------------------------------------------------------
 
@@ -1390,6 +1466,43 @@ mod tests {
 
     fn test_root_key() -> AuthKey {
         AuthKey::from_seed(42)
+    }
+
+    // --- MacaroonKeyRing — br-asupersync-bp985e ---
+
+    #[test]
+    fn macaroon_ring_new_only_active_verifies() {
+        let active = MacaroonSignature::from_bytes([0xAAu8; 32]);
+        let ring = MacaroonKeyRing::new(active);
+        assert!(ring.verify(&active));
+        let other = MacaroonSignature::from_bytes([0xBBu8; 32]);
+        assert!(!ring.verify(&other));
+        assert!(ring.retired.is_none());
+    }
+
+    #[test]
+    fn macaroon_ring_rotate_accepts_old_and_new() {
+        let old = MacaroonSignature::from_bytes([0xAAu8; 32]);
+        let new = MacaroonSignature::from_bytes([0xBBu8; 32]);
+        let mut ring = MacaroonKeyRing::new(old);
+        ring.rotate(new);
+        assert!(ring.verify(&old), "retired signature must still verify");
+        assert!(ring.verify(&new), "active signature must verify");
+        assert_eq!(ring.active, new);
+        assert_eq!(ring.retired, Some(old));
+    }
+
+    #[test]
+    fn macaroon_ring_retire_drops_retired_slot() {
+        let old = MacaroonSignature::from_bytes([0x11u8; 32]);
+        let new = MacaroonSignature::from_bytes([0x22u8; 32]);
+        let mut ring = MacaroonKeyRing::new(old);
+        ring.rotate(new);
+        ring.retire();
+        assert!(!ring.verify(&old));
+        assert!(ring.verify(&new));
+        ring.retire(); // idempotent
+        assert!(ring.retired.is_none());
     }
 
     // --- Minting and verification ---

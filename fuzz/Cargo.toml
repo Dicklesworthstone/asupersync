@@ -242,6 +242,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "grpc_protobuf_decode"
+path = "fuzz_targets/grpc_protobuf_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "grpc_server"
 path = "fuzz_targets/grpc_server.rs"
 test = false
