@@ -268,7 +268,21 @@ impl DependencyLaplacian {
         }
 
         // Normalize labels to 0..k-1.
-        let mut label_map = std::collections::HashMap::new();
+        //
+        // br-asupersync-r8pbrn: replay-determinism requires that the
+        // root-to-label mapping iterate in a deterministic order across
+        // runs. Previously this used `std::collections::HashMap`, whose
+        // iteration order is randomised per process via `RandomState`;
+        // any future caller that traversed `label_map` (or any future
+        // refactor that surfaced the mapping) would observe non-stable
+        // ordering. The label-assignment loop here is currently driven
+        // by node-index iteration so labels themselves are stable, but
+        // using `BTreeMap<usize, usize>` (keyed by root node index)
+        // hardens the future-proofing: every insertion+lookup is now
+        // ordered by the deterministic key set, leaving zero ambient-
+        // hashing surface in this routine.
+        let mut label_map: std::collections::BTreeMap<usize, usize> =
+            std::collections::BTreeMap::new();
         let mut labels = vec![0_usize; self.size];
         let mut next_label = 0_usize;
         for (i, label_slot) in labels.iter_mut().enumerate() {
@@ -1471,7 +1485,24 @@ fn spearman_rho(values: &[f64]) -> Option<f64> {
 fn average_rank_f64(values: &[f64]) -> Vec<f64> {
     let n = values.len();
     let mut indexed: Vec<(usize, f64)> = values.iter().copied().enumerate().collect();
-    indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    // br-asupersync-k3aw0l: tiebreak on the original index so the sort
+    // produces a total order even when two values compare Equal under
+    // `partial_cmp`. Without the secondary key, `Vec::sort_by` is not
+    // guaranteed stable across calls (and is explicitly unstable
+    // post-pdqsort), so two replays of the same f64 array could bind
+    // tied values to different (index, value) pairs. Downstream
+    // average-rank assignment then attached different ranks to
+    // identical inputs, breaking replay-determinism for Spearman's
+    // rho, Hoeffding's D, and the spectral-health classifier those
+    // statistics feed. Tied values still receive the SAME averaged
+    // rank (computed below over positions `i..j` of the sorted
+    // window), so this tiebreak only affects the latent ordering
+    // within each tie group — not the rank values themselves.
+    indexed.sort_by(|a, b| {
+        a.1.partial_cmp(&b.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.cmp(&b.0))
+    });
 
     let mut ranks = vec![0.0_f64; n];
     let mut i = 0;
@@ -3551,6 +3582,119 @@ mod tests {
                 (0.0..=1.0).contains(&dc),
                 "pattern {idx}: dCor should be in [0,1], got {dc}"
             );
+        }
+    }
+
+    // ================================================================
+    // br-asupersync-r8pbrn / br-asupersync-k3aw0l
+    // Replay-determinism regression tests
+    // ================================================================
+
+    /// `connected_components` must produce the same `(k, labels)` for
+    /// the same input across repeated calls. Hashed-state leakage
+    /// (e.g. via `std::collections::HashMap`'s RandomState) would
+    /// historically be process-stable within a run but vary across
+    /// processes; replacing the inner `label_map` with `BTreeMap`
+    /// removes that surface entirely. We exercise the function many
+    /// times in-process and assert byte-identical results.
+    #[test]
+    fn connected_components_is_deterministic_within_run() {
+        // Two clusters: {0,1,2,3} and {4,5,6,7} with no bridge so we
+        // exercise the multi-component label-assignment path.
+        let edges = [(0, 1), (1, 2), (2, 3), (4, 5), (5, 6), (6, 7)];
+        let lap = DependencyLaplacian::new(8, &edges);
+
+        let (k, labels) = lap.connected_components();
+        for _ in 0..16 {
+            let (k2, labels2) = lap.connected_components();
+            assert_eq!(k, k2, "component count must be stable across calls");
+            assert_eq!(
+                labels, labels2,
+                "component labels must be stable across calls"
+            );
+        }
+    }
+
+    /// `connected_components` must assign labels in node-index order
+    /// of first encounter. With the BTreeMap-backed label_map and the
+    /// existing `for i in 0..size` loop, the first node visited is
+    /// always 0, so its component (whatever the union-find root is)
+    /// gets label 0. Likewise the next previously-unseen component
+    /// gets label 1, etc. We assert this invariant directly.
+    #[test]
+    fn connected_components_labels_are_node_index_first_encounter_order() {
+        let edges = [(0, 1), (2, 3), (4, 5)];
+        let lap = DependencyLaplacian::new(6, &edges);
+        let (k, labels) = lap.connected_components();
+        assert_eq!(k, 3);
+        // Nodes 0 and 1 share a component → label 0.
+        assert_eq!(labels[0], 0);
+        assert_eq!(labels[1], 0);
+        // Nodes 2 and 3 share the second component → label 1.
+        assert_eq!(labels[2], 1);
+        assert_eq!(labels[3], 1);
+        // Nodes 4 and 5 share the third → label 2.
+        assert_eq!(labels[4], 2);
+        assert_eq!(labels[5], 2);
+    }
+
+    /// `average_rank_f64` must produce identical rank vectors across
+    /// repeated calls with the same input, even when ties are
+    /// present. With the index tiebreak on the sort, the ordering
+    /// inside tie groups is fully determined; without it, pdqsort's
+    /// internal heuristics could rearrange ties differently between
+    /// calls (especially after pattern-detection branches).
+    #[test]
+    fn average_rank_f64_is_deterministic_under_ties() {
+        // Many tied values forcing the comparator into the Equal
+        // branch repeatedly.
+        let values = vec![1.0, 1.0, 2.0, 1.0, 3.0, 2.0, 1.0, 3.0, 2.0, 1.0];
+        let r1 = average_rank_f64(&values);
+        for _ in 0..16 {
+            let r2 = average_rank_f64(&values);
+            assert_eq!(r1, r2, "ranks must be stable across repeated calls");
+        }
+    }
+
+    /// `average_rank_f64`'s tiebreak must NOT change the actual rank
+    /// values for tie groups — tied entries still get the average
+    /// midrank. Verify by computing ranks on a known input with two
+    /// clear tie groups and asserting the assigned ranks match the
+    /// midrank formula exactly.
+    #[test]
+    fn average_rank_f64_assigns_midrank_to_tie_groups() {
+        // values: [10.0, 20.0, 20.0, 30.0]
+        // sorted positions: 10 -> rank 1, two 20s tie at ranks 2 & 3
+        // (avg = 2.5), 30 -> rank 4.
+        let values = vec![10.0_f64, 20.0, 20.0, 30.0];
+        let ranks = average_rank_f64(&values);
+        assert_eq!(ranks[0], 1.0);
+        assert!((ranks[1] - 2.5).abs() < f64::EPSILON);
+        assert!((ranks[2] - 2.5).abs() < f64::EPSILON);
+        assert_eq!(ranks[3], 4.0);
+    }
+
+    /// Three-way tie at the start: positions 1, 2, 3 in sorted order
+    /// each get rank (1+2+3)/3 = 2.0 (using the (i+1+j)/2 midrank
+    /// formula in the code: i=0, j=3 -> (1+3)/2 = 2.0).
+    #[test]
+    fn average_rank_f64_handles_three_way_tie() {
+        let values = vec![5.0_f64, 5.0, 5.0, 99.0];
+        let ranks = average_rank_f64(&values);
+        assert_eq!(ranks[0], 2.0);
+        assert_eq!(ranks[1], 2.0);
+        assert_eq!(ranks[2], 2.0);
+        assert_eq!(ranks[3], 4.0);
+    }
+
+    /// All-equal input: every entry gets the same average rank
+    /// (n+1)/2.
+    #[test]
+    fn average_rank_f64_all_equal_input() {
+        let values = vec![7.0_f64; 5];
+        let ranks = average_rank_f64(&values);
+        for &r in &ranks {
+            assert_eq!(r, 3.0); // (1+5)/2 = 3.0
         }
     }
 }
