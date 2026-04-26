@@ -59,6 +59,31 @@ test = false
 doc = false
 bench = false
 
+# br-asupersync (testing-fuzzing rotation 2026-04-26) — drives arbitrary
+# 32-byte inputs through AuthKey::from_bytes (q3terg entropy validator).
+# Cross-checks the validator's accept/reject decision against hand-computed
+# distinct-byte and Hamming-weight metrics; verifies determinism, round-trip
+# via as_bytes, and subkey-derivation no-panic on accepted keys.
+[[bin]]
+name = "security_key_entropy_validation"
+path = "fuzz_targets/security_key_entropy_validation.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync (testing-fuzzing rotation 2026-04-26) — exercises the
+# zeroize-on-drop SecretString (r2l1ze + y3he7v). Asserts: UTF-8 round-trip
+# via as_str/as_bytes; Debug always renders <redacted> with no plaintext
+# leak; PartialEq is reflexive + symmetric + matches byte equality;
+# explicit_zeroize is idempotent and leaves is_empty()=true; Drop never
+# panics.
+[[bin]]
+name = "security_secret_string"
+path = "fuzz_targets/security_secret_string.rs"
+test = false
+doc = false
+bench = false
+
 [[bin]]
 name = "fuzz_http1_request"
 path = "fuzz_targets/http1_request.rs"
