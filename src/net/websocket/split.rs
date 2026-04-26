@@ -196,16 +196,33 @@ async fn acquire_write_permit<IO>(
     .await
 }
 
+#[cfg(test)]
 /// Flush the shared write buffer to the underlying I/O.
 async fn flush_write_buf<IO: AsyncWrite + Unpin>(
     shared: &Arc<Mutex<WebSocketShared<IO>>>,
 ) -> Result<(), WsError> {
+    flush_write_buf_with_cx(shared, None).await
+}
+
+fn write_path_cancelled(op_cx: Option<&Cx>, is_open: bool) -> bool {
+    is_open
+        && match op_cx {
+            Some(cx) => cx.checkpoint().is_err(),
+            None => crate::cx::Cx::current().is_some_and(|cx| cx.checkpoint().is_err()),
+        }
+}
+
+async fn flush_write_buf_with_cx<IO: AsyncWrite + Unpin>(
+    shared: &Arc<Mutex<WebSocketShared<IO>>>,
+    op_cx: Option<&Cx>,
+) -> Result<(), WsError> {
     let _permit = acquire_write_permit(shared).await;
-    flush_shared_write_buf_with_permit(shared).await
+    flush_shared_write_buf_with_permit(shared, op_cx).await
 }
 
 async fn flush_shared_write_buf_with_permit<IO: AsyncWrite + Unpin>(
     shared: &Arc<Mutex<WebSocketShared<IO>>>,
+    op_cx: Option<&Cx>,
 ) -> Result<(), WsError> {
     use std::future::poll_fn;
 
@@ -215,7 +232,7 @@ async fn flush_shared_write_buf_with_permit<IO: AsyncWrite + Unpin>(
     } {
         let is_open = shared.lock().close_handshake.is_open();
         let n = poll_fn(|poll_cx| {
-            if is_open && crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            if write_path_cancelled(op_cx, is_open) {
                 return Poll::Ready(Err(std::io::Error::new(
                     std::io::ErrorKind::Interrupted,
                     "cancelled",
@@ -247,7 +264,7 @@ async fn flush_shared_write_buf_with_permit<IO: AsyncWrite + Unpin>(
     // Ensure the underlying I/O stream is flushed
     let is_open = shared.lock().close_handshake.is_open();
     poll_fn(|poll_cx| {
-        if is_open && crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        if write_path_cancelled(op_cx, is_open) {
             return Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
                 "cancelled",
@@ -263,12 +280,13 @@ async fn flush_shared_write_buf_with_permit<IO: AsyncWrite + Unpin>(
 
 async fn write_owned_buf_with_permit<IO: AsyncWrite + Unpin>(
     shared: &Arc<Mutex<WebSocketShared<IO>>>,
+    op_cx: Option<&Cx>,
     buf: &mut BytesMut,
 ) -> Result<(), WsError> {
     use std::future::poll_fn;
 
     let _permit = acquire_write_permit(shared).await;
-    flush_shared_write_buf_with_permit(shared).await?;
+    flush_shared_write_buf_with_permit(shared, op_cx).await?;
 
     if buf.is_empty() {
         return Ok(());
@@ -276,7 +294,7 @@ async fn write_owned_buf_with_permit<IO: AsyncWrite + Unpin>(
 
     let is_open = shared.lock().close_handshake.is_open();
     let n = poll_fn(|poll_cx| {
-        if is_open && crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        if write_path_cancelled(op_cx, is_open) {
             return Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
                 "cancelled",
@@ -301,12 +319,12 @@ async fn write_owned_buf_with_permit<IO: AsyncWrite + Unpin>(
             guard.write_buf.extend_from_slice(&buf[..]);
             buf.clear();
         }
-        return flush_shared_write_buf_with_permit(shared).await;
+        return flush_shared_write_buf_with_permit(shared, op_cx).await;
     }
 
     let is_open = shared.lock().close_handshake.is_open();
     poll_fn(|poll_cx| {
-        if is_open && crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        if write_path_cancelled(op_cx, is_open) {
             return Poll::Ready(Err(std::io::Error::new(
                 std::io::ErrorKind::Interrupted,
                 "cancelled",
@@ -448,7 +466,7 @@ where
             // Flush pending pongs if this call queued them or a prior recv()
             // was cancelled after encoding them but before the flush.
             if flush_pending_pongs {
-                flush_write_buf(&self.shared).await?;
+                flush_write_buf_with_cx(&self.shared, Some(cx)).await?;
                 self.shared.lock().pending_pong_flush = false;
             }
 
@@ -478,7 +496,11 @@ where
 
                         if let Some(response_frame) = response {
                             let send_result = self
-                                .send_frame_internal_with_entropy(&response_frame, cx.entropy())
+                                .send_frame_internal_with_entropy(
+                                    Some(cx),
+                                    &response_frame,
+                                    cx.entropy(),
+                                )
                                 .await;
                             send_result?;
                             self.shared.lock().close_handshake.mark_response_sent();
@@ -593,18 +615,19 @@ where
 
     async fn send_frame_internal_with_entropy(
         &self,
+        op_cx: Option<&Cx>,
         frame: &Frame,
         entropy: &dyn EntropySource,
     ) -> Result<(), WsError> {
         self.encode_frame_with_entropy(frame, entropy)?;
-        flush_write_buf(&self.shared).await
+        flush_write_buf_with_cx(&self.shared, op_cx).await
     }
 
     /// Internal: send a single frame (for control messages like pong/close).
     #[allow(dead_code)] // WebSocket control frame API
     async fn send_frame_internal(&self, frame: &Frame) -> Result<(), WsError> {
         let entropy = { Arc::clone(&self.shared.lock().entropy) };
-        self.send_frame_internal_with_entropy(frame, entropy.as_ref())
+        self.send_frame_internal_with_entropy(None, frame, entropy.as_ref())
             .await
     }
 
@@ -675,19 +698,20 @@ where
 
         if let Message::Close(reason) = msg {
             return self
-                .initiate_close(reason.unwrap_or_else(CloseReason::normal))
+                .initiate_close_with_cx(Some(cx), reason.unwrap_or_else(CloseReason::normal))
                 .await;
         }
 
         let frame = Frame::from(msg);
-        self.send_frame_with_entropy(&frame, cx.entropy()).await
+        self.send_frame_with_entropy(Some(cx), &frame, cx.entropy())
+            .await
     }
 
     /// Initiate a close handshake.
     ///
     /// Sends a close frame. The read half will receive the peer's response.
     pub async fn close(&mut self, reason: CloseReason) -> Result<(), WsError> {
-        Self::initiate_close(self, reason).await
+        self.initiate_close(reason).await
     }
 
     /// Send a ping frame.
@@ -716,18 +740,26 @@ where
 
     /// Internal: initiate close without waiting.
     async fn initiate_close(&self, reason: CloseReason) -> Result<(), WsError> {
+        Self::initiate_close_with_cx(self, None, reason).await
+    }
+
+    async fn initiate_close_with_cx(
+        &self,
+        op_cx: Option<&Cx>,
+        reason: CloseReason,
+    ) -> Result<(), WsError> {
         let close_state = {
             let shared = self.shared.lock();
             shared.close_handshake.state()
         };
         if close_state == CloseState::CloseReceived {
-            flush_write_buf(&self.shared).await?;
+            flush_write_buf_with_cx(&self.shared, op_cx).await?;
             self.shared.lock().close_handshake.mark_response_sent();
             return Ok(());
         }
 
         if close_state == CloseState::CloseSent {
-            flush_write_buf(&self.shared).await?;
+            flush_write_buf_with_cx(&self.shared, op_cx).await?;
             return Ok(());
         }
 
@@ -737,13 +769,24 @@ where
         };
 
         if let Some(f) = frame {
-            self.send_frame(&f).await?;
+            self.send_frame_with_cx(op_cx, &f).await?;
         }
         Ok(())
     }
 
     async fn send_frame_with_entropy(
         &self,
+        op_cx: Option<&Cx>,
+        frame: &Frame,
+        entropy: &dyn EntropySource,
+    ) -> Result<(), WsError> {
+        self.send_frame_with_entropy_impl(op_cx, frame, entropy)
+            .await
+    }
+
+    async fn send_frame_with_entropy_impl(
+        &self,
+        op_cx: Option<&Cx>,
         frame: &Frame,
         entropy: &dyn EntropySource,
     ) -> Result<(), WsError> {
@@ -754,13 +797,18 @@ where
                 .codec
                 .encode_with_entropy(frame, &mut encoded, entropy)?;
         }
-        write_owned_buf_with_permit(&self.shared, &mut encoded).await
+        write_owned_buf_with_permit(&self.shared, op_cx, &mut encoded).await
     }
 
     /// Internal: send a single frame.
     async fn send_frame(&self, frame: &Frame) -> Result<(), WsError> {
+        self.send_frame_with_cx(None, frame).await
+    }
+
+    async fn send_frame_with_cx(&self, op_cx: Option<&Cx>, frame: &Frame) -> Result<(), WsError> {
         let entropy = { Arc::clone(&self.shared.lock().entropy) };
-        self.send_frame_with_entropy(frame, entropy.as_ref()).await
+        self.send_frame_with_entropy_impl(op_cx, frame, entropy.as_ref())
+            .await
     }
 }
 
@@ -1454,6 +1502,51 @@ mod tests {
             cx.checkpoint().is_err(),
             "cancellation must still surface after the mask is released"
         );
+    }
+
+    #[test]
+    fn write_half_send_mid_write_cancel_uses_explicit_cx_without_ambient_current() {
+        future::block_on(async {
+            let ws = WebSocket::from_upgraded(
+                TestIo::new(vec![]).with_pending_first_write(),
+                WebSocketConfig::default(),
+            );
+            let (_read, mut write) = ws.split();
+            let cx = test_cx_with_entropy(Arc::new(FixedEntropy([0x46, 0xD0, 0x1B, 0x0A])));
+            assert!(
+                Cx::current().is_none(),
+                "regression must not rely on ambient Cx::current()"
+            );
+
+            let mut send = Box::pin(write.send(&cx, Message::text("cancelled")));
+            let waker = std::task::Waker::noop().clone();
+            let mut poll_cx = Context::from_waker(&waker);
+
+            assert!(
+                matches!(send.as_mut().poll(&mut poll_cx), Poll::Pending),
+                "first split-send poll should park in the transport write"
+            );
+
+            cx.set_cancel_requested(true);
+            let err = match send.as_mut().poll(&mut poll_cx) {
+                Poll::Ready(Err(err)) => err,
+                other => panic!("expected cancelled split send error, got {other:?}"),
+            };
+
+            assert!(
+                matches!(err, WsError::Io(ref e) if e.kind() == io::ErrorKind::Interrupted),
+                "expected interrupted split send after explicit Cx cancellation, got {err:?}"
+            );
+            let guard = write.shared.lock();
+            assert!(
+                guard.io.written.is_empty(),
+                "cancelled split send must not commit bytes after a pending write"
+            );
+            assert!(
+                guard.write_buf.is_empty(),
+                "cancelled split send must not leave buffered bytes when no write committed"
+            );
+        });
     }
 
     #[test]

@@ -440,12 +440,15 @@ where
 
         if let Message::Close(reason) = msg {
             return self
-                .initiate_close(reason.unwrap_or_else(CloseReason::normal))
+                .initiate_close_with_cx(Some(cx), reason.unwrap_or_else(CloseReason::normal))
                 .await;
         }
 
         let frame = Frame::from(msg);
-        match self.send_frame_with_entropy(&frame, cx.entropy()).await {
+        match self
+            .send_frame_with_entropy_with_cx(Some(cx), &frame, cx.entropy())
+            .await
+        {
             Err(WsError::Io(e))
                 if e.kind() == io::ErrorKind::Interrupted && cx.checkpoint().is_err() =>
             {
@@ -505,7 +508,7 @@ where
             }
 
             if !self.write_buf.is_empty() {
-                match self.flush_write_buf().await {
+                match self.flush_write_buf_with_cx(Some(cx)).await {
                     Ok(()) => {}
                     Err(WsError::Io(e))
                         if e.kind() == io::ErrorKind::Interrupted && cx.checkpoint().is_err() =>
@@ -535,7 +538,7 @@ where
                         if let Some(response) = self.close_handshake.receive_close(&frame)? {
                             let send_result = async {
                                 self.encode_frame_with_entropy(&response, cx.entropy())?;
-                                self.flush_write_buf().await
+                                self.flush_write_buf_with_cx(Some(cx)).await
                             }
                             .await;
                             send_result?;
@@ -583,7 +586,7 @@ where
     ///
     /// Sends a close frame and waits for the peer's response.
     pub async fn close(&mut self, cx: &Cx, reason: CloseReason) -> Result<(), WsError> {
-        self.initiate_close(reason).await?;
+        self.initiate_close_with_cx(Some(cx), reason).await?;
 
         // Wait for close response (with timeout)
         let timeout_duration = self.close_handshake.close_timeout();
@@ -663,7 +666,10 @@ where
         }
 
         let frame = Frame::ping(payload);
-        match self.send_frame_with_entropy(&frame, cx.entropy()).await {
+        match self
+            .send_frame_with_entropy_with_cx(Some(cx), &frame, cx.entropy())
+            .await
+        {
             Err(WsError::Io(e))
                 if e.kind() == io::ErrorKind::Interrupted && cx.checkpoint().is_err() =>
             {
@@ -689,19 +695,27 @@ where
 
     /// Internal: initiate close without waiting.
     async fn initiate_close(&mut self, reason: CloseReason) -> Result<(), WsError> {
+        self.initiate_close_with_cx(None, reason).await
+    }
+
+    async fn initiate_close_with_cx(
+        &mut self,
+        op_cx: Option<&Cx>,
+        reason: CloseReason,
+    ) -> Result<(), WsError> {
         if self.close_handshake.state() == CloseState::CloseReceived {
-            self.flush_write_buf().await?;
+            self.flush_write_buf_with_cx(op_cx).await?;
             self.close_handshake.mark_response_sent();
             return Ok(());
         }
 
         if self.close_handshake.state() == CloseState::CloseSent {
-            self.flush_write_buf().await?;
+            self.flush_write_buf_with_cx(op_cx).await?;
             return Ok(());
         }
 
         if let Some(frame) = self.close_handshake.initiate(reason) {
-            self.send_frame(&frame).await?;
+            self.send_frame_with_cx(op_cx, &frame).await?;
         }
         Ok(())
     }
@@ -726,19 +740,27 @@ where
         Ok(encoded)
     }
 
-    async fn flush_write_buf(&mut self) -> Result<(), WsError> {
+    fn write_path_cancelled(op_cx: Option<&Cx>, is_open: bool) -> bool {
+        is_open
+            && match op_cx {
+                Some(cx) => cx.checkpoint().is_err(),
+                None => crate::cx::Cx::current().is_some_and(|cx| cx.checkpoint().is_err()),
+            }
+    }
+
+    async fn flush_write_buf_with_cx(&mut self, op_cx: Option<&Cx>) -> Result<(), WsError> {
         use std::future::poll_fn;
 
         while !self.write_buf.is_empty() {
             let is_open = self.close_handshake.is_open();
-            let n = poll_fn(|cx| {
-                if is_open && crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            let n = poll_fn(|task_cx| {
+                if Self::write_path_cancelled(op_cx, is_open) {
                     return Poll::Ready(Err(io::Error::new(
                         io::ErrorKind::Interrupted,
                         "cancelled",
                     )));
                 }
-                Pin::new(&mut self.io).poll_write(cx, &self.write_buf[..])
+                Pin::new(&mut self.io).poll_write(task_cx, &self.write_buf[..])
             })
             .await?;
             if n == 0 {
@@ -751,18 +773,22 @@ where
         }
 
         let is_open = self.close_handshake.is_open();
-        poll_fn(|cx| {
-            if is_open && crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        poll_fn(|task_cx| {
+            if Self::write_path_cancelled(op_cx, is_open) {
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
             }
-            Pin::new(&mut self.io).poll_flush(cx)
+            Pin::new(&mut self.io).poll_flush(task_cx)
         })
         .await?;
 
         Ok(())
     }
 
-    async fn write_frame_bytes_to_io(&mut self, buf: &mut BytesMut) -> Result<(), WsError> {
+    async fn write_frame_bytes_to_io_with_cx(
+        &mut self,
+        op_cx: Option<&Cx>,
+        buf: &mut BytesMut,
+    ) -> Result<(), WsError> {
         use std::future::poll_fn;
 
         if buf.is_empty() {
@@ -770,11 +796,11 @@ where
         }
 
         let is_open = self.close_handshake.is_open();
-        let n = poll_fn(|cx| {
-            if is_open && crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        let n = poll_fn(|task_cx| {
+            if Self::write_path_cancelled(op_cx, is_open) {
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
             }
-            Pin::new(&mut self.io).poll_write(cx, &buf[..])
+            Pin::new(&mut self.io).poll_write(task_cx, &buf[..])
         })
         .await?;
         if n == 0 {
@@ -788,37 +814,43 @@ where
         if !buf.is_empty() {
             self.write_buf.extend_from_slice(&buf[..]);
             buf.clear();
-            return self.flush_write_buf().await;
+            return self.flush_write_buf_with_cx(op_cx).await;
         }
 
         let is_open = self.close_handshake.is_open();
-        poll_fn(|cx| {
-            if is_open && crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        poll_fn(|task_cx| {
+            if Self::write_path_cancelled(op_cx, is_open) {
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
             }
-            Pin::new(&mut self.io).poll_flush(cx)
+            Pin::new(&mut self.io).poll_flush(task_cx)
         })
         .await?;
 
         Ok(())
     }
 
-    async fn send_frame_with_entropy(
+    async fn send_frame_with_entropy_with_cx(
         &mut self,
+        op_cx: Option<&Cx>,
         frame: &Frame,
         entropy: &dyn EntropySource,
     ) -> Result<(), WsError> {
         if !self.write_buf.is_empty() {
-            self.flush_write_buf().await?;
+            self.flush_write_buf_with_cx(op_cx).await?;
         }
         let mut encoded = self.encode_frame_bytes_with_entropy(frame, entropy)?;
-        self.write_frame_bytes_to_io(&mut encoded).await
+        self.write_frame_bytes_to_io_with_cx(op_cx, &mut encoded)
+            .await
     }
 
-    /// Internal: send a single frame.
-    async fn send_frame(&mut self, frame: &Frame) -> Result<(), WsError> {
+    async fn send_frame_with_cx(
+        &mut self,
+        op_cx: Option<&Cx>,
+        frame: &Frame,
+    ) -> Result<(), WsError> {
         let entropy = Arc::clone(&self.entropy);
-        self.send_frame_with_entropy(frame, entropy.as_ref()).await
+        self.send_frame_with_entropy_with_cx(op_cx, frame, entropy.as_ref())
+            .await
     }
 
     /// Internal: read more data into buffer.
@@ -2055,6 +2087,50 @@ mod tests {
             cx.checkpoint().is_err(),
             "cancellation must still surface after the mask is released"
         );
+    }
+
+    #[test]
+    fn send_mid_write_cancel_uses_explicit_cx_without_ambient_current() {
+        future::block_on(async {
+            let entropy: Arc<dyn EntropySource> = Arc::new(FixedEntropy([0x12, 0x34, 0x56, 0x78]));
+            let cx = test_cx_with_entropy(entropy);
+            let mut ws = WebSocket::from_upgraded(
+                TestIo::new().with_pending_first_write(),
+                WebSocketConfig::default(),
+            );
+            assert!(
+                Cx::current().is_none(),
+                "regression must not rely on ambient Cx::current()"
+            );
+
+            let mut send = Box::pin(ws.send(&cx, Message::text("cancelled")));
+            let waker = std::task::Waker::noop().clone();
+            let mut poll_cx = std::task::Context::from_waker(&waker);
+
+            assert!(
+                matches!(send.as_mut().poll(&mut poll_cx), Poll::Pending),
+                "first send poll should park in the transport write"
+            );
+
+            cx.set_cancel_requested(true);
+            let err = match send.as_mut().poll(&mut poll_cx) {
+                Poll::Ready(Err(err)) => err,
+                other => panic!("expected cancelled send error, got {other:?}"),
+            };
+
+            assert!(
+                matches!(err, WsError::Io(ref e) if e.kind() == io::ErrorKind::Interrupted),
+                "expected interrupted send after explicit Cx cancellation, got {err:?}"
+            );
+            assert!(
+                ws.io.written.is_empty(),
+                "cancelled client send must not commit bytes after a pending write"
+            );
+            assert!(
+                ws.write_buf.is_empty(),
+                "cancelled client send must not leave buffered bytes when no write committed"
+            );
+        });
     }
 
     #[test]
