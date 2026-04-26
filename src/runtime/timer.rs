@@ -143,21 +143,36 @@ impl TimerHeap {
 
     /// Cancel any pending timer for `task`.
     ///
-    /// br-asupersync-40mcc2: bumps the per-task generation so all
-    /// in-flight heap entries for this task become stale. The entries
-    /// themselves remain in the heap until naturally popped, but they
-    /// will not fire a wakeup. Returns `true` if a timer was active
-    /// (i.e. the task had an entry in `current_gen`); `false`
-    /// otherwise.
+    /// br-asupersync-40mcc2 + br-asupersync-cvn2se/j5srno: bumps the
+    /// per-task generation so all in-flight heap entries for this
+    /// task become stale, AND physically reaps those stale entries
+    /// from the heap. Returns `true` if a timer was active.
+    ///
+    /// Pre-fix the heap was left to lazy deletion — stale entries
+    /// only released their slot when their deadline arrived and
+    /// `pop_expired_into` popped them. For long-deadline timers on
+    /// short-lived tasks (the bead's concrete scenario: task T sets
+    /// `deadline=tomorrow`, runtime processes millions of such
+    /// task-lifecycles) the heap accumulated stale entries
+    /// proportional to total cancel volume. Eager reap turns the
+    /// memory cost into O(N) at cancel-time (where N is the heap
+    /// size, capped by the number of distinct LIVE timers); cancel
+    /// is rare relative to the per-poll heap-touch frequency, so the
+    /// amortised cost is favourable.
+    ///
+    /// `BinaryHeap` does not support O(log n) remove-by-key, so the
+    /// reap is implemented as a predicate retain pass that filters
+    /// out entries for the cancelled task and restores heap order.
     pub fn cancel(&mut self, task: TaskId) -> bool {
         if self.current_gen.remove(&task).is_none() {
             return false;
         }
-        // Note: we deliberately do NOT walk the heap to remove the
-        // stale entry. BinaryHeap doesn't support O(log n) remove-by-
-        // key; lazy deletion is the standard pattern. The entry
-        // stays in the heap (consuming O(1) memory) until its
-        // deadline arrives and pop_expired_into discovers it stale.
+        // br-asupersync-cvn2se/j5srno — eagerly reap the stale heap
+        // entries for this task. Without this, a long-deadline timer
+        // on a short-lived task left a stale entry sitting in the
+        // heap until the deadline arrived; in a long-running runtime
+        // this accumulated proportional to cancel volume.
+        self.heap.retain(|e| e.task != task);
         true
     }
 
@@ -197,7 +212,7 @@ impl TimerHeap {
             let is_live = self
                 .current_gen
                 .get(&entry.task)
-                .map_or(false, |g| *g == entry.generation);
+                .is_some_and(|g| *g == entry.generation);
             if is_live {
                 // Fired — remove the per-task tracking so a later
                 // insert() starts fresh.
@@ -805,6 +820,83 @@ mod tests {
         assert_eq!(
             fired, expected,
             "t1 fires once at its latest, t3 fires once, t2 silenced by cancel"
+        );
+        assert!(heap.is_empty());
+    }
+
+    /// br-asupersync-cvn2se/j5srno — Conformance: cancel BEFORE the
+    /// timer fires must release BOTH the per-task generation entry
+    /// AND any heap entries for the task. Pre-fix the heap entry
+    /// was left to lazy deletion — for long-deadline timers on
+    /// short-lived tasks, the stale entry sat until the deadline
+    /// arrived. Across millions of cancel-without-fire cycles the
+    /// heap accumulated proportional to total cancel volume.
+    #[test]
+    fn cancel_before_fire_releases_both_current_gen_and_heap_entry() {
+        let mut heap = TimerHeap::new();
+        let t = task(7);
+
+        heap.insert(t, Time::from_millis(86_400_000)); // 1 day in the future
+        assert_eq!(heap.live_len(), 1);
+        assert_eq!(heap.len(), 1, "one heap entry post-insert");
+
+        let did_cancel = heap.cancel(t);
+        assert!(did_cancel);
+
+        // Post-fix: cancel reaps the heap entry. live_len AND raw
+        // heap size both drop to 0 — no lazy deletion residue.
+        assert_eq!(heap.live_len(), 0);
+        assert_eq!(
+            heap.len(),
+            0,
+            "br-asupersync-cvn2se/j5srno: heap entry reaped on cancel (no lazy-deletion leak)"
+        );
+        assert!(heap.is_empty());
+    }
+
+    /// br-asupersync-cvn2se/j5srno — Conformance: many distinct
+    /// tasks each insert + cancel without firing. Heap size after
+    /// every (insert, cancel) cycle stays at 0 — proving no leak
+    /// even across high cancel volume.
+    #[test]
+    fn many_cancel_without_fire_does_not_leak() {
+        let mut heap = TimerHeap::new();
+        const N: u32 = 1024;
+        for i in 0..N {
+            let t = task(i + 1);
+            heap.insert(t, Time::from_millis(86_400_000 + u64::from(i)));
+            assert!(heap.cancel(t));
+            assert_eq!(
+                heap.len(),
+                0,
+                "br-asupersync-cvn2se/j5srno: heap must not retain cancelled-before-fire entries (i={i})"
+            );
+        }
+    }
+
+    /// br-asupersync-cvn2se/j5srno — Regression guard: cancel of
+    /// task A must NOT touch heap entries for other tasks.
+    #[test]
+    fn cancel_does_not_disturb_other_tasks_heap_entries() {
+        let mut heap = TimerHeap::new();
+        let a = task(1);
+        let b = task(2);
+        let c = task(3);
+
+        heap.insert(a, Time::from_millis(100));
+        heap.insert(b, Time::from_millis(200));
+        heap.insert(c, Time::from_millis(300));
+        assert_eq!(heap.len(), 3);
+
+        assert!(heap.cancel(b));
+        assert_eq!(heap.len(), 2, "cancel reaps only b's entry; a and c remain");
+
+        let mut fired = heap.pop_expired(Time::from_millis(1000));
+        fired.sort();
+        assert_eq!(
+            fired,
+            vec![a, c],
+            "a and c fire normally; b is gone (cancelled before fire)"
         );
         assert!(heap.is_empty());
     }
