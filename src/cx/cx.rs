@@ -104,6 +104,33 @@ fn wall_clock_now() -> Time {
     crate::time::wall_now()
 }
 
+/// Maximum allowed length of a `task_type` label value. Sized to fit the
+/// dot-separated identifier conventions used by gRPC service names
+/// (`package.Service.Method`) without admitting unbounded user input.
+/// (br-asupersync-9vpwpc)
+const MAX_TASK_TYPE_LEN: usize = 64;
+
+/// Returns true if `s` is a syntactically safe `task_type` label.
+///
+/// A safe value is non-empty, ≤ [`MAX_TASK_TYPE_LEN`] bytes, starts with
+/// an ASCII letter, and contains only ASCII alphanumerics plus the
+/// punctuation `_`, `.`, `-`, `:`. This rejects the high-entropy shapes
+/// typical of PII (UUIDs, base64 tokens, email addresses contain `@`,
+/// user-id-templated formats contain `{}`, etc.) and the whitespace /
+/// control characters that would corrupt OpenTelemetry label exports.
+/// (br-asupersync-9vpwpc)
+pub(crate) fn is_valid_task_type(s: &str) -> bool {
+    if s.is_empty() || s.len() > MAX_TASK_TYPE_LEN {
+        return false;
+    }
+    let mut bytes = s.bytes();
+    let first = bytes.next().expect("checked non-empty above");
+    if !first.is_ascii_alphabetic() {
+        return false;
+    }
+    bytes.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-' | b':'))
+}
+
 #[cfg(unix)]
 fn noop_waker() -> Waker {
     Waker::noop().clone()
@@ -1198,9 +1225,46 @@ impl<Caps> Cx<Caps> {
     ///
     /// This is intended to be called early in task execution to associate
     /// a stable label with the task's behavior profile.
+    ///
+    /// # Policy (br-asupersync-9vpwpc)
+    ///
+    /// `task_type` is exported VERBATIM as an OpenTelemetry label by the
+    /// observability layer (see `src/observability/otel.rs`). To prevent
+    /// cardinality explosion against the metrics backend AND PII leakage
+    /// into telemetry pipelines, the value MUST be a fixed, low-cardinality
+    /// identifier:
+    ///
+    ///   * Length ≤ 64 bytes
+    ///   * Charset: ASCII alphanumeric, `_`, `.`, `-`, `:` only (no
+    ///     whitespace, no high-entropy characters typical of PII like
+    ///     email addresses, UUIDs, or user IDs).
+    ///   * First character: ASCII letter (matches OpenTelemetry naming
+    ///     conventions and rejects formats like `"-leading-dash"`).
+    ///
+    /// Values that violate the policy are SILENTLY DROPPED with a
+    /// `tracing::warn!` log instead of being stored — `set_task_type`'s
+    /// public signature returns `()` so we cannot surface the rejection
+    /// as `Err`. The warn includes a length-truncated preview so the
+    /// developer can find their offending call site without the full
+    /// PII content showing up in production logs again.
     pub fn set_task_type(&self, task_type: impl Into<String>) {
+        let task_type = task_type.into();
+        if !is_valid_task_type(&task_type) {
+            // Truncate the offending value to 16 chars before logging so
+            // we don't replay PII into the same log pipeline we're
+            // trying to protect. This is enough for the developer to
+            // recognise the misuse without echoing user_ids verbatim.
+            let preview: String = task_type.chars().take(16).collect();
+            warn!(
+                rejected_len = task_type.len(),
+                rejected_preview = %preview,
+                "set_task_type: rejected high-cardinality / PII-shaped value \
+                 (br-9vpwpc; must match [A-Za-z][A-Za-z0-9_.:-]{{0,63}})"
+            );
+            return;
+        }
         let mut inner = self.inner.write();
-        inner.task_type = Some(task_type.into());
+        inner.task_type = Some(task_type);
     }
 
     /// Returns the current budget.

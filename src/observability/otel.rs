@@ -980,7 +980,7 @@ impl MetricsProvider for OtelMetrics {
     }
 
     fn deadline_warning(&self, task_type: &str, reason: &'static str, remaining: Duration) {
-        let task_type = task_type.to_string();
+        let task_type = sanitize_task_type_label(task_type);
         let labels = [
             KeyValue::new("task_type", task_type),
             KeyValue::new("reason", reason),
@@ -994,7 +994,7 @@ impl MetricsProvider for OtelMetrics {
     }
 
     fn deadline_violation(&self, task_type: &str, _over_by: Duration) {
-        let task_type = task_type.to_string();
+        let task_type = sanitize_task_type_label(task_type);
         let labels = [KeyValue::new("task_type", task_type)];
         if let Some(filtered) =
             self.check_cardinality("asupersync.deadline.violations_total", &labels)
@@ -1005,7 +1005,7 @@ impl MetricsProvider for OtelMetrics {
 
     fn deadline_remaining(&self, task_type: &str, remaining: Duration) {
         if self.should_sample("asupersync.deadline.remaining_seconds") {
-            let task_type = task_type.to_string();
+            let task_type = sanitize_task_type_label(task_type);
             let labels = [KeyValue::new("task_type", task_type)];
             if let Some(filtered) =
                 self.check_cardinality("asupersync.deadline.remaining_seconds", &labels)
@@ -1018,7 +1018,7 @@ impl MetricsProvider for OtelMetrics {
 
     fn checkpoint_interval(&self, task_type: &str, interval: Duration) {
         if self.should_sample("asupersync.checkpoint.interval_seconds") {
-            let task_type = task_type.to_string();
+            let task_type = sanitize_task_type_label(task_type);
             let labels = [KeyValue::new("task_type", task_type)];
             if let Some(filtered) =
                 self.check_cardinality("asupersync.checkpoint.interval_seconds", &labels)
@@ -1030,7 +1030,7 @@ impl MetricsProvider for OtelMetrics {
     }
 
     fn task_stuck_detected(&self, task_type: &str) {
-        let task_type = task_type.to_string();
+        let task_type = sanitize_task_type_label(task_type);
         let labels = [KeyValue::new("task_type", task_type)];
         if let Some(filtered) =
             self.check_cardinality("asupersync.task.stuck_detected_total", &labels)
@@ -1070,6 +1070,40 @@ const fn outcome_label(outcome: OutcomeKind) -> &'static str {
         OutcomeKind::Err => "err",
         OutcomeKind::Cancelled => "cancelled",
         OutcomeKind::Panicked => "panicked",
+    }
+}
+
+/// Sanitise a `task_type` value before stamping it as an OpenTelemetry
+/// label. Defence-in-depth against the Cx::set_task_type validator
+/// (which is the primary gate); this protects against any code path
+/// that constructs a TaskRecord directly and bypasses set_task_type
+/// (test paths, internal runtime initialisation).
+///
+/// Substitutes the bucketed sentinel `"<invalid>"` for values that
+/// either:
+///   * exceed 64 bytes (cardinality bomb risk), OR
+///   * contain any byte outside `[A-Za-z0-9_.:-]` (PII / control-char
+///     risk — the same charset enforced by `cx::is_valid_task_type`).
+///
+/// Pre-validated values pass through unchanged. The single bucket
+/// `"<invalid>"` keeps cardinality bounded even when many distinct
+/// dirty values are seen.
+/// (br-asupersync-9vpwpc)
+fn sanitize_task_type_label(task_type: &str) -> String {
+    const MAX: usize = 64;
+    const SENTINEL: &str = "<invalid>";
+    if task_type.is_empty() || task_type.len() > MAX {
+        return SENTINEL.to_string();
+    }
+    let mut bytes = task_type.bytes();
+    let first = bytes.next().expect("non-empty checked above");
+    if !first.is_ascii_alphabetic() {
+        return SENTINEL.to_string();
+    }
+    if bytes.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-' | b':')) {
+        task_type.to_string()
+    } else {
+        SENTINEL.to_string()
     }
 }
 
