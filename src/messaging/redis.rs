@@ -3941,4 +3941,135 @@ mod tests {
 
         server.join().expect("server join");
     }
+
+    /// br-asupersync-f3635k (follow-up to br-asupersync-pr32li).
+    /// Pipeline::exec must collect ALL responses even when one of them is a
+    /// RESP `-ERR` reply, classify the `-ERR` as `Err(RedisError::Redis(_))`
+    /// at the per-command position, return the connection to the pool, and
+    /// leave the connection healthy enough to serve the next command.
+    ///
+    /// Mock server scripts the wire exchange:
+    ///   1. Client sends HELLO 3 (RESP3 negotiation in ensure_initialized).
+    ///      Server replies `-ERR unknown command 'HELLO'\r\n` so the client
+    ///      falls through to RESP2 (no AUTH because no password configured).
+    ///   2. Client writes the 3 pipelined commands as one combined buffer.
+    ///      Server reads three RESP frames in succession.
+    ///   3. Server writes back, in one buffer:
+    ///         $5\r\nfirst\r\n
+    ///         -ERR something went wrong\r\n
+    ///         $5\r\nthird\r\n
+    ///   4. Client receives Vec<Result<RespValue, RedisError>> with three
+    ///      entries; middle one is Err(RedisError::Redis(...)); first and
+    ///      third are Ok(BulkString(...)).
+    ///   5. Client then runs a single PING via the same pool — reuses the
+    ///      same RedisConnection (because the pipeline defused its discard
+    ///      guard on the -ERR path) and the server replies +PONG.
+    #[test]
+    fn pipeline_exec_collects_all_results_when_middle_command_errors() {
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept pipeline client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+
+            // 1. HELLO 3 (RESP3 negotiation). Reply -ERR so client falls back
+            //    to RESP2 with no AUTH since the test config has no password.
+            let hello = read_resp_frame(&mut stream);
+            assert_resp_command(hello, &[b"HELLO", b"3"]);
+            stream
+                .write_all(b"-ERR unknown command 'HELLO'\r\n")
+                .expect("write HELLO -ERR");
+            stream.flush().expect("flush HELLO -ERR");
+
+            // 2. Three pipelined commands — read each frame as a separate
+            //    RESP array. read_resp_frame asserts each frame is consumed
+            //    fully before returning, but pipeline writes all three in
+            //    one combined buffer; that's fine because the buffer's
+            //    framing boundaries are explicit per RESP.
+            let cmd1 = read_resp_frame(&mut stream);
+            assert_resp_command(cmd1, &[b"GET", b"k1"]);
+            let cmd2 = read_resp_frame(&mut stream);
+            assert_resp_command(cmd2, &[b"GET", b"k2"]);
+            let cmd3 = read_resp_frame(&mut stream);
+            assert_resp_command(cmd3, &[b"GET", b"k3"]);
+
+            // 3. Three responses in one combined write: Ok, -ERR, Ok.
+            let mut response = Vec::new();
+            response.extend_from_slice(b"$5\r\nfirst\r\n");
+            response.extend_from_slice(b"-ERR something went wrong\r\n");
+            response.extend_from_slice(b"$5\r\nthird\r\n");
+            stream.write_all(&response).expect("write pipeline replies");
+            stream.flush().expect("flush pipeline replies");
+
+            // 5. Health check — pipeline should have defused the discard
+            //    guard so the SAME RedisConnection comes back from the pool
+            //    for the next command. Read PING + reply PONG.
+            let ping = read_resp_frame(&mut stream);
+            assert_resp_command(ping, &[b"PING"]);
+            stream
+                .write_all(&RespValue::SimpleString("PONG".to_string()).encode())
+                .expect("write PING reply");
+            stream.flush().expect("flush PING reply");
+        });
+
+        run_test_with_cx(|cx| async move {
+            let url = format!("redis://{}:{}", addr.ip(), addr.port());
+            let client = RedisClient::connect(&cx, &url)
+                .await
+                .expect("connect redis client");
+
+            let mut pipeline = client.pipeline();
+            pipeline.cmd(&["GET", "k1"]);
+            pipeline.cmd(&["GET", "k2"]);
+            pipeline.cmd(&["GET", "k3"]);
+
+            let results = pipeline
+                .exec(&cx)
+                .await
+                .expect("pipeline exec must return Ok even when a per-cmd -ERR appears");
+
+            // 4. All three results returned — the mid -ERR did NOT short-
+            //    circuit collection.
+            assert_eq!(
+                results.len(),
+                3,
+                "pipeline must collect ALL three responses (br-pr32li); got {results:?}"
+            );
+
+            // results[0] = Ok(BulkString(first))
+            match &results[0] {
+                Ok(RespValue::BulkString(Some(bytes))) if bytes == b"first" => {}
+                other => panic!("results[0] expected Ok(BulkString(\"first\")), got {other:?}"),
+            }
+
+            // results[1] = Err(RedisError::Redis("something went wrong"))
+            match &results[1] {
+                Err(RedisError::Redis(msg)) if msg.contains("something went wrong") => {}
+                other => panic!(
+                    "results[1] expected Err(RedisError::Redis(...)), got {other:?}"
+                ),
+            }
+
+            // results[2] = Ok(BulkString(third))
+            match &results[2] {
+                Ok(RespValue::BulkString(Some(bytes))) if bytes == b"third" => {}
+                other => panic!("results[2] expected Ok(BulkString(\"third\")), got {other:?}"),
+            }
+
+            // 5. Connection-healthy assertion — a follow-up command must
+            //    reuse the pool and succeed. If pipeline had wrongly
+            //    discarded the connection on the -ERR, this PING would
+            //    fail (or stall on a fresh accept the test server doesn't
+            //    handle).
+            client
+                .ping(&cx)
+                .await
+                .expect("connection should remain healthy after per-cmd -ERR");
+        });
+
+        server.join().expect("server join");
+    }
 }
