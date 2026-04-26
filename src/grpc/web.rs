@@ -202,7 +202,20 @@ pub fn decode_trailers(body: &[u8]) -> Result<TrailerFrame, GrpcError> {
                     ));
                 }
                 seen_status = true;
-                status_code = value.parse::<i32>().ok();
+                // br-asupersync-6qwzl0: per gRPC spec, grpc-status MUST
+                // be a valid integer. Pre-fix a malformed value (e.g.
+                // "garbage") was silently coerced to INTERNAL via the
+                // unwrap_or(13) fallback below — a malicious or buggy
+                // server could mask its real wire behaviour as a
+                // generic INTERNAL error and the client could not
+                // distinguish a real INTERNAL from coerced garbage.
+                // Now we surface the protocol violation explicitly.
+                status_code = Some(value.parse::<i32>().map_err(|e| {
+                    GrpcError::protocol(format!(
+                        "malformed grpc-status integer in trailer block: \
+                         {value:?} ({e}) (br-asupersync-6qwzl0)"
+                    ))
+                })?);
             }
             "grpc-message" => {
                 if seen_message {
@@ -257,6 +270,20 @@ const DEFAULT_MAX_FRAME_SIZE: usize = 4 * 1024 * 1024;
 #[derive(Debug)]
 pub struct WebFrameCodec {
     max_frame_size: usize,
+    /// br-asupersync-nln9sc: once `decode` has surfaced an
+    /// unrecoverable error (reserved-flag bits, MessageTooLarge, or a
+    /// malformed trailer block), the codec is poisoned. Subsequent
+    /// `decode` calls return the same error WITHOUT re-reading the
+    /// buffer. This breaks the infinite-Err loop a naive caller
+    /// would otherwise produce by re-polling on the same un-consumed
+    /// header bytes (see br-asupersync-3asq77 for the analogous
+    /// `FramedRead` poison; the codec layer needs the same fail-
+    /// closed property because its callers may not always go through
+    /// FramedRead). Stored via `Cell` so the existing `&self`
+    /// signature is preserved — the codec is documented as
+    /// single-threaded and `Cell` matches that contract without the
+    /// runtime cost of `RefCell`.
+    poisoned: std::cell::Cell<bool>,
 }
 
 impl WebFrameCodec {
@@ -269,12 +296,34 @@ impl WebFrameCodec {
     /// Create a codec with a custom max frame size.
     #[must_use]
     pub fn with_max_size(max_frame_size: usize) -> Self {
-        Self { max_frame_size }
+        Self {
+            max_frame_size,
+            poisoned: std::cell::Cell::new(false),
+        }
+    }
+
+    /// Returns true once `decode` has surfaced an unrecoverable
+    /// error and the codec has been poisoned. (br-asupersync-nln9sc)
+    #[must_use]
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned.get()
     }
 
     /// Decode the next frame from the buffer, returning `None` if
     /// insufficient data is available.
     pub fn decode(&self, src: &mut BytesMut) -> Result<Option<WebFrame>, GrpcError> {
+        // br-asupersync-nln9sc: once poisoned, refuse to re-read the
+        // buffer. Returning the canonical poisoned error keeps the
+        // caller's diagnostic trail (the original error is in their
+        // logs already) while breaking the infinite-Err loop.
+        if self.poisoned.get() {
+            return Err(GrpcError::protocol(
+                "gRPC-Web codec is poisoned after a prior unrecoverable \
+                 decode error (br-asupersync-nln9sc); construct a new \
+                 WebFrameCodec to resume",
+            ));
+        }
+
         if src.len() < 5 {
             return Ok(None);
         }
@@ -288,8 +337,11 @@ impl WebFrameCodec {
         // Reject frames that set any reserved bit so a future protocol
         // extension can't be silently mis-handled as a data frame here.
         // Done BEFORE the length / split_to consumption so the buffer
-        // stays untouched for the caller's diagnostic logging.
+        // stays untouched for the caller's diagnostic logging — but
+        // the codec is poisoned so the next decode call will not re-
+        // read the same broken header (br-asupersync-nln9sc).
         if flag & RESERVED_FLAG_MASK != 0 {
+            self.poisoned.set(true);
             return Err(GrpcError::protocol(format!(
                 "gRPC-Web frame has reserved flag bits set: 0x{flag:02x} \
                  (only bits 0x01 and 0x80 are defined; mask 0x7E is reserved)"
@@ -297,6 +349,12 @@ impl WebFrameCodec {
         }
 
         if length > self.max_frame_size {
+            // br-asupersync-nln9sc: poison so the caller can't loop
+            // re-reading the same oversize header. We cannot safely
+            // consume `length` body bytes (they may not have arrived,
+            // and skipping would re-frame on garbage); poisoning is
+            // the only safe recovery.
+            self.poisoned.set(true);
             return Err(GrpcError::MessageTooLarge);
         }
 
@@ -310,7 +368,13 @@ impl WebFrameCodec {
 
         let is_trailer = flag & TRAILER_FLAG != 0;
         if is_trailer {
-            let trailer = decode_trailers(&payload)?;
+            // br-asupersync-nln9sc: a malformed trailer block also
+            // poisons — once a trailer arrives, the gRPC-Web stream
+            // is by definition over, so any decode failure here is
+            // terminal anyway.
+            let trailer = decode_trailers(&payload).inspect_err(|_| {
+                self.poisoned.set(true);
+            })?;
             Ok(Some(WebFrame::Trailers(trailer)))
         } else {
             let compressed = flag & 0x01 != 0;
@@ -1244,5 +1308,151 @@ mod tests {
             "reserved-bit rejection must NOT consume the frame header"
         );
         crate::test_complete!("ood365_reject_does_not_consume_buffer");
+    }
+
+    // ── br-asupersync-nln9sc: codec poison after unrecoverable error ─
+
+    #[test]
+    fn nln9sc_reserved_bit_err_poisons_codec() {
+        // First decode trips reserved-bit Err. Second decode must NOT
+        // re-emit the original Err in a tight loop — codec is poisoned
+        // and returns a distinct "codec poisoned" protocol error.
+        init_test("nln9sc_reserved_bit_err_poisons_codec");
+        let codec = WebFrameCodec::new();
+        assert!(!codec.is_poisoned(), "fresh codec must not be poisoned");
+
+        let mut buf = build_frame(0x40, 4);
+        let first = codec.decode(&mut buf);
+        assert!(matches!(first, Err(GrpcError::Protocol(_))));
+        assert!(codec.is_poisoned(), "first decode Err must poison");
+
+        // Second decode on the same buffer must surface the poisoned
+        // sentinel error rather than re-reading the bytes and producing
+        // the original reserved-bit error again.
+        let second = codec.decode(&mut buf);
+        match second {
+            Err(GrpcError::Protocol(msg)) => {
+                assert!(
+                    msg.contains("poisoned") && msg.contains("br-asupersync-nln9sc"),
+                    "second decode must return the poisoned sentinel: {msg}"
+                );
+            }
+            other => panic!("expected Protocol poisoned error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nln9sc_message_too_large_err_poisons_codec() {
+        init_test("nln9sc_message_too_large_err_poisons_codec");
+        let codec = WebFrameCodec::with_max_size(4);
+        // Frame with length 100 — far over the 4-byte cap.
+        let mut buf = BytesMut::new();
+        buf.put_u8(0x00);
+        buf.put_u32(100);
+        // (no body bytes — the length check fires before src.len() < 5+length)
+        let first = codec.decode(&mut buf);
+        assert!(matches!(first, Err(GrpcError::MessageTooLarge)));
+        assert!(codec.is_poisoned(), "MessageTooLarge must poison the codec");
+
+        let second = codec.decode(&mut buf);
+        match second {
+            Err(GrpcError::Protocol(msg)) => {
+                assert!(msg.contains("poisoned"));
+            }
+            other => panic!("expected Protocol poisoned error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn nln9sc_successful_decode_after_successful_decode_unaffected() {
+        // Successful decodes must NEVER poison — only Err paths.
+        init_test("nln9sc_successful_decode_after_successful_decode_unaffected");
+        let codec = WebFrameCodec::new();
+        let mut buf = BytesMut::new();
+        codec.encode_data(b"first", false, &mut buf).unwrap();
+        codec.encode_data(b"second", false, &mut buf).unwrap();
+
+        let f1 = codec.decode(&mut buf).unwrap().unwrap();
+        assert!(matches!(f1, WebFrame::Data { .. }));
+        assert!(!codec.is_poisoned(), "successful decode must not poison");
+
+        let f2 = codec.decode(&mut buf).unwrap().unwrap();
+        assert!(matches!(f2, WebFrame::Data { .. }));
+        assert!(!codec.is_poisoned());
+    }
+
+    #[test]
+    fn nln9sc_malformed_trailer_block_also_poisons() {
+        // A malformed trailer payload (e.g. propagated from
+        // decode_trailers via a duplicate grpc-status) is also
+        // unrecoverable — the trailer marks end-of-stream by
+        // definition, so any subsequent decode should NOT loop on
+        // unconsumed bytes either. Trigger via duplicate grpc-status
+        // from br-nbryje hardening.
+        init_test("nln9sc_malformed_trailer_block_also_poisons");
+        let codec = WebFrameCodec::new();
+        let block = b"grpc-status: 0\r\ngrpc-status: 0\r\n";
+        let mut buf = BytesMut::new();
+        buf.put_u8(TRAILER_FLAG);
+        buf.put_u32(u32::try_from(block.len()).unwrap());
+        buf.extend_from_slice(block);
+
+        let first = codec.decode(&mut buf);
+        assert!(matches!(first, Err(GrpcError::Protocol(_))));
+        assert!(
+            codec.is_poisoned(),
+            "trailer-block decode failure must poison the codec"
+        );
+    }
+
+    // ── br-asupersync-6qwzl0: malformed grpc-status surfaced as Err ─
+
+    #[test]
+    fn _6qwzl0_malformed_grpc_status_returns_protocol_error() {
+        // Pre-fix: parse failure silently coerced to INTERNAL via
+        // unwrap_or(13). Now must surface as GrpcError::protocol so
+        // the client can distinguish a real INTERNAL from coerced
+        // garbage.
+        init_test("_6qwzl0_malformed_grpc_status_returns_protocol_error");
+        let body = b"grpc-status: garbage\r\n";
+        let result = decode_trailers(body);
+        match result {
+            Err(GrpcError::Protocol(msg)) => {
+                assert!(
+                    msg.contains("malformed grpc-status")
+                        && msg.contains("br-asupersync-6qwzl0"),
+                    "must surface as protocol error: {msg}"
+                );
+            }
+            other => panic!("expected Protocol error for malformed status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn _6qwzl0_negative_grpc_status_still_accepted() {
+        // Negative integers are technically out-of-range per gRPC spec
+        // (codes are u8), but `parse::<i32>` accepts them. Pre-fix
+        // they passed through Code::from_i32 (which maps unknown to
+        // Unknown). The fix is about surfacing PARSE failure, not
+        // about range validation — negative values must still parse
+        // OK so we don't accidentally tighten the contract here.
+        init_test("_6qwzl0_negative_grpc_status_still_accepted");
+        let body = b"grpc-status: -1\r\n";
+        let trailer = decode_trailers(body).unwrap();
+        // Code::from_i32 may map -1 to Unknown — we only assert
+        // decode_trailers returned Ok, which matches the pre-fix
+        // contract for any successfully-parsed integer.
+        let _ = trailer.status.code();
+    }
+
+    #[test]
+    fn _6qwzl0_well_formed_grpc_status_round_trips_unchanged() {
+        // The fix must NOT regress the happy path — well-formed
+        // integer status codes still parse and produce the
+        // corresponding Code variant.
+        init_test("_6qwzl0_well_formed_grpc_status_round_trips_unchanged");
+        let body = b"grpc-status: 5\r\n";
+        let trailer = decode_trailers(body).unwrap();
+        assert_eq!(trailer.status.code().as_i32(), 5);
     }
 }
