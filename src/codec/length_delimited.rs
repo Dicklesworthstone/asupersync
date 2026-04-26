@@ -381,14 +381,35 @@ impl Encoder<BytesMut> for LengthDelimitedCodec {
             ));
         }
 
-        // Calculate total header length
+        // br-asupersync-ooqkxe — checked arithmetic on the reserve budget.
+        // The previous shape was `header_len + frame_len` after `header_len`
+        // was computed via saturating_add — so an attacker-controlled
+        // `length_field_offset` near `usize::MAX` could saturate and then
+        // the unchecked `+ frame_len` would wrap, calling reserve() with a
+        // tiny value and silently leaving the buffer too small for the
+        // bytes we are about to put_u8/put_slice. checked_add(frame_len)
+        // returns None on overflow; we surface that as InvalidData so
+        // callers see an explicit error rather than a panic or buffer
+        // corruption.
         let header_len = self
             .builder
             .length_field_offset
-            .saturating_add(self.builder.length_field_length);
+            .checked_add(self.builder.length_field_length)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "header length (offset + length_field_length) overflows usize",
+                )
+            })?;
+        let total_len = header_len.checked_add(frame_len).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "frame buffer reservation overflows usize",
+            )
+        })?;
 
         // Reserve space for the entire frame
-        dst.reserve(header_len + frame_len);
+        dst.reserve(total_len);
 
         // Write length field offset padding (zeros)
         for _ in 0..self.builder.length_field_offset {
@@ -1846,14 +1867,16 @@ mod tests {
                 2 => 65_535,
                 _ => 100_000,
             };
-            let lengths: Vec<usize> = vec![
-                0, 1, 2, 7, 16, 31, 64, 100, 127, 200, 255,
-            ]
-            .into_iter()
-            .filter(|&l| l <= cap)
-            .chain(if cap > 1024 { vec![1024, 4096, 65_535] } else { vec![] })
-            .filter(|&l| l <= cap)
-            .collect();
+            let lengths: Vec<usize> = vec![0, 1, 2, 7, 16, 31, 64, 100, 127, 200, 255]
+                .into_iter()
+                .filter(|&l| l <= cap)
+                .chain(if cap > 1024 {
+                    vec![1024, 4096, 65_535]
+                } else {
+                    vec![]
+                })
+                .filter(|&l| l <= cap)
+                .collect();
 
             // Encode each length and capture the encoded-output size.
             let mut encoded_sizes: Vec<(usize, usize)> = Vec::new();
@@ -1866,9 +1889,11 @@ mod tests {
                 let mut buf = BytesMut::new();
                 codec
                     .encode(BytesMut::from(&payload[..]), &mut buf)
-                    .unwrap_or_else(|e| panic!(
-                        "encode failed for width={length_field_length} len={payload_len}: {e}"
-                    ));
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "encode failed for width={length_field_length} len={payload_len}: {e}"
+                        )
+                    });
                 encoded_sizes.push((payload_len, buf.len()));
             }
 
@@ -1975,10 +2000,7 @@ mod tests {
                 frames.len()
             );
             for (i, (got, expected)) in emitted.iter().zip(frames.iter()).enumerate() {
-                assert_eq!(
-                    got, expected,
-                    "split_at={split_at}: frame {i} mismatch"
-                );
+                assert_eq!(got, expected, "split_at={split_at}: frame {i} mismatch");
             }
             assert!(
                 buf.is_empty(),
@@ -1986,5 +2008,93 @@ mod tests {
                 buf.len()
             );
         }
+    }
+
+    /// br-asupersync-ooqkxe — encode() must surface `InvalidData` (not
+    /// panic, not wrap, not silently under-reserve) when
+    /// `length_field_offset + length_field_length` overflows usize.
+    #[test]
+    fn encode_rejects_header_len_overflow() {
+        let mut codec = LengthDelimitedCodec::builder()
+            .length_field_offset(usize::MAX)
+            .length_field_length(4)
+            .max_frame_length(usize::MAX)
+            .new_codec();
+        let mut dst = BytesMut::new();
+        let mut item = BytesMut::new();
+        item.put_slice(b"hello");
+        let err = codec
+            .encode(item, &mut dst)
+            .expect_err("must reject header_len overflow");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains("header length"),
+            "unexpected error message: {}",
+            err
+        );
+    }
+
+    /// br-asupersync-ooqkxe — encode() must surface `InvalidData` when the
+    /// total reserve budget (header + frame) overflows usize, even if
+    /// header_len itself is fine. We engineer this by giving header_len a
+    /// near-MAX offset and a frame near-MAX length (the real-world attack
+    /// surface is an attacker-controlled offset combined with a large but
+    /// allowed frame).
+    #[test]
+    fn encode_rejects_total_reserve_overflow() {
+        // Pick offset so header_len is just under usize::MAX. Then frame
+        // length doesn't have to be MAX itself — just enough to overflow
+        // the sum.
+        let offset = usize::MAX - 16;
+        let mut codec = LengthDelimitedCodec::builder()
+            .length_field_offset(offset)
+            .length_field_length(4)
+            .max_frame_length(usize::MAX)
+            .new_codec();
+        let mut dst = BytesMut::new();
+        // A 1024-byte frame plus an offset within 16 of usize::MAX
+        // overflows; header_len = offset + 4 = MAX-12; total = MAX-12+1024
+        // wraps. Construct the frame and assert overflow detection.
+        let mut item = BytesMut::with_capacity(1024);
+        for _ in 0..1024 {
+            item.put_u8(0);
+        }
+        let err = codec
+            .encode(item, &mut dst)
+            .expect_err("must reject total reservation overflow");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// br-asupersync-ooqkxe — happy-path: zero-length frame with valid
+    /// offset/length must encode successfully (regression guard against
+    /// over-eager rejection).
+    #[test]
+    fn encode_zero_length_frame_succeeds() {
+        let mut codec = LengthDelimitedCodec::new();
+        let mut dst = BytesMut::new();
+        let item = BytesMut::new();
+        codec.encode(item, &mut dst).expect("zero-length frame OK");
+        // Default codec writes a 4-byte big-endian length of zero.
+        assert_eq!(&dst[..], &[0, 0, 0, 0]);
+    }
+
+    /// br-asupersync-ooqkxe — happy-path: max-frame-length frame at the
+    /// boundary must encode successfully when offset+length doesn't
+    /// overflow.
+    #[test]
+    fn encode_at_max_frame_length_succeeds() {
+        let max = 1024;
+        let mut codec = LengthDelimitedCodec::builder()
+            .length_field_length(4)
+            .max_frame_length(max)
+            .new_codec();
+        let mut dst = BytesMut::new();
+        let mut item = BytesMut::with_capacity(max);
+        for _ in 0..max {
+            item.put_u8(0xAB);
+        }
+        codec.encode(item, &mut dst).expect("max frame OK");
+        // 4-byte length prefix + max-byte payload.
+        assert_eq!(dst.len(), 4 + max);
     }
 }
