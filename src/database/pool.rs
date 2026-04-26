@@ -60,6 +60,35 @@ pub trait ConnectionManager: Send + Sync + 'static {
     /// `validate_on_checkout` is enabled.
     fn is_valid(&self, conn: &Self::Connection) -> bool;
 
+    /// Synchronous release-time health check (br-asupersync-5bv5sr).
+    ///
+    /// Called by [`PooledConnection`]'s `Drop` impl BEFORE returning the
+    /// connection to the idle pool. Return `true` to route through the
+    /// normal return-to-pool path; return `false` to route to
+    /// [`Self::disconnect`] instead. The default impl returns `true` —
+    /// preserving the legacy behaviour for backends that do not
+    /// implement release-time validation.
+    ///
+    /// **Why this exists:** without it, `PooledConnection`'s `Drop`
+    /// unconditionally returned the connection to the pool — even when
+    /// the previous caller errored mid-transaction or left protocol
+    /// state poisoned. The next caller acquired the connection with
+    /// uncommitted-transaction state, holding the prior caller's locks
+    /// until the next operation triggered `ensure_no_orphaned_transaction`
+    /// (which itself only catches a narrow set of recoverable cases).
+    /// Backends that can detect such state synchronously (e.g.,
+    /// PostgreSQL's `transaction_status` byte read in `in_transaction()`,
+    /// MySQL's status flags) should override this to return `false` for
+    /// any connection that should not be handed to a fresh caller.
+    ///
+    /// Async cleanup (e.g., issuing a `ROLLBACK` round-trip) is NOT
+    /// possible from this hook because `Drop` cannot await. The honest
+    /// safe choice is to discard suspect connections; the cost is one
+    /// fresh connection on the next acquire vs. cross-caller state leak.
+    fn release_check(&self, _conn: &mut Self::Connection) -> bool {
+        true
+    }
+
     /// Called when a connection is permanently removed from the pool.
     ///
     /// Default implementation does nothing. Override for cleanup
@@ -759,8 +788,19 @@ impl<M: ConnectionManager> std::ops::DerefMut for PooledConnection<'_, M> {
 
 impl<M: ConnectionManager> Drop for PooledConnection<'_, M> {
     fn drop(&mut self) {
-        if let Some(conn) = self.conn.take() {
-            self.pool.return_connection(conn, self.created_at);
+        if let Some(mut conn) = self.conn.take() {
+            // br-asupersync-5bv5sr: gate the return-to-pool path on the
+            // manager's release-time health check. Backends that detect a
+            // poisoned protocol state, an open transaction, or any other
+            // condition that would corrupt the next caller's view should
+            // override `release_check` to return `false`; we then route
+            // the connection through `discard_connection` so it's closed
+            // rather than handed back to a fresh caller.
+            if self.pool.manager.release_check(&mut conn) {
+                self.pool.return_connection(conn, self.created_at);
+            } else {
+                self.pool.discard_connection(conn);
+            }
         }
     }
 }
@@ -806,6 +846,15 @@ pub trait AsyncConnectionManager: Send + Sync + 'static {
         cx: &Cx,
         conn: &mut Self::Connection,
     ) -> impl std::future::Future<Output = bool> + Send;
+
+    /// Synchronous release-time health check (br-asupersync-5bv5sr).
+    ///
+    /// See [`ConnectionManager::release_check`] — same contract, applied
+    /// from `AsyncPooledConnection`'s `Drop` impl. Async cleanup is NOT
+    /// possible from `Drop`, so this hook can only signal reuse-vs-discard.
+    fn release_check(&self, _conn: &mut Self::Connection) -> bool {
+        true
+    }
 
     /// Called when a connection is permanently removed from the pool.
     fn disconnect(&self, _conn: Self::Connection) {}
@@ -1224,8 +1273,17 @@ impl<M: AsyncConnectionManager> std::ops::DerefMut for AsyncPooledConnection<'_,
 
 impl<M: AsyncConnectionManager> Drop for AsyncPooledConnection<'_, M> {
     fn drop(&mut self) {
-        if let Some(conn) = self.conn.take() {
-            self.pool.return_connection(conn, self.created_at);
+        if let Some(mut conn) = self.conn.take() {
+            // br-asupersync-5bv5sr: gate on the manager's release-time
+            // health check; discard rather than return-to-pool when the
+            // backend reports the connection is in a state that would
+            // poison the next caller (open transaction, half-drained
+            // result set, protocol desync).
+            if self.pool.manager.release_check(&mut conn) {
+                self.pool.return_connection(conn, self.created_at);
+            } else {
+                self.pool.discard_connection(conn);
+            }
         }
     }
 }
@@ -2088,6 +2146,114 @@ mod tests {
         assert_eq!(pool.stats().total_discards, 1);
         assert_eq!(pool.manager.disconnects(), 1);
         crate::test_complete!("discard_removes_from_pool");
+    }
+
+    /// br-asupersync-5bv5sr: PooledConnection::Drop must consult
+    /// `ConnectionManager::release_check` and route the connection to
+    /// `disconnect()` (NOT the idle pool) when release_check returns
+    /// false. This is the cross-user transaction-state-leak defense:
+    /// a backend that detects an open transaction or poisoned protocol
+    /// state at release time signals "discard" so the next acquire
+    /// gets a fresh connection rather than inheriting the prior
+    /// caller's half-state.
+    #[test]
+    fn drop_routes_unhealthy_to_discard_via_release_check() {
+        init_test("drop_routes_unhealthy_to_discard_via_release_check");
+
+        struct UnhealthyOnReleaseManager {
+            inner: TestManager,
+            // Set to true to make every release_check return false.
+            unhealthy: Arc<AtomicBool>,
+        }
+
+        impl ConnectionManager for UnhealthyOnReleaseManager {
+            type Connection = TestConnection;
+            type Error = TestError;
+
+            fn connect(&self) -> Result<Self::Connection, Self::Error> {
+                self.inner.connect()
+            }
+
+            fn is_valid(&self, conn: &Self::Connection) -> bool {
+                self.inner.is_valid(conn)
+            }
+
+            fn release_check(&self, _conn: &mut Self::Connection) -> bool {
+                // Inverted: false means "don't reuse — discard".
+                !self.unhealthy.load(Ordering::SeqCst)
+            }
+
+            fn disconnect(&self, conn: Self::Connection) {
+                self.inner.disconnect(conn);
+            }
+        }
+
+        let unhealthy = Arc::new(AtomicBool::new(false));
+        let manager = UnhealthyOnReleaseManager {
+            inner: TestManager::new(),
+            unhealthy: unhealthy.clone(),
+        };
+        let pool = DbPool::new(manager, DbPoolConfig::with_max_size(2));
+
+        // Healthy path: release_check returns true, conn returns to pool.
+        {
+            let _conn = pool.get().unwrap();
+        }
+        assert_eq!(
+            pool.stats().idle,
+            1,
+            "healthy connection must return to idle pool"
+        );
+        assert_eq!(
+            pool.stats().total_discards,
+            0,
+            "healthy drop must NOT discard"
+        );
+
+        // Mark all subsequent releases as unhealthy. Acquire the idle
+        // connection and drop it — it should be discarded, not returned.
+        unhealthy.store(true, Ordering::SeqCst);
+        {
+            let _conn = pool.get().unwrap();
+        }
+        assert_eq!(
+            pool.stats().idle,
+            0,
+            "unhealthy drop must remove from idle pool"
+        );
+        assert_eq!(
+            pool.stats().total_discards,
+            1,
+            "unhealthy drop must increment discards"
+        );
+        assert_eq!(
+            pool.stats().total,
+            0,
+            "unhealthy drop must decrement total connection count"
+        );
+
+        crate::test_complete!("drop_routes_unhealthy_to_discard_via_release_check");
+    }
+
+    /// br-asupersync-5bv5sr: default release_check returns true, so
+    /// existing ConnectionManager implementations that DO NOT override
+    /// release_check observe the legacy return-to-pool behavior. This
+    /// is the non-breaking-change guarantee.
+    #[test]
+    fn drop_default_release_check_preserves_legacy_return_to_pool() {
+        init_test("drop_default_release_check_preserves_legacy_return_to_pool");
+        // Plain TestManager — does NOT override release_check.
+        let pool = DbPool::new(TestManager::new(), DbPoolConfig::with_max_size(2));
+        {
+            let _conn = pool.get().unwrap();
+        }
+        assert_eq!(
+            pool.stats().idle,
+            1,
+            "default release_check=true must return-to-pool as before"
+        );
+        assert_eq!(pool.stats().total_discards, 0);
+        crate::test_complete!("drop_default_release_check_preserves_legacy_return_to_pool");
     }
 
     // ================================================================
