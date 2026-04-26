@@ -531,7 +531,10 @@ impl RuntimeState {
             entropy_source: Arc::new(OsEntropy),
             observability: None,
             blocking_pool: None,
-            obligation_leak_response: ObligationLeakResponse::Log,
+            // br-asupersync-qp2tfx: internal constructors Panic on obligation
+            // leak so the lab/test paths surface bugs the same way the
+            // user-facing default (Fail, set in br-gi61n1) does.
+            obligation_leak_response: ObligationLeakResponse::Panic,
             leak_escalation: None,
             leak_count: 0,
             handling_leaks: 0,
@@ -642,7 +645,10 @@ impl RuntimeState {
             entropy_source: Arc::new(OsEntropy),
             observability: None,
             blocking_pool: None,
-            obligation_leak_response: ObligationLeakResponse::Log,
+            // br-asupersync-qp2tfx: internal constructors Panic on obligation
+            // leak so the lab/test paths surface bugs the same way the
+            // user-facing default (Fail, set in br-gi61n1) does.
+            obligation_leak_response: ObligationLeakResponse::Panic,
             leak_escalation: None,
             leak_count: 0,
             handling_leaks: 0,
@@ -8486,7 +8492,10 @@ mod tests {
             cancel_attribution: CancelAttributionConfig::default(),
             entropy_source: Arc::new(OsEntropy),
             blocking_pool: None,
-            obligation_leak_response: ObligationLeakResponse::Log,
+            // br-asupersync-qp2tfx: internal constructors Panic on obligation
+            // leak so the lab/test paths surface bugs the same way the
+            // user-facing default (Fail, set in br-gi61n1) does.
+            obligation_leak_response: ObligationLeakResponse::Panic,
             leak_escalation: None,
             observability: None,
         };
