@@ -132,9 +132,15 @@ impl Decoder for GrpcCodec {
         };
         let length = u32::from_be_bytes([src[1], src[2], src[3], src[4]]) as usize;
 
-        // Validate message size (for uncompressed frames only)
-        // Compressed frames are validated after decompression in FramedCodec
-        if !compressed && length > self.max_decode_message_size {
+        // Validate ON-WIRE message size for ALL frames, including compressed.
+        // The post-decompression check in FramedCodec only catches inflated
+        // payloads — but a peer declaring Length=u32::MAX with Compressed-Flag=1
+        // would otherwise force the upstream HTTP/2 buffer to grow to ~4 GiB
+        // before decompression is even attempted. That's a remote OOM-DoS
+        // (asupersync-6o5iax). Compressed payloads must still fit within
+        // max_decode_message_size on the wire — high-ratio compressed payloads
+        // can configure a separate larger cap if needed.
+        if length > self.max_decode_message_size {
             return Err(GrpcError::MessageTooLarge);
         }
 
