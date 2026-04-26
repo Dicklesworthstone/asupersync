@@ -593,10 +593,20 @@ impl LoadBalancer {
                         // serialization layers identically.
                         let key = oid.as_u128().to_string();
                         ring.node_for_key(&key).and_then(|node_id| {
-                            healthy
-                                .iter()
-                                .copied()
-                                .find(|ep| ep.id.0.to_string() == node_id)
+                            // br-asupersync-klff8q: pre-fix the find
+                            // predicate called `ep.id.0.to_string() ==
+                            // node_id` per healthy endpoint, allocating
+                            // O(N) Strings per dispatch on the hot path
+                            // and overwhelming jemalloc's tcache at
+                            // high dispatch rates. The node_id we get
+                            // back is the same `u64.to_string()` form
+                            // we registered via `ring.add_node`, so
+                            // we parse it ONCE to a u64 and compare
+                            // numerically — zero allocation per
+                            // endpoint, single allocation amortised
+                            // by the parse error path.
+                            let target_id: u64 = node_id.parse().ok()?;
+                            healthy.iter().copied().find(|ep| ep.id.0 == target_id)
                         })
                     },
                 )
@@ -1439,10 +1449,27 @@ pub struct DispatchResult {
     pub failures: usize,
 
     /// Endpoints that received the symbol.
-    pub sent_to: SmallVec<[EndpointId; 4]>,
+    ///
+    /// br-asupersync-dv32fs: inline capacity bumped from 4 → 16. The
+    /// pre-fix `[EndpointId; 4]` shape spilled to the heap on every
+    /// broadcast/multicast/quorum to 5+ endpoints — typical k8s
+    /// service fan-out (10-50 pods) ALWAYS spilled, defeating
+    /// SmallVec's purpose entirely. 16 covers the typical
+    /// in-process / single-AZ fan-out without spill while keeping
+    /// the per-DispatchResult stack footprint bounded
+    /// (16 × 8 bytes = 128 bytes inline, comfortably below typical
+    /// 8 KiB stack frame budget). Larger fan-outs still spill but
+    /// that's the documented tradeoff at this capacity.
+    pub sent_to: SmallVec<[EndpointId; 16]>,
 
     /// Endpoints that failed.
-    pub failed_endpoints: SmallVec<[(EndpointId, DispatchError); 4]>,
+    ///
+    /// br-asupersync-dv32fs: inline capacity bumped from 4 → 16
+    /// (same rationale as `sent_to`). The failure tuple
+    /// `(EndpointId, DispatchError)` is wider than EndpointId alone,
+    /// so 16 inline entries cost ~256 bytes inline — still below
+    /// any reasonable stack budget.
+    pub failed_endpoints: SmallVec<[(EndpointId, DispatchError); 16]>,
 
     /// Total time for dispatch.
     pub duration: Time,
@@ -1746,8 +1773,8 @@ impl SymbolDispatcher {
         // Actually dispatch to selected endpoints
         let mut successes = 0;
         let mut failures = 0;
-        let mut sent_to = SmallVec::<[EndpointId; 4]>::new();
-        let mut failed = SmallVec::<[(EndpointId, DispatchError); 4]>::new();
+        let mut sent_to = SmallVec::<[EndpointId; 16]>::new();
+        let mut failed = SmallVec::<[(EndpointId, DispatchError); 16]>::new();
 
         for route in routes {
             if cx.checkpoint().is_err() {
@@ -1796,8 +1823,8 @@ impl SymbolDispatcher {
 
         let mut successes = 0;
         let mut failures = 0;
-        let mut sent_to = SmallVec::<[EndpointId; 4]>::new();
-        let mut failed = SmallVec::<[(EndpointId, DispatchError); 4]>::new();
+        let mut sent_to = SmallVec::<[EndpointId; 16]>::new();
+        let mut failed = SmallVec::<[(EndpointId, DispatchError); 16]>::new();
 
         for route in endpoints {
             if cx.checkpoint().is_err() {
@@ -1849,8 +1876,8 @@ impl SymbolDispatcher {
 
         let mut successes = 0;
         let mut failures = 0;
-        let mut sent_to = SmallVec::<[EndpointId; 4]>::new();
-        let mut failed = SmallVec::<[(EndpointId, DispatchError); 4]>::new();
+        let mut sent_to = SmallVec::<[EndpointId; 16]>::new();
+        let mut failed = SmallVec::<[(EndpointId, DispatchError); 16]>::new();
 
         for route in endpoints {
             if cx.checkpoint().is_err() {
