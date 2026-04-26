@@ -90,6 +90,21 @@ impl<'a> RequestRegion<'a> {
     ///
     /// Use [`into_response`](RegionOutcome::into_response) to convert the
     /// outcome to an HTTP response.
+    ///
+    /// # Cancel-race semantics (br-asupersync-bmc8m5)
+    ///
+    /// Cancellation is checked *before* the handler runs (request → drain
+    /// boundary): a cancelled region rejects the handler call entirely and
+    /// returns [`RegionOutcome::Cancelled`].
+    ///
+    /// Once the handler has *completed*, the response (or panic) is a
+    /// committed obligation and is **always returned to the caller**, even
+    /// if a cancel arrived during the handler's execution. Discarding a
+    /// completed response on a cancel race would leak the work the
+    /// handler already performed (allocations, side effects, downstream
+    /// I/O receipts) and present a misleading view of the region's
+    /// outcome to the caller. Callers that need to observe the cancel
+    /// can read [`Cx::is_cancel_requested`] on the original `Cx`.
     #[inline]
     pub fn run<F>(self, handler: F) -> RegionOutcome
     where
@@ -102,7 +117,7 @@ impl<'a> RequestRegion<'a> {
             _not_send_sync: PhantomData,
         };
 
-        // Check cancellation before running the handler.
+        // Pre-handler check: a cancelled region must not start new work.
         if self.cx.checkpoint().is_err() {
             return RegionOutcome::Cancelled;
         }
@@ -111,13 +126,11 @@ impl<'a> RequestRegion<'a> {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(&ctx)));
 
         match result {
-            Ok(response) => {
-                if self.cx.checkpoint().is_err() {
-                    RegionOutcome::Cancelled
-                } else {
-                    RegionOutcome::Ok(response)
-                }
-            }
+            // br-asupersync-bmc8m5: commit the response even if cancel
+            // arrived during execution. The handler's completed work is a
+            // discharged obligation; dropping the Response here would
+            // silently lose state the caller needs.
+            Ok(response) => RegionOutcome::Ok(response),
             Err(panic_payload) => {
                 let message = extract_panic_message(&panic_payload);
                 RegionOutcome::Panicked(message)
@@ -146,6 +159,7 @@ impl<'a> RequestRegion<'a> {
             _not_send_sync: PhantomData,
         };
 
+        // Pre-handler check: a cancelled region must not start new work.
         if self.cx.checkpoint().is_err() {
             return RegionOutcome::Cancelled;
         }
@@ -153,20 +167,14 @@ impl<'a> RequestRegion<'a> {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(&ctx)));
 
         match result {
-            Ok(Ok(response)) => {
-                if self.cx.checkpoint().is_err() {
-                    RegionOutcome::Cancelled
-                } else {
-                    RegionOutcome::Ok(response)
-                }
-            }
-            Ok(Err(err)) => {
-                if self.cx.checkpoint().is_err() {
-                    RegionOutcome::Cancelled
-                } else {
-                    RegionOutcome::Error(err)
-                }
-            }
+            // br-asupersync-bmc8m5: commit handler output (Ok or Err
+            // application-level result) even if cancel arrived during
+            // execution. Discarding completed work on the cancel race
+            // would silently drop state the caller has already paid
+            // for. The cancel signal stays observable on the cx; the
+            // caller can read it post-hoc if it needs that signal.
+            Ok(Ok(response)) => RegionOutcome::Ok(response),
+            Ok(Err(err)) => RegionOutcome::Error(err),
             Err(panic_payload) => {
                 let message = extract_panic_message(&panic_payload);
                 RegionOutcome::Panicked(message)
@@ -528,22 +536,33 @@ mod tests {
     }
 
     #[test]
-    fn run_cancelled_during_handler_returns_499() {
+    fn run_commits_response_when_cancel_arrives_during_handler() {
+        // br-asupersync-bmc8m5: a cancel that arrives while the handler is
+        // running must NOT cause the completed Response to be silently
+        // dropped. The handler's work is a discharged obligation; the
+        // outcome is committed (Ok), and callers that need to observe
+        // the cancel can read it from the `Cx` post-hoc.
         let cx = test_cx();
         let req = test_request("GET", "/cancel-during");
         let region = RequestRegion::new(&cx, req);
 
         let outcome = region.run(|ctx| {
+            // Simulate a cancel arriving during handler execution
+            // (e.g., parent region timeout fires) before the handler
+            // returns its already-built Response.
             ctx.cx().set_cancel_requested(true);
             Response::new(StatusCode::OK, b"ok".to_vec())
         });
 
-        assert!(outcome.is_cancelled());
+        // Completed work survives the cancel race.
+        assert!(outcome.is_ok(), "completed Response must survive cancel race");
         let resp = outcome.into_response();
-        assert_eq!(resp.status, StatusCode::CLIENT_CLOSED_REQUEST);
-        assert_eq!(
-            resp.body.as_ref(),
-            b"Client Closed Request: request cancelled"
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(resp.body.as_ref(), b"ok");
+        // Cancel signal remains observable on the cx for telemetry/retry.
+        assert!(
+            cx.is_cancel_requested(),
+            "cancel signal remains observable on the cx after the handler returns"
         );
     }
 
@@ -615,7 +634,10 @@ mod tests {
     }
 
     #[test]
-    fn run_sync_cancelled_during_handler_returns_499() {
+    fn run_sync_commits_ok_response_when_cancel_arrives_during_handler() {
+        // br-asupersync-bmc8m5: same contract as run() — if the handler
+        // reaches a successful Response before the cancel takes effect,
+        // commit the Response instead of throwing the work away.
         let cx = test_cx();
         let req = test_request("GET", "/cancel-during");
         let region = RequestRegion::new(&cx, req);
@@ -625,13 +647,31 @@ mod tests {
             Ok(Response::new(StatusCode::OK, b"ok".to_vec()))
         });
 
-        assert!(outcome.is_cancelled());
+        assert!(outcome.is_ok(), "completed Ok Response must survive cancel race");
         let resp = outcome.into_response();
-        assert_eq!(resp.status, StatusCode::CLIENT_CLOSED_REQUEST);
-        assert_eq!(
-            resp.body.as_ref(),
-            b"Client Closed Request: request cancelled"
-        );
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(resp.body.as_ref(), b"ok");
+        assert!(cx.is_cancel_requested());
+    }
+
+    #[test]
+    fn run_sync_commits_err_response_when_cancel_arrives_during_handler() {
+        // br-asupersync-bmc8m5: an Err result is also a discharged
+        // obligation — it carries application-level failure info the
+        // caller has paid for. Don't silently rewrite it as Cancelled.
+        let cx = test_cx();
+        let req = test_request("GET", "/cancel-during-err");
+        let region = RequestRegion::new(&cx, req);
+
+        let outcome = region.run_sync(|ctx| {
+            ctx.cx().set_cancel_requested(true);
+            Err(Error::new(crate::error::ErrorKind::Internal))
+        });
+
+        assert!(outcome.is_error(), "Err result must survive cancel race");
+        let resp = outcome.into_response();
+        assert_eq!(resp.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(cx.is_cancel_requested());
     }
 
     #[test]
