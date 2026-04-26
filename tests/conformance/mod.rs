@@ -8,6 +8,7 @@
 pub mod aggregator_flush;
 pub mod codec_round_trip;
 pub mod cx_capability_semantics;
+pub mod messaging_broker_parity;
 // pub mod codec_framing;
 // br-asupersync-9036u6 follow-up: orphan h1_* files have bit-rot and
 // fail to compile against current asupersync APIs (cx::test_cx removed,
