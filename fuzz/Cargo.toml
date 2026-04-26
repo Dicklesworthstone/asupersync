@@ -1889,3 +1889,82 @@ path = "fuzz_targets/symbol_cancel_protocol.rs"
 test = false
 doc = false
 bench = false
+
+# br-asupersync-tumfif — fuzz target for the
+# Scenario::from_json -> validate -> to_lab_config pipeline in
+# src/lab/scenario.rs. Adversarial scenario JSON (NaN/Inf
+# probabilities, swapped delay min/max, huge participants vec,
+# malformed link keys) must produce typed Err / Vec<ValidationError>
+# without panicking the validator or the downstream LabConfig builder.
+[[bin]]
+name = "lab_scenario_validate_and_build"
+path = "fuzz_targets/lab_scenario_validate_and_build.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-5o8xxe — fuzz target for
+# RestorableSnapshot::validate in src/lab/snapshot_restore.rs.
+# Adversarial snapshot graphs (cyclic parent pointers, dangling
+# owner IDs, NonQuiescentClosure shapes, duplicate IDs across
+# tables) must produce a ValidationResult without panicking the
+# cycle detector or OOM-ing during orphan walks.
+[[bin]]
+name = "lab_snapshot_restorable_validate"
+path = "fuzz_targets/lab_snapshot_restorable_validate.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-ebsbrw — fuzz target for the trace-comparison
+# quartet (find_divergence, normalize_for_replay, compare_normalized,
+# traces_equivalent) in src/lab/replay.rs. Adversarial &[TraceEvent]
+# pairs must not panic any of the comparators; reflexivity
+# (traces_equivalent(t, t) == true) is asserted as a metamorphic
+# invariant.
+[[bin]]
+name = "lab_replay_trace_compare"
+path = "fuzz_targets/lab_replay_trace_compare.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-eetrey — fuzz target for compare_observables and
+# check_core_invariants in src/lab/dual_run.rs. Adversarial
+# NormalizedObservable pairs (NaN counters, swapped timestamps,
+# dangling IDs) must not panic; reflexivity
+# (compare_observables(o, o) reports zero mismatches) is enforced.
+[[bin]]
+name = "lab_dual_run_compare_observables"
+path = "fuzz_targets/lab_dual_run_compare_observables.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-gu6ua2 — fuzz target for ConformalCalibrator in
+# src/lab/conformal.rs. Adversarial OracleReport sequences (NaN
+# stats, total < failed, empty entries vec) driven through arbitrary
+# interleavings of calibrate() and predict() must not panic the
+# numerical kernels; is_well_calibrated() stays total.
+[[bin]]
+name = "lab_conformal_calibrate_predict"
+path = "fuzz_targets/lab_conformal_calibrate_predict.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-ifb4n3 — meta-fuzz target for FuzzHarness::run in
+# src/lab/fuzz.rs. Adversarial seed sequences crossed with closure
+# behaviours (varied panic shapes, allocations, nested catch_unwind)
+# verify two intended invariants of the campaign driver:
+#   (P1) panic-floor — run() never propagates a closure panic;
+#   (P2) progress-floor — every seed in the budget is iterated.
+# Plus output invariants (findings ⊆ seed range, regression-corpus
+# round-trip stability) and end-to-end determinism (same input → same
+# finding seeds across two harness.run() invocations).
+[[bin]]
+name = "lab_fuzz_campaign_meta"
+path = "fuzz_targets/lab_fuzz_campaign_meta.rs"
+test = false
+doc = false
+bench = false
