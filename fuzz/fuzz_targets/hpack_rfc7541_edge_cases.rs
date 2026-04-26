@@ -119,7 +119,9 @@ fuzz_target!(|edge_case: RFC7541EdgeCase| {
             populate_headers,
             shrink_size,
             access_patterns,
-        } => fuzz_table_shrink_eviction(initial_size, populate_headers, shrink_size, access_patterns),
+        } => {
+            fuzz_table_shrink_eviction(initial_size, populate_headers, shrink_size, access_patterns)
+        }
 
         RFC7541EdgeCase::MalformedVarint {
             varint_patterns,
@@ -145,7 +147,12 @@ fn fuzz_huffman_prefix_edge(
         // Name field
         if literal_name {
             let name_len = (i % 8) + 1;
-            encode_string_with_huffman(&mut buffer, &string_data[i..i.min(string_data.len())], name_len, true);
+            encode_string_with_huffman(
+                &mut buffer,
+                &string_data[i..i.min(string_data.len())],
+                name_len,
+                true,
+            );
         } else {
             // Use static table index for name
             encode_integer(&mut buffer, (i % 20) + 1, 4);
@@ -340,10 +347,10 @@ fn construct_2byte_huffman_edge(seq: u16, data: &[u8], offset: usize) -> Vec<u8>
 
     // Some critical 2-byte boundary codes from the Huffman table
     let critical_codes = [
-        0x1ff8, // 13-bit code for space (common)
-        0x3ffc, // 14-bit code for '/'
-        0x7ffc, // 15-bit code for '='
-        0xffff, // Invalid 16-bit sequence
+        0x1ff8,                  // 13-bit code for space (common)
+        0x3ffc,                  // 14-bit code for '/'
+        0x7ffc,                  // 15-bit code for '='
+        0xffff,                  // Invalid 16-bit sequence
         0x1ff0 | (offset & 0xf), // Mutated boundary codes
     ];
 

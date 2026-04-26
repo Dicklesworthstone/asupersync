@@ -101,10 +101,11 @@ fn fuzz_mutated_frame(input: &FuzzInput) {
         }
     };
 
-    for (slot, byte) in body
-        .iter_mut()
-        .zip(bounded_bytes(&input.suffix, MAX_SUFFIX_BYTES).iter().copied())
-    {
+    for (slot, byte) in body.iter_mut().zip(
+        bounded_bytes(&input.suffix, MAX_SUFFIX_BYTES)
+            .iter()
+            .copied(),
+    ) {
         *slot ^= byte;
     }
 
@@ -115,8 +116,7 @@ fn fuzz_mutated_frame(input: &FuzzInput) {
 
     let declared_delta = i64::from(input.declared_delta).clamp(-32, 32);
     let declared_len_base = i64::try_from(body.len()).unwrap_or(i64::from(u32::MAX));
-    let declared_len_i64 =
-        (declared_len_base + declared_delta).clamp(0, i64::from(u32::MAX));
+    let declared_len_i64 = (declared_len_base + declared_delta).clamp(0, i64::from(u32::MAX));
     let declared_len = u32::try_from(declared_len_i64).unwrap_or(u32::MAX);
 
     let mut frame = BytesMut::with_capacity(MESSAGE_HEADER_SIZE + body.len());

@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use asupersync::lab::oracle::priority_inversion::{
-    PriorityInversionOracle, PriorityInversionConfig, Priority, ResourceId,
+    Priority, PriorityInversionConfig, PriorityInversionOracle, ResourceId,
 };
 use asupersync::types::TaskId;
 use std::time::Duration;
@@ -48,7 +48,10 @@ impl From<FuzzConfig> for PriorityInversionConfig {
 #[derive(Arbitrary, Debug, Clone)]
 enum LifecycleEvent {
     /// Task spawn with priority
-    TaskSpawn { task_id: u32, priority: FuzzPriority },
+    TaskSpawn {
+        task_id: u32,
+        priority: FuzzPriority,
+    },
     /// Task starts execution
     TaskStart { task_id: u32 },
     /// Task completes
@@ -219,7 +222,10 @@ fn test_resource_lifecycle(input: &PriorityInversionFuzzInput) {
 
     // Test various invalid resource operations
     match &input.attack_scenario {
-        AttackScenario::ResourceLeak { task_id, resource_id } => {
+        AttackScenario::ResourceLeak {
+            task_id,
+            resource_id,
+        } => {
             oracle.on_task_spawn(TaskId(*task_id), Priority::Normal);
             oracle.on_task_start(TaskId(*task_id));
             oracle.on_resource_acquire(TaskId(*task_id), ResourceId(*resource_id as u64));
@@ -227,14 +233,20 @@ fn test_resource_lifecycle(input: &PriorityInversionFuzzInput) {
             oracle.on_task_complete(TaskId(*task_id));
             assert!(true, "Resource leak handled without panic");
         }
-        AttackScenario::DoubleAcquire { task_id, resource_id } => {
+        AttackScenario::DoubleAcquire {
+            task_id,
+            resource_id,
+        } => {
             oracle.on_task_spawn(TaskId(*task_id), Priority::Normal);
             oracle.on_task_start(TaskId(*task_id));
             oracle.on_resource_acquire(TaskId(*task_id), ResourceId(*resource_id as u64));
             oracle.on_resource_acquire(TaskId(*task_id), ResourceId(*resource_id as u64));
             assert!(true, "Double acquire handled without panic");
         }
-        AttackScenario::ReleaseWithoutAcquire { task_id, resource_id } => {
+        AttackScenario::ReleaseWithoutAcquire {
+            task_id,
+            resource_id,
+        } => {
             oracle.on_task_spawn(TaskId(*task_id), Priority::Normal);
             oracle.on_task_start(TaskId(*task_id));
             oracle.on_resource_release(TaskId(*task_id), ResourceId(*resource_id as u64));
@@ -344,13 +356,22 @@ fn process_event(oracle: &PriorityInversionOracle, event: &LifecycleEvent) {
         LifecycleEvent::TaskComplete { task_id } => {
             oracle.on_task_complete(TaskId(*task_id));
         }
-        LifecycleEvent::ResourceAcquire { task_id, resource_id } => {
+        LifecycleEvent::ResourceAcquire {
+            task_id,
+            resource_id,
+        } => {
             oracle.on_resource_acquire(TaskId(*task_id), ResourceId(*resource_id as u64));
         }
-        LifecycleEvent::ResourceWait { task_id, resource_id } => {
+        LifecycleEvent::ResourceWait {
+            task_id,
+            resource_id,
+        } => {
             oracle.on_resource_wait(TaskId(*task_id), ResourceId(*resource_id as u64));
         }
-        LifecycleEvent::ResourceRelease { task_id, resource_id } => {
+        LifecycleEvent::ResourceRelease {
+            task_id,
+            resource_id,
+        } => {
             oracle.on_resource_release(TaskId(*task_id), ResourceId(*resource_id as u64));
         }
     }

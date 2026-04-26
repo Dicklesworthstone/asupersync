@@ -11,8 +11,8 @@
 
 use arbitrary::Arbitrary;
 use asupersync::grpc::{
-    streaming::{RequestSink, Streaming, StreamingRequest},
     Code, GrpcError, Status,
+    streaming::{RequestSink, Streaming, StreamingRequest},
 };
 use libfuzzer_sys::fuzz_target;
 use std::collections::VecDeque;
@@ -66,7 +66,9 @@ fn fuzz_grpc_client_streaming_flow_control(input: FuzzInput) {
 }
 
 fn exercise_streaming_request(mut scenario: StreamScenario) {
-    scenario.after_close_values.truncate(MAX_AFTER_CLOSE_ATTEMPTS);
+    scenario
+        .after_close_values
+        .truncate(MAX_AFTER_CLOSE_ATTEMPTS);
 
     let mut stream = StreamingRequest::<u16>::open();
     assert!(
@@ -133,9 +135,13 @@ fn exercise_streaming_request(mut scenario: StreamScenario) {
 
     if !closed {
         for step in 0..=drain_count {
-            let payload = scenario.refill_values.get(step).copied().unwrap_or_else(|| {
-                20_000_u16.wrapping_add(u16::try_from(step).expect("step fits in u16"))
-            });
+            let payload = scenario
+                .refill_values
+                .get(step)
+                .copied()
+                .unwrap_or_else(|| {
+                    20_000_u16.wrapping_add(u16::try_from(step).expect("step fits in u16"))
+                });
             let use_error = (usize::from(payload) + step + 1) % error_stride == 0;
             let result = if use_error {
                 stream.push_result(Err(Status::cancelled(format!("refill-{step}"))))

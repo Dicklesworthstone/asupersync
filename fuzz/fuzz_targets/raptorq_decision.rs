@@ -32,7 +32,7 @@
 //!   4. **Confidence score is bounded.** `confidence_score: u16` MUST
 //!      stay in [0, 1000]. Anything above is a normalization bug.
 //!
-//!   5. **Fallback reason is a non-empty string.** `fallback_reason`
+//!   5. **Fallback reason is a non-empty string.** `deterministic_fallback_reason`
 //!      MUST be one of the documented strings ("none" or a specific
 //!      reason); never empty, never panic-format-Debug-output.
 //!
@@ -103,10 +103,10 @@ fuzz_target!(|data: &[u8]| {
         telemetry_a.confidence_score
     );
 
-    // ── Property 5: fallback_reason is a non-empty string ────────────────
+    // ── Property 5: deterministic_fallback_reason is a non-empty string ────────────────
     assert!(
-        !telemetry_a.fallback_reason.is_empty(),
-        "fallback_reason MUST be non-empty, got '' for snap {snap:?}"
+        !telemetry_a.deterministic_fallback_reason.is_empty(),
+        "deterministic_fallback_reason MUST be non-empty, got '' for snap {snap:?}"
     );
 
     // ── Bonus: extreme-input smoke — does the contract tolerate the all-

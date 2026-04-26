@@ -178,7 +178,11 @@ fn fuzz_size_update_mid_block(
 
     // Mid-block size update — this MUST be a COMPRESSION_ERROR.
     buf.push(0x20);
-    encode_integer_into(&mut buf, (mid_block_new_size as usize).min(MAX_TABLE_SIZE), 5);
+    encode_integer_into(
+        &mut buf,
+        (mid_block_new_size as usize).min(MAX_TABLE_SIZE),
+        5,
+    );
 
     // Optional trailing header to ensure the decoder fails *before* consuming it.
     if let Some(idx) = trailing_header {

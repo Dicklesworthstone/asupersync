@@ -9,13 +9,10 @@
 //! 4. Index 0 rejected as invalid per RFC
 //! 5. Huffman + literal round-trips preserve bytes
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 
-use asupersync::{
-    bytes::Bytes,
-    http::h2::hpack::Decoder,
-};
+use asupersync::{bytes::Bytes, http::h2::hpack::Decoder};
 
 /// Fuzzing input structure for HPACK indexed header testing
 #[derive(Arbitrary, Debug)]
@@ -145,20 +142,24 @@ fn setup_dynamic_table(decoder: &mut Decoder, operations: &[DynamicTableOp]) {
             DynamicTableOp::InsertHeader { name, value } => {
                 // Bound header sizes
                 let bounded_name = if name.len() > 256 { &name[..256] } else { name };
-                let bounded_value = if value.len() > 512 { &value[..512] } else { value };
+                let bounded_value = if value.len() > 512 {
+                    &value[..512]
+                } else {
+                    value
+                };
 
                 // Encode literal with incremental indexing (pattern: 01xxxxxx)
                 // Use index 0 for new name + encode name string + encode value string
                 header_block.push(0x40); // 01000000 - literal with incremental indexing, index 0
                 encode_string(&mut header_block, bounded_name, false);
                 encode_string(&mut header_block, bounded_value, false);
-            },
+            }
             DynamicTableOp::UpdateTableSize(size) => {
                 let bounded_size = (*size as usize).min(16384);
                 // Encode dynamic table size update (pattern: 001xxxxx)
                 header_block.push(0x20); // 00100000
                 encode_integer(&mut header_block, bounded_size, 5);
-            },
+            }
         }
     }
 
@@ -172,7 +173,8 @@ fn setup_dynamic_table(decoder: &mut Decoder, operations: &[DynamicTableOp]) {
 /// Test Property 1: No panic on any indexed byte sequence
 fn test_no_panic_on_indexed_bytes(decoder: &mut Decoder, data: &[u8]) {
     // Test direct indexed patterns (1xxxxxxx)
-    for byte in data.iter().take(256) { // Limit iterations
+    for byte in data.iter().take(256) {
+        // Limit iterations
         let indexed_byte = *byte | 0x80; // Force indexed pattern
         let mut bytes = Bytes::from(vec![indexed_byte]);
         let _ = decoder.decode(&mut bytes); // Should not panic
@@ -198,7 +200,9 @@ fn test_no_panic_on_indexed_bytes(decoder: &mut Decoder, data: &[u8]) {
 fn test_static_table_correctness() {
     let mut decoder = Decoder::new();
 
-    for (expected_index, &(expected_name, expected_value)) in STATIC_TABLE_ENTRIES.iter().enumerate() {
+    for (expected_index, &(expected_name, expected_value)) in
+        STATIC_TABLE_ENTRIES.iter().enumerate()
+    {
         let index = expected_index + 1; // Static table is 1-indexed
 
         // Encode indexed header field for this static table entry
@@ -211,12 +215,16 @@ fn test_static_table_correctness() {
             && let Some(header) = headers.first()
         {
             // Verify name and value match static table entry exactly
-            assert_eq!(header.name, expected_name,
+            assert_eq!(
+                header.name, expected_name,
                 "Static table index {} name mismatch: expected '{}', got '{}'",
-                index, expected_name, header.name);
-            assert_eq!(header.value, expected_value,
+                index, expected_name, header.name
+            );
+            assert_eq!(
+                header.value, expected_value,
                 "Static table index {} value mismatch: expected '{}', got '{}'",
-                index, expected_value, header.value);
+                index, expected_value, header.value
+            );
         }
     }
 }
@@ -235,8 +243,11 @@ fn test_dynamic_table_bounds(decoder: &mut Decoder) {
         let result = decoder.decode(&mut bytes);
 
         // Should return error, not panic
-        assert!(result.is_err(),
-            "Expected error for out-of-bounds dynamic table index {}, but got success", index);
+        assert!(
+            result.is_err(),
+            "Expected error for out-of-bounds dynamic table index {}, but got success",
+            index
+        );
     }
 }
 
@@ -251,7 +262,10 @@ fn test_index_zero_rejection() {
     let result = decoder.decode(&mut bytes);
 
     // RFC 7541 requires rejecting index 0
-    assert!(result.is_err(), "Expected error for invalid index 0, but decoding succeeded");
+    assert!(
+        result.is_err(),
+        "Expected error for invalid index 0, but decoding succeeded"
+    );
 }
 
 /// Test Property 5: Huffman + literal round-trip preservation
@@ -262,9 +276,16 @@ fn test_huffman_round_trip(data: &[u8]) {
     }
 
     // Test Huffman encoding round-trip on ASCII-ish data
-    let ascii_data: Vec<u8> = data.iter()
+    let ascii_data: Vec<u8> = data
+        .iter()
         .take(512)
-        .map(|&b| if b.is_ascii_graphic() || b == b' ' { b } else { b'?' })
+        .map(|&b| {
+            if b.is_ascii_graphic() || b == b' ' {
+                b
+            } else {
+                b'?'
+            }
+        })
         .collect();
 
     if ascii_data.is_empty() {
@@ -288,9 +309,13 @@ fn test_huffman_round_trip(data: &[u8]) {
             && let Some(header) = headers.first()
         {
             // The decoded name should equal the original input (round-trip preservation)
-            assert_eq!(header.name.as_bytes(), ascii_data,
+            assert_eq!(
+                header.name.as_bytes(),
+                ascii_data,
                 "Huffman round-trip failed: original {:?} != decoded {:?}",
-                ascii_data, header.name.as_bytes());
+                ascii_data,
+                header.name.as_bytes()
+            );
         }
     }
 }

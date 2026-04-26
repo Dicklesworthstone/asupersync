@@ -81,7 +81,8 @@ fn run_mul_slice(c: &mut Cursor) {
 
     let expected = scalar_mul_ref(&dst0, scalar);
     assert_eq!(
-        got, expected,
+        got,
+        expected,
         "gf256_mul_slice diverged from scalar reference (c={scalar}, len={})",
         dst0.len()
     );
@@ -98,7 +99,8 @@ fn run_addmul_slice(c: &mut Cursor) {
 
     let expected = scalar_addmul_ref(&dst0, &src, scalar);
     assert_eq!(
-        got, expected,
+        got,
+        expected,
         "gf256_addmul_slice diverged from scalar reference (c={scalar}, len={})",
         dst0.len()
     );
@@ -200,7 +202,8 @@ fn run_mr_mul_compose(c: &mut Cursor) {
     gf256_mul_slice(&mut onestep, Gf256::new(composed));
 
     assert_eq!(
-        twostep, onestep,
+        twostep,
+        onestep,
         "MR-MUL-COMPOSE failed: c1={c1} c2={c2} c1·c2={composed} len={}",
         buf.len()
     );
@@ -222,7 +225,8 @@ fn run_mr_addmul_involution(c: &mut Cursor) {
     gf256_addmul_slice(&mut work, &src, Gf256::new(scalar));
 
     assert_eq!(
-        work, dst0,
+        work,
+        dst0,
         "MR-ADDMUL-XOR-INVOLUTION failed: c={scalar} len={}",
         dst0.len()
     );
@@ -274,10 +278,7 @@ impl<'a> Cursor<'a> {
 
     fn next_u16(&mut self) -> u16 {
         let bytes = self.take(2).unwrap_or(&[0, 0]);
-        u16::from_le_bytes([
-            *bytes.first().unwrap_or(&0),
-            *bytes.get(1).unwrap_or(&0),
-        ])
+        u16::from_le_bytes([*bytes.first().unwrap_or(&0), *bytes.get(1).unwrap_or(&0)])
     }
 
     fn next_u8(&mut self) -> u8 {

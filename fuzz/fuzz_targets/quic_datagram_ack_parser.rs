@@ -12,11 +12,11 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
+use libfuzzer_sys::fuzz_target;
 
 use asupersync::net::quic_native::transport::{
-    QuicTransportMachine, AckRange, PacketNumberSpace, SentPacketMeta
+    AckRange, PacketNumberSpace, QuicTransportMachine, SentPacketMeta,
 };
 
 #[derive(Debug, Arbitrary)]

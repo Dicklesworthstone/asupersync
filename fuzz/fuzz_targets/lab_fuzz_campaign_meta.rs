@@ -176,7 +176,9 @@ fuzz_target!(|input: CampaignInput| {
             .iter()
             .find(|f| f.seed == case.seed)
             .expect("every regression case must correspond to a finding");
-        let expected = matching_finding.minimized_seed.unwrap_or(matching_finding.seed);
+        let expected = matching_finding
+            .minimized_seed
+            .unwrap_or(matching_finding.seed);
         assert_eq!(
             case.replay_seed, expected,
             "regression case replay_seed {} doesn't match finding {} minimized_seed {:?}",

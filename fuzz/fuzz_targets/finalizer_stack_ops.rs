@@ -44,9 +44,17 @@ fn decode_escalation(raw: u8) -> FinalizerEscalation {
     }
 }
 
-fn assert_stack_shape(stack: &FinalizerStack, model: &[ModelFinalizer], escalation: FinalizerEscalation) {
+fn assert_stack_shape(
+    stack: &FinalizerStack,
+    model: &[ModelFinalizer],
+    escalation: FinalizerEscalation,
+) {
     assert_eq!(stack.len(), model.len(), "stack length diverged from model");
-    assert_eq!(stack.is_empty(), model.is_empty(), "is_empty diverged from model");
+    assert_eq!(
+        stack.is_empty(),
+        model.is_empty(),
+        "is_empty diverged from model"
+    );
     assert_eq!(stack.escalation(), escalation, "escalation policy drifted");
     assert_eq!(
         stack.escalation().allows_continuation(),
@@ -101,7 +109,9 @@ fuzz_target!(|input: FinalizerStackInput| {
             }
             StackOp::DrainAll => {
                 while let Some(expected) = model.pop() {
-                    let actual = stack.pop().expect("stack pop must match model during drain");
+                    let actual = stack
+                        .pop()
+                        .expect("stack pop must match model during drain");
                     match (expected, actual) {
                         (ModelFinalizer::Sync(expected_tag), Finalizer::Sync(f)) => {
                             f();
@@ -118,7 +128,10 @@ fuzz_target!(|input: FinalizerStackInput| {
                         }
                     }
                 }
-                assert!(stack.pop().is_none(), "stack not empty after draining model");
+                assert!(
+                    stack.pop().is_none(),
+                    "stack not empty after draining model"
+                );
             }
         }
 

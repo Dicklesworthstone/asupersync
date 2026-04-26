@@ -194,8 +194,7 @@ fn catch_all_only() -> &'static Router {
 /// Build a fuzz-driven router from up to 4 patterns. Each pattern's status
 /// is set to a distinct value so the oracle can identify which route won.
 fn build_router(seeds: &[u8]) -> Router {
-    let mut router = Router::new()
-        .fallback(handler_with_status(StatusCode::NOT_FOUND));
+    let mut router = Router::new().fallback(handler_with_status(StatusCode::NOT_FOUND));
 
     // First registered pattern wins on ties. Use distinct statuses to
     // detect ordering bugs — e.g., if the matcher picks the LAST match
@@ -292,10 +291,7 @@ fuzz_target!(|data: &[u8]| {
             // doesn't (NOT_FOUND from fallback). CREATED would mean the
             // second-registered route won — a routing bug.
             assert!(
-                matches!(
-                    resp.status,
-                    StatusCode::OK | StatusCode::NOT_FOUND
-                ),
+                matches!(resp.status, StatusCode::OK | StatusCode::NOT_FOUND),
                 "first-match-wins violated: got status {:?}, expected OK or NOT_FOUND, pattern={pattern:?}",
                 resp.status
             );

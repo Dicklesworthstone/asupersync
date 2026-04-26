@@ -10,7 +10,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::runtime::region_heap::{global_alloc_count, HeapIndex, RegionHeap};
+use asupersync::runtime::region_heap::{HeapIndex, RegionHeap, global_alloc_count};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashSet;
 
@@ -234,7 +234,9 @@ fn mutate_record(heap: &mut RegionHeap, record: &mut HandleRecord, delta: u8) {
         }
         ValueModel::Word(value) => {
             let mutated = value.rotate_left(u32::from(delta & 31)) ^ u64::from(delta);
-            *heap.get_mut::<u64>(record.handle).expect("live word handle") = mutated;
+            *heap
+                .get_mut::<u64>(record.handle)
+                .expect("live word handle") = mutated;
             *value = mutated;
         }
         ValueModel::Bytes(bytes) => {

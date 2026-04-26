@@ -244,12 +244,12 @@ impl<'a> Cursor<'a> {
             // unknown. Mix both classes plus occasional reserved-style
             // tags (tag 0 is invalid per the spec).
             let tag = match self.next_u8() % 6 {
-                0 => 0,                                // invalid: tag 0
-                1 => 7,                                // gap in schema
-                2 => 8,                                // gap in schema
-                3 => 9,                                // gap in schema
+                0 => 0,                                    // invalid: tag 0
+                1 => 7,                                    // gap in schema
+                2 => 8,                                    // gap in schema
+                3 => 9,                                    // gap in schema
                 4 => 12 + (self.next_u16() as u32 % 1024), // beyond schema
-                _ => 1 << 28,                          // huge tag
+                _ => 1 << 28,                              // huge tag
             };
             let wire_type = self.next_u8() % 6; // 6+ are reserved/illegal
             wire::write_tag(&mut buf, tag, wire_type);

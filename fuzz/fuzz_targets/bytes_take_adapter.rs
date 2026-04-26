@@ -346,9 +346,5 @@ fn parse_input(data: &[u8]) -> ParsedInput {
 }
 
 fn parse_num(text: &str, max: usize) -> usize {
-    text.trim()
-        .parse::<usize>()
-        .ok()
-        .unwrap_or(0)
-        .min(max)
+    text.trim().parse::<usize>().ok().unwrap_or(0).min(max)
 }

@@ -156,7 +156,9 @@ fn fuzz_length_prefix_overflow(
     let mut buf = Vec::with_capacity(MESSAGE_HEADER_SIZE + payload.len() + 5);
     buf.push(compressed_flag);
     buf.extend_from_slice(&advertised_len.to_be_bytes());
-    let take = payload.len().min(MAX_BUF_BYTES.saturating_sub(MESSAGE_HEADER_SIZE));
+    let take = payload
+        .len()
+        .min(MAX_BUF_BYTES.saturating_sub(MESSAGE_HEADER_SIZE));
     buf.extend_from_slice(&payload[..take]);
 
     if chain_second_frame {
@@ -208,7 +210,10 @@ fn fuzz_zero_length_message(compressed: bool) {
     // Err) is a finding — assert via panic so libfuzzer captures the
     // seed.
     if let Ok(Some(msg)) = result {
-        assert!(msg.data.is_empty(), "zero-length frame must have empty data");
+        assert!(
+            msg.data.is_empty(),
+            "zero-length frame must have empty data"
+        );
     } else {
         // Ok(None) or Err on a complete zero-length frame is a real bug.
         // We only assert this for the compressed=false case; compressed
@@ -218,9 +223,7 @@ fn fuzz_zero_length_message(compressed: bool) {
             // Don't panic on the rare malformed seed — but a Err here
             // would be a real codec contract violation, so we must
             // surface it. libfuzzer's panic = finding.
-            panic!(
-                "zero-length uncompressed frame must decode to Ok(Some(empty)); got {result:?}"
-            );
+            panic!("zero-length uncompressed frame must decode to Ok(Some(empty)); got {result:?}");
         }
     }
 }

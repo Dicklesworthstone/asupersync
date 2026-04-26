@@ -15,8 +15,8 @@
 
 use arbitrary::Arbitrary;
 use asupersync::messaging::kafka::{
-    Acks, Compression, KafkaError, KafkaProducer, ProducerConfig,
-    RecordMetadata, TransactionalConfig, TransactionalProducer
+    Acks, Compression, KafkaError, KafkaProducer, ProducerConfig, RecordMetadata,
+    TransactionalConfig, TransactionalProducer,
 };
 use libfuzzer_sys::fuzz_target;
 use std::time::Duration;
@@ -184,7 +184,9 @@ enum ProducerOperation {
         payload: Vec<u8>,
         headers: Vec<(String, Vec<u8>)>,
     },
-    Flush { timeout_ms: u64 },
+    Flush {
+        timeout_ms: u64,
+    },
 }
 
 #[derive(Arbitrary, Debug)]
@@ -230,7 +232,13 @@ fuzz_target!(|scenario: FuzzScenario| match scenario {
         max_message_size,
         key_sizes,
         header_scenarios,
-    } => fuzz_message_validation(topic, payload_sizes, max_message_size, key_sizes, header_scenarios),
+    } => fuzz_message_validation(
+        topic,
+        payload_sizes,
+        max_message_size,
+        key_sizes,
+        header_scenarios
+    ),
 
     FuzzScenario::RetryLogic {
         retry_attempts,
@@ -276,8 +284,8 @@ fn fuzz_config_validation(
                 // Create various malformed server strings
                 match server.host.len() % 4 {
                     0 => format!("{}:{}:{}", server.host, server.port, server.port), // Double port
-                    1 => format!("{}:", server.host), // Missing port
-                    2 => format!(":{}", server.port), // Missing host
+                    1 => format!("{}:", server.host),                                // Missing port
+                    2 => format!(":{}", server.port),                                // Missing host
                     _ => server.host, // No port at all
                 }
             } else {
@@ -326,22 +334,30 @@ fn fuzz_config_validation(
     // - No bootstrap servers
     // - Zero batch size
     // - Zero max message size (if we could set it)
-    let should_be_valid = !config.bootstrap_servers.is_empty()
-        && config.batch_size > 0;
+    let should_be_valid = !config.bootstrap_servers.is_empty() && config.batch_size > 0;
 
     if should_be_valid {
         // Try to create producer with valid config
         let _producer_result = KafkaProducer::new(config);
         // Producer creation might still fail due to feature flags or other constraints
         // but config validation should pass
-        assert!(validation_result.is_ok(), "Valid config should pass validation");
+        assert!(
+            validation_result.is_ok(),
+            "Valid config should pass validation"
+        );
     } else {
         // Invalid configs should be rejected
-        assert!(validation_result.is_err(), "Invalid config should fail validation");
+        assert!(
+            validation_result.is_err(),
+            "Invalid config should fail validation"
+        );
     }
 }
 
-fn fuzz_topic_validation(topic_names: Vec<String>, _validation_attempts: Vec<TopicValidationAttempt>) {
+fn fuzz_topic_validation(
+    topic_names: Vec<String>,
+    _validation_attempts: Vec<TopicValidationAttempt>,
+) {
     for topic in topic_names.iter().take(16) {
         let topic = limit_string_length(topic, MAX_TOPIC_LENGTH);
 
@@ -432,10 +448,16 @@ fn fuzz_retry_logic(
         let backoff = calculate_retry_backoff(&config, scenario.attempt);
 
         // Backoff should be bounded and not overflow
-        assert!(backoff.as_millis() <= 250, "Backoff should be capped at 250ms");
+        assert!(
+            backoff.as_millis() <= 250,
+            "Backoff should be capped at 250ms"
+        );
 
         if scenario.linger_ms > 0 && scenario.attempt < 10 {
-            assert!(backoff.as_millis() > 0, "Backoff should be non-zero for non-zero linger");
+            assert!(
+                backoff.as_millis() > 0,
+                "Backoff should be non-zero for non-zero linger"
+            );
         }
     }
 
@@ -459,7 +481,11 @@ fn fuzz_transactional_validation(
     let servers = if base_config.bootstrap_servers.is_empty() {
         vec!["localhost:9092".to_string()]
     } else {
-        base_config.bootstrap_servers.into_iter().take(MAX_SERVERS).collect()
+        base_config
+            .bootstrap_servers
+            .into_iter()
+            .take(MAX_SERVERS)
+            .collect()
     };
 
     let mut producer_config = ProducerConfig::new(servers);
@@ -513,7 +539,11 @@ fn fuzz_producer_operations(
     let servers = if config.bootstrap_servers.is_empty() {
         vec!["localhost:9092".to_string()]
     } else {
-        config.bootstrap_servers.into_iter().take(MAX_SERVERS).collect()
+        config
+            .bootstrap_servers
+            .into_iter()
+            .take(MAX_SERVERS)
+            .collect()
     };
 
     let producer_config = ProducerConfig::new(servers)
@@ -573,7 +603,10 @@ fn create_kafka_error_from_fuzz(error_type: ErrorTypeFuzz) -> KafkaError {
         ErrorTypeFuzz::QueueFull => KafkaError::QueueFull,
         ErrorTypeFuzz::Broker => KafkaError::Broker("fuzz broker error".to_string()),
         ErrorTypeFuzz::Io => KafkaError::Io(std::io::Error::other("fuzz io error")),
-        ErrorTypeFuzz::MessageTooLarge => KafkaError::MessageTooLarge { size: 1000, max_size: 500 },
+        ErrorTypeFuzz::MessageTooLarge => KafkaError::MessageTooLarge {
+            size: 1000,
+            max_size: 500,
+        },
         ErrorTypeFuzz::InvalidTopic => KafkaError::InvalidTopic("fuzz-topic".to_string()),
         ErrorTypeFuzz::Transaction => KafkaError::Transaction("fuzz transaction error".to_string()),
         ErrorTypeFuzz::Cancelled => KafkaError::Cancelled,
@@ -633,14 +666,24 @@ fn test_header_scenario(scenario: &HeaderScenario) {
 
 fn validate_operation_inputs(operation: &ProducerOperation) {
     match operation {
-        ProducerOperation::Send { topic, key, payload, partition: _ } => {
+        ProducerOperation::Send {
+            topic,
+            key,
+            payload,
+            partition: _,
+        } => {
             assert!(!topic.trim().is_empty(), "Topic should not be empty");
             assert!(payload.len() <= MAX_PAYLOAD_SIZE);
             if let Some(key) = key {
                 assert!(key.len() <= 1024); // Reasonable key size limit
             }
         }
-        ProducerOperation::SendWithHeaders { topic, key, payload, headers } => {
+        ProducerOperation::SendWithHeaders {
+            topic,
+            key,
+            payload,
+            headers,
+        } => {
             assert!(!topic.trim().is_empty(), "Topic should not be empty");
             assert!(payload.len() <= MAX_PAYLOAD_SIZE);
             assert!(headers.len() <= MAX_HEADERS);
@@ -660,7 +703,10 @@ fn validate_operation_inputs(operation: &ProducerOperation) {
 
 fn test_close_scenario(producer: &KafkaProducer, scenario: &CloseScenario) {
     // Test close timeout bounds
-    assert!(scenario.timeout_ms <= 60000, "Close timeout should be reasonable");
+    assert!(
+        scenario.timeout_ms <= 60000,
+        "Close timeout should be reasonable"
+    );
 
     // Test double close scenario
     if scenario.double_close {

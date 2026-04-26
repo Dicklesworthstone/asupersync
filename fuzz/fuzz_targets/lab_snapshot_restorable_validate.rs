@@ -121,11 +121,11 @@ impl SnapshotSeed {
             .map(|i| {
                 let mode = self.parent_mode[i] & 0x07;
                 let parent: serde_json::Value = match mode {
-                    0 => serde_json::Value::Null,                     // root
-                    1 => serde_json::json!(i),                        // self-loop
+                    0 => serde_json::Value::Null, // root
+                    1 => serde_json::json!(i),    // self-loop
                     2 if region_count > 0 => serde_json::json!((i + 1) % region_count), // forward (cycle if i is last)
-                    3 => serde_json::json!(u64::MAX),                 // dangling
-                    4 if i > 0 => serde_json::json!(i - 1),           // valid backward
+                    3 => serde_json::json!(u64::MAX),                                   // dangling
+                    4 if i > 0 => serde_json::json!(i - 1), // valid backward
                     _ => serde_json::Value::Null,
                 };
                 let state = match self.state_choice[i] & 0x07 {

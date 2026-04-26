@@ -35,7 +35,9 @@
 
 #![no_main]
 
-use asupersync::raptorq::decoder::{DecodeError, DecodeResult, InactivationDecoder, ReceivedSymbol};
+use asupersync::raptorq::decoder::{
+    DecodeError, DecodeResult, InactivationDecoder, ReceivedSymbol,
+};
 use asupersync::raptorq::gf256::Gf256;
 use libfuzzer_sys::fuzz_target;
 

@@ -92,7 +92,10 @@ fn exercise_structured(input: &HarnessInput) {
             let decoded = codec
                 .decode(&encoded)
                 .expect("encoded message must decode with the same codec");
-            assert_eq!(decoded, message, "roundtrip through ProstCodec changed the message");
+            assert_eq!(
+                decoded, message,
+                "roundtrip through ProstCodec changed the message"
+            );
 
             let reencoded = codec
                 .encode(&decoded)
@@ -133,11 +136,7 @@ fn exercise_raw(data: &[u8]) {
     }
 }
 
-fn exercise_decode(
-    limit: usize,
-    wire: Bytes,
-    expected_message: Option<&RoundTripMessage>,
-) {
+fn exercise_decode(limit: usize, wire: Bytes, expected_message: Option<&RoundTripMessage>) {
     let mut codec = ProstCodec::<RoundTripMessage, RoundTripMessage>::with_max_size(limit);
 
     match codec.decode(&wire) {

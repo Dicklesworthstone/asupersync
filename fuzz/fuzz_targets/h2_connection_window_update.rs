@@ -2,10 +2,8 @@
 
 use arbitrary::Arbitrary;
 use asupersync::bytes::Bytes;
-use asupersync::http::h2::{
-    Connection, ErrorCode, Frame, Settings,
-};
 use asupersync::http::h2::frame::{HeadersFrame, SettingsFrame, WindowUpdateFrame};
+use asupersync::http::h2::{Connection, ErrorCode, Frame, Settings};
 use libfuzzer_sys::fuzz_target;
 
 const ACTIVE_STREAM_ID: u32 = 1;
@@ -94,10 +92,8 @@ fn apply_inbound_update(connection: &mut Connection, op: &InboundWindowUpdate) {
     match op.target {
         InboundTarget::Connection => {
             let before = connection.send_window();
-            let result = connection.process_frame(Frame::WindowUpdate(WindowUpdateFrame::new(
-                0,
-                op.increment,
-            )));
+            let result = connection
+                .process_frame(Frame::WindowUpdate(WindowUpdateFrame::new(0, op.increment)));
 
             if op.increment == 0 {
                 let err = result.expect_err("zero increment on connection must fail");

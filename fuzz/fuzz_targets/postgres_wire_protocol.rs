@@ -363,7 +363,12 @@ fuzz_target!(|scenario: FuzzScenario| match scenario {
         length_override,
         body_data,
         truncation_scenarios,
-    } => fuzz_message_framing(message_type, length_override, body_data, truncation_scenarios),
+    } => fuzz_message_framing(
+        message_type,
+        length_override,
+        body_data,
+        truncation_scenarios
+    ),
 
     FuzzScenario::RowDescriptionParsing {
         num_fields,
@@ -401,7 +406,12 @@ fuzz_target!(|scenario: FuzzScenario| match scenario {
         query_text,
         parameter_oids,
         preparation_options,
-    } => fuzz_query_preparation(statement_name, query_text, parameter_oids, preparation_options),
+    } => fuzz_query_preparation(
+        statement_name,
+        query_text,
+        parameter_oids,
+        preparation_options
+    ),
 
     FuzzScenario::CopyProtocol {
         copy_format,
@@ -438,13 +448,19 @@ fn fuzz_message_framing(
     // Test message length validation
     if actual_length < 4 {
         // Length too small - should be rejected
-        assert!(actual_length < 4, "Length field must include itself (4 bytes)");
+        assert!(
+            actual_length < 4,
+            "Length field must include itself (4 bytes)"
+        );
     }
 
     const MAX_MESSAGE_LEN: u32 = 64 * 1024 * 1024; // Same as in postgres.rs
     if actual_length > MAX_MESSAGE_LEN {
         // Length too large - should be rejected for DoS protection
-        assert!(actual_length > MAX_MESSAGE_LEN, "Message length should be bounded");
+        assert!(
+            actual_length > MAX_MESSAGE_LEN,
+            "Message length should be bounded"
+        );
     }
 
     // Test truncation scenarios
@@ -456,19 +472,25 @@ fn fuzz_message_framing(
         match scenario.expected_behavior {
             TruncationBehavior::ProtocolError => {
                 // Should detect incomplete message
-                if truncate_point < 5 { // Less than header
+                if truncate_point < 5 {
+                    // Less than header
                     assert!(truncated.len() < 5, "Incomplete header should be detected");
                 }
             }
             TruncationBehavior::UnexpectedEnd => {
                 // Should detect body truncation
                 let expected_total = if message.len() >= 5 {
-                    5 + (u32::from_be_bytes([message[1], message[2], message[3], message[4]]) as usize - 4)
+                    5 + (u32::from_be_bytes([message[1], message[2], message[3], message[4]])
+                        as usize
+                        - 4)
                 } else {
                     5
                 };
                 if truncate_point < expected_total {
-                    assert!(truncated.len() < expected_total, "Body truncation should be detected");
+                    assert!(
+                        truncated.len() < expected_total,
+                        "Body truncation should be detected"
+                    );
                 }
             }
             TruncationBehavior::ValidPartial => {
@@ -596,7 +618,10 @@ fn fuzz_data_row_parsing(
     format_codes: Vec<FormatCode>,
     type_oids: Vec<u32>,
 ) {
-    if values.len() > MAX_COLUMNS || format_codes.len() > MAX_COLUMNS || type_oids.len() > MAX_COLUMNS {
+    if values.len() > MAX_COLUMNS
+        || format_codes.len() > MAX_COLUMNS
+        || type_oids.len() > MAX_COLUMNS
+    {
         return;
     }
 
@@ -632,7 +657,10 @@ fn fuzz_data_row_parsing(
             test_type_conversion(actual_data, type_oid, format, &value.expected_type);
         } else if value.length != -1 {
             // Invalid negative length (not -1 for NULL)
-            assert!(value.length == -1 || value.length >= 0, "Invalid field length");
+            assert!(
+                value.length == -1 || value.length >= 0,
+                "Invalid field length"
+            );
         }
     }
 
@@ -788,16 +816,25 @@ fn fuzz_query_preparation(
 ) {
     let stmt_name = sanitize_string(&statement_name, 64);
     let query = sanitize_string(&query_text, MAX_STRING_LENGTH);
-    let param_oids = parameter_oids.into_iter().take(MAX_PARAMETERS).collect::<Vec<_>>();
+    let param_oids = parameter_oids
+        .into_iter()
+        .take(MAX_PARAMETERS)
+        .collect::<Vec<_>>();
 
     // Test statement name validation
     assert!(stmt_name.len() <= 64, "Statement name should be bounded");
 
     // Test query length validation
-    assert!(query.len() <= MAX_STRING_LENGTH, "Query length should be bounded");
+    assert!(
+        query.len() <= MAX_STRING_LENGTH,
+        "Query length should be bounded"
+    );
 
     // Test parameter OID validation
-    assert!(param_oids.len() <= MAX_PARAMETERS, "Parameter count should be bounded");
+    assert!(
+        param_oids.len() <= MAX_PARAMETERS,
+        "Parameter count should be bounded"
+    );
 
     // Test preparation options
     test_preparation_options(&preparation_options);
@@ -809,7 +846,8 @@ fn fuzz_copy_protocol(
     data_rows: Vec<CopyRow>,
     delimiter_tests: Vec<DelimiterTest>,
 ) {
-    if data_rows.len() > 1000 { // Limit for fuzzing
+    if data_rows.len() > 1000 {
+        // Limit for fuzzing
         return;
     }
 
@@ -857,7 +895,7 @@ fn apply_malformed_data(data: &mut Vec<u8>, malformation: &MalformedData) {
             // Corrupt length field if it exists
             if pos + 4 <= data.len() {
                 let corrupted_len = 0xFFFFFFFFu32;
-                data[pos..pos+4].copy_from_slice(&corrupted_len.to_be_bytes());
+                data[pos..pos + 4].copy_from_slice(&corrupted_len.to_be_bytes());
             }
         }
         CorruptionType::InvalidUtf8 => {
@@ -876,22 +914,27 @@ fn apply_malformed_data(data: &mut Vec<u8>, malformation: &MalformedData) {
     }
 }
 
-fn test_type_conversion(data: &[u8], type_oid: u32, format: &FormatCode, expected_type: &PostgresType) {
+fn test_type_conversion(
+    data: &[u8],
+    type_oid: u32,
+    format: &FormatCode,
+    expected_type: &PostgresType,
+) {
     // Test common PostgreSQL type OIDs
     let common_oids = [
-        16,    // BOOL
-        20,    // INT8
-        21,    // INT2
-        23,    // INT4
-        25,    // TEXT
-        700,   // FLOAT4
-        701,   // FLOAT8
-        1043,  // VARCHAR
-        1114,  // TIMESTAMP
-        2950,  // UUID
-        114,   // JSON
-        3802,  // JSONB
-        17,    // BYTEA
+        16,   // BOOL
+        20,   // INT8
+        21,   // INT2
+        23,   // INT4
+        25,   // TEXT
+        700,  // FLOAT4
+        701,  // FLOAT8
+        1043, // VARCHAR
+        1114, // TIMESTAMP
+        2950, // UUID
+        114,  // JSON
+        3802, // JSONB
+        17,   // BYTEA
     ];
 
     match format {
@@ -920,18 +963,21 @@ fn test_type_conversion(data: &[u8], type_oid: u32, format: &FormatCode, expecte
 
 fn test_text_conversion(text: &str, type_oid: u32, expected_type: &PostgresType) {
     match type_oid {
-        16 => { // BOOL
+        16 => {
+            // BOOL
             let valid_bool_values = ["t", "f", "true", "false", "yes", "no", "1", "0"];
             if !valid_bool_values.contains(&text.to_lowercase().as_str()) {
                 // Invalid boolean value should be rejected
             }
         }
-        20 | 21 | 23 => { // INT8, INT2, INT4
+        20 | 21 | 23 => {
+            // INT8, INT2, INT4
             if let Err(_) = text.parse::<i64>() {
                 // Invalid integer should be rejected
             }
         }
-        700 | 701 => { // FLOAT4, FLOAT8
+        700 | 701 => {
+            // FLOAT4, FLOAT8
             if let Err(_) = text.parse::<f64>() {
                 // Invalid float should be rejected (unless special values like NaN, Infinity)
                 if !["NaN", "Infinity", "-Infinity"].contains(&text) {
@@ -950,33 +996,39 @@ fn test_text_conversion(text: &str, type_oid: u32, expected_type: &PostgresType)
 
 fn test_binary_conversion(data: &[u8], type_oid: u32, expected_type: &PostgresType) {
     match type_oid {
-        16 => { // BOOL
+        16 => {
+            // BOOL
             if data.len() != 1 {
                 // Boolean should be 1 byte
                 assert!(data.len() != 1, "Boolean binary format should be 1 byte");
             }
         }
-        21 => { // INT2
+        21 => {
+            // INT2
             if data.len() != 2 {
                 assert!(data.len() != 2, "INT2 binary format should be 2 bytes");
             }
         }
-        23 => { // INT4
+        23 => {
+            // INT4
             if data.len() != 4 {
                 assert!(data.len() != 4, "INT4 binary format should be 4 bytes");
             }
         }
-        20 => { // INT8
+        20 => {
+            // INT8
             if data.len() != 8 {
                 assert!(data.len() != 8, "INT8 binary format should be 8 bytes");
             }
         }
-        700 => { // FLOAT4
+        700 => {
+            // FLOAT4
             if data.len() != 4 {
                 assert!(data.len() != 4, "FLOAT4 binary format should be 4 bytes");
             }
         }
-        701 => { // FLOAT8
+        701 => {
+            // FLOAT8
             if data.len() != 8 {
                 assert!(data.len() != 8, "FLOAT8 binary format should be 8 bytes");
             }
@@ -1047,7 +1099,10 @@ fn test_sqlstate_categorization(sqlstate: &str, expected_category: &ErrorCategor
         (ErrorCategory::TransactionRollback, ErrorCategory::TransactionRollback) => {
             // Serialization failures and deadlocks should be retryable
         }
-        (ErrorCategory::IntegrityConstraintViolation, ErrorCategory::IntegrityConstraintViolation) => {
+        (
+            ErrorCategory::IntegrityConstraintViolation,
+            ErrorCategory::IntegrityConstraintViolation,
+        ) => {
             // Constraint violations should not be retryable
         }
         _ => {
@@ -1125,7 +1180,8 @@ fn test_scram_client_first(data: &[u8], attributes: &[ScramAttribute]) {
             'n' => { // Username
                 // Should be valid username
             }
-            'r' => { // Nonce
+            'r' => {
+                // Nonce
                 // Should be sufficient entropy
                 if attr.value.len() < 18 { // Minimum nonce length
                     // Insufficient entropy
@@ -1144,11 +1200,13 @@ fn test_scram_server_first(data: &[u8], attributes: &[ScramAttribute]) {
             'r' => { // Nonce (client + server)
                 // Should include client nonce plus server nonce
             }
-            's' => { // Salt
+            's' => {
+                // Salt
                 // Should be base64-encoded salt
                 test_base64_decoding(&attr.value);
             }
-            'i' => { // Iteration count
+            'i' => {
+                // Iteration count
                 if let Ok(text) = std::str::from_utf8(&attr.value) {
                     if let Ok(iterations) = text.parse::<u32>() {
                         if iterations < 4096 { // SCRAM-SHA-256 minimum
@@ -1167,13 +1225,15 @@ fn test_scram_server_first(data: &[u8], attributes: &[ScramAttribute]) {
 fn test_scram_client_final(data: &[u8], attributes: &[ScramAttribute]) {
     for attr in attributes {
         match attr.name {
-            'c' => { // Channel binding
+            'c' => {
+                // Channel binding
                 test_base64_decoding(&attr.value);
             }
             'r' => { // Nonce
                 // Should match server nonce
             }
-            'p' => { // Proof
+            'p' => {
+                // Proof
                 test_base64_decoding(&attr.value);
                 // Should be correct length for SHA-256
                 if let Ok(decoded) = base64_decode(&attr.value) {
@@ -1192,7 +1252,8 @@ fn test_scram_client_final(data: &[u8], attributes: &[ScramAttribute]) {
 fn test_scram_server_final(data: &[u8], attributes: &[ScramAttribute]) {
     for attr in attributes {
         match attr.name {
-            'v' => { // Verification
+            'v' => {
+                // Verification
                 test_base64_decoding(&attr.value);
                 if let Ok(decoded) = base64_decode(&attr.value) {
                     if decoded.len() != 32 { // SHA-256 output length
@@ -1251,7 +1312,8 @@ fn test_parameter_value(param: &ParameterValue) {
 fn test_text_parameter_conversion(text: &str, type_oid: u32, conversion: &ConversionTest) {
     match conversion.edge_case {
         EdgeCaseType::IntegerOverflow => {
-            if type_oid == 21 { // INT2
+            if type_oid == 21 {
+                // INT2
                 if let Ok(val) = text.parse::<i64>() {
                     if val < i16::MIN as i64 || val > i16::MAX as i64 {
                         // Should detect overflow
@@ -1261,7 +1323,8 @@ fn test_text_parameter_conversion(text: &str, type_oid: u32, conversion: &Conver
             }
         }
         EdgeCaseType::FloatInfinity => {
-            if type_oid == 700 || type_oid == 701 { // FLOAT4/8
+            if type_oid == 700 || type_oid == 701 {
+                // FLOAT4/8
                 if text == "Infinity" || text == "-Infinity" {
                     // Should handle infinity
                     assert!(conversion.expected_success);
@@ -1280,7 +1343,8 @@ fn test_text_parameter_conversion(text: &str, type_oid: u32, conversion: &Conver
             // Already validated as UTF-8 at this point
         }
         EdgeCaseType::JsonSyntaxError => {
-            if type_oid == 114 || type_oid == 3802 { // JSON/JSONB
+            if type_oid == 114 || type_oid == 3802 {
+                // JSON/JSONB
                 // Should validate JSON syntax
                 if let Err(_) = serde_json::from_str::<serde_json::Value>(text) {
                     assert!(!conversion.expected_success);
@@ -1296,10 +1360,10 @@ fn test_text_parameter_conversion(text: &str, type_oid: u32, conversion: &Conver
 fn test_binary_parameter_conversion(data: &[u8], type_oid: u32, conversion: &ConversionTest) {
     // Test binary format constraints
     match type_oid {
-        16 => assert!(data.len() == 1), // BOOL
-        21 => assert!(data.len() == 2), // INT2
-        23 => assert!(data.len() == 4), // INT4
-        20 => assert!(data.len() == 8), // INT8
+        16 => assert!(data.len() == 1),  // BOOL
+        21 => assert!(data.len() == 2),  // INT2
+        23 => assert!(data.len() == 4),  // INT4
+        20 => assert!(data.len() == 8),  // INT8
         700 => assert!(data.len() == 4), // FLOAT4
         701 => assert!(data.len() == 8), // FLOAT8
         _ => {
@@ -1414,7 +1478,8 @@ fn test_delimiter_handling(delimiter_test: &DelimiterTest) {
 fn base64_decode(data: &[u8]) -> Result<Vec<u8>, String> {
     use base64::Engine as _;
     let text = std::str::from_utf8(data).map_err(|_| "Invalid UTF-8")?;
-    base64::engine::general_purpose::STANDARD.decode(text)
+    base64::engine::general_purpose::STANDARD
+        .decode(text)
         .map_err(|_| "Invalid base64")
 }
 

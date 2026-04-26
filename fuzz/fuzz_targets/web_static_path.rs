@@ -48,17 +48,13 @@ use tempfile::TempDir;
 /// process — every legitimate path resolution must therefore yield 404.
 fn doc_root() -> &'static TempDir {
     static ROOT: OnceLock<TempDir> = OnceLock::new();
-    ROOT.get_or_init(|| {
-        TempDir::new().expect("create empty fuzz doc-root")
-    })
+    ROOT.get_or_init(|| TempDir::new().expect("create empty fuzz doc-root"))
 }
 
 /// Lazily-built handler bound to the empty doc-root.
 fn handler() -> &'static asupersync::web::static_files::StaticFilesHandler {
     static HANDLER: OnceLock<asupersync::web::static_files::StaticFilesHandler> = OnceLock::new();
-    HANDLER.get_or_init(|| {
-        StaticFiles::new(doc_root().path()).handler()
-    })
+    HANDLER.get_or_init(|| StaticFiles::new(doc_root().path()).handler())
 }
 
 /// Convert raw fuzz bytes into a "shape-biased" URL path string. The first

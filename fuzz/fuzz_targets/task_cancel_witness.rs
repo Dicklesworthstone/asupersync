@@ -44,7 +44,8 @@ fuzz_target!(|spec: CancelWitnessSpec| {
 
     // Test JSON serialization round-trip
     if let Ok(json) = serde_json::to_string(&witness) {
-        if let Ok(deserialized) = serde_json::from_str::<CancelWitness>(&json) { // ubs:ignore — intentional fuzz test deserialization
+        if let Ok(deserialized) = serde_json::from_str::<CancelWitness>(&json) {
+            // ubs:ignore — intentional fuzz test deserialization
             assert_eq!(witness, deserialized); // ubs:ignore — fuzz test validation
         }
     }

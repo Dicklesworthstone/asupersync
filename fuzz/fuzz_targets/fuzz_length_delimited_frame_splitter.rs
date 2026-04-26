@@ -221,7 +221,10 @@ fn fuzz_oversized_prefix(
     let first = decoder
         .decode(&mut read_buf)
         .expect("partial oversized header should not error");
-    assert!(first.is_none(), "partial oversized header must remain pending");
+    assert!(
+        first.is_none(),
+        "partial oversized header must remain pending"
+    );
     assert_eq!(
         &read_buf[..],
         &wire[..split],
@@ -272,12 +275,8 @@ fn reference_splitter(wire: &[u8], max_frame_length: usize) -> io::Result<Splitt
             });
         }
 
-        let declared_len = u32::from_be_bytes([
-            remaining[0],
-            remaining[1],
-            remaining[2],
-            remaining[3],
-        ]) as usize;
+        let declared_len =
+            u32::from_be_bytes([remaining[0], remaining[1], remaining[2], remaining[3]]) as usize;
         if declared_len > max_frame_length {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,

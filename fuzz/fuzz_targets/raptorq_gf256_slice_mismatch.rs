@@ -97,11 +97,7 @@ fuzz_target!(|data: &[u8]| {
     if len_a > 0 && payload.len() >= 2 * len_a {
         let mut dst = payload[..len_a].to_vec();
         let src: Vec<u8> = payload[len_a..2 * len_a].to_vec();
-        let expected: Vec<u8> = dst
-            .iter()
-            .zip(src.iter())
-            .map(|(d, s)| d ^ s)
-            .collect();
+        let expected: Vec<u8> = dst.iter().zip(src.iter()).map(|(d, s)| d ^ s).collect();
         gf256_add_slice(&mut dst, &src);
         assert_eq!(dst, expected, "gf256_add_slice must equal byte-wise XOR");
     }

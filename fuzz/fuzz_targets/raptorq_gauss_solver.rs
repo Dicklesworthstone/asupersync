@@ -104,12 +104,7 @@ fn build_rhs(seed: &[u8], row: usize) -> DenseRow {
     DenseRow::new(bytes)
 }
 
-fn build_solver(
-    coeffs: &[Vec<u8>],
-    rhs: &[DenseRow],
-    rows: usize,
-    cols: usize,
-) -> GaussianSolver {
+fn build_solver(coeffs: &[Vec<u8>], rhs: &[DenseRow], rows: usize, cols: usize) -> GaussianSolver {
     let mut s = GaussianSolver::new(rows, cols);
     for r in 0..rows {
         let r_bytes: Vec<u8> = rhs[r].as_slice().to_vec();
@@ -151,10 +146,7 @@ fn verify_solution(
         "Solved variant must return one DenseRow per column, got {} for cols={cols}",
         solution.len()
     );
-    let payload_len = rhs
-        .first()
-        .map(|r| r.as_slice().len())
-        .unwrap_or(RHS_LEN);
+    let payload_len = rhs.first().map(|r| r.as_slice().len()).unwrap_or(RHS_LEN);
 
     for r in 0..rows {
         let mut acc = vec![0u8; payload_len];

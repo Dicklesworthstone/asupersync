@@ -103,9 +103,11 @@ fn assert_consistency(oracle: &CancelOrderingOracle, max_violations: usize, expe
     assert_eq!(stats.total_violations, all_violations.len());
     assert!(stats.total_violations <= max_violations);
     assert!(oracle.get_recent_violations(3).len() <= 3);
-    assert!(tracked
-        .windows(2)
-        .all(|pair| pair[0].task_id <= pair[1].task_id));
+    assert!(
+        tracked
+            .windows(2)
+            .all(|pair| pair[0].task_id <= pair[1].task_id)
+    );
 }
 
 fn run_fuzz_case(mut input: FuzzInput) {

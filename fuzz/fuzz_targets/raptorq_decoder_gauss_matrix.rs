@@ -125,7 +125,8 @@ fn execute(input: FuzzInput) {
                 let boundary_seed = input.seed.wrapping_add(offset as u64);
                 let boundary_source =
                     build_source_block(&input.payload, boundary_k, symbol_size, boundary_seed);
-                let boundary_decoder = InactivationDecoder::new(boundary_k, symbol_size, boundary_seed);
+                let boundary_decoder =
+                    InactivationDecoder::new(boundary_k, symbol_size, boundary_seed);
                 let mut received = boundary_decoder.constraint_symbols();
                 received.extend(build_valid_source_symbols(&boundary_source));
                 assert_success_consensus(
@@ -171,8 +172,7 @@ fn execute(input: FuzzInput) {
         }
         Scenario::NearRankDeficientMixedSet => {
             let missing = 1 + (usize::from(input.missing_sources) % (k - 1));
-            let source_payload =
-                build_mixed_payload(&decoder, &encoder, &source, missing, 0);
+            let source_payload = build_mixed_payload(&decoder, &encoder, &source, missing, 0);
             let source_symbols = k - missing;
             let repair_symbols = source_payload.len() - source_symbols;
             let duplicate_repairs = repair_symbols.max(2);
@@ -198,7 +198,12 @@ fn execute(input: FuzzInput) {
             let mut received = decoder.constraint_symbols();
             received.extend(build_valid_source_symbols(&source));
             let target = decoder.constraint_symbols().len() + (usize::from(input.target_index) % k);
-            mutate_structural_fault(&decoder, &mut received[target], input.fault, input.bad_column);
+            mutate_structural_fault(
+                &decoder,
+                &mut received[target],
+                input.fault,
+                input.bad_column,
+            );
             let expected = match input.fault {
                 StructuralFault::ArityMismatch => FailureKind::SymbolEquationArityMismatch,
                 StructuralFault::ColumnOutOfRange => FailureKind::ColumnIndexOutOfRange,
@@ -222,7 +227,8 @@ fn execute(input: FuzzInput) {
                 &encoder,
                 1 + usize::from(input.extra_repairs).max(1),
             ));
-            let source_offset = decoder.constraint_symbols().len() + (usize::from(input.target_index) % k);
+            let source_offset =
+                decoder.constraint_symbols().len() + (usize::from(input.target_index) % k);
             let byte_offset = usize::from(input.corrupt_offset) % symbol_size;
             let mask = if input.corrupt_mask == 0 {
                 1
@@ -362,9 +368,7 @@ fn failure_kind(error: &DecodeError) -> FailureKind {
         DecodeError::SymbolEquationArityMismatch { .. } => FailureKind::SymbolEquationArityMismatch,
         DecodeError::ColumnIndexOutOfRange { .. } => FailureKind::ColumnIndexOutOfRange,
         DecodeError::SourceEsiOutOfRange { .. } => FailureKind::SourceEsiOutOfRange,
-        DecodeError::InvalidSourceSymbolEquation { .. } => {
-            FailureKind::InvalidSourceSymbolEquation
-        }
+        DecodeError::InvalidSourceSymbolEquation { .. } => FailureKind::InvalidSourceSymbolEquation,
         DecodeError::CorruptDecodedOutput { .. } => FailureKind::CorruptDecodedOutput,
     }
 }
@@ -375,7 +379,9 @@ fn assert_success_consensus(
     expected_source: &[Vec<u8>],
     wavefront_batch: usize,
 ) {
-    let direct = decoder.decode(received).expect("direct decode should succeed");
+    let direct = decoder
+        .decode(received)
+        .expect("direct decode should succeed");
     let wavefront = decoder
         .decode_wavefront(received, wavefront_batch)
         .expect("wavefront decode should succeed");
@@ -397,7 +403,9 @@ fn assert_failure_consensus(
     expected: FailureKind,
     recoverable: bool,
 ) {
-    let direct = decoder.decode(received).expect_err("direct decode should fail");
+    let direct = decoder
+        .decode(received)
+        .expect_err("direct decode should fail");
     let wavefront = decoder
         .decode_wavefront(received, wavefront_batch)
         .expect_err("wavefront decode should fail");

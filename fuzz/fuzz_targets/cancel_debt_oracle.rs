@@ -3,10 +3,8 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use asupersync::lab::oracle::cancel_debt::{
-    CancelDebtOracle, CancelDebtConfig, CleanupWorkType,
-};
-use asupersync::types::{TaskId, RegionId, Time};
+use asupersync::lab::oracle::cancel_debt::{CancelDebtConfig, CancelDebtOracle, CleanupWorkType};
+use asupersync::types::{RegionId, TaskId, Time};
 
 /// Fuzz input for CancelDebtOracle testing
 #[derive(Arbitrary, Debug)]
@@ -67,13 +65,9 @@ enum DebtOperation {
         timestamp_offset_ms: u16,
     },
     /// Check for debt accumulation violations
-    CheckDebt {
-        timestamp_offset_ms: u16,
-    },
+    CheckDebt { timestamp_offset_ms: u16 },
     /// Call general check method
-    CheckGeneral {
-        timestamp_offset_ms: u16,
-    },
+    CheckGeneral { timestamp_offset_ms: u16 },
     /// Reset the oracle state
     Reset,
     /// Get statistics (introspection)
@@ -165,14 +159,9 @@ enum AttackScenario {
         pattern_count: u8,
     },
     /// Resource exhaustion simulation
-    ResourceExhaustion {
-        memory_target_kb: u32,
-    },
+    ResourceExhaustion { memory_target_kb: u32 },
     /// Completion rate manipulation
-    CompletionRateManipulation {
-        add_rate: u8,
-        complete_rate: u8,
-    },
+    CompletionRateManipulation { add_rate: u8, complete_rate: u8 },
 }
 
 fuzz_target!(|input: CancelDebtFuzzInput| {
@@ -257,9 +246,14 @@ fn test_statistics_consistency(input: &CancelDebtFuzzInput) {
 
 /// Property 3: Debt accumulation detection
 fn test_debt_accumulation_detection(input: &CancelDebtFuzzInput) {
-    if let AttackScenario::DebtBomb { queue_type, work_count, work_type } = &input.attack_scenario {
+    if let AttackScenario::DebtBomb {
+        queue_type,
+        work_count,
+        work_type,
+    } = &input.attack_scenario
+    {
         let config = CancelDebtConfig {
-            max_debt_items: 10, // Low threshold for testing
+            max_debt_items: 10,         // Low threshold for testing
             max_debt_rate_per_sec: 5.0, // Low rate for testing
             ..input.config.clone().into()
         };
@@ -300,33 +294,39 @@ fn test_queue_management(input: &CancelDebtFuzzInput) {
     let base_time = Time::from_nanos(1_000_000_000);
 
     // Test edge case: completion without addition
-    if let AttackScenario::CompletionWithoutWork { queue_type, completion_count } = &input.attack_scenario {
+    if let AttackScenario::CompletionWithoutWork {
+        queue_type,
+        completion_count,
+    } = &input.attack_scenario
+    {
         let queue_name: String = (*queue_type).into();
 
         // Try to complete items from empty queue
-        oracle.on_work_items_completed(
-            &queue_name,
-            *completion_count as usize,
-            base_time,
-        );
+        oracle.on_work_items_completed(&queue_name, *completion_count as usize, base_time);
 
         // Should handle gracefully
         let stats = oracle.get_statistics();
-        assert!(stats.total_current_debt == 0, "Debt should remain 0 when completing from empty queue");
+        assert!(
+            stats.total_current_debt == 0,
+            "Debt should remain 0 when completing from empty queue"
+        );
     }
 }
 
 /// Property 5: Timestamp handling
 fn test_timestamp_handling(input: &CancelDebtFuzzInput) {
-    if let AttackScenario::FutureTimestamps { operations, future_offset_ms } = &input.attack_scenario {
+    if let AttackScenario::FutureTimestamps {
+        operations,
+        future_offset_ms,
+    } = &input.attack_scenario
+    {
         let config = input.config.clone().into();
         let oracle = CancelDebtOracle::new(config);
         let base_time = Time::from_nanos(1_000_000_000);
 
         // Use future timestamps
-        let future_time = Time::from_nanos(
-            base_time.as_nanos() + (*future_offset_ms as u64) * 1_000_000
-        );
+        let future_time =
+            Time::from_nanos(base_time.as_nanos() + (*future_offset_ms as u64) * 1_000_000);
 
         for operation in operations {
             // Process with future timestamp context
@@ -345,7 +345,10 @@ fn test_attack_scenarios(input: &CancelDebtFuzzInput) {
     let base_time = Time::from_nanos(1_000_000_000);
 
     match &input.attack_scenario {
-        AttackScenario::Starvation { queue_type, work_count } => {
+        AttackScenario::Starvation {
+            queue_type,
+            work_count,
+        } => {
             let queue_name: String = (*queue_type).into();
 
             // Add many work items but never complete any
@@ -370,7 +373,8 @@ fn test_attack_scenarios(input: &CancelDebtFuzzInput) {
 
             // Add items until we approach target memory usage
             let mut added_items = 0;
-            while added_items < 10000 { // Safety limit
+            while added_items < 10000 {
+                // Safety limit
                 oracle.on_work_item_added(
                     queue_name,
                     Some(TaskId(added_items)),
@@ -397,7 +401,11 @@ fn test_attack_scenarios(input: &CancelDebtFuzzInput) {
 
 /// Property 7: Configuration bounds enforcement
 fn test_configuration_bounds(input: &CancelDebtFuzzInput) {
-    if let AttackScenario::BoundaryTest { target_debt, queue_type } = &input.attack_scenario {
+    if let AttackScenario::BoundaryTest {
+        target_debt,
+        queue_type,
+    } = &input.attack_scenario
+    {
         let config = CancelDebtConfig {
             max_debt_items: *target_debt as usize,
             ..input.config.clone().into()
@@ -450,9 +458,8 @@ fn process_operation(oracle: &CancelDebtOracle, operation: &DebtOperation, base_
             timestamp_offset_ms,
         } => {
             let queue_name: String = (*queue_type).into();
-            let timestamp = Time::from_nanos(
-                base_time.as_nanos() + (*timestamp_offset_ms as u64) * 1_000_000
-            );
+            let timestamp =
+                Time::from_nanos(base_time.as_nanos() + (*timestamp_offset_ms as u64) * 1_000_000);
 
             oracle.on_work_item_added(
                 &queue_name,
@@ -468,22 +475,23 @@ fn process_operation(oracle: &CancelDebtOracle, operation: &DebtOperation, base_
             timestamp_offset_ms,
         } => {
             let queue_name: String = (*queue_type).into();
-            let timestamp = Time::from_nanos(
-                base_time.as_nanos() + (*timestamp_offset_ms as u64) * 1_000_000
-            );
+            let timestamp =
+                Time::from_nanos(base_time.as_nanos() + (*timestamp_offset_ms as u64) * 1_000_000);
 
             oracle.on_work_items_completed(&queue_name, *count as usize, timestamp);
         }
-        DebtOperation::CheckDebt { timestamp_offset_ms } => {
-            let timestamp = Time::from_nanos(
-                base_time.as_nanos() + (*timestamp_offset_ms as u64) * 1_000_000
-            );
+        DebtOperation::CheckDebt {
+            timestamp_offset_ms,
+        } => {
+            let timestamp =
+                Time::from_nanos(base_time.as_nanos() + (*timestamp_offset_ms as u64) * 1_000_000);
             oracle.check_debt_accumulation(timestamp);
         }
-        DebtOperation::CheckGeneral { timestamp_offset_ms } => {
-            let timestamp = Time::from_nanos(
-                base_time.as_nanos() + (*timestamp_offset_ms as u64) * 1_000_000
-            );
+        DebtOperation::CheckGeneral {
+            timestamp_offset_ms,
+        } => {
+            let timestamp =
+                Time::from_nanos(base_time.as_nanos() + (*timestamp_offset_ms as u64) * 1_000_000);
             let _ = oracle.check(timestamp);
         }
         DebtOperation::Reset => {

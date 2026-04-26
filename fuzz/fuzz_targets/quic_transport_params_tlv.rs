@@ -3,9 +3,7 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use asupersync::net::quic_core::{
-    TransportParameters, UnknownTransportParameter, QuicCoreError,
-};
+use asupersync::net::quic_core::{QuicCoreError, TransportParameters, UnknownTransportParameter};
 
 /// Fuzz input for QUIC transport parameters TLV codec testing
 #[derive(Arbitrary, Debug)]
@@ -70,18 +68,26 @@ impl From<FuzzTransportParams> for TransportParameters {
             max_idle_timeout: fuzz.max_idle_timeout.map(|v| v as u64),
             max_udp_payload_size: fuzz.max_udp_payload_size.map(|v| v as u64),
             initial_max_data: fuzz.initial_max_data.map(|v| v as u64),
-            initial_max_stream_data_bidi_local: fuzz.initial_max_stream_data_bidi_local.map(|v| v as u64),
-            initial_max_stream_data_bidi_remote: fuzz.initial_max_stream_data_bidi_remote.map(|v| v as u64),
+            initial_max_stream_data_bidi_local: fuzz
+                .initial_max_stream_data_bidi_local
+                .map(|v| v as u64),
+            initial_max_stream_data_bidi_remote: fuzz
+                .initial_max_stream_data_bidi_remote
+                .map(|v| v as u64),
             initial_max_stream_data_uni: fuzz.initial_max_stream_data_uni.map(|v| v as u64),
             initial_max_streams_bidi: fuzz.initial_max_streams_bidi.map(|v| v as u64),
             initial_max_streams_uni: fuzz.initial_max_streams_uni.map(|v| v as u64),
             ack_delay_exponent: fuzz.ack_delay_exponent.map(|v| v as u64),
             max_ack_delay: fuzz.max_ack_delay.map(|v| v as u64),
             disable_active_migration: fuzz.disable_active_migration,
-            unknown: fuzz.unknown_params.into_iter().map(|p| UnknownTransportParameter {
-                id: p.id as u64,
-                value: p.value,
-            }).collect(),
+            unknown: fuzz
+                .unknown_params
+                .into_iter()
+                .map(|p| UnknownTransportParameter {
+                    id: p.id as u64,
+                    value: p.value,
+                })
+                .collect(),
         }
     }
 }
@@ -186,7 +192,10 @@ fn test_round_trip_consistency(input: &TransportParamsFuzzInput) {
                         Ok(decoded) => {
                             // Should match original (modulo validation constraints)
                             // Note: Some fuzz values may be adjusted during construction
-                            assert_eq!(decoded.disable_active_migration, tp.disable_active_migration);
+                            assert_eq!(
+                                decoded.disable_active_migration,
+                                tp.disable_active_migration
+                            );
                             // Unknown params should be preserved
                             assert_eq!(decoded.unknown.len(), tp.unknown.len());
                         }
@@ -216,7 +225,10 @@ fn test_invalid_input_rejection(input: &TransportParamsFuzzInput) {
                     // If decoding succeeded, result should be valid
                     // Check some basic constraints
                     if let Some(udp_size) = params.max_udp_payload_size {
-                        assert!(udp_size >= 1200, "UDP payload size should be >= 1200 if set");
+                        assert!(
+                            udp_size >= 1200,
+                            "UDP payload size should be >= 1200 if set"
+                        );
                     }
                     if let Some(ack_exp) = params.ack_delay_exponent {
                         assert!(ack_exp <= 20, "ACK delay exponent should be <= 20");
@@ -275,7 +287,10 @@ fn test_attack_scenarios(input: &TransportParamsFuzzInput) {
                     };
                     if params.encode(&mut encoded).is_ok() {
                         let result = TransportParameters::decode(&encoded);
-                        assert!(result.is_err(), "Large ACK delay exponent should be rejected");
+                        assert!(
+                            result.is_err(),
+                            "Large ACK delay exponent should be rejected"
+                        );
                     }
                 }
                 InvalidValueType::NonEmptyDisableActiveMigration => {

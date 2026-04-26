@@ -121,12 +121,7 @@ fn attach_listener_counter(token: &SymbolCancelToken) -> Arc<AtomicUsize> {
     hits
 }
 
-fn build_peer(
-    object_id: ObjectId,
-    registered: bool,
-    child_count: usize,
-    seed: u64,
-) -> PeerState {
+fn build_peer(object_id: ObjectId, registered: bool, child_count: usize, seed: u64) -> PeerState {
     let broadcaster = CancelBroadcaster::new(NoopSink);
     let root_hits = Arc::new(AtomicUsize::new(0));
     let mut child_tokens = Vec::new();
@@ -245,7 +240,10 @@ fuzz_target!(|data: &[u8]| {
         .prepare_cancel(object_id, &reason, initiated_at)
         .with_max_hops(input.max_hops % 5);
 
-    assert!(origin_token.is_cancelled(), "origin token must cancel locally");
+    assert!(
+        origin_token.is_cancelled(),
+        "origin token must cancel locally"
+    );
     assert_eq!(
         origin_token.reason().map(|stored| stored.kind()),
         Some(reason_kind),
@@ -271,7 +269,10 @@ fuzz_target!(|data: &[u8]| {
     }
     let origin_metrics = origin.metrics();
     assert_eq!(origin_metrics.initiated, 1, "origin should initiate once");
-    assert_eq!(origin_metrics.received, 0, "origin should not receive remote messages");
+    assert_eq!(
+        origin_metrics.received, 0,
+        "origin should not receive remote messages"
+    );
 
     let mut peers = Vec::with_capacity(peer_count);
     let mut expected_cancelled = vec![false; peer_count];

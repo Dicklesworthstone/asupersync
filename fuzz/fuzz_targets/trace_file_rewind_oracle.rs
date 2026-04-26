@@ -104,10 +104,7 @@ fuzz_target!(|data: &[u8]| {
             // CompactTaskId is a transparent u64 wrapper (packed
             // index<<32 | generation). Use the i-th index / gen=0 so the
             // generated id is trivially distinguishable across events.
-            ReplayEvent::task_scheduled(
-                CompactTaskId((i as u64) << 32),
-                i as u64,
-            )
+            ReplayEvent::task_scheduled(CompactTaskId((i as u64) << 32), i as u64)
         } else {
             ReplayEvent::TimeAdvanced {
                 from: i as u64,

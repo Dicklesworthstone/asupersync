@@ -402,19 +402,20 @@ fn test_connector() -> Option<TlsConnector> {
 
 fn server_config() -> Option<Arc<ServerConfig>> {
     static CONFIG: OnceLock<Option<Arc<ServerConfig>>> = OnceLock::new();
-    CONFIG.get_or_init(|| {
-        let cert = parse_fixture_cert()?;
-        let key = parse_fixture_key()?;
-        let builder = ServerConfig::builder_with_provider(Arc::new(default_provider()))
-            .with_safe_default_protocol_versions()
-            .ok()?;
-        let config = builder
-            .with_no_client_auth()
-            .with_single_cert(vec![cert], key)
-            .ok()?;
-        Some(Arc::new(config))
-    })
-    .clone()
+    CONFIG
+        .get_or_init(|| {
+            let cert = parse_fixture_cert()?;
+            let key = parse_fixture_key()?;
+            let builder = ServerConfig::builder_with_provider(Arc::new(default_provider()))
+                .with_safe_default_protocol_versions()
+                .ok()?;
+            let config = builder
+                .with_no_client_auth()
+                .with_single_cert(vec![cert], key)
+                .ok()?;
+            Some(Arc::new(config))
+        })
+        .clone()
 }
 
 fn parse_fixture_cert() -> Option<CertificateDer<'static>> {

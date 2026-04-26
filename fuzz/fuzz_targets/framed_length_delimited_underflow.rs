@@ -3,15 +3,15 @@
 use arbitrary::Arbitrary;
 use asupersync::{
     codec::{FramedRead, length_delimited::LengthDelimitedCodecBuilder},
-    io::{AsyncRead, ReadBuf},
     cx::Cx,
+    io::{AsyncRead, ReadBuf},
 };
+use libfuzzer_sys::fuzz_target;
 use std::{
     io as std_io,
     pin::Pin,
     task::{Context, Poll},
 };
-use libfuzzer_sys::fuzz_target;
 
 #[derive(Debug, Arbitrary)]
 struct FuzzInput {
@@ -52,10 +52,10 @@ impl AsyncRead for MockTransport {
                 return Poll::Ready(Ok(())); // EOF
             }
         }
-        
+
         let rem = &self.current_chunk[self.pos..];
         let take = std::cmp::min(rem.len(), buf.remaining());
-        
+
         if take > 0 {
             buf.put_slice(&rem[..take]);
             self.pos += take;
@@ -79,21 +79,21 @@ fuzz_target!(|data: FuzzInput| {
         2 => 3,
         _ => 4,
     };
-    
+
     let mut builder = LengthDelimitedCodecBuilder::new();
     builder.max_frame_length((data.max_frame_len as usize).max(1));
     builder.length_field_length(length_field_len);
     builder.num_skip(data.num_skip as usize);
     builder.length_adjustment(data.length_adjustment as isize);
-    
+
     let codec = builder.new_codec();
     let transport = MockTransport::new(data.chunks);
     let mut framed = FramedRead::new(transport, codec);
-    
+
     let cx = Cx::for_testing();
     let waker = futures_util::task::noop_waker();
     let mut ctx = Context::from_waker(&waker);
-    
+
     loop {
         // Run under a panic catch block just to be defensive, though libfuzzer catches panics anyway.
         // We want to ensure NO panic happens on partial frames or underflow.
@@ -101,13 +101,13 @@ fuzz_target!(|data: FuzzInput| {
             let mut pin_framed = Pin::new(&mut framed);
             pin_framed.poll_next(&mut ctx)
         }));
-        
+
         match res {
             Ok(Poll::Ready(Some(Ok(_frame)))) => {
                 // Successfully parsed a frame
             }
             Ok(Poll::Ready(Some(Err(_e)))) => {
-                // Parsing failed (e.g. frame too large, underflow). 
+                // Parsing failed (e.g. frame too large, underflow).
                 // This is expected and valid; it must fail closed.
                 break;
             }
@@ -116,7 +116,7 @@ fuzz_target!(|data: FuzzInput| {
                 break;
             }
             Ok(Poll::Pending) => {
-                // We don't return Pending in MockTransport, so if we get here, 
+                // We don't return Pending in MockTransport, so if we get here,
                 // something's weird but not a bug necessarily if Buf is empty.
                 break;
             }

@@ -21,7 +21,7 @@ use asupersync::decoding::{
     DecodingConfig, DecodingError, DecodingPipeline, RejectReason, SymbolAcceptResult,
 };
 use asupersync::encoding::{EncodingError, EncodingPipeline};
-use asupersync::security::{tag::AuthenticationTag, AuthenticatedSymbol};
+use asupersync::security::{AuthenticatedSymbol, tag::AuthenticationTag};
 use asupersync::types::resource::{PoolConfig, SymbolPool};
 use asupersync::types::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
 

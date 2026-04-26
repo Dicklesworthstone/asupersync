@@ -1,8 +1,8 @@
 #![no_main]
-use libfuzzer_sys::fuzz_target;
+use arbitrary::Arbitrary;
 use asupersync::bytes::{BufMut, BytesMut};
 use asupersync::codec::{Decoder, LengthDelimitedCodec};
-use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use std::io;
 
 #[derive(Arbitrary, Debug)]
@@ -22,7 +22,7 @@ struct FuzzInput {
 fuzz_target!(|data: &[u8]| {
     // We'll write a manual test specifically tailored to the oracle, rather than using arbitrary data,
     // to strictly enforce the EOF retention logic described in the bead.
-    
+
     // Concrete corpus seed case:
     // - 2-byte BE length field declaring payload length 4
     // - payload bytes 'a', 'b' present
@@ -51,7 +51,7 @@ fuzz_target!(|data: &[u8]| {
         Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {}
         _ => panic!("decode_eof on truncated frame should return UnexpectedEof"),
     }
-    
+
     // 3. Prefix/header bytes remain unconsumed until a full frame exists.
     assert_eq!(buf.len(), 4, "buffer should not be consumed");
     assert_eq!(&buf[..], &[0, 4, b'a', b'b']);
@@ -61,7 +61,6 @@ fuzz_target!(|data: &[u8]| {
     let frame = codec.decode(&mut buf).unwrap().unwrap();
     assert_eq!(frame.as_ref(), b"abcd");
     assert!(buf.is_empty());
-
 
     // Case 2: Companion seed with header split
     let mut codec2 = LengthDelimitedCodec::builder()
@@ -75,21 +74,24 @@ fuzz_target!(|data: &[u8]| {
 
     let mut buf2 = BytesMut::new();
     buf2.put_u8(0); // Half of length field
-    
+
     let res2 = codec2.decode_eof(&mut buf2);
     match res2 {
         Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {}
         _ => panic!("decode_eof on truncated header should return UnexpectedEof"),
     }
-    assert_eq!(buf2.len(), 1, "buffer should not be consumed for split header");
-    
+    assert_eq!(
+        buf2.len(),
+        1,
+        "buffer should not be consumed for split header"
+    );
+
     buf2.put_u8(4); // Second half of length field
     buf2.put_slice(b"efgh");
-    
+
     let frame2 = codec2.decode(&mut buf2).unwrap().unwrap();
     assert_eq!(frame2.as_ref(), b"efgh");
     assert!(buf2.is_empty());
-
 
     // Case 3: Fuzz with arbitrary chunks to ensure we don't crash
     if let Ok(input) = FuzzInput::arbitrary(&mut arbitrary::Unstructured::new(data)) {
@@ -104,7 +106,11 @@ fuzz_target!(|data: &[u8]| {
             .length_field_length(length_field_length)
             .length_adjustment(input.length_adjustment as isize)
             .num_skip(input.num_skip as usize)
-            .max_frame_length(if input.max_frame_length == 0 { 1024 } else { input.max_frame_length })
+            .max_frame_length(if input.max_frame_length == 0 {
+                1024
+            } else {
+                input.max_frame_length
+            })
             .big_endian(input.big_endian)
             .new_codec();
 

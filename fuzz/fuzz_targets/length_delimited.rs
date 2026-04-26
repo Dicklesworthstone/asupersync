@@ -627,7 +627,9 @@ fuzz_target!(|input: FuzzInput| {
     );
 
     let writer_len = edge_source.len().clamp(1, 48);
-    let second_writer_len = edge_source.len().saturating_add(header_len(&roundtrip_config));
+    let second_writer_len = edge_source
+        .len()
+        .saturating_add(header_len(&roundtrip_config));
     let second_writer_len = second_writer_len.clamp(1, 64);
     let max_writer_len = writer_len.max(second_writer_len);
     let writer_config = normalized_edge_case_config(&roundtrip_config, max_writer_len);

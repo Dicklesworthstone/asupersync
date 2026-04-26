@@ -71,7 +71,10 @@ fuzz_target!(|data: &[u8]| {
         .expect("complete structured input should decode");
     assert_eq!(original_result.result.source, original_source);
     assert!(
-        original_result.proof.replay_and_verify(&original_received).is_ok(),
+        original_result
+            .proof
+            .replay_and_verify(&original_received)
+            .is_ok(),
         "proof must verify against its original received set"
     );
 
@@ -83,7 +86,10 @@ fuzz_target!(|data: &[u8]| {
 
     if mutated_source == original_source {
         assert!(
-            original_result.proof.replay_and_verify(&mutated_received).is_ok(),
+            original_result
+                .proof
+                .replay_and_verify(&mutated_received)
+                .is_ok(),
             "identical replay inputs must continue to verify"
         );
     } else {
@@ -96,7 +102,10 @@ fuzz_target!(|data: &[u8]| {
             "expected source_payload_hash mismatch, got {err}"
         );
         assert!(
-            mutated_result.proof.replay_and_verify(&mutated_received).is_ok(),
+            mutated_result
+                .proof
+                .replay_and_verify(&mutated_received)
+                .is_ok(),
             "proof must verify against its own regenerated payload"
         );
     }
@@ -139,12 +148,7 @@ fn build_source_block(
     source
 }
 
-fn mutate_source(
-    original: &[Vec<u8>],
-    raw: &[u8],
-    seed: u64,
-    plan: MutationPlan,
-) -> Vec<Vec<u8>> {
+fn mutate_source(original: &[Vec<u8>], raw: &[u8], seed: u64, plan: MutationPlan) -> Vec<Vec<u8>> {
     let mut mutated = original.to_vec();
     match plan.mode {
         MutationMode::Identical => {}

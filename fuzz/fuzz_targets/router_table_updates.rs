@@ -12,8 +12,8 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
 /// Maximum operations per fuzz iteration to prevent timeouts
@@ -112,7 +112,12 @@ fn test_routing_table_operations(operations: &[RoutingOperation]) {
 
     for operation in operations {
         match operation {
-            RoutingOperation::AddEndpoint { id, address, weight, region_id } => {
+            RoutingOperation::AddEndpoint {
+                id,
+                address,
+                weight,
+                region_id,
+            } => {
                 // Test weight overflow scenarios - u32 already prevents overflow
                 let clamped_weight = *weight;
 
@@ -144,7 +149,7 @@ fn test_routing_table_operations(operations: &[RoutingOperation]) {
                 endpoint_ids,
                 ttl_secs,
                 priority,
-                strategy
+                strategy,
             } => {
                 // Test TTL underflow protection
                 let ttl = if *ttl_secs == 0 {
@@ -193,7 +198,11 @@ fn test_routing_table_operations(operations: &[RoutingOperation]) {
                 routes.insert(route_key, entry);
             }
 
-            RoutingOperation::RemoveRoute { route_type, object_id, region_id } => {
+            RoutingOperation::RemoveRoute {
+                route_type,
+                object_id,
+                region_id,
+            } => {
                 let route_key = match route_type {
                     RouteType::Object => MockRouteKey::Object(*object_id),
                     RouteType::Region => {
@@ -238,7 +247,10 @@ fn test_routing_table_operations(operations: &[RoutingOperation]) {
                 }
             }
 
-            RoutingOperation::SelectEndpoint { object_id, strategy } => {
+            RoutingOperation::SelectEndpoint {
+                object_id,
+                strategy,
+            } => {
                 // Test endpoint selection with various strategies
                 test_endpoint_selection(&endpoints, &routes, *object_id, *strategy);
             }
@@ -275,11 +287,7 @@ fn test_routing_table_operations(operations: &[RoutingOperation]) {
 
         // Limit memory usage
         if endpoints.len() > MAX_ENDPOINTS {
-            let keys_to_remove: Vec<u64> = endpoints
-                .keys()
-                .skip(MAX_ENDPOINTS)
-                .cloned()
-                .collect();
+            let keys_to_remove: Vec<u64> = endpoints.keys().skip(MAX_ENDPOINTS).cloned().collect();
             for key in keys_to_remove {
                 endpoints.remove(&key);
             }
@@ -292,8 +300,15 @@ fn test_load_balancer_robustness(operations: &[RoutingOperation]) {
     // Build adversarial endpoint configurations
     let mut endpoints = Vec::new();
 
-    for operation in operations.iter().take(10) { // Limit for performance
-        if let RoutingOperation::AddEndpoint { id, address, weight, region_id } = operation {
+    for operation in operations.iter().take(10) {
+        // Limit for performance
+        if let RoutingOperation::AddEndpoint {
+            id,
+            address,
+            weight,
+            region_id,
+        } = operation
+        {
             endpoints.push(MockEndpoint {
                 id: *id,
                 address: address.clone(),
@@ -383,10 +398,7 @@ fn test_endpoint_selection(
         }
         LoadBalanceStrategyFuzz::WeightedRoundRobin => {
             // Weight-based selection - ensure no divide by zero
-            let total_weight: u64 = healthy_endpoints
-                .iter()
-                .map(|e| e.weight as u64)
-                .sum();
+            let total_weight: u64 = healthy_endpoints.iter().map(|e| e.weight as u64).sum();
             if total_weight > 0 {
                 let target = object_id % total_weight;
                 let mut cumulative = 0u64;
@@ -401,9 +413,7 @@ fn test_endpoint_selection(
         }
         LoadBalanceStrategyFuzz::LeastConnections => {
             // Select endpoint with minimum connections (simulated as ID for fuzzing)
-            let _selected = healthy_endpoints
-                .iter()
-                .min_by_key(|e| e.id);
+            let _selected = healthy_endpoints.iter().min_by_key(|e| e.id);
         }
         LoadBalanceStrategyFuzz::HashBased => {
             // Hash-based selection
@@ -422,7 +432,7 @@ fn test_endpoint_selection(
 fn test_load_balance_strategy(
     endpoints: &[MockEndpoint],
     _strategy: LoadBalanceStrategyFuzz,
-    object_id: u64
+    object_id: u64,
 ) {
     if endpoints.is_empty() {
         return;

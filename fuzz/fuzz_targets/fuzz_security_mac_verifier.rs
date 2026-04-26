@@ -13,8 +13,8 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::security::{AuthKey, AuthenticationTag};
 use asupersync::security::authenticated::AuthenticatedSymbol;
+use asupersync::security::{AuthKey, AuthenticationTag};
 use asupersync::types::{Symbol, SymbolId, SymbolKind};
 use libfuzzer_sys::fuzz_target;
 
@@ -109,7 +109,12 @@ fuzz_target!(|scenario: FuzzScenario| match scenario {
         corrupted_variants,
         key_seed,
         recompute_tags,
-    } => fuzz_symbol_manipulation(original_symbol, corrupted_variants, key_seed, recompute_tags),
+    } => fuzz_symbol_manipulation(
+        original_symbol,
+        corrupted_variants,
+        key_seed,
+        recompute_tags
+    ),
 
     FuzzScenario::TimingOracle {
         symbol_data,
@@ -163,7 +168,11 @@ fn fuzz_key_rotation(
     let symbol = Symbol::new(symbol_id, symbol_data, SymbolKind::Repair);
 
     // Generate keys and compute tags
-    let keys: Vec<_> = key_seeds.iter().take(MAX_KEYS).map(|&seed| AuthKey::from_seed(seed)).collect();
+    let keys: Vec<_> = key_seeds
+        .iter()
+        .take(MAX_KEYS)
+        .map(|&seed| AuthKey::from_seed(seed))
+        .collect();
     if keys.is_empty() {
         return;
     }
@@ -213,7 +222,10 @@ fn fuzz_replay_attack(base_symbol: SymbolData, key_seed: u64, replayed_variants:
         if symbols_identical(&base, &variant) {
             assert!(result, "Identical symbols should verify with same tag");
         } else {
-            assert!(!result, "Modified symbol should not verify with original tag");
+            assert!(
+                !result,
+                "Modified symbol should not verify with original tag"
+            );
         }
     }
 }
@@ -241,7 +253,10 @@ fn fuzz_symbol_manipulation(
         if recompute_tags {
             // Test with freshly computed tag - should always verify
             let variant_tag = AuthenticationTag::compute(&key, &variant);
-            assert!(variant_tag.verify(&key, &variant), "Fresh tag should always verify");
+            assert!(
+                variant_tag.verify(&key, &variant),
+                "Fresh tag should always verify"
+            );
 
             // Test AuthenticatedSymbol state transitions
             let auth_variant = AuthenticatedSymbol::from_parts(variant.clone(), variant_tag);
@@ -262,7 +277,12 @@ fn fuzz_symbol_manipulation(
     }
 }
 
-fn fuzz_timing_oracle(symbol_data: Vec<u8>, key_seed: u64, valid_tag: bool, verification_rounds: u16) {
+fn fuzz_timing_oracle(
+    symbol_data: Vec<u8>,
+    key_seed: u64,
+    valid_tag: bool,
+    verification_rounds: u16,
+) {
     if symbol_data.len() > MAX_PAYLOAD_SIZE {
         return;
     }
@@ -281,7 +301,10 @@ fn fuzz_timing_oracle(symbol_data: Vec<u8>, key_seed: u64, valid_tag: bool, veri
     let rounds = verification_rounds.min(100); // Limit to prevent timeout
     for _ in 0..rounds {
         let result = tag.verify(&key, &symbol);
-        assert_eq!(result, valid_tag, "Verification result should be consistent");
+        assert_eq!(
+            result, valid_tag,
+            "Verification result should be consistent"
+        );
     }
 
     // Test AuthenticatedSymbol integration
@@ -297,7 +320,10 @@ fn apply_tag_mutation(original: &AuthenticationTag, mutation: &TagMutation) -> A
     let mut bytes = *original.as_bytes();
 
     match mutation {
-        TagMutation::FlipRandomBit { byte_index, bit_index } => {
+        TagMutation::FlipRandomBit {
+            byte_index,
+            bit_index,
+        } => {
             let byte_idx = (*byte_index as usize) % bytes.len();
             let bit_idx = bit_index % 8;
             bytes[byte_idx] ^= 1 << bit_idx;
@@ -349,16 +375,25 @@ fn create_symbol_from_data(data: &SymbolData) -> Symbol {
         data.sbn,
         data.esi,
     );
-    let kind = if data.kind { SymbolKind::Source } else { SymbolKind::Repair };
-    let payload = data.payload.iter().take(MAX_PAYLOAD_SIZE).cloned().collect();
+    let kind = if data.kind {
+        SymbolKind::Source
+    } else {
+        SymbolKind::Repair
+    };
+    let payload = data
+        .payload
+        .iter()
+        .take(MAX_PAYLOAD_SIZE)
+        .cloned()
+        .collect();
 
     Symbol::new(symbol_id, payload, kind)
 }
 
 fn symbols_identical(a: &Symbol, b: &Symbol) -> bool {
-    a.id() == b.id() &&
-    a.data() == b.data() &&
-    a.kind() == b.kind() &&
-    a.sbn() == b.sbn() &&
-    a.esi() == b.esi()
+    a.id() == b.id()
+        && a.data() == b.data()
+        && a.kind() == b.kind()
+        && a.sbn() == b.sbn()
+        && a.esi() == b.esi()
 }

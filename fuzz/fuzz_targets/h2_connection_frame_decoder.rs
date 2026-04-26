@@ -13,8 +13,8 @@ use arbitrary::Arbitrary;
 use asupersync::bytes::Bytes;
 use asupersync::http::h2::{
     connection::Connection,
-    frame::{Frame, FrameHeader, parse_frame},
     error::ErrorCode,
+    frame::{Frame, FrameHeader, parse_frame},
     settings::Settings,
 };
 use libfuzzer_sys::fuzz_target;
@@ -80,13 +80,13 @@ fuzz_target!(|scenario: TestScenario| {
         TestScenario::FloodAttack {
             conn_type,
             flood_frame_type,
-            count
+            count,
         } => {
             fuzz_flood_attack(conn_type, flood_frame_type, count);
         }
         TestScenario::WindowStress {
             conn_type,
-            window_ops
+            window_ops,
         } => {
             fuzz_window_stress(conn_type, window_ops);
         }

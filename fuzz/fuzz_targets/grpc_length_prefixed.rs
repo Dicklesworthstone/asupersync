@@ -43,8 +43,14 @@ struct MessageSpec {
 
 #[derive(Arbitrary, Debug, Clone)]
 enum MalformedFrame {
-    InvalidCompressionFlag { flag: u8, payload: Vec<u8> },
-    OversizedLength { compressed: bool, excess: u16 },
+    InvalidCompressionFlag {
+        flag: u8,
+        payload: Vec<u8>,
+    },
+    OversizedLength {
+        compressed: bool,
+        excess: u16,
+    },
     TruncatedPayload {
         compressed: bool,
         declared_extra: u8,
@@ -164,7 +170,11 @@ fn exercise_malformed(frame: &MalformedFrame, decode_limit: usize) {
 
     match frame {
         MalformedFrame::InvalidCompressionFlag { flag, payload } => {
-            let invalid_flag = if *flag <= 1 { flag.saturating_add(2) } else { *flag };
+            let invalid_flag = if *flag <= 1 {
+                flag.saturating_add(2)
+            } else {
+                *flag
+            };
             let payload = truncate_bytes(payload);
             encode_frame(invalid_flag, payload.len(), &payload, &mut buf);
             let before = buf.clone();
@@ -191,7 +201,9 @@ fn exercise_malformed(frame: &MalformedFrame, decode_limit: usize) {
             actual,
         } => {
             let actual = truncate_bytes(actual);
-            let declared_len = actual.len().saturating_add(usize::from(*declared_extra).max(1));
+            let declared_len = actual
+                .len()
+                .saturating_add(usize::from(*declared_extra).max(1));
             if declared_len > decode_limit {
                 return;
             }

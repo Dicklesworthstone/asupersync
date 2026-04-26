@@ -92,9 +92,7 @@ fuzz_target!(|data: &[u8]| {
         // Columns: pick 1-3 column indices from the remaining bytes mod L.
         let n_cols = ((chunk.get(4).copied().unwrap_or(1) as usize) % 3) + 1;
         let columns: Vec<usize> = (0..n_cols)
-            .map(|i| {
-                (chunk.get(5 + i).copied().unwrap_or(0) as usize) % l.max(1)
-            })
+            .map(|i| (chunk.get(5 + i).copied().unwrap_or(0) as usize) % l.max(1))
             .collect();
         let coefficients: Vec<Gf256> = columns
             .iter()
@@ -118,15 +116,11 @@ fuzz_target!(|data: &[u8]| {
     // outcome — this is intentionally non-equal to whatever the actual
     // decoder will produce for the random inputs, so the comparator
     // exercises every divergence-detection path.
-    use asupersync::raptorq::proof::{
-        EliminationTrace, PeelingTrace, ReceivedSummary,
-    };
+    use asupersync::raptorq::proof::{EliminationTrace, PeelingTrace, ReceivedSummary};
     let proof = DecodeProof {
         version: 1,
         config,
-        received: ReceivedSummary::from_received(
-            symbols.iter().map(|s| (s.esi, s.is_source)),
-        ),
+        received: ReceivedSummary::from_received(symbols.iter().map(|s| (s.esi, s.is_source))),
         peeling: PeelingTrace::default(),
         elimination: EliminationTrace::default(),
         outcome: ProofOutcome::Success {

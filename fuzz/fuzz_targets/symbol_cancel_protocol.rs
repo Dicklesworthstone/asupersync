@@ -228,6 +228,9 @@ fuzz_target!(|data: &[u8]| {
             winners, 1,
             "exactly one cancel() must win the CAS race; got {winners} winners"
         );
-        assert!(race_token.is_cancelled(), "post-race token MUST be cancelled");
+        assert!(
+            race_token.is_cancelled(),
+            "post-race token MUST be cancelled"
+        );
     }
 });

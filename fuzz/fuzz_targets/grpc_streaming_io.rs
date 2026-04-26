@@ -28,10 +28,8 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use asupersync::grpc::streaming::{
-    RequestSink, ResponseStream, Streaming, StreamingRequest,
-};
 use asupersync::grpc::status::Status;
+use asupersync::grpc::streaming::{RequestSink, ResponseStream, Streaming, StreamingRequest};
 use libfuzzer_sys::fuzz_target;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -73,10 +71,7 @@ enum Scenario {
     /// Same shape against `ResponseStream<u32>` (client-side view of an
     /// inbound server stream). Same data structure, separate code path
     /// — both must obey the cap + closed-rejects-push contracts.
-    ResponseStreamOps {
-        start_open: bool,
-        ops: Vec<Op>,
-    },
+    ResponseStreamOps { start_open: bool, ops: Vec<Op> },
     /// `RequestSink<u32>::send` + `close` are async; we drive them on a
     /// synchronous executor (futures_lite::block_on) to confirm the
     /// state machine: send-after-close MUST fail; close is idempotent.
@@ -85,7 +80,10 @@ enum Scenario {
     /// push a Cancelled status, then drain. The first poll MUST yield
     /// the Cancelled status; the second poll yields None (terminal).
     /// Variants permit a deadline-exceeded status instead of cancel.
-    CancelOrDeadlineBeforeBody { use_deadline: bool, then_close: bool },
+    CancelOrDeadlineBeforeBody {
+        use_deadline: bool,
+        then_close: bool,
+    },
     /// Buffer-cap stress: push exactly enough items to straddle the
     /// MAX_STREAM_BUFFERED cap (1024). The 1025th push MUST fail with
     /// resource_exhausted; subsequent polls drain the queue normally.
@@ -102,8 +100,7 @@ enum RequestSinkOp {
 /// waker has 'static lifetime and we never drop the Box.
 fn ctx() -> Context<'static> {
     use std::sync::LazyLock;
-    static WAKER: LazyLock<std::task::Waker> =
-        LazyLock::new(|| std::task::Waker::noop().clone());
+    static WAKER: LazyLock<std::task::Waker> = LazyLock::new(|| std::task::Waker::noop().clone());
     Context::from_waker(&WAKER)
 }
 
@@ -189,7 +186,10 @@ fuzz_target!(|s: Scenario| match s {
             }
         });
     }
-    Scenario::CancelOrDeadlineBeforeBody { use_deadline, then_close } => {
+    Scenario::CancelOrDeadlineBeforeBody {
+        use_deadline,
+        then_close,
+    } => {
         // Cancel-after-headers-before-body: the producer pushes a
         // terminal status as the very first item. Consumers must see
         // the status and then None on the subsequent poll.

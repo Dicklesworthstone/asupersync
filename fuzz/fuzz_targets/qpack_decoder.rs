@@ -4,8 +4,8 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use asupersync::http::h3_native::{
-    qpack_decode_field_section, qpack_decode_request_field_section,
-    qpack_decode_response_field_section, H3NativeError, H3QpackMode,
+    H3NativeError, H3QpackMode, qpack_decode_field_section, qpack_decode_request_field_section,
+    qpack_decode_response_field_section,
 };
 
 /// Fuzz input for QPACK decoder testing

@@ -35,10 +35,10 @@
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::bytes::Bytes;
 use asupersync::web::{
+    FromRequest,
     extract::Request,
     multipart::{Multipart, MultipartLimits},
     response::StatusCode,
-    FromRequest,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -663,7 +663,10 @@ impl FuzzMultipartPayload {
 
 fn build_regression_request(boundary: &str, body: Bytes, limits: MultipartLimits) -> Request {
     let mut request = Request::new("POST", "/upload")
-        .with_header("content-type", format!("multipart/form-data; boundary={boundary}"))
+        .with_header(
+            "content-type",
+            format!("multipart/form-data; boundary={boundary}"),
+        )
         .with_body(body);
     request.extensions.insert_typed(limits);
     request

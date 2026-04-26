@@ -48,8 +48,7 @@ fuzz_target!(|data: &[u8]| {
     config.encoding.decoding_parallelism = data[11] as usize;
 
     // resources: tiny budgets exercise InsufficientMemory.
-    config.resources.max_symbol_buffer_memory =
-        (data[12] as usize).saturating_mul(1024);
+    config.resources.max_symbol_buffer_memory = (data[12] as usize).saturating_mul(1024);
 
     // Standalone validate() invariant: never panics, always returns
     // Result<(), ConfigError>. The builder build()s call this same

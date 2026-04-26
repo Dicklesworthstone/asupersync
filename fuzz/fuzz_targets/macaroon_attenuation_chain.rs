@@ -355,7 +355,11 @@ fn test_trailing_predicate_bytes(encoded: &[u8], malformed_data: &[u8]) {
 
     let (decoded, consumed) = CaveatPredicate::from_bytes(&with_trailing)
         .expect("valid predicate prefix should still parse with trailing bytes");
-    assert_eq!(consumed, encoded.len(), "parser must stop at predicate boundary");
+    assert_eq!(
+        consumed,
+        encoded.len(),
+        "parser must stop at predicate boundary"
+    );
     assert_eq!(
         decoded.to_bytes(),
         encoded,
@@ -406,7 +410,10 @@ fn test_malformed_predicate_parsing(data: &[u8]) {
 
     // Should handle malformed predicate data gracefully
     if let Some((decoded, consumed)) = CaveatPredicate::from_bytes(limited_data) {
-        assert!(consumed <= limited_data.len(), "parser cannot overrun input");
+        assert!(
+            consumed <= limited_data.len(),
+            "parser cannot overrun input"
+        );
         assert_eq!(
             decoded.to_bytes(),
             limited_data[..consumed],

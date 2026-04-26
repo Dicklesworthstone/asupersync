@@ -13,22 +13,30 @@ fuzz_target!(|data: &[u8]| {
     let input = String::from_utf8_lossy(data);
 
     // Property 1: Parser should never panic on any input
-    let parse_result = std::panic::catch_unwind(|| {
-        SubjectPattern::parse(&input)
-    });
+    let parse_result = std::panic::catch_unwind(|| SubjectPattern::parse(&input));
 
     // Should handle panic-free
-    assert!(parse_result.is_ok(), "SubjectPattern::parse panicked on input: {:?}", input);
+    assert!(
+        parse_result.is_ok(),
+        "SubjectPattern::parse panicked on input: {:?}",
+        input
+    );
 
     // Property 2: If parsing succeeds, the result should be well-formed
     if let Ok(Ok(pattern)) = parse_result {
         // Should have a valid string representation
         let canonical = pattern.as_str();
-        assert!(!canonical.is_empty(), "Valid pattern should have non-empty canonical form");
+        assert!(
+            !canonical.is_empty(),
+            "Valid pattern should have non-empty canonical form"
+        );
 
         // Should have segments
         let segments = pattern.segments();
-        assert!(!segments.is_empty(), "Valid pattern should have at least one segment");
+        assert!(
+            !segments.is_empty(),
+            "Valid pattern should have at least one segment"
+        );
 
         // Property 3: Round-trip consistency
         // If we can parse it, we should be able to re-parse the canonical form

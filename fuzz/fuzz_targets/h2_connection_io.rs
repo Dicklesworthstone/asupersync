@@ -29,14 +29,12 @@
 use arbitrary::Arbitrary;
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::codec::Decoder;
-use asupersync::http::h2::{
-    Connection, Frame, FrameCodec, Settings,
-};
 use asupersync::http::h2::error::ErrorCode;
 use asupersync::http::h2::frame::{
     DataFrame, GoAwayFrame, HeadersFrame, PingFrame, RstStreamFrame, Setting, SettingsFrame,
     WindowUpdateFrame,
 };
+use asupersync::http::h2::{Connection, Frame, FrameCodec, Settings};
 use libfuzzer_sys::fuzz_target;
 
 /// Cap on the total wire-bytes / frame-count any single seed can drive.
@@ -51,10 +49,7 @@ const MAX_FRAMES_PER_SCENARIO: usize = 64;
 enum Scenario {
     /// Random wire bytes streamed through FrameCodec into Connection.
     /// Stresses the parser + the parser->process_frame plumbing.
-    RawWireBytes {
-        is_client: bool,
-        bytes: Vec<u8>,
-    },
+    RawWireBytes { is_client: bool, bytes: Vec<u8> },
     /// Sequence of well-formed (per individual-frame parser) frames in
     /// arbitrary order. Stresses the connection state machine, NOT the
     /// parser.
@@ -119,9 +114,18 @@ enum FuzzFrame {
 #[derive(Arbitrary, Debug, Clone)]
 enum ControlFrame {
     Ping([u8; 8]),
-    Rst { stream_id: u32, error_code: u32 },
-    GoAway { last_stream_id: u32, error_code: u32 },
-    WindowUpdate { stream_id: u32, delta: u32 },
+    Rst {
+        stream_id: u32,
+        error_code: u32,
+    },
+    GoAway {
+        last_stream_id: u32,
+        error_code: u32,
+    },
+    WindowUpdate {
+        stream_id: u32,
+        delta: u32,
+    },
 }
 
 fn make_connection(is_client: bool) -> Connection {
@@ -157,16 +161,33 @@ fn arb_error_code(raw: u32) -> ErrorCode {
 
 fn build_frame(ff: &FuzzFrame) -> Option<Frame> {
     match ff {
-        FuzzFrame::Data { stream_id, payload, end_stream } => {
-            let payload = if payload.len() > MAX_WIRE_BYTES { &payload[..MAX_WIRE_BYTES] } else { payload };
+        FuzzFrame::Data {
+            stream_id,
+            payload,
+            end_stream,
+        } => {
+            let payload = if payload.len() > MAX_WIRE_BYTES {
+                &payload[..MAX_WIRE_BYTES]
+            } else {
+                payload
+            };
             Some(Frame::Data(DataFrame::new(
                 *stream_id,
                 Bytes::copy_from_slice(payload),
                 *end_stream,
             )))
         }
-        FuzzFrame::Headers { stream_id, block, end_stream, end_headers } => {
-            let block = if block.len() > MAX_WIRE_BYTES { &block[..MAX_WIRE_BYTES] } else { block };
+        FuzzFrame::Headers {
+            stream_id,
+            block,
+            end_stream,
+            end_headers,
+        } => {
+            let block = if block.len() > MAX_WIRE_BYTES {
+                &block[..MAX_WIRE_BYTES]
+            } else {
+                block
+            };
             Some(Frame::Headers(HeadersFrame::new(
                 *stream_id,
                 Bytes::copy_from_slice(block),
@@ -192,12 +213,20 @@ fn build_frame(ff: &FuzzFrame) -> Option<Frame> {
             p.ack = true;
             Some(Frame::Ping(p))
         }
-        FuzzFrame::RstStream { stream_id, error_code } => Some(Frame::RstStream(
-            RstStreamFrame::new(*stream_id, arb_error_code(*error_code)),
-        )),
-        FuzzFrame::GoAway { last_stream_id, error_code } => Some(Frame::GoAway(
-            GoAwayFrame::new(*last_stream_id, arb_error_code(*error_code)),
-        )),
+        FuzzFrame::RstStream {
+            stream_id,
+            error_code,
+        } => Some(Frame::RstStream(RstStreamFrame::new(
+            *stream_id,
+            arb_error_code(*error_code),
+        ))),
+        FuzzFrame::GoAway {
+            last_stream_id,
+            error_code,
+        } => Some(Frame::GoAway(GoAwayFrame::new(
+            *last_stream_id,
+            arb_error_code(*error_code),
+        ))),
         FuzzFrame::WindowUpdate { stream_id, delta } => Some(Frame::WindowUpdate(
             WindowUpdateFrame::new(*stream_id, *delta),
         )),
@@ -207,15 +236,23 @@ fn build_frame(ff: &FuzzFrame) -> Option<Frame> {
 fn build_control_frame(cf: &ControlFrame) -> Option<Frame> {
     match cf {
         ControlFrame::Ping(opaque) => Some(Frame::Ping(PingFrame::new(*opaque))),
-        ControlFrame::Rst { stream_id, error_code } => Some(Frame::RstStream(
-            RstStreamFrame::new(*stream_id, arb_error_code(*error_code)),
+        ControlFrame::Rst {
+            stream_id,
+            error_code,
+        } => Some(Frame::RstStream(RstStreamFrame::new(
+            *stream_id,
+            arb_error_code(*error_code),
+        ))),
+        ControlFrame::GoAway {
+            last_stream_id,
+            error_code,
+        } => Some(Frame::GoAway(GoAwayFrame::new(
+            *last_stream_id,
+            arb_error_code(*error_code),
+        ))),
+        ControlFrame::WindowUpdate { stream_id, delta } => Some(Frame::WindowUpdate(
+            WindowUpdateFrame::new(*stream_id, *delta),
         )),
-        ControlFrame::GoAway { last_stream_id, error_code } => Some(Frame::GoAway(
-            GoAwayFrame::new(*last_stream_id, arb_error_code(*error_code)),
-        )),
-        ControlFrame::WindowUpdate { stream_id, delta } => {
-            Some(Frame::WindowUpdate(WindowUpdateFrame::new(*stream_id, *delta)))
-        }
     }
 }
 
@@ -256,7 +293,10 @@ fuzz_target!(|s: Scenario| match s {
         let mut conn = make_connection(is_client);
         drive_frames(&mut conn, &ops);
     }
-    Scenario::SettingsHandshakeAdversarial { is_client, first_frames } => {
+    Scenario::SettingsHandshakeAdversarial {
+        is_client,
+        first_frames,
+    } => {
         // Fresh Connection starts in Handshaking — feed it whatever the
         // fuzzer produced (including frames that would normally come
         // after the SETTINGS handshake). The state machine must surface
@@ -264,7 +304,12 @@ fuzz_target!(|s: Scenario| match s {
         let mut conn = make_connection(is_client);
         drive_frames(&mut conn, &first_frames);
     }
-    Scenario::ContinuationOrderingViolation { is_client, headers_stream_id, continuation_stream_id, intervening } => {
+    Scenario::ContinuationOrderingViolation {
+        is_client,
+        headers_stream_id,
+        continuation_stream_id,
+        intervening,
+    } => {
         let mut conn = make_connection(is_client);
         // First do a normal SETTINGS exchange so the connection leaves
         // Handshaking state — gives the CONTINUATION rule something to

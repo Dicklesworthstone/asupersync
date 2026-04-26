@@ -105,18 +105,22 @@ fn test_no_panic_splitter(input: &FrameSplitterInput) {
     let data = generate_splitter_data(&input.splitter_scenario, &input.config);
 
     // Test should never panic
-    let _decode_result = std::panic::catch_unwind(|| {
-        decode_with_iteration_limit(&mut codec, data)
-    });
+    let _decode_result = std::panic::catch_unwind(|| decode_with_iteration_limit(&mut codec, data));
 
     assert!(true, "Frame splitter handled input without panic");
 }
 
 /// Property 2: Frame boundary detection is consistent
 fn test_frame_boundary_consistency(input: &FrameSplitterInput) {
-    let Some(mut codec) = create_codec(&input.config) else { return; };
+    let Some(mut codec) = create_codec(&input.config) else {
+        return;
+    };
 
-    if let SplitterScenario::MultiFrame { frames, corrupt_boundary: false } = &input.splitter_scenario {
+    if let SplitterScenario::MultiFrame {
+        frames,
+        corrupt_boundary: false,
+    } = &input.splitter_scenario
+    {
         // Test clean multi-frame parsing
         let concatenated_data = build_concatenated_frames(&input.config, frames);
         let decoded_frames = decode_with_iteration_limit(&mut codec, concatenated_data);
@@ -145,23 +149,30 @@ fn test_frame_boundary_consistency(input: &FrameSplitterInput) {
 
 /// Property 3: Resource exhaustion protection works
 fn test_resource_exhaustion_protection(input: &FrameSplitterInput) {
-    let Some(mut codec) = create_codec(&input.config) else { return; };
+    let Some(mut codec) = create_codec(&input.config) else {
+        return;
+    };
 
-    if let SplitterScenario::AdversarialLength { claimed_length, actual_payload } = &input.splitter_scenario {
-        let malicious_frame = build_frame_with_length(&input.config, *claimed_length, actual_payload);
+    if let SplitterScenario::AdversarialLength {
+        claimed_length,
+        actual_payload,
+    } = &input.splitter_scenario
+    {
+        let malicious_frame =
+            build_frame_with_length(&input.config, *claimed_length, actual_payload);
 
         match decode_single_frame(&mut codec, malicious_frame) {
             Err(e) => {
                 // Should reject excessive lengths appropriately
                 let error_msg = format!("{e}");
                 assert!(
-                    error_msg.contains("frame length") ||
-                    error_msg.contains("max") ||
-                    error_msg.contains("overflow") ||
-                    error_msg.contains("invalid"),
+                    error_msg.contains("frame length")
+                        || error_msg.contains("max")
+                        || error_msg.contains("overflow")
+                        || error_msg.contains("invalid"),
                     "Should reject length overflow with descriptive error"
                 );
-            },
+            }
             Ok(Some(frame)) => {
                 // If successful, length must have been within configured limits
                 let max_expected = (input.config.max_frame_length as usize * 10).min(10_000_000);
@@ -169,7 +180,7 @@ fn test_resource_exhaustion_protection(input: &FrameSplitterInput) {
                     frame.len() <= max_expected,
                     "Large claimed length should only succeed if within limits"
                 );
-            },
+            }
             Ok(None) => {
                 // Incomplete frame acceptable
             }
@@ -179,10 +190,17 @@ fn test_resource_exhaustion_protection(input: &FrameSplitterInput) {
 
 /// Property 4: State machine handles fragmentation correctly
 fn test_fragmentation_robustness(input: &FrameSplitterInput) {
-    let Some(mut codec) = create_codec(&input.config) else { return; };
+    let Some(mut codec) = create_codec(&input.config) else {
+        return;
+    };
 
-    if let SplitterScenario::Fragmented { frame_data, split_points } = &input.splitter_scenario {
-        let complete_frame = build_frame_with_length(&input.config, frame_data.len() as u64, frame_data);
+    if let SplitterScenario::Fragmented {
+        frame_data,
+        split_points,
+    } = &input.splitter_scenario
+    {
+        let complete_frame =
+            build_frame_with_length(&input.config, frame_data.len() as u64, frame_data);
         let fragments = fragment_at_points(&complete_frame, split_points);
 
         let mut decoded_frames = Vec::new();
@@ -192,8 +210,8 @@ fn test_fragmentation_robustness(input: &FrameSplitterInput) {
             let mut buffer = BytesMut::from(fragment.as_slice());
             match codec.decode(&mut buffer) {
                 Ok(Some(frame)) => decoded_frames.push(frame),
-                Ok(None) => {}, // Expected for incomplete fragments
-                Err(_) => {}, // Errors acceptable for malformed data
+                Ok(None) => {} // Expected for incomplete fragments
+                Err(_) => {}   // Errors acceptable for malformed data
             }
         }
 
@@ -206,9 +224,15 @@ fn test_fragmentation_robustness(input: &FrameSplitterInput) {
 
 /// Property 5: Multi-frame parsing maintains boundaries
 fn test_multi_frame_boundaries(input: &FrameSplitterInput) {
-    let Some(mut codec) = create_codec(&input.config) else { return; };
+    let Some(mut codec) = create_codec(&input.config) else {
+        return;
+    };
 
-    if let SplitterScenario::TruncatedFrame { complete_frame, truncate_at } = &input.splitter_scenario {
+    if let SplitterScenario::TruncatedFrame {
+        complete_frame,
+        truncate_at,
+    } = &input.splitter_scenario
+    {
         let truncate_pos = (*truncate_at as usize * complete_frame.len()) / 256;
         let truncated = &complete_frame[..truncate_pos.min(complete_frame.len())];
 
@@ -217,10 +241,10 @@ fn test_multi_frame_boundaries(input: &FrameSplitterInput) {
         match result {
             Ok(None) => {
                 // Expected for incomplete frames
-            },
+            }
             Ok(Some(_)) => {
                 // Successful decode of truncated data - should be valid
-            },
+            }
             Err(_) => {
                 // Parse errors expected for malformed truncated frames
             }
@@ -255,16 +279,24 @@ fn create_codec(config: &FuzzConfig) -> Option<LengthDelimitedCodec> {
         };
 
         builder.new_codec()
-    }).ok()
+    })
+    .ok()
 }
 
 /// Generate test data based on splitter scenario
 fn generate_splitter_data(scenario: &SplitterScenario, config: &FuzzConfig) -> Vec<u8> {
     match scenario {
         SplitterScenario::RawBytes { data } => {
-            if data.len() > MAX_INPUT_SIZE { data[..MAX_INPUT_SIZE].to_vec() } else { data.clone() }
-        },
-        SplitterScenario::MultiFrame { frames, corrupt_boundary } => {
+            if data.len() > MAX_INPUT_SIZE {
+                data[..MAX_INPUT_SIZE].to_vec()
+            } else {
+                data.clone()
+            }
+        }
+        SplitterScenario::MultiFrame {
+            frames,
+            corrupt_boundary,
+        } => {
             let mut data = build_concatenated_frames(config, frames);
             if *corrupt_boundary && !data.is_empty() {
                 // Corrupt a random byte to test error handling
@@ -272,16 +304,15 @@ fn generate_splitter_data(scenario: &SplitterScenario, config: &FuzzConfig) -> V
                 data[corrupt_pos] = data[corrupt_pos].wrapping_add(1);
             }
             data
-        },
+        }
         SplitterScenario::Fragmented { frame_data, .. } => {
             build_frame_with_length(config, frame_data.len() as u64, frame_data)
-        },
-        SplitterScenario::AdversarialLength { claimed_length, actual_payload } => {
-            build_frame_with_length(config, *claimed_length, actual_payload)
-        },
-        SplitterScenario::TruncatedFrame { complete_frame, .. } => {
-            complete_frame.clone()
-        },
+        }
+        SplitterScenario::AdversarialLength {
+            claimed_length,
+            actual_payload,
+        } => build_frame_with_length(config, *claimed_length, actual_payload),
+        SplitterScenario::TruncatedFrame { complete_frame, .. } => complete_frame.clone(),
     }
 }
 
@@ -306,10 +337,13 @@ fn build_frame_with_length(config: &FuzzConfig, length: u64, payload: &[u8]) -> 
 /// Build concatenated frames
 fn build_concatenated_frames(config: &FuzzConfig, frames: &[Vec<u8>]) -> Vec<u8> {
     let mut data = Vec::new();
-    for frame in frames.iter().take(10) { // Limit to prevent excessive data
+    for frame in frames.iter().take(10) {
+        // Limit to prevent excessive data
         let frame_data = build_frame_with_length(config, frame.len() as u64, frame);
         data.extend(frame_data);
-        if data.len() > MAX_INPUT_SIZE { break; }
+        if data.len() > MAX_INPUT_SIZE {
+            break;
+        }
     }
     data
 }
@@ -327,7 +361,8 @@ fn fragment_at_points(data: &[u8], split_points: &[u8]) -> Vec<Vec<u8>> {
     let mut fragments = Vec::new();
     let mut start = 0;
 
-    for &point in split_points.iter().take(10) { // Limit fragments
+    for &point in split_points.iter().take(10) {
+        // Limit fragments
         let pos = (point as usize * data.len()) / 256;
         if pos > start && pos < data.len() {
             fragments.push(data[start..pos].to_vec());
@@ -357,7 +392,7 @@ fn decode_with_iteration_limit(codec: &mut LengthDelimitedCodec, data: Vec<u8>) 
             Ok(Some(frame)) => {
                 frames.push(frame);
                 iterations += 1;
-            },
+            }
             Ok(None) => break, // Need more data
             Err(_) => break,   // Parse error
         }
@@ -371,7 +406,10 @@ fn decode_with_iteration_limit(codec: &mut LengthDelimitedCodec, data: Vec<u8>) 
 }
 
 /// Decode a single frame
-fn decode_single_frame(codec: &mut LengthDelimitedCodec, data: Vec<u8>) -> Result<Option<BytesMut>, std::io::Error> {
+fn decode_single_frame(
+    codec: &mut LengthDelimitedCodec,
+    data: Vec<u8>,
+) -> Result<Option<BytesMut>, std::io::Error> {
     let mut buffer = BytesMut::from(data.as_slice());
     codec.decode(&mut buffer)
 }

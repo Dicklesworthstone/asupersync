@@ -72,9 +72,10 @@ fuzz_target!(|data: &[u8]| {
 
     match input.scenario {
         Scenario::StaticIndexed => {
-            let index = VALID_STATIC_INDICES[usize::from(input.static_case) % VALID_STATIC_INDICES.len()];
-            let wire =
-                qpack_encode_field_section(&[QpackFieldPlan::StaticIndex(index)]).expect("known static index");
+            let index =
+                VALID_STATIC_INDICES[usize::from(input.static_case) % VALID_STATIC_INDICES.len()];
+            let wire = qpack_encode_field_section(&[QpackFieldPlan::StaticIndex(index)])
+                .expect("known static index");
             let decoded = qpack_decode_field_section(&wire, mode).expect("static field section");
             assert_eq!(decoded.len(), 1);
             match &decoded[0] {
@@ -86,15 +87,16 @@ fuzz_target!(|data: &[u8]| {
         }
         Scenario::DynamicIndexReference => {
             let wire = build_dynamic_index_reference(u64::from(input.dynamic_index));
-            let err = qpack_decode_field_section(&wire, mode).expect_err("dynamic references require state");
+            let err = qpack_decode_field_section(&wire, mode)
+                .expect_err("dynamic references require state");
             assert_policy_error(
                 err,
                 "dynamic qpack index references require dynamic table state",
             );
         }
         Scenario::LiteralWithNameReference => {
-            let (name_index, expected_name) =
-                VALID_NAME_REFERENCES[usize::from(input.name_ref_case) % VALID_NAME_REFERENCES.len()];
+            let (name_index, expected_name) = VALID_NAME_REFERENCES
+                [usize::from(input.name_ref_case) % VALID_NAME_REFERENCES.len()];
             let expected_value = sanitize_ascii(&input.value);
             let wire = build_literal_with_name_reference(name_index, expected_value.as_bytes());
             let decoded = qpack_decode_field_section(&wire, mode).expect("literal with name ref");
@@ -110,8 +112,8 @@ fuzz_target!(|data: &[u8]| {
             assert_eq!(expanded, vec![(expected_name.to_string(), expected_value)]);
         }
         Scenario::PrefixIntegerOverflow => {
-            let err =
-                qpack_decode_field_section(&build_prefix_integer_overflow(), mode).expect_err("overflow");
+            let err = qpack_decode_field_section(&build_prefix_integer_overflow(), mode)
+                .expect_err("overflow");
             assert_invalid_frame(err, "qpack integer overflow");
         }
     }

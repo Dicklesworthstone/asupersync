@@ -48,7 +48,10 @@ struct AdversarialSymbol {
 #[derive(Debug, Arbitrary)]
 enum SymbolType {
     /// Normal symbol with valid equation
-    Valid { columns: Vec<u16>, coefficients: Vec<u8> },
+    Valid {
+        columns: Vec<u16>,
+        coefficients: Vec<u8>,
+    },
     /// Missing rows: skip critical intermediate symbols
     MissingRow { skip_columns: Vec<u16> },
     /// Extra rows: duplicate ESI with different equations
@@ -56,11 +59,17 @@ enum SymbolType {
     /// Padded zeros: zero coefficients or empty equations
     PaddedZeros { zero_positions: Vec<u16> },
     /// Repeated indices: duplicate column references
-    RepeatedIndices { base_columns: Vec<u16>, repetitions: Vec<u8> },
+    RepeatedIndices {
+        base_columns: Vec<u16>,
+        repetitions: Vec<u8>,
+    },
     /// Out of bounds column indices
     OutOfBounds { invalid_columns: Vec<u16> },
     /// Mismatched equation arity (columns.len() != coefficients.len())
-    MismatchedArity { columns: Vec<u16>, coefficients: Vec<u8> },
+    MismatchedArity {
+        columns: Vec<u16>,
+        coefficients: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Arbitrary)]
@@ -74,7 +83,10 @@ enum DataMutation {
     /// Undersized data (smaller than symbol_size)
     Undersized { truncate: u16 },
     /// Random corruption
-    Corrupted { positions: Vec<u16>, values: Vec<u8> },
+    Corrupted {
+        positions: Vec<u16>,
+        values: Vec<u8>,
+    },
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -101,7 +113,8 @@ fn test_adversarial_symbol_set(input: &AdversarialSymbolSet, k: usize, symbol_si
     let decoder = InactivationDecoder::new(k, symbol_size, input.seed);
 
     // Limit symbols to prevent memory exhaustion
-    let symbols: Vec<_> = input.symbols
+    let symbols: Vec<_> = input
+        .symbols
         .iter()
         .take(MAX_SYMBOLS)
         .filter_map(|adv_symbol| build_received_symbol(adv_symbol, k, symbol_size))
@@ -112,9 +125,8 @@ fn test_adversarial_symbol_set(input: &AdversarialSymbolSet, k: usize, symbol_si
     }
 
     // Test basic decode - should never panic
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        decoder.decode(&symbols)
-    }));
+    let result =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| decoder.decode(&symbols)));
 
     match result {
         Ok(decode_result) => {
@@ -124,12 +136,19 @@ fn test_adversarial_symbol_set(input: &AdversarialSymbolSet, k: usize, symbol_si
                     // Successful decode - verify invariants
                     assert_eq!(decoded.source.len(), k, "Source length mismatch");
                     for (i, source_symbol) in decoded.source.iter().enumerate() {
-                        assert_eq!(source_symbol.len(), symbol_size,
-                            "Source symbol {} size mismatch", i);
+                        assert_eq!(
+                            source_symbol.len(),
+                            symbol_size,
+                            "Source symbol {} size mismatch",
+                            i
+                        );
                     }
 
                     // Intermediate symbols length should match the systematic parameter L
-                    assert!(!decoded.intermediate.is_empty(), "No intermediate symbols recovered");
+                    assert!(
+                        !decoded.intermediate.is_empty(),
+                        "No intermediate symbols recovered"
+                    );
                 }
                 Err(decode_error) => {
                     // Decode failed cleanly - validate error types
@@ -150,14 +169,17 @@ fn test_adversarial_symbol_set(input: &AdversarialSymbolSet, k: usize, symbol_si
             }));
 
             if result.is_err() {
-                panic!("decode_wavefront panicked with batch_size={}, input: {:?}",
-                    batch_size, input);
+                panic!(
+                    "decode_wavefront panicked with batch_size={}, input: {:?}",
+                    batch_size, input
+                );
             }
         }
     }
 
     // Test decode_with_proof
-    if symbols.len() <= 64 { // Limit for proof generation
+    if symbols.len() <= 64 {
+        // Limit for proof generation
         let object_id = ObjectId::new_for_test(input.seed);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             decoder.decode_with_proof(&symbols, object_id, 0)
@@ -173,20 +195,25 @@ fn test_adversarial_symbol_set(input: &AdversarialSymbolSet, k: usize, symbol_si
 fn build_received_symbol(
     adv_symbol: &AdversarialSymbol,
     k: usize,
-    symbol_size: usize
+    symbol_size: usize,
 ) -> Option<ReceivedSymbol> {
     let esi = adv_symbol.esi;
     let is_source = adv_symbol.is_source;
 
     // Generate columns and coefficients based on symbol type
     let (columns, coefficients) = match &adv_symbol.symbol_type {
-        SymbolType::Valid { columns, coefficients } => {
-            let cols: Vec<usize> = columns.iter()
+        SymbolType::Valid {
+            columns,
+            coefficients,
+        } => {
+            let cols: Vec<usize> = columns
+                .iter()
                 .map(|&c| c as usize)
                 .filter(|&c| c < k + 100) // Loose bound, let decoder validate
                 .take(MAX_COLUMNS_PER_SYMBOL)
                 .collect();
-            let coeffs: Vec<Gf256> = coefficients.iter()
+            let coeffs: Vec<Gf256> = coefficients
+                .iter()
                 .take(cols.len())
                 .map(|&c| Gf256::new(c))
                 .collect();
@@ -205,7 +232,10 @@ fn build_received_symbol(
             (cols, coeffs)
         }
 
-        SymbolType::ExtraRow { duplicate_esi, variant } => {
+        SymbolType::ExtraRow {
+            duplicate_esi,
+            variant,
+        } => {
             // Create duplicate ESI with different equation
             let base_col = (duplicate_esi % k as u32) as usize;
             let cols = vec![base_col, (base_col + (*variant as usize % 10)) % k];
@@ -225,7 +255,10 @@ fn build_received_symbol(
             (cols, coeffs)
         }
 
-        SymbolType::RepeatedIndices { base_columns, repetitions } => {
+        SymbolType::RepeatedIndices {
+            base_columns,
+            repetitions,
+        } => {
             // Duplicate column indices in equation
             let mut cols = Vec::new();
             let mut coeffs = Vec::new();
@@ -242,7 +275,8 @@ fn build_received_symbol(
 
         SymbolType::OutOfBounds { invalid_columns } => {
             // Column indices outside valid range [0, L)
-            let cols: Vec<usize> = invalid_columns.iter()
+            let cols: Vec<usize> = invalid_columns
+                .iter()
                 .map(|&c| c as usize)
                 .take(MAX_COLUMNS_PER_SYMBOL)
                 .collect();
@@ -250,13 +284,18 @@ fn build_received_symbol(
             (cols, coeffs)
         }
 
-        SymbolType::MismatchedArity { columns, coefficients } => {
+        SymbolType::MismatchedArity {
+            columns,
+            coefficients,
+        } => {
             // Mismatched lengths between columns and coefficients
-            let cols: Vec<usize> = columns.iter()
+            let cols: Vec<usize> = columns
+                .iter()
                 .map(|&c| (c as usize) % (k + 10))
                 .take(MAX_COLUMNS_PER_SYMBOL)
                 .collect();
-            let coeffs: Vec<Gf256> = coefficients.iter()
+            let coeffs: Vec<Gf256> = coefficients
+                .iter()
                 .map(|&c| Gf256::new(c))
                 .take(MAX_COLUMNS_PER_SYMBOL)
                 .collect();
@@ -270,9 +309,7 @@ fn build_received_symbol(
         DataMutation::Normal { fill } => {
             vec![*fill; symbol_size]
         }
-        DataMutation::Empty => {
-            Vec::new()
-        }
+        DataMutation::Empty => Vec::new(),
         DataMutation::Oversized { extra_bytes } => {
             let mut data = vec![0u8; symbol_size];
             data.extend_from_slice(&extra_bytes[..extra_bytes.len().min(256)]);
@@ -316,16 +353,27 @@ fn validate_decode_error(error: &DecodeError, k: usize, symbols: &[ReceivedSymbo
         DecodeError::SymbolSizeMismatch { expected, actual } => {
             assert!(*expected != *actual);
         }
-        DecodeError::SymbolEquationArityMismatch { esi: _, columns, coefficients } => {
+        DecodeError::SymbolEquationArityMismatch {
+            esi: _,
+            columns,
+            coefficients,
+        } => {
             assert_ne!(*columns, *coefficients);
         }
-        DecodeError::ColumnIndexOutOfRange { esi: _, column, max_valid } => {
+        DecodeError::ColumnIndexOutOfRange {
+            esi: _,
+            column,
+            max_valid,
+        } => {
             assert!(*column >= *max_valid);
         }
         DecodeError::SourceEsiOutOfRange { esi, max_valid } => {
             assert!(*esi >= (*max_valid as u32));
         }
-        DecodeError::InvalidSourceSymbolEquation { esi, expected_column } => {
+        DecodeError::InvalidSourceSymbolEquation {
+            esi,
+            expected_column,
+        } => {
             assert!((*esi as usize) < k);
             assert!(*expected_column < k + 100); // Reasonable upper bound
         }

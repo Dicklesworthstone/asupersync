@@ -69,7 +69,12 @@ fuzz_target!(|scenario: FuzzScenario| match scenario {
         max_header_list_size,
         blocks,
         table_size_changes,
-    } => fuzz_multiple_blocks(max_table_size, max_header_list_size, blocks, table_size_changes),
+    } => fuzz_multiple_blocks(
+        max_table_size,
+        max_header_list_size,
+        blocks,
+        table_size_changes
+    ),
 
     FuzzScenario::HuffmanAdversarial {
         huffman_data,
@@ -82,7 +87,12 @@ fuzz_target!(|scenario: FuzzScenario| match scenario {
         size_updates,
         header_insertions,
         index_accesses,
-    } => fuzz_table_manipulation(initial_size, size_updates, header_insertions, index_accesses),
+    } => fuzz_table_manipulation(
+        initial_size,
+        size_updates,
+        header_insertions,
+        index_accesses
+    ),
 
     FuzzScenario::IntegerEdgeCases {
         prefix_bits,
@@ -145,7 +155,11 @@ fn fuzz_multiple_blocks(
     }
 }
 
-fn fuzz_huffman_adversarial(huffman_data: Vec<u8>, string_lengths: Vec<u16>, mix_literal_huffman: bool) {
+fn fuzz_huffman_adversarial(
+    huffman_data: Vec<u8>,
+    string_lengths: Vec<u16>,
+    mix_literal_huffman: bool,
+) {
     let mut decoder = Decoder::new();
     let mut buffer = Vec::new();
 

@@ -120,7 +120,8 @@ fuzz_target!(|input: FuzzInput| {
     // Determinism: a second call must return the same result.
     let observed_adversarial_again = ring.verify(&msg, &adversarial);
     assert_eq!(
-        observed_adversarial, observed_adversarial_again,
+        observed_adversarial,
+        observed_adversarial_again,
         "KeyRing::verify is not deterministic for sig of length {} on a {}-byte message",
         adversarial.len(),
         msg.len()
@@ -170,9 +171,7 @@ fuzz_target!(|input: FuzzInput| {
 
         // 2b. Same data with the WRONG key MUST fail (with overwhelming
         //     probability — a collision would be a 2^-256 cryptographic event).
-        if key_a.as_bytes() != key_b.as_bytes()
-            && valid_tag.verify(&key_b, &symbol)
-        {
+        if key_a.as_bytes() != key_b.as_bytes() && valid_tag.verify(&key_b, &symbol) {
             panic!(
                 "[testing-fuzzing][CRITICAL] AuthenticationTag::verify accepted a tag \
                  under a different key. This indicates either a broken HMAC \

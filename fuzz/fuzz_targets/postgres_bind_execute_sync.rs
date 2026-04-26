@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use asupersync::database::postgres::{
-    build_bind_msg, build_execute_msg, build_sync_msg, Format, IsNull, PgError, ToSql,
+    Format, IsNull, PgError, ToSql, build_bind_msg, build_execute_msg, build_sync_msg,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -44,9 +44,7 @@ impl ParamValue {
             Self::Bool(value) => Self::Bool(value),
             Self::Int32(value) => Self::Int32(value),
             Self::Text(value) => Self::Text(value.chars().take(MAX_TEXT_CHARS).collect()),
-            Self::Binary(bytes) => {
-                Self::Binary(bytes.into_iter().take(MAX_BINARY_BYTES).collect())
-            }
+            Self::Binary(bytes) => Self::Binary(bytes.into_iter().take(MAX_BINARY_BYTES).collect()),
             Self::Error(message) => Self::Error(message.chars().take(MAX_TEXT_CHARS).collect()),
         }
     }
@@ -170,10 +168,19 @@ fn normalized_cstring(input: &str) -> &[u8] {
 
 fn expect_message_type(message: &[u8], expected: u8) -> &[u8] {
     assert!(message.len() >= 5, "postgres frontend message too short");
-    assert_eq!(message[0], expected, "unexpected postgres frontend message type");
+    assert_eq!(
+        message[0], expected,
+        "unexpected postgres frontend message type"
+    );
     let len = i32::from_be_bytes([message[1], message[2], message[3], message[4]]);
-    assert!(len >= 4, "postgres frontend message length must include header");
-    assert_eq!(usize::try_from(len).ok().map(|body| body + 1), Some(message.len()));
+    assert!(
+        len >= 4,
+        "postgres frontend message length must include header"
+    );
+    assert_eq!(
+        usize::try_from(len).ok().map(|body| body + 1),
+        Some(message.len())
+    );
     &message[5..]
 }
 
@@ -207,7 +214,10 @@ fn take_cstring<'a>(cursor: &mut &'a [u8]) -> &'a [u8] {
 fn assert_bind_round_trip(message: &[u8], input: &FuzzInput) {
     let mut body = expect_message_type(message, b'B');
     assert_eq!(take_cstring(&mut body), normalized_cstring(&input.portal));
-    assert_eq!(take_cstring(&mut body), normalized_cstring(&input.statement));
+    assert_eq!(
+        take_cstring(&mut body),
+        normalized_cstring(&input.statement)
+    );
 
     let format_count = take_i16(&mut body);
     assert_eq!(usize::try_from(format_count).ok(), Some(input.params.len()));
@@ -231,19 +241,28 @@ fn assert_bind_round_trip(message: &[u8], input: &FuzzInput) {
 
     assert_eq!(take_i16(&mut body), 1);
     assert_eq!(take_i16(&mut body), input.result_format.to_pg() as i16);
-    assert!(body.is_empty(), "bind message carried unexpected trailing bytes");
+    assert!(
+        body.is_empty(),
+        "bind message carried unexpected trailing bytes"
+    );
 }
 
 fn assert_execute_round_trip(message: &[u8], input: &FuzzInput) {
     let mut body = expect_message_type(message, b'E');
     assert_eq!(take_cstring(&mut body), normalized_cstring(&input.portal));
     assert_eq!(take_i32(&mut body), input.max_rows);
-    assert!(body.is_empty(), "execute message carried unexpected trailing bytes");
+    assert!(
+        body.is_empty(),
+        "execute message carried unexpected trailing bytes"
+    );
 }
 
 fn assert_sync_round_trip(message: &[u8]) {
     let body = expect_message_type(message, b'S');
-    assert!(body.is_empty(), "sync message carried unexpected trailing bytes");
+    assert!(
+        body.is_empty(),
+        "sync message carried unexpected trailing bytes"
+    );
 }
 
 fn assert_stream_boundaries(messages: &[&[u8]]) {
@@ -265,7 +284,10 @@ fn assert_stream_boundaries(messages: &[&[u8]]) {
         assert_eq!(&cursor[..frame_len], *message);
         cursor = &cursor[frame_len..];
     }
-    assert!(cursor.is_empty(), "concatenated postgres stream has leftover bytes");
+    assert!(
+        cursor.is_empty(),
+        "concatenated postgres stream has leftover bytes"
+    );
 }
 
 fn fuzz_bind_execute_sync(mut input: FuzzInput) {
@@ -304,7 +326,12 @@ fn fuzz_bind_execute_sync(mut input: FuzzInput) {
         .collect();
     let params: Vec<&dyn ToSql> = owners.iter().map(|param| param as &dyn ToSql).collect();
 
-    match build_bind_msg(&input.portal, &input.statement, &params, input.result_format.to_pg()) {
+    match build_bind_msg(
+        &input.portal,
+        &input.statement,
+        &params,
+        input.result_format.to_pg(),
+    ) {
         Ok(bind) => {
             assert!(
                 input
