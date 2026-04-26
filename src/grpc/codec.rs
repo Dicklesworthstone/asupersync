@@ -219,35 +219,61 @@ pub trait Codec: Send + 'static {
 }
 
 /// Function signature for frame-level compression hooks.
-pub type FrameCompressor = fn(&[u8]) -> Result<Bytes, GrpcError>;
+///
+/// br-asupersync-535iu9: takes `Bytes` (not `&[u8]`) so the identity
+/// no-compression path is a pure move (Arc refcount bump) instead of
+/// a full memcpy. The pre-fix `&[u8]` signature forced
+/// `Bytes::copy_from_slice` at every identity call — one heap alloc +
+/// memcpy per gRPC frame on the no-compression hot path.
+pub type FrameCompressor = fn(Bytes) -> Result<Bytes, GrpcError>;
 
 /// Function signature for frame-level decompression hooks.
-pub type FrameDecompressor = fn(&[u8], usize) -> Result<Bytes, GrpcError>;
+///
+/// br-asupersync-535iu9: see [`FrameCompressor`] doc — same Bytes-by-value
+/// rationale.
+pub type FrameDecompressor = fn(Bytes, usize) -> Result<Bytes, GrpcError>;
 
 #[allow(clippy::unnecessary_wraps)]
-fn identity_frame_compress(input: &[u8]) -> Result<Bytes, GrpcError> {
-    Ok(Bytes::copy_from_slice(input))
+fn identity_frame_compress(input: Bytes) -> Result<Bytes, GrpcError> {
+    // br-asupersync-535iu9: zero-copy pass-through on the no-compression
+    // hot path. Pre-fix was `Bytes::copy_from_slice(input)` which did a
+    // full memcpy of the entire frame; post-fix is a move (no heap
+    // allocation, no memcpy). For per-request gRPC traffic with
+    // many small frames this is a substantial throughput win.
+    Ok(input)
 }
 
-fn identity_frame_decompress(input: &[u8], max_size: usize) -> Result<Bytes, GrpcError> {
+fn identity_frame_decompress(input: Bytes, max_size: usize) -> Result<Bytes, GrpcError> {
     if input.len() > max_size {
         return Err(GrpcError::MessageTooLarge);
     }
-    Ok(Bytes::copy_from_slice(input))
+    // br-asupersync-535iu9: zero-copy pass-through, see identity_frame_compress.
+    Ok(input)
 }
 
 /// Gzip frame compressor using flate2.
 ///
 /// Compresses the input bytes with gzip encoding at the default compression level.
+///
+/// br-asupersync-ky9o3j: pre-fix used `Vec::new()` as the encoder backing
+/// buffer with no size hint, causing flate2 to grow the vector through
+/// successive doublings (typical 4-8 reallocs per frame). Post-fix
+/// pre-allocates `input.len()` bytes — a tight upper bound for typical
+/// gzip ratios on protobuf payloads (gzip rarely produces output larger
+/// than the input for small protobuf messages, and over-allocation by a
+/// few KB is amortized against avoiding the realloc cycle).
 #[cfg(feature = "compression")]
-pub fn gzip_frame_compress(input: &[u8]) -> Result<Bytes, GrpcError> {
+pub fn gzip_frame_compress(input: Bytes) -> Result<Bytes, GrpcError> {
     use flate2::Compression;
     use flate2::write::GzEncoder;
     use std::io::Write;
 
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    let mut encoder = GzEncoder::new(
+        Vec::with_capacity(input.len()),
+        Compression::default(),
+    );
     encoder
-        .write_all(input)
+        .write_all(&input)
         .map_err(|e| GrpcError::compression(e.to_string()))?;
     let compressed = encoder
         .finish()
@@ -259,13 +285,27 @@ pub fn gzip_frame_compress(input: &[u8]) -> Result<Bytes, GrpcError> {
 ///
 /// Decompresses gzip-encoded bytes, enforcing `max_size` to guard against
 /// decompression bombs.
+///
+/// br-asupersync-ky9o3j: pre-fix used `Vec::new()` for the output buffer
+/// with no size hint, causing typical gzip-ratio decompression (4-8x
+/// expansion) to trigger 3-4 reallocs per frame. Post-fix pre-allocates
+/// based on a 4× input estimate, capped at the configured max_size to
+/// avoid attacker-controlled allocation amplification (decompression-bomb
+/// safety preserved by the existing per-iteration `total > max_size`
+/// check below).
 #[cfg(feature = "compression")]
-pub fn gzip_frame_decompress(input: &[u8], max_size: usize) -> Result<Bytes, GrpcError> {
+pub fn gzip_frame_decompress(input: Bytes, max_size: usize) -> Result<Bytes, GrpcError> {
     use flate2::read::GzDecoder;
     use std::io::Read;
 
-    let mut decoder = GzDecoder::new(input);
-    let mut output = Vec::new();
+    // 4× input is the typical ratio for protobuf payloads under default
+    // gzip compression; capped at max_size so an attacker can't force
+    // amplification by sending tiny compressed inputs that hint a huge
+    // output. The per-iteration check below remains the actual bomb
+    // defense.
+    let initial_capacity = input.len().saturating_mul(4).min(max_size);
+    let mut decoder = GzDecoder::new(input.as_ref());
+    let mut output = Vec::with_capacity(initial_capacity);
     let mut buf = [0u8; 8192];
     let mut total = 0;
     loop {
@@ -432,7 +472,10 @@ impl<C: Codec> FramedCodec<C> {
             let compressor = self.compressor.ok_or_else(|| {
                 GrpcError::compression("compression requested but no frame compressor configured")
             })?;
-            let compressed = compressor(data.as_ref())?;
+            // br-asupersync-535iu9: pass Bytes by-value (move) — identity
+            // compressor avoids a memcpy entirely; gzip compressor still
+            // allocates output but with a sized hint (br-ky9o3j).
+            let compressed = compressor(data)?;
             if compressed.len() > self.max_encode_message_size() {
                 return Err(GrpcError::MessageTooLarge);
             }
@@ -459,7 +502,10 @@ impl<C: Codec> FramedCodec<C> {
                     "compressed frame received but no frame decompressor configured",
                 )
             })?;
-            decompressor(message.data.as_ref(), self.max_decode_message_size())?
+            // br-asupersync-535iu9: pass Bytes by-value (move) — identity
+            // decompressor is zero-copy; gzip pre-allocates output
+            // with a sized hint (br-ky9o3j).
+            decompressor(message.data, self.max_decode_message_size())?
         } else {
             message.data
         };
@@ -834,7 +880,9 @@ mod tests {
     fn test_gzip_frame_compress_decompress_roundtrip() {
         init_test("test_gzip_frame_compress_decompress_roundtrip");
         let original = b"hello gzip compression roundtrip test";
-        let compressed = gzip_frame_compress(original).expect("compress must succeed");
+        // br-535iu9: signature now takes Bytes by-value.
+        let compressed = gzip_frame_compress(Bytes::from_static(original))
+            .expect("compress must succeed");
 
         // Compressed output should differ from input (gzip header + payload).
         crate::assert_with_log!(
@@ -845,7 +893,7 @@ mod tests {
         );
 
         let decompressed =
-            gzip_frame_decompress(&compressed, 1024).expect("decompress must succeed");
+            gzip_frame_decompress(compressed, 1024).expect("decompress must succeed");
         crate::assert_with_log!(
             decompressed.as_ref() == original.as_slice(),
             "decompressed matches original",
@@ -861,9 +909,10 @@ mod tests {
         init_test("test_gzip_frame_decompress_bomb_protection");
         // Compress a large payload, then try to decompress with a tiny limit.
         let large = vec![0u8; 4096];
-        let compressed = gzip_frame_compress(&large).expect("compress must succeed");
+        let compressed = gzip_frame_compress(Bytes::from(large))
+            .expect("compress must succeed");
 
-        let result = gzip_frame_decompress(&compressed, 100);
+        let result = gzip_frame_decompress(compressed, 100);
         let ok = matches!(result, Err(GrpcError::MessageTooLarge));
         crate::assert_with_log!(ok, "decompression bomb rejected", true, ok);
         crate::test_complete!("test_gzip_frame_decompress_bomb_protection");
@@ -918,9 +967,9 @@ mod tests {
     #[cfg(feature = "compression")]
     fn test_gzip_frame_empty_input() {
         init_test("test_gzip_frame_empty_input");
-        let compressed = gzip_frame_compress(b"").expect("compress empty must succeed");
+        let compressed = gzip_frame_compress(Bytes::new()).expect("compress empty must succeed");
         let decompressed =
-            gzip_frame_decompress(&compressed, 1024).expect("decompress empty must succeed");
+            gzip_frame_decompress(compressed, 1024).expect("decompress empty must succeed");
         let empty = decompressed.is_empty();
         crate::assert_with_log!(empty, "empty roundtrip", true, empty);
         crate::test_complete!("test_gzip_frame_empty_input");
@@ -964,7 +1013,7 @@ mod tests {
     fn test_gzip_frame_decompress_invalid_input() {
         init_test("test_gzip_frame_decompress_invalid_input");
         // Invalid gzip data should produce a compression error, not panic.
-        let garbage = b"this is not gzip data";
+        let garbage = Bytes::from_static(b"this is not gzip data");
         let result = gzip_frame_decompress(garbage, 4096);
         let ok = matches!(result, Err(GrpcError::Compression(_)));
         crate::assert_with_log!(ok, "invalid gzip rejected", true, ok);
