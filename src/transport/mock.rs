@@ -22,6 +22,26 @@ fn wall_clock_now() -> Time {
     crate::time::wall_now()
 }
 
+/// br-asupersync-emcu9j: deterministic time source for the simulator's
+/// default config. Always returns `Time::ZERO` so tests using
+/// `SimTransportConfig::default()` (or `::reliable()`/`::lossy()` —
+/// both delegate to default) start with a known, replay-stable clock
+/// reading. Tests that genuinely need wall-clock time must either
+/// build the config via [`SimTransportConfig::with_wall_clock_time`]
+/// (the explicit, grep-able opt-in) or install a Cx-rooted virtual
+/// clock via the `time_getter` field directly.
+///
+/// Pre-fix the default `time_getter` was `wall_clock_now`, which
+/// silently captured wall-clock readings into every test using the
+/// default config. That broke the lab-runtime invariant 'tests are
+/// replayable': the same scenario produced different time values
+/// across runs; latency-dependent assertions (e.g. 'less than 50ms')
+/// passed on fast machines and failed on slow ones. The new default
+/// is deterministic; tests that need wall-clock must opt in.
+fn deterministic_zero_time() -> Time {
+    Time::ZERO
+}
+
 /// Configuration for simulated transport behavior.
 #[derive(Debug, Clone)]
 pub struct SimTransportConfig {
@@ -62,12 +82,31 @@ impl Default for SimTransportConfig {
             seed: None,
             preserve_order: true,
             fail_after: None,
-            time_getter: wall_clock_now,
+            // br-asupersync-emcu9j: deterministic default time source.
+            // Pre-fix this defaulted to `wall_clock_now`, silently
+            // capturing wall-clock readings into every test using the
+            // simulator. Replace with `deterministic_zero_time` so
+            // replays produce identical traces; tests that need real
+            // wall-clock must opt in via `with_wall_clock_time()` or
+            // by setting `time_getter` directly.
+            time_getter: deterministic_zero_time,
         }
     }
 }
 
 impl SimTransportConfig {
+    /// br-asupersync-emcu9j: explicit, grep-able opt-in for callers
+    /// that genuinely need wall-clock time in the simulator. Defaults
+    /// (`reliable`, `lossy`, `with_latency`, `Default::default`) all
+    /// install the deterministic `Time::ZERO` source; tests that
+    /// must observe wall-clock progress wire it through this builder.
+    #[inline]
+    #[must_use]
+    pub fn with_wall_clock_time(mut self) -> Self {
+        self.time_getter = wall_clock_now;
+        self
+    }
+
     /// Create config for reliable, zero-latency transport (unit tests).
     #[inline]
     #[must_use]

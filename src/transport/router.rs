@@ -1062,6 +1062,31 @@ impl RoutingTable {
         arc
     }
 
+    /// br-asupersync-mboi13: removes the endpoint with `id` from the
+    /// routing table, returning the dropped `Arc<Endpoint>` if it was
+    /// present.
+    ///
+    /// The pre-fix shape registered endpoints via `register_endpoint`
+    /// but had no inverse — the `endpoints` HashMap accumulated
+    /// `Arc<Endpoint>` entries forever. In long-running services with
+    /// dynamic membership (k8s pod churn, blue/green deploys, cloud
+    /// autoscaling) every dead endpoint kept its metric counters,
+    /// dispatch history, last-success/failure timestamps, and label
+    /// maps live — at conservatively 1-2 KiB per entry, ~13 MiB
+    /// leaked per ~9000-pod-day workload. This violated the
+    /// asupersync 'no obligation leaks' invariant: the routing table
+    /// holds Endpoint Arcs that are obligations to dispatch, and
+    /// without a removal path those obligations leak.
+    ///
+    /// Callers must invoke this when an endpoint goes permanently
+    /// offline (deregistration event from the membership layer,
+    /// k8s pod-deleted webhook, etc.). Callers should also drop any
+    /// routing entries that referenced the endpoint via
+    /// [`Self::remove_route`] (out of scope for this fix; pair work).
+    pub fn remove_endpoint(&self, id: EndpointId) -> Option<Arc<Endpoint>> {
+        self.endpoints.write().remove(&id)
+    }
+
     /// Gets an endpoint by ID.
     #[must_use]
     pub fn get_endpoint(&self, id: EndpointId) -> Option<Arc<Endpoint>> {
@@ -1721,9 +1746,15 @@ impl SymbolDispatcher {
 
         let _guard = route.endpoint.acquire_connection_guard();
 
+        // br-asupersync-kfk19o: see dispatch_multicast for rationale.
+        let now_fn = || {
+            cx.timer_driver()
+                .map_or_else(crate::time::wall_now, |d| d.now())
+        };
+
         match self.send_to_endpoint(cx, route.endpoint.id, symbol).await {
             Ok(()) => {
-                route.endpoint.record_success(Time::ZERO);
+                route.endpoint.record_success(now_fn());
                 Ok(DispatchResult {
                     successes: 1,
                     failures: 0,
@@ -1734,7 +1765,7 @@ impl SymbolDispatcher {
             }
             Err(DispatchError::Cancelled) => Err(DispatchError::Cancelled),
             Err(err) => {
-                route.endpoint.record_failure(Time::ZERO);
+                route.endpoint.record_failure(now_fn());
                 Err(err)
             }
         }
@@ -1770,6 +1801,22 @@ impl SymbolDispatcher {
             Err(e) => return Err(DispatchError::RoutingFailed(e)),
         };
 
+        // br-asupersync-kfk19o: route timestamps through the caller's
+        // Cx so endpoint health metrics observe meaningful time. The
+        // pre-fix shape passed Time::ZERO into every record_success /
+        // record_failure call, leaving last_success and last_failure
+        // permanently at Unix epoch zero — circuit breakers tripping
+        // on 'no success in last 30s' fired on every fresh endpoint
+        // (epoch-zero is older than any threshold under wall_now), and
+        // recovery cooldowns either skipped or never advanced. Mirror
+        // the asupersync-my0rls / asupersync-307rnt pattern:
+        // cx.timer_driver() for replay-determinism in the lab harness,
+        // wall_now() fallback for production builds without a driver.
+        let now_fn = || {
+            cx.timer_driver()
+                .map_or_else(crate::time::wall_now, |d| d.now())
+        };
+
         // Actually dispatch to selected endpoints
         let mut successes = 0;
         let mut failures = 0;
@@ -1786,13 +1833,13 @@ impl SymbolDispatcher {
 
             match self.send_to_endpoint(cx, endpoint.id, symbol.clone()).await {
                 Ok(()) => {
-                    endpoint.record_success(Time::ZERO);
+                    endpoint.record_success(now_fn());
                     successes += 1;
                     sent_to.push(endpoint.id);
                 }
                 Err(DispatchError::Cancelled) => return Err(DispatchError::Cancelled),
                 Err(err) => {
-                    endpoint.record_failure(Time::ZERO);
+                    endpoint.record_failure(now_fn());
                     failures += 1;
                     failed.push((endpoint.id, err));
                 }
@@ -1821,6 +1868,12 @@ impl SymbolDispatcher {
             return Err(DispatchError::NoEndpoints);
         }
 
+        // br-asupersync-kfk19o: see dispatch_multicast for rationale.
+        let now_fn = || {
+            cx.timer_driver()
+                .map_or_else(crate::time::wall_now, |d| d.now())
+        };
+
         let mut successes = 0;
         let mut failures = 0;
         let mut sent_to = SmallVec::<[EndpointId; 16]>::new();
@@ -1835,13 +1888,13 @@ impl SymbolDispatcher {
 
             match self.send_to_endpoint(cx, route.id, symbol.clone()).await {
                 Ok(()) => {
-                    route.record_success(Time::ZERO);
+                    route.record_success(now_fn());
                     successes += 1;
                     sent_to.push(route.id);
                 }
                 Err(DispatchError::Cancelled) => return Err(DispatchError::Cancelled),
                 Err(err) => {
-                    route.record_failure(Time::ZERO);
+                    route.record_failure(now_fn());
                     failures += 1;
                     failed.push((route.id, err));
                 }
@@ -1874,6 +1927,12 @@ impl SymbolDispatcher {
             });
         }
 
+        // br-asupersync-kfk19o: see dispatch_multicast for rationale.
+        let now_fn = || {
+            cx.timer_driver()
+                .map_or_else(crate::time::wall_now, |d| d.now())
+        };
+
         let mut successes = 0;
         let mut failures = 0;
         let mut sent_to = SmallVec::<[EndpointId; 16]>::new();
@@ -1892,13 +1951,13 @@ impl SymbolDispatcher {
 
             match self.send_to_endpoint(cx, route.id, symbol.clone()).await {
                 Ok(()) => {
-                    route.record_success(Time::ZERO);
+                    route.record_success(now_fn());
                     successes += 1;
                     sent_to.push(route.id);
                 }
                 Err(DispatchError::Cancelled) => return Err(DispatchError::Cancelled),
                 Err(err) => {
-                    route.record_failure(Time::ZERO);
+                    route.record_failure(now_fn());
                     failures += 1;
                     failed.push((route.id, err));
                 }
