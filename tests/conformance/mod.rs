@@ -6,10 +6,13 @@
 //! against formal specifications (RFCs) and reference implementations.
 
 pub mod aggregator_flush;
+pub mod codec_framing_properties;
 pub mod codec_round_trip;
 pub mod cx_capability_semantics;
 pub mod messaging_broker_parity;
 // pub mod codec_framing;
+// codec_framing.rs would collide with the codec_framing/ directory;
+// the new exhaustive-properties suite lives in codec_framing_properties.rs.
 // br-asupersync-9036u6 follow-up: orphan h1_* files have bit-rot and
 // fail to compile against current asupersync APIs (cx::test_cx removed,
 // time::{Duration,Instant} renamed, io::Cursor moved, Setting/Request
