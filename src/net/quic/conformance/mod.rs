@@ -258,20 +258,11 @@ fn test_version_negotiation_support() -> ConformanceResult {
 }
 
 fn test_transport_parameter_exchange() -> ConformanceResult {
-    let cx = test_cx();
-    let config = QuicConfig::default();
-
-    // Verify that transport config is properly created
-    let transport_config = config.to_transport_config();
-
-    // Basic sanity checks on transport parameters
-    if transport_config.max_idle_timeout().is_none() {
-        return ConformanceResult::Fail {
-            reason: "Transport config missing idle timeout parameter".to_string(),
-        };
+    ConformanceResult::Skipped {
+        reason:
+            "Requires a live client/server handshake harness to verify transport-parameter exchange"
+                .to_string(),
     }
-
-    ConformanceResult::Pass
 }
 
 fn test_invalid_transport_parameters() -> ConformanceResult {

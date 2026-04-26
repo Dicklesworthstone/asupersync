@@ -1598,8 +1598,16 @@ mod tests {
         }
 
         // Value pair from the bead instructions: u32::MAX vs u32::MAX-1.
-        let a = eval_context(&snapshot_with(u32::MAX as usize, (u32::MAX - 1) as usize), 500, 500);
-        let b = eval_context(&snapshot_with((u32::MAX - 1) as usize, u32::MAX as usize), 500, 500);
+        let a = eval_context(
+            &snapshot_with(u32::MAX as usize, (u32::MAX - 1) as usize),
+            500,
+            500,
+        );
+        let b = eval_context(
+            &snapshot_with((u32::MAX - 1) as usize, u32::MAX as usize),
+            500,
+            500,
+        );
         assert_ne!(
             a.decision_id, b.decision_id,
             "swapping (n_rows, n_cols) must yield distinct DecisionIds"
@@ -1645,5 +1653,95 @@ mod tests {
             }
         }
         assert_eq!(seen.len(), 100);
+    }
+
+    /// br-asupersync-gqnv2o: when `outcome.fallback_active` is true
+    /// AND the deterministic_fallback_reason resolves to "none" (the
+    /// UNCLASSIFIED bucket at the publish site), the published
+    /// `confidence_score` MUST be the clamped fallback ceiling (250)
+    /// rather than the unclamped `preliminary_confidence`. Pre-fix the
+    /// triple was inconsistent — a downstream rollback gate that
+    /// keys on `(deterministic_fallback_triggered=true,
+    /// confidence_score < threshold)` would observe (true, high) and
+    /// silently skip the safety branch despite the explicit fallback
+    /// signal. The fix re-binds confidence_score and uncertainty_score
+    /// to the clamped values when the asymmetry is observed; this
+    /// test pins the contract.
+    #[test]
+    fn gqnv2o_named_fallback_clamps_confidence_to_ceiling() {
+        let telemetry = evaluate_governance(&GovernanceSnapshot {
+            n_rows: 24,
+            n_cols: 16,
+            density_permille: 90,
+            rank_deficit_permille: 0,
+            inactivation_pressure_permille: 80,
+            overhead_ratio_permille: 120,
+            budget_exhausted: true,
+            baseline_loss: 540,
+            high_support_loss: 760,
+            block_schur_loss: u32::MAX,
+        });
+        assert!(telemetry.deterministic_fallback_triggered);
+        assert!(
+            telemetry.confidence_score <= 250,
+            "named-reason fallback must clamp confidence to <= 250, \
+             got {}",
+            telemetry.confidence_score
+        );
+        assert_eq!(
+            u32::from(telemetry.uncertainty_score) + u32::from(telemetry.confidence_score),
+            1000
+        );
+    }
+
+    /// br-asupersync-gqnv2o: defensive sweep — for every snapshot in
+    /// a small adversarial set, the
+    /// `(deterministic_fallback_triggered=true ⇒ confidence_score<=250)`
+    /// implication MUST hold. Catches any future code path that
+    /// re-introduces the pre-fix asymmetry.
+    #[test]
+    fn gqnv2o_fallback_implies_clamped_confidence_invariant() {
+        let snapshots = [
+            GovernanceSnapshot {
+                n_rows: 16,
+                n_cols: 16,
+                density_permille: 100,
+                rank_deficit_permille: 0,
+                inactivation_pressure_permille: 0,
+                overhead_ratio_permille: 0,
+                budget_exhausted: true,
+                baseline_loss: 0,
+                high_support_loss: 0,
+                block_schur_loss: 0,
+            },
+            GovernanceSnapshot {
+                n_rows: 32,
+                n_cols: 16,
+                density_permille: 200,
+                rank_deficit_permille: 100,
+                inactivation_pressure_permille: 200,
+                overhead_ratio_permille: 250,
+                budget_exhausted: true,
+                baseline_loss: u32::MAX,
+                high_support_loss: u32::MAX,
+                block_schur_loss: u32::MAX,
+            },
+        ];
+        for (i, s) in snapshots.iter().enumerate() {
+            let telemetry = evaluate_governance(s);
+            if telemetry.deterministic_fallback_triggered {
+                assert!(
+                    telemetry.confidence_score <= 250,
+                    "snapshot[{i}]: fallback triggered but confidence={} \
+                     — gate would not engage rollback (br-asupersync-gqnv2o)",
+                    telemetry.confidence_score
+                );
+                assert_eq!(
+                    u32::from(telemetry.uncertainty_score) + u32::from(telemetry.confidence_score),
+                    1000,
+                    "snapshot[{i}]: uncertainty + confidence != 1000"
+                );
+            }
+        }
     }
 }
