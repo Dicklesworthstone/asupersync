@@ -2028,6 +2028,27 @@ impl Transaction {
     }
 
     /// Queue a command in this transaction.
+    ///
+    /// # State invariants (br-asupersync-4tb7kn)
+    ///
+    /// `self.finished` is **not** mutated until after both await points
+    /// (`write_command`, `read_response`) complete. The previous
+    /// implementation set `self.finished = true` eagerly at the top of
+    /// the function and only reset it to `false` on the success and
+    /// Redis-`-ERR` paths — so on a transient network failure mid-write
+    /// or a cancel mid-read, the transaction object was permanently
+    /// bricked from the caller's perspective with no signal that it
+    /// might be a recoverable retry candidate. The reorder below
+    /// preserves the correct connection-state hygiene (poisoned
+    /// connection discarded by `DiscardOnDropGuard`) while leaving
+    /// `self.finished` unset on the failure paths so the caller's
+    /// subsequent attempt observes the more accurate
+    /// `"transaction already finished"` (no live connection) error
+    /// rather than the misleading `"after transaction completion"`.
+    /// `self.finished` is now only set in two places: the protocol-
+    /// violation arm (the connection responded with garbage — terminal),
+    /// and the public `exec`/`discard` methods which are the legitimate
+    /// terminal transitions.
     pub async fn cmd_bytes(&mut self, cx: &Cx, args: &[&[u8]]) -> Result<(), RedisError> {
         if self.finished {
             return Err(RedisError::Protocol(
@@ -2035,7 +2056,6 @@ impl Transaction {
             ));
         }
 
-        self.finished = true;
         let conn = self
             .conn
             .take()
@@ -2048,18 +2068,26 @@ impl Transaction {
         match resp {
             RespValue::SimpleString(s) if s == "QUEUED" => {
                 self.conn = Some(conn.defuse());
-                self.finished = false;
                 self.queued_commands = self.queued_commands.saturating_add(1);
                 Ok(())
             }
             RespValue::Error(msg) => {
                 self.conn = Some(conn.defuse());
-                self.finished = false;
                 Err(RedisError::Redis(msg))
             }
-            other => Err(RedisError::Protocol(format!(
-                "queued command expected +QUEUED, got {other:?}"
-            ))),
+            other => {
+                // Protocol violation: the connection responded with a
+                // shape Redis does not document as legal in MULTI mode.
+                // Mark the transaction terminated so subsequent calls
+                // surface the precise "after transaction completion"
+                // error rather than the generic "no connection" error.
+                // The connection itself is poisoned and discarded by
+                // the guard.
+                self.finished = true;
+                Err(RedisError::Protocol(format!(
+                    "queued command expected +QUEUED, got {other:?}"
+                )))
+            }
         }
     }
 
@@ -3794,6 +3822,17 @@ mod tests {
                 .recv_timeout(Duration::from_secs(2))
                 .expect("dropped queued transaction command should discard the connection");
 
+            // br-asupersync-4tb7kn: Transaction::cmd_bytes no longer sets
+            // self.finished = true before the await points, so a dropped
+            // queued future leaves self.finished == false but
+            // self.conn == None (DiscardOnDropGuard discarded the
+            // poisoned connection). The next cmd hits the take().
+            // ok_or_else path with "transaction already finished" rather
+            // than the finished-flag's "after transaction completion".
+            // Both messages communicate the same observable outcome
+            // (further commands on this transaction are rejected); the
+            // new shape is more honest about *why* (no live connection
+            // vs caller already EXEC'd or DISCARD'd).
             let err = tx
                 .cmd(&cx, &["GET", "key"])
                 .await
@@ -3801,7 +3840,8 @@ mod tests {
             match err {
                 RedisError::Protocol(message) => {
                     assert!(
-                        message.contains("after transaction completion"),
+                        message.contains("transaction already finished")
+                            || message.contains("after transaction completion"),
                         "unexpected transaction failure message: {message}"
                     );
                 }
@@ -3809,6 +3849,94 @@ mod tests {
                     panic!("expected protocol failure after dropped queued command, got {other:?}")
                 }
             }
+        });
+
+        server.join().expect("server join");
+    }
+
+    #[test]
+    fn transaction_redis_error_response_keeps_transaction_alive_for_retry() {
+        // br-asupersync-4tb7kn: a `-ERR ...` reply from Redis to a
+        // queued cmd_bytes call is a *transient*, command-scoped
+        // rejection — not a transaction-terminating event. The
+        // transaction object must remain usable: a subsequent
+        // cmd_bytes must succeed when the same command shape is
+        // accepted, and EXEC must still execute. The pre-fix code
+        // already handled this path correctly via the explicit
+        // `finished = false` reset on the `RespValue::Error` arm; the
+        // fix keeps the contract intact by removing the eager
+        // `finished = true` at the top of cmd_bytes (so the post-error
+        // reset is no longer required, but the observable contract is
+        // identical). This test pins the contract so a future refactor
+        // cannot regress it.
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept transaction client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set transaction read timeout");
+
+            let multi = read_resp_frame(&mut stream);
+            assert_resp_command(multi, &[b"MULTI"]);
+            stream.write_all(b"+OK\r\n").expect("write MULTI ack");
+            stream.flush().expect("flush MULTI ack");
+
+            // First queued command — server returns -ERR (transient).
+            let first = read_resp_frame(&mut stream);
+            assert_resp_command(first, &[b"BOGUS_COMMAND"]);
+            stream
+                .write_all(b"-ERR unknown command 'BOGUS_COMMAND'\r\n")
+                .expect("write -ERR ack");
+            stream.flush().expect("flush -ERR ack");
+
+            // Retry with a valid command — server returns +QUEUED.
+            let retry = read_resp_frame(&mut stream);
+            assert_resp_command(retry, &[b"SET", b"k", b"v"]);
+            stream.write_all(b"+QUEUED\r\n").expect("write +QUEUED ack");
+            stream.flush().expect("flush +QUEUED ack");
+
+            // EXEC — server returns array with the SET's reply.
+            let exec = read_resp_frame(&mut stream);
+            assert_resp_command(exec, &[b"EXEC"]);
+            stream
+                .write_all(b"*1\r\n+OK\r\n")
+                .expect("write EXEC ack");
+            stream.flush().expect("flush EXEC ack");
+        });
+
+        run_test_with_cx(|cx| async move {
+            let url = format!("redis://{}:{}", addr.ip(), addr.port());
+            let client = RedisClient::connect(&cx, &url)
+                .await
+                .expect("connect redis client");
+            let mut tx = client.transaction(&cx).await.expect("start transaction");
+
+            // First queued command rejected by Redis — must surface as
+            // RedisError::Redis (not Protocol), and must NOT brick the
+            // transaction object.
+            let first_err = tx
+                .cmd(&cx, &["BOGUS_COMMAND"])
+                .await
+                .expect_err("BOGUS_COMMAND should be rejected by Redis");
+            assert!(
+                matches!(first_err, RedisError::Redis(ref msg) if msg.contains("unknown command")),
+                "expected RedisError::Redis(unknown command), got {first_err:?}"
+            );
+
+            // Transaction is still alive: the next cmd_bytes succeeds.
+            tx.cmd(&cx, &["SET", "k", "v"])
+                .await
+                .expect("retry after -ERR should still queue");
+
+            // EXEC consumes the transaction and returns the queued
+            // command's reply.
+            let replies = tx.exec(&cx).await.expect("EXEC after retry should succeed");
+            assert_eq!(replies.len(), 1);
+            assert!(matches!(
+                &replies[0],
+                RespValue::SimpleString(s) if s == "OK"
+            ));
         });
 
         server.join().expect("server join");
