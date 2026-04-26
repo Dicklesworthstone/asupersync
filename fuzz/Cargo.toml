@@ -46,6 +46,16 @@ rand = "0.9"
 # Fuzz targets - each [[bin]] entry defines a fuzz target
 # Run with: cargo +nightly fuzz run <target_name>
 
+# br-asupersync — focused HMAC verify fuzzer for src/security/{authenticated,
+# key}.rs. Exercises wrong-length / all-zero / all-ones / near-collision /
+# rotated-keyring shapes against KeyRing::verify and AuthenticationTag::verify.
+[[bin]]
+name = "security_authenticated_hmac"
+path = "fuzz_targets/security_authenticated_hmac.rs"
+test = false
+doc = false
+bench = false
+
 [[bin]]
 name = "fuzz_http1_request"
 path = "fuzz_targets/http1_request.rs"
@@ -1789,6 +1799,13 @@ bench = false
 [[bin]]
 name = "length_delimited_decode"
 path = "fuzz_targets/length_delimited_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "codec_raptorq_roundtrip"
+path = "fuzz_targets/codec_raptorq_roundtrip.rs"
 test = false
 doc = false
 bench = false

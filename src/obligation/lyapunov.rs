@@ -229,6 +229,10 @@ pub struct StateSnapshot {
 }
 
 impl StateSnapshot {
+    /// Currently unused at the call site — wiring is pending an upstream
+    /// br-asupersync-xxcss5 follow-up; allow(dead_code) keeps the lib
+    /// compilable in the meantime.
+    #[allow(dead_code)]
     #[inline]
     fn accumulate_cancel_phase_counts(
         task_state: &crate::record::task::TaskState,
