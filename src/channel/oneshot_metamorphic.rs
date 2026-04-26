@@ -150,7 +150,8 @@ fn mr2_send_atomicity() {
 
                 // Send should fail with SendError::Disconnected containing the value
                 match tx.send(&cx, value.clone()) {
-                    Err(SendError::Disconnected(returned_value)) => {
+                    Err(SendError::Disconnected(returned_value)
+                        | SendError::Cancelled(returned_value)) => {
                         // MR2.1: Failed send must return the original value unchanged
                         if returned_value == value {
                             Ok(("send_failed", Some(value.clone())))

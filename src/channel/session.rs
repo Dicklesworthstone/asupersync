@@ -237,10 +237,19 @@ impl<T> TrackedOneshotSender<T> {
     ///
     /// The returned permit carries an [`ObligationToken<SendPermit>`] that
     /// panics on drop if not committed or aborted.
-    pub fn reserve(self, cx: &Cx) -> TrackedOneshotPermit<T> {
-        let permit = self.inner.reserve(cx);
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(oneshot::SendError::Cancelled(()))` if the supplied `Cx`
+    /// is already cancelled — propagated from `oneshot::Sender::reserve`
+    /// (br-asupersync-4taf1b).
+    pub fn reserve(
+        self,
+        cx: &Cx,
+    ) -> Result<TrackedOneshotPermit<T>, oneshot::SendError<()>> {
+        let permit = self.inner.reserve(cx)?;
         let obligation = ObligationToken::<SendPermit>::reserve("TrackedOneshotPermit");
-        TrackedOneshotPermit { permit, obligation }
+        Ok(TrackedOneshotPermit { permit, obligation })
     }
 
     /// Convenience: reserve + send in one step, returning a proof on success.
@@ -249,8 +258,13 @@ impl<T> TrackedOneshotSender<T> {
         cx: &Cx,
         value: T,
     ) -> Result<CommittedProof<SendPermit>, oneshot::SendError<T>> {
-        let permit = self.reserve(cx);
-        permit.send(value)
+        match self.reserve(cx) {
+            Ok(permit) => permit.send(value),
+            Err(oneshot::SendError::Cancelled(())) => Err(oneshot::SendError::Cancelled(value)),
+            Err(oneshot::SendError::Disconnected(())) => {
+                Err(oneshot::SendError::Disconnected(value))
+            }
+        }
     }
 
     /// Returns the underlying [`oneshot::Sender`], discarding obligation tracking.
@@ -474,7 +488,7 @@ mod tests {
         let cx = test_cx();
         let (tx, mut rx) = tracked_oneshot::<i32>();
 
-        let permit = tx.reserve(&cx);
+        let permit = tx.reserve(&cx).expect("cx not cancelled in test");
         let proof = permit.send(100).expect("oneshot send failed");
 
         crate::assert_with_log!(
@@ -497,7 +511,7 @@ mod tests {
         let cx = test_cx();
         let (tx, mut rx) = tracked_oneshot::<i32>();
 
-        let permit = tx.reserve(&cx);
+        let permit = tx.reserve(&cx).expect("cx not cancelled in test");
         let proof = permit.abort();
 
         crate::assert_with_log!(
@@ -527,7 +541,7 @@ mod tests {
         let cx = test_cx();
         let (tx, _rx) = tracked_oneshot::<i32>();
 
-        let permit = tx.reserve(&cx);
+        let permit = tx.reserve(&cx).expect("cx not cancelled in test");
         drop(permit); // should panic
     }
 
@@ -602,7 +616,7 @@ mod tests {
         init_test("tracked_oneshot_reserved_send_returns_disconnected_without_obligation_leak");
         let cx = test_cx();
         let (tx, rx) = tracked_oneshot::<i32>();
-        let permit = tx.reserve(&cx);
+        let permit = tx.reserve(&cx).expect("cx not cancelled in test");
         drop(rx);
 
         let err = permit
@@ -672,7 +686,7 @@ mod tests {
     fn tracked_oneshot_permit_debug() {
         let cx = test_cx();
         let (tx, _rx) = tracked_oneshot::<i32>();
-        let permit = tx.reserve(&cx);
+        let permit = tx.reserve(&cx).expect("cx not cancelled in test");
         let dbg = format!("{permit:?}");
         assert!(dbg.contains("TrackedOneshotPermit"));
         let _ = permit.abort();
@@ -682,7 +696,7 @@ mod tests {
     fn tracked_oneshot_permit_is_closed() {
         let cx = test_cx();
         let (tx, rx) = tracked_oneshot::<i32>();
-        let permit = tx.reserve(&cx);
+        let permit = tx.reserve(&cx).expect("cx not cancelled in test");
         assert!(!permit.is_closed());
         drop(rx);
         assert!(permit.is_closed());
@@ -708,6 +722,9 @@ mod tests {
                     202,
                     value
                 );
+            }
+            oneshot::SendError::Cancelled(_) => {
+                panic!("cx not cancelled in this test — Cancelled unexpected");
             }
         }
 

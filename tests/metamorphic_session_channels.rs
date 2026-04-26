@@ -233,7 +233,7 @@ proptest! {
 
         // Test oneshot reserve→send path
         let (tx1, _rx1) = tracked_oneshot::<i32>();
-        let permit = tx1.reserve(&cx);
+        let permit = tx1.reserve(&cx).expect("cx not cancelled in test");
         let proof1 = permit.send(value).unwrap();
 
         // Test oneshot direct send path
@@ -355,7 +355,7 @@ proptest! {
 
         // Test oneshot disconnected error consistency
         let (tx3, rx3) = tracked_oneshot::<i32>();
-        let permit3 = tx3.reserve(&cx);
+        let permit3 = tx3.reserve(&cx).expect("cx not cancelled in test");
         drop(rx3);
         let err3 = permit3.send(value).unwrap_err();
 

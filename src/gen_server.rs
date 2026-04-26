@@ -938,7 +938,20 @@ impl<S: GenServer> GenServerHandle<S> {
         };
 
         let (reply_tx, mut reply_rx) = session::tracked_oneshot::<S::Reply>();
-        let reply_permit: session::TrackedOneshotPermit<S::Reply> = reply_tx.reserve(cx);
+        // br-asupersync-4taf1b: reply_tx.reserve now propagates a cancelled-Cx
+        // error. If we observe one here we map it to CallError::Cancelled so
+        // the caller sees the cancel rather than racing to commit a permit
+        // into a region that is already draining.
+        let reply_permit: session::TrackedOneshotPermit<S::Reply> = match reply_tx.reserve(cx) {
+            Ok(p) => p,
+            Err(_) => {
+                cx.trace("gen_server::call_reply_reserve_cancelled");
+                let reason = cx
+                    .cancel_reason()
+                    .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
+                return Err(CallError::Cancelled(reason));
+            }
+        };
         let envelope: Envelope<S> = Envelope::Call {
             request,
             reply_permit,
@@ -1361,7 +1374,20 @@ impl<S: GenServer> GenServerRef<S> {
         };
 
         let (reply_tx, mut reply_rx) = session::tracked_oneshot::<S::Reply>();
-        let reply_permit: session::TrackedOneshotPermit<S::Reply> = reply_tx.reserve(cx);
+        // br-asupersync-4taf1b: reply_tx.reserve now propagates a cancelled-Cx
+        // error. If we observe one here we map it to CallError::Cancelled so
+        // the caller sees the cancel rather than racing to commit a permit
+        // into a region that is already draining.
+        let reply_permit: session::TrackedOneshotPermit<S::Reply> = match reply_tx.reserve(cx) {
+            Ok(p) => p,
+            Err(_) => {
+                cx.trace("gen_server::call_reply_reserve_cancelled");
+                let reason = cx
+                    .cancel_reason()
+                    .unwrap_or_else(crate::types::CancelReason::parent_cancelled);
+                return Err(CallError::Cancelled(reason));
+            }
+        };
         let envelope: Envelope<S> = Envelope::Call {
             request,
             reply_permit,
@@ -4004,7 +4030,7 @@ mod tests {
         runtime.state.store_spawned_task(task_id, stored);
 
         let (reply_tx, mut reply_rx) = session::tracked_oneshot::<u64>();
-        let reply_permit = reply_tx.reserve(&cx);
+        let reply_permit = reply_tx.reserve(&cx).expect("cx not cancelled in test");
         let call_envelope: Envelope<DropOldestCounter> = Envelope::Call {
             request: CounterCall::Get,
             reply_permit,
@@ -4082,7 +4108,7 @@ mod tests {
 
         let cx = Cx::for_testing();
         let (tx, _rx) = session::tracked_oneshot::<u64>();
-        let permit = tx.reserve(&cx);
+        let permit = tx.reserve(&cx).expect("cx not cancelled in test");
         let reply = Reply::new(&cx, permit);
         let debug_str = format!("{reply:?}");
         assert!(debug_str.contains("Reply"));
@@ -4108,7 +4134,7 @@ mod tests {
 
         let cx = Cx::for_testing();
         let (tx, mut rx) = session::tracked_oneshot::<u64>();
-        let permit = tx.reserve(&cx);
+        let permit = tx.reserve(&cx).expect("cx not cancelled in test");
         let reply = Reply::new(&cx, permit);
 
         // Mid-handler async cancellation arrives. The handler future is
@@ -4140,7 +4166,7 @@ mod tests {
     fn reply_drop_without_cancel_still_panics_on_linearity_violation() {
         let cx = Cx::for_testing();
         let (tx, _rx) = session::tracked_oneshot::<u64>();
-        let permit = tx.reserve(&cx);
+        let permit = tx.reserve(&cx).expect("cx not cancelled in test");
         let reply = Reply::new(&cx, permit);
 
         // No cancel — the handler is silently dropping its Reply. This is

@@ -36,7 +36,7 @@
 //! let (tx, mut rx) = oneshot::channel::<i32>();
 //!
 //! // Two-phase send pattern (explicit reserve)
-//! let permit = tx.reserve(&cx);
+//! let permit = tx.reserve(&cx).expect("cx not cancelled in test");
 //! permit.send(42)?;
 //!
 //! // Or convenience method
@@ -58,6 +58,10 @@ use std::task::{Context, Poll, Waker};
 pub enum SendError<T> {
     /// The receiver was dropped before the value could be sent.
     Disconnected(T),
+    /// The sender's `Cx` was cancelled before the reservation could be taken.
+    /// Carries `()` because no value has been consumed (reserve is the
+    /// pre-commit phase).
+    Cancelled(T),
 }
 
 impl<T> std::fmt::Display for SendError<T> {
@@ -65,6 +69,7 @@ impl<T> std::fmt::Display for SendError<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Disconnected(_) => write!(f, "sending on a closed oneshot channel"),
+            Self::Cancelled(_) => write!(f, "sending on a cancelled cx"),
         }
     }
 }
@@ -229,9 +234,25 @@ impl<T> Sender<T> {
     /// This operation is cancel-safe: if dropped before returning,
     /// the sender is still available. After returning, the permit
     /// owns the obligation.
-    #[must_use]
+    /// # Errors
+    ///
+    /// Returns `Err(SendError::Cancelled(()))` if the supplied `Cx` is
+    /// already cancelled at the time of reservation. Per the cancel-correctness
+    /// invariant (asupersync_plan_v4 §3.2), a cancelled context must not be
+    /// permitted to take side-effects on a region that has been requested to
+    /// drain — the sender consumes itself and the underlying channel closes
+    /// (the receiver observes `RecvError::Closed`).
     #[inline]
-    pub fn reserve(self, cx: &Cx) -> SendPermit<T> {
+    pub fn reserve(self, cx: &Cx) -> Result<SendPermit<T>, SendError<()>> {
+        // br-asupersync-4taf1b: enforce cancel-correctness at the reserve
+        // boundary. Without this check a cancelled task could obtain a
+        // SendPermit and later push into the channel after its region has
+        // been signalled to drain.
+        if cx.checkpoint().is_err() {
+            cx.trace("oneshot::reserve cancelled");
+            return Err(SendError::Cancelled(()));
+        }
+
         cx.trace("oneshot::reserve creating permit");
 
         {
@@ -240,23 +261,28 @@ impl<T> Sender<T> {
             inner.permit_outstanding = true;
         }
 
-        SendPermit {
+        Ok(SendPermit {
             inner: Arc::clone(&self.inner),
             sent: false,
-        }
+        })
     }
 
     /// Convenience method: reserves and sends in one step.
     ///
-    /// Equivalent to `self.reserve(cx).send(value)` but more ergonomic.
+    /// Equivalent to `self.reserve(cx).and_then(|p| p.send(value))` but more
+    /// ergonomic.
     ///
     /// # Errors
     ///
-    /// Returns `Err(SendError::Disconnected(value))` if the receiver was dropped.
+    /// Returns `Err(SendError::Disconnected(value))` if the receiver was dropped,
+    /// or `Err(SendError::Cancelled(value))` if the `Cx` is already cancelled.
     #[inline]
     pub fn send(self, cx: &Cx, value: T) -> Result<(), SendError<T>> {
-        let permit = self.reserve(cx);
-        permit.send(value)
+        match self.reserve(cx) {
+            Ok(permit) => permit.send(value),
+            Err(SendError::Cancelled(())) => Err(SendError::Cancelled(value)),
+            Err(SendError::Disconnected(())) => Err(SendError::Disconnected(value)),
+        }
     }
 
     /// Checks if the receiver has been dropped.
@@ -809,13 +835,13 @@ mod tests {
         let (send_ok, disconnected_value, recv_state, recv_value) = match scenario {
             SendScenario::LiveNoWaiter => {
                 let send_result = if reserve_first {
-                    tx.reserve(&cx).send(value)
+                    tx.reserve(&cx).expect("cx not cancelled in test").send(value)
                 } else {
                     tx.send(&cx, value)
                 };
                 let (send_ok, disconnected_value) = match send_result {
                     Ok(()) => (true, None),
-                    Err(SendError::Disconnected(v)) => (false, Some(v)),
+                    Err(SendError::Disconnected(v) | SendError::Cancelled(v)) => (false, Some(v)),
                 };
                 let (recv_state, recv_value) = match rx.try_recv() {
                     Ok(v) => ("value", Some(v)),
@@ -831,13 +857,13 @@ mod tests {
                 assert!(matches!(fut.as_mut().poll(&mut task_cx), Poll::Pending));
 
                 let send_result = if reserve_first {
-                    tx.reserve(&cx).send(value)
+                    tx.reserve(&cx).expect("cx not cancelled in test").send(value)
                 } else {
                     tx.send(&cx, value)
                 };
                 let (send_ok, disconnected_value) = match send_result {
                     Ok(()) => (true, None),
-                    Err(SendError::Disconnected(v)) => (false, Some(v)),
+                    Err(SendError::Disconnected(v) | SendError::Cancelled(v)) => (false, Some(v)),
                 };
                 let (recv_state, recv_value) = match fut.as_mut().poll(&mut task_cx) {
                     Poll::Ready(Ok(v)) => ("value", Some(v)),
@@ -852,13 +878,13 @@ mod tests {
             SendScenario::ReceiverDropped => {
                 drop(rx);
                 let send_result = if reserve_first {
-                    tx.reserve(&cx).send(value)
+                    tx.reserve(&cx).expect("cx not cancelled in test").send(value)
                 } else {
                     tx.send(&cx, value)
                 };
                 let (send_ok, disconnected_value) = match send_result {
                     Ok(()) => (true, None),
-                    Err(SendError::Disconnected(v)) => (false, Some(v)),
+                    Err(SendError::Disconnected(v) | SendError::Cancelled(v)) => (false, Some(v)),
                 };
                 (send_ok, disconnected_value, "receiver-dropped", None)
             }
@@ -935,12 +961,59 @@ mod tests {
     }
 
     #[test]
+    fn reserve_with_cancelled_cx_returns_cancelled() {
+        // br-asupersync-4taf1b: cx.checkpoint must gate reserve. A cancelled
+        // Cx must not be permitted to obtain a SendPermit.
+        init_test("reserve_with_cancelled_cx_returns_cancelled");
+        let cx = test_cx();
+        cx.cancel_with(crate::types::CancelKind::User, Some("test cancel"));
+        let (tx, mut rx) = channel::<i32>();
+
+        let err = tx.reserve(&cx).expect_err("cancelled cx must reject reserve");
+        crate::assert_with_log!(
+            matches!(err, SendError::Cancelled(())),
+            "reserve must surface SendError::Cancelled on cancelled cx",
+            "Err(Cancelled(()))",
+            format!("{:?}", err)
+        );
+
+        // Sender was consumed, so receiver must observe Closed (not stuck Empty).
+        let recv = rx.try_recv();
+        crate::assert_with_log!(
+            matches!(recv, Err(TryRecvError::Closed)),
+            "receiver of cancelled-reserve sender observes Closed",
+            "Err(Closed)",
+            format!("{:?}", recv)
+        );
+        crate::test_complete!("reserve_with_cancelled_cx_returns_cancelled");
+    }
+
+    #[test]
+    fn send_with_cancelled_cx_returns_cancelled_with_value() {
+        // br-asupersync-4taf1b: convenience send must propagate Cancelled
+        // and return the original value to the caller.
+        init_test("send_with_cancelled_cx_returns_cancelled_with_value");
+        let cx = test_cx();
+        cx.cancel_with(crate::types::CancelKind::User, Some("test cancel"));
+        let (tx, _rx) = channel::<i32>();
+
+        let err = tx.send(&cx, 99).expect_err("cancelled cx must reject send");
+        crate::assert_with_log!(
+            matches!(err, SendError::Cancelled(99)),
+            "send must surface SendError::Cancelled(value) on cancelled cx",
+            "Err(Cancelled(99))",
+            format!("{:?}", err)
+        );
+        crate::test_complete!("send_with_cancelled_cx_returns_cancelled_with_value");
+    }
+
+    #[test]
     fn reserve_then_send() {
         init_test("reserve_then_send");
         let cx = test_cx();
         let (tx, mut rx) = channel::<i32>();
 
-        let permit = tx.reserve(&cx);
+        let permit = tx.reserve(&cx).expect("cx not cancelled in test");
         permit.send(42).expect("send should succeed");
 
         let value = block_on(rx.recv(&cx)).expect("recv should succeed");
@@ -954,7 +1027,7 @@ mod tests {
         let cx = test_cx();
         let (tx, mut rx) = channel::<i32>();
 
-        let permit = tx.reserve(&cx);
+        let permit = tx.reserve(&cx).expect("cx not cancelled in test");
         permit.abort();
 
         let err = rx.try_recv();
@@ -974,7 +1047,7 @@ mod tests {
         let (tx, mut rx) = channel::<i32>();
 
         {
-            let _permit = tx.reserve(&cx);
+            let _permit = tx.reserve(&cx).expect("cx not cancelled in test");
             // permit dropped here without send or abort
         }
 
@@ -1213,7 +1286,7 @@ mod tests {
 
         drop(rx);
 
-        let permit = tx.reserve(&cx);
+        let permit = tx.reserve(&cx).expect("cx not cancelled in test");
         let err = permit.send(42);
         crate::assert_with_log!(
             matches!(err, Err(SendError::Disconnected(42))),
@@ -1562,7 +1635,7 @@ mod tests {
         drop(rx);
 
         // Reserve a permit and send (should fail because receiver dropped)
-        let permit = tx.reserve(&cx);
+        let permit = tx.reserve(&cx).expect("cx not cancelled in test");
         let result = permit.send(42);
         assert!(matches!(result, Err(SendError::Disconnected(42))));
 
@@ -1591,7 +1664,7 @@ mod tests {
         let cx = test_cx();
         let (tx, _rx) = channel::<i32>();
 
-        let permit = tx.reserve(&cx);
+        let permit = tx.reserve(&cx).expect("cx not cancelled in test");
 
         // Poison the mutex.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1682,7 +1755,7 @@ mod tests {
         let cx = test_cx();
         let (tx, rx) = channel::<i32>();
 
-        let permit = tx.reserve(&cx);
+        let permit = tx.reserve(&cx).expect("cx not cancelled in test");
         // At this point: sender_consumed=true, permit_outstanding=true
         let closed_during_permit = rx.is_closed();
         crate::assert_with_log!(
@@ -1711,7 +1784,7 @@ mod tests {
         let cx = test_cx();
         let (tx, mut rx) = channel::<i32>();
 
-        let permit = tx.reserve(&cx);
+        let permit = tx.reserve(&cx).expect("cx not cancelled in test");
 
         let result = rx.try_recv();
         let empty_ok = matches!(result, Err(TryRecvError::Empty));
@@ -1830,7 +1903,7 @@ mod tests {
             matches!(first_poll, Poll::Pending)
         );
 
-        let permit = tx.reserve(&cx);
+        let permit = tx.reserve(&cx).expect("cx not cancelled in test");
         permit.abort();
 
         let wake_count = wake_counter.load(Ordering::SeqCst);
@@ -1865,7 +1938,7 @@ mod tests {
             matches!(first_poll, Poll::Pending)
         );
 
-        let permit = tx.reserve(&cx);
+        let permit = tx.reserve(&cx).expect("cx not cancelled in test");
         drop(permit);
 
         let wake_count = wake_counter.load(Ordering::SeqCst);

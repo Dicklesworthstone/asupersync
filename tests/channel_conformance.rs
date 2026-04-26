@@ -173,7 +173,8 @@ impl<T: Send + 'static> OneshotSender<T> for OneshotSenderWrapper<T> {
         if let Some(tx) = self.sender.take() {
             let cx = current_cx();
             tx.send(&cx, value).map_err(|e| match e {
-                asupersync::channel::oneshot::SendError::Disconnected(v) => v,
+                asupersync::channel::oneshot::SendError::Disconnected(v)
+                | asupersync::channel::oneshot::SendError::Cancelled(v) => v,
             })
         } else {
             Err(value)
