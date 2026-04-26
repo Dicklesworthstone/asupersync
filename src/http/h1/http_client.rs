@@ -1792,7 +1792,16 @@ fn parse_set_cookie_pair(raw: &str) -> Option<(String, String)> {
     if name.is_empty() {
         return None;
     }
-    let value = value.trim().trim_matches('"');
+    // br-asupersync-7xe690: RFC 6265 §5.2.3 specifies paired-DQUOTE strip:
+    // both leading AND trailing '"' must be present to remove BOTH; otherwise
+    // both are kept. The previous trim_matches('"') was greedy/asymmetric and
+    // mis-handled `name="abc` (kept as `abc`), `name=abc"` (kept as `abc`),
+    // and `name=""x""` (collapsed to `x` instead of `"x"`).
+    let value = value.trim();
+    let value = value
+        .strip_prefix('"')
+        .and_then(|inner| inner.strip_suffix('"'))
+        .unwrap_or(value);
     Some((name.to_owned(), value.to_owned()))
 }
 
@@ -3143,6 +3152,56 @@ mod tests {
         assert_eq!(parse_set_cookie_pair(""), None);
         assert_eq!(parse_set_cookie_pair("invalid"), None);
         assert_eq!(parse_set_cookie_pair(" =value"), None);
+    }
+
+    /// br-asupersync-7xe690: RFC 6265 §5.2.3 paired-DQUOTE strip — only
+    /// remove BOTH quotes when both are present; never trim asymmetric or
+    /// repeated quotes. Previously parse_set_cookie_pair used trim_matches
+    /// which is greedy/asymmetric.
+    #[test]
+    fn parse_set_cookie_pair_paired_dquote_strip_per_rfc6265() {
+        // Symmetric paired quotes: strip both.
+        assert_eq!(
+            parse_set_cookie_pair("session=\"abc123==\""),
+            Some(("session".to_string(), "abc123==".to_string())),
+            "paired DQUOTEs must be stripped together"
+        );
+        // Leading-only quote: keep both bytes literal (one-sided is not paired).
+        assert_eq!(
+            parse_set_cookie_pair("name=\"abc"),
+            Some(("name".to_string(), "\"abc".to_string())),
+            "asymmetric leading-only DQUOTE must NOT be stripped"
+        );
+        // Trailing-only quote: keep both bytes literal.
+        assert_eq!(
+            parse_set_cookie_pair("name=abc\""),
+            Some(("name".to_string(), "abc\"".to_string())),
+            "asymmetric trailing-only DQUOTE must NOT be stripped"
+        );
+        // Doubled quotes on each side: strip exactly one pair, leaving the
+        // inner pair literal. Previously trim_matches collapsed all four to
+        // the inner contents.
+        assert_eq!(
+            parse_set_cookie_pair("name=\"\"x\"\""),
+            Some(("name".to_string(), "\"x\"".to_string())),
+            "double-quoted value must yield single inner pair literal, not collapse"
+        );
+        // No quotes: passthrough.
+        assert_eq!(
+            parse_set_cookie_pair("name=abc"),
+            Some(("name".to_string(), "abc".to_string()))
+        );
+        // Empty value with paired quotes: paired strip yields empty string.
+        assert_eq!(
+            parse_set_cookie_pair("k=\"\""),
+            Some(("k".to_string(), String::new()))
+        );
+        // Single quote (only one byte): not enough to be paired, must be kept.
+        assert_eq!(
+            parse_set_cookie_pair("k=\""),
+            Some(("k".to_string(), "\"".to_string())),
+            "a single-byte DQUOTE value must remain literal"
+        );
     }
 
     #[test]
