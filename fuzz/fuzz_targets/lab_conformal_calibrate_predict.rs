@@ -20,8 +20,8 @@
 //!    crash queue. Adversarial alpha values are still exercised via
 //!    the bounded-clamp path.
 //!
-//! 3. **`is_well_calibrated` is total.** After any sequence of
-//!    calibrate/predict calls, `is_well_calibrated()` must produce
+//! 3. **`is_calibrated` is total.** After any sequence of
+//!    calibrate/predict calls, `is_calibrated()` must produce
 //!    a `bool` without panicking — even when no calibration data
 //!    was supplied (the empty-history path) and when adversarial
 //!    reports drove the internal coverage counters.
@@ -185,7 +185,7 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    // Contract 3: is_well_calibrated must be total — no panic, no
+    // Contract 3: is_calibrated must be total — no panic, no
     // matter what the call sequence was.
-    let _ = cal.is_well_calibrated();
+    let _ = cal.is_calibrated();
 });
