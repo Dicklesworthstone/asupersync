@@ -2027,3 +2027,42 @@ path = "fuzz_targets/messaging_kafka_record_batch.rs"
 test = false
 doc = false
 bench = false
+
+# br-asupersync-6zcnd9 — gRPC trailer-header decode fuzz: grpc-status
+# integer parser, grpc-message escape/unescape, grpc-status-details-bin
+# base64 decode. Asserts no panic / no OOM on adversarial UTF-8 inputs
+# with U+202E bidi, embedded NUL, truncated `%` escapes, oversize
+# integers, and base64 decode-bombs.
+[[bin]]
+name = "grpc_status_trailers"
+path = "fuzz_targets/grpc_status_trailers.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-icvybx — bearer-token Authorization header parser fuzz.
+# Auth boundary; every authenticated gRPC RPC's header passes through
+# `bearer_token` (exposed via the `#[doc(hidden)] fuzz_bearer_token`
+# re-exporter for direct testing). Asserts UTF-8 boundary safety, no
+# panic on multi-byte scheme prefixes, and the leading-space-trim
+# contract on the returned token.
+[[bin]]
+name = "grpc_bearer_token"
+path = "fuzz_targets/grpc_bearer_token.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-52uhvk — gRPC server-reflection DescribeService /
+# list_services fuzz. Drives ReflectionService::describe_service with
+# adversarial service-name strings (path-traversal shapes, U+202E,
+# very-long names) and asserts no panic / bounded allocation. The
+# in-memory BTreeMap lookup must never exfiltrate path-traversal
+# shapes — regression guard against future filesystem-touching
+# refactors.
+[[bin]]
+name = "grpc_reflection_describe"
+path = "fuzz_targets/grpc_reflection_describe.rs"
+test = false
+doc = false
+bench = false

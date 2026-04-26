@@ -428,6 +428,18 @@ fn bearer_token(auth: &str) -> Option<&str> {
     Some(token)
 }
 
+/// br-asupersync-icvybx — Fuzz-target entry point for the bearer-token
+/// Authorization parser. `#[doc(hidden)]` because it exists only to let
+/// `fuzz/fuzz_targets/grpc_bearer_token.rs` exercise the parser
+/// directly without fabricating a full `Request<Bytes>` + metadata
+/// stack. Production callers reach the same logic via
+/// `BearerAuthValidator::intercept_request`.
+#[doc(hidden)]
+#[must_use]
+pub fn fuzz_bearer_token(auth: &str) -> Option<&str> {
+    bearer_token(auth)
+}
+
 fn copy_metadata_value(
     metadata: &mut super::streaming::Metadata,
     key: &str,
