@@ -2881,7 +2881,7 @@ mod tests {
         ledger.mark_region_finalized(region);
         assert!(ledger.is_region_finalized(region));
 
-        let stats_before = *ledger.stats();
+        let stats_before = ledger.stats();
         let err = ledger
             .try_acquire(
                 ObligationKind::SendPermit,
@@ -2954,7 +2954,7 @@ mod tests {
             region,
             Time::from_nanos(0),
         );
-        let stats_after_acquire = *ledger.stats();
+        let stats_after_acquire = ledger.stats();
         assert_eq!(stats_after_acquire.pending, 1);
 
         ledger.mark_region_finalized(region);

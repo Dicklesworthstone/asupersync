@@ -3047,11 +3047,7 @@ mod tests {
             return;
         }
 
-        let region = RegionRecord::new(
-            RegionId::new_for_test(1, 0),
-            None,
-            Budget::default(),
-        );
+        let region = RegionRecord::new(RegionId::new_for_test(1, 0), None, Budget::default());
         // Reserve one slot, resolve once (legit), resolve again (bug).
         region
             .try_reserve_obligation()
@@ -3077,11 +3073,7 @@ mod tests {
     /// after begin_close cannot observe Open and silently sneak in.
     #[test]
     fn admission_after_begin_close_is_rejected() {
-        let region = RegionRecord::new(
-            RegionId::new_for_test(2, 0),
-            None,
-            Budget::default(),
-        );
+        let region = RegionRecord::new(RegionId::new_for_test(2, 0), None, Budget::default());
         // Pre-close: admissions succeed.
         region
             .add_child(RegionId::new_for_test(3, 0))

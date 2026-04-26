@@ -2586,8 +2586,7 @@ impl RuntimeState {
         // If the task was already removed (or never existed), return
         // an empty waiter set with the same early-return semantics
         // the prior implementation provided.
-        let Some(waiters) =
-            self.update_task(task_id, |task| std::mem::take(&mut task.waiters))
+        let Some(waiters) = self.update_task(task_id, |task| std::mem::take(&mut task.waiters))
         else {
             trace!(
                 task_id = ?task_id,
@@ -5705,9 +5704,7 @@ mod tests {
         // `run_sync_finalizers_tracked` returning an Async finalizer
         // and `task_completed` clearing the barrier.
         let finalizer_task = insert_task(&mut state, region);
-        state
-            .active_async_finalizers
-            .insert(region, finalizer_task);
+        state.active_async_finalizers.insert(region, finalizer_task);
 
         let can_close = state.can_region_complete_close(region);
         crate::assert_with_log!(

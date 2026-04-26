@@ -380,6 +380,9 @@ impl<R, S> Chan<R, S> {
         op: &'static str,
         error: &SessionError,
     ) {
+        // Keep these observability fields "used" even when the tracing
+        // macro compiles down to a no-op in minimal builds.
+        let _ = (channel_id, &obligation_kind, op, error);
         SILENT_SESSION_CONSUME_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         crate::tracing_compat::error!(
             channel_id = channel_id,
@@ -2633,7 +2636,10 @@ mod tests {
             // dropped it). The sender's send_async will now observe
             // peer-disconnect → SessionError::Closed.
             let result = sender.send_async(&cx, send_permit::ReserveMsg).await;
-            let err = result.expect_err("peer disconnect must surface as Err");
+            let err = match result {
+                Err(err) => err,
+                Ok(_) => panic!("peer disconnect must surface as Err"),
+            };
             assert!(
                 matches!(err, SessionError::Closed | SessionError::Cancelled),
                 "unexpected error variant: {err:?}"

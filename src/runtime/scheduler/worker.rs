@@ -1220,7 +1220,8 @@ mod tests {
 
         for (ph, uh) in handles {
             uh.join().expect("unparker thread should complete");
-            ph.join().expect("parker thread should complete (no lost wakeup)");
+            ph.join()
+                .expect("parker thread should complete (no lost wakeup)");
         }
 
         let driven = success_count.load(Ordering::SeqCst);

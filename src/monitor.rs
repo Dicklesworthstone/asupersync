@@ -1238,8 +1238,7 @@ mod tests {
         // vt=100: tid(2) before tid(3)
         assert_eq!(sorted[0].monitored, t_d); // tid(2), vt=100
         assert_eq!(sorted[1].monitored, t_b); // tid(3), vt=100
-        // vt=200: tid(5) before tid(8)
-        assert_eq!(sorted[2].monitored, t_a); // tid(5), vt=200
+        assert_eq!(sorted[2].monitored, t_a); // vt=200: tid(5) before tid(8)
         assert_eq!(sorted[3].monitored, t_c); // tid(8), vt=200
     }
 
