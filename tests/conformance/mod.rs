@@ -9,6 +9,23 @@ pub mod aggregator_flush;
 pub mod codec_round_trip;
 pub mod cx_capability_semantics;
 // pub mod codec_framing;
+// br-asupersync-9036u6 follow-up: orphan h1_* files have bit-rot and
+// fail to compile against current asupersync APIs (cx::test_cx removed,
+// time::{Duration,Instant} renamed, io::Cursor moved, Setting/Request
+// became private). Each needs targeted refactoring before being wired
+// in; tracked separately as h1-conformance-bitrot follow-up.
+//
+//   pub mod h1_body_framing;
+//   pub mod h1_chunked;
+//   pub mod h1_content_encoding;
+//   pub mod h1_expect_continue;
+//   pub mod h1_keepalive;
+//   pub mod h1_methods;
+//   pub mod h1_request_chunked;
+//
+// h1_protocol.rs is the new RFC 7230 obs-fold + TE/CL precedence suite
+// (no bit-rot — built against current Http1Codec API).
+pub mod h1_protocol;
 pub mod h1_request_target;
 pub mod h1_rfc9112;
 pub mod h2_alpn_negotiation_rfc7540;
