@@ -361,9 +361,8 @@ impl Budget {
     pub fn combine(self, other: Self) -> Self {
         let combined = Self {
             deadline: match (self.deadline, other.deadline) {
-                (Some(a), Some(b)) => Some(if a < b { a } else { b }),
-                (Some(a), None) => Some(a),
-                (None, Some(b)) => Some(b),
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (deadline @ Some(_), None) | (None, deadline @ Some(_)) => deadline,
                 (None, None) => None,
             },
             poll_quota: self.poll_quota.min(other.poll_quota),
