@@ -923,9 +923,23 @@ impl RuntimeState {
     }
 
     /// Returns a mutable reference to a task record by ID.
+    ///
+    /// NOTE: Direct use of `task_mut` bypasses O(1) Lyapunov counter updates.
+    /// Prefer `update_task` which maintains incremental counters automatically.
     #[inline]
     pub fn task_mut(&mut self, task_id: TaskId) -> Option<&mut TaskRecord> {
         self.tasks.task_mut(task_id)
+    }
+
+    /// Safely updates a task record and maintains incremental counters.
+    ///
+    /// O(1) — maintained incrementally for O(1) Lyapunov snapshots.
+    #[inline]
+    pub fn update_task<F, R>(&mut self, task_id: TaskId, f: F) -> Option<R>
+    where
+        F: FnOnce(&mut TaskRecord) -> R,
+    {
+        self.tasks.update_task(task_id, f)
     }
 
     /// Inserts a new task record into the arena.

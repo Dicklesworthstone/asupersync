@@ -8,6 +8,9 @@ use crate::runtime::stored_task::StoredTask;
 use crate::types::TaskId;
 use crate::util::{Arena, ArenaIndex, RecyclingPool};
 
+/// Number of task phases that are considered "live" (not Completed).
+const LIVE_PHASE_COUNT: usize = 5;
+
 /// Encapsulates task arena and stored futures for hot-path isolation.
 ///
 /// This table owns the hot-path data structures accessed during every poll cycle:
@@ -34,6 +37,19 @@ pub struct TaskTable {
     /// Reduces 35% of hot-path allocations by reusing TaskRecord objects instead
     /// of creating new ones. Pool size is bounded to prevent unbounded growth.
     task_record_pool: RecyclingPool<TaskRecord>,
+    /// Incremental counters for tasks in each phase (Created, Running, etc.).
+    /// Used for O(1) Lyapunov snapshots (br-asupersync-xxcss5).
+    /// Indexed by `TaskPhase` enum values 0..5.
+    #[allow(dead_code)]
+    phase_counts: [usize; LIVE_PHASE_COUNT],
+    /// Sum of all deadlines (in nanoseconds) for live tasks that have a
+    /// non-infinite deadline. Combined with virtual-time `now`, allows O(1)
+    /// estimation of deadline pressure.
+    #[allow(dead_code)]
+    deadline_sum_ns: u128,
+    /// Number of live tasks that contributed to `deadline_sum_ns`.
+    #[allow(dead_code)]
+    tasks_with_deadline: usize,
 }
 
 impl TaskTable {
@@ -46,6 +62,9 @@ impl TaskTable {
             stored_futures: Vec::new(),
             stored_future_len: 0,
             task_record_pool: RecyclingPool::new(256), // Pool up to 256 recycled TaskRecords
+            phase_counts: [0; LIVE_PHASE_COUNT],
+            deadline_sum_ns: 0,
+            tasks_with_deadline: 0,
         }
     }
 
@@ -63,6 +82,9 @@ impl TaskTable {
             stored_futures: Vec::with_capacity(capacity),
             stored_future_len: 0,
             task_record_pool: RecyclingPool::new(pool_size),
+            phase_counts: [0; LIVE_PHASE_COUNT],
+            deadline_sum_ns: 0,
+            tasks_with_deadline: 0,
         }
     }
 
