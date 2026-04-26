@@ -234,20 +234,24 @@ impl RaptorQDecisionContract {
         // br-asupersync-g1pzep: evaluate now returns Result; for the
         // RaptorQ contract we control the action_set so this should
         // never produce ActionIndexOutOfRange in practice. On error we
-        // fall back to the BALANCED action with the original fallback
-        // reason preserved — keeps telemetry well-formed without
-        // panicking the caller.
+        // fall back to the conservative FALLBACK action and emit a
+        // canonical-registered reason so safety gates that key on
+        // (chosen_action == "fallback" && deterministic_fallback_triggered)
+        // engage as designed and is_runtime_fallback_reason returns true.
+        // br-asupersync-dezwpc: previously emitted action::CONTINUE +
+        // unregistered reason "contract_action_out_of_range" — fail-open
+        // on contract evaluation error and broke G7 reason invariant.
         let outcome = match evaluate(self, &posterior, &ctx) {
             Ok(o) => o,
             Err(_) => {
                 return GovernanceTelemetry {
                     state_posterior_permille: posterior_permille,
                     expected_loss_terms,
-                    chosen_action: action_label(action::CONTINUE),
+                    chosen_action: action_label(action::FALLBACK),
                     confidence_score: clamped_fallback_confidence,
                     uncertainty_score: clamped_fallback_uncertainty,
                     deterministic_fallback_triggered: true,
-                    deterministic_fallback_reason: "contract_action_out_of_range",
+                    deterministic_fallback_reason: FALLBACK_REASON_UNCLASSIFIED,
                     replay_ref: G7_DECISION_REPLAY_REF,
                     top_evidence_contributors: top_evidence_contributors(snapshot),
                 };
@@ -1743,5 +1747,42 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// br-asupersync-dezwpc: pin the contract-evaluation-error fallback path
+    /// constants. The early-return GovernanceTelemetry on `evaluate()` Err
+    /// must use action::FALLBACK (the conservative action) and a reason
+    /// registered in G7_RUNTIME_FALLBACK_REASONS. Previously emitted
+    /// action::CONTINUE (most-aggressive) and "contract_action_out_of_range"
+    /// (unregistered) — fail-open on contract error, broke reason invariant.
+    #[test]
+    fn dezwpc_contract_error_fallback_uses_canonical_action_and_reason() {
+        // The action emitted on the contract-evaluation-error path must
+        // resolve to the conservative "fallback" label, not "continue".
+        assert_eq!(
+            action_label(action::FALLBACK),
+            "fallback",
+            "action::FALLBACK must label as 'fallback' for safety-gate matching"
+        );
+        assert_ne!(
+            action_label(action::FALLBACK),
+            action_label(action::CONTINUE),
+            "FALLBACK and CONTINUE labels must be distinct"
+        );
+
+        // The deterministic_fallback_reason emitted on the error path must
+        // pass the canonical-reason filter, otherwise replay/golden-snapshot
+        // validators silently drop these telemetry rows.
+        assert!(
+            is_runtime_fallback_reason(FALLBACK_REASON_UNCLASSIFIED),
+            "FALLBACK_REASON_UNCLASSIFIED must be registered in G7_RUNTIME_FALLBACK_REASONS"
+        );
+        // The previous (buggy) reason string must NOT pass the filter — pin
+        // the regression so a future revert is caught.
+        assert!(
+            !is_runtime_fallback_reason("contract_action_out_of_range"),
+            "the previously-emitted unregistered reason string must remain rejected; \
+             if you re-add it, also register it in G7_RUNTIME_FALLBACK_REASONS"
+        );
     }
 }
