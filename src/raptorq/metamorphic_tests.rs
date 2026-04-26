@@ -1235,6 +1235,99 @@ mod validation_tests {
     }
 }
 
+/// MR14: Decode-Completion Idempotence (br-asupersync-h004s7)
+///
+/// Property: after a successful decode returns the original block,
+/// feeding ADDITIONAL repair symbols (or duplicate source symbols)
+/// to a fresh decode invocation MUST either:
+///   (a) return the same block byte-for-byte, OR
+///   (b) return a decode error
+///
+/// MUST NOT: corrupt internal state, panic, mutate the previously-
+/// returned block, or return a DIFFERENT block.
+///
+/// Distinguishes from MR8 (mr_symbol_duplication_idempotence): MR8
+/// tests duplicate-source-symbol handling DURING a single decode
+/// call. MR14 tests the POST-completion case where late-arriving
+/// symbols continue to flow after decode succeeded — common in lossy
+/// network codecs where the receiver continues receiving after enough
+/// symbols arrived.
+///
+/// Catches: decoder state corruption on extra-symbol re-decode, race
+/// conditions in streaming receivers, any future caching that
+/// silently drifts on extra inputs.
+#[test]
+fn mr_decode_completion_idempotence() {
+    proptest!(|(
+        data_size in 128usize..256,
+        seed in any::<u64>(),
+        extra_count in 1usize..10,
+    )| {
+        let cx = Cx::for_testing();
+        let data = generate_test_data(data_size, seed);
+        let object_id = ObjectId::new_for_test(seed);
+
+        let config = RaptorQConfig {
+            encoding: crate::config::EncodingConfig {
+                symbol_size: 16,
+                repair_overhead: 4.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let sink = CollectorSink::new();
+        let mut sender = RaptorQSenderBuilder::new()
+            .config(config.clone())
+            .transport(sink)
+            .build()
+            .expect("sender build");
+
+        let outcome = sender.send_object(&cx, object_id, &data)
+            .expect("encoding");
+        let symbols = sender.transport_mut().symbols().to_vec();
+
+        let k = outcome.source_symbols;
+        let symbol_size = config.encoding.symbol_size as usize;
+
+        // First decode: minimum needed for success.
+        let min_symbols = std::cmp::min(symbols.len(), k + 2);
+        let decoder1 = create_test_decoder(&symbols, k, symbol_size);
+        let received1 = symbols_to_received(&symbols[..min_symbols], k);
+        let result1 = decoder1.decode(&received1);
+
+        // Only the success-then-success path is the property's domain.
+        if let Ok(decoded1) = result1 {
+            let block1 = flatten_source_symbols(&decoded1.source, data.len());
+            prop_assert_eq!(block1.clone(), data.clone(),
+                "MR14 first decode must round-trip");
+
+            // Second decode: SAME minimum + extra_count more symbols.
+            let extended_count = std::cmp::min(symbols.len(), min_symbols + extra_count);
+            let decoder2 = create_test_decoder(&symbols, k, symbol_size);
+            let received2 = symbols_to_received(&symbols[..extended_count], k);
+            let result2 = decoder2.decode(&received2);
+
+            match result2 {
+                Ok(decoded2) => {
+                    let block2 = flatten_source_symbols(&decoded2.source, data.len());
+                    // Property: extra symbols MUST yield the same block.
+                    prop_assert_eq!(block2.clone(), block1.clone(),
+                        "MR14 VIOLATION: extra symbols changed the decoded block");
+                    prop_assert_eq!(block2, data.clone(),
+                        "MR14 VIOLATION: extended decode failed identity");
+                }
+                Err(_) => {
+                    // Returning Err on the extended set is acceptable per
+                    // the property's (a) OR (b) clause — but unlikely in
+                    // practice since more symbols should never make decode
+                    // FAIL after fewer symbols succeeded. We allow it but
+                    // don't require it.
+                }
+            }
+        }
+    });
+}
+
 /// MR13: Byte-Identical Determinism Across Runs (br-asupersync-kohtae)
 ///
 /// Property: encode(data, seed, symbol_size) × N runs MUST produce the

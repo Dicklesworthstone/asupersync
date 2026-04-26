@@ -1906,4 +1906,85 @@ mod tests {
             }
         }
     }
+
+    /// MR8: Exhaustive Split-Input Invariance (br-asupersync-426vdh)
+    ///
+    /// Property: encode N items into a single buffer B; for EVERY split
+    /// position k in 1..B.len(), feeding (B[..k], B[k..]) sequentially
+    /// through the decoder MUST yield all N items in order, byte-equal
+    /// to the originals.
+    ///
+    /// Catches:
+    ///   * decoder state-machine bugs where a partial-frame parse
+    ///     mutates state non-recoverably
+    ///   * length-prefix bugs where the decoder consumes header bytes
+    ///     prematurely
+    ///   * buffer-management issues where a sub-buffer carryover loses
+    ///     bytes between calls
+    ///
+    /// This is a Decoder-level property; the Framed wrapper (src/codec/
+    /// framed.rs) uses LengthDelimitedCodec via the same Decoder trait,
+    /// so this test covers the `framed` code path indirectly. The
+    /// existing `metamorphic_decoder_boundary_fragmentation_*` test
+    /// covers SOME splits but not exhaustively across all positions.
+    /// TCP delivers data in arbitrary chunk sizes — every frame
+    /// boundary IS a split point in production.
+    #[test]
+    fn mr_exhaustive_split_input_invariance() {
+        // Build encoded bytes for N=4 frames of varying sizes.
+        let frames: Vec<Vec<u8>> = vec![
+            b"first".to_vec(),
+            vec![0xAB; 100],
+            b"third frame with spaces".to_vec(),
+            vec![0u8; 256],
+        ];
+        let mut encoder = LengthDelimitedCodec::new();
+        let mut full = BytesMut::new();
+        for frame in &frames {
+            encoder
+                .encode(BytesMut::from(&frame[..]), &mut full)
+                .expect("encode");
+        }
+        let total_len = full.len();
+        let serialized: Vec<u8> = full.to_vec();
+
+        // For every split position 1..total_len, feed two halves and
+        // assert all N frames decode in order.
+        for split_at in 1..total_len {
+            let left = &serialized[..split_at];
+            let right = &serialized[split_at..];
+            let mut decoder = LengthDelimitedCodec::new();
+            let mut buf = BytesMut::from(left);
+            let mut emitted: Vec<Vec<u8>> = Vec::new();
+
+            // Drain decode after first feed.
+            while let Some(frame) = decoder.decode(&mut buf).expect("decode left") {
+                emitted.push(frame.to_vec());
+            }
+            // Append right half + drain again.
+            buf.extend_from_slice(right);
+            while let Some(frame) = decoder.decode(&mut buf).expect("decode right") {
+                emitted.push(frame.to_vec());
+            }
+
+            assert_eq!(
+                emitted.len(),
+                frames.len(),
+                "split_at={split_at}: emitted {} frames, expected {}",
+                emitted.len(),
+                frames.len()
+            );
+            for (i, (got, expected)) in emitted.iter().zip(frames.iter()).enumerate() {
+                assert_eq!(
+                    got, expected,
+                    "split_at={split_at}: frame {i} mismatch"
+                );
+            }
+            assert!(
+                buf.is_empty(),
+                "split_at={split_at}: leftover {} bytes after drain",
+                buf.len()
+            );
+        }
+    }
 }

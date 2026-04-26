@@ -268,10 +268,7 @@ pub fn gzip_frame_compress(input: Bytes) -> Result<Bytes, GrpcError> {
     use flate2::write::GzEncoder;
     use std::io::Write;
 
-    let mut encoder = GzEncoder::new(
-        Vec::with_capacity(input.len()),
-        Compression::default(),
-    );
+    let mut encoder = GzEncoder::new(Vec::with_capacity(input.len()), Compression::default());
     encoder
         .write_all(&input)
         .map_err(|e| GrpcError::compression(e.to_string()))?;
@@ -881,8 +878,8 @@ mod tests {
         init_test("test_gzip_frame_compress_decompress_roundtrip");
         let original = b"hello gzip compression roundtrip test";
         // br-535iu9: signature now takes Bytes by-value.
-        let compressed = gzip_frame_compress(Bytes::from_static(original))
-            .expect("compress must succeed");
+        let compressed =
+            gzip_frame_compress(Bytes::from_static(original)).expect("compress must succeed");
 
         // Compressed output should differ from input (gzip header + payload).
         crate::assert_with_log!(
@@ -909,8 +906,7 @@ mod tests {
         init_test("test_gzip_frame_decompress_bomb_protection");
         // Compress a large payload, then try to decompress with a tiny limit.
         let large = vec![0u8; 4096];
-        let compressed = gzip_frame_compress(Bytes::from(large))
-            .expect("compress must succeed");
+        let compressed = gzip_frame_compress(Bytes::from(large)).expect("compress must succeed");
 
         let result = gzip_frame_decompress(compressed, 100);
         let ok = matches!(result, Err(GrpcError::MessageTooLarge));
@@ -1023,11 +1019,12 @@ mod tests {
     #[test]
     #[allow(clippy::unnecessary_wraps)]
     fn test_framed_codec_custom_decompressor_enforces_size() {
-        fn passthrough_compress(input: &[u8]) -> Result<Bytes, GrpcError> {
-            Ok(Bytes::copy_from_slice(input))
+        // br-asupersync-535iu9: signatures updated to take Bytes by-value.
+        fn passthrough_compress(input: Bytes) -> Result<Bytes, GrpcError> {
+            Ok(input)
         }
 
-        fn expanding_decompress(_input: &[u8], max_size: usize) -> Result<Bytes, GrpcError> {
+        fn expanding_decompress(_input: Bytes, max_size: usize) -> Result<Bytes, GrpcError> {
             let expanded = vec![7u8; max_size.saturating_add(1)];
             if expanded.len() > max_size {
                 return Err(GrpcError::MessageTooLarge);
@@ -1159,5 +1156,74 @@ mod tests {
             matches!(decode_err, GrpcError::MessageTooLarge)
         );
         crate::test_complete!("test_framed_codec_enforces_asymmetric_framing_limits");
+    }
+
+    /// MR: gRPC encode→decode round-trip across ALL compression algorithms
+    /// (br-asupersync-y1wxtm).
+    ///
+    /// Property: for each registered compression algorithm (identity, gzip
+    /// when feature enabled, future deflate/snappy), encoding a payload
+    /// then decoding the resulting framed bytes MUST yield byte-equal
+    /// payload. The same payload across algorithms MUST decode to the
+    /// same bytes.
+    ///
+    /// Catches:
+    ///   * compression-algo-specific framing bugs where one algo's
+    ///     header isn't mirrored on decode
+    ///   * compressed-flag bit-mismatch where encode sets the bit but
+    ///     decode interprets it inverted
+    ///   * identity-decompress accidentally trying to inflate a
+    ///     non-compressed payload after a recent refactor
+    ///   * cross-algo regressions where two paths drift from each other
+    #[test]
+    fn mr_framed_codec_round_trip_across_compression_algos() {
+        let payloads: Vec<Bytes> = vec![
+            Bytes::new(),
+            Bytes::from_static(b"a"),
+            Bytes::from(vec![0x42u8; 1024]),
+            Bytes::from(
+                (0u8..=255)
+                    .cycle()
+                    .take(64 * 1024)
+                    .collect::<Vec<u8>>(),
+            ),
+        ];
+
+        // Algo 1: identity (always available).
+        for (i, payload) in payloads.iter().enumerate() {
+            let mut codec = FramedCodec::new(IdentityCodec).with_identity_frame_codec();
+            let mut buf = BytesMut::new();
+            codec
+                .encode_message(payload, &mut buf)
+                .unwrap_or_else(|e| panic!("identity encode case {i}: {e}"));
+            let decoded = codec
+                .decode_message(&mut buf)
+                .unwrap_or_else(|e| panic!("identity decode case {i}: {e}"))
+                .unwrap_or_else(|| panic!("identity decode case {i} yielded None"));
+            assert_eq!(
+                &decoded[..],
+                &payload[..],
+                "identity round-trip drift case {i}"
+            );
+        }
+
+        // Algo 2: gzip (only available with `compression` feature).
+        #[cfg(feature = "compression")]
+        for (i, payload) in payloads.iter().enumerate() {
+            let mut codec = FramedCodec::new(IdentityCodec).with_gzip_frame_codec();
+            let mut buf = BytesMut::new();
+            codec
+                .encode_message(payload, &mut buf)
+                .unwrap_or_else(|e| panic!("gzip encode case {i}: {e}"));
+            let decoded = codec
+                .decode_message(&mut buf)
+                .unwrap_or_else(|e| panic!("gzip decode case {i}: {e}"))
+                .unwrap_or_else(|| panic!("gzip decode case {i} yielded None"));
+            assert_eq!(
+                &decoded[..],
+                &payload[..],
+                "gzip round-trip drift case {i}"
+            );
+        }
     }
 }
