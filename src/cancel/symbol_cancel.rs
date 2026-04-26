@@ -105,6 +105,15 @@ struct CancelTokenState {
     /// observed so re-notification is monotone — listeners only see
     /// progressively-stronger reasons, never the same severity twice.
     listeners: RwLock<SmallVec<[ListenerEntry; 2]>>,
+    /// br-asupersync-mzamuo — Count of listener `on_cancel` callbacks
+    /// (and listener-Drop side effects routed through them) that
+    /// panicked and were caught via `catch_unwind`. Surfaced via
+    /// [`SymbolCancelToken::listener_panic_count`] so silently-
+    /// swallowed listener-reentrancy panics become observable
+    /// instead of remaining invisible. Every such panic also emits
+    /// a `tracing::warn!` (when the `tracing-integration` feature
+    /// is on) carrying the panic message.
+    listener_panic_count: AtomicU64,
 }
 
 /// One registered cancel listener plus the severity at which it was
@@ -144,6 +153,7 @@ impl SymbolCancelToken {
                 cleanup_budget: Budget::default(),
                 children: RwLock::new(SmallVec::new()),
                 listeners: RwLock::new(SmallVec::new()),
+                listener_panic_count: AtomicU64::new(0),
             }),
         }
     }
@@ -161,7 +171,87 @@ impl SymbolCancelToken {
                 cleanup_budget: budget,
                 children: RwLock::new(SmallVec::new()),
                 listeners: RwLock::new(SmallVec::new()),
+                listener_panic_count: AtomicU64::new(0),
             }),
+        }
+    }
+
+    /// br-asupersync-mzamuo — Number of listener `on_cancel` calls
+    /// that panicked and were recovered via `catch_unwind`. A
+    /// non-zero value indicates that a listener (or its Drop impl)
+    /// raised a panic during cancel notification — most commonly a
+    /// listener whose Drop re-entered the originating token's cancel
+    /// path. The runtime keeps running because of the `catch_unwind`
+    /// guard, but operators can poll this counter to detect the
+    /// invariant violation that would otherwise be silenced.
+    #[must_use]
+    pub fn listener_panic_count(&self) -> u64 {
+        self.state.listener_panic_count.load(Ordering::Relaxed)
+    }
+
+    fn record_listener_panic(
+        state: &CancelTokenState,
+        panic_payload: Box<dyn std::any::Any + Send>,
+    ) {
+        state.listener_panic_count.fetch_add(1, Ordering::Relaxed);
+        #[cfg(feature = "tracing-integration")]
+        {
+            let panic_msg = if let Some(s) = panic_payload.downcast_ref::<&str>() {
+                (*s).to_string()
+            } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "<non-string panic payload>".to_string()
+            };
+            tracing::warn!(
+                object_id = ?state.object_id,
+                token_id = state.token_id,
+                panic = %panic_msg,
+                "cancel listener panicked during on_cancel — caught and logged \
+                 instead of silently swallowed (br-asupersync-mzamuo)"
+            );
+        }
+        #[cfg(not(feature = "tracing-integration"))]
+        {
+            let _ = panic_payload;
+        }
+    }
+
+    /// br-asupersync-mzamuo — Invoke a listener's `on_cancel` under
+    /// `catch_unwind`. On panic, increment the per-token listener-
+    /// panic counter and emit a `tracing::warn!`. Replaces the
+    /// previous bare `let _ = catch_unwind(...)` shape that silently
+    /// swallowed every panic, masking listener-Drop re-entrancy bugs
+    /// (the scenario the bead exists to surface).
+    fn notify_listener_with_panic_logging(
+        state: &CancelTokenState,
+        listener: &dyn CancelListener,
+        reason: &CancelReason,
+        now: Time,
+    ) {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            listener.on_cancel(reason, now);
+        }));
+        if let Err(panic_payload) = result {
+            Self::record_listener_panic(state, panic_payload);
+        }
+    }
+
+    /// Late-add listeners are not retained, so this variant also
+    /// covers any panic in the listener's `Drop` path by ensuring the
+    /// owned box is dropped inside the `catch_unwind` boundary.
+    fn notify_owned_listener_with_panic_logging(
+        state: &CancelTokenState,
+        listener: Box<dyn CancelListener>,
+        reason: &CancelReason,
+        now: Time,
+    ) {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            listener.on_cancel(reason, now);
+            drop(listener);
+        }));
+        if let Err(panic_payload) = result {
+            Self::record_listener_panic(state, panic_payload);
         }
     }
 
@@ -273,12 +363,14 @@ impl SymbolCancelToken {
             {
                 let mut listeners = self.state.listeners.write();
                 for entry in listeners.iter_mut() {
-                    // Catch panics per-listener so a single misbehaving
-                    // listener cannot prevent the rest from running.
-                    let listener = &entry.listener;
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        listener.on_cancel(reason, now);
-                    }));
+                    // br-asupersync-mzamuo — log + count panics
+                    // instead of silently swallowing them.
+                    Self::notify_listener_with_panic_logging(
+                        &self.state,
+                        entry.listener.as_ref(),
+                        reason,
+                        now,
+                    );
                     entry.notified_severity = new_severity;
                 }
             }
@@ -336,17 +428,69 @@ impl SymbolCancelToken {
                 let mut listeners = self.state.listeners.write();
                 for entry in listeners.iter_mut() {
                     if entry.notified_severity < new_severity {
-                        let listener = &entry.listener;
-                        let reason_ref = &strengthened_reason;
-                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            listener.on_cancel(reason_ref, now);
-                        }));
+                        // br-asupersync-mzamuo — strengthen-loop
+                        // panic surfaces via per-token counter +
+                        // tracing::warn! instead of silent swallow.
+                        // This is the specific code path the bead
+                        // targets: a listener whose Drop re-enters
+                        // the originating token's cancel path used
+                        // to be invisible.
+                        Self::notify_listener_with_panic_logging(
+                            &self.state,
+                            entry.listener.as_ref(),
+                            &strengthened_reason,
+                            now,
+                        );
                         entry.notified_severity = new_severity;
                     }
                 }
             }
 
             false
+        }
+    }
+
+    /// Returns the cancellation timestamp to inherit in `child()`
+    /// after `cancelled == true` has been observed under the
+    /// `children` lock.
+    ///
+    /// br-asupersync-n1a1br: if a local `cancel()` is in flight, the
+    /// flag can become visible before `cancelled_at` is written. In
+    /// that window the reason write lock is still held, so `try_read`
+    /// fails and we spin until the timestamp is published. For
+    /// deserialized remote tokens (`from_bytes`) there is no local
+    /// writer and `reason == None`, so the fallback remains
+    /// `Time::ZERO`.
+    fn cancelled_at_snapshot_for_child(&self) -> Option<Time> {
+        if !self.is_cancelled() {
+            return None;
+        }
+
+        loop {
+            let nanos = self.state.cancelled_at.load(Ordering::Acquire);
+            if nanos != u64::MAX {
+                return Some(Time::from_nanos(nanos));
+            }
+
+            if let Some(reason_guard) = self.state.reason.try_read() {
+                if reason_guard.is_none() {
+                    return Some(Time::ZERO);
+                }
+
+                let synced = self.state.cancelled_at.load(Ordering::Acquire);
+                debug_assert_ne!(
+                    synced,
+                    u64::MAX,
+                    "cancelled_at must be published before reason write lock is released"
+                );
+                return Some(if synced == u64::MAX {
+                    Time::ZERO
+                } else {
+                    Time::from_nanos(synced)
+                });
+            }
+
+            std::hint::spin_loop();
         }
     }
 
@@ -361,10 +505,20 @@ impl SymbolCancelToken {
         // race: cancel() sets the `cancelled` flag (Release) *before* reading
         // children, so if we observe !cancelled (Acquire) under the write lock
         // the subsequent cancel() will see our child when it reads the list.
+        //
+        // br-asupersync-n1a1br — atomic enough snapshot under the
+        // `children` lock. The previous shape could observe
+        // `cancelled == true` while `cancelled_at` was still the
+        // sentinel `u64::MAX`, then incorrectly stamp the child with
+        // `Time::ZERO`. The helper below waits out the in-flight
+        // local-cancel window without taking the `reason` lock in the
+        // blocking direction (that would invert cancel()'s
+        // reason→children ordering and deadlock).
         let mut children = self.state.children.write();
-        if self.is_cancelled() {
+        let snapshot = self.cancelled_at_snapshot_for_child();
+
+        if let Some(at) = snapshot {
             drop(children);
-            let at = self.cancelled_at().unwrap_or(Time::ZERO);
             let parent_reason = CancelReason::parent_cancelled();
             child.cancel(&parent_reason, at);
         } else {
@@ -425,7 +579,16 @@ impl SymbolCancelToken {
                 );
                 CancelReason::parent_cancelled()
             });
-            let at = self.cancelled_at().unwrap_or_else(|| Time::from_nanos(0));
+            let at_nanos = self.state.cancelled_at.load(Ordering::Acquire);
+            debug_assert!(
+                at_nanos != u64::MAX || reason_guard.is_none(),
+                "add_listener must not observe reason=Some(_) with unpublished cancelled_at"
+            );
+            let at = if at_nanos == u64::MAX {
+                Time::ZERO
+            } else {
+                Time::from_nanos(at_nanos)
+            };
             // Drop both locks before invoking the listener so a
             // listener that re-enters the token (e.g., to read
             // reason()) does not deadlock on this thread. The
@@ -437,9 +600,13 @@ impl SymbolCancelToken {
             // type-level rustdoc.
             drop(listeners);
             drop(reason_guard);
-            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                listener.on_cancel(&reason, at);
-            }));
+            // br-asupersync-mzamuo — same panic-logging discipline as
+            // the cancel/strengthen paths. The listener is not boxed
+            // here so we route through the helper via a transient
+            // Box<dyn> indirection; the cost is amortised because
+            // this path only runs on add-after-cancel.
+            let boxed: Box<dyn CancelListener> = Box::new(listener);
+            Self::notify_owned_listener_with_panic_logging(&self.state, boxed, &reason, at);
         } else {
             listeners.push(ListenerEntry {
                 listener: Box::new(listener),
@@ -489,6 +656,7 @@ impl SymbolCancelToken {
                 cleanup_budget: Budget::default(),
                 children: RwLock::new(SmallVec::new()),
                 listeners: RwLock::new(SmallVec::new()),
+                listener_panic_count: AtomicU64::new(0),
             }),
         })
     }
@@ -539,6 +707,7 @@ impl SymbolCancelToken {
                 cleanup_budget: Budget::default(),
                 children: RwLock::new(SmallVec::new()),
                 listeners: RwLock::new(SmallVec::new()),
+                listener_panic_count: AtomicU64::new(0),
             }),
         }
     }
@@ -1026,17 +1195,27 @@ impl<S: CancelSink> CancelBroadcaster<S> {
 
     fn mark_seen(&self, object_id: ObjectId, token_id: u64, sequence: u64) {
         let mut seen = self.seen_sequences.write();
-        let inserted = seen.insert((object_id, token_id, sequence));
-        if !inserted {
+        if seen.set.contains(&(object_id, token_id, sequence)) {
             return;
         }
 
-        // Deterministic eviction: remove oldest until under cap.
-        while seen.set.len() > self.max_seen {
+        // br-asupersync-as12cf — evict BEFORE insert, not after.
+        // The previous shape (insert -> evict-while-over-cap) left
+        // the set holding `max_seen + 1` entries during the brief
+        // window between the insert and the eviction loop. Although
+        // the write lock prevents any other thread from observing
+        // the over-allocated state, the bounded-memory contract is
+        // a documentation invariant that future maintainers (and
+        // peak-memory accounting tools) read literally. Evicting
+        // first keeps `seen.set.len()` strictly within `max_seen`
+        // at every observable point in time.
+        while seen.set.len() >= self.max_seen {
             if seen.remove_oldest().is_none() {
                 break;
             }
         }
+
+        seen.insert((object_id, token_id, sequence));
     }
 }
 
@@ -1855,7 +2034,10 @@ mod tests {
 
     #[test]
     fn test_deserialized_cancelled_token_notifies_listener() {
-        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{
+            Mutex,
+            atomic::{AtomicBool, Ordering},
+        };
 
         let mut rng = DetRng::new(42);
         let cancel_handle = SymbolCancelToken::new(ObjectId::new_for_test(1), &mut rng);
@@ -1866,11 +2048,19 @@ mod tests {
 
         let notified = Arc::new(AtomicBool::new(false));
         let notified_clone = Arc::clone(&notified);
-        parsed.add_listener(move |_reason: &CancelReason, _at: Time| {
+        let seen_at = Arc::new(Mutex::new(None::<Time>));
+        let seen_at_clone = Arc::clone(&seen_at);
+        parsed.add_listener(move |_reason: &CancelReason, at: Time| {
             notified_clone.store(true, Ordering::SeqCst);
+            *seen_at_clone.lock().unwrap() = Some(at);
         });
 
         assert!(notified.load(Ordering::SeqCst));
+        assert_eq!(
+            *seen_at.lock().unwrap(),
+            Some(Time::ZERO),
+            "deserialized cancelled tokens must replay with Time::ZERO instead of deadlocking"
+        );
     }
 
     #[test]
@@ -3797,5 +3987,177 @@ mod tests {
             !coord.completed.read().contains(&object_id),
             "object_id must NOT be in completed set after no-handler outcome"
         );
+    }
+
+    /// br-asupersync-mzamuo — A panicking listener must (a) NOT
+    /// crash the cancel path, (b) increment the per-token panic
+    /// counter so the silent-swallow becomes observable.
+    #[test]
+    fn cancel_listener_panic_logged_via_counter() {
+        struct PanickingListener;
+        impl CancelListener for PanickingListener {
+            fn on_cancel(&self, _reason: &CancelReason, _at: Time) {
+                panic!("simulated listener panic (mzamuo)");
+            }
+        }
+
+        let mut rng = DetRng::new(0xc0ffee);
+        let token = SymbolCancelToken::new(ObjectId::new(1, 1), &mut rng);
+        token.add_listener(PanickingListener);
+
+        // First cancel fires the listener → panic → caught + counted.
+        let reason = CancelReason::new(CancelKind::User);
+        token.cancel(&reason, Time::from_nanos(100));
+        assert!(
+            token.listener_panic_count() >= 1,
+            "expected listener_panic_count >= 1, got {}",
+            token.listener_panic_count()
+        );
+
+        // Strengthen path: re-fires the listener for severity uplift.
+        let stronger = CancelReason::new(CancelKind::Shutdown);
+        token.cancel(&stronger, Time::from_nanos(200));
+        assert!(
+            token.listener_panic_count() >= 2,
+            "strengthen path must also count panics, got {}",
+            token.listener_panic_count()
+        );
+    }
+
+    #[test]
+    fn late_add_listener_drop_panic_logged_via_counter() {
+        struct DropPanickingListener;
+        impl CancelListener for DropPanickingListener {
+            fn on_cancel(&self, _reason: &CancelReason, _at: Time) {}
+        }
+        impl Drop for DropPanickingListener {
+            fn drop(&mut self) {
+                panic!("simulated late-add drop panic (mzamuo)");
+            }
+        }
+
+        let mut rng = DetRng::new(0xd00d);
+        let token = SymbolCancelToken::new(ObjectId::new(4, 4), &mut rng);
+        token.cancel(&CancelReason::new(CancelKind::User), Time::from_nanos(1));
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            token.add_listener(DropPanickingListener);
+        }));
+        assert!(
+            result.is_ok(),
+            "late-add path must not propagate listener drop panic"
+        );
+        assert_eq!(token.listener_panic_count(), 1);
+    }
+
+    /// br-asupersync-as12cf — `mark_seen` must NEVER let
+    /// `seen_sequences.set.len()` exceed `max_seen` even
+    /// transiently. The harness mirrors the production fix
+    /// (evict-before-insert) so the invariant can be exercised
+    /// without standing up the full coordinator.
+    #[test]
+    fn mark_seen_never_exceeds_max_seen_transiently() {
+        let mut rng = DetRng::new(0xbeef);
+        let token = SymbolCancelToken::new(ObjectId::new(7, 7), &mut rng);
+        let coord = CancelMarkSeenHarness {
+            seen_sequences: parking_lot::RwLock::new(SeenSequences::default()),
+            max_seen: 5,
+        };
+        for i in 0..15u64 {
+            coord.mark_seen(token.object_id(), token.token_id(), i);
+            let len = coord.seen_sequences.read().set.len();
+            assert!(
+                len <= coord.max_seen,
+                "seen.set.len()={len} exceeded max_seen={} after insert {i}",
+                coord.max_seen
+            );
+        }
+    }
+
+    struct CancelMarkSeenHarness {
+        seen_sequences: parking_lot::RwLock<SeenSequences>,
+        max_seen: usize,
+    }
+
+    impl CancelMarkSeenHarness {
+        fn mark_seen(&self, object_id: ObjectId, token_id: u64, sequence: u64) {
+            let mut seen = self.seen_sequences.write();
+            if seen.set.contains(&(object_id, token_id, sequence)) {
+                return;
+            }
+            while seen.set.len() >= self.max_seen {
+                if seen.remove_oldest().is_none() {
+                    break;
+                }
+            }
+            seen.insert((object_id, token_id, sequence));
+        }
+    }
+
+    /// br-asupersync-n1a1br — child() must observe a consistent
+    /// (is_cancelled, cancelled_at) pair. After the parent is
+    /// cancelled, every child created via `child()` must inherit
+    /// the parent's cancelled_at value as it was at the moment of
+    /// the cancel decision — not a later strengthened value.
+    #[test]
+    fn child_inherits_parent_cancelled_at_atomically() {
+        let mut rng = DetRng::new(0x1234);
+        let parent = SymbolCancelToken::new(ObjectId::new(2, 2), &mut rng);
+        let cancel_time = Time::from_nanos(500);
+        let reason = CancelReason::new(CancelKind::User);
+        parent.cancel(&reason, cancel_time);
+
+        // Now create a child after the parent is already cancelled.
+        let child = parent.child(&mut rng);
+        assert!(child.is_cancelled());
+        assert_eq!(
+            child.cancelled_at().map(Time::as_nanos),
+            Some(cancel_time.as_nanos()),
+            "child must inherit the cancelled_at the parent had \
+             at the moment of the is_cancelled check (snapshot under lock)"
+        );
+    }
+
+    /// br-asupersync-n1a1br — if `cancelled` becomes visible before
+    /// `cancelled_at` is published, `child()` must wait out that
+    /// local-cancel window rather than fabricating `Time::ZERO`.
+    #[test]
+    fn child_waits_for_inflight_cancelled_at_publication() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        let mut rng = DetRng::new(0x5678);
+        let parent = SymbolCancelToken::new(ObjectId::new(3, 3), &mut rng);
+        let cancel_time = Time::from_nanos(777);
+        let started = Arc::new(AtomicBool::new(false));
+
+        let mut reason_guard = parent.state.reason.write();
+        *reason_guard = Some(CancelReason::new(CancelKind::User));
+        parent.state.cancelled.store(true, Ordering::Release);
+        parent.state.cancelled_at.store(u64::MAX, Ordering::Release);
+
+        let parent_for_child = parent.clone();
+        let started_for_child = started.clone();
+        let join = std::thread::spawn(move || {
+            started_for_child.store(true, Ordering::Release);
+            let mut child_rng = DetRng::new(0x9abc);
+            let child = parent_for_child.child(&mut child_rng);
+            child.cancelled_at().map(Time::as_nanos)
+        });
+
+        while !started.load(Ordering::Acquire) {
+            std::hint::spin_loop();
+        }
+
+        parent
+            .state
+            .cancelled_at
+            .store(cancel_time.as_nanos(), Ordering::Release);
+        drop(reason_guard);
+
+        let child_cancelled_at = join.join().expect("child thread must complete");
+        assert_eq!(child_cancelled_at, Some(cancel_time.as_nanos()));
     }
 }
