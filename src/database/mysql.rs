@@ -908,6 +908,17 @@ pub struct MySqlConnectOptions {
     pub connect_timeout: Option<std::time::Duration>,
     /// Require SSL.
     pub ssl_mode: SslMode,
+    /// br-asupersync-m6c35i: opt-in escape hatch for legacy
+    /// `mysql_native_password` authentication. Default `false` — the
+    /// client REJECTS any auth-switch request from the server that
+    /// asks for `mysql_native_password` (which uses SHA1 over a
+    /// server-supplied nonce — offline-crackable from a captured
+    /// exchange, vulnerable to MitM downgrade from
+    /// `caching_sha2_password`). Operators that explicitly need the
+    /// legacy plugin (e.g., MySQL 5.6 or MariaDB 10.0) must set this
+    /// flag, accept the documented risk, and ideally pair with
+    /// `ssl_mode: Required` to neutralise the offline-crack surface.
+    pub insecure_legacy_mysql_native_password: bool,
 }
 
 // br-asupersync-fldb34 — manual Debug impl that redacts the password field.
@@ -1105,6 +1116,10 @@ impl MySqlConnectOptions {
             password,
             connect_timeout,
             ssl_mode,
+            // br-asupersync-m6c35i: parse() defaults to safe-by-default;
+            // operators that need legacy plugin must construct via
+            // struct-update syntax with the field set explicitly.
+            insecure_legacy_mysql_native_password: false,
         })
     }
 }
@@ -1602,7 +1617,23 @@ impl MySqlConnection {
         // Auth response
         let password = options.password.as_deref().unwrap_or_default();
         let auth_response = match handshake.auth_plugin_name.as_str() {
-            "mysql_native_password" => mysql_native_auth(password, &handshake.auth_plugin_data),
+            "mysql_native_password" => {
+                // br-asupersync-m6c35i: reject the legacy plugin
+                // unless the operator has explicitly opted in.
+                // mysql_native_password uses SHA1 over a server-
+                // supplied nonce — captured exchanges are
+                // offline-crackable and a MitM can downgrade a
+                // caching_sha2_password-configured client into this
+                // mode. Default-deny closes that door.
+                if !options.insecure_legacy_mysql_native_password {
+                    return Err(MySqlError::UnsupportedAuthPlugin(format!(
+                        "mysql_native_password rejected by default — set \
+                         MySqlConnectOptions::insecure_legacy_mysql_native_password = true \
+                         to opt in (and prefer ssl_mode: Required to neutralise the offline-crack surface)"
+                    )));
+                }
+                mysql_native_auth(password, &handshake.auth_plugin_data)
+            }
             "caching_sha2_password" => caching_sha2_auth(password, &handshake.auth_plugin_data),
             plugin => {
                 return Err(MySqlError::UnsupportedAuthPlugin(plugin.to_string()));
@@ -2618,11 +2649,7 @@ impl MySqlConnection {
         result
     }
 
-    async fn execute_unchecked_inner(
-        &mut self,
-        cx: &Cx,
-        sql: &str,
-    ) -> Outcome<u64, MySqlError> {
+    async fn execute_unchecked_inner(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, MySqlError> {
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()

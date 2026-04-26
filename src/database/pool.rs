@@ -559,8 +559,7 @@ impl<M: ConnectionManager> DbPool<M> {
                     }
 
                     // Check if deadline already passed (Time-space).
-                    let remaining_nanos =
-                        deadline.duration_since(crate::time::wall_now());
+                    let remaining_nanos = deadline.duration_since(crate::time::wall_now());
                     if remaining_nanos == 0 {
                         self.stats.total_timeouts.fetch_add(1, Ordering::Relaxed);
                         return Err(DbPoolError::Timeout);
@@ -1034,6 +1033,22 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
 
             {
                 let mut inner = self.inner.lock();
+                // br-asupersync-2buqek: check `closed` AND `total >=
+                // max_size` in the same critical section as the
+                // `total += 1` increment. Pre-fix the closed check
+                // happened later in finish_async_checkout, after the
+                // lock had been released for the manager.connect()
+                // round-trip. If pool.close() ran during that window
+                // it drained `inner.total` once for our slot, then
+                // finish_async_checkout decremented it AGAIN on the
+                // closed-detect path — double-decrement, drifting
+                // the reservation count below the real connection
+                // count and oversubscribing the pool on subsequent
+                // get() calls. Atomically refusing the increment
+                // when closed is set closes the door.
+                if inner.closed {
+                    return Err(DbPoolError::Closed);
+                }
                 if inner.total >= self.config.max_size {
                     return Err(DbPoolError::Full);
                 }

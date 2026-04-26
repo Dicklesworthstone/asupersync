@@ -3400,6 +3400,20 @@ impl PgConnection {
         self.inner.transaction_status == b'T' || self.inner.transaction_status == b'E'
     }
 
+    /// br-asupersync-yl4gu1: returns `true` when this connection has
+    /// been tagged as unsafe for pool recycling — typically because a
+    /// `PgTransaction` was dropped without commit and the pending
+    /// ROLLBACK has not yet executed. Pool implementations MUST
+    /// consult this flag in their return path: when it is `true`,
+    /// close the connection (`Self::close`) instead of returning it
+    /// to the idle list. Failing to do so leaks an
+    /// `idle_in_transaction` backend with locks held to the next
+    /// tenant.
+    #[must_use]
+    pub fn needs_discard(&self) -> bool {
+        self.inner.needs_discard
+    }
+
     /// Close the connection.
     pub async fn close(&mut self) -> Result<(), PgError> {
         if self.inner.closed {
@@ -4107,6 +4121,11 @@ impl PgConnection {
 
         // Successfully rolled back, restore connection state.
         self.inner.needs_rollback = false;
+        // br-asupersync-yl4gu1: rollback completed cleanly, so the
+        // connection is safe to recycle into the pool again. Clear
+        // the discard flag now that the orphaned-transaction state
+        // is provably resolved.
+        self.inner.needs_discard = false;
         self.inner.closed = false;
 
         Ok(())
@@ -4944,13 +4963,24 @@ impl PgTransaction<'_> {
 }
 
 impl Drop for PgTransaction<'_> {
+    /// br-asupersync-yl4gu1: a `PgTransaction` dropped without commit
+    /// MUST mark the connection for both (a) inline ROLLBACK on the
+    /// next operation AND (b) discard-on-pool-return. Pre-fix only
+    /// (a) was set; if the caller dropped both PgTransaction AND
+    /// PgConnection without issuing another query, the BEGIN stayed
+    /// open on the server — the pool's next tenant inherited an
+    /// `idle_in_transaction` backend with locks held.
+    ///
+    /// Setting `needs_discard = true` ensures the pool's return path
+    /// (expected to call `PgConnection::needs_discard()` before
+    /// recycling) closes the connection instead. Both flags stay
+    /// set in tandem so callers that DO continue using the same
+    /// connection without a pool round-trip still get the inline
+    /// ROLLBACK fast path.
     fn drop(&mut self) {
         if !self.finished {
-            // Mark the connection so the next operation issues ROLLBACK first.
-            // We can't await here, but without this flag the connection stays
-            // in an aborted transaction state and all subsequent queries fail
-            // with "current transaction is aborted".
             self.conn.inner.needs_rollback = true;
+            self.conn.inner.needs_discard = true;
         }
     }
 }
@@ -5222,7 +5252,7 @@ mod tests {
                     transaction_status: b'I',
                     closed: false,
                     needs_rollback: false,
-                needs_discard: false,
+                    needs_discard: false,
                     next_stmt_id: 0,
                     max_result_rows: DEFAULT_MAX_RESULT_ROWS,
                     prepared_cache: PreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
