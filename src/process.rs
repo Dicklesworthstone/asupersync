@@ -267,6 +267,23 @@ unsafe extern "system" {
 }
 
 #[cfg(windows)]
+// Cancel-drain escalation knobs (br-asupersync-nhk8ur).
+//
+// On parent-Cx cancel, `wait_async` / `wait_with_output_async` send SIGTERM
+// (Unix) or TerminateProcess (Windows) and poll `try_wait` for up to roughly
+// 2 seconds before escalating to SIGKILL. The 2-second budget is the rough
+// industry default for graceful-shutdown deadlines (Docker, Kubernetes,
+// systemd's TimeoutStopSec all default in this neighborhood) and is the
+// cap on cancel-path latency the parent task experiences.
+//
+// `GRACEFUL_KILL_POLLS = 200` × `GRACEFUL_KILL_POLL_MAX_BACKOFF_MS = 10`
+// gives the upper bound; with exponential backoff starting at 1ms doubling
+// to the cap, the actual wall-clock spent on a non-exiting child is just
+// over 2 seconds.
+const GRACEFUL_KILL_POLLS: u32 = 200;
+const GRACEFUL_KILL_POLL_MAX_BACKOFF_MS: u64 = 10;
+const REAP_AFTER_KILL_POLLS: u32 = 200;
+
 const WINDOWS_TRUE: i32 = 1;
 #[cfg(windows)]
 const WINDOWS_CSTR_LESS_THAN: i32 = 1;
@@ -725,10 +742,10 @@ impl Command {
     /// Async variant of [`output`](Self::output).
     ///
     /// Uses cooperative polling to avoid blocking the runtime thread while
-    /// waiting for process exit and draining pipes.
-    pub async fn output_async(&mut self) -> Result<Output, ProcessError> {
+    /// waiting for process exit and draining pipes. (br-asupersync-nhk8ur)
+    pub async fn output_async(&mut self, cx: &Cx) -> Result<Output, ProcessError> {
         let child = self.spawn_with_temporary_stdio(Stdio::Null, Stdio::Pipe, Stdio::Pipe)?;
-        child.wait_with_output_async().await
+        child.wait_with_output_async(cx).await
     }
 
     /// Spawns the command and waits for it to complete, returning status.
@@ -758,11 +775,11 @@ impl Command {
     /// Async variant of [`status`](Self::status).
     ///
     /// Uses cooperative polling to avoid blocking the runtime thread while
-    /// waiting for process exit.
-    pub async fn status_async(&mut self) -> Result<ExitStatus, ProcessError> {
+    /// waiting for process exit. (br-asupersync-nhk8ur)
+    pub async fn status_async(&mut self, cx: &Cx) -> Result<ExitStatus, ProcessError> {
         let mut child =
             self.spawn_with_temporary_stdio(Stdio::Inherit, Stdio::Inherit, Stdio::Inherit)?;
-        child.wait_async().await
+        child.wait_async(cx).await
     }
 }
 
@@ -858,7 +875,30 @@ impl Child {
     ///
     /// Uses `try_wait()` + cooperative yielding to avoid blocking the runtime
     /// worker thread while waiting for process completion.
-    pub async fn wait_async(&mut self) -> Result<ExitStatus, ProcessError> {
+    ///
+    /// # Cancellation
+    ///
+    /// `wait_async` takes the parent task's [`Cx`] so cancellation propagates
+    /// to the child per asupersync's structured-concurrency invariant: a
+    /// spawned subprocess is an owned resource of its parent region, and on
+    /// region close the parent must not return Cancelled while the child is
+    /// still running. (br-asupersync-nhk8ur)
+    ///
+    /// On cancel detection the child is escalated:
+    ///
+    ///   1. SIGTERM (Unix) / `TerminateProcess` (Windows) — request graceful
+    ///      shutdown.
+    ///   2. Poll for graceful exit for up to `GRACEFUL_KILL_POLLS *
+    ///      GRACEFUL_KILL_POLL_MS` = 2 seconds.
+    ///   3. SIGKILL — if still running, force-terminate.
+    ///   4. Reap — drive `try_wait` until the child exits so no zombie
+    ///      remains.
+    ///
+    /// The escalation runs without honoring further cancellation
+    /// checkpoints — the parent's cancel has already fired, this is the
+    /// drain phase. The function returns `Cancelled` after the child has
+    /// been fully reaped.
+    pub async fn wait_async(&mut self, cx: &Cx) -> Result<ExitStatus, ProcessError> {
         // Match the synchronous wait path and std semantics so async wait does
         // not keep the child's stdin pipe open indefinitely.
         drop(self.stdin.take());
@@ -867,7 +907,8 @@ impl Child {
         // Starts at 1ms, doubles up to 50ms between checks.
         let mut backoff_ms = 1u64;
         loop {
-            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            if cx.checkpoint().is_err() {
+                self.cancel_drain_child().await;
                 return Err(ProcessError::Io(io::Error::new(
                     io::ErrorKind::Interrupted,
                     "cancelled",
@@ -879,6 +920,57 @@ impl Child {
             let now = crate::time::wall_now();
             crate::time::sleep(now, std::time::Duration::from_millis(backoff_ms)).await;
             backoff_ms = (backoff_ms * 2).min(50);
+        }
+    }
+
+    /// Drain phase of cancel propagation: SIGTERM, brief grace window, then
+    /// SIGKILL, then reap. Best-effort — every step ignores its own errors
+    /// because the caller is already returning Cancelled and the only goal
+    /// of this drain is to leave no zombie behind.
+    /// (br-asupersync-nhk8ur)
+    async fn cancel_drain_child(&mut self) {
+        // Step 1: graceful-termination request.
+        #[cfg(unix)]
+        {
+            let _ = self.signal(libc::SIGTERM);
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = self.kill();
+        }
+
+        // Step 2: poll for graceful exit. Cap is 2 seconds total so a
+        // misbehaving child cannot stall the cancel path indefinitely.
+        let mut polls = 0u32;
+        let mut backoff_ms = 1u64;
+        while polls < GRACEFUL_KILL_POLLS {
+            polls += 1;
+            match self.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) => {}
+                Err(_) => return, // child gone or already reaped — done.
+            }
+            let now = crate::time::wall_now();
+            crate::time::sleep(now, std::time::Duration::from_millis(backoff_ms)).await;
+            backoff_ms = (backoff_ms * 2).min(GRACEFUL_KILL_POLL_MAX_BACKOFF_MS);
+        }
+
+        // Step 3: force-kill.
+        let _ = self.kill();
+
+        // Step 4: reap. The child has been SIGKILL'd; this loop is bounded
+        // by the kernel's delivery of the kill signal, which is essentially
+        // immediate. We still cap reap polls so a kernel quirk cannot
+        // deadlock the cancel path.
+        let mut reap_polls = 0u32;
+        while reap_polls < REAP_AFTER_KILL_POLLS {
+            reap_polls += 1;
+            match self.try_wait() {
+                Ok(Some(_)) | Err(_) => return,
+                Ok(None) => {}
+            }
+            let now = crate::time::wall_now();
+            crate::time::sleep(now, std::time::Duration::from_millis(2)).await;
         }
     }
 
@@ -974,8 +1066,10 @@ impl Child {
     /// Async variant of [`wait_with_output`](Self::wait_with_output).
     ///
     /// Uses cooperative yielding instead of thread sleeps while waiting for
-    /// process exit and pipe drain progress.
-    pub async fn wait_with_output_async(mut self) -> Result<Output, ProcessError> {
+    /// process exit and pipe drain progress. Takes the parent task's [`Cx`]
+    /// so cancellation propagates to the child via the SIGTERM-then-SIGKILL
+    /// drain escalation in [`wait_async`]. (br-asupersync-nhk8ur)
+    pub async fn wait_with_output_async(mut self, cx: &Cx) -> Result<Output, ProcessError> {
         #[cfg(windows)]
         {
             return crate::runtime::spawn_blocking_io(move || {
@@ -999,7 +1093,11 @@ impl Child {
         let mut backoff_ms = 1u64;
 
         while status.is_none() || !stdout_done || !stderr_done {
-            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            if cx.checkpoint().is_err() {
+                // br-asupersync-nhk8ur: drain the child via the same
+                // escalation wait_async uses so wait_with_output_async also
+                // leaves no zombie behind on parent-task cancel.
+                self.cancel_drain_child().await;
                 return Err(ProcessError::Io(io::Error::new(
                     io::ErrorKind::Interrupted,
                     "cancelled",
@@ -1054,7 +1152,7 @@ impl Child {
 
         let status = match status {
             Some(s) => s,
-            None => self.wait_async().await?,
+            None => self.wait_async(cx).await?,
         };
 
         Ok(Output {
@@ -1824,7 +1922,8 @@ mod tests {
                 .arg("hello")
                 .stdout(Stdio::Pipe)
                 .spawn()?;
-            child.wait_with_output_async().await
+            let cx = crate::cx::Cx::for_testing();
+            child.wait_with_output_async(&cx).await
         })
         .expect("async output failed");
 
@@ -1871,7 +1970,8 @@ mod tests {
 
         let result = futures_lite::future::block_on(async {
             let mut child = Command::new("sh").arg("-c").arg("exit 42").spawn()?;
-            child.wait_async().await
+            let cx = crate::cx::Cx::for_testing();
+            child.wait_async(&cx).await
         })
         .expect("async wait failed");
 
@@ -2162,7 +2262,8 @@ mod tests {
 
         let join = std::thread::spawn(move || {
             let mut child = child;
-            let result = futures_lite::future::block_on(child.wait_async());
+            let cx = crate::cx::Cx::for_testing();
+            let result = futures_lite::future::block_on(child.wait_async(&cx));
             tx.send(result).expect("send async wait result");
         });
 

@@ -494,7 +494,10 @@ impl TimerWheel {
                 deadline = current.saturating_add_nanos(self.max_timer_duration_ns);
             }
         }
-        self.insert_validated(deadline, waker, current)
+        // br-asupersync-ifq7c5: We already have `current`, but `try_register`
+        // would call it again. Since we know the deadline is now validated
+        // (clamped above), we call `insert_validated` directly.
+        self.insert_validated(deadline, waker)
     }
 
     /// Attempts to register a timer with validation.
@@ -516,12 +519,12 @@ impl TimerWheel {
                 });
             }
         }
-        Ok(self.insert_validated(deadline, waker, current))
+        Ok(self.insert_validated(deadline, waker))
     }
 
     /// Inserts a timer whose deadline has already been validated/clamped by
     /// the caller. Avoids a redundant `current_time()` read on the hot path.
-    fn insert_validated(&mut self, deadline: Time, waker: Waker, _current: Time) -> TimerHandle {
+    fn insert_validated(&mut self, deadline: Time, waker: Waker) -> TimerHandle {
         let generation = self.next_generation;
         self.next_generation = self.next_generation.wrapping_add(1);
 

@@ -13,7 +13,8 @@ fn run_command() -> Result<(), ProcessError> {
 fn run_command_async() -> Result<(), ProcessError> {
     futures_lite::future::block_on(async {
         let mut child = Command::new("echo").arg("hello").spawn()?;
-        let _status = child.wait_async().await?;
+        let cx = asupersync::cx::Cx::for_testing();
+        let _status = child.wait_async(&cx).await?;
         Ok::<(), ProcessError>(())
     })?;
     Ok(())

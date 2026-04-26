@@ -137,7 +137,8 @@ fn pc_03_wait_async_cancel_safe() {
             .stdout(Stdio::piped())
             .spawn()
             .expect("spawn");
-        child.wait_with_output_async().await
+        let cx = asupersync::cx::Cx::for_testing();
+        child.wait_with_output_async(&cx).await
     })
     .expect("output");
     assert!(output.status.success());

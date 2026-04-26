@@ -77,7 +77,8 @@ fn pl_04_wait_async_returns_exit_code() {
             .arg("exit 7")
             .spawn()
             .expect("spawn");
-        child.wait_async().await
+        let cx = asupersync::cx::Cx::for_testing();
+        child.wait_async(&cx).await
     })
     .expect("wait_async");
 
@@ -343,7 +344,8 @@ fn pc_04_wait_with_output_async_captures_data() {
             .stdout(Stdio::piped())
             .spawn()
             .expect("spawn");
-        child.wait_with_output_async().await
+        let cx = asupersync::cx::Cx::for_testing();
+        child.wait_with_output_async(&cx).await
     })
     .expect("wait_with_output_async");
     assert!(output.status.success());

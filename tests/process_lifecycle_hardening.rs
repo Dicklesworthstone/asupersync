@@ -396,7 +396,8 @@ fn pl_g1_01_wait_async_nonblocking() {
             .spawn()
             .expect("spawn for async test");
 
-        let status = child.wait_async().await.expect("wait_async should succeed");
+        let cx = asupersync::cx::Cx::for_testing();
+        let status = child.wait_async(&cx).await.expect("wait_async should succeed");
         assert!(status.success(), "echo should exit successfully");
         status
     });
