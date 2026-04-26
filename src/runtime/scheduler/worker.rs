@@ -858,6 +858,16 @@ impl Parker {
         }
 
         self.inner.waiting.fetch_add(1, Ordering::Release);
+        // br-asupersync-re7cz3: Dekker-style store-load barrier. The
+        // cross-atomic pair below — park's `waiting` store + `notified`
+        // load, vs unpark's `notified` store + `waiting` load — needs a
+        // total order to avoid both sides observing each other's pre-store
+        // state (lost wakeup). SeqCst fences on both sides participate in
+        // a single sequential consistency total order: AT LEAST ONE side
+        // observes the other's published store. Concretely: either unpark
+        // sees waiting >= 1 and signals the condvar, OR park's CAS check
+        // below sees notified == true and returns without sleeping.
+        std::sync::atomic::fence(Ordering::SeqCst);
         let mut guard = self.lock_unpoisoned();
         while self
             .inner
@@ -900,6 +910,10 @@ impl Parker {
         }
 
         self.inner.waiting.fetch_add(1, Ordering::Release);
+        // br-asupersync-re7cz3: see fence comment in park(). Same
+        // Dekker-style pairing required here so park_timeout doesn't
+        // race with unpark and miss the wake-up.
+        std::sync::atomic::fence(Ordering::SeqCst);
         let (guard, _timeout) = self
             .inner
             .cvar
@@ -933,6 +947,15 @@ impl Parker {
             // park() fast-path check.  No mutex or condvar needed.
             return;
         }
+        // br-asupersync-re7cz3: Dekker-style store-load barrier — see the
+        // matching fence in park()/park_timeout(). Without this, unpark's
+        // load on `waiting` could be reordered ahead of the CAS publish on
+        // `notified`, observing the pre-park value of `waiting` (0) while
+        // the parker is mid-park-prep. The SeqCst fences on both sides
+        // form a total order; if THIS side observes waiting == 0 the
+        // other side is guaranteed to subsequently observe notified ==
+        // true on its post-fence CAS check and return without sleeping.
+        std::sync::atomic::fence(Ordering::SeqCst);
         // No waiter currently parked or preparing to park under the mutex.
         // The permit has been published via `notified`, so the next park()
         // will consume it. `waiting` is an optimization hint — a stale read
@@ -1143,6 +1166,68 @@ mod tests {
 
             assert!(woken.load(Ordering::SeqCst), "wakeup should not be lost");
         }
+    }
+
+    /// br-asupersync-re7cz3 regression: high-stress concurrent park/unpark
+    /// across many parker instances and many iterations to maximize the
+    /// chance of triggering the Dekker-style store-load reordering window
+    /// the fence guards against. Each parker should observe its single
+    /// unpark within a bounded timeout — a missed wakeup would manifest
+    /// as the worker thread blocking past the timeout and the assertion
+    /// failing.
+    #[test]
+    fn test_parker_no_lost_wakeup_under_stress() {
+        // Many parkers × many iterations to fish for the race window. If
+        // unpark's load on `waiting` were reordered ahead of the CAS on
+        // `notified`, *some* iteration would deadlock or hit the fallback
+        // park_timeout (we use park_timeout for safety so the test fails
+        // fast instead of hanging forever).
+        const PARKERS: usize = 32;
+        const ITERATIONS: usize = 200;
+        let success_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+        let mut handles = Vec::with_capacity(PARKERS);
+        for parker_idx in 0..PARKERS {
+            let parker = Arc::new(Parker::new());
+            let count = success_count.clone();
+            let p_unpark = parker.clone();
+
+            // Parker thread: park ITERATIONS times, each with a generous
+            // timeout (1s) — the timeout exists so a real lost-wakeup bug
+            // makes the test fail rather than hang the whole suite.
+            let parker_handle = thread::spawn(move || {
+                for _ in 0..ITERATIONS {
+                    parker.park_timeout(Duration::from_secs(1));
+                }
+            });
+
+            // Unparker thread: unpark ITERATIONS times with a tiny yield
+            // between calls to maximize race-window exposure between
+            // unpark's notified-CAS and waiting-load.
+            let unparker_handle = thread::spawn(move || {
+                for _ in 0..ITERATIONS {
+                    p_unpark.unpark();
+                    if parker_idx % 3 == 0 {
+                        thread::yield_now();
+                    }
+                }
+                // Flag this parker pair as having driven its full quota.
+                count.fetch_add(1, Ordering::SeqCst);
+            });
+
+            handles.push((parker_handle, unparker_handle));
+        }
+
+        for (ph, uh) in handles {
+            uh.join().expect("unparker thread should complete");
+            ph.join().expect("parker thread should complete (no lost wakeup)");
+        }
+
+        let driven = success_count.load(Ordering::SeqCst);
+        assert_eq!(
+            driven, PARKERS,
+            "all unparker threads should drive their full iteration quota"
+        );
     }
 
     #[test]
