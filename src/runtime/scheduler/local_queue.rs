@@ -14,7 +14,9 @@ use crate::util::Arena;
 use parking_lot::Mutex;
 use smallvec::SmallVec;
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 thread_local! {
     static CURRENT_QUEUE: RefCell<Option<LocalQueue>> = const { RefCell::new(None) };
@@ -58,15 +60,38 @@ impl TaskSource {
     }
 }
 
+/// br-asupersync-5oll2p / pvbwxm: queue payload + O(1) presence index.
+///
+/// `queue` is the LIFO/FIFO storage (LIFO for owner pop, FIFO for stealer).
+/// `presence` is an auxiliary index used by [`LocalQueue::schedule_local_push`]
+/// to detect duplicate scheduling without an O(N) linear scan over `queue`.
+/// All write paths (push, push_many, pop, steal, steal_batch) keep `queue`
+/// and `presence` in sync under a single mutex acquisition so the index
+/// never drifts from the storage.
+#[derive(Debug, Default)]
+struct LocalQueueInner {
+    queue: SmallVec<[TaskId; 32]>,
+    presence: HashSet<TaskId>,
+}
+
 /// A local task queue for a worker.
 ///
 /// This queue is single-producer, multi-consumer. The worker owning this
 /// queue pushes and pops from one end (LIFO), while other workers steal
 /// from the other end (FIFO).
+///
+/// br-asupersync-pvbwxm: `cached_len` is an `AtomicUsize` mirror of
+/// `inner.queue.len()` updated under the same lock that mutates the
+/// queue. The owner's backoff loop reads `is_empty()` / `len()` very
+/// frequently while looking for work to park on; routing those reads
+/// through a single `Acquire` atomic load lets the worker decide whether
+/// to spin / yield / park without ever taking the deque mutex (which
+/// would contend with stealers from other workers).
 #[derive(Debug, Clone)]
 pub struct LocalQueue {
     tasks: TaskSource,
-    inner: Arc<Mutex<SmallVec<[TaskId; 32]>>>,
+    inner: Arc<Mutex<LocalQueueInner>>,
+    cached_len: Arc<AtomicUsize>,
 }
 
 impl LocalQueue {
@@ -91,7 +116,8 @@ impl LocalQueue {
     fn new_with_source(tasks: TaskSource) -> Self {
         Self {
             tasks,
-            inner: Arc::new(Mutex::new(SmallVec::new())),
+            inner: Arc::new(Mutex::new(LocalQueueInner::default())),
+            cached_len: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -159,10 +185,17 @@ impl LocalQueue {
     }
 
     /// Pushes a task to the local queue.
+    ///
+    /// br-asupersync-pvbwxm: maintains the `cached_len` atomic mirror so
+    /// owner backoff `is_empty()` checks can be lock-free.
     #[inline]
     pub fn push(&self, task: TaskId) {
-        let mut queue = self.inner.lock();
-        queue.push(task);
+        let mut inner = self.inner.lock();
+        inner.queue.push(task);
+        inner.presence.insert(task);
+        let new_len = inner.queue.len();
+        drop(inner);
+        self.cached_len.store(new_len, Ordering::Release);
     }
 
     /// Pushes a task from the TLS scheduling fast path.
@@ -170,15 +203,24 @@ impl LocalQueue {
     /// Returns `false` only when the task record does not exist in the backing
     /// arena. Duplicate scheduling still returns `true` because the task is
     /// already present in this queue.
+    ///
+    /// br-asupersync-5oll2p: dedup uses the `presence` HashSet for O(1)
+    /// membership, replacing the prior O(N) `queue.contains(&task)`
+    /// linear scan.
     #[inline]
     fn schedule_local_push(&self, task: TaskId) -> bool {
         self.tasks.with_tasks_arena_mut(|arena| {
             if arena.get(task.arena_index()).is_none() {
                 return false;
             }
-            let mut queue = self.inner.lock();
-            if !queue.contains(&task) {
-                queue.push(task);
+            let mut inner = self.inner.lock();
+            // O(1) HashSet check + insert vs. the legacy O(N)
+            // SmallVec::contains scan.
+            if inner.presence.insert(task) {
+                inner.queue.push(task);
+                let new_len = inner.queue.len();
+                drop(inner);
+                self.cached_len.store(new_len, Ordering::Release);
             }
             true
         })
@@ -190,33 +232,52 @@ impl LocalQueue {
         if tasks.is_empty() {
             return;
         }
-        let mut queue = self.inner.lock();
-        queue.extend_from_slice(tasks);
+        let mut inner = self.inner.lock();
+        inner.queue.extend_from_slice(tasks);
+        for task in tasks {
+            inner.presence.insert(*task);
+        }
+        let new_len = inner.queue.len();
+        drop(inner);
+        self.cached_len.store(new_len, Ordering::Release);
     }
 
     /// Pops a task from the local queue (LIFO).
     #[inline]
     #[must_use]
     pub fn pop(&self) -> Option<TaskId> {
-        let mut queue = self.inner.lock();
-        queue.pop()
+        let mut inner = self.inner.lock();
+        let popped = inner.queue.pop();
+        if let Some(task) = popped {
+            inner.presence.remove(&task);
+        }
+        let new_len = inner.queue.len();
+        drop(inner);
+        self.cached_len.store(new_len, Ordering::Release);
+        popped
     }
 
     /// Returns true if the local queue is empty.
+    ///
+    /// br-asupersync-pvbwxm: lock-free atomic load of the cached length;
+    /// the owner's backoff loop calls this on every iteration and previously
+    /// took the queue mutex (contending with stealers from other workers).
     #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        let stack = self.inner.lock();
-        stack.is_empty()
+        self.cached_len.load(Ordering::Acquire) == 0
     }
 
     /// Returns the current length of the local queue.
-    /// Takes a short-lived lock; intended for observability and tests.
+    ///
+    /// br-asupersync-pvbwxm: lock-free atomic load of the cached length.
+    /// Reads are eventually consistent with concurrent steals — the value
+    /// is current as of the most recent push/pop/steal critical section
+    /// observed by this thread.
     #[inline]
     #[must_use]
     pub fn len(&self) -> usize {
-        let stack = self.inner.lock();
-        stack.len()
+        self.cached_len.load(Ordering::Acquire)
     }
 
     /// Returns a stable snapshot of queued task IDs for observability/tests.
@@ -227,8 +288,8 @@ impl LocalQueue {
     #[inline]
     #[must_use]
     pub fn snapshot_tasks(&self) -> SmallVec<[TaskId; 32]> {
-        let queue = self.inner.lock();
-        queue.iter().copied().collect()
+        let inner = self.inner.lock();
+        inner.queue.iter().copied().collect()
     }
 
     /// Creates a stealer for this queue.
@@ -238,6 +299,7 @@ impl LocalQueue {
         Stealer {
             tasks: self.tasks.clone(),
             inner: Arc::clone(&self.inner),
+            cached_len: Arc::clone(&self.cached_len),
         }
     }
 }
@@ -260,7 +322,8 @@ impl Drop for CurrentQueueGuard {
 #[derive(Debug, Clone)]
 pub struct Stealer {
     tasks: TaskSource,
-    inner: Arc<Mutex<SmallVec<[TaskId; 32]>>>,
+    inner: Arc<Mutex<LocalQueueInner>>,
+    cached_len: Arc<AtomicUsize>,
 }
 
 impl Stealer {
@@ -285,28 +348,36 @@ impl Stealer {
     }
 
     /// Returns the exact length of the queue.
-    /// Uses a short-lived lock, making it suitable for Power of Two Choices sampling
-    /// without heavy contention since steal sampling occurs outside the hot execution path.
+    ///
+    /// br-asupersync-pvbwxm: lock-free atomic load — Power of Two Choices
+    /// stealer sampling consults this from many workers at once. Routing
+    /// every sample through the deque mutex (the prior implementation)
+    /// turned the sampling itself into the contention point. The atomic
+    /// mirror is updated on every owner push/pop and stealer steal
+    /// critical section, so the value is eventually consistent and
+    /// adequate for sampling decisions.
     #[inline]
     #[must_use]
     pub fn len(&self) -> usize {
-        self.inner.lock().len()
+        self.cached_len.load(Ordering::Acquire)
     }
 
     /// Returns true if the queue has no stealable items.
+    ///
+    /// br-asupersync-pvbwxm: lock-free atomic check.
     #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.inner.lock().is_empty()
+        self.cached_len.load(Ordering::Acquire) == 0
     }
 
     #[inline]
     fn steal_batch_locked(
-        src: &mut SmallVec<[TaskId; 32]>,
-        dest: &mut SmallVec<[TaskId; 32]>,
+        src: &mut LocalQueueInner,
+        dest: &mut LocalQueueInner,
         arena: &Arena<TaskRecord>,
     ) -> bool {
-        let initial_len = src.len();
+        let initial_len = src.queue.len();
         if initial_len == 0 {
             return false;
         }
@@ -317,11 +388,11 @@ impl Stealer {
         let mut scanned_len = 0;
 
         while scanned_len < scan_limit && stolen < steal_limit {
-            let task_id = src[scanned_len];
+            let task_id = src.queue[scanned_len];
             match arena.get(task_id.arena_index()) {
                 Some(record) if record.is_local() => {
                     if kept_prefix_len != scanned_len {
-                        src[kept_prefix_len] = task_id;
+                        src.queue[kept_prefix_len] = task_id;
                     }
                     kept_prefix_len += 1;
                 }
@@ -332,14 +403,19 @@ impl Stealer {
                     // case out of the queue previously lost ready work parked
                     // in a peer's fast_queue during round-robin stealing
                     // (br-asupersync-uguhr2).
-                    dest.push(task_id);
+                    // br-asupersync-5oll2p: keep the presence index in
+                    // sync — the task moves from src to dest, so remove
+                    // from src.presence and insert into dest.presence.
+                    src.presence.remove(&task_id);
+                    dest.queue.push(task_id);
+                    dest.presence.insert(task_id);
                     stolen += 1;
                 }
             }
             scanned_len += 1;
         }
 
-        Self::compact_scanned_prefix(src, kept_prefix_len, scanned_len);
+        Self::compact_scanned_prefix(&mut src.queue, kept_prefix_len, scanned_len);
         stolen > 0
     }
 
@@ -354,18 +430,18 @@ impl Stealer {
     #[allow(clippy::significant_drop_tightening)]
     pub fn steal(&self) -> Option<TaskId> {
         self.tasks.with_tasks_arena_mut(|arena| {
-            let mut stack = self.inner.lock();
-            let scan_limit = stack.len().min(Self::SKIPPED_LOCALS_INLINE_CAP);
+            let mut inner = self.inner.lock();
+            let scan_limit = inner.queue.len().min(Self::SKIPPED_LOCALS_INLINE_CAP);
             let mut kept_prefix_len = 0;
             let mut scanned_len = 0;
             let mut stolen = None;
 
             while scanned_len < scan_limit {
-                let task_id = stack[scanned_len];
+                let task_id = inner.queue[scanned_len];
                 match arena.get(task_id.arena_index()) {
                     Some(record) if record.is_local() => {
                         if kept_prefix_len != scanned_len {
-                            stack[kept_prefix_len] = task_id;
+                            inner.queue[kept_prefix_len] = task_id;
                         }
                         kept_prefix_len += 1;
                     }
@@ -384,8 +460,14 @@ impl Stealer {
                 scanned_len += 1;
             }
 
-            Self::compact_scanned_prefix(&mut stack, kept_prefix_len, scanned_len);
-            drop(stack);
+            Self::compact_scanned_prefix(&mut inner.queue, kept_prefix_len, scanned_len);
+            // br-asupersync-5oll2p: drop the stolen task from presence.
+            if let Some(task) = stolen {
+                inner.presence.remove(&task);
+            }
+            let new_len = inner.queue.len();
+            drop(inner);
+            self.cached_len.store(new_len, Ordering::Release);
             stolen
         })
     }
@@ -404,7 +486,7 @@ impl Stealer {
         }
         debug_assert!(self.tasks.same_underlying_tasks(&dest.tasks));
 
-        self.tasks.with_tasks_arena_mut(|arena| {
+        let stole = self.tasks.with_tasks_arena_mut(|arena| {
             // Avoid lock inversion when two workers concurrently steal from each
             // other by acquiring queue locks in a deterministic pointer order.
             let src_addr = Arc::as_ptr(&self.inner) as usize;
@@ -412,14 +494,29 @@ impl Stealer {
 
             if src_addr < dest_addr {
                 let mut src = self.inner.lock();
-                let mut dest_stack = dest.inner.lock();
-                Self::steal_batch_locked(&mut src, &mut dest_stack, arena)
+                let mut dest_inner = dest.inner.lock();
+                let stole = Self::steal_batch_locked(&mut src, &mut dest_inner, arena);
+                let src_len = src.queue.len();
+                let dest_len = dest_inner.queue.len();
+                drop(dest_inner);
+                drop(src);
+                (stole, src_len, dest_len)
             } else {
-                let mut dest_stack = dest.inner.lock();
+                let mut dest_inner = dest.inner.lock();
                 let mut src = self.inner.lock();
-                Self::steal_batch_locked(&mut src, &mut dest_stack, arena)
+                let stole = Self::steal_batch_locked(&mut src, &mut dest_inner, arena);
+                let src_len = src.queue.len();
+                let dest_len = dest_inner.queue.len();
+                drop(src);
+                drop(dest_inner);
+                (stole, src_len, dest_len)
             }
-        })
+        });
+        // br-asupersync-pvbwxm: publish updated cached lengths after
+        // dropping all queue locks.
+        self.cached_len.store(stole.1, Ordering::Release);
+        dest.cached_len.store(stole.2, Ordering::Release);
+        stole.0
     }
 }
 
