@@ -999,10 +999,26 @@ fn qpack_relative_to_absolute(
                 "dynamic qpack post-base index overflow",
             ))
     } else {
-        // Pre-base reference: absolute = base - index - 1
-        base.checked_sub(relative_index + 1)
+        // br-asupersync-6ws34s — Pre-base reference: absolute = base - index - 1.
+        // Both subtractions must be checked. The previous shape was
+        // `base.checked_sub(relative_index + 1)` which evaluates the
+        // `relative_index + 1` *first*, unchecked. When
+        // `relative_index == u64::MAX`, the inner add wraps to 0 and
+        // `checked_sub(0)` returns `Some(base)` — yielding an absolute
+        // index that bypasses the under-base bounds check, mapping a
+        // crafted relative_index to whatever entry is currently at
+        // `base`. The fix routes both arithmetic steps through
+        // `checked_add` / `checked_sub`. RFC 9204 / 9114 treat any
+        // qpack reference exceeding the base as a stream-level
+        // decoding error (H3_QPACK_DECODER_STREAM_ERROR).
+        let plus_one = relative_index
+            .checked_add(1)
             .ok_or(H3NativeError::InvalidFrame(
-                "dynamic qpack relative index exceeds base",
+                "dynamic qpack relative index +1 overflow (H3_QPACK_DECODER_STREAM_ERROR)",
+            ))?;
+        base.checked_sub(plus_one)
+            .ok_or(H3NativeError::InvalidFrame(
+                "dynamic qpack relative index exceeds base (H3_QPACK_DECODER_STREAM_ERROR)",
             ))
     }
 }
@@ -1366,8 +1382,28 @@ pub fn qpack_decode_response_field_section_with_limit(
     header_fields_to_response_head(&fields)
 }
 
+/// br-asupersync-5vj2xy — Header field names forbidden in HTTP/3 per
+/// RFC 9114 §4.2 ("HTTP Fields"). These are connection-specific
+/// fields whose semantics map to HTTP/1.1 wire framing and are
+/// meaningless or actively harmful when carried over a multiplexed
+/// HTTP/3 stream. RFC 9114 §4.2 says any such field on the wire
+/// MUST be treated as malformed; the spec gives the exact list.
+///
+/// `te` is NOT forbidden as a name (it's allowed when the value is
+/// exactly the token `trailers`); per-value validation for `te` is
+/// handled separately via `validate_te_value` and is out of scope
+/// for this name-level check.
+const H3_FORBIDDEN_HEADER_NAMES: &[&str] = &[
+    "connection",
+    "keep-alive",
+    "proxy-connection",
+    "transfer-encoding",
+    "upgrade",
+];
+
 /// Validate that a header field name contains only valid characters per
-/// RFC 9110 §5.1 and is lowercase per HTTP/3 requirements (RFC 9114 §4.2).
+/// RFC 9110 §5.1, is lowercase per HTTP/3 requirements (RFC 9114 §4.2),
+/// and is not on the RFC 9114 §4.2 forbidden list (br-asupersync-5vj2xy).
 fn validate_header_name(name: &str) -> Result<(), H3NativeError> {
     if name.is_empty() {
         return Err(H3NativeError::InvalidFrame("empty header field name"));
@@ -1412,6 +1448,14 @@ fn validate_header_name(name: &str) -> Result<(), H3NativeError> {
                 ));
             }
         }
+    }
+    // br-asupersync-5vj2xy — RFC 9114 §4.2 forbidden-header check.
+    // The name has already passed the lowercase enforcement above, so
+    // an exact match against the lowercase forbidden list is correct.
+    if H3_FORBIDDEN_HEADER_NAMES.contains(&name) {
+        return Err(H3NativeError::InvalidFrame(
+            "header field name forbidden in HTTP/3 (RFC 9114 §4.2)",
+        ));
     }
     Ok(())
 }
@@ -3971,9 +4015,7 @@ mod tests {
         let err = H3Frame::decode(&buf, &test_config()).expect_err("must fail");
         assert_eq!(
             err,
-            H3NativeError::InvalidFrame(
-                "push_promise empty field_block (RFC 9114 §7.2.5)"
-            )
+            H3NativeError::InvalidFrame("push_promise empty field_block (RFC 9114 §7.2.5)")
         );
     }
 
@@ -3991,8 +4033,7 @@ mod tests {
         encode_varint(payload.len() as u64, &mut buf).expect("frame length");
         buf.extend_from_slice(&payload);
 
-        let (frame, _consumed) =
-            H3Frame::decode(&buf, &test_config()).expect("must decode");
+        let (frame, _consumed) = H3Frame::decode(&buf, &test_config()).expect("must decode");
         match frame {
             H3Frame::PushPromise {
                 push_id,
@@ -4003,6 +4044,92 @@ mod tests {
             }
             other => panic!("expected PushPromise, got {other:?}"),
         }
+    }
+
+    /// br-asupersync-5vj2xy — RFC 9114 §4.2 forbidden-header check.
+    /// Each name on the forbidden list must be rejected by
+    /// `validate_header_name` even when its character set is
+    /// otherwise valid (lowercase, RFC 9110 token).
+    #[test]
+    fn validate_header_name_rejects_rfc9114_forbidden_names() {
+        for forbidden in [
+            "connection",
+            "keep-alive",
+            "proxy-connection",
+            "transfer-encoding",
+            "upgrade",
+        ] {
+            let err = validate_header_name(forbidden).expect_err(forbidden);
+            match err {
+                H3NativeError::InvalidFrame(msg) => assert!(
+                    msg.contains("forbidden"),
+                    "wrong reject reason for {forbidden}: {msg}"
+                ),
+                other => panic!("expected InvalidFrame, got {other:?}"),
+            }
+        }
+    }
+
+    /// br-asupersync-5vj2xy — Regression guard: ordinary headers and
+    /// pseudo-headers are NOT rejected by the new check.
+    #[test]
+    fn validate_header_name_accepts_ordinary_names() {
+        for ok in [
+            "content-type",
+            "content-length",
+            "x-custom-header",
+            "te", // not on the forbidden list (only certain values are restricted)
+            ":authority",
+            ":method",
+            ":path",
+        ] {
+            validate_header_name(ok).unwrap_or_else(|e| panic!("rejected {ok}: {e:?}"));
+        }
+    }
+
+    /// br-asupersync-6ws34s — Pre-base relative-index arithmetic must
+    /// fail closed at `u64::MAX` rather than wrap to a valid absolute
+    /// index. The previous shape `base.checked_sub(relative_index + 1)`
+    /// silently wrapped the inner add and returned `Some(base)`,
+    /// mapping the crafted index to whatever entry sat at `base`.
+    #[test]
+    fn qpack_relative_to_absolute_pre_base_overflow_rejected() {
+        let err = qpack_relative_to_absolute(100, u64::MAX, false)
+            .expect_err("must reject u64::MAX relative_index");
+        match err {
+            H3NativeError::InvalidFrame(msg) => assert!(
+                msg.contains("H3_QPACK_DECODER_STREAM_ERROR"),
+                "wrong reject reason: {msg}"
+            ),
+            other => panic!("expected InvalidFrame, got {other:?}"),
+        }
+    }
+
+    /// br-asupersync-6ws34s — Pre-base relative_index strictly less
+    /// than base computes correctly: absolute = base - index - 1.
+    /// Regression guard against the fix accidentally rejecting valid
+    /// inputs.
+    #[test]
+    fn qpack_relative_to_absolute_pre_base_happy_path() {
+        let abs = qpack_relative_to_absolute(10, 3, false).expect("valid pre-base");
+        assert_eq!(abs, 6); // 10 - 3 - 1 = 6
+        let abs0 = qpack_relative_to_absolute(1, 0, false).expect("base=1, index=0");
+        assert_eq!(abs0, 0);
+    }
+
+    /// br-asupersync-6ws34s — Pre-base relative_index >= base must
+    /// also reject (legitimate H3_QPACK_DECODER_STREAM_ERROR shape).
+    #[test]
+    fn qpack_relative_to_absolute_pre_base_index_geq_base_rejected() {
+        // index = base means absolute = -1 (would underflow).
+        assert!(qpack_relative_to_absolute(5, 5, false).is_err());
+        // index > base also rejects.
+        assert!(qpack_relative_to_absolute(5, 10, false).is_err());
+        // index = base - 1 is the boundary: absolute = 0 (valid).
+        assert_eq!(
+            qpack_relative_to_absolute(5, 4, false).expect("boundary valid"),
+            0
+        );
     }
 
     // --- 3. Request stream state gaps ---
