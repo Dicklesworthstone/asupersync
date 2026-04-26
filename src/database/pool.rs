@@ -34,7 +34,9 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use crate::types::Time;
 
 // ─── ConnectionManager trait ────────────────────────────────────────────────
 
@@ -160,19 +162,26 @@ impl DbPoolConfig {
 // ─── Pool internals ─────────────────────────────────────────────────────────
 
 /// An idle connection with metadata.
+///
+/// br-asupersync-w3g9kb: time fields use the runtime
+/// [`crate::types::Time`] abstraction (returned by `cx.now()` in
+/// async paths and `crate::time::wall_now()` in Drop / sync paths)
+/// rather than `std::time::Instant::now()` directly. This routes
+/// every wall-clock read through a single typed boundary that
+/// future Cx-aware test injection can intercept.
 struct IdleConnection<C> {
     conn: C,
-    created_at: Instant,
-    last_used: Instant,
+    created_at: Time,
+    last_used: Time,
 }
 
 impl<C> IdleConnection<C> {
-    fn is_expired(&self, config: &DbPoolConfig) -> bool {
-        self.created_at.elapsed() > config.max_lifetime
+    fn is_expired(&self, config: &DbPoolConfig, now: Time) -> bool {
+        Duration::from_nanos(now.duration_since(self.created_at)) > config.max_lifetime
     }
 
-    fn is_idle_too_long(&self, config: &DbPoolConfig) -> bool {
-        self.last_used.elapsed() > config.idle_timeout
+    fn is_idle_too_long(&self, config: &DbPoolConfig, now: Time) -> bool {
+        Duration::from_nanos(now.duration_since(self.last_used)) > config.idle_timeout
     }
 }
 
@@ -382,7 +391,12 @@ impl<M: ConnectionManager> DbPool<M> {
 
                 let mut popped = None;
                 if let Some(idle) = inner.idle.pop_front() {
-                    if idle.is_expired(&self.config) || idle.is_idle_too_long(&self.config) {
+                    // br-asupersync-w3g9kb: sync get path has no Cx;
+                    // sample wall_now() once for both eviction checks.
+                    let now = crate::time::wall_now();
+                    if idle.is_expired(&self.config, now)
+                        || idle.is_idle_too_long(&self.config, now)
+                    {
                         inner.total = inner.total.saturating_sub(1);
                         self.stats.total_discards.fetch_add(1, Ordering::Relaxed);
                         popped = Some((idle.conn, false, idle.created_at));
@@ -463,7 +477,8 @@ impl<M: ConnectionManager> DbPool<M> {
                     return Ok(PooledConnection {
                         conn: Some(conn),
                         pool: self,
-                        created_at: Instant::now(),
+                        // br-asupersync-w3g9kb: sync path → wall_now().
+                        created_at: crate::time::wall_now(),
                     });
                 }
                 Err(e) => {
@@ -491,7 +506,11 @@ impl<M: ConnectionManager> DbPool<M> {
         &self,
         policy: &RetryPolicy,
     ) -> Result<PooledConnection<'_, M>, DbPoolError<M::Error>> {
-        let deadline = Instant::now() + self.config.connection_timeout;
+        // br-asupersync-w3g9kb: deadline + remaining computed in
+        // Time space; Time supports `+ Duration` and saturating
+        // `duration_since` returning u64 nanoseconds, which we
+        // convert back to `Duration` for `std::thread::sleep`.
+        let deadline: Time = crate::time::wall_now() + self.config.connection_timeout;
         let mut attempt = 0u32;
 
         loop {
@@ -510,19 +529,21 @@ impl<M: ConnectionManager> DbPool<M> {
                         return Err(e);
                     }
 
-                    // Check if deadline already passed.
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    if remaining.is_zero() {
+                    // Check if deadline already passed (Time-space).
+                    let remaining_nanos =
+                        deadline.duration_since(crate::time::wall_now());
+                    if remaining_nanos == 0 {
                         self.stats.total_timeouts.fetch_add(1, Ordering::Relaxed);
                         return Err(DbPoolError::Timeout);
                     }
+                    let remaining = Duration::from_nanos(remaining_nanos);
 
                     // Calculate backoff delay (no jitter in synchronous context).
                     let delay = calculate_delay(policy, attempt, None);
                     std::thread::sleep(delay.min(remaining));
 
                     // Re-check deadline after sleep.
-                    if Instant::now() >= deadline {
+                    if crate::time::wall_now() >= deadline {
                         self.stats.total_timeouts.fetch_add(1, Ordering::Relaxed);
                         return Err(DbPoolError::Timeout);
                     }
@@ -538,7 +559,7 @@ impl<M: ConnectionManager> DbPool<M> {
     }
 
     /// Return a connection to the pool, preserving its original creation time.
-    fn return_connection(&self, conn: M::Connection, created_at: Instant) {
+    fn return_connection(&self, conn: M::Connection, created_at: Time) {
         let conn_to_disconnect = {
             let mut inner = self.inner.lock();
             if inner.closed {
@@ -548,7 +569,10 @@ impl<M: ConnectionManager> DbPool<M> {
                 inner.idle.push_back(IdleConnection {
                     conn,
                     created_at,
-                    last_used: Instant::now(),
+                    // br-asupersync-w3g9kb: Drop / sync return path
+                    // has no Cx; wall_now() is the runtime-time
+                    // abstraction.
+                    last_used: crate::time::wall_now(),
                 });
                 None
             }
@@ -606,9 +630,12 @@ impl<M: ConnectionManager> DbPool<M> {
         // Drain all idle, keep only the valid ones.
         let mut keep = VecDeque::new();
         let mut to_disconnect = Vec::new();
+        // br-asupersync-w3g9kb: sample wall_now() once for the entire
+        // eviction sweep so all entries see the same "now".
+        let now = crate::time::wall_now();
 
         while let Some(entry) = inner.idle.pop_front() {
-            if entry.is_expired(&self.config) || entry.is_idle_too_long(&self.config) {
+            if entry.is_expired(&self.config, now) || entry.is_idle_too_long(&self.config, now) {
                 to_disconnect.push(entry.conn);
             } else {
                 keep.push_back(entry);
@@ -642,7 +669,7 @@ impl<M: ConnectionManager> DbPool<M> {
 
             if let Ok(conn) = self.manager.connect() {
                 self.stats.total_creates.fetch_add(1, Ordering::Relaxed);
-                self.return_connection(conn, Instant::now());
+                self.return_connection(conn, crate::time::wall_now());
                 created += 1;
             } else {
                 let mut inner = self.inner.lock();
@@ -682,7 +709,9 @@ impl<M: ConnectionManager> fmt::Debug for DbPool<M> {
 pub struct PooledConnection<'a, M: ConnectionManager> {
     conn: Option<M::Connection>,
     pool: &'a DbPool<M>,
-    created_at: Instant,
+    // br-asupersync-w3g9kb: Time replaces Instant; same values
+    // produced by wall_now() in sync paths and cx.now() in async.
+    created_at: Time,
 }
 
 impl<M: ConnectionManager> PooledConnection<'_, M> {
@@ -908,8 +937,12 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
             };
 
             if let Some(idle) = candidate {
-                let is_expired = idle.is_expired(&self.config);
-                let is_stale = idle.is_idle_too_long(&self.config);
+                // br-asupersync-w3g9kb: async path uses cx.now() so
+                // eviction decisions follow the runtime's logical
+                // clock (deterministic in the lab runtime).
+                let now = cx.now();
+                let is_expired = idle.is_expired(&self.config, now);
+                let is_stale = idle.is_idle_too_long(&self.config, now);
 
                 if is_expired || is_stale {
                     {
@@ -972,7 +1005,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                     }
                     creation_guard.disarmed = true;
                     self.stats.total_creates.fetch_add(1, Ordering::Relaxed);
-                    return self.finish_async_checkout(conn, Instant::now());
+                    return self.finish_async_checkout(conn, cx.now());
                 }
                 Outcome::Err(e) => return Err(DbPoolError::Connect(e)),
                 Outcome::Cancelled(_) | Outcome::Panicked(_) => {
@@ -1032,7 +1065,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
     fn finish_async_checkout(
         &self,
         conn: M::Connection,
-        created_at: Instant,
+        created_at: Time,
     ) -> Result<AsyncPooledConnection<'_, M>, DbPoolError<M::Error>> {
         {
             let mut inner = self.inner.lock();
@@ -1056,7 +1089,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
     }
 
     /// Return a connection to the pool.
-    fn return_connection(&self, conn: M::Connection, created_at: Instant) {
+    fn return_connection(&self, conn: M::Connection, created_at: Time) {
         let conn_to_disconnect = {
             let mut inner = self.inner.lock();
             if inner.closed {
@@ -1066,7 +1099,10 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                 inner.idle.push_back(IdleConnection {
                     conn,
                     created_at,
-                    last_used: Instant::now(),
+                    // br-asupersync-w3g9kb: Drop / async return
+                    // path has no Cx; wall_now() is the runtime-time
+                    // abstraction.
+                    last_used: crate::time::wall_now(),
                 });
                 None
             }
@@ -1140,7 +1176,9 @@ impl<M: AsyncConnectionManager> fmt::Debug for AsyncDbPool<M> {
 pub struct AsyncPooledConnection<'a, M: AsyncConnectionManager> {
     conn: Option<M::Connection>,
     pool: &'a AsyncDbPool<M>,
-    created_at: Instant,
+    // br-asupersync-w3g9kb: Time replaces Instant; populated by
+    // cx.now() at finish_async_checkout.
+    created_at: Time,
 }
 
 impl<M: AsyncConnectionManager> AsyncPooledConnection<'_, M> {
