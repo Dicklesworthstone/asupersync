@@ -24,8 +24,8 @@
 #![allow(unsafe_code)]
 
 use parking_lot::Mutex as ParkingMutex;
+use slab::Slab;
 use std::cell::UnsafeCell;
-use std::collections::VecDeque;
 use std::future::Future;
 use std::ops::{Deref, DerefMut};
 use std::pin::Pin;
@@ -99,18 +99,162 @@ unsafe impl<T: Send> Sync for Mutex<T> {}
 struct MutexState {
     /// Whether the mutex is currently locked.
     locked: bool,
-    /// Queue of waiters.
-    waiters: VecDeque<Waiter>,
-    /// Waiter that has been granted the next turn but has not yet resumed.
-    granted_waiter: Option<u64>,
-    /// Monotonic counter for waiter identity.
-    next_waiter_id: u64,
+    /// Slab-backed doubly-linked FIFO of waiters
+    /// (br-asupersync-wlf0xh). Replaces the old `VecDeque<Waiter>`
+    /// whose `iter().position(|w| w.id == ...)` cleanup was O(N) in
+    /// the queue depth. The slab allocates stable indices so the
+    /// caller-held `waiter_id` directly identifies the slot — no
+    /// scan needed. The intrusive `prev`/`next` pointers preserve
+    /// FIFO ordering; cleanup, contains-check, and waker update are
+    /// all O(1) with no probing of the rest of the queue.
+    waiters: WaiterChain,
+    /// Waiter that has been granted the next turn but has not yet
+    /// resumed. Holds the slab index of the granted waiter (or
+    /// `usize::MAX` as a sentinel via Option).
+    granted_waiter: Option<usize>,
+}
+
+/// Slab-backed doubly-linked FIFO of waiters
+/// (br-asupersync-wlf0xh). Each slot carries the task's `Waker` plus
+/// `prev`/`next` slab-index pointers so that O(1) removal at any
+/// position is possible from a known waiter id.
+#[derive(Debug)]
+struct WaiterChain {
+    slots: Slab<WaiterSlot>,
+    head: Option<usize>,
+    tail: Option<usize>,
 }
 
 #[derive(Debug)]
-struct Waiter {
+struct WaiterSlot {
     waker: Waker,
-    id: u64,
+    prev: Option<usize>,
+    next: Option<usize>,
+}
+
+impl WaiterChain {
+    fn new() -> Self {
+        Self {
+            slots: Slab::with_capacity(4),
+            head: None,
+            tail: None,
+        }
+    }
+
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.head.is_none()
+    }
+
+    #[inline]
+    fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// Push a new waiter to the BACK of the chain (FIFO insert).
+    /// Returns the waiter id (slab index).
+    fn push_back(&mut self, waker: Waker) -> usize {
+        let new_id = self.slots.insert(WaiterSlot {
+            waker,
+            prev: self.tail,
+            next: None,
+        });
+        match self.tail {
+            Some(prev_tail) => {
+                self.slots[prev_tail].next = Some(new_id);
+            }
+            None => {
+                self.head = Some(new_id);
+            }
+        }
+        self.tail = Some(new_id);
+        new_id
+    }
+
+    /// Push a new waiter to the FRONT of the chain (used for
+    /// "preserve precedence after spurious requeue", e.g. when a
+    /// granted waiter races with a steal).
+    fn push_front(&mut self, waker: Waker) -> usize {
+        let new_id = self.slots.insert(WaiterSlot {
+            waker,
+            prev: None,
+            next: self.head,
+        });
+        match self.head {
+            Some(next_head) => {
+                self.slots[next_head].prev = Some(new_id);
+            }
+            None => {
+                self.tail = Some(new_id);
+            }
+        }
+        self.head = Some(new_id);
+        new_id
+    }
+
+    /// Pop the front waiter (FIFO take). Returns `(id, waker)` so
+    /// callers can both record the granted_waiter id and wake.
+    fn pop_front(&mut self) -> Option<(usize, Waker)> {
+        let head_id = self.head?;
+        let slot = self.slots.remove(head_id);
+        self.head = slot.next;
+        match slot.next {
+            Some(new_head) => {
+                self.slots[new_head].prev = None;
+            }
+            None => {
+                self.tail = None;
+            }
+        }
+        Some((head_id, slot.waker))
+    }
+
+    /// Returns the current front-of-queue id without removing.
+    /// Used to determine "would my removal force a re-grant?".
+    #[inline]
+    fn front_id(&self) -> Option<usize> {
+        self.head
+    }
+
+    /// O(1) remove by waiter id. Returns `Some(_)` if the id was
+    /// in the chain, `None` otherwise (idempotent for already-
+    /// removed ids — important for cleanup paths).
+    fn remove(&mut self, id: usize) -> Option<Waker> {
+        if !self.slots.contains(id) {
+            return None;
+        }
+        let slot = self.slots.remove(id);
+        match slot.prev {
+            Some(p) => self.slots[p].next = slot.next,
+            None => self.head = slot.next,
+        }
+        match slot.next {
+            Some(n) => self.slots[n].prev = slot.prev,
+            None => self.tail = slot.prev,
+        }
+        Some(slot.waker)
+    }
+
+    /// O(1) waker update by id. Returns whether the slot existed.
+    fn update_waker(&mut self, id: usize, new: &Waker) -> bool {
+        match self.slots.get_mut(id) {
+            Some(slot) => {
+                if !slot.waker.will_wake(new) {
+                    slot.waker.clone_from(new);
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// O(1) presence check. Used by `LockFuture::poll` to detect
+    /// whether the future's previously-allocated id is still queued
+    /// (vs popped by `unlock` and granted).
+    #[inline]
+    fn contains(&self, id: usize) -> bool {
+        self.slots.contains(id)
+    }
 }
 
 impl<T> Mutex<T> {
@@ -123,9 +267,8 @@ impl<T> Mutex<T> {
             poisoned: AtomicBool::new(false),
             state: ParkingMutex::new(MutexState {
                 locked: false,
-                waiters: VecDeque::with_capacity(4),
+                waiters: WaiterChain::new(),
                 granted_waiter: None,
-                next_waiter_id: 0,
             }),
         }
     }
@@ -206,9 +349,10 @@ impl<T> Mutex<T> {
         let waker_to_wake = {
             let mut state = self.state.lock();
             state.locked = false;
-            if let Some(waiter) = state.waiters.pop_front() {
-                state.granted_waiter = Some(waiter.id);
-                Some(waiter.waker)
+            // br-asupersync-wlf0xh: O(1) FIFO take via slab pop_front.
+            if let Some((id, waker)) = state.waiters.pop_front() {
+                state.granted_waiter = Some(id);
+                Some(waker)
             } else {
                 state.granted_waiter = None;
                 None
@@ -232,16 +376,21 @@ impl<T: Default> Default for Mutex<T> {
 pub struct LockFuture<'a, 'b, T> {
     mutex: &'a Mutex<T>,
     cx: &'b Cx,
-    waiter_id: Option<u64>,
+    /// Slab index of this waiter's slot in the parent mutex's
+    /// `WaiterChain` (br-asupersync-wlf0xh). `usize` rather than the
+    /// previous `u64` because slab indices are stable allocations
+    /// owned by the chain itself.
+    waiter_id: Option<usize>,
     completed: bool,
 }
 
 impl<T> LockFuture<'_, '_, T> {
     #[inline]
     fn grant_next_waiter(state: &mut MutexState) -> Option<Waker> {
-        if let Some(waiter) = state.waiters.pop_front() {
-            state.granted_waiter = Some(waiter.id);
-            Some(waiter.waker)
+        // br-asupersync-wlf0xh: O(1) FIFO take via slab pop_front.
+        if let Some((id, waker)) = state.waiters.pop_front() {
+            state.granted_waiter = Some(id);
+            Some(waker)
         } else {
             state.granted_waiter = None;
             None
@@ -262,12 +411,15 @@ impl<T> LockFuture<'_, '_, T> {
                         None
                     }
                 } else {
-                    let pos = state.waiters.iter().position(|w| w.id == waiter_id);
-                    let is_head = pos == Some(0);
-
-                    if let Some(p) = pos {
-                        state.waiters.remove(p);
-                    }
+                    // br-asupersync-wlf0xh: O(1) head-check + remove.
+                    // The previous code performed an O(N) iter().position()
+                    // scan to locate the waiter and a separate O(N)
+                    // VecDeque::remove(pos). With the slab-backed chain
+                    // we know the slot index directly, so we can ask the
+                    // chain whether we are the front in O(1) and remove
+                    // by id in O(1).
+                    let is_head = state.waiters.front_id() == Some(waiter_id);
+                    let _removed = state.waiters.remove(waiter_id);
 
                     if !state.locked && state.granted_waiter.is_none() && is_head {
                         Self::grant_next_waiter(&mut state)
@@ -322,13 +474,10 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
 
                 // Another caller stole the lock before we resumed. Re-register
                 // ourselves at the front to preserve our turn.
+                // br-asupersync-wlf0xh: O(1) re-register via slab.push_front;
+                // the slab assigns the new id without a monotonic counter.
                 state.granted_waiter = None;
-                let new_id = state.next_waiter_id;
-                state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
-                state.waiters.push_front(Waiter {
-                    waker: context.waker().clone(),
-                    id: new_id,
-                });
+                let new_id = state.waiters.push_front(context.waker().clone());
                 drop(state);
                 self.waiter_id = Some(new_id);
                 return Poll::Pending;
@@ -345,32 +494,22 @@ impl<'a, T> Future for LockFuture<'a, '_, T> {
         // Register waiter or update existing waker. We must update the waker
         // when it changes because some executors provide different wakers on
         // each poll - failing to update would cause the task to never be woken.
+        // br-asupersync-wlf0xh: contains() and update_waker() are O(1)
+        // via slab.contains / slab.get_mut; the previous code did an
+        // O(N) iter_mut().find().
         if let Some(waiter_id) = self.waiter_id {
-            if let Some(existing) = state.waiters.iter_mut().find(|w| w.id == waiter_id) {
-                // Still queued — update the waker in case it changed.
-                if !existing.waker.will_wake(context.waker()) {
-                    existing.waker.clone_from(context.waker());
-                }
+            if state.waiters.update_waker(waiter_id, context.waker()) {
+                // Still queued — waker updated in place.
             } else {
                 // Was dequeued earlier but is no longer the granted waiter.
                 // Re-register at the FRONT to preserve FIFO fairness.
-                let new_id = state.next_waiter_id;
-                state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
-                state.waiters.push_front(Waiter {
-                    waker: context.waker().clone(),
-                    id: new_id,
-                });
+                let new_id = state.waiters.push_front(context.waker().clone());
                 drop(state);
                 self.waiter_id = Some(new_id);
                 return Poll::Pending;
             }
         } else {
-            let id = state.next_waiter_id;
-            state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
-            state.waiters.push_back(Waiter {
-                waker: context.waker().clone(),
-                id,
-            });
+            let id = state.waiters.push_back(context.waker().clone());
             drop(state);
             self.waiter_id = Some(id);
             return Poll::Pending;
