@@ -44,6 +44,15 @@ const CSRF_TOKEN_KEY: &str = "__asupersync.csrf_token";
 /// expiration check (br-asupersync-7udumi).
 const LAST_ACCESSED_KEY: &str = "__asupersync.last_accessed_unix_secs";
 
+/// br-asupersync-hifab2 — Reserved key set by [`Session::regenerate`] to
+/// signal the middleware that the session ID must be rotated at response
+/// time. The middleware deletes the old store entry, mints a fresh ID,
+/// saves the data under the new ID, and emits a new Set-Cookie. This
+/// prevents session fixation: if an attacker primes the victim's browser
+/// with a known session ID and then waits for the victim to authenticate,
+/// rotating on auth boundary makes the captured ID worthless.
+const REGENERATE_FLAG_KEY: &str = "__asupersync.regenerate";
+
 /// HTTP request methods that mutate server-side state. CSRF validation
 /// is required on these methods only — safe methods (GET/HEAD/OPTIONS)
 /// are exempt per the OWASP CSRF Prevention Cheat Sheet.
@@ -242,8 +251,46 @@ fn get_cookie(req: &Request, name: &str) -> Option<String> {
     None
 }
 
+/// br-asupersync-uz7oxb — true if `s` is safe to interpolate into a
+/// `Set-Cookie` header field as a name, value, or attribute value.
+/// Rejects any byte that would terminate the current attribute or split
+/// the header: `;`, `,`, `=` for names, control chars (< 0x20), `\r`,
+/// `\n`, and DEL (0x7f).
+fn is_cookie_token_safe(s: &str, allow_eq: bool) -> bool {
+    s.bytes().all(|b| {
+        b >= 0x20
+            && b != 0x7f
+            && b != b';'
+            && b != b','
+            && b != b'\r'
+            && b != b'\n'
+            && (allow_eq || b != b'=')
+    })
+}
+
 /// Build a Set-Cookie header value.
+///
+/// br-asupersync-uz7oxb — sanitises the cookie `name`, `value`, and the
+/// configured `cookie_path`: any byte that would let a caller escape its
+/// attribute (`;`, `,`, control chars, CR/LF, DEL) panics. The current
+/// internal callers all pass either the configured cookie name (set at
+/// startup) or hex session IDs (caller-built), but the helper is a
+/// general-purpose API and a future caller passing user-controlled input
+/// is one refactor away from header injection / cookie scope escape.
+/// Names additionally reject `=` since the format is `name=value`.
 fn set_cookie_header(name: &str, value: &str, config: &SessionConfig) -> String {
+    assert!(
+        is_cookie_token_safe(name, false),
+        "br-asupersync-uz7oxb: cookie name contains forbidden byte (;,=,CR,LF,control,DEL)"
+    );
+    assert!(
+        is_cookie_token_safe(value, true),
+        "br-asupersync-uz7oxb: cookie value contains forbidden byte (;,,CR,LF,control,DEL)"
+    );
+    assert!(
+        is_cookie_token_safe(&config.cookie_path, true),
+        "br-asupersync-uz7oxb: cookie_path contains forbidden byte (;,,CR,LF,control,DEL)"
+    );
     let mut cookie = format!("{name}={value}; Path={}", config.cookie_path);
     if config.http_only {
         cookie.push_str("; HttpOnly");
@@ -328,6 +375,25 @@ pub struct SessionConfig {
     /// supplied by the client as the `X-CSRF-Token` request header.
     /// **Default: `true`.** (br-asupersync-7udumi)
     pub csrf_protection: bool,
+    /// br-asupersync-czbj90 — Allowed `Origin` values for state-changing
+    /// requests. Each entry is a scheme+host[+port] string matched
+    /// case-insensitively against the request `Origin` header (with
+    /// `Referer` as a fallback when `Origin` is absent — older clients).
+    /// Per OWASP CSRF Prevention Cheat Sheet, this is the second layer
+    /// of defense alongside the synchronizer-token check.
+    ///
+    /// **When empty** (default), origin checking is disabled and only
+    /// the X-CSRF-Token check fires. **When non-empty**, state-changing
+    /// requests must carry an `Origin` (or `Referer`) header whose
+    /// origin matches one of these entries; otherwise the request is
+    /// rejected with 403 even before the X-CSRF-Token check.
+    ///
+    /// Modern browsers always send `Origin` on state-changing requests,
+    /// so populating this is essentially free at runtime and adds
+    /// significant defense against header-stripping intermediaries that
+    /// drop `X-CSRF-Token` but preserve `Origin` (forms posted from same
+    /// site without JS).
+    pub allowed_origins: Vec<String>,
 }
 
 impl Default for SessionConfig {
@@ -343,6 +409,7 @@ impl Default for SessionConfig {
             max_age: None,
             idle_ttl_seconds: None,
             csrf_protection: true,
+            allowed_origins: Vec::new(),
         }
     }
 }
@@ -384,7 +451,9 @@ impl<S: SessionStore> SessionLayer<S> {
         // future maintainers who change the default — they'll see the
         // panic at startup rather than discovering broken cookies in
         // prod.
-        config.validate().expect("default SessionConfig must validate");
+        config
+            .validate()
+            .expect("default SessionConfig must validate");
         Self {
             store: Arc::new(store),
             config,
@@ -402,6 +471,20 @@ impl<S: SessionStore> SessionLayer<S> {
     #[must_use]
     pub fn cookie_path(mut self, path: impl Into<String>) -> Self {
         self.config.cookie_path = path.into();
+        self
+    }
+
+    /// br-asupersync-czbj90 — Set the allow-list of expected origins for
+    /// state-changing requests. See [`SessionConfig::allowed_origins`].
+    /// Each entry should be a scheme+host[+port] string such as
+    /// `"https://app.example.com"` or `"https://app.example.com:8443"`.
+    #[must_use]
+    pub fn allowed_origins<I, S2>(mut self, origins: I) -> Self
+    where
+        I: IntoIterator<Item = S2>,
+        S2: Into<String>,
+    {
+        self.config.allowed_origins = origins.into_iter().map(Into::into).collect();
         self
     }
 
@@ -531,9 +614,7 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
         // 2c. Ensure a CSRF token exists. New sessions get one on first
         //     touch; existing sessions that pre-date this commit get one
         //     lazily on first access. (br-asupersync-7udumi)
-        if self.config.csrf_protection
-            && session_data.get(CSRF_TOKEN_KEY).is_none()
-        {
+        if self.config.csrf_protection && session_data.get(CSRF_TOKEN_KEY).is_none() {
             session_data.insert(CSRF_TOKEN_KEY, generate_session_id());
         }
 
@@ -541,6 +622,45 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
         //     X-CSRF-Token header matching the session's stored token.
         //     Constant-time comparison prevents timing oracles.
         //     (br-asupersync-7udumi)
+        //
+        //     br-asupersync-czbj90 — defense in depth: when allowed_origins
+        //     is non-empty, also validate the request Origin (or Referer
+        //     fallback) against the allow-list. Modern browsers always
+        //     send Origin on state-changing requests, so this check is
+        //     essentially free at runtime. Header-stripping intermediaries
+        //     that drop X-CSRF-Token but preserve Origin still get
+        //     stopped here; a forged Origin would fail this check before
+        //     the X-CSRF-Token check has a chance to compensate. If both
+        //     Origin and Referer are absent on a state-changing request
+        //     and origin checking is configured, reject as 403.
+        if self.config.csrf_protection
+            && is_state_changing_method(&req.method)
+            && !self.config.allowed_origins.is_empty()
+        {
+            match request_origin(&req) {
+                None => {
+                    return Response::new(
+                        StatusCode::FORBIDDEN,
+                        crate::bytes::Bytes::from_static(
+                            b"CSRF: missing Origin/Referer header on state-changing request",
+                        ),
+                    )
+                    .header("content-type", "text/plain; charset=utf-8");
+                }
+                Some(origin) => {
+                    if !origin_is_allowed(&origin, &self.config.allowed_origins) {
+                        return Response::new(
+                            StatusCode::FORBIDDEN,
+                            crate::bytes::Bytes::from_static(
+                                b"CSRF: Origin/Referer not in allow-list",
+                            ),
+                        )
+                        .header("content-type", "text/plain; charset=utf-8");
+                    }
+                }
+            }
+        }
+
         if self.config.csrf_protection && is_state_changing_method(&req.method) {
             // Brand-new sessions on the first request can't have shipped
             // a token to the client yet, so we don't reject them — but
@@ -555,12 +675,8 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
                     .find(|(k, _)| k.eq_ignore_ascii_case("x-csrf-token"))
                     .map(|(_, v)| v.as_str())
                     .unwrap_or("");
-                let session_token = session_data
-                    .get(CSRF_TOKEN_KEY)
-                    .unwrap_or("");
-                if !constant_time_eq_str(header_token, session_token)
-                    || session_token.is_empty()
-                {
+                let session_token = session_data.get(CSRF_TOKEN_KEY).unwrap_or("");
+                if !constant_time_eq_str(header_token, session_token) || session_token.is_empty() {
                     return Response::new(
                         StatusCode::FORBIDDEN,
                         crate::bytes::Bytes::from_static(b"CSRF token missing or invalid"),
@@ -585,6 +701,28 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
             guard.clone()
         };
 
+        // 5b. br-asupersync-hifab2 — handle session-ID regeneration. If the
+        //     handler called Session::regenerate(), the data carries a
+        //     REGENERATE_FLAG_KEY marker. Delete the old store entry, mint
+        //     a fresh ID, strip the marker, and proceed with the new ID
+        //     for the save+cookie steps below. The CSRF token was already
+        //     rotated inside Session::regenerate(); we strip the marker
+        //     here so it doesn't persist into the saved data.
+        let regenerate_requested = session_data.get(REGENERATE_FLAG_KEY).is_some();
+        if regenerate_requested {
+            session_data.remove(REGENERATE_FLAG_KEY);
+            if !is_new {
+                self.store.delete(&session_id);
+            }
+            session_id = generate_session_id();
+            // Treat as a freshly-issued cookie (must be Set-Cookie'd to
+            // the client); the old client cookie is implicitly replaced
+            // by the new one in the response.
+            is_new = true;
+            // Force the modified flag so the save+cookie branches fire.
+            session_data.insert(LAST_ACCESSED_KEY, now_unix_secs().to_string());
+        }
+
         // 6. Save if modified. Untouched new sessions are NOT saved to prevent DoS.
         let session_cleared = session_data.is_empty() && session_data.is_modified();
 
@@ -593,7 +731,7 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
                 // Session cleared → delete server-side data and expire the cookie.
                 self.store.delete(&session_id);
             }
-        } else if session_data.is_modified() {
+        } else if session_data.is_modified() || regenerate_requested {
             self.store.save(&session_id, &session_data);
         }
 
@@ -609,7 +747,7 @@ impl<S: SessionStore, H: Handler> Handler for SessionMiddleware<S, H> {
                 let cookie_val = set_cookie_header(&self.config.cookie_name, "", &expire_config);
                 resp.set_header("set-cookie", cookie_val);
             }
-        } else if session_data.is_modified() {
+        } else if session_data.is_modified() || regenerate_requested {
             let cookie_val = set_cookie_header(&self.config.cookie_name, &session_id, &self.config);
             resp.set_header("set-cookie", cookie_val);
         }
@@ -636,6 +774,53 @@ impl<S: SessionStore, H: Handler> SessionMiddleware<S, H> {
         let now = now_unix_secs();
         now.saturating_sub(last) > ttl
     }
+}
+
+/// br-asupersync-czbj90 — Extract the `Origin` header verbatim, falling
+/// back to the scheme+host+port portion of `Referer` if Origin is
+/// absent. Returns `None` if neither header is present or the Referer
+/// fails to parse far enough to derive an origin. Comparison against
+/// `allowed_origins` is case-insensitive.
+fn request_origin(req: &Request) -> Option<String> {
+    if let Some((_, origin)) = req
+        .headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("origin"))
+    {
+        let trimmed = origin.trim();
+        if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("null") {
+            return Some(trimmed.to_string());
+        }
+    }
+    if let Some((_, referer)) = req
+        .headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("referer"))
+    {
+        // Extract the scheme+authority prefix: scheme://host[:port]
+        // (everything up to the first '/' after the "://").
+        let r = referer.trim();
+        let scheme_end = r.find("://")?;
+        let after_scheme_idx = scheme_end + 3;
+        let rest = &r[after_scheme_idx..];
+        let path_start = rest.find('/').unwrap_or(rest.len());
+        return Some(r[..after_scheme_idx + path_start].to_string());
+    }
+    None
+}
+
+/// br-asupersync-czbj90 — true if `origin` matches at least one entry of
+/// `allowed`. Comparison is case-insensitive on the scheme+host[+port]
+/// portion only; trailing slashes / paths are stripped from candidates
+/// to make `https://app.example.com/` and `https://app.example.com`
+/// equivalent.
+fn origin_is_allowed(origin: &str, allowed: &[String]) -> bool {
+    fn normalise(s: &str) -> String {
+        let trimmed = s.trim().trim_end_matches('/');
+        trimmed.to_ascii_lowercase()
+    }
+    let want = normalise(origin);
+    allowed.iter().any(|a| normalise(a) == want)
 }
 
 /// Constant-time string equality. Used for CSRF-token comparison so a
@@ -700,6 +885,41 @@ impl Session {
     #[must_use]
     pub fn csrf_token(&self) -> Option<String> {
         self.0.lock().get(CSRF_TOKEN_KEY).map(ToString::to_string)
+    }
+
+    /// br-asupersync-hifab2 — Request a session-ID rotation at the end of
+    /// this request. The middleware deletes the old server-side entry,
+    /// mints a fresh cryptographic ID, saves the (carried-over) data
+    /// under the new ID, rotates the CSRF token, and issues a new
+    /// Set-Cookie header. Idiomatic call sites: directly after a
+    /// successful login, on MFA verification, on role-elevation, on
+    /// logout (followed by `clear()`).
+    ///
+    /// User data is preserved — only the ID and CSRF token change.
+    /// To clear data, call [`Self::clear`] before or after
+    /// `regenerate()`.
+    pub fn regenerate(&self) {
+        let mut guard = self.0.lock();
+        guard.insert(REGENERATE_FLAG_KEY, "1");
+        // Rotate CSRF token alongside ID — a session ID rotation that
+        // doesn't rotate the bound CSRF token leaves a trust-boundary
+        // hole. (br-asupersync-3cvnmo)
+        guard.insert(CSRF_TOKEN_KEY, generate_session_id());
+    }
+
+    /// br-asupersync-3cvnmo — Mint a fresh CSRF token for this session
+    /// without rotating the session ID. Use this for periodic in-session
+    /// rotation (e.g. on a per-N-request or per-time-window policy)
+    /// where a full ID rotation is not warranted. The new token is
+    /// returned to the caller so the response can echo it to the client
+    /// before the old one becomes invalid.
+    ///
+    /// Most callers should prefer [`Self::regenerate`], which rotates
+    /// both ID and CSRF in lockstep.
+    pub fn rotate_csrf_token(&self) -> String {
+        let token = generate_session_id();
+        self.0.lock().insert(CSRF_TOKEN_KEY, token.clone());
+        token
     }
 }
 
@@ -1058,6 +1278,103 @@ mod tests {
         assert_eq!(store.len(), 1);
     }
 
+    /// br-asupersync-hifab2: end-to-end session-fixation defence.
+    ///
+    /// A handler that calls `Session::regenerate()` (the OWASP-mandated
+    /// post-login action) MUST cause the middleware to:
+    ///   1. issue a NEW session ID in Set-Cookie (different from the
+    ///      inbound cookie),
+    ///   2. DELETE the old server-side store entry (so the
+    ///      pre-authentication ID an attacker might have planted via
+    ///      session-fixation can't be replayed), and
+    ///   3. PRESERVE the user's session data under the new ID (so the
+    ///      authenticated state survives the rotation).
+    ///
+    /// Without these three properties, an attacker can plant a chosen
+    /// session ID on a victim, wait for them to log in, and then hijack
+    /// the now-authenticated session by reusing the planted ID.
+    #[test]
+    fn middleware_regenerate_rotates_id_and_preserves_data() {
+        struct LoginHandler;
+        impl Handler for LoginHandler {
+            fn call(&self, req: Request) -> Response {
+                if let Some(session) = req.extensions.get_typed::<Session>() {
+                    // Simulate a successful login: stash an authenticated
+                    // user_id and rotate the session ID.
+                    session.insert("user_id", "alice");
+                    session.regenerate();
+                }
+                Response::new(StatusCode::OK, b"logged in".to_vec())
+            }
+        }
+
+        let store = MemoryStore::new();
+        // Seed a pre-auth session that the attacker might have planted.
+        let attacker_planted_id = "1234567890abcdef1234567890abcdef";
+        let mut pre_auth = SessionData::new();
+        pre_auth.insert("pre_auth_marker", "still here");
+        store.save(attacker_planted_id, &pre_auth);
+
+        let layer = SessionLayer::new(store.clone());
+        let handler = layer.wrap(LoginHandler);
+
+        // Victim arrives with the attacker's planted cookie and "logs in".
+        let mut req = Request::new("POST", "/login");
+        req.headers.insert(
+            "cookie".to_string(),
+            format!("session_id={attacker_planted_id}"),
+        );
+        let resp = handler.call(req);
+        assert_eq!(resp.status, StatusCode::OK);
+
+        // Property 1: response carries a NEW session-id cookie that is
+        // NOT the attacker-planted one.
+        let cookie = resp
+            .headers
+            .get("set-cookie")
+            .expect("middleware must issue Set-Cookie after regenerate");
+        assert!(
+            !cookie.contains(attacker_planted_id),
+            "middleware reused the attacker's planted ID after regenerate(); fixation is OPEN. Set-Cookie: {cookie}"
+        );
+        let new_id = cookie
+            .split('=')
+            .nth(1)
+            .expect("malformed Set-Cookie")
+            .split(';')
+            .next()
+            .expect("missing cookie value")
+            .to_string();
+        assert_ne!(
+            new_id, attacker_planted_id,
+            "regenerate() did not actually rotate the ID"
+        );
+        assert_eq!(new_id.len(), 32, "new ID must be 32-char hex");
+
+        // Property 2: old server-side store entry is GONE.
+        assert!(
+            store.load(attacker_planted_id).is_none(),
+            "old session id must be deleted from store after regenerate()"
+        );
+
+        // Property 3: session data was PRESERVED under the new ID.
+        let migrated = store
+            .load(&new_id)
+            .expect("new session id must be persisted");
+        assert_eq!(
+            migrated.get("user_id"),
+            Some("alice"),
+            "post-login user_id was not preserved across regenerate()"
+        );
+
+        // Defense in depth: the regenerate flag must NOT have leaked
+        // into the saved session data (it's an internal marker).
+        assert!(
+            migrated.get(REGENERATE_FLAG_KEY).is_none(),
+            "REGENERATE_FLAG_KEY leaked into persisted session data"
+        );
+    }
+
     #[test]
     fn middleware_clear_session_expires_cookie() {
         // Regression: clearing a session must expire the cookie (Max-Age=0),
@@ -1151,5 +1468,139 @@ mod tests {
         };
         let header = set_cookie_header("s", "v", &config_none);
         assert!(header.contains("SameSite=None"));
+    }
+
+    // ================================================================
+    // br-asupersync-uz7oxb — set_cookie_header injection guard
+    // ================================================================
+
+    #[test]
+    #[should_panic(expected = "br-asupersync-uz7oxb")]
+    fn cookie_name_with_semicolon_panics() {
+        let cfg = SessionConfig::default();
+        let _ = set_cookie_header("evil; HttpOnly=false; X", "v", &cfg);
+    }
+
+    #[test]
+    #[should_panic(expected = "br-asupersync-uz7oxb")]
+    fn cookie_value_with_semicolon_panics() {
+        let cfg = SessionConfig::default();
+        let _ = set_cookie_header("s", "v; Domain=attacker.com", &cfg);
+    }
+
+    #[test]
+    #[should_panic(expected = "br-asupersync-uz7oxb")]
+    fn cookie_path_with_crlf_panics() {
+        let cfg = SessionConfig {
+            cookie_path: "/foo\r\nX-Injected: 1".to_string(),
+            ..Default::default()
+        };
+        let _ = set_cookie_header("s", "v", &cfg);
+    }
+
+    #[test]
+    fn cookie_helper_accepts_safe_inputs() {
+        let cfg = SessionConfig::default();
+        let h = set_cookie_header("session", "abcd1234", &cfg);
+        assert!(h.starts_with("session=abcd1234; Path=/"));
+    }
+
+    // ================================================================
+    // br-asupersync-3cvnmo — CSRF token rotation
+    // ================================================================
+
+    #[test]
+    fn rotate_csrf_token_changes_token() {
+        let session = Session(Arc::new(Mutex::new(SessionData::new())));
+        // Seed an initial token.
+        session.insert(CSRF_TOKEN_KEY, "old-token");
+        let new = session.rotate_csrf_token();
+        assert_ne!(new, "old-token");
+        assert_eq!(session.csrf_token().as_deref(), Some(new.as_str()));
+    }
+
+    #[test]
+    fn regenerate_rotates_csrf_and_sets_flag() {
+        let session = Session(Arc::new(Mutex::new(SessionData::new())));
+        session.insert(CSRF_TOKEN_KEY, "old-token");
+        session.regenerate();
+        let inner = session.0.lock();
+        assert!(inner.get(REGENERATE_FLAG_KEY).is_some());
+        let new_csrf = inner.get(CSRF_TOKEN_KEY).unwrap();
+        assert_ne!(new_csrf, "old-token");
+    }
+
+    // ================================================================
+    // br-asupersync-czbj90 — Origin/Referer extraction + allow-list
+    // ================================================================
+
+    #[test]
+    fn referer_origin_strips_path() {
+        // Origin absent; Referer present with path component.
+        let req = Request {
+            method: crate::http::Method::POST,
+            uri: "/api/x".to_string(),
+            version: crate::http::Version::HTTP_1_1,
+            headers: vec![(
+                "Referer".to_string(),
+                "https://app.example.com/foo/bar?q=1".to_string(),
+            )],
+            body: crate::bytes::Bytes::new(),
+            extensions: crate::web::Extensions::new(),
+        };
+        let origin = request_origin(&req);
+        assert_eq!(origin.as_deref(), Some("https://app.example.com"));
+    }
+
+    #[test]
+    fn origin_allow_list_match_is_case_insensitive_and_trim_slash() {
+        let allowed = vec!["https://App.Example.Com/".to_string()];
+        assert!(origin_is_allowed("https://app.example.com", &allowed));
+        assert!(origin_is_allowed("HTTPS://APP.EXAMPLE.COM", &allowed));
+        assert!(!origin_is_allowed("https://attacker.com", &allowed));
+    }
+
+    #[test]
+    fn origin_header_takes_precedence_over_referer() {
+        let req = Request {
+            method: crate::http::Method::POST,
+            uri: "/api/x".to_string(),
+            version: crate::http::Version::HTTP_1_1,
+            headers: vec![
+                ("Origin".to_string(), "https://app.example.com".to_string()),
+                (
+                    "Referer".to_string(),
+                    "https://other.example.com/".to_string(),
+                ),
+            ],
+            body: crate::bytes::Bytes::new(),
+            extensions: crate::web::Extensions::new(),
+        };
+        assert_eq!(
+            request_origin(&req).as_deref(),
+            Some("https://app.example.com")
+        );
+    }
+
+    #[test]
+    fn null_origin_falls_back_to_referer() {
+        let req = Request {
+            method: crate::http::Method::POST,
+            uri: "/api/x".to_string(),
+            version: crate::http::Version::HTTP_1_1,
+            headers: vec![
+                ("Origin".to_string(), "null".to_string()),
+                (
+                    "Referer".to_string(),
+                    "https://app.example.com/foo".to_string(),
+                ),
+            ],
+            body: crate::bytes::Bytes::new(),
+            extensions: crate::web::Extensions::new(),
+        };
+        assert_eq!(
+            request_origin(&req).as_deref(),
+            Some("https://app.example.com")
+        );
     }
 }
