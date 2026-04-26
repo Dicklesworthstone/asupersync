@@ -15,7 +15,13 @@ use std::time::Duration;
 fn generate_observations(seed: u64, count: usize, max_ms: u64) -> Vec<Duration> {
     let mut rng = DetRng::new(seed);
     (0..count)
-        .map(|_| Duration::from_millis(rng.next_u64() % max_ms))
+        .map(|_| {
+            if max_ms == 0 {
+                Duration::ZERO
+            } else {
+                Duration::from_millis(rng.next_u64() % max_ms)
+            }
+        })
         .collect()
 }
 
@@ -145,4 +151,12 @@ fn metamorphic_scale_invariance() {
             diff
         );
     }
+}
+
+#[test]
+fn generate_observations_zero_max_yields_zero_latencies() {
+    let samples = generate_observations(0x9abc, 16, 0);
+
+    assert_eq!(samples.len(), 16);
+    assert!(samples.iter().all(|sample| *sample == Duration::ZERO));
 }
