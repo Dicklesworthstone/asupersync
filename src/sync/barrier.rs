@@ -902,4 +902,61 @@ mod tests {
         assert!(!result2.is_leader());
         crate::test_complete!("barrier_wait_result_is_leader");
     }
+
+    /// br-asupersync-br51xq: when *every* party cancels (instead of
+    /// tripping), the barrier returns to its initial state and a fresh
+    /// cohort can subsequently trip it. Pins the invariant: the
+    /// arrival counter never holds stale increments from cancelled
+    /// waiters.
+    #[test]
+    fn br51xq_all_parties_cancel_resets_barrier() {
+        init_test("br51xq_all_parties_cancel_resets_barrier");
+        let barrier = Arc::new(Barrier::new(3));
+
+        // Three parties each request and immediately cancel.
+        for _ in 0..3 {
+            let cx: Cx = Cx::for_testing();
+            cx.set_cancel_requested(true);
+            let err = block_on(barrier.wait(&cx)).expect_err("br51xq cancel must Err");
+            crate::assert_with_log!(
+                err == BarrierWaitError::Cancelled,
+                "all-cancel each cancelled",
+                BarrierWaitError::Cancelled,
+                err
+            );
+        }
+
+        // After all-parties-cancel the barrier MUST be ready to trip
+        // with a fresh cohort. Stale arrivals would block this trip
+        // forever.
+        let leaders = Arc::new(AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let barrier = Arc::clone(&barrier);
+            let leaders = Arc::clone(&leaders);
+            handles.push(std::thread::spawn(move || {
+                let cx: Cx = Cx::for_testing();
+                let result = block_on(barrier.wait(&cx)).expect("post-reset wait");
+                if result.is_leader() {
+                    leaders.fetch_add(1, Ordering::SeqCst);
+                }
+            }));
+        }
+        let cx: Cx = Cx::for_testing();
+        let result = block_on(barrier.wait(&cx)).expect("post-reset main");
+        if result.is_leader() {
+            leaders.fetch_add(1, Ordering::SeqCst);
+        }
+        for h in handles {
+            h.join().expect("thread");
+        }
+        let leader_count = leaders.load(Ordering::SeqCst);
+        crate::assert_with_log!(
+            leader_count == 1,
+            "br51xq exactly-one leader after reset",
+            1usize,
+            leader_count
+        );
+        crate::test_complete!("br51xq_all_parties_cancel_resets_barrier");
+    }
 }

@@ -1544,4 +1544,58 @@ mod tests {
         let is_ready = poll_once(&mut fut2).is_ready();
         assert!(!is_ready, "Spurious wakeup detected!");
     }
+
+    /// br-asupersync-umesjh: notify_one baton-passing under select-
+    /// mediated drop. When notify_one targets a waiter that is then
+    /// dropped (as in a select arm where a peer branch fired first),
+    /// the notification MUST baton-pass to the next pending waiter
+    /// rather than be lost. A lost permit here means the next
+    /// notified() blocks forever — silent deadlock.
+    #[test]
+    fn umesjh_notify_one_baton_passes_when_target_dropped() {
+        let notify = Notify::new();
+        let mut fut_a = notify.notified();
+        let mut fut_b = notify.notified();
+        assert!(poll_once(&mut fut_a).is_pending());
+        assert!(poll_once(&mut fut_b).is_pending());
+
+        notify.notify_one();
+        // The permit lands on fut_a (FIFO). Simulate the select-
+        // mediated drop: a peer branch fired first and dropped the
+        // notified() future without polling.
+        drop(fut_a);
+
+        // The notify_one permit MUST be re-handed-off to fut_b.
+        let ready = poll_once(&mut fut_b).is_ready();
+        assert!(
+            ready,
+            "umesjh: notify_one permit must baton-pass to fut_b when fut_a drops without polling"
+        );
+    }
+
+    /// br-asupersync-umesjh: extended baton-pass through a drop chain.
+    /// A single notify_one MUST survive an arbitrary chain of waiter
+    /// drops — the permit lives at the queue level, not at the
+    /// future level.
+    #[test]
+    fn umesjh_notify_one_baton_passes_through_drop_chain() {
+        let notify = Notify::new();
+        let mut fut_a = notify.notified();
+        let mut fut_b = notify.notified();
+        let mut fut_c = notify.notified();
+        assert!(poll_once(&mut fut_a).is_pending());
+        assert!(poll_once(&mut fut_b).is_pending());
+        assert!(poll_once(&mut fut_c).is_pending());
+
+        notify.notify_one();
+        drop(fut_a);
+        drop(fut_b);
+        // fut_c is the last standing waiter; the single permit must
+        // have travelled all the way down the queue.
+        let ready = poll_once(&mut fut_c).is_ready();
+        assert!(
+            ready,
+            "umesjh: single notify_one must survive a chain of waiter drops"
+        );
+    }
 }

@@ -3163,4 +3163,86 @@ mod metamorphic_tests {
             "reader should acquire after the cancelled writer is removed"
         );
     }
+
+    /// br-asupersync-jxq2e6: writer-preference under reader-cancellation
+    /// cascade. The invariant: cancelling N pending readers (while a
+    /// writer is queued behind the writer-preference gate) MUST allow
+    /// the writer to acquire — the cancelled readers must not leak
+    /// reader-waiter slots that keep the writer-preference gate down.
+    ///
+    /// Concrete shape:
+    ///   1. Reader-1 acquires the lock.
+    ///   2. Writer arrives, queues, raises the writer-preference flag
+    ///      so subsequent readers must wait.
+    ///   3. Three readers (R-2, R-3, R-4) arrive and queue behind
+    ///      the writer (preference gate blocks them).
+    ///   4. All three readers cancel (futures dropped).
+    ///   5. Reader-1 releases.
+    ///   6. The writer MUST acquire — the three cancelled-reader
+    ///      slots must have been cleared, not left dangling.
+    #[test]
+    fn jxq2e6_writer_preference_holds_under_reader_cancellation_cascade() {
+        let lock = Arc::new(RwLock::new(0_u32));
+
+        let cx = test_cx();
+        // Step 1: reader-1 acquires.
+        let reader_1 = block_on(lock.read(&cx)).expect("reader-1 acquires");
+        let state = lock.debug_state();
+        assert_eq!(state.readers, 1, "jxq2e6: one active reader");
+
+        // Step 2: writer arrives, queues, raises writer-preference.
+        let waker = Waker::noop().clone();
+        let mut writer_task_cx = Context::from_waker(&waker);
+        let mut writer_fut = lock.write(&cx);
+        let pending = Pin::new(&mut writer_fut)
+            .poll(&mut writer_task_cx)
+            .is_pending();
+        assert!(pending, "jxq2e6: writer must queue while reader-1 holds");
+
+        // Step 3: three readers queue behind the writer-preference gate.
+        let mut reader_2 = lock.read(&cx);
+        let mut reader_3 = lock.read(&cx);
+        let mut reader_4 = lock.read(&cx);
+        for r in [
+            Pin::new(&mut reader_2),
+            Pin::new(&mut reader_3),
+            Pin::new(&mut reader_4),
+        ] {
+            assert!(
+                r.poll(&mut writer_task_cx).is_pending(),
+                "jxq2e6: queued reader must wait for writer-preference"
+            );
+        }
+
+        // Step 4: cancel all three pending readers.
+        drop(reader_2);
+        drop(reader_3);
+        drop(reader_4);
+
+        let state_after_cancel = lock.debug_state();
+        assert!(
+            state_after_cancel.reader_waiters.is_empty(),
+            "jxq2e6: cancelled reader-waiter slots must clear (got {} waiters)",
+            state_after_cancel.reader_waiters.len()
+        );
+        assert_eq!(
+            state_after_cancel.writer_waiters, 1,
+            "jxq2e6: writer still queued"
+        );
+
+        // Step 5: reader-1 releases.
+        drop(reader_1);
+
+        // Step 6: writer MUST acquire. If the cancelled reader slots
+        // had leaked, the lock would still see them as live and
+        // refuse to admit the writer.
+        let writer_acquired = matches!(
+            Pin::new(&mut writer_fut).poll(&mut writer_task_cx),
+            Poll::Ready(Ok(_))
+        );
+        assert!(
+            writer_acquired,
+            "jxq2e6: writer MUST acquire after reader-1 release + cancelled-reader cleanup"
+        );
+    }
 }

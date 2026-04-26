@@ -3078,4 +3078,62 @@ mod tests {
         crate::assert_with_log!(available == 1, "capacity restored", 1usize, available);
         crate::test_complete!("dropping_owned_semaphore_permit_releases_capacity_without_panic");
     }
+
+    /// br-asupersync-yk1595: try_acquire(count) where count exceeds
+    /// the semaphore's total permits MUST fail synchronously and
+    /// NEVER decrement, partially reserve, or block. Pins the
+    /// invariant that prevents oversubscription via overshoot.
+    #[test]
+    fn yk1595_try_acquire_count_exceeds_total_permits() {
+        init_test("yk1595_try_acquire_count_exceeds_total_permits");
+        let sem = Semaphore::new(3);
+
+        // count > total: synchronous reject.
+        let err_result = sem.try_acquire(4);
+        crate::assert_with_log!(
+            err_result.is_err(),
+            "yk1595 acquire(4) on new(3) rejects",
+            true,
+            err_result.is_err()
+        );
+
+        // Reject path MUST NOT have decremented available_permits.
+        let available = sem.available_permits();
+        crate::assert_with_log!(
+            available == 3,
+            "yk1595 rejected acquire preserves permits",
+            3usize,
+            available
+        );
+
+        // Boundary: try_acquire(N) on new(N) succeeds.
+        let permit = sem
+            .try_acquire(3)
+            .expect("yk1595 try_acquire(3) on new(3) succeeds");
+        let after = sem.available_permits();
+        crate::assert_with_log!(
+            after == 0,
+            "yk1595 boundary acquire drains pool",
+            0usize,
+            after
+        );
+        drop(permit);
+
+        // After release, overshoot still rejects without state damage.
+        let again = sem.try_acquire(usize::MAX);
+        crate::assert_with_log!(
+            again.is_err(),
+            "yk1595 acquire(MAX) on new(3) rejects",
+            true,
+            again.is_err()
+        );
+        let restored = sem.available_permits();
+        crate::assert_with_log!(
+            restored == 3,
+            "yk1595 oversize-reject preserves capacity",
+            3usize,
+            restored
+        );
+        crate::test_complete!("yk1595_try_acquire_count_exceeds_total_permits");
+    }
 }
