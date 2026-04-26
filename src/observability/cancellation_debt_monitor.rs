@@ -5,11 +5,41 @@
 //! early warning and debt management capabilities.
 
 use crate::types::{CancelKind, CancelReason};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime};
+
+/// br-asupersync-i40ap4 — maximum bytes of cancel-reason text retained per
+/// pending entry. Caps the per-entry memory cost so an attacker who controls
+/// `CancelReason` text cannot amplify the leak proportional to message
+/// length. Anything past this is truncated with a `…` suffix.
+const DEFAULT_MAX_CANCEL_REASON_BYTES: usize = 64;
+
+/// br-asupersync-i40ap4 — default cap on pending entries per `WorkType`.
+/// When `record_pending_work`/`queue_work` would exceed this, the oldest
+/// entry of that work type is evicted and an Emergency alert is generated.
+const DEFAULT_MAX_PENDING_PER_WORK_TYPE: usize = 10_000;
+
+/// Truncate a string at a UTF-8 boundary not exceeding `max_bytes` bytes.
+/// If truncated, append `…` (which costs 3 bytes in UTF-8). The returned
+/// string therefore never exceeds `max_bytes + 3` bytes.
+fn truncate_to_bytes(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    // Find last char boundary at or before max_bytes.
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = String::with_capacity(end + 3);
+    out.push_str(&s[..end]);
+    out.push('…');
+    out
+}
 
 /// Configuration for the cancellation debt monitor.
 #[derive(Debug, Clone)]
@@ -28,6 +58,14 @@ pub struct CancellationDebtConfig {
     pub enable_auto_relief: bool,
     /// Maximum memory for debt tracking.
     pub max_tracking_memory_mb: usize,
+    /// br-asupersync-i40ap4 — Cap on pending entries per `WorkType`. When a
+    /// new entry would exceed this, the oldest entry of that work type is
+    /// evicted (and an Emergency alert fires once per overflow event).
+    pub max_pending_per_work_type: usize,
+    /// br-asupersync-i40ap4 — Maximum bytes of cancel-reason text retained
+    /// per pending entry. Bounds attacker amplification through long
+    /// `CancelReason` messages.
+    pub max_cancel_reason_bytes: usize,
 }
 
 impl Default for CancellationDebtConfig {
@@ -40,6 +78,8 @@ impl Default for CancellationDebtConfig {
             debt_threshold_percentage: 75.0, // 75% of capacity
             enable_auto_relief: false,       // Conservative default
             max_tracking_memory_mb: 50,
+            max_pending_per_work_type: DEFAULT_MAX_PENDING_PER_WORK_TYPE,
+            max_cancel_reason_bytes: DEFAULT_MAX_CANCEL_REASON_BYTES,
         }
     }
 }
@@ -76,10 +116,15 @@ pub struct PendingWork {
     pub priority: u32,
     /// Estimated processing cost (arbitrary units).
     pub estimated_cost: u32,
-    /// Cancellation reason that triggered this work.
+    /// br-asupersync-i40ap4 — Cancellation reason text, truncated at
+    /// [`CancellationDebtConfig::max_cancel_reason_bytes`]. Was previously
+    /// `format!("{cancel_reason:?}")` of the full `CancelReason` (which
+    /// could be attacker-controlled and arbitrarily long).
     pub cancel_reason: String,
-    /// Cancel kind.
-    pub cancel_kind: String,
+    /// br-asupersync-i40ap4 — Cancel kind stored as the typed enum (Copy,
+    /// no allocation). Was previously `format!("{cancel_kind:?}")`, which
+    /// allocated a fresh String per pending entry.
+    pub cancel_kind: CancelKind,
     /// Dependencies that must complete first.
     pub dependencies: Vec<u64>,
 }
@@ -120,6 +165,35 @@ pub enum DebtAlertLevel {
     Critical,
     /// Debt overflow, system may be unstable.
     Emergency,
+}
+
+impl DebtAlertLevel {
+    /// br-asupersync-37sffr — encode as u8 for lock-free `AtomicU8` storage
+    /// in [`CancellationDebtMonitor`].
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        match self {
+            Self::Normal => 0,
+            Self::Watch => 1,
+            Self::Warning => 2,
+            Self::Critical => 3,
+            Self::Emergency => 4,
+        }
+    }
+
+    /// br-asupersync-37sffr — decode from a u8 written by [`Self::as_u8`].
+    /// Out-of-range values cannot occur via this API but defensively
+    /// decode to `Normal`.
+    #[must_use]
+    pub const fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Watch,
+            2 => Self::Warning,
+            3 => Self::Critical,
+            4 => Self::Emergency,
+            _ => Self::Normal,
+        }
+    }
 }
 
 /// A debt alert notification.
@@ -213,6 +287,11 @@ impl ProcessingStats {
 }
 
 /// Cancellation debt accumulation monitor.
+///
+/// br-asupersync-37sffr — All four state guards now use `parking_lot::Mutex`
+/// (faster acquire/release than `std::sync::Mutex`, no poison panic on a
+/// monitor-internal panic). `current_alert_level` is a lock-free `AtomicU8`
+/// since the value is a 5-variant `Copy` enum.
 pub struct CancellationDebtMonitor {
     config: CancellationDebtConfig,
     /// Pending work by work type.
@@ -221,12 +300,16 @@ pub struct CancellationDebtMonitor {
     processing_stats: Arc<Mutex<HashMap<WorkType, ProcessingStats>>>,
     /// Next work ID.
     next_work_id: AtomicU64,
-    /// Current alert level.
-    current_alert_level: Arc<Mutex<DebtAlertLevel>>,
+    /// Current alert level (encoded via [`DebtAlertLevel::as_u8`] /
+    /// [`DebtAlertLevel::from_u8`]).
+    current_alert_level: AtomicU8,
     /// Recent alerts.
     recent_alerts: Arc<Mutex<VecDeque<DebtAlert>>>,
     /// Total memory usage estimate.
     memory_usage_bytes: AtomicUsize,
+    /// br-asupersync-i40ap4 — Count of evictions triggered by per-work-type
+    /// cap overflow since startup. Surfaced via [`Self::eviction_count`].
+    eviction_count: AtomicU64,
 }
 
 impl CancellationDebtMonitor {
@@ -238,10 +321,18 @@ impl CancellationDebtMonitor {
             pending_work: Arc::new(Mutex::new(HashMap::new())),
             processing_stats: Arc::new(Mutex::new(HashMap::new())),
             next_work_id: AtomicU64::new(1),
-            current_alert_level: Arc::new(Mutex::new(DebtAlertLevel::Normal)),
+            current_alert_level: AtomicU8::new(DebtAlertLevel::Normal.as_u8()),
             recent_alerts: Arc::new(Mutex::new(VecDeque::new())),
             memory_usage_bytes: AtomicUsize::new(0),
+            eviction_count: AtomicU64::new(0),
         }
+    }
+
+    /// br-asupersync-i40ap4 — Number of pending-work entries evicted because
+    /// they would have exceeded `config.max_pending_per_work_type`.
+    #[must_use]
+    pub fn eviction_count(&self) -> u64 {
+        self.eviction_count.load(Ordering::Relaxed)
     }
 
     /// Creates a debt monitor with default configuration.
@@ -251,6 +342,15 @@ impl CancellationDebtMonitor {
     }
 
     /// Queue a new piece of cancellation work.
+    ///
+    /// br-asupersync-i40ap4 — `cancel_reason` is truncated at
+    /// `config.max_cancel_reason_bytes` to bound per-entry memory cost
+    /// (an attacker who controls `CancelReason` text cannot amplify the
+    /// leak proportional to message length). `cancel_kind` is stored as
+    /// the typed enum (Copy) rather than a freshly-allocated Debug String.
+    /// If inserting this entry would exceed `config.max_pending_per_work_type`
+    /// for `work_type`, the oldest entry of that type is evicted first and
+    /// `eviction_count()` is incremented.
     pub fn queue_work(
         &self,
         work_type: WorkType,
@@ -264,6 +364,8 @@ impl CancellationDebtMonitor {
         let work_id = self.next_work_id.fetch_add(1, Ordering::Relaxed);
         let now = super::replayable_system_time();
 
+        let cancel_reason_text =
+            truncate_to_bytes(&format!("{cancel_reason}"), self.config.max_cancel_reason_bytes);
         let work = PendingWork {
             work_id,
             work_type,
@@ -271,23 +373,64 @@ impl CancellationDebtMonitor {
             queued_at: now,
             priority,
             estimated_cost,
-            cancel_reason: format!("{cancel_reason:?}"),
-            cancel_kind: format!("{cancel_kind:?}"),
+            cancel_reason: cancel_reason_text,
+            cancel_kind,
             dependencies,
         };
 
         // Update memory usage estimate
         let work_size = std::mem::size_of::<PendingWork>()
             + work.entity_id.len()
-            + work.cancel_reason.len()
-            + work.cancel_kind.len();
+            + work.cancel_reason.len();
         self.memory_usage_bytes
             .fetch_add(work_size, Ordering::Relaxed);
 
-        // Add to pending work
-        {
-            let mut pending = self.pending_work.lock().unwrap();
-            pending.entry(work_type).or_default().insert(work_id, work);
+        // Add to pending work — evicting the oldest entry of this work type
+        // if we would otherwise exceed the per-WorkType cap.
+        let evicted_for_alert = {
+            let mut pending = self.pending_work.lock();
+            let map = pending.entry(work_type).or_default();
+            let evicted = if map.len() >= self.config.max_pending_per_work_type {
+                // Find the oldest entry (smallest queued_at). Linear scan is
+                // OK since the cap bounds the search size.
+                let oldest_id = map
+                    .iter()
+                    .min_by_key(|(_, w)| w.queued_at)
+                    .map(|(id, _)| *id);
+                oldest_id.and_then(|id| map.remove(&id)).map(|w| {
+                    let evicted_size = std::mem::size_of::<PendingWork>()
+                        + w.entity_id.len()
+                        + w.cancel_reason.len();
+                    self.memory_usage_bytes
+                        .fetch_sub(evicted_size, Ordering::Relaxed);
+                    self.eviction_count.fetch_add(1, Ordering::Relaxed);
+                    w.work_id
+                })
+            } else {
+                None
+            };
+            map.insert(work_id, work);
+            evicted
+        };
+
+        if let Some(evicted_id) = evicted_for_alert {
+            self.generate_alert(DebtAlert {
+                level: DebtAlertLevel::Emergency,
+                message: format!(
+                    "evicted oldest pending {work_type:?} (work_id={evicted_id}) — \
+                     per-type cap of {} reached (br-asupersync-i40ap4)",
+                    self.config.max_pending_per_work_type
+                ),
+                work_type: Some(work_type),
+                entity_id: None,
+                metric_value: self.config.max_pending_per_work_type as f64,
+                threshold: self.config.max_pending_per_work_type as f64,
+                generated_at: now,
+                remediation_suggestions: vec![
+                    "Investigate why pending work is not being completed".to_string(),
+                    "Increase max_pending_per_work_type if eviction is benign".to_string(),
+                ],
+            });
         }
 
         // Check if we need to trigger debt alerts
@@ -303,7 +446,7 @@ impl CancellationDebtMonitor {
 
         // Find and remove the work
         {
-            let mut pending = self.pending_work.lock().unwrap();
+            let mut pending = self.pending_work.lock();
             for (work_type, work_map) in pending.iter_mut() {
                 if let Some(work) = work_map.remove(&work_id) {
                     found_work = Some((*work_type, work));
@@ -317,13 +460,13 @@ impl CancellationDebtMonitor {
             let work_size = std::mem::size_of::<PendingWork>()
                 + work.entity_id.len()
                 + work.cancel_reason.len()
-                + work.cancel_kind.len();
+                /* br-asupersync-i40ap4: cancel_kind is now CancelKind enum (no allocation) */;
             self.memory_usage_bytes
                 .fetch_sub(work_size, Ordering::Relaxed);
 
             // Update processing statistics
             {
-                let mut stats = self.processing_stats.lock().unwrap();
+                let mut stats = self.processing_stats.lock();
                 stats
                     .entry(work_type)
                     .or_insert_with(ProcessingStats::new)
@@ -344,7 +487,7 @@ impl CancellationDebtMonitor {
 
         // Process completions
         {
-            let mut pending = self.pending_work.lock().unwrap();
+            let mut pending = self.pending_work.lock();
             for &work_id in work_ids {
                 for (work_type, work_map) in pending.iter_mut() {
                     if let Some(work) = work_map.remove(&work_id) {
@@ -355,7 +498,7 @@ impl CancellationDebtMonitor {
                         let work_size = std::mem::size_of::<PendingWork>()
                             + work.entity_id.len()
                             + work.cancel_reason.len()
-                            + work.cancel_kind.len();
+                            /* br-asupersync-i40ap4: cancel_kind is now CancelKind enum (no allocation) */;
                         self.memory_usage_bytes
                             .fetch_sub(work_size, Ordering::Relaxed);
                         break;
@@ -366,7 +509,7 @@ impl CancellationDebtMonitor {
 
         // Update processing statistics
         {
-            let mut stats = self.processing_stats.lock().unwrap();
+            let mut stats = self.processing_stats.lock();
             for (work_type, count) in completed_by_type {
                 stats
                     .entry(work_type)
@@ -381,7 +524,7 @@ impl CancellationDebtMonitor {
     /// Get current debt snapshot.
     pub fn get_debt_snapshot(&self) -> DebtSnapshot {
         let now = super::replayable_system_time();
-        let pending = self.pending_work.lock().unwrap();
+        let pending = self.pending_work.lock();
 
         // Calculate totals
         let mut total_pending = 0;
@@ -416,7 +559,7 @@ impl CancellationDebtMonitor {
 
         // Calculate processing rate
         let processing_rate = {
-            let mut stats = self.processing_stats.lock().unwrap();
+            let mut stats = self.processing_stats.lock();
             let mut total_rate = 0.0;
             for (_, stat) in stats.iter_mut() {
                 total_rate += stat.calculate_rate(self.config.rate_sampling_window, now);
@@ -429,7 +572,7 @@ impl CancellationDebtMonitor {
             self.memory_usage_bytes.load(Ordering::Relaxed) as f64 / (1024.0 * 1024.0);
 
         // Current alert level
-        let alert_level = *self.current_alert_level.lock().unwrap();
+        let alert_level = DebtAlertLevel::from_u8(self.current_alert_level.load(Ordering::Relaxed));
 
         DebtSnapshot {
             snapshot_time: now,
@@ -446,7 +589,7 @@ impl CancellationDebtMonitor {
 
     /// Get pending work for a specific entity.
     pub fn get_entity_pending_work(&self, entity_id: &str) -> Vec<PendingWork> {
-        let pending = self.pending_work.lock().unwrap();
+        let pending = self.pending_work.lock();
         let mut result = Vec::new();
 
         for work_map in pending.values() {
@@ -463,7 +606,7 @@ impl CancellationDebtMonitor {
 
     /// Get the highest priority pending work items.
     pub fn get_priority_work(&self, limit: usize) -> Vec<PendingWork> {
-        let pending = self.pending_work.lock().unwrap();
+        let pending = self.pending_work.lock();
         let mut result = Vec::new();
 
         for work_map in pending.values() {
@@ -486,14 +629,14 @@ impl CancellationDebtMonitor {
 
     /// Get recent debt alerts.
     pub fn get_recent_alerts(&self, limit: usize) -> Vec<DebtAlert> {
-        let alerts = self.recent_alerts.lock().unwrap();
+        let alerts = self.recent_alerts.lock();
         alerts.iter().rev().take(limit).cloned().collect()
     }
 
     /// Clear old alerts beyond a certain age.
     pub fn clear_old_alerts(&self, max_age: Duration) {
         let cutoff = super::replayable_system_time() - max_age;
-        let mut alerts = self.recent_alerts.lock().unwrap();
+        let mut alerts = self.recent_alerts.lock();
         alerts.retain(|alert| alert.generated_at > cutoff);
     }
 
@@ -503,7 +646,7 @@ impl CancellationDebtMonitor {
         let mut cleaned_count = 0;
 
         {
-            let mut pending = self.pending_work.lock().unwrap();
+            let mut pending = self.pending_work.lock();
             for work_map in pending.values_mut() {
                 let before_count = work_map.len();
                 work_map.retain(|_, work| work.queued_at > cutoff);
@@ -536,12 +679,13 @@ impl CancellationDebtMonitor {
         let snapshot = self.get_debt_snapshot();
         let new_alert_level = self.calculate_alert_level(&snapshot);
 
-        let mut current_level = self.current_alert_level.lock().unwrap();
-        if new_alert_level != *current_level {
-            let old_level = *current_level;
-            *current_level = new_alert_level;
-
-            // Generate alert for level change
+        // br-asupersync-37sffr — atomic compare-and-update on the alert
+        // level. Multiple cancel hot-path callers may race here; only one
+        // observes the transition and emits the alert.
+        let new_byte = new_alert_level.as_u8();
+        let prev_byte = self.current_alert_level.swap(new_byte, Ordering::AcqRel);
+        if prev_byte != new_byte {
+            let old_level = DebtAlertLevel::from_u8(prev_byte);
             self.generate_debt_level_alert(old_level, new_alert_level, &snapshot);
         }
 
@@ -646,7 +790,7 @@ impl CancellationDebtMonitor {
     /// Check for specific threshold violations.
     fn check_threshold_violations(&self, snapshot: &DebtSnapshot) {
         // Check processing rate violations by type
-        let stats = self.processing_stats.lock().unwrap();
+        let stats = self.processing_stats.lock();
         for (work_type, stat) in stats.iter() {
             if stat.last_rate < self.config.min_processing_rate * 0.1 {
                 self.generate_alert(DebtAlert {
@@ -692,7 +836,7 @@ impl CancellationDebtMonitor {
     #[allow(unused_variables)]
     fn generate_alert(&self, alert: DebtAlert) {
         {
-            let mut alerts = self.recent_alerts.lock().unwrap();
+            let mut alerts = self.recent_alerts.lock();
             alerts.push_back(alert.clone());
 
             // Keep alerts bounded
@@ -867,5 +1011,159 @@ mod tests {
 
         let snapshot = monitor.get_debt_snapshot();
         assert_eq!(snapshot.total_pending, 0);
+    }
+
+    /// br-asupersync-i40ap4 — long cancel-reason text is truncated at the
+    /// configured byte cap so attacker-controlled reasons cannot amplify
+    /// the per-entry memory footprint.
+    #[test]
+    fn cancel_reason_truncated_at_byte_cap() {
+        let mut config = CancellationDebtConfig::default();
+        config.max_cancel_reason_bytes = 16;
+        let monitor = CancellationDebtMonitor::new(config);
+
+        let long = "A".repeat(10_000);
+        let mut reason = CancelReason::new(CancelKind::User);
+        reason.message = Some(long);
+        let id = monitor.queue_work(
+            WorkType::TaskCleanup,
+            "entity".into(),
+            1,
+            1,
+            &reason,
+            CancelKind::User,
+            Vec::new(),
+        );
+
+        let work = monitor
+            .get_priority_work(10)
+            .into_iter()
+            .find(|w| w.work_id == id)
+            .expect("queued work present");
+        // Truncated text is at most max_cancel_reason_bytes + 3 (ellipsis is
+        // 3 bytes in UTF-8) and ends with the ellipsis character.
+        assert!(
+            work.cancel_reason.len() <= 16 + 3,
+            "cancel_reason exceeded cap: {} bytes",
+            work.cancel_reason.len()
+        );
+        assert!(
+            work.cancel_reason.ends_with('…'),
+            "expected ellipsis suffix on truncated reason: {:?}",
+            work.cancel_reason
+        );
+    }
+
+    /// br-asupersync-i40ap4 — short cancel-reason text passes through
+    /// unchanged (no spurious truncation).
+    #[test]
+    fn cancel_reason_short_passes_through() {
+        let monitor = CancellationDebtMonitor::default();
+        let reason = CancelReason::user("short");
+        let id = monitor.queue_work(
+            WorkType::TaskCleanup,
+            "entity".into(),
+            1,
+            1,
+            &reason,
+            CancelKind::User,
+            Vec::new(),
+        );
+        let work = monitor
+            .get_priority_work(10)
+            .into_iter()
+            .find(|w| w.work_id == id)
+            .unwrap();
+        assert!(!work.cancel_reason.ends_with('…'));
+        assert!(!work.cancel_reason.is_empty());
+    }
+
+    /// br-asupersync-i40ap4 — once per-WorkType cap is reached, the oldest
+    /// entry is evicted on each new insert and `eviction_count` advances.
+    #[test]
+    fn per_work_type_cap_evicts_oldest() {
+        let mut config = CancellationDebtConfig::default();
+        config.max_pending_per_work_type = 4;
+        let monitor = CancellationDebtMonitor::new(config);
+
+        let mut ids = Vec::new();
+        for i in 0..4 {
+            ids.push(monitor.queue_work(
+                WorkType::TaskCleanup,
+                format!("task-{i}"),
+                1,
+                1,
+                &CancelReason::user("x"),
+                CancelKind::User,
+                Vec::new(),
+            ));
+        }
+        assert_eq!(monitor.get_debt_snapshot().total_pending, 4);
+        assert_eq!(monitor.eviction_count(), 0);
+
+        // Inserting a 5th must evict an older entry.
+        let _new_id = monitor.queue_work(
+            WorkType::TaskCleanup,
+            "task-5".into(),
+            1,
+            1,
+            &CancelReason::user("x"),
+            CancelKind::User,
+            Vec::new(),
+        );
+        assert_eq!(monitor.get_debt_snapshot().total_pending, 4);
+        assert_eq!(monitor.eviction_count(), 1);
+
+        // Sanity: a different WorkType is independently capped.
+        for i in 0..4 {
+            monitor.queue_work(
+                WorkType::ChannelCleanup,
+                format!("chan-{i}"),
+                1,
+                1,
+                &CancelReason::user("x"),
+                CancelKind::User,
+                Vec::new(),
+            );
+        }
+        assert_eq!(monitor.get_debt_snapshot().total_pending, 8);
+        assert_eq!(monitor.eviction_count(), 1);
+    }
+
+    /// br-asupersync-37sffr — the alert level transitions atomically through
+    /// the AtomicU8 store; concurrent observers always see one of the
+    /// well-formed enum variants, never a torn/poisoned state.
+    #[test]
+    fn alert_level_atomic_roundtrip() {
+        for level in [
+            DebtAlertLevel::Normal,
+            DebtAlertLevel::Watch,
+            DebtAlertLevel::Warning,
+            DebtAlertLevel::Critical,
+            DebtAlertLevel::Emergency,
+        ] {
+            assert_eq!(DebtAlertLevel::from_u8(level.as_u8()), level);
+        }
+        // Out-of-range bytes defensively decode to Normal.
+        assert_eq!(DebtAlertLevel::from_u8(255), DebtAlertLevel::Normal);
+        assert_eq!(DebtAlertLevel::from_u8(99), DebtAlertLevel::Normal);
+    }
+
+    /// br-asupersync-i40ap4 — `truncate_to_bytes` respects UTF-8 character
+    /// boundaries (does not split a multi-byte codepoint mid-sequence).
+    #[test]
+    fn truncate_to_bytes_respects_utf8_boundaries() {
+        // 4-byte UTF-8 codepoint (😀 = U+1F600 = F0 9F 98 80).
+        let s = "ABC😀DEF";
+        // Cap of 5 forces truncation between A,B,C and the emoji.
+        let out = truncate_to_bytes(s, 5);
+        assert!(out.is_char_boundary(out.len()));
+        // 4 bytes ABC + 3 bytes for ellipsis.
+        // The truncation may stop after "ABC" (3 bytes) so the resulting
+        // truncated portion is "ABC" + "…".
+        assert!(out.starts_with("ABC"));
+        assert!(out.ends_with('…'));
+        // Cap exceeding the input length leaves it untouched.
+        assert_eq!(truncate_to_bytes("hi", 100), "hi");
     }
 }
