@@ -45,6 +45,78 @@ pub struct ServerConfig {
     pub send_compression: Option<CompressionEncoding>,
     /// Compression encodings accepted by this server.
     pub accept_compression: Vec<CompressionEncoding>,
+    /// Maximum aggregate size, in bytes, of all metadata entries
+    /// (request headers + trailers) accepted on a single inbound call.
+    /// Each entry contributes `key.len() + value.byte_len()` bytes.
+    /// Defaults to 8 KiB — matches the gRPC ecosystem convention used
+    /// by `grpc-go`'s `MaxHeaderListSize` and the per-RFC-9113 §6.5.2
+    /// `SETTINGS_MAX_HEADER_LIST_SIZE` advisory cap.
+    ///
+    /// Inbound metadata exceeding this limit is rejected with
+    /// `Status::resource_exhausted` via
+    /// [`enforce_metadata_size_limit`]. The gRPC wire protocol always
+    /// returns HTTP 200 with a `grpc-status` trailer; the equivalent
+    /// of HTTP 431 ("Request Header Fields Too Large") for gRPC is
+    /// the RESOURCE_EXHAUSTED status code.
+    ///
+    /// br-asupersync-i2bae8.
+    pub max_metadata_size: usize,
+}
+
+/// Default max-metadata-size in bytes (8 KiB) — matches the gRPC
+/// ecosystem convention. See [`ServerConfig::max_metadata_size`].
+pub const DEFAULT_MAX_METADATA_SIZE: usize = 8 * 1024;
+
+/// Compute the total byte size of a [`Metadata`] block as the sum of
+/// `key.len() + value.byte_len()` over every entry. Used by
+/// [`enforce_metadata_size_limit`] to bound HPACK decoder memory at
+/// the request-reception boundary.
+#[must_use]
+pub fn metadata_byte_size(metadata: &super::streaming::Metadata) -> usize {
+    let mut total = 0usize;
+    for (key, value) in metadata.iter() {
+        let value_len = match value {
+            super::streaming::MetadataValue::Ascii(s) => s.len(),
+            super::streaming::MetadataValue::Binary(b) => b.len(),
+        };
+        total = total.saturating_add(key.len()).saturating_add(value_len);
+    }
+    total
+}
+
+/// Reject `metadata` with `Status::resource_exhausted` when its
+/// aggregate byte size exceeds `limit`. Transport adapters MUST call
+/// this on inbound HEADERS and TRAILERS frames before storing them
+/// in long-lived `CallContext`s, so a hostile peer cannot exhaust
+/// per-connection HPACK decoder memory by streaming arbitrarily long
+/// header lists.
+///
+/// `limit` is typically [`ServerConfig::max_metadata_size`]
+/// (default 8 KiB via [`DEFAULT_MAX_METADATA_SIZE`]). A `limit` of
+/// 0 disables enforcement (matches the convention used elsewhere in
+/// this crate where 0 means "no cap").
+///
+/// Returns `Ok(())` when the metadata is within bounds, or
+/// `Err(Status::resource_exhausted(...))` carrying both the actual
+/// and the configured limit so SREs can diagnose the rejection.
+///
+/// br-asupersync-i2bae8.
+pub fn enforce_metadata_size_limit(
+    metadata: &super::streaming::Metadata,
+    limit: usize,
+) -> Result<(), Status> {
+    if limit == 0 {
+        return Ok(());
+    }
+    let actual = metadata_byte_size(metadata);
+    if actual > limit {
+        return Err(Status::resource_exhausted(format!(
+            "metadata exceeds max_metadata_size: {actual} bytes > {limit} bytes \
+             (gRPC equivalent of HTTP 431 Request Header Fields Too Large; \
+             see ServerConfig::max_metadata_size)"
+        )));
+    }
+    Ok(())
 }
 
 impl Default for ServerConfig {
@@ -60,6 +132,10 @@ impl Default for ServerConfig {
             default_timeout: None,
             send_compression: None,
             accept_compression: vec![CompressionEncoding::Identity],
+            // 8 KiB matches the gRPC ecosystem convention (grpc-go
+            // MaxHeaderListSize default) and bounds per-connection
+            // HPACK decoder memory (br-asupersync-i2bae8).
+            max_metadata_size: DEFAULT_MAX_METADATA_SIZE,
         }
     }
 }
@@ -100,6 +176,18 @@ impl ServerBuilder {
     #[must_use]
     pub fn max_recv_message_size(mut self, size: usize) -> Self {
         self.config.max_recv_message_size = size;
+        self
+    }
+
+    /// Set the maximum aggregate metadata size (request headers +
+    /// trailers) in bytes. Defaults to 8 KiB
+    /// ([`DEFAULT_MAX_METADATA_SIZE`]). Inbound metadata exceeding
+    /// this is rejected with `Status::resource_exhausted` by
+    /// [`enforce_metadata_size_limit`]. A value of `0` disables the
+    /// cap. (br-asupersync-i2bae8.)
+    #[must_use]
+    pub fn max_metadata_size(mut self, size: usize) -> Self {
+        self.config.max_metadata_size = size;
         self
     }
 
@@ -1291,6 +1379,87 @@ mod tests {
         let ok = interceptor.intercept_request(&mut request).is_ok();
         crate::assert_with_log!(ok, "auth ok", true, ok);
         crate::test_complete!("test_auth_interceptor");
+    }
+
+    // -------------------------------------------------------------------
+    // br-asupersync-i2bae8: max_metadata_size enforcement
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn server_config_default_caps_metadata_at_8_kib() {
+        init_test("server_config_default_caps_metadata_at_8_kib");
+        let cfg = ServerConfig::default();
+        assert_eq!(
+            cfg.max_metadata_size,
+            DEFAULT_MAX_METADATA_SIZE,
+            "default max_metadata_size must equal DEFAULT_MAX_METADATA_SIZE (8 KiB)"
+        );
+        assert_eq!(cfg.max_metadata_size, 8 * 1024);
+        crate::test_complete!("server_config_default_caps_metadata_at_8_kib");
+    }
+
+    #[test]
+    fn enforce_metadata_size_limit_accepts_under_cap() {
+        init_test("enforce_metadata_size_limit_accepts_under_cap");
+        let mut metadata = super::super::streaming::Metadata::new();
+        metadata.insert("authorization", "Bearer abc");
+        metadata.insert("x-request-id", "deadbeef");
+        let total = metadata_byte_size(&metadata);
+        assert!(total > 0);
+        enforce_metadata_size_limit(&metadata, 8 * 1024)
+            .expect("under-cap metadata must pass enforcement");
+        crate::test_complete!("enforce_metadata_size_limit_accepts_under_cap");
+    }
+
+    #[test]
+    fn enforce_metadata_size_limit_rejects_over_cap_with_resource_exhausted() {
+        init_test("enforce_metadata_size_limit_rejects_over_cap_with_resource_exhausted");
+        let mut metadata = super::super::streaming::Metadata::new();
+        // 16 KiB of value bytes blows past an 8 KiB cap by 2x.
+        let huge = "A".repeat(16 * 1024);
+        metadata.insert("x-attack", huge);
+
+        match enforce_metadata_size_limit(&metadata, 8 * 1024) {
+            Err(status) => {
+                // gRPC equivalent of HTTP 431 — RESOURCE_EXHAUSTED.
+                assert_eq!(
+                    status.code() as u32,
+                    super::super::status::StatusCode::ResourceExhausted as u32,
+                    "must reject with RESOURCE_EXHAUSTED, got {:?}",
+                    status.code()
+                );
+                let msg = format!("{status}");
+                assert!(
+                    msg.contains("max_metadata_size") || msg.contains("metadata"),
+                    "error message must mention the limit, got: {msg}"
+                );
+            }
+            Ok(()) => panic!(
+                "16 KiB metadata must be rejected by 8 KiB cap, but enforcement passed"
+            ),
+        }
+        crate::test_complete!(
+            "enforce_metadata_size_limit_rejects_over_cap_with_resource_exhausted"
+        );
+    }
+
+    #[test]
+    fn enforce_metadata_size_limit_zero_disables_cap() {
+        init_test("enforce_metadata_size_limit_zero_disables_cap");
+        let mut metadata = super::super::streaming::Metadata::new();
+        let huge = "A".repeat(1024 * 1024); // 1 MiB
+        metadata.insert("x-anything", huge);
+        enforce_metadata_size_limit(&metadata, 0)
+            .expect("limit=0 must disable enforcement (no-cap convention)");
+        crate::test_complete!("enforce_metadata_size_limit_zero_disables_cap");
+    }
+
+    #[test]
+    fn server_builder_max_metadata_size_overrides_default() {
+        init_test("server_builder_max_metadata_size_overrides_default");
+        let server = ServerBuilder::new().max_metadata_size(16 * 1024).build();
+        assert_eq!(server.config().max_metadata_size, 16 * 1024);
+        crate::test_complete!("server_builder_max_metadata_size_overrides_default");
     }
 
     // =========================================================================
