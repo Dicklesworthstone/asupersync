@@ -40,17 +40,137 @@ pub struct TaskTable {
     /// Incremental counters for tasks in each phase (Created, Running, etc.).
     /// Used for O(1) Lyapunov snapshots (br-asupersync-xxcss5).
     /// Indexed by `TaskPhase` enum values 0..5.
-    #[allow(dead_code)]
     phase_counts: [usize; LIVE_PHASE_COUNT],
     /// Sum of all deadlines (in nanoseconds) for live tasks that have a
     /// non-infinite deadline. Combined with virtual-time `now`, allows O(1)
     /// estimation of deadline pressure.
-    #[allow(dead_code)]
     deadline_sum_ns: u128,
     /// Number of live tasks that contributed to `deadline_sum_ns`.
-    #[allow(dead_code)]
     tasks_with_deadline: usize,
 }
+
+    /// Records a task phase transition for incremental bookkeeping.
+    ///
+    /// O(1) — updates cached counters used for Lyapunov governor snapshots.
+    #[inline]
+    pub fn note_phase_transition(
+        &mut self,
+        old_phase: crate::record::task::TaskPhase,
+        new_phase: crate::record::task::TaskPhase,
+    ) {
+        if old_phase == new_phase {
+            return;
+        }
+
+        // Decrement old phase counter if it was live
+        let old_idx = old_phase as usize;
+        if old_idx < LIVE_PHASE_COUNT {
+            self.phase_counts[old_idx] = self.phase_counts[old_idx].saturating_sub(1);
+        }
+
+        // Increment new phase counter if it is live
+        let new_idx = new_phase as usize;
+        if new_idx < LIVE_PHASE_COUNT {
+            self.phase_counts[new_idx] = self.phase_counts[new_idx].saturating_add(1);
+        }
+    }
+
+    /// Internal helper to register a new live task's metadata.
+    #[inline]
+    fn note_task_added(&mut self, phase: crate::record::task::TaskPhase, deadline: Option<crate::types::Time>) {
+        let idx = phase as usize;
+        if idx < LIVE_PHASE_COUNT {
+            self.phase_counts[idx] = self.phase_counts[idx].saturating_add(1);
+        }
+        if let Some(d) = deadline {
+            self.deadline_sum_ns = self.deadline_sum_ns.saturating_add(u128::from(d.as_nanos()));
+            self.tasks_with_deadline += 1;
+        }
+    }
+
+    /// Internal helper to unregister a task's metadata (called on removal or terminal transition).
+    #[inline]
+    fn note_task_removed(&mut self, phase: crate::record::task::TaskPhase, deadline: Option<crate::types::Time>) {
+        let idx = phase as usize;
+        if idx < LIVE_PHASE_COUNT {
+            self.phase_counts[idx] = self.phase_counts[idx].saturating_sub(1);
+        }
+        if let Some(d) = deadline {
+            self.deadline_sum_ns = self.deadline_sum_ns.saturating_sub(u128::from(d.as_nanos()));
+            self.tasks_with_deadline = self.tasks_with_deadline.saturating_sub(1);
+        }
+    }
+
+    /// Updates a task's deadline in the incremental sum.
+    #[inline]
+    pub fn note_deadline_changed(&mut self, old_deadline: Option<crate::types::Time>, new_deadline: Option<crate::types::Time>) {
+        if old_deadline == new_deadline {
+            return;
+        }
+        if let Some(d) = old_deadline {
+            self.deadline_sum_ns = self.deadline_sum_ns.saturating_sub(u128::from(d.as_nanos()));
+            self.tasks_with_deadline = self.tasks_with_deadline.saturating_sub(1);
+        }
+        if let Some(d) = new_deadline {
+            self.deadline_sum_ns = self.deadline_sum_ns.saturating_add(u128::from(d.as_nanos()));
+            self.tasks_with_deadline += 1;
+        }
+    }
+
+    /// Safely updates a task record and maintains incremental counters.
+    ///
+    /// O(1) — maintained incrementally for O(1) Lyapunov snapshots.
+    #[inline]
+    pub fn update_task<F, R>(&mut self, task_id: TaskId, f: F) -> Option<R>
+    where
+        F: FnOnce(&mut TaskRecord) -> R,
+    {
+        if let Some(record) = self.tasks.get_mut(task_id.arena_index()) {
+            let old_phase = record.phase.load();
+            let old_deadline = record.deadline;
+            let res = f(record);
+            let new_phase = record.phase.load();
+            let new_deadline = record.deadline;
+            self.note_phase_transition(old_phase, new_phase);
+            self.note_deadline_changed(old_deadline, new_deadline);
+            Some(res)
+        } else {
+            None
+        }
+    }
+
+    /// Returns the number of tasks in a specific phase.
+    #[must_use]
+    #[inline]
+    pub fn count_in_phase(&self, phase: crate::record::task::TaskPhase) -> usize {
+        let idx = phase as usize;
+        if idx < LIVE_PHASE_COUNT {
+            self.phase_counts[idx]
+        } else {
+            0
+        }
+    }
+
+    /// Returns the total number of non-terminal (live) tasks.
+    #[must_use]
+    #[inline]
+    pub fn live_tasks(&self) -> usize {
+        self.phase_counts.iter().sum()
+    }
+
+    /// Returns the sum of deadlines for all live tasks.
+    #[must_use]
+    #[inline]
+    pub fn deadline_sum_ns(&self) -> u128 {
+        self.deadline_sum_ns
+    }
+
+    /// Returns the number of live tasks with a non-infinite deadline.
+    #[must_use]
+    #[inline]
+    pub fn tasks_with_deadline_count(&self) -> usize {
+        self.tasks_with_deadline
+    }
 
 impl TaskTable {
     /// Creates a new empty task table.
