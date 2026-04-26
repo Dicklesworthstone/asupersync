@@ -405,6 +405,14 @@ pub struct PooledResource<R> {
     /// `None`, which is harmless — it just means notification relies on
     /// the next `process_returns` call instead of being immediate.
     return_wakers: Option<ReturnWakers>,
+    /// Caller-flagged "this resource is broken, do not re-pool" bit.
+    /// Set via [`mark_broken`](Self::mark_broken). When `true`, the
+    /// `Drop` impl routes through `discard_inner` instead of
+    /// `return_inner`, ensuring known-bad resources can never poison
+    /// the idle pool — even when the holder hits an error path that
+    /// drops the wrapper via `?`-propagation rather than calling
+    /// [`discard`](Self::discard) explicitly. (br-asupersync-ob62ki)
+    is_broken: bool,
 }
 
 impl<R> PooledResource<R> {
@@ -432,6 +440,7 @@ impl<R> PooledResource<R> {
             created_at: now,
             time_getter,
             return_wakers: None,
+            is_broken: false,
         }
     }
 
@@ -450,6 +459,7 @@ impl<R> PooledResource<R> {
             created_at,
             time_getter,
             return_wakers: None,
+            is_broken: false,
         }
     }
 
@@ -487,6 +497,44 @@ impl<R> PooledResource<R> {
     /// The pool will create a new resource to replace this one.
     pub fn discard(mut self) {
         self.discard_inner();
+    }
+
+    /// Flag this resource as broken WITHOUT consuming it.
+    ///
+    /// Use when the holder discovers mid-use that the resource is in a
+    /// bad state (network blip mid-query, server-side connection close,
+    /// stored-procedure left an open transaction, etc.) but still needs
+    /// to use the wrapper through the rest of an error-handling scope.
+    /// The subsequent `Drop` (e.g. via `?`-propagation) routes through
+    /// [`discard_inner`] instead of [`return_inner`], so the broken
+    /// resource never re-enters the idle pool.
+    ///
+    /// Idempotent — calling twice is a no-op. (br-asupersync-ob62ki)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut conn = pool.acquire(&cx).await?;
+    /// match conn.execute_query(sql).await {
+    ///     Ok(rows) => return Ok(rows),
+    ///     Err(e) if e.is_connection_broken() => {
+    ///         conn.mark_broken();           // ← key call
+    ///         return Err(e);                 // Drop now routes to discard
+    ///     }
+    ///     Err(e) => return Err(e),          // Drop returns to pool (healthy)
+    /// }
+    /// ```
+    #[inline]
+    pub fn mark_broken(&mut self) {
+        self.is_broken = true;
+    }
+
+    /// Returns whether the resource has been flagged as broken.
+    /// (br-asupersync-ob62ki)
+    #[inline]
+    #[must_use]
+    pub fn is_broken(&self) -> bool {
+        self.is_broken
     }
 
     /// How long this resource has been held.
@@ -546,8 +594,25 @@ impl<R> PooledResource<R> {
 }
 
 impl<R> Drop for PooledResource<R> {
+    /// Routes the resource based on its broken flag:
+    ///
+    /// * If [`mark_broken`](PooledResource::mark_broken) was called at any
+    ///   point during this resource's lifetime, route through
+    ///   `discard_inner` so the pool destroys the resource and creates a
+    ///   fresh one in its place. This prevents broken connections from
+    ///   poisoning the idle pool when the holder hits an error path that
+    ///   drops the wrapper via `?`-propagation rather than calling
+    ///   [`discard`](PooledResource::discard) explicitly.
+    /// * Otherwise (default, healthy path), route through `return_inner`
+    ///   so the resource re-enters the idle pool for reuse.
+    ///
+    /// (br-asupersync-ob62ki)
     fn drop(&mut self) {
-        self.return_inner();
+        if self.is_broken {
+            self.discard_inner();
+        } else {
+            self.return_inner();
+        }
     }
 }
 
@@ -2471,6 +2536,71 @@ mod tests {
             PoolReturn::Discard { .. } => unreachable!("unexpected discard"),
         }
         crate::test_complete!("pooled_resource_returns_on_drop");
+    }
+
+    // ── br-asupersync-ob62ki: mark_broken regression tests ──────────────
+
+    /// A PooledResource flagged broken via mark_broken MUST route to
+    /// PoolReturn::Discard on Drop instead of PoolReturn::Return —
+    /// preventing broken connections from poisoning the idle pool.
+    #[test]
+    fn ob62ki_mark_broken_routes_drop_to_discard() {
+        init_test("ob62ki_mark_broken_routes_drop_to_discard");
+        let (tx, rx) = mpsc::channel();
+        let mut pooled = PooledResource::new(99u8, tx);
+        crate::assert_with_log!(!pooled.is_broken(), "default not broken", false, pooled.is_broken());
+        pooled.mark_broken();
+        crate::assert_with_log!(pooled.is_broken(), "after mark_broken", true, pooled.is_broken());
+        drop(pooled);
+
+        let msg = rx.recv().expect("discard message");
+        match msg {
+            PoolReturn::Discard { .. } => {}
+            PoolReturn::Return { .. } => {
+                panic!("broken resource MUST route to Discard on Drop, not Return")
+            }
+        }
+        crate::test_complete!("ob62ki_mark_broken_routes_drop_to_discard");
+    }
+
+    /// A PooledResource NOT flagged broken keeps the existing default:
+    /// Drop routes to PoolReturn::Return so the resource is recycled.
+    /// (Regression guard against the fix accidentally flipping the
+    /// default behaviour.)
+    #[test]
+    fn ob62ki_unflagged_resource_still_returns_on_drop() {
+        init_test("ob62ki_unflagged_resource_still_returns_on_drop");
+        let (tx, rx) = mpsc::channel();
+        let pooled = PooledResource::new(11u8, tx);
+        // No mark_broken call.
+        drop(pooled);
+        let msg = rx.recv().expect("return message");
+        match msg {
+            PoolReturn::Return { resource: value, .. } => {
+                crate::assert_with_log!(value == 11, "default Drop returns", 11u8, value);
+            }
+            PoolReturn::Discard { .. } => panic!("default Drop must Return, not Discard"),
+        }
+        crate::test_complete!("ob62ki_unflagged_resource_still_returns_on_drop");
+    }
+
+    /// mark_broken is idempotent — calling twice does not double-process
+    /// the resource. The Drop runs exactly once, exactly as Discard.
+    #[test]
+    fn ob62ki_mark_broken_is_idempotent() {
+        init_test("ob62ki_mark_broken_is_idempotent");
+        let (tx, rx) = mpsc::channel();
+        let mut pooled = PooledResource::new(5u8, tx);
+        pooled.mark_broken();
+        pooled.mark_broken();
+        pooled.mark_broken();
+        drop(pooled);
+
+        // Exactly one message.
+        let msg = rx.recv().expect("discard message");
+        assert!(matches!(msg, PoolReturn::Discard { .. }));
+        assert!(rx.try_recv().is_err(), "no second message should arrive");
+        crate::test_complete!("ob62ki_mark_broken_is_idempotent");
     }
 
     #[test]
