@@ -6,7 +6,7 @@ use crate::types::{CancelKind, Outcome, RegionId, TaskId};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::time::Duration;
 
 /// A monotonically increasing counter.
@@ -315,32 +315,184 @@ impl Summary {
     }
 }
 
+/// Default per-kind cardinality cap for [`Metrics`] (br-asupersync-eq197n).
+///
+/// Each metric kind (counters, gauges, histograms, summaries) is capped
+/// independently at this value to bound the in-process registry size and
+/// the downstream Prometheus scrape size. Override via
+/// [`Metrics::with_cardinality_cap`].
+pub const DEFAULT_METRIC_CARDINALITY_CAP: usize = 10_000;
+
+/// Sentinel name used by the overflow bucket when the per-kind cap is hit.
+///
+/// Callers requesting a fresh metric beyond the cap receive the shared
+/// overflow bucket for that kind so observations are NOT silently
+/// dropped — they are just aggregated into a single named entry the
+/// operator can spot in the Prometheus output.
+const OVERFLOW_METRIC_NAME: &str = "asupersync_metric_cardinality_overflow";
+
 /// A collection of metrics.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Metrics {
     counters: BTreeMap<String, Arc<Counter>>,
     gauges: BTreeMap<String, Arc<Gauge>>,
     histograms: BTreeMap<String, Arc<Histogram>>,
     summaries: BTreeMap<String, Arc<Summary>>,
+    /// Per-kind cap on distinct metric names. Default
+    /// [`DEFAULT_METRIC_CARDINALITY_CAP`]. (br-asupersync-eq197n)
+    cardinality_cap: usize,
+    /// Per-kind overflow-warning latch (counters, gauges, histograms,
+    /// summaries). The warn line fires at most once per kind per
+    /// `Metrics` instance to avoid log-flooding under sustained
+    /// overflow pressure.
+    overflow_warned_counter: AtomicBool,
+    overflow_warned_gauge: AtomicBool,
+    overflow_warned_histogram: AtomicBool,
+    overflow_warned_summary: AtomicBool,
+    /// Per-kind cumulative count of times the cap rejected a fresh
+    /// name and routed to the overflow bucket. Useful for SREs auditing
+    /// cardinality pressure without parsing logs.
+    overflow_rejections_counter: AtomicU64,
+    overflow_rejections_gauge: AtomicU64,
+    overflow_rejections_histogram: AtomicU64,
+    overflow_rejections_summary: AtomicU64,
+}
+
+impl Default for Metrics {
+    fn default() -> Self {
+        Self::with_cardinality_cap(DEFAULT_METRIC_CARDINALITY_CAP)
+    }
 }
 
 impl Metrics {
-    /// Creates a new metrics registry.
+    /// Creates a new metrics registry with the default cardinality cap
+    /// ([`DEFAULT_METRIC_CARDINALITY_CAP`]).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Gets or creates a counter.
+    /// Creates a new metrics registry with a custom per-kind cardinality cap
+    /// (br-asupersync-eq197n).
+    ///
+    /// A cap of `0` disables the limit (legacy unbounded behaviour). Any
+    /// other value caps each metric kind independently — once the
+    /// counters map reaches `cap` distinct names, a request for a new
+    /// counter name returns the shared overflow bucket
+    /// (`asupersync_metric_cardinality_overflow`) and the rejection is
+    /// recorded in [`Self::overflow_rejections_counter`].
+    #[must_use]
+    pub fn with_cardinality_cap(cap: usize) -> Self {
+        Self {
+            counters: BTreeMap::new(),
+            gauges: BTreeMap::new(),
+            histograms: BTreeMap::new(),
+            summaries: BTreeMap::new(),
+            cardinality_cap: cap,
+            overflow_warned_counter: AtomicBool::new(false),
+            overflow_warned_gauge: AtomicBool::new(false),
+            overflow_warned_histogram: AtomicBool::new(false),
+            overflow_warned_summary: AtomicBool::new(false),
+            overflow_rejections_counter: AtomicU64::new(0),
+            overflow_rejections_gauge: AtomicU64::new(0),
+            overflow_rejections_histogram: AtomicU64::new(0),
+            overflow_rejections_summary: AtomicU64::new(0),
+        }
+    }
+
+    /// Returns the configured per-kind cardinality cap. `0` means
+    /// unlimited (legacy behaviour).
+    #[must_use]
+    pub fn cardinality_cap(&self) -> usize {
+        self.cardinality_cap
+    }
+
+    /// Returns the cumulative overflow-rejection count per kind in the
+    /// order `(counters, gauges, histograms, summaries)`. SREs can poll
+    /// this to detect cardinality pressure without parsing logs.
+    #[must_use]
+    pub fn overflow_rejections(&self) -> (u64, u64, u64, u64) {
+        (
+            self.overflow_rejections_counter.load(Ordering::Relaxed),
+            self.overflow_rejections_gauge.load(Ordering::Relaxed),
+            self.overflow_rejections_histogram.load(Ordering::Relaxed),
+            self.overflow_rejections_summary.load(Ordering::Relaxed),
+        )
+    }
+
+    /// Internal helper: returns true if `name` would be a fresh entry
+    /// AND the kind's map is already at the cap. The caller routes to
+    /// the overflow bucket in that case.
+    #[inline]
+    fn cap_would_reject(
+        cardinality_cap: usize,
+        map_len: usize,
+        name: &str,
+        contains: bool,
+    ) -> bool {
+        if cardinality_cap == 0 {
+            return false; // Unlimited.
+        }
+        if contains {
+            return false; // Existing name — no growth.
+        }
+        if name == OVERFLOW_METRIC_NAME {
+            // The overflow bucket itself must always be insertable so
+            // we can record rejections. Don't recurse.
+            return false;
+        }
+        map_len >= cardinality_cap
+    }
+
+    /// Gets or creates a counter. (br-asupersync-eq197n: capped at
+    /// [`Self::cardinality_cap`] distinct names; over-cap requests
+    /// return the shared overflow bucket.)
     pub fn counter(&mut self, name: &str) -> Arc<Counter> {
+        let contains = self.counters.contains_key(name);
+        if Self::cap_would_reject(self.cardinality_cap, self.counters.len(), name, contains) {
+            self.overflow_rejections_counter
+                .fetch_add(1, Ordering::Relaxed);
+            if !self.overflow_warned_counter.swap(true, Ordering::Relaxed) {
+                crate::tracing_compat::warn!(
+                    "metrics: counter cardinality cap ({}) reached; \
+                     subsequent fresh names route to '{}' bucket. \
+                     Inspect Metrics::overflow_rejections() to monitor pressure.",
+                    self.cardinality_cap,
+                    OVERFLOW_METRIC_NAME
+                );
+            }
+            return self
+                .counters
+                .entry(OVERFLOW_METRIC_NAME.to_string())
+                .or_insert_with(|| Arc::new(Counter::new(OVERFLOW_METRIC_NAME)))
+                .clone();
+        }
         self.counters
             .entry(name.to_string())
             .or_insert_with(|| Arc::new(Counter::new(name)))
             .clone()
     }
 
-    /// Gets or creates a gauge.
+    /// Gets or creates a gauge. (br-asupersync-eq197n: capped.)
     pub fn gauge(&mut self, name: &str) -> Arc<Gauge> {
+        let contains = self.gauges.contains_key(name);
+        if Self::cap_would_reject(self.cardinality_cap, self.gauges.len(), name, contains) {
+            self.overflow_rejections_gauge
+                .fetch_add(1, Ordering::Relaxed);
+            if !self.overflow_warned_gauge.swap(true, Ordering::Relaxed) {
+                crate::tracing_compat::warn!(
+                    "metrics: gauge cardinality cap ({}) reached; \
+                     subsequent fresh names route to '{}' bucket.",
+                    self.cardinality_cap,
+                    OVERFLOW_METRIC_NAME
+                );
+            }
+            return self
+                .gauges
+                .entry(OVERFLOW_METRIC_NAME.to_string())
+                .or_insert_with(|| Arc::new(Gauge::new(OVERFLOW_METRIC_NAME)))
+                .clone();
+        }
         self.gauges
             .entry(name.to_string())
             .or_insert_with(|| Arc::new(Gauge::new(name)))
@@ -348,16 +500,57 @@ impl Metrics {
     }
 
     /// Gets or creates a histogram with default buckets.
+    /// (br-asupersync-eq197n: capped. Note: re-creating histogram with
+    /// different buckets is not supported for same name.)
     pub fn histogram(&mut self, name: &str, buckets: Vec<f64>) -> Arc<Histogram> {
-        // Note: Re-creating histogram with different buckets is not supported for same name
+        let contains = self.histograms.contains_key(name);
+        if Self::cap_would_reject(self.cardinality_cap, self.histograms.len(), name, contains) {
+            self.overflow_rejections_histogram
+                .fetch_add(1, Ordering::Relaxed);
+            if !self
+                .overflow_warned_histogram
+                .swap(true, Ordering::Relaxed)
+            {
+                crate::tracing_compat::warn!(
+                    "metrics: histogram cardinality cap ({}) reached; \
+                     subsequent fresh names route to '{}' bucket. \
+                     Overflow histogram uses the FIRST seen bucket layout.",
+                    self.cardinality_cap,
+                    OVERFLOW_METRIC_NAME
+                );
+            }
+            return self
+                .histograms
+                .entry(OVERFLOW_METRIC_NAME.to_string())
+                .or_insert_with(|| Arc::new(Histogram::new(OVERFLOW_METRIC_NAME, buckets)))
+                .clone();
+        }
         self.histograms
             .entry(name.to_string())
             .or_insert_with(|| Arc::new(Histogram::new(name, buckets)))
             .clone()
     }
 
-    /// Gets or creates a summary.
+    /// Gets or creates a summary. (br-asupersync-eq197n: capped.)
     pub fn summary(&mut self, name: &str) -> Arc<Summary> {
+        let contains = self.summaries.contains_key(name);
+        if Self::cap_would_reject(self.cardinality_cap, self.summaries.len(), name, contains) {
+            self.overflow_rejections_summary
+                .fetch_add(1, Ordering::Relaxed);
+            if !self.overflow_warned_summary.swap(true, Ordering::Relaxed) {
+                crate::tracing_compat::warn!(
+                    "metrics: summary cardinality cap ({}) reached; \
+                     subsequent fresh names route to '{}' bucket.",
+                    self.cardinality_cap,
+                    OVERFLOW_METRIC_NAME
+                );
+            }
+            return self
+                .summaries
+                .entry(OVERFLOW_METRIC_NAME.to_string())
+                .or_insert_with(|| Arc::new(Summary::new(OVERFLOW_METRIC_NAME)))
+                .clone();
+        }
         self.summaries
             .entry(name.to_string())
             .or_insert_with(|| Arc::new(Summary::new(name)))
@@ -621,6 +814,106 @@ mod tests {
         let output = metrics.export_prometheus();
         assert!(output.contains("requests 10"));
         assert!(output.contains("memory 1024"));
+    }
+
+    /// br-asupersync-eq197n: cardinality cap rejects fresh names beyond
+    /// the limit and routes them to the shared overflow bucket while
+    /// preserving access to existing-name lookups.
+    #[test]
+    fn cardinality_cap_routes_fresh_names_to_overflow_bucket() {
+        let mut metrics = Metrics::with_cardinality_cap(3);
+        // Fill cap exactly.
+        metrics.counter("a").increment();
+        metrics.counter("b").increment();
+        metrics.counter("c").increment();
+        assert_eq!(metrics.counters.len(), 3);
+        assert_eq!(metrics.overflow_rejections().0, 0);
+
+        // Existing names still resolve — no growth, no rejection.
+        let a_again = metrics.counter("a");
+        a_again.add(5);
+        assert_eq!(metrics.counters.len(), 3);
+        assert_eq!(metrics.overflow_rejections().0, 0);
+
+        // Fresh name beyond cap routes to overflow bucket. The map
+        // grows by ONE (the overflow entry itself, created lazily).
+        let overflow = metrics.counter("d");
+        overflow.add(7);
+        assert_eq!(
+            metrics.overflow_rejections().0,
+            1,
+            "first over-cap name should bump rejection counter"
+        );
+        // Subsequent fresh names DON'T grow the map further — they all
+        // funnel into the SAME overflow bucket.
+        metrics.counter("e").add(3);
+        metrics.counter("f").add(11);
+        assert_eq!(
+            metrics.overflow_rejections().0,
+            3,
+            "every fresh-name-over-cap should bump rejection counter"
+        );
+        // Map size: 3 originals + 1 overflow bucket = 4. Stable.
+        assert_eq!(metrics.counters.len(), 4);
+
+        // The overflow bucket aggregates all over-cap observations
+        // (7 + 3 + 11 = 21).
+        assert_eq!(overflow.get(), 21);
+    }
+
+    /// br-asupersync-eq197n: per-kind caps are independent — counter
+    /// overflow does NOT affect gauge / histogram / summary growth.
+    #[test]
+    fn cardinality_cap_is_per_kind_not_shared() {
+        let mut metrics = Metrics::with_cardinality_cap(1);
+        metrics.counter("c1");
+        metrics.counter("c2"); // overflow on counters
+        assert_eq!(metrics.overflow_rejections().0, 1);
+
+        // Gauges have their own cap budget, untouched.
+        metrics.gauge("g1");
+        assert_eq!(metrics.overflow_rejections().1, 0);
+        metrics.gauge("g2"); // overflow on gauges only
+        assert_eq!(metrics.overflow_rejections().1, 1);
+
+        // Histograms still untouched.
+        metrics.histogram("h1", vec![1.0, 2.0]);
+        assert_eq!(metrics.overflow_rejections().2, 0);
+
+        // Summaries still untouched.
+        metrics.summary("s1");
+        assert_eq!(metrics.overflow_rejections().3, 0);
+    }
+
+    /// br-asupersync-eq197n: cap of 0 disables the limit (legacy
+    /// unbounded behaviour) — non-breaking escape hatch for callers
+    /// that explicitly opt out.
+    #[test]
+    fn cardinality_cap_zero_disables_limit() {
+        let mut metrics = Metrics::with_cardinality_cap(0);
+        for i in 0..50 {
+            metrics.counter(&format!("c{i}"));
+        }
+        assert_eq!(metrics.counters.len(), 50);
+        assert_eq!(metrics.overflow_rejections().0, 0);
+    }
+
+    /// br-asupersync-eq197n: warn-once latches per kind so sustained
+    /// overflow pressure doesn't flood the log.
+    #[test]
+    fn cardinality_cap_warn_latches_per_kind() {
+        let mut metrics = Metrics::with_cardinality_cap(1);
+        metrics.counter("c1");
+        // Trigger the warn-once latch by a single overflow.
+        metrics.counter("c2");
+        assert!(metrics.overflow_warned_counter.load(Ordering::Relaxed));
+        // Many subsequent overflows must NOT re-flip the latch.
+        for i in 0..100 {
+            metrics.counter(&format!("c_extra_{i}"));
+        }
+        assert!(metrics.overflow_warned_counter.load(Ordering::Relaxed));
+        // Gauge latch must still be unset (per-kind isolation).
+        assert!(!metrics.overflow_warned_gauge.load(Ordering::Relaxed));
     }
 
     #[test]
@@ -1218,7 +1511,7 @@ mod tests {
         /// Builds OTLP request from metrics registry.
         fn build_request(&self, metrics: &Metrics) -> Result<OtelMetricsRequest, OtelExportError> {
             let mut otel_metrics = Vec::new();
-            let timestamp = super::replayable_system_time()
+            let timestamp = crate::observability::replayable_system_time()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_err(|_| OtelExportError::TimestampError)?
                 .as_nanos() as u64;
