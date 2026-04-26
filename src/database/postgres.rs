@@ -45,7 +45,7 @@ use crate::net::TcpStream;
 #[cfg(feature = "tls")]
 use crate::tls::{TlsConnectorBuilder, TlsStream};
 use crate::types::{CancelReason, Outcome};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
 use std::io;
 use std::pin::Pin;
@@ -1963,6 +1963,104 @@ impl AsyncWrite for PgStream {
 /// Maximum rows accepted per result set before closing the connection.
 const DEFAULT_MAX_RESULT_ROWS: usize = 1_000_000;
 
+/// Default cap on the per-connection prepared-statement cache.
+///
+/// br-asupersync-cvkoe9: pre-fix every distinct prepare() call allocated
+/// a new server-side named statement that lived until DEALLOCATE or
+/// session end. For long-lived pooled connections (default
+/// max_lifetime 3600s in src/database/pool.rs) the server-side
+/// pg_prepared_statements table grew monotonically with cumulative
+/// distinct prepares — a real connection-scoped memory leak with no
+/// upper bound. Post-fix the cache caps at this value, returns cached
+/// statements on repeat-SQL hits, and sends DEALLOCATE for the LRU
+/// entry on eviction.
+pub const DEFAULT_MAX_PREPARED_STATEMENTS: usize = 256;
+
+/// Bounded LRU cache for server-side prepared statements.
+///
+/// Keyed by SQL string (cheap given typical SQL is < 1 KB and there
+/// are at most `cap` entries). LRU order is tracked by a
+/// `VecDeque<String>` of SQL keys — most-recently-used at the BACK,
+/// least-recently-used at the FRONT. On insert at cap the FRONT entry
+/// is evicted and returned to the caller for DEALLOCATE.
+struct PreparedStatementCache {
+    /// SQL → cached statement metadata.
+    entries: HashMap<String, PgStatement>,
+    /// LRU order: front = least recently used, back = most recently used.
+    /// Each String here is also a key in `entries`.
+    lru: VecDeque<String>,
+    /// Maximum entries before eviction. Setting to 0 effectively
+    /// disables caching (every prepare() goes straight to wire + the
+    /// just-inserted entry is evicted on the very next insert).
+    cap: usize,
+}
+
+impl PreparedStatementCache {
+    fn new(cap: usize) -> Self {
+        Self {
+            entries: HashMap::with_capacity(cap.min(64)),
+            lru: VecDeque::with_capacity(cap.min(64)),
+            cap,
+        }
+    }
+
+    /// Look up a cached statement. Returns a clone of the cached metadata
+    /// AND moves the SQL key to the back of the LRU queue (most-recently
+    /// used). Returns `None` on miss.
+    fn get_and_touch(&mut self, sql: &str) -> Option<PgStatement> {
+        let stmt = self.entries.get(sql)?.clone();
+        // Move to back of LRU.
+        if let Some(pos) = self.lru.iter().position(|s| s == sql) {
+            if let Some(key) = self.lru.remove(pos) {
+                self.lru.push_back(key);
+            }
+        }
+        Some(stmt)
+    }
+
+    /// Insert a new statement into the cache. If the cache is at capacity,
+    /// evicts the least-recently-used entry and returns its server-side
+    /// name so the caller can send DEALLOCATE. If the SQL is already
+    /// present, REPLACES the entry (returning the old name for DEALLOCATE
+    /// — Postgres requires the old statement be closed before re-Parsing
+    /// the same name, but here the names are unique per insert so we
+    /// only return the OLD entry's name).
+    fn insert_returning_evicted_name(
+        &mut self,
+        sql: String,
+        stmt: PgStatement,
+    ) -> Option<String> {
+        // Reject zero-cap configs cleanly: insert returns evicted-self.
+        if self.cap == 0 {
+            return Some(stmt.name);
+        }
+        let mut evicted = None;
+        // If SQL already cached (rare — would mean caller didn't check
+        // get_and_touch first), close the OLD server-side name.
+        if let Some(old) = self.entries.remove(&sql) {
+            if let Some(pos) = self.lru.iter().position(|s| s == &sql) {
+                self.lru.remove(pos);
+            }
+            evicted = Some(old.name);
+        } else if self.entries.len() >= self.cap {
+            // At cap. Evict LRU = front of queue.
+            if let Some(victim_sql) = self.lru.pop_front() {
+                if let Some(victim_stmt) = self.entries.remove(&victim_sql) {
+                    evicted = Some(victim_stmt.name);
+                }
+            }
+        }
+        self.lru.push_back(sql.clone());
+        self.entries.insert(sql, stmt);
+        evicted
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
 /// Inner connection state.
 struct PgConnectionInner {
     /// Transport stream (plain TCP or TLS).
@@ -1991,6 +2089,12 @@ struct PgConnectionInner {
     /// connection. Prevents unbounded memory growth from runaway queries or
     /// a malicious server sending an endless DataRow stream.
     max_result_rows: usize,
+    /// Bounded LRU cache of server-side prepared statements (br-asupersync-cvkoe9).
+    /// Pre-fix this connection leaked one server-side prepared statement per
+    /// distinct prepare() call; post-fix the cache caps at
+    /// [`DEFAULT_MAX_PREPARED_STATEMENTS`] entries with DEALLOCATE on
+    /// eviction. Repeat-SQL prepares hit the fast path (no wire exchange).
+    prepared_cache: PreparedStatementCache,
 }
 
 /// Coordinates needed to send a PG `CancelRequest` on a fresh socket.
@@ -2316,6 +2420,7 @@ impl PgConnection {
                 needs_rollback: false,
                 next_stmt_id: 0,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                prepared_cache: PreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
             },
         };
 
@@ -3325,6 +3430,14 @@ impl PgConnection {
             return Outcome::Err(PgError::ConnectionClosed);
         }
 
+        // br-asupersync-cvkoe9: fast-path for repeat-SQL. Bypasses the
+        // Parse/Describe/Sync wire exchange entirely and returns the
+        // cached metadata. Touching the entry promotes it to MRU in
+        // the LRU queue so it survives the next eviction round.
+        if let Some(cached) = self.inner.prepared_cache.get_and_touch(sql) {
+            return Outcome::Ok(cached);
+        }
+
         match self.ensure_no_orphaned_transaction(cx).await {
             Outcome::Ok(()) => {}
             Outcome::Err(err) => return Outcome::Err(err),
@@ -3418,11 +3531,36 @@ impl PgConnection {
             }
         }
 
-        Outcome::Ok(PgStatement {
+        let stmt = PgStatement {
             name: stmt_name,
             param_oids,
             columns,
-        })
+        };
+
+        // br-asupersync-cvkoe9: insert into the bounded LRU cache. If at
+        // capacity, the cache returns the LRU entry's server-side name
+        // for DEALLOCATE. We send the close best-effort — if the
+        // DEALLOCATE fails (e.g., connection error mid-protocol) the
+        // server-side statement leaks ONE entry rather than the whole
+        // unbounded set; the cache entry on our side is still evicted
+        // so subsequent prepare()s for the same SQL will re-Parse.
+        let evicted_name = self
+            .inner
+            .prepared_cache
+            .insert_returning_evicted_name(sql.to_string(), stmt.clone());
+        if let Some(victim_name) = evicted_name {
+            // Best-effort: ignore the result (logging would require Cx
+            // tracing infra; the documented eviction-leak floor is
+            // documented in the bead).
+            let victim_stmt = PgStatement {
+                name: victim_name,
+                param_oids: Vec::new(),
+                columns: Vec::new(),
+            };
+            let _ = self.close_statement(cx, &victim_stmt).await;
+        }
+
+        Outcome::Ok(stmt)
     }
 
     /// Execute a prepared statement returning rows.
@@ -4654,6 +4792,7 @@ mod tests {
                 needs_rollback: false,
                 next_stmt_id: 0,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                prepared_cache: PreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
             },
         }
     }
@@ -4678,6 +4817,7 @@ mod tests {
                     needs_rollback: false,
                     next_stmt_id: 0,
                     max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                    prepared_cache: PreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
                 },
             },
             peer_stream,
@@ -7575,5 +7715,116 @@ mod tests {
             let payload = &null_fail_msg[5..];
             assert_eq!(payload[payload.len() - 1], 0); // Still properly null-terminated
         }
+    }
+
+    // ─── br-asupersync-cvkoe9: PreparedStatementCache regression tests ──
+
+    fn fake_pg_statement(name: &str) -> PgStatement {
+        PgStatement {
+            name: name.to_string(),
+            param_oids: Vec::new(),
+            columns: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn prepared_cache_returns_evicted_name_at_cap() {
+        // br-asupersync-cvkoe9: when the cache hits its capacity, the
+        // LRU entry's server-side statement name MUST be returned so the
+        // caller can DEALLOCATE it. Otherwise the bound is fictional.
+        let mut cache = PreparedStatementCache::new(3);
+        // Fill to cap.
+        assert_eq!(
+            cache.insert_returning_evicted_name("sql_a".into(), fake_pg_statement("__s0")),
+            None
+        );
+        assert_eq!(
+            cache.insert_returning_evicted_name("sql_b".into(), fake_pg_statement("__s1")),
+            None
+        );
+        assert_eq!(
+            cache.insert_returning_evicted_name("sql_c".into(), fake_pg_statement("__s2")),
+            None
+        );
+        assert_eq!(cache.len(), 3);
+
+        // Insert at cap → evicts LRU (sql_a).
+        let evicted =
+            cache.insert_returning_evicted_name("sql_d".into(), fake_pg_statement("__s3"));
+        assert_eq!(
+            evicted,
+            Some("__s0".to_string()),
+            "cache at cap MUST return LRU name for DEALLOCATE"
+        );
+        assert_eq!(cache.len(), 3);
+        assert!(cache.entries.contains_key("sql_b"));
+        assert!(cache.entries.contains_key("sql_c"));
+        assert!(cache.entries.contains_key("sql_d"));
+        assert!(!cache.entries.contains_key("sql_a"));
+    }
+
+    #[test]
+    fn prepared_cache_get_and_touch_promotes_lru() {
+        // Touching an entry must move it to MRU so it survives the next
+        // eviction round. Otherwise frequently-reused statements get
+        // evicted alongside one-shot statements.
+        let mut cache = PreparedStatementCache::new(3);
+        cache.insert_returning_evicted_name("sql_a".into(), fake_pg_statement("__s0"));
+        cache.insert_returning_evicted_name("sql_b".into(), fake_pg_statement("__s1"));
+        cache.insert_returning_evicted_name("sql_c".into(), fake_pg_statement("__s2"));
+
+        // Touch sql_a → moves it to back of LRU. Now sql_b is LRU.
+        let hit = cache.get_and_touch("sql_a");
+        assert!(hit.is_some());
+        assert_eq!(hit.unwrap().name, "__s0");
+
+        // Insert sql_d at cap. sql_b (now LRU) MUST be evicted.
+        let evicted =
+            cache.insert_returning_evicted_name("sql_d".into(), fake_pg_statement("__s3"));
+        assert_eq!(
+            evicted,
+            Some("__s1".to_string()),
+            "after touching sql_a, the next eviction must take sql_b not sql_a"
+        );
+    }
+
+    #[test]
+    fn prepared_cache_get_and_touch_miss_returns_none() {
+        let mut cache = PreparedStatementCache::new(3);
+        cache.insert_returning_evicted_name("sql_a".into(), fake_pg_statement("__s0"));
+        assert!(cache.get_and_touch("sql_b").is_none());
+    }
+
+    #[test]
+    fn prepared_cache_zero_cap_evicts_immediately() {
+        // Edge case: a cap-0 cache is effectively disabled. Every insert
+        // returns the just-inserted entry's name for DEALLOCATE so no
+        // server-side state ever lingers beyond the prepare() call.
+        let mut cache = PreparedStatementCache::new(0);
+        let evicted =
+            cache.insert_returning_evicted_name("sql".into(), fake_pg_statement("__only"));
+        assert_eq!(evicted, Some("__only".to_string()));
+    }
+
+    #[test]
+    fn prepared_cache_duplicate_sql_replaces_and_returns_old_name() {
+        // Caller didn't check get_and_touch first (or raced) and called
+        // insert with SQL already present. The OLD server-side name MUST
+        // be returned for DEALLOCATE so the duplicate doesn't leak.
+        let mut cache = PreparedStatementCache::new(3);
+        cache.insert_returning_evicted_name("sql".into(), fake_pg_statement("__s0"));
+        let evicted =
+            cache.insert_returning_evicted_name("sql".into(), fake_pg_statement("__s1"));
+        assert_eq!(evicted, Some("__s0".to_string()));
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.entries.get("sql").unwrap().name, "__s1");
+    }
+
+    #[test]
+    fn default_max_prepared_statements_is_documented_value() {
+        // Regression guard: if the default cap changes the bead's
+        // 'connection-scoped memory footprint' calculation needs
+        // revalidating.
+        assert_eq!(DEFAULT_MAX_PREPARED_STATEMENTS, 256);
     }
 }
