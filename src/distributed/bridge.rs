@@ -2420,4 +2420,86 @@ mod tests {
         bridge.apply_snapshot(&newer).unwrap();
         assert_eq!(bridge.sync_state.last_applied_inbound_sequence, 11);
     }
+
+    // =====================================================================
+    // br-asupersync-c2m5w7: apply_snapshot also realigns self.distributed
+    // =====================================================================
+
+    #[test]
+    fn c2m5w7_apply_snapshot_aligns_distributed_state() {
+        // Build a distributed bridge in Active state, then apply a
+        // snapshot whose local state is Closing. Pre-fix only
+        // self.local was updated, leaving distributed=Active and
+        // effective_state()=Inconsistent. Post-fix self.distributed
+        // is realigned and effective_state() returns Closing.
+        let mut bridge = create_distributed_bridge();
+        if let Some(ref mut dist) = bridge.distributed {
+            let _ = dist.activate(Time::from_secs(0));
+        }
+        assert_eq!(
+            bridge.distributed_state(),
+            Some(DistributedRegionState::Active)
+        );
+
+        let mut snap = nyp2ts_snapshot_at(&bridge, 1);
+        snap.state = RegionState::Closing;
+
+        bridge.apply_snapshot(&snap).unwrap();
+
+        assert_eq!(bridge.local_state(), RegionState::Closing);
+        assert_eq!(
+            bridge.distributed_state(),
+            Some(DistributedRegionState::Closing),
+            "apply_snapshot must align self.distributed (was stuck at Active pre-fix)"
+        );
+        assert_eq!(
+            bridge.effective_state(),
+            EffectiveState::Closing,
+            "effective_state must be Closing — pre-fix it was Inconsistent"
+        );
+    }
+
+    #[test]
+    fn c2m5w7_apply_snapshot_no_op_when_distributed_already_aligned() {
+        // If the inbound snapshot's translated distributed state
+        // already matches self.distributed, we must not redundantly
+        // poke last_replicated or rebuild state.
+        let mut bridge = create_distributed_bridge();
+        if let Some(ref mut dist) = bridge.distributed {
+            let _ = dist.activate(Time::from_secs(0));
+            dist.last_replicated = None;
+        }
+
+        // Snapshot with state=Open → translates to
+        // DistributedRegionState::Active, which matches the bridge.
+        let snap = nyp2ts_snapshot_at(&bridge, 1);
+        bridge.apply_snapshot(&snap).unwrap();
+
+        assert_eq!(
+            bridge.distributed_state(),
+            Some(DistributedRegionState::Active)
+        );
+        assert!(
+            bridge
+                .distributed()
+                .and_then(|d| d.last_replicated)
+                .is_none(),
+            "no-change apply_snapshot must not mutate last_replicated"
+        );
+    }
+
+    #[test]
+    fn c2m5w7_apply_snapshot_skips_distributed_update_when_local_only() {
+        // Local-only bridges have no self.distributed to align —
+        // apply_snapshot must remain a local-only op there.
+        let mut bridge = create_local_bridge();
+        let snap = nyp2ts_snapshot_at(&bridge, 1);
+        bridge.apply_snapshot(&snap).unwrap();
+
+        assert!(
+            bridge.distributed().is_none(),
+            "local bridge must not gain a distributed record from apply_snapshot"
+        );
+        assert_eq!(bridge.local_state(), RegionState::Open);
+    }
 }
