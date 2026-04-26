@@ -132,14 +132,76 @@ pub use task_inspector::{
     TaskSummaryWire,
 };
 
+/// br-asupersync-z5ge0x: globally-installable observability clock for
+/// ambient-context (no-Cx) callers.
+///
+/// Lab runtimes / replay harnesses install this once at test setup so
+/// observability records emitted from Drop impls, panic handlers,
+/// background sweeps spawned outside the runtime, and other ambient
+/// contexts derive their wall-clock from a deterministic source instead
+/// of leaking `SystemTime::now()`. Production code does NOT install
+/// anything; the no-Cx path then falls back to ambient `SystemTime::now()`
+/// as before, but the fallback emits `tracing::warn!` exactly once per
+/// process so the leak is visible to operators.
+///
+/// `OnceLock` semantics: the clock can be installed at most once per
+/// process. Subsequent installation attempts are no-ops (the first
+/// installation wins). This matches the singleton lifetime of a
+/// process-wide deterministic time source.
+static GLOBAL_OBSERVABILITY_CLOCK: std::sync::OnceLock<
+    fn() -> std::time::SystemTime,
+> = std::sync::OnceLock::new();
+
+/// Latch (br-asupersync-z5ge0x) ensuring the ambient-fallback warning
+/// fires at most once per process. Without this, observability emitted
+/// from a hot Drop path or panic handler could flood the log every time
+/// it ran outside a Cx scope.
+static AMBIENT_FALLBACK_WARNED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Installs the process-global observability clock used by
+/// [`replayable_system_time`] when no `Cx` is in scope (br-asupersync-z5ge0x).
+///
+/// Returns `Ok(())` on the first installation and `Err(())` on every
+/// subsequent attempt — the OnceLock semantics mean the first install
+/// wins for the lifetime of the process. Lab runtimes and replay
+/// harnesses MUST call this at test setup; production should not call
+/// it (and will then receive the explicit warn-once when ambient
+/// fallback fires).
+///
+/// The provided `clock_fn` MUST be deterministic for replay
+/// guarantees — typically a closure-free `fn` pointer that consults a
+/// virtual clock in static state or a counter.
+pub fn install_global_observability_clock(
+    clock_fn: fn() -> std::time::SystemTime,
+) -> Result<(), ()> {
+    GLOBAL_OBSERVABILITY_CLOCK.set(clock_fn).map_err(|_| ())
+}
+
 /// Returns a wall-clock `SystemTime` that is replayable when an asupersync
 /// `Cx` with an installed timer driver is in scope.
 ///
-/// In production (no virtual timer driver) this is equivalent to
-/// `SystemTime::now()`. In the lab runtime, it derives a deterministic
-/// `SystemTime` from the virtual clock so emitted observability records
-/// (metric timestamps, debt snapshots, cancellation trace steps) compare
-/// byte-for-byte across replays.
+/// **Resolution order (br-asupersync-z5ge0x):**
+/// 1. If a `Cx` is current, derive `SystemTime` from `cx.now_for_observability()`
+///    — fully deterministic and replayable.
+/// 2. Else if a global observability clock has been installed via
+///    [`install_global_observability_clock`], call it — deterministic for
+///    lab/replay runs that install a virtual clock at test setup.
+/// 3. Else fall back to `SystemTime::now()` AND emit `tracing::warn!`
+///    exactly once per process. The fallback breaks replay determinism
+///    for any record that uses it, so the warn line lets operators
+///    spot ambient-context observability they may have missed (Drop
+///    impls, panic handlers, background sweeps spawned outside the
+///    runtime, `std::thread::spawn`'d helpers).
+///
+/// The `pub` ↔ `pub(crate)` distinction matters: this is `pub(crate)`
+/// because production callers should not be designing their
+/// observability around the timestamp source — they should just emit
+/// records and the resolution policy is centralized here.
+///
+/// For callers that want the strict "no deterministic source available
+/// → skip the record entirely" semantic, see
+/// [`try_replayable_system_time`].
 ///
 /// This is the canonical replacement for direct `std::time::SystemTime::now()`
 /// calls inside `src/observability/*` per asupersync_plan_v4.md §I7
@@ -150,7 +212,48 @@ pub(crate) fn replayable_system_time() -> std::time::SystemTime {
         let nanos = cx.now_for_observability().as_nanos();
         return std::time::UNIX_EPOCH + std::time::Duration::from_nanos(nanos);
     }
+    if let Some(clock_fn) = GLOBAL_OBSERVABILITY_CLOCK.get() {
+        return clock_fn();
+    }
+    // Ambient fallback. Warn once per process so the leak is visible.
+    if !AMBIENT_FALLBACK_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        crate::tracing_compat::warn!(
+            "observability: replayable_system_time fell back to \
+             ambient SystemTime::now() — observability records emitted \
+             outside a Cx scope and without a globally-installed \
+             observability clock break replay determinism. Install a \
+             clock via observability::install_global_observability_clock \
+             at lab-runtime setup to fix. (warning fires once per process)"
+        );
+    }
     std::time::SystemTime::now()
+}
+
+/// Strict variant of [`replayable_system_time`] that returns `None`
+/// when no deterministic source is available, instead of falling back
+/// to ambient `SystemTime::now()` (br-asupersync-z5ge0x).
+///
+/// Callers that PREFER to skip emitting a record over emitting a
+/// non-replay-deterministic timestamp use this variant. Returns:
+/// - `Some(..)` derived from `Cx::current().now_for_observability()` if a Cx is in scope.
+/// - `Some(..)` from the globally-installed observability clock if [`install_global_observability_clock`] has been called.
+/// - `None` otherwise.
+///
+/// This NEVER calls `SystemTime::now()` and NEVER emits the
+/// ambient-fallback warning — the absent-source signal is given to the
+/// caller via `None`.
+#[must_use]
+pub(crate) fn try_replayable_system_time() -> Option<std::time::SystemTime> {
+    if let Some(cx) = crate::cx::Cx::current() {
+        let nanos = cx.now_for_observability().as_nanos();
+        return Some(std::time::UNIX_EPOCH + std::time::Duration::from_nanos(nanos));
+    }
+    GLOBAL_OBSERVABILITY_CLOCK.get().map(|clock_fn| clock_fn())
+}
+
+#[cfg(test)]
+pub(crate) fn _reset_ambient_fallback_warned_for_test() {
+    AMBIENT_FALLBACK_WARNED.store(false, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[allow(clippy::cast_precision_loss)]
@@ -421,6 +524,75 @@ mod tests {
         assert!((config.sample_rate() - 1.0).abs() < f64::EPSILON);
         assert!(config.metrics_enabled());
     }
+
+    /// br-asupersync-z5ge0x: try_replayable_system_time returns None
+    /// when there is no Cx in scope AND no global observability clock
+    /// has been installed. This is the strict-no-fallback variant; it
+    /// must NEVER consult ambient SystemTime::now and NEVER emit the
+    /// warn line.
+    ///
+    /// Note: this test runs in a dedicated thread to ensure no prior
+    /// test in the same thread installed a Cx via thread-local that we
+    /// might inherit; OnceLock state is process-wide so we only assert
+    /// the None case if no installer has fired earlier in the process.
+    #[test]
+    fn try_replayable_system_time_returns_none_without_source_in_isolated_thread() {
+        // Spawn a fresh thread so no thread-local Cx leaks in.
+        let result = std::thread::spawn(|| {
+            // If a prior test in this process installed the global
+            // clock, try_replayable_system_time returns Some — that's
+            // valid behaviour, just not the case we're asserting. Skip
+            // the assertion in that scenario.
+            if GLOBAL_OBSERVABILITY_CLOCK.get().is_some() {
+                return;
+            }
+            let observed = try_replayable_system_time();
+            assert!(
+                observed.is_none(),
+                "try_replayable_system_time must return None when neither Cx nor global clock is available; observed {observed:?}"
+            );
+        })
+        .join();
+        assert!(result.is_ok());
+    }
+
+    /// br-asupersync-z5ge0x: install_global_observability_clock installs
+    /// the singleton at most once per process. The first installation
+    /// returns Ok; subsequent attempts return Err and do NOT replace
+    /// the installed clock.
+    ///
+    /// Because OnceLock is process-wide and other tests may install
+    /// their own clock, this test only asserts the once-only semantic
+    /// — it accepts EITHER (a) we won the install race and observe the
+    /// time from our deterministic clock, OR (b) we lost the race to
+    /// some prior test and observe a Time from THEIR clock. In both
+    /// cases install_global_observability_clock must reject our second
+    /// call with Err.
+    #[test]
+    fn install_global_observability_clock_is_once_only() {
+        fn fixed_clock() -> std::time::SystemTime {
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(0xC0FFEE)
+        }
+        // First install: may succeed (we won) or fail (someone else won).
+        let first = install_global_observability_clock(fixed_clock);
+        // Second install must always fail (OnceLock is set after first).
+        let second = install_global_observability_clock(fixed_clock);
+        assert!(
+            second.is_err(),
+            "second install must return Err per OnceLock semantics; first attempt was {first:?}"
+        );
+        // The clock is now definitely populated (either by us or a
+        // prior test); try_replayable_system_time must return Some
+        // even with no Cx in scope.
+        let observed = std::thread::spawn(|| try_replayable_system_time())
+            .join()
+            .expect("isolated-thread query");
+        assert!(
+            observed.is_some(),
+            "with the global clock populated, try_replayable_system_time must return Some"
+        );
+    }
+
 
     #[test]
     fn config_builder() {
