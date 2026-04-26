@@ -4,6 +4,54 @@ use std::fmt;
 use std::io;
 use std::time::Duration;
 
+/// Maximum bytes a sanitized peer-controlled string may contribute to
+/// a TLS error display. Larger strings are truncated with an ellipsis.
+///
+/// Defends against log-amplification (a peer could return a multi-KB
+/// rustls error, which would explode log volume per failed handshake).
+const MAX_SANITIZED_LEN: usize = 256;
+
+/// Strip CR, LF, tab, NUL, and other ASCII control characters from a
+/// peer-controlled string before rendering it to the log path.
+///
+/// br-asupersync-kxw8nx: rustls error strings, peer-supplied SNI values,
+/// peer certificate subjects, etc. all flow through Display and end up
+/// in structured logs. An attacker who controls these strings can inject
+/// embedded `\n` to splice fake log lines (log injection / forgery).
+///
+/// Sanitization rules:
+///   * `\r`, `\n`, `\t` → ASCII space (preserves field separation,
+///     prevents line splitting)
+///   * Any other ASCII control char (0x00..=0x1F, 0x7F) → replaced with
+///     `?` (visible-but-not-special placeholder)
+///   * UTF-8 truncation at MAX_SANITIZED_LEN bytes, cut on a char
+///     boundary to avoid invalid UTF-8 in the output, with `…` suffix
+///     on truncation
+fn sanitize_for_log(input: &str) -> String {
+    let mut out = String::with_capacity(input.len().min(MAX_SANITIZED_LEN + 3));
+    let mut byte_count = 0usize;
+    let mut truncated = false;
+    for ch in input.chars() {
+        let mapped = match ch {
+            '\r' | '\n' | '\t' => ' ',
+            // ASCII control chars (excluding the three above already handled)
+            c if (c as u32) < 0x20 || c == '\u{7f}' => '?',
+            c => c,
+        };
+        let mapped_len = mapped.len_utf8();
+        if byte_count + mapped_len > MAX_SANITIZED_LEN {
+            truncated = true;
+            break;
+        }
+        out.push(mapped);
+        byte_count += mapped_len;
+    }
+    if truncated {
+        out.push('…');
+    }
+    out
+}
+
 /// Error type for TLS operations.
 #[derive(Debug)]
 pub enum TlsError {
@@ -60,25 +108,61 @@ pub enum TlsError {
 
 impl fmt::Display for TlsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // br-asupersync-kxw8nx: every peer-controlled string is wrapped
+        // in `sanitize_for_log` before formatting so an attacker cannot
+        // inject CR/LF/tab to forge log lines, embed NULs to truncate
+        // C-string consumers, or amplify log volume past 256 bytes per
+        // error. Operator-controlled fields (Configuration) and
+        // structured numeric fields (Timeout duration, expired_at
+        // timestamp) are passed through verbatim.
         match self {
-            Self::InvalidDnsName(name) => write!(f, "invalid DNS name: {name}"),
-            Self::Handshake(msg) => write!(f, "TLS handshake failed: {msg}"),
-            Self::Certificate(msg) => write!(f, "certificate error: {msg}"),
+            Self::InvalidDnsName(name) => {
+                write!(f, "invalid DNS name: {}", sanitize_for_log(name))
+            }
+            Self::Handshake(msg) => {
+                write!(f, "TLS handshake failed: {}", sanitize_for_log(msg))
+            }
+            Self::Certificate(msg) => {
+                write!(f, "certificate error: {}", sanitize_for_log(msg))
+            }
             Self::CertificateExpired {
                 expired_at,
                 description,
-            } => write!(f, "certificate expired at {expired_at}: {description}"),
+            } => write!(
+                f,
+                "certificate expired at {expired_at}: {}",
+                sanitize_for_log(description)
+            ),
             Self::CertificateNotYetValid {
                 valid_from,
                 description,
-            } => write!(f, "certificate not valid until {valid_from}: {description}"),
-            Self::ChainValidation(msg) => write!(f, "certificate chain validation failed: {msg}"),
-            Self::PinMismatch { expected, actual } => write!(
+            } => write!(
                 f,
-                "certificate pin mismatch: expected one of {expected:?}, got {actual}"
+                "certificate not valid until {valid_from}: {}",
+                sanitize_for_log(description)
             ),
+            Self::ChainValidation(msg) => write!(
+                f,
+                "certificate chain validation failed: {}",
+                sanitize_for_log(msg)
+            ),
+            Self::PinMismatch { expected, actual } => {
+                // Pins are base64 — defensive sanitize anyway in case
+                // a misconfigured caller passes raw subject strings.
+                let expected_sanitized: Vec<String> =
+                    expected.iter().map(|s| sanitize_for_log(s)).collect();
+                write!(
+                    f,
+                    "certificate pin mismatch: expected one of {expected_sanitized:?}, got {}",
+                    sanitize_for_log(actual)
+                )
+            }
             Self::Configuration(msg) => write!(f, "TLS configuration error: {msg}"),
-            Self::Io(err) => write!(f, "I/O error: {err}"),
+            Self::Io(err) => {
+                // io::Error Display can include peer-controlled paths
+                // (e.g., file-not-found with attacker-supplied filename).
+                write!(f, "I/O error: {}", sanitize_for_log(&err.to_string()))
+            }
             Self::Timeout(duration) => write!(f, "TLS operation timed out after {duration:?}"),
             Self::AlpnNegotiationFailed {
                 expected,
@@ -88,7 +172,11 @@ impl fmt::Display for TlsError {
                 "ALPN negotiation failed: expected one of {expected:?}, negotiated {negotiated:?}"
             ),
             #[cfg(feature = "tls")]
-            Self::Rustls(err) => write!(f, "rustls error: {err}"),
+            Self::Rustls(err) => {
+                // rustls error strings frequently include peer cert
+                // subject CNs and other peer-controlled values.
+                write!(f, "rustls error: {}", sanitize_for_log(&err.to_string()))
+            }
         }
     }
 }
@@ -344,5 +432,124 @@ mod tests {
         let tls_err: TlsError = io_err.into();
         assert!(matches!(tls_err, TlsError::Io(_)));
         assert!(tls_err.source().is_some());
+    }
+
+    // ---- br-asupersync-kxw8nx: log injection sanitization ----
+
+    #[test]
+    fn sanitize_for_log_strips_crlf_to_space() {
+        let raw = "line1\r\nline2";
+        let sanitized = sanitize_for_log(raw);
+        assert!(
+            !sanitized.contains('\n') && !sanitized.contains('\r'),
+            "CR/LF must be stripped, got {sanitized:?}"
+        );
+        assert_eq!(sanitized, "line1  line2");
+    }
+
+    #[test]
+    fn sanitize_for_log_strips_tab_to_space() {
+        let sanitized = sanitize_for_log("a\tb");
+        assert_eq!(sanitized, "a b");
+    }
+
+    #[test]
+    fn sanitize_for_log_replaces_other_control_with_question() {
+        // NUL, BEL, ESC, DEL — all non-printable controls beyond CR/LF/tab.
+        let raw = "x\x00y\x07z\x1bw\x7fv";
+        let sanitized = sanitize_for_log(raw);
+        assert_eq!(sanitized, "x?y?z?w?v");
+    }
+
+    #[test]
+    fn sanitize_for_log_preserves_printable_ascii_and_unicode() {
+        let raw = "hello, world! ✓ 漢字";
+        let sanitized = sanitize_for_log(raw);
+        assert_eq!(sanitized, raw);
+    }
+
+    #[test]
+    fn sanitize_for_log_truncates_at_256_bytes_with_ellipsis() {
+        let raw = "A".repeat(500);
+        let sanitized = sanitize_for_log(&raw);
+        // 256 bytes of 'A' (ASCII = 1 byte) plus '…' (3 bytes UTF-8).
+        assert!(sanitized.starts_with(&"A".repeat(256)));
+        assert!(sanitized.ends_with('…'));
+        // Total UTF-8 length: 256 + 3 = 259 bytes.
+        assert_eq!(sanitized.len(), 259);
+    }
+
+    #[test]
+    fn sanitize_for_log_under_cap_does_not_append_ellipsis() {
+        let raw = "short";
+        let sanitized = sanitize_for_log(raw);
+        assert!(!sanitized.ends_with('…'));
+        assert_eq!(sanitized, "short");
+    }
+
+    #[test]
+    fn sanitize_for_log_truncates_on_char_boundary_for_multibyte() {
+        // Each '漢' is 3 UTF-8 bytes. 86 of them = 258 bytes (over cap).
+        // Cap is 256 bytes; 85 chars = 255 bytes (fits); 86th char (3
+        // bytes) would push to 258, so truncated at 85 chars + '…'.
+        let raw = "漢".repeat(86);
+        let sanitized = sanitize_for_log(&raw);
+        assert!(sanitized.ends_with('…'));
+        // 85 * 3 = 255 bytes of 漢, plus 3 bytes of '…' = 258 total.
+        assert_eq!(sanitized.len(), 258);
+        // Verify char boundary respected: must be valid UTF-8.
+        assert!(std::str::from_utf8(sanitized.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn display_handshake_with_log_injection_attempt_sanitized() {
+        // Peer-controlled handshake error containing a fake log line
+        // splice attempt. Post-fix Display must NOT contain the
+        // injected newline.
+        let err = TlsError::Handshake(
+            "alert: bad_certificate\n[ERROR] FAKE LOG ENTRY: privilege escalation".to_string(),
+        );
+        let display = err.to_string();
+        assert!(
+            !display.contains('\n'),
+            "Display MUST strip embedded newlines: {display:?}"
+        );
+        // The injected text becomes part of the same log line, prefixed
+        // by the spaces that replaced \n — visible to operators but
+        // unable to forge a separate log entry.
+        assert!(display.contains("FAKE LOG ENTRY"));
+        assert!(display.starts_with("TLS handshake failed: "));
+    }
+
+    #[test]
+    fn display_invalid_dns_name_with_control_chars_sanitized() {
+        let err = TlsError::InvalidDnsName(
+            "evil.com\r\n\x00\x07ROOT_PROMPT$".to_string(),
+        );
+        let display = err.to_string();
+        assert!(!display.contains('\r'));
+        assert!(!display.contains('\n'));
+        assert!(!display.contains('\0'));
+        assert!(!display.contains('\x07'));
+        // The control chars get converted to ? or space; the trailing
+        // text ROOT_PROMPT$ remains visible.
+        assert!(display.contains("ROOT_PROMPT$"));
+    }
+
+    #[test]
+    fn display_certificate_error_amplification_capped() {
+        // Peer-controlled certificate error of 10 KB must be capped at
+        // 256 bytes + ellipsis; total Display output stays bounded.
+        let huge = "X".repeat(10_000);
+        let err = TlsError::Certificate(huge);
+        let display = err.to_string();
+        // Display = "certificate error: " (19) + 256 'X' + '…' (3)
+        // = 19 + 256 + 3 = 278 bytes max.
+        assert!(
+            display.len() < 300,
+            "Display must be capped to ~256 bytes of payload, got {} bytes",
+            display.len()
+        );
+        assert!(display.ends_with('…'));
     }
 }
