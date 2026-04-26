@@ -255,39 +255,171 @@ impl RoundTripHarness {
         })
     }
 
-    /// Executes the actual round-trip encode/decode process
+    /// Executes the actual round-trip encode/decode process against the
+    /// real `asupersync::raptorq` codec (br-2puta6).
     #[allow(dead_code)]
     fn execute_round_trip(
         &self,
         input: &RoundTripInput,
     ) -> Result<RoundTripOutput, RoundTripError> {
-        let start_time = std::time::Instant::now();
+        use asupersync::config::EncodingConfig;
+        use asupersync::decoding::{DecodingConfig, DecodingPipeline};
+        use asupersync::encoding::EncodingPipeline;
+        use asupersync::security::tag::AuthenticationTag;
+        use asupersync::security::AuthenticatedSymbol;
+        use asupersync::types::resource::{PoolConfig, SymbolPool};
+        use asupersync::types::{ObjectId, ObjectParams, Symbol, SymbolKind};
 
-        // TODO: Replace with actual RaptorQ encoder calls
-        let encoded_result = self.mock_encode(&input.source_data, &input.config)?;
-        let encode_time = start_time.elapsed();
+        let cfg = &input.config;
+        let symbol_size: u16 = u16::try_from(cfg.symbol_size).map_err(|_| {
+            RoundTripError::ConfigError(format!("symbol_size {} exceeds u16::MAX", cfg.symbol_size))
+        })?;
+        let symbols_per_block: u16 = u16::try_from(cfg.source_symbols).map_err(|_| {
+            RoundTripError::ConfigError(format!(
+                "source_symbols {} exceeds u16::MAX",
+                cfg.source_symbols
+            ))
+        })?;
+        let data_len = input.source_data.len();
+        // A single source block carries the whole payload; the encoder will
+        // refuse data longer than `max_block_size`.
+        let max_block_size: usize = data_len.max(usize::from(symbol_size) * cfg.source_symbols);
+
+        let enc_config = EncodingConfig {
+            symbol_size,
+            max_block_size,
+            // `encode_with_repair` overrides this; keep a sane default.
+            repair_overhead: 1.0,
+            encoding_parallelism: 1,
+            decoding_parallelism: 1,
+        };
+        let pool_size = (cfg.source_symbols + cfg.repair_symbols).max(16);
+        let pool = SymbolPool::new(PoolConfig {
+            symbol_size,
+            initial_size: pool_size,
+            max_size: pool_size * 2,
+            allow_growth: true,
+            growth_increment: 16,
+        });
+
+        let object_id = ObjectId::new_for_test(cfg.seed);
+        let mut encoder = EncodingPipeline::new(enc_config, pool);
+
+        // ENCODE — drive the real RaptorQ encoding pipeline.
+        let encode_start = std::time::Instant::now();
+        let symbols: Vec<Symbol> = encoder
+            .encode_with_repair(object_id, &input.source_data, cfg.repair_symbols)
+            .map(|res| {
+                res.map(|enc| enc.into_symbol())
+                    .map_err(|e| RoundTripError::EncodingError(e.to_string()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let encode_time = encode_start.elapsed();
+
+        let symbol_indices: Vec<u32> = symbols.iter().map(|s| s.id().esi()).collect();
+        let encoded_symbols_bytes: Vec<Vec<u8>> =
+            symbols.iter().map(|s| s.data().to_vec()).collect();
+
+        // ERASURE: drop a deterministic, seeded fraction of the encoded
+        // symbols so that decode is forced to recover from repair symbols.
+        let mut erased_count: usize = 0;
+        let transmitted: Vec<Symbol> = if cfg.test_erasures && cfg.erasure_probability > 0.0 {
+            let mut rng = cfg.seed.wrapping_mul(0x517c_c1b7_2722_0a95);
+            let drop_threshold: u64 =
+                (cfg.erasure_probability.clamp(0.0, 1.0) * f64::from(u32::MAX)) as u64;
+            symbols
+                .iter()
+                .filter_map(|s| {
+                    rng = rng
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1_442_695_040_888_963_407);
+                    let coin = (rng >> 32) & 0xFFFF_FFFF;
+                    if coin < drop_threshold {
+                        erased_count += 1;
+                        None
+                    } else {
+                        Some(s.clone())
+                    }
+                })
+                .collect()
+        } else {
+            symbols.clone()
+        };
+
+        // DECODE — drive the real RaptorQ decoding pipeline.
+        let dec_config = DecodingConfig {
+            symbol_size,
+            max_block_size,
+            repair_overhead: 1.0,
+            min_overhead: 0,
+            max_buffered_symbols: symbols.len().saturating_mul(2),
+            block_timeout: std::time::Duration::from_secs(60),
+            verify_auth: false,
+        };
+        let mut decoder = DecodingPipeline::new(dec_config);
+        decoder
+            .set_object_params(ObjectParams::new(
+                object_id,
+                data_len as u64,
+                symbol_size,
+                1,
+                symbols_per_block,
+            ))
+            .map_err(|e| RoundTripError::DecodingError(e.to_string()))?;
 
         let decode_start = std::time::Instant::now();
-
-        // TODO: Replace with actual RaptorQ decoder calls
-        let decoded_result = self.mock_decode(
-            &encoded_result.symbols,
-            &encoded_result.indices,
-            &input.config,
-        )?;
+        for symbol in &transmitted {
+            let auth = AuthenticatedSymbol::from_parts(symbol.clone(), AuthenticationTag::zero());
+            decoder
+                .feed(auth)
+                .map_err(|e| RoundTripError::DecodingError(e.to_string()))?;
+        }
+        let decoded_data = decoder
+            .into_data()
+            .map_err(|e| RoundTripError::DecodingError(e.to_string()))?;
         let decode_time = decode_start.elapsed();
 
-        // Validate the round-trip
-        let validation_metrics =
-            self.validate_round_trip(&input.source_data, &decoded_result, &input.config)?;
-        let success = validation_metrics.data_integrity
-            && validation_metrics.symbol_count_valid
-            && validation_metrics.parameters_preserved;
+        // Real validation — every flag is now derived from the live
+        // encode/decode result, no hardcoded `true`.
+        let data_integrity = decoded_data == input.source_data;
+        let expected_total = cfg.source_symbols + cfg.repair_symbols;
+        let symbol_count_valid = symbols.len() == expected_total;
+        let parameters_preserved = usize::from(symbol_size) == cfg.symbol_size
+            && usize::from(symbols_per_block) == cfg.source_symbols;
+        let repair_symbol_count = symbols
+            .iter()
+            .filter(|s| s.kind() == SymbolKind::Repair)
+            .count();
+        let repair_symbols_valid = repair_symbol_count == cfg.repair_symbols
+            && symbols
+                .iter()
+                .filter(|s| s.kind() == SymbolKind::Repair)
+                .all(|s| s.id().esi() >= cfg.source_symbols as u32);
+        let erasure_recovery_valid = if cfg.test_erasures && cfg.erasure_probability > 0.0 {
+            // True only when we actually erased some symbols *and* still
+            // recovered the original payload byte-for-byte.
+            Some(erased_count > 0 && data_integrity)
+        } else {
+            None
+        };
+
+        let validation_metrics = ValidationMetrics {
+            data_integrity,
+            symbol_count_valid,
+            parameters_preserved,
+            repair_symbols_valid,
+            erasure_recovery_valid,
+        };
+        let success = data_integrity
+            && symbol_count_valid
+            && parameters_preserved
+            && repair_symbols_valid
+            && erasure_recovery_valid.unwrap_or(true);
 
         Ok(RoundTripOutput {
-            encoded_symbols: encoded_result.symbols,
-            symbol_indices: encoded_result.indices,
-            decoded_data: decoded_result,
+            encoded_symbols: encoded_symbols_bytes,
+            symbol_indices,
+            decoded_data,
             success,
             error_message: if !success {
                 Some("Round-trip validation failed".to_string())
@@ -298,33 +430,6 @@ impl RoundTripHarness {
             decode_time_us: decode_time.as_micros() as u64,
             validation_metrics,
         })
-    }
-
-    /// Validates round-trip correctness
-    #[allow(dead_code)]
-    fn validate_round_trip(
-        &self,
-        original: &[u8],
-        decoded: &[u8],
-        config: &RoundTripConfig,
-    ) -> Result<ValidationMetrics, RoundTripError> {
-        let _expected_symbols = config.source_symbols + config.repair_symbols;
-
-        let erasure_recovery_valid = if config.test_erasures && config.erasure_probability > 0.0 {
-            Some(true) // TODO: Implement erasure testing
-        } else {
-            None
-        };
-
-        let metrics = ValidationMetrics {
-            data_integrity: original == decoded,
-            symbol_count_valid: true, // TODO: Implement actual symbol count validation
-            parameters_preserved: true, // TODO: Implement parameter validation
-            repair_symbols_valid: true, // TODO: Implement repair symbol validation
-            erasure_recovery_valid,
-        };
-
-        Ok(metrics)
     }
 
     /// Creates metadata for test golden files
@@ -379,78 +484,6 @@ impl RoundTripHarness {
         *rng = rng.wrapping_mul(1103515245).wrapping_add(12345);
         (*rng >> 24) as u8
     }
-
-    // TODO: Replace these mock implementations with actual RaptorQ calls
-
-    /// Mock encoder for testing infrastructure
-    #[allow(dead_code)]
-    fn mock_encode(
-        &self,
-        data: &[u8],
-        config: &RoundTripConfig,
-    ) -> Result<MockEncodeResult, RoundTripError> {
-        // This is a placeholder implementation
-        let symbol_size = config.symbol_size;
-        let total_symbols = config.source_symbols + config.repair_symbols;
-
-        let mut symbols = Vec::new();
-        let mut indices = Vec::new();
-
-        // Mock source symbols
-        for i in 0..config.source_symbols {
-            let start = i * symbol_size;
-            let end = std::cmp::min(start + symbol_size, data.len());
-            let mut symbol = vec![0u8; symbol_size];
-            if start < data.len() {
-                let copy_len = std::cmp::min(end - start, symbol_size);
-                symbol[..copy_len].copy_from_slice(&data[start..start + copy_len]);
-            }
-            symbols.push(symbol);
-            indices.push(i as u32);
-        }
-
-        // Mock repair symbols (just zeros for now)
-        for i in config.source_symbols..total_symbols {
-            symbols.push(vec![0u8; symbol_size]);
-            indices.push(i as u32);
-        }
-
-        Ok(MockEncodeResult { symbols, indices })
-    }
-
-    /// Mock decoder for testing infrastructure
-    #[allow(dead_code)]
-    fn mock_decode(
-        &self,
-        symbols: &[Vec<u8>],
-        indices: &[u32],
-        config: &RoundTripConfig,
-    ) -> Result<Vec<u8>, RoundTripError> {
-        // This is a placeholder that just reconstructs from source symbols
-        let mut decoded_data = Vec::new();
-
-        for i in 0..config.source_symbols {
-            if let Some(symbol_idx) = indices.iter().position(|&idx| idx == i as u32) {
-                if let Some(symbol) = symbols.get(symbol_idx) {
-                    decoded_data.extend_from_slice(symbol);
-                }
-            }
-        }
-
-        // Trim to remove padding
-        let expected_size = config.source_symbols * config.symbol_size;
-        decoded_data.truncate(expected_size);
-
-        Ok(decoded_data)
-    }
-}
-
-/// Result from mock encoding
-#[derive(Debug)]
-#[allow(dead_code)]
-struct MockEncodeResult {
-    symbols: Vec<Vec<u8>>,
-    indices: Vec<u32>,
 }
 
 /// Summary of round-trip test execution

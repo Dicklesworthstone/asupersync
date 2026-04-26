@@ -23,6 +23,8 @@ chrono = { version = "0.4", features = ["serde"] }
 md5 = "0.7"
 tempfile = "3.0"
 clap = { version = "4.0", features = ["derive"] }
+# Real RaptorQ implementation under conformance test (br-2puta6).
+asupersync = { path = "../../../..", default-features = false, features = ["proc-macros", "test-internals"] }
 
 [dev-dependencies]
 tempfile = "3.0"
