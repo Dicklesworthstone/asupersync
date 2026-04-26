@@ -668,9 +668,19 @@ impl<T: serde::de::DeserializeOwned> FromRequest for Json<T> {
             }
         }
 
+        // br-asupersync-y4mc96: keep serde error in server-side log only;
+        // return a generic message to the client so byte offsets, expected
+        // type names, and partial-parse context don't reach an attacker.
+        // The detailed `e` is recorded via tracing for operator forensics.
         serde_json::from_slice(req.body.as_ref())
             .map(Json)
-            .map_err(|e| ExtractionError::unprocessable(format!("invalid JSON: {e}")))
+            .map_err(|e| {
+                crate::tracing_compat::warn!(
+                    error = %e,
+                    "web/extract: Json deserialization failed"
+                );
+                ExtractionError::unprocessable("invalid JSON body")
+            })
     }
 }
 
