@@ -541,29 +541,61 @@ impl LoadBalancer {
                 endpoints.iter().rfind(|e| e.state().can_receive())
             }
             LoadBalanceStrategy::HashBased => {
-                let count = endpoints.iter().filter(|e| e.state().can_receive()).count();
-                if count == 0 {
+                // br-asupersync-v535in: use CONSISTENT HASHING via
+                // crate::distributed::HashRing instead of modulo
+                // arithmetic over a counted slice. The previous
+                // implementation computed `hash % count` where
+                // `count` was the number of healthy endpoints —
+                // adding or removing one endpoint changed `count`
+                // and therefore the modulo result for EVERY key,
+                // breaking sticky-routing for callers that rely on
+                // 'same object_id -> same endpoint as long as the
+                // endpoint is healthy'. Consistent hashing remaps
+                // only ~K/N keys when N changes, preserving stickiness
+                // for the vast majority of object_ids.
+                let healthy: Vec<&Arc<Endpoint>> =
+                    endpoints.iter().filter(|e| e.state().can_receive()).collect();
+                if healthy.is_empty() {
                     return None;
                 }
                 object_id.map_or_else(
                     || {
-                        // Fall back to round-robin
-                        let idx =
-                            (self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize) % count;
-                        endpoints
-                            .iter()
-                            .filter(|e| e.state().can_receive())
-                            .nth(idx)
-                            .or_else(|| endpoints.iter().find(|e| e.state().can_receive()))
+                        // No object_id supplied — fall back to RR
+                        // (modulo here is fine; there's no
+                        // stickiness contract to preserve).
+                        let idx = (self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize)
+                            % healthy.len();
+                        Some(healthy[idx])
                     },
                     |oid| {
-                        let hash = oid.as_u128() as usize;
-                        let idx = hash % count;
-                        endpoints
-                            .iter()
-                            .filter(|e| e.state().can_receive())
-                            .nth(idx)
-                            .or_else(|| endpoints.iter().find(|e| e.state().can_receive()))
+                        // Build a per-call HashRing keyed by the
+                        // healthy endpoints' EndpointId. The ring is
+                        // small (one vnode per healthy endpoint
+                        // suffices for stickiness; HashRing internal
+                        // VirtualNode count is O(N * vnodes_per)),
+                        // so per-call construction is O(N) which is
+                        // dwarfed by the typical select() work for
+                        // any realistic endpoint count. Seed=0 because
+                        // the keyspace (EndpointId u64) is internal,
+                        // not attacker-influenced; the security
+                        // surface that motivates random seeds in
+                        // distributed::consistent_hash does not
+                        // apply to in-process router selection.
+                        let mut ring = crate::distributed::HashRing::new(64, 0);
+                        for ep in &healthy {
+                            ring.add_node(ep.id.0.to_string());
+                        }
+                        // Hash the object_id u128 as a stable string
+                        // form so the ring's hashing path treats it
+                        // as opaque bytes — round-trips through
+                        // serialization layers identically.
+                        let key = oid.as_u128().to_string();
+                        ring.node_for_key(&key).and_then(|node_id| {
+                            healthy
+                                .iter()
+                                .copied()
+                                .find(|ep| ep.id.0.to_string() == node_id)
+                        })
                     },
                 )
             }
@@ -2277,6 +2309,71 @@ mod tests {
         let s1 = lb.select(&endpoints, Some(oid));
         let s2 = lb.select(&endpoints, Some(oid));
         assert_eq!(s1.unwrap().id, s2.unwrap().id);
+    }
+
+    // br-asupersync-v535in: HashBased now uses consistent hashing,
+    // so removing or adding a single endpoint must NOT remap the
+    // majority of object_ids. This is the security/correctness
+    // contract that broke pre-fix when the strategy used `hash %
+    // count` — every endpoint change shuffled every key.
+    #[test]
+    fn test_load_balancer_hash_based_sticky_under_endpoint_changes_v535in() {
+        let lb = LoadBalancer::new(LoadBalanceStrategy::HashBased);
+
+        // 16 endpoints, 1024 sample keys. Record where each key
+        // routes initially.
+        let endpoints_full: Vec<Arc<Endpoint>> =
+            (1..=16).map(|i| Arc::new(test_endpoint(i))).collect();
+        let initial: Vec<EndpointId> = (0..1024)
+            .map(|k| {
+                let oid = ObjectId::new_for_test(k as u64);
+                lb.select(&endpoints_full, Some(oid)).unwrap().id
+            })
+            .collect();
+
+        // Remove the LAST endpoint and re-route every key.
+        let endpoints_minus1: Vec<Arc<Endpoint>> = endpoints_full[..15].to_vec();
+        let after_remove: Vec<EndpointId> = (0..1024)
+            .map(|k| {
+                let oid = ObjectId::new_for_test(k as u64);
+                lb.select(&endpoints_minus1, Some(oid)).unwrap().id
+            })
+            .collect();
+
+        // Every key that previously hit endpoints 1..15 (i.e., NOT
+        // the removed one) must still hit the SAME endpoint. With
+        // modulo hashing, removing one endpoint shifts the count
+        // from 16 to 15 and `hash % count` re-maps every key —
+        // typical remap rate is 15/16 ≈ 94%. With consistent
+        // hashing, only keys that previously hit the removed
+        // endpoint must remap (the ~1/16 share). The threshold here
+        // is conservative: assert that >= 80% of keys are sticky.
+        let stickies = initial
+            .iter()
+            .zip(after_remove.iter())
+            .filter(|(a, b)| a == b)
+            .count();
+        assert!(
+            stickies >= 800,
+            "consistent hashing must preserve sticky routing for >= 80% of keys after \
+             a single endpoint removal; got {stickies}/1024 stuck (modulo-hash baseline \
+             would be near 64/1024 by symmetry)"
+        );
+        // And no key that previously hit endpoints 1..=15 should
+        // suddenly hit a different surviving endpoint.
+        let removed_id = endpoints_full[15].id;
+        let mismatches = initial
+            .iter()
+            .zip(after_remove.iter())
+            .filter(|(before, after)| **before != removed_id && before != after)
+            .count();
+        // mismatches should be 0 with strict consistent hashing.
+        // We allow up to 5% slop for ring boundary effects since
+        // healthy() is filtered before ring construction.
+        assert!(
+            mismatches <= 51,
+            "non-trivial cross-endpoint remapping after single removal: {mismatches}/1024 (must be <= ~5%)",
+        );
     }
 
     #[test]
