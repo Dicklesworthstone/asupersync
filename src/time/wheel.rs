@@ -494,8 +494,7 @@ impl TimerWheel {
                 deadline = current.saturating_add_nanos(self.max_timer_duration_ns);
             }
         }
-        self.try_register(deadline, waker)
-            .expect("timer duration was clamped but still exceeded maximum")
+        self.insert_validated(deadline, waker)
     }
 
     /// Attempts to register a timer with validation.
@@ -518,7 +517,12 @@ impl TimerWheel {
                 });
             }
         }
+        Ok(self.insert_validated(deadline, waker))
+    }
 
+    /// Inserts a timer whose deadline has already been validated/clamped by
+    /// the caller. Avoids a redundant `current_time()` read on the hot path.
+    fn insert_validated(&mut self, deadline: Time, waker: Waker) -> TimerHandle {
         let generation = self.next_generation;
         self.next_generation = self.next_generation.wrapping_add(1);
 
@@ -533,7 +537,7 @@ impl TimerWheel {
 
         self.insert_entry(entry);
 
-        Ok(TimerHandle { id, generation })
+        TimerHandle { id, generation }
     }
 
     /// Returns the number of timers in the overflow list.
