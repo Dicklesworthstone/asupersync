@@ -31,7 +31,18 @@ use std::task::Waker;
 
 // SlabToken encodes two u32 fields (index + generation) into usize.
 // On 64-bit targets, this is completely lossless (32 bits each).
-// On 32-bit targets, it uses 24 bits for the index and 8 bits for the generation.
+//
+// br-asupersync-rtiu1s — On 32-bit targets, the previous packing was
+// 24 bits index + 8 bits generation. The 8-bit generation field
+// wrapped after only 256 reuse cycles per slot — well within the
+// lifetime of a long-running 32-bit reactor — and a stale token from
+// generation N could match a slot reissued at generation N (mod 256),
+// defeating the ABA guard the generation counter is supposed to
+// provide. The new 32-bit packing splits the available 32 bits as
+// 16 bits index + 16 bits generation, raising the wrap point to
+// 65,536 cycles per slot. Slab capacity on 32-bit drops from
+// 2^24 ≈ 16M to 2^16 = 65,536 slots, which is comfortably above the
+// typical I/O reactor working set.
 
 /// Compact identifier for registered I/O sources.
 ///
@@ -69,7 +80,9 @@ impl SlabToken {
     /// Packs the token into a single usize for reactor APIs (mio compatibility).
     ///
     /// On 64-bit platforms: generation is in upper 32 bits, index in lower 32 bits.
-    /// On 32-bit platforms: generation is in upper 8 bits, index in lower 24 bits.
+    /// On 32-bit platforms (br-asupersync-rtiu1s): generation is in upper 16
+    /// bits, index in lower 16 bits — widened from the previous 8-bit
+    /// generation that wrapped after only 256 cycles.
     #[must_use]
     pub const fn to_usize(self) -> usize {
         #[cfg(target_pointer_width = "64")]
@@ -78,7 +91,7 @@ impl SlabToken {
         }
         #[cfg(target_pointer_width = "32")]
         {
-            ((self.generation as usize & 0xFF) << 24) | (self.index as usize & 0xFF_FFFF)
+            ((self.generation as usize & 0xFFFF) << 16) | (self.index as usize & 0xFFFF)
         }
         #[cfg(not(any(target_pointer_width = "64", target_pointer_width = "32")))]
         {
@@ -99,8 +112,8 @@ impl SlabToken {
         #[cfg(target_pointer_width = "32")]
         {
             Self {
-                index: (val & 0xFF_FFFF) as u32,
-                generation: (val >> 24) as u32,
+                index: (val & 0xFFFF) as u32,
+                generation: ((val >> 16) & 0xFFFF) as u32,
             }
         }
         #[cfg(not(any(target_pointer_width = "64", target_pointer_width = "32")))]
@@ -116,9 +129,24 @@ impl SlabToken {
     #[cfg(target_pointer_width = "64")]
     pub const MAX_GENERATION: u32 = u32::MAX;
 
-    /// The maximum generation value supported on this platform.
+    /// br-asupersync-rtiu1s — Maximum generation value on 32-bit
+    /// platforms. Previously `0xFF` (256 cycles, ABA-vulnerable);
+    /// widened to `0xFFFF` (65,536 cycles) by reallocating 8 bits
+    /// from the index field.
     #[cfg(target_pointer_width = "32")]
-    pub const MAX_GENERATION: u32 = 0xFF;
+    pub const MAX_GENERATION: u32 = 0xFFFF;
+
+    /// br-asupersync-rtiu1s — Maximum index value on 32-bit
+    /// platforms. Reduced from 0xFF_FFFF (16M slots) to 0xFFFF
+    /// (64K slots) to make room for the widened generation field.
+    /// 64K is comfortably above the typical I/O reactor working set
+    /// on a 32-bit host.
+    #[cfg(target_pointer_width = "32")]
+    pub const MAX_INDEX: u32 = 0xFFFF;
+
+    /// Maximum index value on 64-bit platforms (lossless).
+    #[cfg(target_pointer_width = "64")]
+    pub const MAX_INDEX: u32 = u32::MAX;
 
     /// Returns an invalid token that will never match any slab entry.
     #[must_use]
@@ -924,5 +952,60 @@ mod tests {
         set.insert(SlabToken::from_usize(99));
         assert_eq!(set.len(), 2);
         assert!(set.contains(&t));
+    }
+
+    /// br-asupersync-rtiu1s — On any platform, MAX_GENERATION is at
+    /// least 2^16 - 1 = 65,535. The 32-bit packing was previously
+    /// 24 bits index + 8 bits generation (MAX_GENERATION = 0xFF =
+    /// 255), which wrapped after 256 reuse cycles per slot — an ABA
+    /// collision in any long-running reactor. The fix splits the
+    /// 32-bit usize as 16+16, raising the wrap point to 65,536.
+    #[test]
+    fn max_generation_supports_at_least_2_to_16_cycles() {
+        assert!(
+            SlabToken::MAX_GENERATION >= 0xFFFF,
+            "br-asupersync-rtiu1s: MAX_GENERATION {} below 65535",
+            SlabToken::MAX_GENERATION
+        );
+    }
+
+    /// br-asupersync-rtiu1s — Pack/unpack round-trip preserves
+    /// generation values across the 256→65535 range. The previous 8-bit
+    /// 32-bit packing would silently truncate any generation > 255 to
+    /// 255 mod 256 == the same generation value as one issued 256
+    /// cycles earlier.
+    #[test]
+    fn pack_unpack_preserves_high_generation_values() {
+        for g in [0u32, 1, 255, 256, 1024, 4096, 65_535] {
+            let token = SlabToken::new(42, g);
+            let round = SlabToken::from_usize(token.to_usize());
+            assert_eq!(
+                round.generation(),
+                g,
+                "br-asupersync-rtiu1s: generation {g} not preserved through pack/unpack"
+            );
+            assert_eq!(round.index(), 42);
+        }
+    }
+
+    /// br-asupersync-rtiu1s — Two tokens that differ only in the
+    /// generation byte beyond the 8-bit boundary now hash and compare
+    /// distinctly. With the prior packing, generations 0 and 256 had
+    /// the same packed representation on 32-bit, so a stale token from
+    /// the first allocation would compare equal to a fresh token after
+    /// 256 reuses.
+    #[test]
+    fn high_bit_generation_does_not_collide_with_low() {
+        let low = SlabToken::new(7, 0);
+        let high = SlabToken::new(7, 256);
+        // Direct comparison (struct level): they differ.
+        assert_ne!(low, high);
+        // Packed representation: must also differ. Pre-fix, on 32-bit
+        // these collided.
+        assert_ne!(
+            low.to_usize(),
+            high.to_usize(),
+            "br-asupersync-rtiu1s: gen=0 and gen=256 must pack to distinct usize"
+        );
     }
 }

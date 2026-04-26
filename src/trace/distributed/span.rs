@@ -366,7 +366,9 @@ fn sanitize_span_value(key: &str, value: String) -> String {
 
 fn is_sensitive_key(key: &str) -> bool {
     let lower = key.to_ascii_lowercase();
-    SENSITIVE_KEY_DENYLIST.iter().any(|&needle| lower.contains(needle))
+    SENSITIVE_KEY_DENYLIST
+        .iter()
+        .any(|&needle| lower.contains(needle))
 }
 
 fn stable_attribute_hash(bytes: &[u8]) -> u64 {
@@ -412,12 +414,23 @@ mod tests {
     fn set_attribute_redacts_authorization_header_65gy5c() {
         let mut span = fresh_span();
         span.set_attribute("Authorization", "Bearer sk_live_ABC123_secret");
-        assert_eq!(span.attributes().get("Authorization").map(String::as_str), Some("<redacted>"));
+        assert_eq!(
+            span.attributes().get("Authorization").map(String::as_str),
+            Some("<redacted>")
+        );
     }
 
     #[test]
     fn set_attribute_redacts_cookie_x_api_key_password_65gy5c() {
-        for key in &["cookie", "Set-Cookie", "x-api-key", "X-Api-Key", "password", "PASSWORD", "session"] {
+        for key in &[
+            "cookie",
+            "Set-Cookie",
+            "x-api-key",
+            "X-Api-Key",
+            "password",
+            "PASSWORD",
+            "session",
+        ] {
             let mut span = fresh_span();
             span.set_attribute(*key, "sensitive-value-that-must-not-leak");
             assert_eq!(

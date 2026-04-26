@@ -483,6 +483,7 @@ fn handle_out_of_bounds_is_rejected() {
         kind: WasmHandleKind::Runtime,
         slot: 999,
         generation: 0,
+        owner_token: 0,
     };
     let err = table.get(&fake).unwrap_err();
     assert!(matches!(err, WasmHandleError::SlotOutOfRange { .. }));

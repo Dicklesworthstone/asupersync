@@ -154,15 +154,44 @@ impl<T: Send + Sync + 'static> RRef<T> {
     /// - The referenced data can be safely shared across threads
     /// - The `RRef` can be passed to Send tasks that may migrate
     ///
-    /// # Example
+    /// # Construction (br-asupersync-aog0xz)
     ///
-    /// ```ignore
-    /// let index = region.heap_alloc(42u32).expect("heap alloc");
-    /// let rref = RRef::new(region_id, index);
-    /// ```
+    /// Pre-fix this constructor was `pub const fn new`. Anyone holding
+    /// a `RegionId` (which is forgeable via the asupersync-3zljmn /
+    /// asupersync-o2oa4l shapes) could mint an RRef pointing at any
+    /// heap index in any region — defeating the capability-token
+    /// contract the type was supposed to enforce. The pattern matches
+    /// the LabIoCap (asupersync-plm0gr) and ArenaIndex (asupersync-3zljmn)
+    /// surfaces fixed earlier this session.
+    ///
+    /// The constructor is now crate-internal: only the runtime's
+    /// region heap-allocator can mint an RRef as the return value of
+    /// a successful `heap_alloc`. Production code reaches an RRef
+    /// through that path; never via direct construction.
+    ///
+    /// Tests that need to construct an RRef (e.g., for table-lookup
+    /// fixtures) opt in via the `test-internals` feature gate, which
+    /// is enabled in the project's default feature set.
     #[inline]
     #[must_use]
-    pub const fn new(region_id: RegionId, index: HeapIndex) -> Self {
+    #[allow(dead_code)]
+    pub(crate) const fn new(region_id: RegionId, index: HeapIndex) -> Self {
+        Self {
+            region_id,
+            index,
+            _marker: PhantomData,
+        }
+    }
+
+    /// br-asupersync-aog0xz: test-only constructor for fixtures that
+    /// need to mint an RRef without going through a real region's
+    /// heap-allocator. Gated behind the same `test-internals` feature
+    /// as `LabIoCap::new_for_tests` (asupersync-plm0gr) so production
+    /// builds without the feature cannot reach this constructor.
+    #[cfg(any(test, feature = "test-internals"))]
+    #[inline]
+    #[must_use]
+    pub const fn new_for_tests(region_id: RegionId, index: HeapIndex) -> Self {
         Self {
             region_id,
             index,

@@ -56,12 +56,46 @@ impl AuthenticationTag {
     /// Verifies that this tag matches the computed tag for the symbol and key.
     ///
     /// This uses a constant-time comparison to prevent timing attacks.
+    ///
+    /// br-asupersync-usr4ax: a tag equal to [`Self::zero`] is the
+    /// sentinel placeholder used by upstream encoders that have not
+    /// yet been wired through to a real key (see types/typed_symbol.rs
+    /// callsites at lines 630 / 925). The sentinel is documented as
+    /// "never produced by [`Self::compute`]" — accepting it here
+    /// would defeat the authentication contract entirely. The verify
+    /// path now returns `false` BEFORE running the constant-time HMAC
+    /// comparison, so any consumer that calls `verify()` against a
+    /// zero-tagged AuthenticatedSymbol gets a fail-closed result
+    /// regardless of the key.
     #[must_use]
     pub fn verify(&self, key: &AuthKey, symbol: &Symbol) -> bool {
+        if self.bytes == [0u8; TAG_SIZE] {
+            return false;
+        }
         let mut mac =
             HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC accepts any key length");
         Self::update_mac(&mut mac, symbol);
         mac.verify_slice(&self.bytes).is_ok()
+    }
+
+    /// br-asupersync-usr4ax: returns `true` when the tag is the
+    /// all-zero sentinel that [`Self::zero`] produces. Consumer code
+    /// that needs to fail-closed against unauthenticated symbols
+    /// (or call out the placeholder shape in diagnostics) checks
+    /// this before treating an [`AuthenticatedSymbol`] as actually
+    /// authenticated.
+    #[inline]
+    #[must_use]
+    pub const fn is_zero(&self) -> bool {
+        let bytes = &self.bytes;
+        let mut i = 0;
+        while i < TAG_SIZE {
+            if bytes[i] != 0 {
+                return false;
+            }
+            i += 1;
+        }
+        true
     }
 
     /// Returns an all-zero invalid sentinel tag for negative tests and fixtures.

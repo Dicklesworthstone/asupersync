@@ -84,6 +84,7 @@ fn get_with_out_of_range_slot_fails() {
         kind: WasmHandleKind::Task,
         slot: 999,
         generation: 0,
+        owner_token: 0,
     };
     let err = table.get(&bogus).unwrap_err();
     assert!(matches!(err, WasmHandleError::SlotOutOfRange { .. }));
@@ -515,6 +516,7 @@ fn outcome_handle_value_round_trips() {
         kind: WasmHandleKind::Task,
         slot: 42,
         generation: 7,
+        owner_token: 0,
     };
     let outcome: Outcome<WasmAbiValue, WasmAbiFailure> = Outcome::Ok(WasmAbiValue::Handle(handle));
     let envelope = WasmAbiOutcomeEnvelope::from_outcome(outcome);

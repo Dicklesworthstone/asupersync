@@ -626,6 +626,19 @@ impl<T: Serialize + 'static> TypedEncoder<T> {
         let symbols = self.encode(object_id, value)?;
         let mut count = 0;
         for symbol in symbols {
+            // br-asupersync-usr4ax: the AuthenticationTag::zero
+            // placeholder is the documented sentinel that
+            // AuthenticationTag::compute() never produces. The
+            // verify() path now fail-closes on it (see
+            // src/security/tag.rs), so any consumer that calls
+            // verify() against this AuthenticatedSymbol gets `false`
+            // regardless of key. This downgrades the silent-bypass
+            // surface to a deterministic rejection. The proper fix
+            // (computing a real HMAC tag with a runtime-managed key)
+            // is a larger refactor — wire a key into TypedEncoder via
+            // a Cx-rooted capability. Until that lands, every
+            // AuthenticatedSymbol leaving this path is verifiably
+            // unauthenticated and downstream cap-aware code rejects.
             let auth =
                 AuthenticatedSymbol::new_verified(symbol.into_symbol(), AuthenticationTag::zero());
             sink.send(auth)
@@ -922,6 +935,10 @@ fn feed_typed_symbol<T>(
         });
     }
     let inner_symbol = Symbol::new(raw.id(), payload, raw.kind());
+    // br-asupersync-usr4ax: zero-tag placeholder; downstream verify()
+    // fail-closes on it (src/security/tag.rs). Same caveat as the
+    // TypedEncoder::encode_to_sink callsite above — a full fix routes
+    // a real Cx-anchored AuthKey through the pipeline.
     let auth = AuthenticatedSymbol::new_verified(inner_symbol, AuthenticationTag::zero());
     let _ = pipeline.feed(auth)?;
     Ok(())

@@ -197,7 +197,7 @@ impl TimerHeap {
             let is_live = self
                 .current_gen
                 .get(&entry.task)
-                .map_or(false, |gen| *gen == entry.generation);
+                .map_or(false, |g| *g == entry.generation);
             if is_live {
                 // Fired — remove the per-task tracking so a later
                 // insert() starts fresh.

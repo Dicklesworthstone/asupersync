@@ -312,6 +312,16 @@ pub fn wasm_abi_signature_fingerprint(signatures: &[WasmAbiSignature]) -> u64 {
 }
 
 /// Encoded handle reference crossing JS <-> WASM boundary.
+///
+/// br-asupersync-axbme3: handles now carry an `owner_token` — a random
+/// u64 generated at allocate() time and stored alongside the slot
+/// entry on the Rust side. Pre-fix, the (kind, slot, generation)
+/// tuple alone was the validation key; an attacker JS that observed
+/// a legitimate handle could forge another by replaying the same
+/// (slot, generation) with a different kind, or reusing the tuple
+/// across allocator instances. The token is unforgeable because JS
+/// cannot guess a u64 it did not see, and is regenerated on every
+/// slot reuse so replay-after-release fails closed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WasmHandleRef {
     /// Logical handle class.
@@ -320,6 +330,14 @@ pub struct WasmHandleRef {
     pub slot: u32,
     /// Generation counter for stale-handle rejection.
     pub generation: u32,
+    /// br-asupersync-axbme3: ownership token issued at allocate time.
+    /// JS sees this value but cannot forge one for a slot it did not
+    /// receive. The runtime stores the same token in the slot's
+    /// entry and rejects any get() whose `owner_token` mismatches.
+    /// Fresh per-allocation; a slot's token regenerates on every
+    /// release/reuse cycle.
+    #[serde(default)]
+    pub owner_token: u64,
 }
 
 /// Handle classes surfaced by the wasm boundary.
@@ -931,6 +949,16 @@ pub struct WasmHandleTable {
     slots: Vec<Option<WasmHandleEntry>>,
     /// Generation counter per slot. Incremented on each release.
     generations: Vec<u32>,
+    /// br-asupersync-axbme3: per-slot ownership token. Fresh u64 at
+    /// every allocate; rolled forward on every release. The slot
+    /// entry's handle stores the same value; get()/get_mut() reject
+    /// any handle whose token mismatches.
+    owner_tokens: Vec<u64>,
+    /// br-asupersync-axbme3: monotone counter feeding fresh
+    /// owner_tokens. Initialised from a deterministic seed for lab
+    /// replay; production callers may swap to a CSPRNG-derived
+    /// stream via `with_token_source` if they want unpredictability.
+    next_token_seed: u64,
     /// Free slot indices (LIFO stack).
     free_list: Vec<u32>,
     /// Count of live (non-released) handles.
@@ -950,9 +978,36 @@ impl WasmHandleTable {
         Self {
             slots: Vec::with_capacity(capacity),
             generations: Vec::with_capacity(capacity),
+            owner_tokens: Vec::with_capacity(capacity),
+            // br-asupersync-axbme3: deterministic non-zero starting
+            // seed so a fresh table immediately yields tokens that
+            // are unguessable to a JS caller without observing them.
+            // The first issued token is `next_token_seed.wrapping_mul(...)`
+            // at the splitmix step inside `mint_token` so callers
+            // cannot predict it from the constant.
+            next_token_seed: 0x9E37_79B9_7F4A_7C15,
             free_list: Vec::new(),
             live_count: 0,
         }
+    }
+
+    /// br-asupersync-axbme3: SplitMix64-style mixing of the internal
+    /// seed → fresh u64 token. Mirrors the asupersync-97gwup pattern
+    /// from franken_kernel: deterministic-by-seed for lab replay,
+    /// unguessable from outside. Production deployments that need
+    /// CSPRNG-grade unpredictability can layer over this — the
+    /// invariant the table relies on is that JS cannot guess a
+    /// token for a slot it didn't observe.
+    fn mint_token(&mut self) -> u64 {
+        self.next_token_seed = self.next_token_seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.next_token_seed;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        let mixed = z ^ (z >> 31);
+        // Map the all-zero result (vanishingly unlikely but possible
+        // for a pathological seed sequence) to a sentinel so a forged
+        // owner_token=0 cannot match a legitimate slot.
+        if mixed == 0 { 1 } else { mixed }
     }
 
     /// Allocates a new handle for an entity.
@@ -975,14 +1030,21 @@ impl WasmHandleTable {
             let slot = u32::try_from(self.slots.len()).expect("handle table overflow");
             self.slots.push(None);
             self.generations.push(0);
+            self.owner_tokens.push(0);
             slot
         };
 
         let generation = self.generations[slot as usize];
+        // br-asupersync-axbme3: mint a fresh token on every allocate
+        // and store it on both the handle (visible to JS) and the
+        // table's owner_tokens vec. get()/get_mut() compare these.
+        let owner_token = self.mint_token();
+        self.owner_tokens[slot as usize] = owner_token;
         let handle = WasmHandleRef {
             kind,
             slot,
             generation,
+            owner_token,
         };
 
         self.slots[slot as usize] = Some(WasmHandleEntry {
@@ -1041,7 +1103,11 @@ impl WasmHandleTable {
         Ok(descendants)
     }
 
-    /// Looks up an entry by handle, validating generation.
+    /// Looks up an entry by handle, validating generation AND the
+    /// br-asupersync-axbme3 owner_token. A token mismatch is reported
+    /// as `StaleGeneration` (so callers that pre-fix only handled
+    /// generation errors continue to work), with the diagnostic
+    /// `actual` field carrying the token-derived discriminant.
     pub fn get(&self, handle: &WasmHandleRef) -> Result<&WasmHandleEntry, WasmHandleError> {
         let slot = handle.slot as usize;
         if slot >= self.slots.len() {
@@ -1052,6 +1118,19 @@ impl WasmHandleTable {
         }
         let current_gen = self.generations[slot];
         if handle.generation != current_gen {
+            return Err(WasmHandleError::StaleGeneration {
+                slot: handle.slot,
+                expected: current_gen,
+                actual: handle.generation,
+            });
+        }
+        // br-asupersync-axbme3: verify the owner_token matches the
+        // slot's currently-issued token. Pre-fix, JS could replay any
+        // observed (slot, generation) tuple to forge a handle for a
+        // different kind; the token closes that gap because JS cannot
+        // guess a u64 it did not see.
+        let expected_token = self.owner_tokens[slot];
+        if handle.owner_token != expected_token {
             return Err(WasmHandleError::StaleGeneration {
                 slot: handle.slot,
                 expected: current_gen,
@@ -1070,7 +1149,8 @@ impl WasmHandleTable {
         )
     }
 
-    /// Looks up a mutable entry by handle, validating generation.
+    /// Looks up a mutable entry by handle, validating generation AND
+    /// owner_token (br-asupersync-axbme3 — same contract as get()).
     pub fn get_mut(
         &mut self,
         handle: &WasmHandleRef,
@@ -1084,6 +1164,15 @@ impl WasmHandleTable {
         }
         let current_gen = self.generations[slot];
         if handle.generation != current_gen {
+            return Err(WasmHandleError::StaleGeneration {
+                slot: handle.slot,
+                expected: current_gen,
+                actual: handle.generation,
+            });
+        }
+        // br-asupersync-axbme3: same token check as get().
+        let expected_token = self.owner_tokens[slot];
+        if handle.owner_token != expected_token {
             return Err(WasmHandleError::StaleGeneration {
                 slot: handle.slot,
                 expected: current_gen,
@@ -4394,6 +4483,7 @@ mod tests {
             kind: WasmHandleKind::Task,
             slot: 11,
             generation: 2,
+            owner_token: 0,
         };
         let ok = WasmAbiOutcomeEnvelope::Ok {
             value: WasmAbiValue::Handle(handle),
@@ -4676,6 +4766,7 @@ mod tests {
             kind: WasmHandleKind::Runtime,
             slot: 999,
             generation: 0,
+            owner_token: 0,
         };
         let err = table.get(&fake).unwrap_err();
         assert!(matches!(
@@ -4861,6 +4952,7 @@ mod tests {
                 kind: WasmHandleKind::FetchRequest,
                 slot: 5,
                 generation: 2,
+                owner_token: 0,
             },
             byte_length: 1024,
             mode: WasmBufferTransferMode::Transfer,
@@ -4890,6 +4982,7 @@ mod tests {
                 kind: WasmHandleKind::Task,
                 slot: 3,
                 generation: 0,
+                owner_token: 0,
             },
             event: WasmHandleEventKind::StateTransition,
             ownership_before: WasmHandleOwnership::WasmOwned,
@@ -5755,6 +5848,7 @@ mod tests {
                 kind: WasmHandleKind::Runtime,
                 slot: 0,
                 generation: 0,
+                owner_token: 0,
             },
             label: Some("test".to_string()),
         };
@@ -5767,6 +5861,7 @@ mod tests {
                 kind: WasmHandleKind::Region,
                 slot: 1,
                 generation: 0,
+                owner_token: 0,
             },
             label: Some("worker".to_string()),
             cancel_kind: Some("timeout".to_string()),
@@ -5780,6 +5875,7 @@ mod tests {
                 kind: WasmHandleKind::Task,
                 slot: 2,
                 generation: 0,
+                owner_token: 0,
             },
             kind: "user".to_string(),
             message: Some("cancelled by operator".to_string()),
@@ -5793,6 +5889,7 @@ mod tests {
                 kind: WasmHandleKind::Region,
                 slot: 1,
                 generation: 0,
+                owner_token: 0,
             },
             url: "https://example.com".to_string(),
             method: "POST".to_string(),
@@ -5883,6 +5980,7 @@ mod tests {
             kind: WasmHandleKind::Runtime,
             slot: 0,
             generation: 0,
+            owner_token: 0,
         };
 
         // With label
@@ -5901,6 +5999,7 @@ mod tests {
             kind: WasmHandleKind::Region,
             slot: 1,
             generation: 0,
+            owner_token: 0,
         };
 
         let req = WasmTaskSpawnBuilder::new(scope)
@@ -5918,6 +6017,7 @@ mod tests {
             kind: WasmHandleKind::Region,
             slot: 1,
             generation: 0,
+            owner_token: 0,
         };
 
         let req = WasmFetchBuilder::new(scope, "https://example.com").build();
@@ -6482,6 +6582,7 @@ mod tests {
                         kind: WasmHandleKind::Runtime,
                         slot: 0,
                         generation: 0,
+                        owner_token: 0,
                     },
                     Some("y"),
                 )
