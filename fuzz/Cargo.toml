@@ -1968,3 +1968,36 @@ path = "fuzz_targets/lab_fuzz_campaign_meta.rs"
 test = false
 doc = false
 bench = false
+
+# br-asupersync-wg35z0 — adversarial DecodeProof::replay_and_verify
+# fuzz. Synthesises arbitrary (DecodeConfig, ReceivedSymbol[]) tuples
+# and asserts replay_and_verify never panics — only Result<(), ReplayError>.
+[[bin]]
+name = "raptorq_proof_replay"
+path = "fuzz_targets/raptorq_proof_replay.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-voxekc — degenerate-config fuzz for RaptorQSenderBuilder /
+# RaptorQReceiverBuilder. NaN/Inf repair_overhead, symbol_size 0,
+# zero parallelism, tiny memory budgets must all be cleanly rejected
+# via ConfigError — never panic.
+[[bin]]
+name = "raptorq_builder_degenerate"
+path = "fuzz_targets/raptorq_builder_degenerate.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-i9d6b6 — slice-length-mismatch fuzz for the gf256
+# vector kernels (gf256_add_slice, gf256_addmul_slice,
+# gf256_add_slices2, gf256_addmul_slices2, gf256_mul_slices2).
+# Mismatched lengths must panic via the documented assertions; matched
+# lengths must not panic and gf256_add_slice must equal byte-wise XOR.
+[[bin]]
+name = "raptorq_gf256_slice_mismatch"
+path = "fuzz_targets/raptorq_gf256_slice_mismatch.rs"
+test = false
+doc = false
+bench = false
