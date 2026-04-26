@@ -410,9 +410,17 @@ impl Encoder {
             }
             encode_string(dst, value, self.use_huffman);
 
-            // Add to dynamic table
-            let mut indexed_header = header.clone();
-            indexed_header.name = normalized_name.into_owned();
+            // br-asupersync-nzs9lx — construct the indexed header directly.
+            // The previous shape was `let mut h = header.clone(); h.name =
+            // normalized_name.into_owned();` which cloned `header.name` only
+            // to immediately drop it and overwrite with the normalized form
+            // — wasted String clone + drop per insert. Now the name is
+            // moved out of the Cow once (Borrowed → owned, or Owned →
+            // moved) and only the value is cloned.
+            let indexed_header = Header {
+                name: normalized_name.into_owned(),
+                value: header.value.clone(),
+            };
             self.dynamic_table.insert(indexed_header);
         } else {
             // Literal without indexing (never indexed for sensitive)
@@ -901,7 +909,14 @@ fn decode_string_bounded(src: &mut Bytes, max_len: usize) -> Result<String, H2Er
     if huffman {
         decode_huffman(&data)
     } else {
-        String::from_utf8(data.to_vec())
+        // br-asupersync-73dak3 — validate UTF-8 on the borrowed slice and
+        // allocate exactly once. The previous shape was
+        // `String::from_utf8(data.to_vec())`, which copied the bytes into a
+        // fresh Vec *first* and only then validated; on bad UTF-8 we paid
+        // the alloc + copy before failing. Validating first is also a
+        // single contiguous pass over the bytes (good for the cache).
+        std::str::from_utf8(&data)
+            .map(str::to_owned)
             .map_err(|_| H2Error::compression("invalid UTF-8 in header"))
     }
 }
