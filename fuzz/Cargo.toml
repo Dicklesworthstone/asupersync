@@ -2001,3 +2001,29 @@ path = "fuzz_targets/raptorq_gf256_slice_mismatch.rs"
 test = false
 doc = false
 bench = false
+
+# br-asupersync-6ugt3c — NATS INFO JSON extractor + HMSG header-block
+# decoder. Mirrors the production extract_json_string/_i64/_bool
+# functions and the HMSG name:value parser; feeds arbitrary bytes to
+# all three. Catches crash classes the high-level nats_parser target
+# does not surface (string-extractor escape-handling, HMSG name-CRLF
+# violations, JSON depth-bombs that bypass serde).
+[[bin]]
+name = "messaging_nats_info_hmsg"
+path = "fuzz_targets/messaging_nats_info_hmsg.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-9d9b89 — Kafka record-batch v2 decode hot path.
+# Mirrors the KIP-98 wire format (header + record-count + varint-
+# encoded records) and feeds arbitrary bytes. Targets crash classes
+# the kafka_protocol* targets do not cover: varint continuation
+# overrun, record_count integer overflow before pre-allocation, batch-
+# length-vs-CRC ordering on truncated frames.
+[[bin]]
+name = "messaging_kafka_record_batch"
+path = "fuzz_targets/messaging_kafka_record_batch.rs"
+test = false
+doc = false
+bench = false
