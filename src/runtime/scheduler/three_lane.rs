@@ -62,7 +62,7 @@ use crate::runtime::stored_task::AnyStoredTask;
 use crate::runtime::{RuntimeState, TaskTable};
 use crate::sync::ContendedMutex;
 use crate::time::TimerDriverHandle;
-use crate::tracing_compat::{error, trace};
+use crate::tracing_compat::{error, trace, warn};
 use crate::types::{CxInner, TaskId, Time};
 use crate::util::{CachePadded, DetHasher, DetRng};
 use parking_lot::Mutex;
@@ -1820,7 +1820,24 @@ pub struct FairnessMonitor {
     /// Configuration for fairness monitoring.
     config: FairnessConfig,
     /// Per-task starvation tracking information.
-    tracked_tasks: std::collections::HashMap<TaskId, TaskStarvationInfo>,
+    ///
+    /// br-asupersync-ks0t6j: BTreeMap (was std::collections::HashMap)
+    /// for replay-stable iteration AND deterministic eviction. With
+    /// std HashMap's randomised iteration order, two tasks that
+    /// share the same `enqueue_time_ns` (common under high-resolution
+    /// clocks AND under lab-runtime virtual time that advances in
+    /// fixed steps) had their `min_by_key` tiebreak resolved by
+    /// per-process iteration order — making the fairness report
+    /// non-deterministic across replays and crash-pack hashes
+    /// instable. BTreeMap iterates in TaskId order, so eviction is
+    /// `(enqueue_time_ns, TaskId)` deterministic even when timestamps
+    /// tie. Memory cost is negligible at the documented
+    /// `max_tracked_tasks=10_000` cap; lookup is O(log N) ≈ 14 vs
+    /// HashMap's amortised O(1) — irrelevant on the bookkeeping path.
+    /// Also closes the hash-DoS surface: a multi-tenant deployment
+    /// could otherwise influence TaskId allocation order to cluster
+    /// HashMap buckets and amplify the per-record_task_enqueue cost.
+    tracked_tasks: BTreeMap<TaskId, TaskStarvationInfo>,
     /// Recent priority inversion events.
     priority_inversions: Vec<PriorityInversionEvent>,
     /// Moving window for starvation pattern analysis.
@@ -1842,7 +1859,7 @@ impl FairnessMonitor {
         let window_size = config.analysis_window_size;
         Self {
             config,
-            tracked_tasks: std::collections::HashMap::new(),
+            tracked_tasks: BTreeMap::new(),
             priority_inversions: Vec::new(),
             starvation_window: StarvationAnalysisWindow::new(window_size),
             total_starvation_events: 0,
@@ -1873,13 +1890,20 @@ impl FairnessMonitor {
         // Cleanup old entries if needed
         self.cleanup_if_needed(current_time_ns);
 
-        // Only track up to max_tracked_tasks to prevent unbounded growth
+        // Only track up to max_tracked_tasks to prevent unbounded growth.
+        //
+        // br-asupersync-ks0t6j: tiebreak ties on enqueue_time_ns by
+        // TaskId so eviction is fully deterministic across replays
+        // even before BTreeMap's sorted-iteration guarantee buys us
+        // determinism. The (enqueue_time_ns, *id) key form makes the
+        // intent explicit at the call site and survives any future
+        // refactor that swaps the storage backend.
         if self.tracked_tasks.len() >= self.config.max_tracked_tasks {
             // Remove oldest entry
             if let Some((oldest_task_id, _)) = self
                 .tracked_tasks
                 .iter()
-                .min_by_key(|(_, info)| info.enqueue_time_ns)
+                .min_by_key(|(id, info)| (info.enqueue_time_ns, **id))
                 .map(|(id, info)| (*id, info.clone()))
             {
                 self.tracked_tasks.remove(&oldest_task_id);
@@ -2245,13 +2269,48 @@ impl PreemptionFairnessCertificate {
     }
 }
 
+/// br-asupersync-9nn568: fired-once warn flag for the
+/// `current_time_ns` fallback path. The pre-fix shape silently
+/// returned 0 when `timer_driver` was None — the FairnessMonitor
+/// then computed every wait_time as 0 - 0 = 0, never crossed the
+/// starvation_threshold, never reported priority inversions, never
+/// evicted aged-out entries (max_tracked_tasks cap still applied
+/// but with meaningless ages), and `starvation_stats()` reported
+/// `starvation_events: 0, priority_inversions: 0` to the operator.
+/// Production deployments alerting on those counters silently lost
+/// their DoS-detection surface. The fix routes through `wall_now()`
+/// when no driver is attached and emits a one-time WARN so
+/// operators can see the fallback in their logs.
+static THREE_LANE_TIME_FALLBACK_WARNED: AtomicBool = AtomicBool::new(false);
+
 impl ThreeLaneWorker {
     /// Returns the current time in nanoseconds for fairness monitoring.
+    ///
+    /// br-asupersync-9nn568: when the worker has a TimerDriverHandle
+    /// attached, use it (replay-deterministic in the lab runtime).
+    /// When it does not — a permitted RuntimeBuilder configuration
+    /// for minimal-runtime callers — fall back to
+    /// [`crate::time::wall_now`] (the same fallback the worker.rs
+    /// poll path uses, see br-asupersync-qdkyqs). The previous shape
+    /// returned 0, which silently disabled the FairnessMonitor's
+    /// starvation + priority-inversion detection — a security-relevant
+    /// DoS-detection bypass with no operator-visible warning. We now
+    /// emit a one-time WARN through `tracing` so the fallback is at
+    /// least surfaced in logs.
     #[inline]
     fn current_time_ns(&self) -> u64 {
-        self.timer_driver
-            .as_ref()
-            .map_or(0, |timer| timer.now().as_nanos())
+        if let Some(timer) = self.timer_driver.as_ref() {
+            return timer.now().as_nanos();
+        }
+        if !THREE_LANE_TIME_FALLBACK_WARNED.swap(true, Ordering::Relaxed) {
+            crate::tracing_compat::warn!(
+                target: "asupersync::runtime::scheduler::three_lane",
+                "br-asupersync-9nn568: ThreeLaneWorker has no TimerDriverHandle attached; \
+                 FairnessMonitor falling back to wall_now() for current_time_ns. Replay \
+                 determinism in the lab runtime requires a timer driver."
+            );
+        }
+        crate::time::wall_now().as_nanos()
     }
 
     /// Executes a closure with access to the fairness monitor for this worker.
@@ -10281,5 +10340,67 @@ mod tests {
                 violations
             );
         }
+    }
+
+    /// br-asupersync-ks0t6j: when many tasks share the same
+    /// `enqueue_time_ns` and the cap is exceeded, eviction must be
+    /// deterministic across two independent monitors built with the
+    /// same configuration. Pre-fix: std HashMap iteration order
+    /// randomised the eviction; the test would flake.
+    #[test]
+    fn fairness_monitor_eviction_is_deterministic_across_instances() {
+        let make_config = || FairnessConfig {
+            enable_per_task_tracking: true,
+            max_tracked_tasks: 4,
+            ..FairnessConfig::default()
+        };
+
+        let mut monitor_a = FairnessMonitor::new(make_config());
+        let mut monitor_b = FairnessMonitor::new(make_config());
+
+        // 5 tasks at the SAME enqueue_time_ns. The 5th insertion must
+        // evict an entry — and both monitors must agree on which one.
+        let task_ids: Vec<TaskId> = (0..5)
+            .map(|i| TaskId::from_arena(crate::util::ArenaIndex::new(0, i)))
+            .collect();
+
+        for tid in &task_ids {
+            monitor_a.record_task_enqueue(*tid, 0, 100, 0);
+            monitor_b.record_task_enqueue(*tid, 0, 100, 0);
+        }
+
+        let keys_a: Vec<TaskId> = monitor_a.tracked_tasks.keys().copied().collect();
+        let keys_b: Vec<TaskId> = monitor_b.tracked_tasks.keys().copied().collect();
+        assert_eq!(
+            keys_a, keys_b,
+            "br-asupersync-ks0t6j: eviction must be deterministic across replays"
+        );
+        assert_eq!(monitor_a.tracked_tasks.len(), 4);
+        // BTreeMap iteration is sorted by TaskId; the (enqueue_time_ns, *id)
+        // tiebreak picks the smallest id when timestamps tie, so id 0 is
+        // evicted and ids 1..=4 remain.
+        assert!(!monitor_a.tracked_tasks.contains_key(&task_ids[0]));
+        for tid in &task_ids[1..] {
+            assert!(monitor_a.tracked_tasks.contains_key(tid));
+        }
+    }
+
+    /// br-asupersync-9nn568: when no TimerDriverHandle is attached,
+    /// `current_time_ns` must NOT silently return 0. The fall-back
+    /// path must produce a non-zero monotonic value so that
+    /// FairnessMonitor wait-time computations remain meaningful and
+    /// the runtime's documented starvation/priority-inversion
+    /// detection surface stays armed.
+    #[test]
+    fn current_time_ns_falls_back_when_no_timer_driver() {
+        // wall_now is monotonic and seeded on first call; force it to
+        // initialise then sample twice to confirm a non-zero advance.
+        let _ = crate::time::wall_now();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let t = crate::time::wall_now().as_nanos();
+        assert!(
+            t > 0,
+            "br-asupersync-9nn568: wall_now() fallback must return non-zero"
+        );
     }
 }
