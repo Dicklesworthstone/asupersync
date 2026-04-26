@@ -1,0 +1,30 @@
+---
+source: tests/trace_golden_artifacts.rs
+expression: summary
+---
+[
+  {
+    "constructor": "spawn",
+    "seq": 0
+  },
+  {
+    "constructor": "schedule",
+    "seq": 1
+  },
+  {
+    "constructor": "yield",
+    "seq": 2
+  },
+  {
+    "constructor": "wake",
+    "seq": 3
+  },
+  {
+    "constructor": "poll",
+    "seq": 4
+  },
+  {
+    "constructor": "complete",
+    "seq": 5
+  }
+]

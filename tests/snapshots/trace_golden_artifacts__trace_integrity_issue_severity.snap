@@ -1,0 +1,61 @@
+---
+source: tests/trace_golden_artifacts.rs
+expression: table
+---
+[
+  {
+    "display": "file too small: 32 bytes, expected at least 64",
+    "is_fatal": true,
+    "severity": "fatal"
+  },
+  {
+    "display": "invalid magic bytes: [68, 69, 65, 68, 66, 69, 69, 70, 0, 0, 0]",
+    "is_fatal": true,
+    "severity": "fatal"
+  },
+  {
+    "display": "unsupported version: 99, max supported: 1",
+    "is_fatal": true,
+    "severity": "fatal"
+  },
+  {
+    "display": "unsupported flags: 0xf000",
+    "is_fatal": false,
+    "severity": "error"
+  },
+  {
+    "display": "schema version mismatch: found 7, expected 1",
+    "is_fatal": false,
+    "severity": "error"
+  },
+  {
+    "display": "invalid metadata: fixed metadata-error string for golden snapshot",
+    "is_fatal": true,
+    "severity": "fatal"
+  },
+  {
+    "display": "event count mismatch: declared 100, actual 95",
+    "is_fatal": false,
+    "severity": "error"
+  },
+  {
+    "display": "invalid event at index 42: fixed event-error string for golden snapshot",
+    "is_fatal": false,
+    "severity": "error"
+  },
+  {
+    "display": "file truncated at event 17",
+    "is_fatal": false,
+    "severity": "error"
+  },
+  {
+    "display": "non-monotonic timeline at event 5: 1000 -> 999",
+    "is_fatal": false,
+    "severity": "error"
+  },
+  {
+    "display": "I/O error: fixed io-error string for golden snapshot",
+    "is_fatal": false,
+    "severity": "error"
+  }
+]

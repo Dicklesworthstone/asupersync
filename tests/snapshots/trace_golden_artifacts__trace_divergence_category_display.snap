@@ -1,0 +1,54 @@
+---
+source: tests/trace_golden_artifacts.rs
+expression: table
+---
+[
+  {
+    "display": "scheduling-order",
+    "variant": "SchedulingOrder"
+  },
+  {
+    "display": "outcome-mismatch",
+    "variant": "OutcomeMismatch"
+  },
+  {
+    "display": "time-divergence",
+    "variant": "TimeDivergence"
+  },
+  {
+    "display": "timer-mismatch",
+    "variant": "TimerMismatch"
+  },
+  {
+    "display": "io-mismatch",
+    "variant": "IoMismatch"
+  },
+  {
+    "display": "rng-mismatch",
+    "variant": "RngMismatch"
+  },
+  {
+    "display": "region-mismatch",
+    "variant": "RegionMismatch"
+  },
+  {
+    "display": "event-type-mismatch",
+    "variant": "EventTypeMismatch"
+  },
+  {
+    "display": "length-mismatch",
+    "variant": "LengthMismatch"
+  },
+  {
+    "display": "waker-mismatch",
+    "variant": "WakerMismatch"
+  },
+  {
+    "display": "chaos-mismatch",
+    "variant": "ChaosMismatch"
+  },
+  {
+    "display": "checkpoint-mismatch",
+    "variant": "CheckpointMismatch"
+  }
+]

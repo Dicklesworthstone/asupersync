@@ -1,0 +1,26 @@
+---
+source: tests/trace_golden_artifacts.rs
+expression: text
+---
+=== Replay Divergence Report ===
+
+Category:   scheduling-order
+Event:      17 of 42 (40.5% replayed)
+Seed:       0x0123456789abcdef
+Min prefix: 18 events
+
+Expected: [Schedule] task=7 region=42
+Actual:   [Schedule] task=8 region=42
+
+Explanation: expected task 7 to be scheduled next, but task 8 was scheduled instead (work-stealer raced)
+Suggestion:  re-run with --deterministic-stealer or pin worker count to 1
+
+Affected tasks:   [7, 8]
+Affected regions: [42]
+
+--- Context (before) ---
+  [15] Poll task=7 region=42
+  [16] Yield task=7 region=42
+  [17] >>> DIVERGENCE <<<
+--- Context (expected after) ---
+  [18] Poll task=7 region=42
