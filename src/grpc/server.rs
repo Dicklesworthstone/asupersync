@@ -446,6 +446,19 @@ impl Server {
         H: FnOnce(Request<Bytes>) -> F,
         F: Future<Output = Result<Response<Bytes>, Status>>,
     {
+        // br-asupersync-7u4r72: enforce ServerConfig::max_metadata_size
+        // BEFORE the interceptor chain runs. Pre-fix the
+        // enforce_metadata_size_limit helper existed (see line ~106)
+        // and was documented as 'Transport adapters MUST call this on
+        // inbound HEADERS and TRAILERS frames before storing them in
+        // long-lived CallContexts', but no callsite within the
+        // dispatch path actually invoked it — a transport adapter
+        // wired straight into dispatch_unary silently bypassed the
+        // 8 KiB cap. Same anti-pattern as the closed asupersync-mfk14i
+        // (interceptor chain not invoked in production). Now the cap
+        // is the FIRST gate before any per-request work.
+        enforce_metadata_size_limit(request.metadata(), self.config.max_metadata_size)?;
+
         // ── Phase 1: request-side chain (registration order). ────────
         // The first error short-circuits without invoking the
         // handler or the response-side chain.
@@ -2270,5 +2283,64 @@ mod tests {
         }));
         let response = authed_result.expect("authed call must succeed");
         assert_eq!(response.get_ref().as_ref(), b"ok");
+    }
+
+    /// br-asupersync-7u4r72: dispatch_unary MUST enforce
+    /// ServerConfig::max_metadata_size before invoking the
+    /// interceptor chain or handler. A request whose metadata
+    /// exceeds the cap returns Status::resource_exhausted; the
+    /// handler is NOT invoked.
+    #[test]
+    fn test_dispatch_unary_enforces_max_metadata_size() {
+        use futures_lite::future::block_on;
+        init_test("test_dispatch_unary_enforces_max_metadata_size");
+        // tiny cap to exercise the gate
+        let server = Server::builder().max_metadata_size(64).build();
+
+        // Build metadata that exceeds the cap (a single header with
+        // > 64 bytes including overhead).
+        let mut metadata = Metadata::new();
+        metadata.insert("x-large-trace-id", "a".repeat(128).as_str());
+        let request = Request::with_metadata(Bytes::new(), metadata);
+
+        // Counter to verify the handler is NOT invoked.
+        let handler_invoked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handler_invoked_clone = std::sync::Arc::clone(&handler_invoked);
+        let result = block_on(server.dispatch_unary(request, move |_req| {
+            handler_invoked_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+            async move { Ok(Response::new(Bytes::from_static(b"ok"))) }
+        }));
+
+        let err = result.expect_err("oversized metadata must reject");
+        assert_eq!(
+            err.code(),
+            crate::grpc::status::Code::ResourceExhausted,
+            "rejection must use RESOURCE_EXHAUSTED per gRPC convention"
+        );
+        assert!(
+            !handler_invoked.load(std::sync::atomic::Ordering::Relaxed),
+            "handler must NOT be invoked when metadata cap is exceeded"
+        );
+        crate::test_complete!("test_dispatch_unary_enforces_max_metadata_size");
+    }
+
+    /// br-asupersync-7u4r72: a request within the cap passes through
+    /// to the handler — happy-path regression guard.
+    #[test]
+    fn test_dispatch_unary_within_metadata_cap_succeeds() {
+        use futures_lite::future::block_on;
+        init_test("test_dispatch_unary_within_metadata_cap_succeeds");
+        let server = Server::builder().max_metadata_size(8 * 1024).build();
+
+        let mut metadata = Metadata::new();
+        metadata.insert("x-trace-id", "abc123");
+        let request = Request::with_metadata(Bytes::new(), metadata);
+
+        let result = block_on(server.dispatch_unary(request, |_req| async move {
+            Ok(Response::new(Bytes::from_static(b"ok")))
+        }));
+        let response = result.expect("call within cap must succeed");
+        assert_eq!(response.get_ref().as_ref(), b"ok");
+        crate::test_complete!("test_dispatch_unary_within_metadata_cap_succeeds");
     }
 }
