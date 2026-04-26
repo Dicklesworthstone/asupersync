@@ -85,7 +85,8 @@ async fn main() -> Result<()> {
         .get_matches();
 
     let address = matches.get_one::<String>("address").unwrap();
-    let port: u16 = matches.get_one::<String>("port")
+    let port: u16 = matches
+        .get_one::<String>("port")
         .unwrap()
         .parse()
         .context("Invalid port number")?;
@@ -94,7 +95,8 @@ async fn main() -> Result<()> {
         .parse()
         .context("Invalid bind address")?;
 
-    let max_message_size: usize = matches.get_one::<String>("max-message-size")
+    let max_message_size: usize = matches
+        .get_one::<String>("max-message-size")
         .unwrap()
         .parse()
         .context("Invalid max message size")?;
@@ -126,8 +128,8 @@ async fn main() -> Result<()> {
     // Add optional services
     if enable_reflection {
         info!("Adding gRPC reflection service");
-        // TODO: Add reflection service when available
-        warn!("gRPC reflection service not yet implemented");
+        let reflection_service = asupersync::grpc::ReflectionService::new();
+        server_builder = server_builder.add_service(reflection_service);
     }
 
     if enable_health {
@@ -136,18 +138,41 @@ async fn main() -> Result<()> {
         server_builder = server_builder.add_service(health_service);
     }
 
-    // Add Connect protocol support
+    // Add Connect protocol support.
+    //
+    // PENDING(br-asupersync-egeaq2): asupersync ships gRPC-web (see
+    // `asupersync::grpc::web` — `WebFrameCodec`, `is_grpc_web_request`,
+    // base64 trailer encoding) but not the Buf-defined Connect protocol.
+    // Enabling `--connect-protocol` is currently a no-op at the server
+    // layer; the conformance harness still runs Connect-format validation
+    // entirely client-side (see `connect_compat::ConnectConformanceTests`).
     if connect_protocol {
-        info!("Enabling Connect protocol support");
-        // TODO: Add Connect-specific middleware/handlers
-        warn!("Connect protocol support not yet fully implemented");
+        info!("--connect-protocol requested");
+        warn!(
+            "Connect protocol support is not implemented in asupersync; \
+             falling back to gRPC over HTTP/2. The conformance suite's \
+             Connect format checks still run, but no server-side Connect \
+             middleware is wired (br-asupersync-egeaq2)."
+        );
     }
 
-    // Add TLS if requested
+    // Add TLS if requested.
+    //
+    // PENDING(br-asupersync-egeaq2): wiring TLS requires enabling the
+    // `tls` feature on the conformance crate's `asupersync` dependency
+    // and threading a `rustls::ServerConfig` through `ServerBuilder`.
+    // That widens this crate's dependency graph (rustls + ring) for a
+    // test harness that today only exercises plaintext flows; deferred
+    // until the suite is rewired to drive real network sockets instead
+    // of in-process loopback. Until then, `--enable-tls` is a no-op.
     if enable_tls {
-        info!("Enabling TLS support");
-        // TODO: Add TLS configuration when available
-        warn!("TLS support not yet implemented - serving plaintext");
+        info!("--enable-tls requested");
+        warn!(
+            "TLS is not wired in this conformance harness — serving \
+             plaintext. To enable, add the `tls` feature to the \
+             asupersync dep in Cargo.toml and pass a `ServerConfig` to \
+             `ServerBuilder::tls(...)` (br-asupersync-egeaq2)."
+        );
     }
 
     let server = server_builder.build();
@@ -163,7 +188,9 @@ async fn main() -> Result<()> {
 
     info!("🚀 gRPC Connect test server listening on {}", bind_addr);
     info!("Available services:");
-    info!("  - conformance.TestService (UnaryCall, ServerStreamingCall, ClientStreamingCall, BidirectionalStreamingCall, ErrorTestCall)");
+    info!(
+        "  - conformance.TestService (UnaryCall, ServerStreamingCall, ClientStreamingCall, BidirectionalStreamingCall, ErrorTestCall)"
+    );
 
     if enable_health {
         info!("  - grpc.health.v1.Health (Check, Watch)");
@@ -204,11 +231,7 @@ mod tests {
                     .long("address")
                     .default_value("127.0.0.1"),
             )
-            .arg(
-                Arg::new("port")
-                    .long("port")
-                    .default_value("8080"),
-            );
+            .arg(Arg::new("port").long("port").default_value("8080"));
 
         let matches = app.try_get_matches_from(&["test"]).unwrap();
         assert_eq!(matches.get_one::<String>("address").unwrap(), "127.0.0.1");

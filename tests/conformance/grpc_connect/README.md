@@ -110,19 +110,44 @@ View detailed error information in the generated JSON report.
 ## Status
 
 - ✅ Basic unary RPC conformance
-- ✅ Error handling and status codes  
+- ✅ Error handling and status codes
 - ✅ Metadata and headers
-- 🚧 Server streaming (placeholder)
-- 🚧 Client streaming (placeholder)
-- 🚧 Bidirectional streaming (placeholder)
-- 🚧 Connect protocol specifics
-- 🚧 Compression testing
-- 🚧 TLS/SSL testing
+- ✅ Compression header detection (`grpc-encoding` / `grpc-accept-encoding`)
+- ✅ gRPC reflection service wiring (`--enable-reflection`)
+- ✅ Health service wiring (`--enable-health`)
+- ✅ Server / client / bidi streaming client surface
+  (`ConformanceClient::server_streaming_call` etc.) wired to the
+  `asupersync::grpc::client` streaming methods
+- ✅ Connect protocol header / error-format / streaming-flag validators
+  (format-level — see *Quarantined surfaces* below)
+- 🚧 Connect protocol *server-side* support — asupersync ships gRPC-web
+  but not the Buf-defined Connect protocol; `--connect-protocol` falls
+  back to gRPC over HTTP/2 with a warning. (br-asupersync-egeaq2)
+- 🚧 TLS — the `tls` feature is not enabled on this crate's asupersync
+  dep; `--enable-tls` is currently a no-op. (br-asupersync-egeaq2)
+- 🚧 `ServiceHandler` trait wiring for `ConformanceTestService` — the
+  service methods are invoked directly by the in-process runner; full
+  trait wiring needs per-method codec/descriptor wiring not yet exposed
+  by the surrounding crate. (br-asupersync-egeaq2)
+
+## Quarantined surfaces
+
+This conformance suite is an **independent workspace** that links
+`asupersync` via path dep and uses `tokio` as its async runtime — both
+of which exist outside the project's normal feature graph for legacy
+reasons. New work should prefer instrumenting the in-tree gRPC tests
+under `tests/grpc_*.rs` rather than expanding this suite. The remaining
+🚧 items above all require either widening this crate's dependency
+graph (TLS) or implementing protocol surfaces in `asupersync` proper
+(server-side Connect). Both are tracked under bead
+[`br-asupersync-egeaq2`](../../../.beads/issues.jsonl).
 
 ## Future Enhancements
 
-- Complete streaming method implementations
-- Full Connect protocol validation
+- Server-side Connect protocol middleware in `asupersync::grpc` (would
+  unblock end-to-end Connect compliance testing)
+- TLS wiring once the suite drives real network sockets instead of
+  in-process loopback
 - Performance benchmarking
 - Interoperability with other gRPC implementations
 - Advanced timeout and cancellation scenarios

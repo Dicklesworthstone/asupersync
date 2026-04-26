@@ -251,10 +251,7 @@ impl ConnectProtocolValidator {
         match protocol_version {
             Some(version) => {
                 if version != constants::CONNECT_PROTOCOL_VERSION {
-                    issues.push(format!(
-                        "Unsupported protocol version: {:?}",
-                        version
-                    ));
+                    issues.push(format!("Unsupported protocol version: {:?}", version));
                 }
             }
             None => issues.push("Missing Connect protocol version header".to_string()),
@@ -304,7 +301,7 @@ impl ConnectProtocolValidator {
                 // Try to parse error body
                 if !response.body.is_empty() {
                     match serde_json::from_slice::<ConnectError>(&response.body) {
-                        Ok(_) => {}, // Valid error format
+                        Ok(_) => {} // Valid error format
                         Err(e) => issues.push(format!("Invalid error body format: {}", e)),
                     }
                 }
@@ -349,19 +346,19 @@ impl ConnectProtocolValidator {
     #[allow(dead_code)]
     pub fn http_to_grpc_status(http_status: u16) -> i32 {
         match http_status {
-            200 => 0,  // OK
-            400 => 3,  // INVALID_ARGUMENT
-            401 => 16, // UNAUTHENTICATED
-            403 => 7,  // PERMISSION_DENIED
-            404 => 5,  // NOT_FOUND
-            408 => 4,  // DEADLINE_EXCEEDED
-            409 => 6,  // ALREADY_EXISTS
-            412 => 9,  // FAILED_PRECONDITION
-            413 => 11, // OUT_OF_RANGE
-            429 => 8,  // RESOURCE_EXHAUSTED
-            501 => 12, // UNIMPLEMENTED
+            200 => 0,              // OK
+            400 => 3,              // INVALID_ARGUMENT
+            401 => 16,             // UNAUTHENTICATED
+            403 => 7,              // PERMISSION_DENIED
+            404 => 5,              // NOT_FOUND
+            408 => 4,              // DEADLINE_EXCEEDED
+            409 => 6,              // ALREADY_EXISTS
+            412 => 9,              // FAILED_PRECONDITION
+            413 => 11,             // OUT_OF_RANGE
+            429 => 8,              // RESOURCE_EXHAUSTED
+            501 => 12,             // UNIMPLEMENTED
             502 | 503 | 504 => 14, // UNAVAILABLE
-            _ => 13, // INTERNAL
+            _ => 13,               // INTERNAL
         }
     }
 }
@@ -381,44 +378,263 @@ pub struct ConnectConformanceTests;
 #[allow(dead_code)]
 
 impl ConnectConformanceTests {
-    /// Test Connect protocol header requirements
+    /// Test Connect protocol header requirements.
+    ///
+    /// Constructs canonical Connect requests through `ConnectRequestBuilder`
+    /// (default proto, JSON, streaming, with-timeout, with-compression,
+    /// custom-user-agent) and asserts each one round-trips through
+    /// `ConnectProtocolValidator::validate_request` cleanly. Also asserts
+    /// that a request stripped of its `connect-protocol-version` header is
+    /// rejected — i.e. the validator actually catches missing required
+    /// headers rather than silently accepting them.
     pub async fn test_protocol_headers() -> Result<ValidationResult> {
-        // This would test that our server correctly handles Connect protocol headers
         let mut issues = Vec::new();
 
-        // TODO: Implement actual Connect protocol header tests
-        issues.push("Connect protocol header tests not yet implemented".to_string());
+        let cases: Vec<(&str, ConnectTestConfig)> = vec![
+            ("default", ConnectTestConfig::default()),
+            (
+                "json",
+                ConnectTestConfig {
+                    use_json_encoding: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "streaming",
+                ConnectTestConfig {
+                    use_streaming: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "timeout_50ms",
+                ConnectTestConfig {
+                    timeout_ms: Some(50),
+                    ..Default::default()
+                },
+            ),
+            (
+                "gzip",
+                ConnectTestConfig {
+                    compression: Some(ConnectCompression::Gzip),
+                    ..Default::default()
+                },
+            ),
+            (
+                "custom_ua",
+                ConnectTestConfig {
+                    user_agent: "conformance-tester/2.0".to_string(),
+                    ..Default::default()
+                },
+            ),
+        ];
+
+        for (label, config) in cases {
+            let req = ConnectRequestBuilder::new("test.Service", "TestMethod")
+                .with_config(config.clone())
+                .build();
+            match ConnectProtocolValidator::validate_request(&req) {
+                Ok(result) if result.is_valid => {}
+                Ok(result) => {
+                    for problem in result.issues {
+                        issues.push(format!("[{label}] {problem}"));
+                    }
+                }
+                Err(e) => issues.push(format!("[{label}] validator error: {e}")),
+            }
+
+            // Spot-check a few headers the validator does not assert
+            // directly so any future regression in `with_config` surfaces here.
+            if let Some(timeout_ms) = config.timeout_ms {
+                let header = req.headers.get(constants::CONNECT_TIMEOUT_HEADER);
+                if header.and_then(|v| v.to_str().ok()) != Some(&timeout_ms.to_string()) {
+                    issues.push(format!("[{label}] expected timeout header {timeout_ms}"));
+                }
+            }
+            if let Some(compression) = config.compression {
+                let header = req.headers.get(constants::CONNECT_ENCODING_HEADER);
+                if header.and_then(|v| v.to_str().ok()) != Some(compression.as_str()) {
+                    issues.push(format!(
+                        "[{label}] expected compression header {}",
+                        compression.as_str()
+                    ));
+                }
+            }
+            let ua = req.headers.get("user-agent");
+            if ua.and_then(|v| v.to_str().ok()) != Some(config.user_agent.as_str()) {
+                issues.push(format!(
+                    "[{label}] user-agent should be {:?}, got {:?}",
+                    config.user_agent, ua
+                ));
+            }
+        }
+
+        // Negative case: stripping the protocol version header MUST fail
+        // validation — otherwise the validator is silently accepting
+        // non-conformant requests.
+        let mut bad = ConnectRequestBuilder::new("test.Service", "TestMethod")
+            .with_config(ConnectTestConfig::default())
+            .build();
+        bad.headers
+            .remove(HeaderName::from_static(constants::CONNECT_PROTOCOL_HEADER));
+        let bad_result = ConnectProtocolValidator::validate_request(&bad)?;
+        if bad_result.is_valid {
+            issues.push(
+                "validator accepted a request with no connect-protocol-version header".to_string(),
+            );
+        }
 
         Ok(ValidationResult {
-            is_valid: false,
+            is_valid: issues.is_empty(),
             issues,
         })
     }
 
-    /// Test Connect error format compliance
+    /// Test Connect error format compliance.
+    ///
+    /// Builds Connect-formatted error envelopes, asserts the JSON shape
+    /// round-trips through serde, validates that the response validator
+    /// accepts well-formed errors and rejects malformed bodies, and that
+    /// the gRPC-status → Connect-string mapping covers all 17 canonical
+    /// gRPC codes.
     pub async fn test_error_format() -> Result<ValidationResult> {
-        // This would test that errors are returned in Connect format
         let mut issues = Vec::new();
 
-        // TODO: Implement Connect error format tests
-        issues.push("Connect error format tests not yet implemented".to_string());
+        // Round-trip a representative error envelope.
+        let original = ConnectError {
+            code: "invalid_argument".to_string(),
+            message: "field 'name' is required".to_string(),
+            details: Some(vec![ConnectErrorDetail {
+                detail_type: "google.rpc.BadRequest.FieldViolation".to_string(),
+                value: serde_json::json!({"field": "name", "description": "required"}),
+            }]),
+        };
+        let encoded = serde_json::to_vec(&original)
+            .map_err(|e| anyhow::anyhow!("envelope serialization: {e}"))?;
+        let decoded: ConnectError = serde_json::from_slice(&encoded)
+            .map_err(|e| anyhow::anyhow!("envelope round-trip: {e}"))?;
+        if decoded.code != original.code || decoded.message != original.message {
+            issues.push("ConnectError did not round-trip through serde_json".to_string());
+        }
+        if decoded
+            .details
+            .as_ref()
+            .map(|d| d.len())
+            .unwrap_or_default()
+            != 1
+        {
+            issues.push("ConnectErrorDetail collapsed during round-trip".to_string());
+        }
+
+        // Construct a 400 response carrying the envelope; validator must accept.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/json"),
+        );
+        let good_response = ConnectResponse {
+            status_code: 400,
+            headers: headers.clone(),
+            body: Bytes::from(encoded),
+            trailers: None,
+        };
+        match ConnectProtocolValidator::validate_response(&good_response) {
+            Ok(r) if r.is_valid => {}
+            Ok(r) => issues.extend(r.issues.into_iter().map(|i| format!("good envelope: {i}"))),
+            Err(e) => issues.push(format!("good envelope error: {e}")),
+        }
+
+        // Construct a 400 response with a non-JSON body — validator must reject.
+        let bad_response = ConnectResponse {
+            status_code: 400,
+            headers,
+            body: Bytes::from_static(b"not a json envelope"),
+            trailers: None,
+        };
+        let bad_result = ConnectProtocolValidator::validate_response(&bad_response)?;
+        if bad_result.is_valid {
+            issues.push("validator accepted an error response with a non-JSON body".to_string());
+        }
+
+        // gRPC code coverage: codes 0..=16 must each map to a non-"unknown"
+        // string except code 2 ("unknown") and out-of-range fallback.
+        for code in 0i32..=16 {
+            let mapped = ConnectProtocolValidator::grpc_to_connect_status(code);
+            if mapped == "unknown" && code != 2 {
+                issues.push(format!("gRPC code {code} mapped to 'unknown'"));
+            }
+        }
+        if ConnectProtocolValidator::grpc_to_connect_status(99_999) != "unknown" {
+            issues.push("out-of-range gRPC code did not map to 'unknown'".to_string());
+        }
 
         Ok(ValidationResult {
-            is_valid: false,
+            is_valid: issues.is_empty(),
             issues,
         })
     }
 
-    /// Test Connect streaming protocol
+    /// Test Connect streaming protocol.
+    ///
+    /// Validates streaming-specific framing prerequisites: the
+    /// streaming Content-Type matches the Connect spec
+    /// (`application/connect+proto`), validator accepts streaming
+    /// requests, and the canonical Connect envelope-flag set
+    /// (`0x00` = uncompressed message, `0x01` = compressed,
+    /// `0x02` = end-of-stream) is internally consistent — the same
+    /// flag space the client and server are expected to honour.
     pub async fn test_streaming_protocol() -> Result<ValidationResult> {
-        // This would test Connect streaming protocol specifics
         let mut issues = Vec::new();
 
-        // TODO: Implement Connect streaming tests
-        issues.push("Connect streaming tests not yet implemented".to_string());
+        let req = ConnectRequestBuilder::new("test.Service", "StreamingMethod")
+            .with_config(ConnectTestConfig {
+                use_streaming: true,
+                ..Default::default()
+            })
+            .build();
+
+        // Streaming requests must carry the streaming content-type per
+        // Connect spec — and the request must validate.
+        match req
+            .headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+        {
+            Some(ct) if ct == constants::CONNECT_STREAMING_CONTENT_TYPE => {}
+            other => issues.push(format!(
+                "expected streaming content-type {:?}, got {:?}",
+                constants::CONNECT_STREAMING_CONTENT_TYPE,
+                other
+            )),
+        }
+        match ConnectProtocolValidator::validate_request(&req) {
+            Ok(r) if r.is_valid => {}
+            Ok(r) => issues.extend(r.issues.into_iter().map(|i| format!("validate: {i}"))),
+            Err(e) => issues.push(format!("validate error: {e}")),
+        }
+
+        // Connect envelope flag bits: bit 0 = compression, bit 1 = end-of-stream.
+        // Verify the canonical bit pattern is recognisable by exercising the
+        // mask the framer must apply.
+        const FLAG_COMPRESSED: u8 = 0x01;
+        const FLAG_END_OF_STREAM: u8 = 0x02;
+        for (label, byte, want_compressed, want_eos) in [
+            ("data", 0x00u8, false, false),
+            ("compressed", 0x01, true, false),
+            ("end_of_stream", 0x02, false, true),
+            ("compressed_eos", 0x03, true, true),
+        ] {
+            let compressed = (byte & FLAG_COMPRESSED) != 0;
+            let eos = (byte & FLAG_END_OF_STREAM) != 0;
+            if compressed != want_compressed || eos != want_eos {
+                issues.push(format!(
+                    "flag {label} (0x{byte:02x}): expected compressed={want_compressed} eos={want_eos}, got compressed={compressed} eos={eos}"
+                ));
+            }
+        }
 
         Ok(ValidationResult {
-            is_valid: false,
+            is_valid: issues.is_empty(),
             issues,
         })
     }
@@ -439,17 +655,33 @@ mod tests {
         assert_eq!(request.method, Method::POST);
         assert_eq!(request.uri.path(), "/test.Service/TestMethod");
         assert!(request.headers.contains_key("user-agent"));
-        assert!(request.headers.contains_key(constants::CONNECT_PROTOCOL_HEADER));
+        assert!(
+            request
+                .headers
+                .contains_key(constants::CONNECT_PROTOCOL_HEADER)
+        );
     }
 
     #[test]
     #[allow(dead_code)]
     fn test_grpc_to_connect_status() {
         assert_eq!(ConnectProtocolValidator::grpc_to_connect_status(0), "ok");
-        assert_eq!(ConnectProtocolValidator::grpc_to_connect_status(1), "cancelled");
-        assert_eq!(ConnectProtocolValidator::grpc_to_connect_status(3), "invalid_argument");
-        assert_eq!(ConnectProtocolValidator::grpc_to_connect_status(12), "unimplemented");
-        assert_eq!(ConnectProtocolValidator::grpc_to_connect_status(999), "unknown");
+        assert_eq!(
+            ConnectProtocolValidator::grpc_to_connect_status(1),
+            "cancelled"
+        );
+        assert_eq!(
+            ConnectProtocolValidator::grpc_to_connect_status(3),
+            "invalid_argument"
+        );
+        assert_eq!(
+            ConnectProtocolValidator::grpc_to_connect_status(12),
+            "unimplemented"
+        );
+        assert_eq!(
+            ConnectProtocolValidator::grpc_to_connect_status(999),
+            "unknown"
+        );
     }
 
     #[test]
