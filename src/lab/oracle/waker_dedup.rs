@@ -37,6 +37,32 @@ use crate::trace::distributed::DistTraceId;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// br-asupersync-1zvt0a — Wall-clock proxy for `WakerEvent` /
+/// `WakerViolation` timestamp fields. In production stamps real
+/// `waker_event_now()`; under `cfg(any(test, feature =
+/// "deterministic-mode"))` returns `UNIX_EPOCH` so per-run timestamps
+/// drop out of the violation stream and trace-certificate hashes /
+/// DPOR class fingerprints become stable across replays.
+///
+/// Note: every WakerEvent / WakerViolation field is still typed as
+/// `SystemTime` (the bead's structural concern). Switching the type
+/// to `crate::types::Time` is a larger refactor — every event-creation
+/// site needs a `now: Time` parameter and every public method
+/// signature changes — and is tracked as follow-up. This proxy
+/// addresses the violation-stream determinism leak (the
+/// user-observable consequence) without an API break.
+#[inline]
+fn waker_event_now() -> SystemTime {
+    #[cfg(any(test, feature = "deterministic-mode"))]
+    {
+        UNIX_EPOCH
+    }
+    #[cfg(not(any(test, feature = "deterministic-mode")))]
+    {
+        SystemTime::now()
+    }
+}
+
 /// Unique identifier for a waker instance
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WakerId(pub u64);
@@ -368,7 +394,7 @@ impl ViolationRecord {
 
         Self {
             violation,
-            timestamp: SystemTime::now(),
+            timestamp: waker_event_now(),
             trace_id,
             stack_trace,
             replay_command,
@@ -541,7 +567,7 @@ impl WakerDedupOracle {
             return;
         }
 
-        let now = SystemTime::now();
+        let now = waker_event_now();
 
         // Check for race with recent wakeups
         if self.config.detect_registration_races {
@@ -590,7 +616,7 @@ impl WakerDedupOracle {
             return;
         }
 
-        let now = SystemTime::now();
+        let now = waker_event_now();
 
         if let Some(state) = self.wakers.get(&waker_id) {
             match &state.status {
@@ -637,7 +663,7 @@ impl WakerDedupOracle {
             return;
         }
 
-        let now = SystemTime::now();
+        let now = waker_event_now();
 
         if let Some(state) = self.wakers.get_mut(&waker_id) {
             match &state.status {
@@ -697,7 +723,7 @@ impl WakerDedupOracle {
             return;
         }
 
-        let now = SystemTime::now();
+        let now = waker_event_now();
 
         if let Some(state) = self.wakers.get_mut(&waker_id) {
             match &state.status {
@@ -741,7 +767,7 @@ impl WakerDedupOracle {
                     channel_id: state.channel_id,
                     expected_queued,
                     actual_queued,
-                    detected_at: SystemTime::now(),
+                    detected_at: waker_event_now(),
                     trace_id,
                 };
                 self.record_violation(violation);
@@ -852,7 +878,7 @@ impl WakerDedupOracle {
 
     /// Check for leaked wakers
     fn check_for_leaked_wakers(&mut self) {
-        let now = SystemTime::now();
+        let now = waker_event_now();
         let leak_threshold = std::time::Duration::from_secs(60); // 1 minute
         let mut leaked_wakers = Vec::new();
         let mut violations_to_record = Vec::new();
@@ -893,7 +919,7 @@ impl WakerDedupOracle {
 
     /// Check for lost wakeups
     fn check_for_lost_wakeups(&mut self) {
-        let now = SystemTime::now();
+        let now = waker_event_now();
         let lost_threshold = std::time::Duration::from_secs(30); // 30 seconds
         let mut violations_to_record = Vec::new();
 
@@ -923,7 +949,7 @@ impl WakerDedupOracle {
 
     /// Clean up tracking data to prevent memory leaks
     fn cleanup_tracking_data(&mut self) {
-        let now = SystemTime::now();
+        let now = waker_event_now();
         let cleanup_window = std::time::Duration::from_secs(300); // 5 minutes
 
         // Clean up old registration events
@@ -1122,7 +1148,7 @@ mod tests {
         // Simulate recent wakeup
         oracle
             .recent_wakeups
-            .push_back((waker_id, SystemTime::now()));
+            .push_back((waker_id, waker_event_now()));
 
         // Register again soon after wakeup (simulating race)
         oracle.on_waker_registered(waker_id, channel_id, true, None);
@@ -1146,7 +1172,7 @@ mod tests {
 
         // Manually set old registration time to trigger leak detection
         if let Some(state) = oracle.wakers.get_mut(&waker_id) {
-            state.registered_at = SystemTime::now() - Duration::from_secs(120); // 2 minutes ago
+            state.registered_at = waker_event_now() - Duration::from_secs(120); // 2 minutes ago
         }
 
         let violations = oracle.check_for_violations().unwrap();
@@ -1169,8 +1195,8 @@ mod tests {
         let violation = WakerDedupViolation::LostWakeup {
             waker_id: WakerId(1),
             channel_id: ChannelId(1),
-            registered_at: SystemTime::now(),
-            expected_wake_at: SystemTime::now(),
+            registered_at: waker_event_now(),
+            expected_wake_at: waker_event_now(),
             trace_id: Some(DistTraceId::new_for_test(1)),
         };
 

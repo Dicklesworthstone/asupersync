@@ -636,21 +636,31 @@ impl CancelDebtOracle {
         }
     }
 
+    /// br-asupersync-ywx3sz — Push the violation BEFORE optionally
+    /// panicking. See cancel_correctness::record_violation for the
+    /// full rationale; same fix.
     fn record_violation(&self, violation: CancelDebtViolation) {
         self.violations_detected.fetch_add(1, Ordering::Relaxed);
 
-        assert!(
-            !self.config.panic_on_violation,
-            "Cancellation debt violation detected: {violation}"
-        );
+        let panic_msg = if self.config.panic_on_violation {
+            Some(format!(
+                "Cancellation debt violation detected: {violation}"
+            ))
+        } else {
+            None
+        };
 
-        // Record violation for later inspection
-        let mut violations = self.violations.write();
-        violations.push_back(violation);
+        {
+            let mut violations = self.violations.write();
+            violations.push_back(violation);
+            // Keep violations bounded.
+            while violations.len() > self.config.max_violations {
+                violations.pop_front();
+            }
+        }
 
-        // Keep violations bounded
-        while violations.len() > self.config.max_violations {
-            violations.pop_front();
+        if let Some(msg) = panic_msg {
+            panic!("{msg}");
         }
     }
 

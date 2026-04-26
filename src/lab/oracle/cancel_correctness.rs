@@ -748,23 +748,36 @@ impl CancelCorrectnessOracle {
         Ok(())
     }
 
+    /// br-asupersync-ywx3sz — Push the violation BEFORE optionally
+    /// panicking. The previous order (counter++, panic, push) left the
+    /// violation in a half-recorded state if the panic was caught
+    /// upstream (lab campaigns deliberately catch panics): the counter
+    /// reported +1 but the queue still missed the entry, so callers
+    /// inspecting state after a caught panic saw a phantom violation.
+    /// Now: counter++, push to queue, prepare panic message, drop the
+    /// queue lock, then panic. State after the panic (caught or not)
+    /// has counter == queue length.
     fn record_violation(&self, violation: CancelCorrectnessViolation) {
         self.violations_detected.fetch_add(1, Ordering::Relaxed);
 
-        assert!(
-            !self.config.panic_on_violation,
-            "Cancel-correctness violation detected: {violation}"
-        );
+        let panic_msg = if self.config.panic_on_violation {
+            Some(format!("Cancel-correctness violation detected: {violation}"))
+        } else {
+            None
+        };
 
-        // Record violation for later inspection
-        let mut violations = self.violations.write();
-        violations.push_back(violation);
-
-        // Keep violations bounded
-        while violations.len() > self.config.max_violations {
-            violations.pop_front();
+        {
+            let mut violations = self.violations.write();
+            violations.push_back(violation);
+            // Keep violations bounded.
+            while violations.len() > self.config.max_violations {
+                violations.pop_front();
+            }
         }
-        drop(violations);
+
+        if let Some(msg) = panic_msg {
+            panic!("{msg}");
+        }
     }
 
     fn capture_stack_trace(&self) -> Option<Arc<Backtrace>> {

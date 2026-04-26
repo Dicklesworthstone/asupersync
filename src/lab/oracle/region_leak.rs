@@ -50,9 +50,38 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant, SystemTime};
+#[cfg(any(test, feature = "deterministic-mode"))]
+use std::time::UNIX_EPOCH;
 
 use crate::types::{Budget, Outcome, RegionId, TaskId};
 use crate::util::stack_trace;
+
+/// br-asupersync-hq5gou — Wall-clock proxy for the violation
+/// `detected_at` field. In production the oracle stamps real
+/// `SystemTime::now()`, but under `cfg(any(test, feature =
+/// "deterministic-mode"))` returns `UNIX_EPOCH` so test runs and lab
+/// replays produce byte-stable violation records (the original concern
+/// in the bead: identical scenarios producing different violation
+/// stamps across runs broke crashpack-hash equivalence and snapshot
+/// regression tests).
+///
+/// Note: this helper addresses the *violation-record* non-determinism
+/// (the part that flows out to crashpacks and trace certificates). The
+/// internal `Instant::now()` sites used for threshold detection
+/// remain — they affect *when* a violation fires, which is a separate
+/// concern requiring the oracle's whole timing model to switch to
+/// `crate::types::Time`. Tracked as follow-up.
+#[inline]
+fn violation_now() -> SystemTime {
+    #[cfg(any(test, feature = "deterministic-mode"))]
+    {
+        UNIX_EPOCH
+    }
+    #[cfg(not(any(test, feature = "deterministic-mode")))]
+    {
+        SystemTime::now()
+    }
+}
 
 /// Configuration for region leak detection
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -322,7 +351,7 @@ impl RegionLeakOracle {
             self.record_violation(RegionViolation {
                 violation_type: ViolationType::CircularDependency,
                 region_id,
-                detected_at: SystemTime::now(),
+                detected_at: violation_now(),
                 duration: Duration::from_secs(0),
                 description: format!("Region {region_id} created twice"),
                 context: ViolationContext::empty(),
@@ -611,7 +640,7 @@ impl RegionLeakOracle {
                     return Some(RegionViolation {
                         violation_type: ViolationType::StuckCreation,
                         region_id: region.region_id,
-                        detected_at: SystemTime::now(),
+                        detected_at: violation_now(),
                         duration,
                         description: format!(
                             "Region {} stuck in Created state for {:?}",
@@ -627,7 +656,7 @@ impl RegionLeakOracle {
                     return Some(RegionViolation {
                         violation_type: ViolationType::StuckClosing,
                         region_id: region.region_id,
-                        detected_at: SystemTime::now(),
+                        detected_at: violation_now(),
                         duration,
                         description: format!(
                             "Region {} stuck in Closing state for {:?}",
@@ -643,7 +672,7 @@ impl RegionLeakOracle {
                     return Some(RegionViolation {
                         violation_type: ViolationType::StuckFinalizing,
                         region_id: region.region_id,
-                        detected_at: SystemTime::now(),
+                        detected_at: violation_now(),
                         duration,
                         description: format!(
                             "Region {} stuck in Finalizing state for {:?}",
@@ -660,7 +689,7 @@ impl RegionLeakOracle {
                     return Some(RegionViolation {
                         violation_type: ViolationType::IdleRegion,
                         region_id: region.region_id,
-                        detected_at: SystemTime::now(),
+                        detected_at: violation_now(),
                         duration: idle_duration,
                         description: format!(
                             "Region {} idle for {:?}",
@@ -692,7 +721,7 @@ impl RegionLeakOracle {
             return Some(RegionViolation {
                 violation_type: ViolationType::LongRunningTask,
                 region_id: task.region_id,
-                detected_at: SystemTime::now(),
+                detected_at: violation_now(),
                 duration,
                 description: format!(
                     "Task {} running for {:?} in region {}",
@@ -737,7 +766,7 @@ impl RegionLeakOracle {
                         violations.push(RegionViolation {
                             violation_type: ViolationType::OrphanedChildren,
                             region_id: region.region_id,
-                            detected_at: SystemTime::now(),
+                            detected_at: violation_now(),
                             duration: Duration::from_secs(0),
                             description: format!(
                                 "Region {} orphaned by closed parent {}",
@@ -756,7 +785,7 @@ impl RegionLeakOracle {
                 violations.push(RegionViolation {
                     violation_type: ViolationType::OrphanedTasks,
                     region_id: region.region_id,
-                    detected_at: SystemTime::now(),
+                    detected_at: violation_now(),
                     duration: Duration::from_secs(0),
                     description: format!(
                         "Region {} closed with {} active tasks",
@@ -775,7 +804,7 @@ impl RegionLeakOracle {
                 violations.push(RegionViolation {
                     violation_type: ViolationType::FinalizersIncomplete,
                     region_id: region.region_id,
-                    detected_at: SystemTime::now(),
+                    detected_at: violation_now(),
                     duration: Duration::from_secs(0),
                     description: format!(
                         "Region {} closed with {}/{} finalizers completed",
