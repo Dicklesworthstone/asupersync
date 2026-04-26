@@ -12,17 +12,43 @@ use std::task::{Context, Poll};
 pub struct Lines<R> {
     reader: R,
     buf: Vec<u8>,
+    max_length: usize,
     completed: bool,
 }
+
+/// Default maximum line length for [`Lines::new`].
+///
+/// Mirrors the safe default used by [`crate::codec::LinesCodec`]: a peer that
+/// never sends `\n` must not be able to grow the iterator's internal buffer
+/// without bound.
+pub const DEFAULT_MAX_LINE_LENGTH: usize = 64 * 1024;
 
 impl<R> Lines<R> {
     /// Creates a new `Lines` iterator.
     pub fn new(reader: R) -> Self {
+        Self::new_with_max_length(reader, DEFAULT_MAX_LINE_LENGTH)
+    }
+
+    /// Creates a new `Lines` iterator with no maximum line length.
+    ///
+    /// Callers that genuinely need unbounded lines must opt in explicitly.
+    pub fn with_unbounded(reader: R) -> Self {
+        Self::new_with_max_length(reader, usize::MAX)
+    }
+
+    /// Creates a new `Lines` iterator with a maximum line length.
+    pub fn new_with_max_length(reader: R, max_length: usize) -> Self {
         Self {
             reader,
             buf: Vec::new(),
+            max_length,
             completed: false,
         }
+    }
+
+    /// Returns the maximum allowed line length.
+    pub fn max_length(&self) -> usize {
+        self.max_length
     }
 }
 
@@ -88,10 +114,26 @@ impl<R: AsyncBufRead + Unpin> Stream for Lines<R> {
 
             // 4. Scan available for newline
             if let Some(pos) = available.iter().position(|&b| b == b'\n') {
+                let remaining_allowed = this.max_length.saturating_sub(this.buf.len());
+                if pos > remaining_allowed {
+                    this.completed = true;
+                    return Poll::Ready(Some(Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "line exceeds maximum length",
+                    ))));
+                }
                 this.buf.extend_from_slice(&available[..=pos]);
                 Pin::new(&mut this.reader).consume(pos + 1);
                 // Loop will catch it in step 1
             } else {
+                let remaining_allowed = this.max_length.saturating_sub(this.buf.len());
+                if available.len() > remaining_allowed {
+                    this.completed = true;
+                    return Poll::Ready(Some(Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "line exceeds maximum length",
+                    ))));
+                }
                 this.buf.extend_from_slice(available);
                 let len = available.len();
                 Pin::new(&mut this.reader).consume(len);
@@ -356,7 +398,7 @@ mod tests {
         let mut chunks = vec![vec![b'a']; 40];
         chunks.push(vec![b'\n']);
         let reader = SplitReader { chunks };
-        let mut lines = Lines::new(reader);
+        let mut lines = Lines::with_unbounded(reader);
         let wake_counter = Arc::new(CountWaker {
             wakes: AtomicUsize::new(0),
         });
@@ -387,18 +429,55 @@ mod tests {
     }
 
     #[test]
-    fn lines_long_line_remains_unbounded() {
-        init_test("lines_long_line_remains_unbounded");
+    fn lines_default_max_length_bounds_unterminated_stream() {
+        init_test("lines_default_max_length_bounds_unterminated_stream");
+        let payload = vec![b'a'; DEFAULT_MAX_LINE_LENGTH + 1];
+        let reader = BufReader::new(payload.as_slice());
+        let mut lines = Lines::new(reader);
+
+        let bounded = matches!(
+            poll_next(&mut lines),
+            Poll::Ready(Some(Err(ref err)))
+                if err.kind() == io::ErrorKind::InvalidData
+                    && err.to_string().contains("maximum length")
+        );
+        crate::assert_with_log!(bounded, "default bound enforced", true, bounded);
+        let done = matches!(poll_next(&mut lines), Poll::Ready(None));
+        crate::assert_with_log!(done, "done", true, done);
+        crate::test_complete!("lines_default_max_length_bounds_unterminated_stream");
+    }
+
+    #[test]
+    fn lines_with_unbounded_permits_long_line() {
+        init_test("lines_with_unbounded_permits_long_line");
         let long = "a".repeat(16 * 1024);
         let payload = format!("{long}\n");
         let reader = BufReader::new(payload.as_bytes());
-        let mut lines = Lines::new(reader);
+        let mut lines = Lines::with_unbounded(reader);
 
         let first = matches!(poll_next(&mut lines), Poll::Ready(Some(Ok(ref s))) if s == &long);
         crate::assert_with_log!(first, "long line", true, first);
         let done = matches!(poll_next(&mut lines), Poll::Ready(None));
         crate::assert_with_log!(done, "done", true, done);
-        crate::test_complete!("lines_long_line_remains_unbounded");
+        crate::test_complete!("lines_with_unbounded_permits_long_line");
+    }
+
+    #[test]
+    fn lines_new_with_max_length_rejects_overlong_line_before_newline() {
+        init_test("lines_new_with_max_length_rejects_overlong_line_before_newline");
+        let reader = BufReader::new(b"toolong\n".as_slice());
+        let mut lines = Lines::new_with_max_length(reader, 5);
+
+        let overlong = matches!(
+            poll_next(&mut lines),
+            Poll::Ready(Some(Err(ref err)))
+                if err.kind() == io::ErrorKind::InvalidData
+                    && err.to_string().contains("maximum length")
+        );
+        crate::assert_with_log!(overlong, "bounded line rejected", true, overlong);
+        let done = matches!(poll_next(&mut lines), Poll::Ready(None));
+        crate::assert_with_log!(done, "done", true, done);
+        crate::test_complete!("lines_new_with_max_length_rejects_overlong_line_before_newline");
     }
 
     #[test]
