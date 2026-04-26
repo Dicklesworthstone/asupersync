@@ -425,9 +425,7 @@ impl SymbolCancelToken {
                 );
                 CancelReason::parent_cancelled()
             });
-            let at = self
-                .cancelled_at()
-                .unwrap_or_else(|| Time::from_nanos(0));
+            let at = self.cancelled_at().unwrap_or_else(|| Time::from_nanos(0));
             // Drop both locks before invoking the listener so a
             // listener that re-enters the token (e.g., to read
             // reason()) does not deadlock on this thread. The
@@ -496,8 +494,32 @@ impl SymbolCancelToken {
     }
 
     /// Creates a token for testing.
+    ///
+    /// br-asupersync-wm9h2a: previously this was an unconditionally
+    /// `pub` constructor — gated only by `#[doc(hidden)]`, which
+    /// hides the method from rustdoc but does NOT prevent production
+    /// callers from invoking it. That left an open capability-
+    /// boundary hole: any code in the dependency graph could mint a
+    /// `SymbolCancelToken` with arbitrary `(token_id, object_id)`
+    /// values, bypass the `CancelBroadcaster::register` /
+    /// `prepare_cancel` issuance path, and forge cancels for objects
+    /// it never owned. The asupersync 'no ambient authority'
+    /// invariant requires every capability-bearing token to flow
+    /// through an explicit issuance ceremony.
+    ///
+    /// The fix is to gate the constructor behind
+    /// `#[cfg(any(test, feature = "test-internals"))]`. The
+    /// `test-internals` feature is the project's documented escape
+    /// hatch for test scaffolding (see Cargo.toml feature flags) —
+    /// production builds (which do NOT enable `test-internals`) lose
+    /// access to this constructor entirely, eliminating the forgery
+    /// path. Tests that need to mint synthetic tokens either:
+    ///   1. live in `#[cfg(test)]` modules inside this crate, or
+    ///   2. enable the `test-internals` feature in their Cargo deps.
+    /// Both are already the project's stated convention.
     #[doc(hidden)]
     #[must_use]
+    #[cfg(any(test, feature = "test-internals"))]
     pub fn new_for_test(token_id: u64, object_id: ObjectId) -> Self {
         Self {
             state: Arc::new(CancelTokenState {
@@ -1460,6 +1482,54 @@ mod tests {
         assert!(!cancel_handle.is_cancelled());
         assert!(cancel_handle.reason().is_none());
         assert!(cancel_handle.cancelled_at().is_none());
+    }
+
+    // br-asupersync-wm9h2a: SymbolCancelToken::new_for_test is now
+    // gated behind `#[cfg(any(test, feature = "test-internals"))]`.
+    // Inside this `#[cfg(test)]` module the gate's positive arm is
+    // active, so the constructor is reachable and we can pin its
+    // forgery-shape behaviour:
+    //   1. The constructor accepts arbitrary token_id / object_id
+    //      values without going through the broadcaster issuance
+    //      ceremony — exactly what makes it a forgery primitive
+    //      and exactly why production must NOT have access.
+    //   2. The constructor mints distinct Arc<CancelTokenState>
+    //      instances for every call, so two synthesized tokens with
+    //      the same (token_id, object_id) are NOT aliased — proving
+    //      the constructor is not a deduplicating issuer that
+    //      could coincidentally mimic a real broadcaster lookup.
+    //
+    // The negative arm of the gate (production builds compile-failing
+    // on any reference to new_for_test) cannot be tested from inside
+    // a `#[cfg(test)]` block by definition — by the time the test
+    // compiles, the gate's positive arm is on. The compile-fail
+    // contract is documented above the constructor and is enforced
+    // by the cfg attribute itself.
+    #[test]
+    fn test_new_for_test_is_a_forgery_primitive_and_must_be_gated_wm9h2a() {
+        let object_id = ObjectId::new_for_test(0xdead_beef);
+        let forged_a = SymbolCancelToken::new_for_test(0x1111_2222_3333_4444, object_id);
+        let forged_b = SymbolCancelToken::new_for_test(0x1111_2222_3333_4444, object_id);
+
+        // Property (1): forged tokens carry exactly the values the
+        // caller supplied, with no broadcaster involvement.
+        assert_eq!(forged_a.object_id(), object_id);
+        assert_eq!(forged_b.object_id(), object_id);
+
+        // Property (2): two forgeries with identical (token_id,
+        // object_id) inputs are still distinct Arc instances — they
+        // share neither cancellation state nor listener slabs. A
+        // production caller that obtained both could cancel one
+        // without affecting the other, which is the textbook shape
+        // of a capability-boundary breach.
+        forged_a.cancel(&CancelReason::user("forgery-A"), Time::from_millis(1));
+        assert!(forged_a.is_cancelled());
+        assert!(
+            !forged_b.is_cancelled(),
+            "two new_for_test tokens with the same id must not share state — \
+             this confirms the constructor is a forgery primitive that MUST \
+             stay gated behind test or test-internals"
+        );
     }
 
     #[test]
@@ -3397,8 +3467,7 @@ mod tests {
             "first notification must carry the initial weak reason, got {log:?}"
         );
         assert!(
-            log.iter()
-                .any(|k| *k == crate::types::CancelKind::Shutdown),
+            log.iter().any(|k| *k == crate::types::CancelKind::Shutdown),
             "listener must be re-notified with the strengthened reason, got {log:?}"
         );
         // No duplicate same-severity notifications.
@@ -3442,7 +3511,11 @@ mod tests {
         }
 
         let log = observed.lock().unwrap().clone();
-        assert_eq!(log.len(), 1, "post-cancel add_listener must fire exactly once, got {log:?}");
+        assert_eq!(
+            log.len(),
+            1,
+            "post-cancel add_listener must fire exactly once, got {log:?}"
+        );
         let (kind, at_nanos) = log[0];
         assert_eq!(
             kind,
@@ -3506,7 +3579,10 @@ mod tests {
             "no-handler outcome must mark completed=false, got {result:?}"
         );
         assert!(
-            result.handler_errors.iter().any(|e| e.contains("no cleanup handler")),
+            result
+                .handler_errors
+                .iter()
+                .any(|e| e.contains("no cleanup handler")),
             "missing-handler condition must surface as a typed error, got {:?}",
             result.handler_errors
         );
