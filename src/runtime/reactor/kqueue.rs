@@ -400,10 +400,23 @@ impl Reactor for KqueueReactor {
         let registrations = self.registrations.lock();
 
         // Convert polling events to our Event type.
+        //
+        // br-asupersync-3uog0t: skip events whose intersection of observed
+        // kernel readiness with the source's registered interest is
+        // `Interest::NONE`. Without this guard, the kqueue path emits
+        // empty-interest events (e.g., kernel reports READABLE for a
+        // WRITABLE-only registration with no HUP/error overlap), causing
+        // spurious waker dispatches and wasting events-buffer slots. Mirrors
+        // the existing filter on the epoll path
+        // (`Self::translate_poll_event` returns `Option<Event>` and skips
+        // empty-interest results).
         for poll_event in poll_events.iter() {
             let token = Token(poll_event.key);
             let registered_interest = registrations.get(&token).map(|info| info.interest);
             let interest = Self::poll_event_to_interest(&poll_event, registered_interest);
+            if interest.is_empty() {
+                continue;
+            }
             events.push(Event::new(token, interest));
         }
 
@@ -1379,6 +1392,40 @@ mod tests {
             interest.is_hup()
         );
         crate::test_complete!("kqueue_poll_event_to_interest_mapping");
+    }
+
+    #[test]
+    fn poll_event_to_interest_no_overlap_returns_none() {
+        // br-asupersync-3uog0t: when the kernel reports readiness in a
+        // direction the source isn't registered for AND the dual-direction
+        // EOF heuristic doesn't trigger, the masked interest must be NONE.
+        // Previously the kqueue poll loop pushed these as Event{token,
+        // NONE}, causing spurious waker dispatches; the new poll() guard
+        // skips empty-interest events. This test pins the upstream
+        // condition that produces the empty result.
+        init_test("kqueue_poll_event_to_interest_no_overlap_returns_none");
+        // Single-direction kernel report (READABLE only) with WRITABLE-only
+        // registration: no overlap, no dual-direction EOF, must yield NONE.
+        let event = PollEvent::readable(7);
+        let interest = KqueueReactor::poll_event_to_interest(&event, Some(Interest::WRITABLE));
+        crate::assert_with_log!(
+            interest.is_empty(),
+            "non-overlapping kernel readiness must yield empty interest",
+            true,
+            interest.is_empty()
+        );
+        // And the inverse: WRITABLE kernel report with READABLE-only
+        // registration must also yield NONE (no EOF heuristic since
+        // PollEvent::writable() does not set both flags).
+        let event = PollEvent::writable(8);
+        let interest = KqueueReactor::poll_event_to_interest(&event, Some(Interest::READABLE));
+        crate::assert_with_log!(
+            interest.is_empty(),
+            "non-overlapping kernel readiness (mirror direction) must yield empty interest",
+            true,
+            interest.is_empty()
+        );
+        crate::test_complete!("kqueue_poll_event_to_interest_no_overlap_returns_none");
     }
 
     #[test]
