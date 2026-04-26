@@ -42,6 +42,7 @@
 use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::net::TcpStream;
+use crate::security::SecretString;
 #[cfg(feature = "tls")]
 use crate::tls::{TlsConnectorBuilder, TlsStream};
 use crate::types::{CancelReason, Outcome};
@@ -1386,9 +1387,15 @@ fn tls_server_end_point_cbind(cert_der: &[u8]) -> Vec<u8> {
 }
 
 /// SCRAM-SHA-256 authentication state machine.
+///
+/// br-asupersync-r2l1ze: `password` is held in a [`SecretString`] so the
+/// plaintext bytes are zeroized when the `ScramAuth` value is dropped
+/// (i.e. when the SCRAM exchange completes or is cancelled). Heap
+/// snapshots, core dumps, or attached debuggers reading stale memory
+/// after auth completes recover only zero bytes.
 struct ScramAuth {
-    /// Password.
-    password: String,
+    /// Password — wiped on drop (br-asupersync-r2l1ze).
+    password: SecretString,
     /// Client nonce.
     client_nonce: String,
     /// Full nonce (client + server).
@@ -1418,7 +1425,7 @@ impl ScramAuth {
         let client_first_bare = format!("n={escaped_username},r={client_nonce}");
 
         Self {
-            password: password.to_string(),
+            password: SecretString::new(password),
             client_nonce,
             full_nonce: None,
             salt: None,
@@ -1487,7 +1494,7 @@ impl ScramAuth {
         self.iterations = Some(iterations);
 
         // Compute salted password using PBKDF2-SHA256
-        let salted_password = self.pbkdf2_sha256(&self.password, &salt, iterations);
+        let salted_password = self.pbkdf2_sha256(self.password.as_str(), &salt, iterations);
 
         // Compute client key and stored key
         let client_key = Self::hmac_sha256(&salted_password, b"Client Key");
@@ -1547,7 +1554,7 @@ impl ScramAuth {
         let iterations = self.iterations.ok_or_else(|| {
             PgError::AuthenticationFailed("SCRAM state error: missing iterations".to_string())
         })?;
-        let salted_password = self.pbkdf2_sha256(&self.password, salt, iterations); // ubs:ignore - dynamic password variable
+        let salted_password = self.pbkdf2_sha256(self.password.as_str(), salt, iterations); // ubs:ignore - dynamic password variable
         let server_key = Self::hmac_sha256(&salted_password, b"Server Key");
         let auth_message = self.auth_message.as_ref().ok_or_else(|| {
             PgError::AuthenticationFailed("SCRAM state error: missing auth_message".to_string())
@@ -1658,7 +1665,10 @@ pub struct PgConnectOptions {
     /// Username.
     pub user: String,
     /// Password.
-    pub password: Option<String>,
+    ///
+    /// br-asupersync-r2l1ze: stored in a [`SecretString`] so the
+    /// plaintext bytes are zeroized when `PgConnectOptions` is dropped.
+    pub password: Option<SecretString>,
     /// Application name.
     pub application_name: Option<String>,
     /// Connect timeout.
@@ -1873,7 +1883,13 @@ impl PgConnectOptions {
             port,
             database: percent_decode(database),
             user,
-            password,
+            // br-asupersync-r2l1ze: wrap the parsed password (whose
+            // owned `String` allocation came from `percent_decode`)
+            // into a `SecretString` so its bytes are zeroized on drop.
+            // `from_string` reuses the existing allocation — the bytes
+            // wiped at drop are the same bytes that were in memory
+            // during connection setup.
+            password: password.map(SecretString::from_string),
             application_name,
             connect_timeout,
             ssl_mode,
@@ -2773,7 +2789,7 @@ impl PgConnection {
                             let password = options.password.as_ref().ok_or_else(|| {
                                 PgError::AuthenticationFailed("password required".to_string())
                             })?;
-                            self.send_password(cx, password).await?;
+                            self.send_password(cx, password.as_str()).await?;
                         }
                         5 => {
                             // AuthenticationMD5Password
@@ -2781,7 +2797,7 @@ impl PgConnection {
                             let password = options.password.as_ref().ok_or_else(|| {
                                 PgError::AuthenticationFailed("password required".to_string())
                             })?;
-                            self.send_md5_password(cx, &options.user, password, salt)
+                            self.send_md5_password(cx, &options.user, password.as_str(), salt)
                                 .await?;
                         }
                         10 => {
@@ -2823,7 +2839,7 @@ impl PgConnection {
                                 let password = options.password.as_ref().ok_or_else(|| {
                                     PgError::AuthenticationFailed("password required".to_string())
                                 })?;
-                                self.authenticate_scram(cx, &options.user, password, cb)
+                                self.authenticate_scram(cx, &options.user, password.as_str(), cb)
                                     .await?;
                                 return Ok(());
                             }
@@ -5131,6 +5147,86 @@ mod tests {
         futures_lite::future::block_on(future)
     }
 
+    // ================================================================
+    // br-asupersync-r2l1ze — credential zeroize-on-drop integration
+    //
+    // The byte-level zeroization (`Drop` running
+    // `ptr::write_volatile(0)` over each backing byte, defeating
+    // dead-store elimination) is verified at the type level by
+    // `crate::security::secret::tests::drop_zeroizes_secret_bytes` and
+    // `from_string_zeroizes_on_drop`. Those tests need
+    // `#[allow(unsafe_code)]` for the post-drop pointer read; this
+    // crate is `#![deny(unsafe_code)]` outside the security module, so
+    // we don't repeat them here.
+    //
+    // The integration tests below verify postgres.rs wiring:
+    // (a) `ScramAuth.password` is held as a `SecretString`, inheriting
+    //     zeroize-on-drop transitively;
+    // (b) `PgConnectOptions::password` parses into `Option<SecretString>`;
+    // (c) Debug redaction continues to work after the type swap;
+    // (d) `explicit_zeroize` works on the held secret for callers that
+    //     want to wipe bytes the moment auth completes rather than at
+    //     scope end.
+    // ================================================================
+
+    /// `ScramAuth` accepts the password by `&str`, copies it into a
+    /// `SecretString`, and exposes it via `as_str()` for PBKDF2.
+    /// `explicit_zeroize` clears the bytes in place — handshake
+    /// completion can call this BEFORE the natural Drop fires to
+    /// minimise the in-memory window.
+    #[test]
+    fn scram_auth_password_uses_secret_string_with_explicit_zeroize() {
+        let cx = Cx::for_testing();
+        let mut scram = ScramAuth::new(
+            &cx,
+            "alice",
+            "scram-handshake-pw",
+            ScramChannelBinding::None,
+        );
+        assert_eq!(scram.password.as_str(), "scram-handshake-pw");
+        assert!(!scram.password.is_empty());
+
+        // Explicit zeroization clears the bytes in place. After this
+        // call the field is the empty string; the natural Drop would
+        // run later and find zeros already.
+        scram.password.explicit_zeroize();
+        assert!(scram.password.is_empty());
+        assert_eq!(scram.password.as_str(), "");
+    }
+
+    /// `PgConnectOptions::parse` must store the URL-decoded password
+    /// in a `SecretString`. Type-level integration check — if someone
+    /// refactors back to `Option<String>`, this test stops compiling.
+    #[test]
+    fn pg_connect_options_parse_yields_secret_string_password() {
+        let opts = PgConnectOptions::parse("postgres://user:pw@h/db").unwrap();
+        let pw: &SecretString = opts.password.as_ref().expect("password parsed");
+        assert_eq!(pw.as_str(), "pw");
+    }
+
+    /// Debug rendering of `PgConnectOptions` must not leak the password
+    /// even when populated — the existing redaction is preserved
+    /// across the `Option<String>` → `Option<SecretString>` migration.
+    #[test]
+    fn pg_connect_options_debug_does_not_leak_secret_string_password() {
+        let opts = PgConnectOptions {
+            host: "h".to_string(),
+            port: 5432,
+            database: "d".to_string(),
+            user: "u".to_string(),
+            password: Some(SecretString::new("hunter2-pg")),
+            application_name: None,
+            connect_timeout: None,
+            ssl_mode: SslMode::Disable,
+        };
+        let dbg = format!("{opts:?}");
+        assert!(
+            !dbg.contains("hunter2-pg"),
+            "password leaked through Debug: {dbg}"
+        );
+        assert!(dbg.contains("[REDACTED]"));
+    }
+
     fn cancelled_cx() -> Cx {
         let cx = Cx::for_testing();
         cx.cancel_fast(CancelKind::User);
@@ -5172,7 +5268,10 @@ mod tests {
     fn test_connect_options_parse() {
         let opts = PgConnectOptions::parse("postgres://user:pass@localhost:5432/mydb").unwrap();
         assert_eq!(opts.user, "user");
-        assert_eq!(opts.password, Some("pass".to_string()));
+        assert_eq!(
+            opts.password.as_ref().map(SecretString::as_str),
+            Some("pass")
+        );
         assert_eq!(opts.host, "localhost");
         assert_eq!(opts.port, 5432);
         assert_eq!(opts.database, "mydb");
@@ -5222,7 +5321,7 @@ mod tests {
     fn test_connect_options_parse_minimal() {
         let opts = PgConnectOptions::parse("postgres://localhost/mydb").unwrap();
         assert_eq!(opts.user, "postgres");
-        assert_eq!(opts.password, None);
+        assert!(opts.password.is_none());
         assert_eq!(opts.host, "localhost");
         assert_eq!(opts.port, 5432);
         assert_eq!(opts.database, "mydb");
@@ -5540,7 +5639,7 @@ mod tests {
     fn connect_options_postgresql_prefix() {
         let opts = PgConnectOptions::parse("postgresql://alice@db.host:5433/prod").unwrap();
         assert_eq!(opts.user, "alice");
-        assert_eq!(opts.password, None);
+        assert!(opts.password.is_none());
         assert_eq!(opts.host, "db.host");
         assert_eq!(opts.port, 5433);
         assert_eq!(opts.database, "prod");
@@ -5552,7 +5651,7 @@ mod tests {
         assert_eq!(opts.host, "::1");
         assert_eq!(opts.port, 5432);
         assert_eq!(opts.user, "user");
-        assert_eq!(opts.password, Some("pw".to_string()));
+        assert_eq!(opts.password.as_ref().map(SecretString::as_str), Some("pw"));
     }
 
     #[test]
@@ -7352,7 +7451,7 @@ mod tests {
             port: addr.port(),
             database: "testdb".to_string(),
             user: "user".to_string(),
-            password: Some("secret".to_string()),
+            password: Some(SecretString::new("secret")),
             application_name: None,
             connect_timeout: Some(std::time::Duration::from_secs(1)),
             ssl_mode: SslMode::Prefer,

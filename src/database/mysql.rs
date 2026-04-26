@@ -32,6 +32,7 @@
 use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWrite, ReadBuf};
 use crate::net::TcpStream;
+use crate::security::SecretString;
 use crate::types::{CancelReason, Outcome};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -903,7 +904,14 @@ pub struct MySqlConnectOptions {
     /// Username.
     pub user: String,
     /// Password.
-    pub password: Option<String>,
+    ///
+    /// br-asupersync-y3he7v: stored in a [`SecretString`] so the
+    /// plaintext bytes are zeroized when `MySqlConnectOptions` is
+    /// dropped. The `mysql_native_password` and
+    /// `caching_sha2_password` auth functions still take a `&str`
+    /// view; the wrapping prevents the underlying allocation from
+    /// outliving auth as plaintext.
+    pub password: Option<SecretString>,
     /// Connect timeout.
     pub connect_timeout: Option<std::time::Duration>,
     /// Require SSL.
@@ -1113,7 +1121,13 @@ impl MySqlConnectOptions {
             port,
             database,
             user,
-            password,
+            // br-asupersync-y3he7v: wrap the parsed password (whose
+            // owned `String` allocation came from `percent_decode`)
+            // into a `SecretString` so its bytes are zeroized on drop.
+            // `from_string` reuses the existing allocation, so the
+            // bytes wiped at drop are exactly the bytes that lived in
+            // memory during connection setup — no second copy.
+            password: password.map(SecretString::from_string),
             connect_timeout,
             ssl_mode,
             // br-asupersync-m6c35i: parse() defaults to safe-by-default;
@@ -1615,7 +1629,15 @@ impl MySqlConnection {
         buf.write_null_terminated(&options.user);
 
         // Auth response
-        let password = options.password.as_deref().unwrap_or_default();
+        // br-asupersync-y3he7v: borrow the secret as `&str` for the
+        // duration of the auth call. The wrapping `SecretString` keeps
+        // the heap allocation under zeroize-on-drop ownership; this
+        // borrow does not extend the secret's lifetime.
+        let password = options
+            .password
+            .as_ref()
+            .map(SecretString::as_str)
+            .unwrap_or_default();
         let auth_response = match handshake.auth_plugin_name.as_str() {
             "mysql_native_password" => {
                 // br-asupersync-m6c35i: reject the legacy plugin
@@ -1722,7 +1744,15 @@ impl MySqlConnection {
             auth_data_raw
         };
 
-        let password = options.password.as_deref().unwrap_or_default();
+        // br-asupersync-y3he7v: borrow the secret as `&str` for the
+        // duration of the auth call. The wrapping `SecretString` keeps
+        // the heap allocation under zeroize-on-drop ownership; this
+        // borrow does not extend the secret's lifetime.
+        let password = options
+            .password
+            .as_ref()
+            .map(SecretString::as_str)
+            .unwrap_or_default();
         let auth_response = match plugin_name {
             "mysql_native_password" => mysql_native_auth(password, auth_data),
             "caching_sha2_password" => caching_sha2_auth(password, auth_data),
@@ -3957,6 +3987,72 @@ mod tests {
     )]
     use super::*;
     use crate::Cx;
+
+    // ================================================================
+    // br-asupersync-y3he7v — credential zeroize-on-drop integration
+    //
+    // Byte-level zeroization is verified by
+    // `crate::security::secret::tests::drop_zeroizes_secret_bytes` and
+    // friends. The integration tests below verify mysql.rs wiring:
+    // (a) `MySqlConnectOptions::password` parses into
+    //     `Option<SecretString>`;
+    // (b) `mysql_native_auth` and `caching_sha2_auth` continue to
+    //     accept the password as `&str` borrowed from the secret;
+    // (c) Debug redaction continues to work after the type swap.
+    // ================================================================
+
+    /// `MySqlConnectOptions::parse` must store the URL-decoded password
+    /// in a `SecretString`. Type-level integration check.
+    #[test]
+    fn mysql_connect_options_parse_yields_secret_string_password() {
+        let opts = MySqlConnectOptions::parse("mysql://user:pw@h/db").unwrap();
+        let pw: &SecretString = opts.password.as_ref().expect("password parsed");
+        assert_eq!(pw.as_str(), "pw");
+    }
+
+    /// `mysql_native_auth` and `caching_sha2_auth` continue to work
+    /// with a password borrowed via `SecretString::as_str()`. Smoke
+    /// test that the auth response is non-empty for a non-empty
+    /// password (the actual XOR/hashing logic is exercised elsewhere).
+    #[test]
+    fn mysql_auth_functions_accept_secret_string_borrow() {
+        let secret = SecretString::new("auth-pw");
+        let nonce = [0x42u8; 20];
+        let native_response = mysql_native_auth(secret.as_str(), &nonce);
+        assert_eq!(native_response.len(), 20);
+        assert!(native_response.iter().any(|&b| b != 0));
+
+        let nonce_sha2 = [0x42u8; 20];
+        let sha2_response = caching_sha2_auth(secret.as_str(), &nonce_sha2);
+        assert_eq!(sha2_response.len(), 32);
+        assert!(sha2_response.iter().any(|&b| b != 0));
+    }
+
+    /// Empty-password short-circuits in both auth functions still work
+    /// when the secret is empty (e.g., `password: None`
+    /// `unwrap_or_default()` borrows `""`).
+    #[test]
+    fn mysql_auth_functions_handle_empty_secret() {
+        let empty = SecretString::new("");
+        let nonce = [0u8; 20];
+        assert!(mysql_native_auth(empty.as_str(), &nonce).is_empty());
+        assert!(caching_sha2_auth(empty.as_str(), &nonce).is_empty());
+    }
+
+    /// Debug rendering of `MySqlConnectOptions` must not leak the
+    /// password even when populated — the existing fldb34 redaction
+    /// is preserved across the `Option<String>` → `Option<SecretString>`
+    /// migration.
+    #[test]
+    fn mysql_connect_options_debug_does_not_leak_secret_string_password() {
+        let opts = MySqlConnectOptions::parse("mysql://user:hunter2-mysql@localhost/db").unwrap();
+        let dbg = format!("{opts:?}");
+        assert!(
+            !dbg.contains("hunter2-mysql"),
+            "password leaked through Debug: {dbg}"
+        );
+        assert!(dbg.contains("[REDACTED]"));
+    }
     use crate::types::CancelKind;
     use std::io::{Read, Write};
     use std::pin::Pin;
@@ -4242,7 +4338,10 @@ mod tests {
     fn test_connect_options_parse() {
         let opts = MySqlConnectOptions::parse("mysql://user:pass@localhost:3306/mydb").unwrap();
         assert_eq!(opts.user, "user");
-        assert_eq!(opts.password, Some("pass".to_string()));
+        assert_eq!(
+            opts.password.as_ref().map(SecretString::as_str),
+            Some("pass")
+        );
         assert_eq!(opts.host, "localhost");
         assert_eq!(opts.port, 3306);
         assert_eq!(opts.database, Some("mydb".to_string()));
@@ -4302,7 +4401,7 @@ mod tests {
     fn test_connect_options_parse_minimal() {
         let opts = MySqlConnectOptions::parse("mysql://localhost/mydb").unwrap();
         assert_eq!(opts.user, "root");
-        assert_eq!(opts.password, None);
+        assert!(opts.password.is_none());
         assert_eq!(opts.host, "localhost");
         assert_eq!(opts.port, 3306);
         assert_eq!(opts.database, Some("mydb".to_string()));
@@ -4477,7 +4576,10 @@ mod tests {
     fn test_connect_options_password_with_special() {
         // Password with special chars (non-encoded)
         let opts = MySqlConnectOptions::parse("mysql://user:pass123@localhost/db").unwrap();
-        assert_eq!(opts.password, Some("pass123".to_string()));
+        assert_eq!(
+            opts.password.as_ref().map(SecretString::as_str),
+            Some("pass123")
+        );
     }
 
     #[test]
@@ -4885,7 +4987,10 @@ mod tests {
     #[test]
     fn test_connect_options_percent_encoded_password() {
         let opts = MySqlConnectOptions::parse("mysql://user:p%40ss%3Aword@localhost/db").unwrap();
-        assert_eq!(opts.password, Some("p@ss:word".to_string()));
+        assert_eq!(
+            opts.password.as_ref().map(SecretString::as_str),
+            Some("p@ss:word")
+        );
     }
 
     #[test]
