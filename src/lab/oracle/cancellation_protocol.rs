@@ -284,6 +284,19 @@ pub enum CancellationProtocolViolation {
         /// When this occurred.
         time: Time,
     },
+
+    /// `on_mask_exit` was observed while the task's mask depth was already
+    /// zero — i.e., more exits than enters. Violates the mask-section
+    /// well-formedness invariant: mask sections must nest, so the count of
+    /// observed exits cannot exceed the count of observed enters at any
+    /// point in time. Previously this was silently absorbed by a
+    /// `saturating_sub`, hiding a real protocol bug (br-asupersync-kzhbt8).
+    UnmatchedMaskExit {
+        /// The task whose `on_mask_exit` arrived without a matching enter.
+        task: TaskId,
+        /// When the unmatched exit was observed.
+        time: Time,
+    },
 }
 
 impl fmt::Display for CancellationProtocolViolation {
@@ -361,6 +374,13 @@ impl fmt::Display for CancellationProtocolViolation {
                 write!(
                     f,
                     "Task {task} mask depth {depth} exceeded maximum {max} at {time}"
+                )
+            }
+            Self::UnmatchedMaskExit { task, time } => {
+                write!(
+                    f,
+                    "Task {task} observed mask_exit while mask_depth=0 at {time} \
+                     (more mask_exit calls than mask_enter — protocol violation)"
                 )
             }
         }
@@ -690,12 +710,24 @@ impl CancellationProtocolOracle {
     }
 
     /// Records a mask section exit for a task.
-    pub fn on_mask_exit(&mut self, task: TaskId, _time: Time) {
+    ///
+    /// br-asupersync-kzhbt8: an exit observed while `mask_depth == 0` is a
+    /// protocol violation (more exits than enters), not a no-op. The
+    /// previous implementation used `saturating_sub`, silently swallowing
+    /// the asymmetry and producing a false-negative oracle verdict.
+    pub fn on_mask_exit(&mut self, task: TaskId, time: Time) {
         let record = self
             .tasks
             .entry(task)
             .or_insert_with(TaskProtocolRecord::new);
-        record.mask_depth = record.mask_depth.saturating_sub(1);
+        if record.mask_depth == 0 {
+            self.record_violation(CancellationProtocolViolation::UnmatchedMaskExit {
+                task,
+                time,
+            });
+            return;
+        }
+        record.mask_depth -= 1;
     }
 
     /// Records a task state transition.
@@ -2072,6 +2104,33 @@ mod tests {
         );
         crate::assert_with_log!(exceeded, "mask depth exceeded", true, exceeded);
         crate::test_complete!("mask_depth_exceeded_detected");
+    }
+
+    #[test]
+    fn unmatched_mask_exit_detected() {
+        // br-asupersync-kzhbt8: an exit without a matching enter must be
+        // surfaced, not silently absorbed by saturating arithmetic.
+        init_test("unmatched_mask_exit_detected");
+        let mut oracle = CancellationProtocolOracle::new();
+        let task = task_id(0);
+        let region = region_id(0);
+
+        oracle.on_region_create(region, None);
+        oracle.on_task_create(task, region);
+
+        // Exit without a prior enter — protocol violation.
+        oracle.on_mask_exit(task, Time::from_nanos(10));
+
+        let result = oracle.check();
+        let err = result.is_err();
+        crate::assert_with_log!(err, "result err", true, err);
+        let violation = result.unwrap_err();
+        let unmatched = matches!(
+            violation,
+            CancellationProtocolViolation::UnmatchedMaskExit { .. }
+        );
+        crate::assert_with_log!(unmatched, "unmatched mask exit", true, unmatched);
+        crate::test_complete!("unmatched_mask_exit_detected");
     }
 
     #[test]

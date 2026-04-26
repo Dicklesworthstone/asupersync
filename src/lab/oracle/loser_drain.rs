@@ -65,6 +65,22 @@ pub enum LoserDrainViolation {
         /// The time when the race completed.
         race_complete_time: Time,
     },
+    /// The same `race_id` was completed twice with different winner or
+    /// completion time. Previously the oracle silently ignored the second
+    /// completion, masking real bugs in the runtime where a race was
+    /// resolved twice with conflicting outcomes (br-asupersync-htqzu1).
+    InconsistentRaceCompletion {
+        /// The race identifier.
+        race_id: u64,
+        /// The first-recorded winning task.
+        original_winner: TaskId,
+        /// The first-recorded completion time.
+        original_time: Time,
+        /// The duplicate completion's winning task.
+        duplicate_winner: TaskId,
+        /// The duplicate completion's reported time.
+        duplicate_time: Time,
+    },
 }
 
 impl fmt::Display for LoserDrainViolation {
@@ -98,6 +114,18 @@ impl fmt::Display for LoserDrainViolation {
             } => write!(
                 f,
                 "Race {race_id} completed at {race_complete_time:?} with winner {winner:?} but was never started"
+            ),
+            Self::InconsistentRaceCompletion {
+                race_id,
+                original_winner,
+                original_time,
+                duplicate_winner,
+                duplicate_time,
+            } => write!(
+                f,
+                "Race {race_id} completed twice with inconsistent outcomes: \
+                 original (winner={original_winner:?}, time={original_time:?}) vs \
+                 duplicate (winner={duplicate_winner:?}, time={duplicate_time:?})"
             ),
         }
     }
@@ -154,6 +182,10 @@ pub struct LoserDrainOracle {
     task_completions: BTreeMap<TaskId, Time>,
     /// Next race ID.
     next_race_id: u64,
+    /// Violations recorded during event ingestion (e.g., inconsistent
+    /// duplicate completions). Drained from `check()` ahead of the
+    /// invariants computed at end-of-run (br-asupersync-htqzu1).
+    runtime_violations: Vec<LoserDrainViolation>,
 }
 
 impl LoserDrainOracle {
@@ -186,10 +218,39 @@ impl LoserDrainOracle {
     }
 
     /// Records that a race has completed.
+    ///
+    /// br-asupersync-htqzu1: a duplicate completion is no longer silently
+    /// swallowed. If the duplicate carries the same `winner` and `time` as
+    /// the first record we treat it as an idempotent retry; otherwise we
+    /// record an `InconsistentRaceCompletion` violation so the conflicting
+    /// outcomes surface in `check()`.
     pub fn on_race_complete(&mut self, race_id: u64, winner: TaskId, time: Time) {
-        if self.completed_races.contains_key(&race_id)
-            || self.unknown_completions.contains_key(&race_id)
-        {
+        if let Some(prior) = self.completed_races.get(&race_id) {
+            if prior.winner != winner || prior.complete_time != time {
+                self.runtime_violations.push(
+                    LoserDrainViolation::InconsistentRaceCompletion {
+                        race_id,
+                        original_winner: prior.winner,
+                        original_time: prior.complete_time,
+                        duplicate_winner: winner,
+                        duplicate_time: time,
+                    },
+                );
+            }
+            return;
+        }
+        if let Some(prior) = self.unknown_completions.get(&race_id) {
+            if prior.winner != winner || prior.complete_time != time {
+                self.runtime_violations.push(
+                    LoserDrainViolation::InconsistentRaceCompletion {
+                        race_id,
+                        original_winner: prior.winner,
+                        original_time: prior.complete_time,
+                        duplicate_winner: winner,
+                        duplicate_time: time,
+                    },
+                );
+            }
             return;
         }
 
@@ -232,6 +293,14 @@ impl LoserDrainOracle {
     /// * `Ok(())` if no violations are found
     /// * `Err(LoserDrainViolation)` if a violation is detected
     pub fn check(&self) -> Result<(), LoserDrainViolation> {
+        // br-asupersync-htqzu1: surface inconsistent duplicate completions
+        // recorded during event ingestion before the structural checks. A
+        // contradictory race-complete is itself a protocol violation, even
+        // if the eventual aggregate state happens to look consistent.
+        if let Some(v) = self.runtime_violations.first() {
+            return Err(v.clone());
+        }
+
         let mut unknown_race_ids: Vec<u64> = self.unknown_completions.keys().copied().collect();
         unknown_race_ids.sort_unstable();
         if let Some(race_id) = unknown_race_ids.first().copied() {
@@ -307,6 +376,7 @@ impl LoserDrainOracle {
         self.completed_races.clear();
         self.unknown_completions.clear();
         self.task_completions.clear();
+        self.runtime_violations.clear();
         // Don't reset next_race_id to avoid ID collisions across tests
     }
 
@@ -825,6 +895,69 @@ mod tests {
             other => panic!("expected UnknownRaceCompletion, got {other:?}"),
         }
         crate::test_complete!("unknown_race_completion_fails");
+    }
+
+    #[test]
+    fn duplicate_race_complete_with_same_winner_and_time_is_idempotent() {
+        // br-asupersync-htqzu1: a duplicate completion that exactly matches
+        // the prior outcome is a benign retry — no violation.
+        init_test("duplicate_race_complete_with_same_winner_and_time_is_idempotent");
+        let mut oracle = LoserDrainOracle::new();
+        let race_id = oracle.on_race_start(region(0), vec![task(1), task(2)], t(0));
+        oracle.on_task_complete(task(1), t(50));
+        oracle.on_task_complete(task(2), t(80));
+        oracle.on_race_complete(race_id, task(1), t(100));
+        // Exact duplicate.
+        oracle.on_race_complete(race_id, task(1), t(100));
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "idempotent duplicate", true, ok);
+        crate::test_complete!("duplicate_race_complete_with_same_winner_and_time_is_idempotent");
+    }
+
+    #[test]
+    fn duplicate_race_complete_with_different_winner_flags_violation() {
+        // br-asupersync-htqzu1: the second completion of the same race with
+        // a different winner is a runtime bug. The oracle previously
+        // silently dropped this; now it must surface as
+        // InconsistentRaceCompletion.
+        init_test("duplicate_race_complete_with_different_winner_flags_violation");
+        let mut oracle = LoserDrainOracle::new();
+        let race_id = oracle.on_race_start(region(0), vec![task(1), task(2)], t(0));
+        oracle.on_task_complete(task(1), t(50));
+        oracle.on_task_complete(task(2), t(80));
+        oracle.on_race_complete(race_id, task(1), t(100));
+        // Conflicting duplicate — different winner.
+        oracle.on_race_complete(race_id, task(2), t(100));
+        let result = oracle.check();
+        let err = result.is_err();
+        crate::assert_with_log!(err, "violation surfaced", true, err);
+        let violation = result.unwrap_err();
+        let inconsistent = matches!(
+            violation,
+            LoserDrainViolation::InconsistentRaceCompletion { .. }
+        );
+        crate::assert_with_log!(inconsistent, "InconsistentRaceCompletion", true, inconsistent);
+        crate::test_complete!("duplicate_race_complete_with_different_winner_flags_violation");
+    }
+
+    #[test]
+    fn duplicate_race_complete_with_different_time_flags_violation() {
+        // br-asupersync-htqzu1: same winner but a contradictory completion
+        // time is also a runtime inconsistency the oracle must report.
+        init_test("duplicate_race_complete_with_different_time_flags_violation");
+        let mut oracle = LoserDrainOracle::new();
+        let race_id = oracle.on_race_start(region(0), vec![task(1), task(2)], t(0));
+        oracle.on_task_complete(task(1), t(50));
+        oracle.on_task_complete(task(2), t(80));
+        oracle.on_race_complete(race_id, task(1), t(100));
+        oracle.on_race_complete(race_id, task(1), t(150));
+        let violation = oracle.check().expect_err("violation expected");
+        let inconsistent = matches!(
+            violation,
+            LoserDrainViolation::InconsistentRaceCompletion { .. }
+        );
+        crate::assert_with_log!(inconsistent, "InconsistentRaceCompletion", true, inconsistent);
+        crate::test_complete!("duplicate_race_complete_with_different_time_flags_violation");
     }
 
     #[test]
