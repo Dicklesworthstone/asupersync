@@ -22,19 +22,19 @@ use crate::messaging::kafka::KafkaError;
 #[cfg(not(feature = "kafka"))]
 use crate::messaging::kafka::{stub_broker_end_offset, stub_broker_fetch, stub_broker_notify};
 use crate::sync::Notify;
-#[cfg(any(not(feature = "kafka"), test))]
+#[cfg(any(feature = "kafka", not(feature = "kafka"), test))]
 use crate::time::Sleep;
 use parking_lot::Mutex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 #[cfg(any(not(feature = "kafka"), test))]
 use std::future::Future;
-#[cfg(any(not(feature = "kafka"), test))]
+#[cfg(any(feature = "kafka", not(feature = "kafka"), test))]
 use std::pin::Pin;
 #[cfg(any(test, feature = "kafka"))]
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(any(not(feature = "kafka"), test))]
+#[cfg(any(feature = "kafka", not(feature = "kafka"), test))]
 use std::task::Poll;
 use std::time::Duration;
 
@@ -391,7 +391,7 @@ struct BrokerPollOutcome {
     snapshot: BrokerSnapshot,
 }
 
-#[cfg(all(feature = "kafka", not(test)))]
+#[cfg(feature = "kafka")]
 fn auto_offset_reset_str(reset: AutoOffsetReset) -> &'static str {
     match reset {
         AutoOffsetReset::Earliest => "earliest",
@@ -400,7 +400,7 @@ fn auto_offset_reset_str(reset: AutoOffsetReset) -> &'static str {
     }
 }
 
-#[cfg(all(feature = "kafka", not(test)))]
+#[cfg(feature = "kafka")]
 fn isolation_level_str(level: IsolationLevel) -> &'static str {
     match level {
         IsolationLevel::ReadUncommitted => "read_uncommitted",
@@ -408,12 +408,12 @@ fn isolation_level_str(level: IsolationLevel) -> &'static str {
     }
 }
 
-#[cfg(all(feature = "kafka", not(test)))]
+#[cfg(feature = "kafka")]
 fn duration_to_millis(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
-#[cfg(all(feature = "kafka", not(test)))]
+#[cfg(feature = "kafka")]
 fn build_consumer_config(config: &ConsumerConfig) -> rdkafka::ClientConfig {
     let mut client = rdkafka::ClientConfig::new();
     client.set("bootstrap.servers", config.bootstrap_servers.join(","));

@@ -43,7 +43,7 @@ use std::time::Duration;
 use rdkafka::{
     client::ClientContext,
     config::ClientConfig,
-    consumer::{Consumer, StreamConsumer},
+    consumer::{BaseConsumer, Consumer, ConsumerContext},
     error::{KafkaError as RdKafkaError, RDKafkaErrorCode},
     message::{BorrowedMessage, DeliveryResult, Header, Message, OwnedHeaders},
     producer::{BaseRecord, ProducerContext, ThreadedProducer},
@@ -164,6 +164,9 @@ struct KafkaContext;
 
 #[cfg(feature = "kafka")]
 impl ClientContext for KafkaContext {}
+
+#[cfg(feature = "kafka")]
+impl ConsumerContext for KafkaContext {}
 
 #[cfg(feature = "kafka")]
 impl ProducerContext for KafkaContext {
@@ -1632,22 +1635,22 @@ pub trait KafkaConsumerTrait: Send + Sync {
     fn consumer_type(&self) -> &'static str;
 }
 
-/// Wrapper around rdkafka StreamConsumer that tracks the topic name.
+/// Wrapper around rdkafka BaseConsumer that tracks the topic name.
 #[cfg(feature = "kafka")]
 pub struct TopicAwareConsumer {
-    consumer: StreamConsumer<KafkaContext>,
+    consumer: BaseConsumer<KafkaContext>,
     topic: String,
 }
 
 #[cfg(feature = "kafka")]
 impl TopicAwareConsumer {
-    /// Get access to the underlying rdkafka StreamConsumer.
-    pub fn inner(&self) -> &StreamConsumer<KafkaContext> {
+    /// Get access to the underlying rdkafka BaseConsumer.
+    pub(crate) fn inner(&self) -> &BaseConsumer<KafkaContext> {
         &self.consumer
     }
 }
 
-/// Real Kafka consumer backend using rdkafka StreamConsumer with topic tracking.
+/// Real Kafka consumer backend using rdkafka BaseConsumer with topic tracking.
 #[cfg(feature = "kafka")]
 impl KafkaConsumerTrait for TopicAwareConsumer {
     fn topic(&self) -> &str {
@@ -1659,14 +1662,14 @@ impl KafkaConsumerTrait for TopicAwareConsumer {
     }
 
     fn consumer_type(&self) -> &'static str {
-        "rdkafka::StreamConsumer"
+        "rdkafka::BaseConsumer"
     }
 }
 
 /// Unified Kafka client combining producer and consumer capabilities.
 ///
 /// This is a high-level wrapper around `KafkaProducer` and rdkafka's
-/// `StreamConsumer` to provide a single entry point for Kafka operations.
+/// `BaseConsumer` to provide a single entry point for Kafka operations.
 /// Automatically selects between real broker integration (when available)
 /// and stub broker (for testing).
 ///
@@ -1724,15 +1727,15 @@ impl KafkaClient {
 
         // Create consumer config based on producer config
         let mut consumer_config = ClientConfig::new();
-        consumer_config.set("bootstrap.servers", &self.config.bootstrap_servers);
+        consumer_config.set("bootstrap.servers", self.config.bootstrap_servers.join(","));
         consumer_config.set("group.id", "asupersync-consumer");
         consumer_config.set("enable.partition.eof", "false");
         consumer_config.set("session.timeout.ms", "6000");
         consumer_config.set("enable.auto.commit", "true");
 
-        // Create StreamConsumer
-        let rdkafka_consumer: StreamConsumer<KafkaContext> = consumer_config
-            .create_with_context(KafkaContext::new())
+        // Create BaseConsumer
+        let rdkafka_consumer: BaseConsumer<KafkaContext> = consumer_config
+            .create_with_context(KafkaContext)
             .map_err(|e| KafkaError::Config(format!("Failed to create consumer: {}", e)))?;
 
         // Subscribe to the topic
