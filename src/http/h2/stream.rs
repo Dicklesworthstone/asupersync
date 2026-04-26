@@ -19,16 +19,25 @@ use super::settings::DEFAULT_INITIAL_WINDOW_SIZE;
 /// Provides protection against DoS via unbounded CONTINUATION frames.
 const HEADER_FRAGMENT_MULTIPLIER: usize = 4;
 
-/// br-asupersync-of0l5f: validate that a TRAILER header block
-/// contains NO pseudo-header fields, per RFC 9113 §8.1
-/// ("Trailers MUST NOT include pseudo-header fields"). Callers
-/// dispatching a HEADERS frame must invoke this when
-/// [`Stream::would_be_trailer_block`] returns `true` — the pre-fix
-/// path accepted trailing HEADERS containing embedded `:status` /
-/// `:method` / `:path` etc., letting a malicious peer rewrite the
-/// request line AFTER the initial HEADERS already committed it
-/// (request-smuggling primitive when the gateway then forwards to
-/// an HTTP/1 backend that re-parses the trailer block as headers).
+/// Validate that a trailer block contains no HTTP/2 pseudo-headers.
+///
+/// br-asupersync-of0l5f: RFC 9113 §8.1 says trailers must not
+/// include pseudo-header fields. The pre-fix path accepted trailing
+/// HEADERS containing embedded `:status` / `:method` / `:path`
+/// etc., letting a malicious peer rewrite the request line after
+/// the initial HEADERS already committed it.
+///
+/// br-asupersync-90n3nh: this helper is now `pub(crate)`. Production
+/// trailer validation is performed by
+/// [`super::connection::validate_h2_pseudo_headers`] with
+/// `is_trailers=true` (introduced in br-asupersync-0eyf7t), which
+/// is the canonical validator and additionally enforces RFC 8.2.1
+/// lowercase + RFC 8.2.2 connection-specific-header bans on the
+/// trailer block. This module-local helper is retained as the
+/// minimal name-only fast path for use by Stream-internal call
+/// sites and the of0l5f regression tests; it is not part of the
+/// public API surface because dual-implementation validators for a
+/// security-sensitive check could drift across maintenance.
 ///
 /// Pseudo-headers are HPACK fields whose name begins with `':'`.
 /// This validator is name-only — it does not inspect values, since
@@ -37,10 +46,9 @@ const HEADER_FRAGMENT_MULTIPLIER: usize = 4;
 /// Returns `Ok(())` if no pseudo-header is present, or
 /// `Err(&'static str)` with a stable error reason on first match.
 /// Callers should map the `Err` to a connection-level
-/// `H2Error::protocol(...)` (PROTOCOL_ERROR) and trigger GOAWAY,
-/// matching the `validate_h2_pseudo_headers` shape in
-/// `connection.rs`.
-pub fn reject_pseudo_headers_in_trailers(headers: &[Header]) -> Result<(), &'static str> {
+/// `H2Error::protocol(...)` (PROTOCOL_ERROR) and trigger GOAWAY.
+#[cfg(test)]
+pub(crate) fn reject_pseudo_headers_in_trailers(headers: &[Header]) -> Result<(), &'static str> {
     for h in headers {
         if h.name.starts_with(':') {
             return Err("trailer block must not contain pseudo-header fields (RFC 9113 §8.1)");
@@ -572,12 +580,14 @@ impl Stream {
     /// Callers (e.g. the `connection.rs` HEADERS dispatch) should
     /// query this BEFORE invoking [`Self::recv_headers`] so the
     /// decoded header block can be passed through
-    /// [`reject_pseudo_headers_in_trailers`] — RFC 9113 §8.1
-    /// requires that "Trailers MUST NOT include pseudo-header
-    /// fields". The pre-fix code path accepted trailing HEADERS
-    /// without rejecting embedded `:status` / `:method` / `:path`
-    /// pseudo-headers, letting an attacker rewrite the request line
-    /// AFTER the initial HEADERS already committed it.
+    /// `connection::validate_h2_pseudo_headers(headers, is_trailers=true)`
+    /// (the canonical trailer validator, br-asupersync-0eyf7t) —
+    /// RFC 9113 §8.1 requires that "Trailers MUST NOT include
+    /// pseudo-header fields". The pre-fix code path accepted
+    /// trailing HEADERS without rejecting embedded `:status` /
+    /// `:method` / `:path` pseudo-headers, letting an attacker
+    /// rewrite the request line AFTER the initial HEADERS already
+    /// committed it.
     #[must_use]
     pub fn would_be_trailer_block(&self) -> bool {
         self.headers_complete
