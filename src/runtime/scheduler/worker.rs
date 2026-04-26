@@ -28,6 +28,7 @@ pub type WorkerId = usize;
 ///
 /// At the cap (~64K distinct tokens) memory footprint is roughly:
 ///   * 65_536 entries × ~24 B/entry (HashSet bucket + u64) ≈ 1.5 MiB
+///
 /// On overflow the set is CLEARED (full reset) rather than LRU-evicted —
 /// the io_requested trace event's contract is "emit the first time this
 /// token is observed," so a periodic reset re-emits some old tokens'

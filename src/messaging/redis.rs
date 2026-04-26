@@ -1262,11 +1262,11 @@ impl RedisConnection {
         // command returns `-ERR unknown command 'HELLO' ...`, in which case
         // we fall back to the legacy AUTH path. Any other error is fatal.
         let mut hello_args: Vec<&[u8]> = vec![b"HELLO", b"3"];
-        if let (Some(ref u), Some(ref p)) = (username.as_ref(), password.as_ref()) {
+        if let (Some(u), Some(p)) = (username.as_ref(), password.as_ref()) {
             hello_args.push(b"AUTH");
             hello_args.push(u.as_bytes());
             hello_args.push(p.as_bytes());
-        } else if let Some(ref p) = password {
+        } else if let Some(p) = password.as_ref() {
             // Pre-ACL servers — synthesise the default user.
             hello_args.push(b"AUTH");
             hello_args.push(b"default");
@@ -1300,10 +1300,9 @@ impl RedisConnection {
             }
         }
 
-        if !hello_handled_auth && password.is_some() {
-            let p = password.expect("password.is_some() checked above");
+        if !hello_handled_auth && let Some(p) = password.as_ref() {
             // Redis 6+ ACL: AUTH username password; pre-6: AUTH password.
-            let resp = if let Some(ref u) = username {
+            let resp = if let Some(u) = username.as_ref() {
                 self.exec_no_init(cx, &[b"AUTH", u.as_bytes(), p.as_bytes()])
                     .await?
             } else {
