@@ -1006,7 +1006,20 @@ impl KafkaConsumer {
                 return Ok(None);
             }
 
-            let deadline = crate::time::wall_now().saturating_add_nanos(duration_to_nanos(timeout));
+            // br-asupersync-my0rls: route the deadline computation
+            // through `cx.timer_driver()` when one is attached so a
+            // VirtualClock-backed lab harness can advance time and
+            // unblock the poll deterministically. The previous shape
+            // pinned the deadline to wall-clock via `wall_now()` even
+            // in the no-kafka stub path, defeating
+            // `LabRuntime::advance` for any test that relied on
+            // exercising poll-timeout flow without the kafka feature.
+            // Mirrors the pattern at messaging/kafka.rs line 522-524.
+            let now_fn = || {
+                cx.timer_driver()
+                    .map_or_else(crate::time::wall_now, |d| d.now())
+            };
+            let deadline = now_fn().saturating_add_nanos(duration_to_nanos(timeout));
             loop {
                 cx.checkpoint().map_err(|_| KafkaError::Cancelled)?;
 
@@ -1027,7 +1040,7 @@ impl KafkaConsumer {
                 if let Some(record) = self.try_poll_local_record()? {
                     return Ok(Some(record));
                 }
-                if crate::time::wall_now() >= deadline {
+                if now_fn() >= deadline {
                     return Ok(None);
                 }
 
