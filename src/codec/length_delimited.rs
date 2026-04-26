@@ -230,10 +230,26 @@ impl Decoder for LengthDelimitedCodec {
         loop {
             match self.state {
                 DecodeState::Head => {
+                    // br-asupersync-qj99nz: symmetry with the encode path.
+                    // Previously this used `saturating_add`, which on a 32-bit
+                    // target with adversarial builder configuration could
+                    // saturate `header_len` to `usize::MAX` — the subsequent
+                    // `total_frame_len = header_len.checked_add(frame_len)`
+                    // would then wrap or pass `max_frame_length` checks while
+                    // leaving the state machine in `Data(usize::MAX)`. The
+                    // encode path at line ~397 already uses `checked_add` and
+                    // surfaces InvalidData on overflow; the decode path now
+                    // uses the same shape for the same reason.
                     let header_len = self
                         .builder
                         .length_field_offset
-                        .saturating_add(self.builder.length_field_length);
+                        .checked_add(self.builder.length_field_length)
+                        .ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "header length (offset + length_field_length) overflows usize",
+                            )
+                        })?;
 
                     if src.len() < header_len {
                         return Ok(None);

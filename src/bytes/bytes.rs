@@ -168,9 +168,18 @@ impl Bytes {
             self.len
         );
 
+        // br-asupersync-zfhz06: under a high-volume zero-copy pipeline,
+        // repeated `slice()`/`split_to()` calls can advance `self.start`
+        // close to `usize::MAX`. The bounds check above only validates
+        // `end <= self.len`, not `self.start + start`. Use `checked_add`
+        // and panic on overflow rather than silently wrap and read from
+        // the wrong offset of the shared underlying buffer.
         Self {
             data: self.data.clone(),
-            start: self.start + start,
+            start: self
+                .start
+                .checked_add(start)
+                .expect("Bytes::slice offset overflow"),
             len: end - start,
         }
     }
@@ -202,9 +211,13 @@ impl Bytes {
             self.len
         );
 
+        // br-asupersync-zfhz06: see slice() for the overflow rationale.
         let other = Self {
             data: self.data.clone(),
-            start: self.start + at,
+            start: self
+                .start
+                .checked_add(at)
+                .expect("Bytes::split_off offset overflow"),
             len: self.len - at,
         };
 
@@ -245,7 +258,13 @@ impl Bytes {
             len: at,
         };
 
-        self.start += at;
+        // br-asupersync-zfhz06: see slice() for the overflow rationale.
+        // Repeated split_to() advances `self.start`; after enough small
+        // advances on a 32-bit target the unchecked `+=` would wrap.
+        self.start = self
+            .start
+            .checked_add(at)
+            .expect("Bytes::split_to offset overflow");
         self.len -= at;
         other
     }
@@ -267,12 +286,24 @@ impl Bytes {
     }
 
     /// Get the underlying byte slice.
+    ///
+    /// br-asupersync-zfhz06: `self.start + self.len` is computed via
+    /// `checked_add` to fail loudly rather than read from the wrong
+    /// offset of the shared underlying buffer if internal accounting
+    /// somehow drifted past `usize::MAX`. The constructor and every
+    /// mutator (`slice`, `split_to`, `split_off`) now also use
+    /// `checked_add`, so this is belt-and-braces — the invariant
+    /// is enforced at every point where it can be broken.
     #[inline]
     fn as_slice(&self) -> &[u8] {
+        let end = self
+            .start
+            .checked_add(self.len)
+            .expect("Bytes::as_slice start + len overflow");
         match &self.data {
             BytesInner::Empty => &[],
-            BytesInner::Static(s) => &s[self.start..self.start + self.len],
-            BytesInner::Shared(arc) => &arc[self.start..self.start + self.len],
+            BytesInner::Static(s) => &s[self.start..end],
+            BytesInner::Shared(arc) => &arc[self.start..end],
         }
     }
 }

@@ -62,11 +62,43 @@ pub struct LinesCodec {
     is_discarding: bool,
 }
 
+/// Default maximum line length for [`LinesCodec::new`].
+///
+/// br-asupersync-4wvgz5: the previous default (`usize::MAX`) made the
+/// MaxLineLengthExceeded check effectively unreachable on any real-world
+/// memory budget — a peer that streams bytes without a `\n` could drain
+/// the host's memory (line-length DoS). 64 KiB is large enough for the
+/// vast majority of line-oriented protocols (HTTP/1 status lines, IRC,
+/// SMTP, redis text-protocol, log streams) but small enough that an
+/// unbounded peer cannot OOM the host. Callers that genuinely need
+/// unbounded line lengths must opt in via [`LinesCodec::with_unbounded`].
+pub const DEFAULT_MAX_LINE_LENGTH: usize = 64 * 1024;
+
 impl LinesCodec {
-    /// Creates a new `LinesCodec` with no length limit.
+    /// Creates a new `LinesCodec` with the default maximum line length
+    /// of [`DEFAULT_MAX_LINE_LENGTH`] (64 KiB).
+    ///
+    /// br-asupersync-4wvgz5: the default is bounded to prevent
+    /// line-length DoS. Use [`Self::new_with_max_length`] to set a
+    /// custom limit, or [`Self::with_unbounded`] to disable the limit
+    /// entirely (only do that when an upstream layer enforces its own
+    /// length cap).
     #[inline]
     #[must_use]
     pub fn new() -> Self {
+        Self::new_with_max_length(DEFAULT_MAX_LINE_LENGTH)
+    }
+
+    /// Creates a new `LinesCodec` with no maximum line length.
+    ///
+    /// br-asupersync-4wvgz5: explicit, grep-able opt-in for callers that
+    /// genuinely need unbounded line lengths (e.g. text-streaming
+    /// protocols where the application provides its own size guard
+    /// upstream). This name is the auditable counterpart to the safe
+    /// default in [`Self::new`].
+    #[inline]
+    #[must_use]
+    pub fn with_unbounded() -> Self {
         Self::new_with_max_length(usize::MAX)
     }
 
