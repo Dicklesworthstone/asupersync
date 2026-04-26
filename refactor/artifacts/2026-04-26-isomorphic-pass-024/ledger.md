@@ -25,7 +25,7 @@
 
 - `rustfmt --edition 2024 --check src/types/budget.rs`: passed
 - `git diff --check -- src/types/budget.rs refactor/artifacts/2026-04-26-isomorphic-pass-024/ledger.md`: passed
-- `rch exec -- cargo test --target-dir /tmp/cargo-target-asupersync-types-budget-pass024-test -p asupersync --lib types::budget`: pending
-- `rch exec -- cargo check --target-dir /tmp/cargo-target-asupersync-pass024-check -p asupersync --lib`: pending
-- `rch exec -- cargo clippy --target-dir /tmp/cargo-target-asupersync-pass024-clippy-lib -p asupersync --lib -- -D warnings`: pending
-- `rch exec -- cargo clippy --target-dir /tmp/cargo-target-asupersync-pass024-clippy-tests -p asupersync --lib --tests -- -D warnings`: pending
+- `rch exec -- cargo test --target-dir /tmp/cargo-target-asupersync-types-budget-pass024-test -p asupersync --lib types::budget`: passed (84 passed, 0 failed; unrelated warnings in `src/gen_server.rs`, `src/runtime/scheduler/three_lane.rs`, and `src/combinator/race.rs`)
+- `rch exec -- cargo check --target-dir /tmp/cargo-target-asupersync-pass024-check -p asupersync --lib`: blocked by unrelated dirty `src/runtime/task_table.rs` calls to missing `TaskRecord::deadline()`.
+- `rch exec -- cargo clippy --target-dir /tmp/cargo-target-asupersync-pass024-clippy-lib -p asupersync --lib -- -D warnings`: not run because the scoped library check is blocked externally.
+- `rch exec -- cargo clippy --target-dir /tmp/cargo-target-asupersync-pass024-clippy-tests -p asupersync --lib --tests -- -D warnings`: not run because the scoped library check is blocked externally.
