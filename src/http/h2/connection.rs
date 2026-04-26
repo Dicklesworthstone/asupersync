@@ -1688,6 +1688,33 @@ fn validate_h2_pseudo_headers(headers: &[Header], is_request: bool) -> Result<()
                 return Err("regular header field name contains uppercase ASCII \
                      (RFC 9113 §8.2.1 violation)");
             }
+            // br-asupersync-rmfjui — RFC 9113 §8.2.2: connection-
+            // specific header fields MUST NOT be transmitted in
+            // HTTP/2; any message containing them is malformed and
+            // MUST be treated as a stream error of PROTOCOL_ERROR.
+            // The exception is `te`, whose name is permitted but
+            // whose value MUST be exactly the token "trailers".
+            match name {
+                b"connection"
+                | b"keep-alive"
+                | b"proxy-connection"
+                | b"transfer-encoding"
+                | b"upgrade" => {
+                    return Err(
+                        "connection-specific header field forbidden in HTTP/2 \
+                         (RFC 9113 §8.2.2)",
+                    );
+                }
+                b"te" => {
+                    if h.value.as_bytes() != b"trailers" {
+                        return Err(
+                            "te header field MUST have value \"trailers\" in HTTP/2 \
+                             (RFC 9113 §8.2.2)",
+                        );
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
@@ -4345,5 +4372,81 @@ mod tests {
             err.contains("must not include request pseudo-headers"),
             "unexpected: {err}"
         );
+    }
+
+    /// br-asupersync-rmfjui — RFC 9113 §8.2.2: each connection-
+    /// specific header on the forbidden list (Connection,
+    /// Keep-Alive, Proxy-Connection, Transfer-Encoding, Upgrade)
+    /// must be rejected by validate_h2_pseudo_headers when present
+    /// in an otherwise-valid request. The validator returns Err
+    /// with a message tagged "RFC 9113 §8.2.2".
+    #[test]
+    fn rmfjui_each_forbidden_connection_header_rejected() {
+        for forbidden in [
+            "connection",
+            "keep-alive",
+            "proxy-connection",
+            "transfer-encoding",
+            "upgrade",
+        ] {
+            let headers = vec![
+                h(":method", "GET"),
+                h(":scheme", "https"),
+                h(":path", "/"),
+                h(":authority", "example.com"),
+                h(forbidden, "close"),
+            ];
+            let err = validate_h2_pseudo_headers(&headers, true)
+                .expect_err(forbidden);
+            assert!(
+                err.contains("RFC 9113 §8.2.2"),
+                "wrong reject reason for {forbidden}: {err}"
+            );
+        }
+    }
+
+    /// br-asupersync-rmfjui — `te` header NAME is permitted by the
+    /// spec but only with value "trailers"; any other value is
+    /// malformed.
+    #[test]
+    fn rmfjui_te_trailers_accepted_other_values_rejected() {
+        // te: trailers (allowed)
+        let ok = vec![
+            h(":method", "GET"),
+            h(":scheme", "https"),
+            h(":path", "/"),
+            h(":authority", "example.com"),
+            h("te", "trailers"),
+        ];
+        assert!(validate_h2_pseudo_headers(&ok, true).is_ok());
+
+        // te: gzip (forbidden value)
+        let bad = vec![
+            h(":method", "GET"),
+            h(":scheme", "https"),
+            h(":path", "/"),
+            h(":authority", "example.com"),
+            h("te", "gzip"),
+        ];
+        let err = validate_h2_pseudo_headers(&bad, true).unwrap_err();
+        assert!(
+            err.contains("RFC 9113 §8.2.2"),
+            "wrong reject reason: {err}"
+        );
+    }
+
+    /// br-asupersync-rmfjui — Regression guard: a valid request
+    /// without any forbidden header must still pass.
+    #[test]
+    fn rmfjui_request_without_forbidden_headers_accepted() {
+        let headers = vec![
+            h(":method", "GET"),
+            h(":scheme", "https"),
+            h(":path", "/"),
+            h(":authority", "example.com"),
+            h("content-type", "application/json"),
+            h("user-agent", "test"),
+        ];
+        assert!(validate_h2_pseudo_headers(&headers, true).is_ok());
     }
 }
