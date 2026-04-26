@@ -16,6 +16,7 @@ use crate::security::{AuthenticatedSymbol, SecurityContext};
 use crate::transport::error::StreamError;
 use crate::transport::sink::SymbolSink;
 use crate::transport::stream::SymbolStream;
+use crate::raptorq::systematic::SystematicParams;
 use crate::types::resource::{PoolConfig, SymbolPool};
 use crate::types::symbol::{ObjectId, ObjectParams};
 
@@ -346,6 +347,40 @@ fn compute_repair_count(data_len: usize, symbol_size: usize, overhead: f64) -> u
     compute_repair_count_for_source_symbols(source_count, overhead)
 }
 
+/// Compute repair-symbol count per RFC 6330 Systematic FEC-OTI semantics.
+///
+/// **RFC 6330 §5.6 + §4.4.1.2 contract:** RaptorQ encodes a source block of
+/// `K` symbols by INTERNALLY padding to `K' = next_lookup_table_entry ≥ K`
+/// (Table 2; the largest K' is 56_403). The decoder needs at LEAST `K'`
+/// encoded symbols to attempt decoding, NOT just `K`. Per RFC 6330 §1.3,
+/// providing `ε` symbols ABOVE K' yields decode failure probability:
+///
+///   * ε = 0  → ~0.85% failure probability
+///   * ε = 1  → ~0.0085% failure probability
+///   * ε = 2  → ~0.000085% failure probability
+///
+/// **Pre-fix bug (br-asupersync-7gxb8n):** the old formula
+/// `ceil(K * overhead) - K` gave an overhead RELATIVE TO K, ignoring the
+/// systematic K' padding. For typical K=10 with overhead=1.05 it returned 1
+/// repair symbol — but K' for K=10 is 18, so the decoder needs (18 - 10) = 8
+/// padding-equivalent symbols BEFORE any erasure budget. Result: silent
+/// under-provisioning on marginal channels.
+///
+/// **Post-fix semantics:** the user-facing `overhead` parameter is now
+/// applied on top of K' (not K), so the formula is:
+///
+///   repair_count = (K' - K)  +  ceil(K' * (overhead - 1.0))
+///                 ^^^^^^^^^   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+///                 systematic   user-requested erasure margin (ε-equivalent)
+///                 padding
+///
+/// The minimum-1 floor is preserved when `overhead > 1.0` so the request
+/// guarantees at least one repair symbol beyond the systematic padding.
+///
+/// For K beyond the RFC table maximum (≥ 56_404), the function falls back
+/// to the multiplicative-only formula since `SystematicParams` cannot
+/// derive K' for such blocks; the surrounding encoder rejects them at
+/// construction time anyway.
 #[allow(clippy::cast_precision_loss)]
 #[allow(clippy::cast_sign_loss)]
 fn compute_repair_count_for_source_symbols(source_count: usize, overhead: f64) -> usize {
@@ -353,9 +388,32 @@ fn compute_repair_count_for_source_symbols(source_count: usize, overhead: f64) -
         return 0;
     }
 
-    let total = (source_count as f64 * overhead).ceil() as usize;
-    // If overhead > 1.0, we always want at least one repair symbol.
-    total.saturating_sub(source_count).max(1)
+    // Look up K' from the RFC 6330 Systematic Index Table (§5.6 Table 2).
+    // For K > max table entry (56_403), there is no K' — fall back to the
+    // pre-fix multiplicative formula. The encoder-construction layer
+    // rejects such blocks separately.
+    let k_prime = match SystematicParams::try_for_source_block(source_count, 1) {
+        Ok(params) => params.k_prime,
+        Err(_) => source_count,
+    };
+
+    // Systematic padding: zero-symbols added by the encoder so the source
+    // block has K' symbols. The decoder treats these as "received for free"
+    // ONLY when their ESIs are present — over a real erasure channel the
+    // sender must transmit them as encoding symbols too.
+    let padding_excess = k_prime.saturating_sub(source_count);
+
+    // Erasure margin ε, computed multiplicatively over K' (NOT K) so the
+    // user-visible `overhead` knob has consistent semantics regardless of
+    // how much padding the systematic table introduces.
+    let erasure_margin = ((k_prime as f64) * (overhead - 1.0)).ceil() as usize;
+
+    // At least one repair symbol when overhead > 1.0 (preserves the
+    // pre-fix contract that "any positive overhead requests at least one
+    // repair beyond the bare K').
+    padding_excess
+        .saturating_add(erasure_margin)
+        .max(padding_excess.saturating_add(1))
 }
 
 fn compute_total_repair_count(
@@ -703,25 +761,72 @@ mod tests {
     }
 
     #[test]
-    fn compute_repair_count_overhead_above_one_requests_at_least_one_repair() {
-        // For small objects, rounding means a small overhead still produces one repair symbol.
+    fn compute_repair_count_overhead_above_one_includes_systematic_padding() {
+        // br-asupersync-7gxb8n: post-fix the formula is
+        //   (K' - K) + max(ceil(K' * (overhead - 1.0)), 1)
+        // For data_len=64, symbol_size=256: source=ceil(64/256)=1, K'=10
+        // (per RFC 6330 Table 2 — smallest K' >= 1 is 10). overhead=1.01
+        // gives erasure_margin=ceil(10*0.01)=1. Total repair = 9 + 1 = 10.
         let data_len = 64;
         let symbol_size = 256;
-        assert_eq!(compute_repair_count(data_len, symbol_size, 1.01), 1);
+        assert_eq!(compute_repair_count(data_len, symbol_size, 1.01), 10);
     }
 
     #[test]
     fn compute_total_repair_count_uses_per_block_ceilings() {
+        // br-asupersync-7gxb8n: per-block repair counts now include the
+        // systematic K' padding from RFC 6330 §5.6 Table 2.
+        //
+        // - data_len=161, symbol_size=8 → ceil(161/8) = 21 source symbols
+        //   in the single-block view. K'(21) = 26 (smallest table entry >= 21).
+        //   padding = 26 - 21 = 5; erasure = ceil(26 * 0.05) = 2;
+        //   compute_repair_count = max(5 + 2, 5 + 1) = 7.
+        //
+        // - For per-block (max_block_size=80):
+        //   * block1: 80 bytes = 10 source. K'(10)=10. padding=0.
+        //     erasure=ceil(10*0.05)=1. Per-block = max(0+1, 0+1) = 1.
+        //   * block2: 81 bytes = 11 source. K'(11)=12. padding=1.
+        //     erasure=ceil(12*0.05)=1. Per-block = max(1+1, 1+1) = 2.
+        //   * Total = 1 + 2 = 3 (unchanged from pre-fix in this case
+        //     because both blocks happen to land at small K' multiples).
         let data_len = 161;
         let max_block_size = 80;
         let symbol_size = 8;
         let overhead = 1.05;
 
-        assert_eq!(compute_repair_count(data_len, symbol_size, overhead), 2);
+        assert_eq!(compute_repair_count(data_len, symbol_size, overhead), 7);
         assert_eq!(
             compute_total_repair_count(data_len, max_block_size, symbol_size, overhead),
             3
         );
+    }
+
+    #[test]
+    fn compute_repair_count_systematic_padding_strictly_added() {
+        // br-asupersync-7gxb8n regression test: for ANY K in the RFC table
+        // range, the repair count MUST be at least (K' - K) so the decoder
+        // receives at least K' encoded symbols (RFC 6330 §1.3 baseline).
+        // K' values per RFC 6330 §5.6 Table 2 (smallest K' ≥ K).
+        for &(source, expected_k_prime) in &[
+            (1usize, 10usize),
+            (5, 10),
+            (10, 10),
+            (11, 12),
+            (13, 18),
+            (49, 49),
+            (100, 101),
+        ] {
+            // Multiply with overhead=1.0 + ε epsilon so the check exercises
+            // both the padding and erasure-margin paths.
+            let symbol_size = 64;
+            let data_len = source * symbol_size;
+            let repair = compute_repair_count(data_len, symbol_size, 1.001);
+            assert!(
+                repair >= expected_k_prime.saturating_sub(source),
+                "K={source}: expected repair >= (K'-K)=({expected_k_prime}-{source})={}, got {repair}",
+                expected_k_prime.saturating_sub(source)
+            );
+        }
     }
 
     #[test]
