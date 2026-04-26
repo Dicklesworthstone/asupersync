@@ -101,6 +101,98 @@ pub type All = CapSet<true, true, true, true, true>;
 /// No capabilities.
 pub type None = CapSet<false, false, false, false, false>;
 
+// ============================================================================
+// br-asupersync-5ckssb: runtime CapMask for thread-local restriction tracking
+// ============================================================================
+
+/// Runtime capability mask, mirror of the type-level [`CapSet`].
+///
+/// Used by [`crate::cx::Cx::current`] to honor the innermost restriction
+/// pushed onto the thread-local restriction stack. Unlike [`CapSet`],
+/// which is a zero-sized type marker checked at compile time, `CapMask`
+/// is a runtime value that travels with the cx returned from `current()`
+/// so an ambient lookup cannot escape the narrowing applied by an
+/// outer `set_current_restricted` or `push_restriction`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CapMask(u8);
+
+impl CapMask {
+    pub(crate) const SPAWN: u8 = 1 << 0;
+    pub(crate) const TIME: u8 = 1 << 1;
+    pub(crate) const RANDOM: u8 = 1 << 2;
+    pub(crate) const IO: u8 = 1 << 3;
+    pub(crate) const REMOTE: u8 = 1 << 4;
+
+    /// All capabilities granted (default for unrestricted contexts).
+    #[must_use]
+    pub const fn all() -> Self {
+        Self(Self::SPAWN | Self::TIME | Self::RANDOM | Self::IO | Self::REMOTE)
+    }
+
+    /// No capabilities.
+    #[must_use]
+    pub const fn none() -> Self {
+        Self(0)
+    }
+
+    /// Returns true if every bit in `other` is also set in `self`.
+    #[inline]
+    #[must_use]
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// Returns true if `bit` is set.
+    #[inline]
+    #[must_use]
+    pub(crate) const fn has(self, bit: u8) -> bool {
+        self.0 & bit != 0
+    }
+
+    /// Bitwise AND of two masks (intersection).
+    #[inline]
+    #[must_use]
+    pub const fn intersect(self, other: Self) -> Self {
+        Self(self.0 & other.0)
+    }
+
+    /// Returns the raw bits (for debug / serialization).
+    #[inline]
+    #[must_use]
+    pub const fn bits(self) -> u8 {
+        self.0
+    }
+}
+
+impl Default for CapMask {
+    fn default() -> Self {
+        Self::all()
+    }
+}
+
+/// Compute the runtime [`CapMask`] for a type-level capability set.
+///
+/// Implemented for each [`CapSet`] variant; the const-generic booleans
+/// determine which bits are set. This trait is sealed so external crates
+/// cannot fabricate a mask that exceeds the type-level capabilities of a
+/// given `Cx<C>`.
+pub trait CapSetRuntimeMask: sealed::Sealed {
+    /// The runtime mask that exactly mirrors the type-level cap row.
+    const MASK: CapMask;
+}
+
+impl<const SPAWN: bool, const TIME: bool, const RANDOM: bool, const IO: bool, const REMOTE: bool>
+    CapSetRuntimeMask for CapSet<SPAWN, TIME, RANDOM, IO, REMOTE>
+{
+    const MASK: CapMask = CapMask(
+        (if SPAWN { CapMask::SPAWN } else { 0 })
+            | (if TIME { CapMask::TIME } else { 0 })
+            | (if RANDOM { CapMask::RANDOM } else { 0 })
+            | (if IO { CapMask::IO } else { 0 })
+            | (if REMOTE { CapMask::REMOTE } else { 0 }),
+    );
+}
+
 // Manual Default implementations for type aliases to avoid confusion
 impl Default for All {
     fn default() -> Self {

@@ -265,12 +265,20 @@ const fn kind_index(kind: ObligationKind) -> u8 {
     }
 }
 
-/// All obligation kinds in index order.
-const ALL_KINDS: [ObligationKind; 4] = [
+/// All obligation kinds in index order. MUST be exhaustive — every variant
+/// returned by `kind_index()` is used to index into this array via
+/// `ALL_KINDS[ki as usize]` in `non_zero()` (and any future readers of the
+/// counts map). Adding a new variant to ObligationKind requires extending
+/// both `kind_index` and this array. Bug history: br-asupersync-m06vgf
+/// missed SemaphorePermit (kind_index=4) here, causing
+/// index-out-of-bounds panic the moment any Semaphore-using region was
+/// observed by the marking machinery.
+const ALL_KINDS: [ObligationKind; 5] = [
     ObligationKind::SendPermit,
     ObligationKind::Ack,
     ObligationKind::Lease,
     ObligationKind::IoOp,
+    ObligationKind::SemaphorePermit,
 ];
 
 // ============================================================================

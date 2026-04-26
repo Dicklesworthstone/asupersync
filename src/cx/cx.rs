@@ -180,6 +180,21 @@ pub struct Cx<Caps = cap::All> {
     pub(crate) inner: Arc<parking_lot::RwLock<CxInner>>,
     observability: Arc<parking_lot::RwLock<ObservabilityState>>,
     handles: Arc<CxHandles>,
+    /// br-asupersync-5ckssb: runtime capability mask. Mirrors the
+    /// type-level `Caps` parameter for cx instances obtained the
+    /// normal way (through the runtime / restrict / for_testing).
+    /// For cx instances obtained via [`Cx::current`], this mask
+    /// reflects the **innermost** restriction pushed onto the
+    /// thread-local restriction stack — so an ambient lookup
+    /// cannot escape a narrowing applied by an outer
+    /// `set_current_restricted` or `push_restriction`.
+    ///
+    /// Cap-gated *Option*-returning methods (`io`, `remote`,
+    /// `timer_driver`, `fetch_cap`) consult this mask in addition
+    /// to the type-level `Caps` bound and return `None` when the
+    /// runtime mask blocks the capability — this is the actual
+    /// teeth of the ambient-authority defense.
+    pub(crate) runtime_mask: cap::CapMask,
     // Use fn() -> Caps instead of just Caps to ensure Send+Sync regardless of Caps
     _caps: PhantomData<fn() -> Caps>,
 }
@@ -193,6 +208,7 @@ impl<Caps> Clone for Cx<Caps> {
             inner: Arc::clone(&self.inner),
             observability: Arc::clone(&self.observability),
             handles: Arc::clone(&self.handles),
+            runtime_mask: self.runtime_mask,
             _caps: PhantomData,
         }
     }
@@ -268,22 +284,47 @@ impl Drop for MaskGuard<'_> {
 
 type FullCx = Cx<cap::All>;
 
-thread_local! {
-    static CURRENT_CX: RefCell<Option<FullCx>> = const { RefCell::new(None) };
+/// br-asupersync-5ckssb: a single frame on the thread-local
+/// `CURRENT_CX_STACK`. Each `set_current` push records BOTH the cx
+/// itself AND the runtime [`cap::CapMask`] under which it was
+/// installed. `Cx::current()` walks the stack to find the innermost
+/// frame and returns its cx with the frame's mask applied — so a
+/// nested `set_current_restricted::<Cx<NoCaps>>(...)` makes any
+/// subsequent ambient `Cx::current()` lookup observe `CapMask::none()`
+/// even though the underlying inner state is shared.
+#[derive(Debug, Clone)]
+struct CurrentCxFrame {
+    cx: FullCx,
+    mask: cap::CapMask,
 }
 
-/// Guard that restores the previous Cx on drop.
+thread_local! {
+    /// Stack of `(cx, mask)` frames. The top of the stack is the
+    /// innermost installed context; `current()` returns from there.
+    /// The historical `Option<FullCx>` semantic is preserved by the
+    /// invariant that an empty stack means "no current cx" — i.e.
+    /// `current()` returns `None`.
+    static CURRENT_CX_STACK: RefCell<Vec<CurrentCxFrame>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Guard that pops the corresponding frame from the
+/// `CURRENT_CX_STACK` on drop. (br-asupersync-5ckssb)
 #[cfg_attr(feature = "test-internals", visibility::make(pub))]
 pub(crate) struct CurrentCxGuard {
-    prev: Option<FullCx>,
+    /// Whether this guard pushed a frame (true) or was a no-op
+    /// (false, when caller passed `None`). Determines whether drop
+    /// pops.
+    pushed: bool,
     _not_send: std::marker::PhantomData<*mut ()>,
 }
 
 impl Drop for CurrentCxGuard {
     fn drop(&mut self) {
-        let prev = self.prev.take();
-        let _ = CURRENT_CX.try_with(|slot| {
-            *slot.borrow_mut() = prev;
+        if !self.pushed {
+            return;
+        }
+        let _ = CURRENT_CX_STACK.try_with(|stack| {
+            stack.borrow_mut().pop();
         });
     }
 }
@@ -293,30 +334,134 @@ impl FullCx {
     ///
     /// This is set by the runtime while polling a task.
     ///
+    /// br-asupersync-5ckssb: walks the thread-local restriction stack
+    /// to find the **innermost** installed context. If an outer scope
+    /// pushed a restricted cx (via [`Cx::set_current_restricted`] or
+    /// [`Cx::push_restriction`]), the returned cx carries the
+    /// narrowed runtime mask, so cap-gated *Option*-returning
+    /// methods (`io`, `remote`, `timer_driver`, `fetch_cap`) return
+    /// `None` for any capability blocked by the restriction. This
+    /// closes the ambient-authority leak that previously let
+    /// untrusted call sites obtain a full-cap cx via the ambient
+    /// lookup regardless of the type-level `Caps` parameter on the
+    /// cx they were given as a function argument.
+    ///
     /// Returns `None` when no task context is installed and also during
     /// thread-local teardown, where the ambient context is no longer
     /// accessible.
     #[inline]
     #[must_use]
     pub fn current() -> Option<Self> {
-        CURRENT_CX
-            .try_with(|slot| slot.borrow().clone())
+        CURRENT_CX_STACK
+            .try_with(|slot| {
+                slot.borrow().last().map(|frame| {
+                    let mut cx = frame.cx.clone();
+                    cx.runtime_mask = frame.mask;
+                    cx
+                })
+            })
             .unwrap_or(None)
     }
 
     /// Sets the current task context for the duration of the guard.
+    ///
+    /// Pushes a new frame onto the thread-local stack with the FULL
+    /// capability mask. For installations that should narrow the
+    /// ambient view (e.g. when handing control to untrusted code
+    /// that should not see full caps), use
+    /// [`Cx::set_current_restricted`] instead.
     #[inline]
     #[must_use]
     #[cfg_attr(feature = "test-internals", visibility::make(pub))]
     pub(crate) fn set_current(cx: Option<Self>) -> CurrentCxGuard {
-        let prev = CURRENT_CX.with(|slot| {
-            let mut guard = slot.borrow_mut();
-            let prev = guard.take();
-            *guard = cx;
-            prev
+        let pushed = CURRENT_CX_STACK.with(|stack| match cx {
+            Some(cx) => {
+                stack.borrow_mut().push(CurrentCxFrame {
+                    cx,
+                    mask: cap::CapMask::all(),
+                });
+                true
+            }
+            None => false,
         });
         CurrentCxGuard {
-            prev,
+            pushed,
+            _not_send: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<Caps> Cx<Caps>
+where
+    Caps: cap::CapSetRuntimeMask,
+{
+    /// Push this cx onto the thread-local restriction stack with
+    /// its OWN runtime mask (computed from the type-level `Caps`
+    /// parameter). While the returned guard is alive, any ambient
+    /// `Cx::current()` lookup observes the narrowed mask — even if
+    /// the underlying `FullCx` it wraps has every capability bit
+    /// set internally.
+    ///
+    /// br-asupersync-5ckssb: this is the tooling that gives the
+    /// `Cx::current()` ambient defense its teeth. A function that
+    /// is about to delegate to less-trusted code can do
+    ///
+    /// ```ignore
+    /// let _guard = restricted_cx.set_current_restricted();
+    /// untrusted::do_work(); // ambient Cx::current() observes the
+    ///                       // restricted cap mask
+    /// ```
+    ///
+    /// and be confident that the callee cannot escape its capability
+    /// budget via a thread-local lookup.
+    #[inline]
+    #[must_use]
+    pub fn set_current_restricted(self) -> CurrentCxGuard {
+        let mask = <Caps as cap::CapSetRuntimeMask>::MASK;
+        let cx = self.retype::<cap::All>();
+        CURRENT_CX_STACK.with(|stack| {
+            stack.borrow_mut().push(CurrentCxFrame { cx, mask });
+        });
+        CurrentCxGuard {
+            pushed: true,
+            _not_send: std::marker::PhantomData,
+        }
+    }
+}
+
+impl FullCx {
+    /// Push an explicit [`cap::CapMask`] restriction onto the
+    /// thread-local stack without changing the underlying cx.
+    ///
+    /// The mask is intersected with the currently-active mask
+    /// (whatever `Cx::current()` would otherwise return). While the
+    /// guard is alive, ambient lookups observe the narrowed view.
+    /// Useful for short scoped restrictions ("disable IO across
+    /// this callback") without requiring a separate restricted-cap
+    /// cx instance.
+    ///
+    /// (br-asupersync-5ckssb)
+    #[must_use]
+    pub fn push_restriction(mask: cap::CapMask) -> CurrentCxGuard {
+        let pushed = CURRENT_CX_STACK.with(|stack| {
+            let mut s = stack.borrow_mut();
+            // Intersect with the current top so a push can only
+            // ever narrow, never widen.
+            let (cx, intersected_mask) = match s.last() {
+                Some(top) => (top.cx.clone(), top.mask.intersect(mask)),
+                // No installed cx: push a no-op marker that current()
+                // will see as None (no cx to clone). Skip push since
+                // there's nothing to restrict.
+                None => return false,
+            };
+            s.push(CurrentCxFrame {
+                cx,
+                mask: intersected_mask,
+            });
+            true
+        });
+        CurrentCxGuard {
+            pushed,
             _not_send: std::marker::PhantomData,
         }
     }
@@ -358,6 +503,7 @@ impl<Caps> Cx<Caps> {
                 #[cfg(feature = "messaging-fabric")]
                 fabric_capabilities: Arc::new(FabricCapabilityRegistry::default()),
             }),
+            runtime_mask: cap::CapMask::all(),
             _caps: PhantomData,
         }
     }
@@ -457,6 +603,7 @@ impl<Caps> Cx<Caps> {
                 #[cfg(feature = "messaging-fabric")]
                 fabric_capabilities: Arc::new(FabricCapabilityRegistry::default()),
             }),
+            runtime_mask: cap::CapMask::all(),
             _caps: PhantomData,
         }
     }
@@ -509,6 +656,11 @@ impl<Caps> Cx<Caps> {
             inner: self.inner.clone(),
             observability: self.observability.clone(),
             handles: self.handles.clone(),
+            // br-asupersync-5ckssb: preserve the runtime mask across
+            // retype. Narrowing the type-level Caps does NOT widen
+            // the runtime mask; widening is impossible at this layer
+            // because the typed `restrict` requires SubsetOf.
+            runtime_mask: self.runtime_mask,
             _caps: PhantomData,
         }
     }
@@ -1005,6 +1157,14 @@ impl<Caps> Cx<Caps> {
     where
         Caps: cap::HasTime,
     {
+        // br-asupersync-5ckssb: respect the runtime mask. A cx
+        // obtained via Cx::current() under an outer
+        // set_current_restricted/push_restriction that excludes TIME
+        // returns None even though Caps: HasTime would otherwise
+        // permit access.
+        if !self.runtime_mask.has(cap::CapMask::TIME) {
+            return None;
+        }
         self.handles.timer_driver.clone()
     }
 
@@ -1051,6 +1211,13 @@ impl<Caps> Cx<Caps> {
     where
         Caps: cap::HasIo,
     {
+        // br-asupersync-5ckssb: respect the runtime mask — see the
+        // doc-comment on `runtime_mask`. A cx obtained via
+        // Cx::current() under an outer restriction returns None for
+        // I/O even though Caps: HasIo would otherwise permit it.
+        if !self.runtime_mask.has(cap::CapMask::IO) {
+            return None;
+        }
         self.handles.io_cap.as_ref().map(AsRef::as_ref)
     }
 
@@ -1090,6 +1257,11 @@ impl<Caps> Cx<Caps> {
     where
         Caps: cap::HasIo,
     {
+        // br-asupersync-5ckssb: fetch_cap is on the IO surface; gate
+        // it on the runtime IO bit too.
+        if !self.runtime_mask.has(cap::CapMask::IO) {
+            return None;
+        }
         self.handles.io_cap.as_ref().and_then(|cap| cap.fetch_cap())
     }
 
@@ -1121,6 +1293,14 @@ impl<Caps> Cx<Caps> {
     where
         Caps: cap::HasRemote,
     {
+        // br-asupersync-5ckssb: respect the runtime mask. A cx
+        // obtained via Cx::current() under an outer restriction
+        // returns None for remote even though Caps: HasRemote would
+        // otherwise permit access — closes the ambient-lookup
+        // escape for the most-sensitive capability surface.
+        if !self.runtime_mask.has(cap::CapMask::REMOTE) {
+            return None;
+        }
         self.handles.remote_cap.as_ref().map(AsRef::as_ref)
     }
 
@@ -4352,5 +4532,167 @@ mod tests {
             branch_traces, 3,
             "Deterministic branching should produce exactly 3 branch traces"
         );
+    }
+
+    // ========================================================================
+    // br-asupersync-5ckssb: Cx::current() honors restriction stack
+    // ========================================================================
+
+    /// Sanity: a freshly-installed full cx returns the full mask.
+    #[test]
+    fn _5ckssb_full_set_current_returns_full_mask() {
+        // Suppress any cx left installed by a previous test on this thread.
+        while CURRENT_CX_STACK.with(|s| s.borrow().last().is_some()) {
+            CURRENT_CX_STACK.with(|s| {
+                s.borrow_mut().pop();
+            });
+        }
+
+        let cx = Cx::for_testing();
+        let _guard = Cx::set_current(Some(cx.clone()));
+        let observed = Cx::current().expect("current must be installed");
+        assert_eq!(observed.runtime_mask, cap::CapMask::all());
+    }
+
+    /// The actual ambient-authority defense: a restricted cx pushed
+    /// via set_current_restricted causes any subsequent ambient
+    /// Cx::current() lookup to observe the narrowed mask.
+    #[test]
+    fn _5ckssb_set_current_restricted_narrows_ambient_view() {
+        while CURRENT_CX_STACK.with(|s| s.borrow().last().is_some()) {
+            CURRENT_CX_STACK.with(|s| {
+                s.borrow_mut().pop();
+            });
+        }
+
+        // Install a full cx first (simulates the runtime polling a task).
+        let full_cx = Cx::for_testing();
+        let _outer = Cx::set_current(Some(full_cx.clone()));
+
+        // Now nest a restricted view (NoCaps).
+        let restricted: Cx<cap::NoCaps> = full_cx.restrict::<cap::NoCaps>();
+        let _inner = restricted.set_current_restricted();
+
+        // Ambient lookup must now see the narrowed mask.
+        let observed = Cx::current().expect("current must be installed");
+        assert_eq!(
+            observed.runtime_mask,
+            cap::CapMask::none(),
+            "innermost restriction must narrow the ambient mask"
+        );
+
+        // The cap-gated Option-returning methods must respect the
+        // narrowed mask. These compile because the returned cx still
+        // has Caps = cap::All (set_current always installs a FullCx);
+        // the runtime check is what blocks access.
+        assert!(observed.io().is_none(), "IO must be masked");
+        assert!(observed.remote().is_none(), "REMOTE must be masked");
+        assert!(observed.timer_driver().is_none(), "TIME must be masked");
+        assert!(observed.fetch_cap().is_none(), "fetch_cap must be masked");
+    }
+
+    /// After the restriction guard drops, ambient lookups recover the
+    /// outer (full) view.
+    #[test]
+    fn _5ckssb_restriction_guard_drop_restores_outer_mask() {
+        while CURRENT_CX_STACK.with(|s| s.borrow().last().is_some()) {
+            CURRENT_CX_STACK.with(|s| {
+                s.borrow_mut().pop();
+            });
+        }
+
+        let full_cx = Cx::for_testing();
+        let _outer = Cx::set_current(Some(full_cx.clone()));
+        {
+            let restricted: Cx<cap::NoCaps> = full_cx.restrict::<cap::NoCaps>();
+            let _inner = restricted.set_current_restricted();
+            assert_eq!(
+                Cx::current().unwrap().runtime_mask,
+                cap::CapMask::none(),
+                "inside scope: restricted"
+            );
+        }
+        // Inner guard dropped — outer full mask restored.
+        assert_eq!(
+            Cx::current().unwrap().runtime_mask,
+            cap::CapMask::all(),
+            "outer scope: full mask restored"
+        );
+    }
+
+    /// Explicit push_restriction(none()) drops every cap on top of
+    /// the current mask without changing the underlying cx.
+    #[test]
+    fn _5ckssb_push_restriction_intersects_with_current_mask() {
+        while CURRENT_CX_STACK.with(|s| s.borrow().last().is_some()) {
+            CURRENT_CX_STACK.with(|s| {
+                s.borrow_mut().pop();
+            });
+        }
+
+        let full_cx = Cx::for_testing();
+        let _outer = Cx::set_current(Some(full_cx));
+
+        let _restrict = Cx::push_restriction(cap::CapMask::none());
+        let observed = Cx::current().unwrap();
+        assert_eq!(
+            observed.runtime_mask,
+            cap::CapMask::none(),
+            "push_restriction(none) intersects to none"
+        );
+        assert!(observed.io().is_none());
+        assert!(observed.remote().is_none());
+        assert!(observed.timer_driver().is_none());
+
+        // After drop, outer ALL is restored.
+        drop(_restrict);
+        assert_eq!(Cx::current().unwrap().runtime_mask, cap::CapMask::all());
+    }
+
+    /// push_restriction with no installed cx must return a no-op
+    /// guard (no panic, drop is safe).
+    #[test]
+    fn _5ckssb_push_restriction_with_no_current_is_no_op() {
+        while CURRENT_CX_STACK.with(|s| s.borrow().last().is_some()) {
+            CURRENT_CX_STACK.with(|s| {
+                s.borrow_mut().pop();
+            });
+        }
+        let _g = Cx::push_restriction(cap::CapMask::none());
+        assert!(Cx::current().is_none());
+    }
+
+    /// Multiple nested restrictions: each push narrows further; pops
+    /// restore the prior level.
+    #[test]
+    fn _5ckssb_nested_restrictions_walk_stack_correctly() {
+        while CURRENT_CX_STACK.with(|s| s.borrow().last().is_some()) {
+            CURRENT_CX_STACK.with(|s| {
+                s.borrow_mut().pop();
+            });
+        }
+
+        let full_cx = Cx::for_testing();
+        let _l1 = Cx::set_current(Some(full_cx.clone())); // ALL
+        {
+            let l2_cx: Cx<cap::CapSet<true, true, true, false, true>> =
+                full_cx.restrict::<cap::CapSet<true, true, true, false, true>>();
+            let _l2 = l2_cx.set_current_restricted(); // no IO
+            assert!(!Cx::current().unwrap().runtime_mask.has(cap::CapMask::IO));
+            assert!(Cx::current().unwrap().runtime_mask.has(cap::CapMask::REMOTE));
+            {
+                let l3_cx: Cx<cap::NoCaps> = full_cx.restrict::<cap::NoCaps>();
+                let _l3 = l3_cx.set_current_restricted(); // none
+                assert_eq!(
+                    Cx::current().unwrap().runtime_mask,
+                    cap::CapMask::none()
+                );
+            }
+            // l3 dropped — back to no-IO mask
+            assert!(!Cx::current().unwrap().runtime_mask.has(cap::CapMask::IO));
+            assert!(Cx::current().unwrap().runtime_mask.has(cap::CapMask::REMOTE));
+        }
+        // l2 dropped — back to ALL
+        assert_eq!(Cx::current().unwrap().runtime_mask, cap::CapMask::all());
     }
 }

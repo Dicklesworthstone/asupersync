@@ -45,8 +45,8 @@ pub mod scope;
 pub mod wrappers;
 
 pub use cap::{
-    All as AllCaps, CapSet, HasIo, HasRandom, HasRemote, HasSpawn, HasTime, None as NoCaps,
-    SubsetOf,
+    All as AllCaps, CapMask, CapSet, CapSetRuntimeMask, HasIo, HasRandom, HasRemote, HasSpawn,
+    HasTime, None as NoCaps, SubsetOf,
 };
 pub use cx::{Cx, SpanGuard};
 pub use macaroon::{
