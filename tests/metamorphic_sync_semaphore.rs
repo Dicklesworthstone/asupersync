@@ -374,3 +374,141 @@ fn mr8_try_acquire_consistency() {
         }
     });
 }
+
+/// MR9-SPLIT: a 10-permit semaphore servicing two waiters with heterogeneous
+/// counts {3, 7} grants per FIFO order and consumes all 10 permits exactly.
+///
+/// Property: for any partition `(a, b)` of `initial = a + b` into two
+/// strictly-positive parts, two waiters acquiring `a` and `b` permits
+/// respectively will both succeed when the semaphore starts at `initial`,
+/// FIFO order is preserved, and `available_permits()` is `0` immediately
+/// after both acquires complete. Releasing both permits restores the count
+/// to `initial`. This is the canonical "asymmetric multi-permit grant"
+/// scenario that single-acquirer tests (MR1) cannot exercise.
+#[test]
+fn mr9_split_heterogeneous_two_waiters() {
+    proptest!(|(
+        a in 1usize..=9,
+    )| {
+        // Split 10 into (a, 10-a) so a∈{1..=9}, b∈{9..=1}; covers the {3,7}
+        // case the bead names plus all other 1+9 partitions.
+        let total = 10usize;
+        let b = total - a;
+        let sem = Semaphore::new(total);
+        let cx_a = test_cx();
+        let cx_b = test_cx();
+
+        // Both acquires succeed immediately — total=a+b ≤ initial.
+        let mut fut_a = sem.acquire(&cx_a, a);
+        let res_a = poll_once(&mut fut_a)
+            .expect("first waiter must complete immediately when initial >= a");
+        let permit_a = res_a.expect("first acquire must produce a permit");
+        prop_assert_eq!(
+            permit_a.count(),
+            a,
+            "first permit must hold exactly the requested count"
+        );
+
+        let available_after_a = sem.available_permits();
+        prop_assert_eq!(
+            available_after_a,
+            b,
+            "available_permits after first acquire must equal initial - a"
+        );
+
+        let mut fut_b = sem.acquire(&cx_b, b);
+        let res_b = poll_once(&mut fut_b)
+            .expect("second waiter must complete immediately when remaining >= b");
+        let permit_b = res_b.expect("second acquire must produce a permit");
+        prop_assert_eq!(
+            permit_b.count(),
+            b,
+            "second permit must hold exactly the requested count"
+        );
+
+        // Pool exhausted: a + b = total consumed.
+        prop_assert_eq!(
+            sem.available_permits(),
+            0,
+            "after both acquires the pool must be empty"
+        );
+
+        // A third try_acquire(1) MUST fail — no permits left.
+        prop_assert!(
+            sem.try_acquire(1).is_err(),
+            "exhausted pool must reject try_acquire"
+        );
+
+        // Release both via Drop and verify conservation.
+        drop(permit_a);
+        drop(permit_b);
+        prop_assert_eq!(
+            sem.available_permits(),
+            total,
+            "releasing both permits must restore the initial count"
+        );
+    });
+}
+
+/// MR9-SPLIT (FIFO variant): when permits are insufficient to grant both
+/// requests up-front, the FIRST waiter (by registration order) gets the
+/// permits when they arrive, NOT the smaller-request waiter that could
+/// fit immediately. Validates that strict-FIFO holds even across
+/// heterogeneous request sizes.
+///
+/// Setup: empty semaphore, waiter A asks for 7, then waiter B asks for 3.
+/// Adding 7 permits MUST satisfy A (not B), even though B's 3 would also
+/// fit in 7. Adding 3 more then satisfies B.
+#[test]
+fn mr9_split_fifo_blocks_smaller_request_behind_larger() {
+    let sem = Semaphore::new(0);
+    let cx_a = test_cx();
+    let cx_b = test_cx();
+
+    let mut fut_a = sem.acquire(&cx_a, 7);
+    assert!(
+        poll_once(&mut fut_a).is_none(),
+        "A blocks waiting for 7 permits"
+    );
+
+    let mut fut_b = sem.acquire(&cx_b, 3);
+    assert!(
+        poll_once(&mut fut_b).is_none(),
+        "B queued behind A, must block even though 0 permits exist"
+    );
+
+    // Add 7 — exactly enough for A. B must STILL block (FIFO denies head-of-line jumping).
+    sem.add_permits(7);
+    let res_a = poll_once(&mut fut_a)
+        .expect("A must complete when 7 permits arrive")
+        .expect("A acquire must produce a permit");
+    assert_eq!(res_a.count(), 7);
+
+    let res_b_after_a = poll_once(&mut fut_b);
+    assert!(
+        res_b_after_a.is_none(),
+        "B must STILL block — FIFO consumed all 7 for A; pool is now 0"
+    );
+    assert_eq!(
+        sem.available_permits(),
+        0,
+        "pool drained by A's 7-permit acquire"
+    );
+
+    // Add 3 more — now B completes.
+    sem.add_permits(3);
+    let res_b = poll_once(&mut fut_b)
+        .expect("B must complete when 3 more permits arrive")
+        .expect("B acquire must produce a permit");
+    assert_eq!(res_b.count(), 3);
+
+    // Final pool = 0 (all 10 issued = 7 to A + 3 to B).
+    assert_eq!(sem.available_permits(), 0);
+    drop(res_a);
+    drop(res_b);
+    assert_eq!(
+        sem.available_permits(),
+        10,
+        "releasing both permits restores 10"
+    );
+}
