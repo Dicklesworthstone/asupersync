@@ -507,19 +507,27 @@ impl SymbolCancelToken {
     /// invariant requires every capability-bearing token to flow
     /// through an explicit issuance ceremony.
     ///
-    /// The fix is to gate the constructor behind
-    /// `#[cfg(any(test, feature = "test-internals"))]`. The
-    /// `test-internals` feature is the project's documented escape
-    /// hatch for test scaffolding (see Cargo.toml feature flags) —
-    /// production builds (which do NOT enable `test-internals`) lose
-    /// access to this constructor entirely, eliminating the forgery
-    /// path. Tests that need to mint synthetic tokens either:
-    ///   1. live in `#[cfg(test)]` modules inside this crate, or
-    ///   2. enable the `test-internals` feature in their Cargo deps.
-    /// Both are already the project's stated convention.
+    /// br-asupersync-evpqdt — the wm9h2a fix originally gated this
+    /// behind `#[cfg(any(test, feature = "test-internals"))]`. That
+    /// gate was ILLUSORY in default builds because Cargo.toml has
+    /// `default = ["test-internals", "proc-macros"]` — `test-internals`
+    /// is enabled by default for any consumer who adds asupersync to
+    /// their `Cargo.toml` without `default-features = false`. The
+    /// constructor remained freely callable from any external crate,
+    /// reopening the exact forgery surface wm9h2a was supposed to
+    /// close.
+    ///
+    /// The current gate is `#[cfg(test)]` only — strict in-crate
+    /// test compilation. External crates that need to mint synthetic
+    /// `SymbolCancelToken` values for their own tests must go
+    /// through the legitimate issuance ceremony
+    /// (`CancelBroadcaster::register` / `prepare_cancel`); there is
+    /// no longer any cross-crate-reachable forgery path. The only
+    /// internal callers are the wm9h2a regression test and the
+    /// listener-uniqueness test inside this file.
     #[doc(hidden)]
     #[must_use]
-    #[cfg(any(test, feature = "test-internals"))]
+    #[cfg(test)]
     pub fn new_for_test(token_id: u64, object_id: ObjectId) -> Self {
         Self {
             state: Arc::new(CancelTokenState {
