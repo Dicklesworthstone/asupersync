@@ -160,6 +160,14 @@ pub fn decode_trailers(body: &[u8]) -> Result<TrailerFrame, GrpcError> {
     let mut status_code: Option<i32> = None;
     let mut status_message = String::new();
     let mut metadata = Metadata::new();
+    // br-asupersync-nbryje: per gRPC-Web spec, exactly ONE grpc-status
+    // and at most one grpc-message MUST appear in the trailer block.
+    // Track 'seen' flags so a second occurrence becomes a protocol
+    // error rather than silently overwriting earlier values — defends
+    // against an adversarial intermediary appending 'grpc-status: 0'
+    // after a real failure status to mask errors.
+    let mut seen_status = false;
+    let mut seen_message = false;
 
     for line in text.split("\r\n") {
         if line.is_empty() {
@@ -173,9 +181,21 @@ pub fn decode_trailers(body: &[u8]) -> Result<TrailerFrame, GrpcError> {
 
         match key.as_str() {
             "grpc-status" => {
+                if seen_status {
+                    return Err(GrpcError::protocol(
+                        "duplicate grpc-status in trailer block (br-nbryje)",
+                    ));
+                }
+                seen_status = true;
                 status_code = value.parse::<i32>().ok();
             }
             "grpc-message" => {
+                if seen_message {
+                    return Err(GrpcError::protocol(
+                        "duplicate grpc-message in trailer block (br-nbryje)",
+                    ));
+                }
+                seen_message = true;
                 // Reverse the percent-encoding applied by encode_trailers
                 // (grpc-message uses percent-encoded ASCII per gRPC spec).
                 status_message = value

@@ -1296,8 +1296,12 @@ pub struct E2ePipelineReport {
     pub rewrite_extraction_equivalent: bool,
     /// Whether dynamic lab execution outcomes matched (across seeds).
     pub dynamic_outcomes_equivalent: bool,
-    /// Certificate fingerprint (FNV-1a hash).
-    pub certificate_fingerprint: u64,
+    /// Certificate fingerprint (full SHA-256 PlanHash).
+    ///
+    /// br-asupersync-eyb1s5: previously a 64-bit FNV-1a value; now the
+    /// full 256-bit SHA-256 digest. Golden tests should compare via
+    /// `to_hex()` for stable string output.
+    pub certificate_fingerprint: PlanHash,
     /// Cost of the original plan.
     pub original_cost: PlanCost,
     /// Cost of the optimized plan.
@@ -1337,7 +1341,14 @@ impl E2ePipelineReport {
             *h ^= v;
             *h = h.wrapping_mul(FNV_PRIME);
         };
-        mix(&mut h, self.certificate_fingerprint);
+        // br-asupersync-eyb1s5: certificate_fingerprint is a 32-byte
+        // SHA-256 digest; fold all 32 bytes into the rolling FNV mix used
+        // for the golden_fingerprint determinism check (this method's
+        // u64 output remains a non-cryptographic fixture identifier).
+        for byte in self.certificate_fingerprint.as_bytes() {
+            h ^= u64::from(*byte);
+            h = h.wrapping_mul(FNV_PRIME);
+        }
         mix(&mut h, self.original_cost.total());
         mix(&mut h, self.optimized_cost.total());
         mix(&mut h, self.original_trace_fingerprint);
@@ -1652,8 +1663,12 @@ mod tests {
             "F1 steps must verify"
         );
         // Golden fingerprint: pinned to detect hash/rewrite changes.
+        // br-asupersync-eyb1s5: fingerprint is now a 32-byte SHA-256 PlanHash.
         let fp1 = cert1.fingerprint();
-        assert_ne!(fp1, 0, "fingerprint must be nonzero");
+        assert!(
+            fp1.as_bytes().iter().any(|b| *b != 0),
+            "fingerprint must not be all-zero"
+        );
         // Verify the before and after hashes differ (rewrite was applied).
         assert_ne!(cert1.before_hash, cert1.after_hash);
 

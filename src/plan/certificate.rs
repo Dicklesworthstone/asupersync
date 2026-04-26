@@ -2382,15 +2382,17 @@ mod tests {
         let fingerprint1 = cert1.fingerprint();
         let fingerprint2 = cert2.fingerprint();
 
-        // Capture fingerprints as stable golden artifacts
+        // Capture fingerprints as stable golden artifacts.
+        // br-asupersync-eyb1s5: 64-character hex digest replaces the
+        // u64 16-char hex format. Snapshot files must be regenerated.
         insta::assert_snapshot!(
             "plan_certificate_join_fingerprint",
-            format!("{fingerprint1:#018x}")
+            fingerprint1.to_hex()
         );
 
         insta::assert_snapshot!(
             "plan_certificate_race_fingerprint",
-            format!("{fingerprint2:#018x}")
+            fingerprint2.to_hex()
         );
 
         assert_ne!(
@@ -2479,22 +2481,24 @@ mod tests {
 
         let minimized = cert_with_redundancy.minimize();
 
-        // Capture before and after minimization
+        // Capture before and after minimization.
+        // br-asupersync-eyb1s5: fingerprint is now a 32-byte SHA-256 hex
+        // digest. Snapshot files must be regenerated.
         insta::assert_snapshot!(
             "plan_certificate_before_minimization",
             format!(
-                "steps: {}\nfingerprint: {:#018x}",
+                "steps: {}\nfingerprint: {}",
                 cert_with_redundancy.steps.len(),
-                cert_with_redundancy.fingerprint()
+                cert_with_redundancy.fingerprint().to_hex()
             )
         );
 
         insta::assert_snapshot!(
             "plan_certificate_after_minimization",
             format!(
-                "steps: {}\nfingerprint: {:#018x}",
+                "steps: {}\nfingerprint: {}",
                 minimized.steps.len(),
-                minimized.fingerprint()
+                minimized.fingerprint().to_hex()
             )
         );
     }
@@ -2586,7 +2590,10 @@ mod tests {
             }
 
             let hash = PlanHash::of(&dag);
-            hash_outputs.push(format!("{}: {:#018x}", name, hash.value()));
+            // br-asupersync-eyb1s5: snapshot the full SHA-256 hex digest
+            // instead of a truncated u64. The snapshot file must be
+            // regenerated (cargo insta accept) once on this commit.
+            hash_outputs.push(format!("{}: {}", name, hash.to_hex()));
         }
 
         insta::assert_snapshot!("plan_certificate_hash_stability", hash_outputs.join("\n"));

@@ -48,14 +48,17 @@ fn policy_json(policy: RewritePolicy) -> Value {
 }
 
 fn certificate_json(cert: &RewriteCertificate) -> Value {
+    // br-asupersync-eyb1s5: hashes are 64-character lowercase hex strings
+    // (full SHA-256 digest) instead of u64. Golden snapshots must be
+    // regenerated; the wire format is incompatible with prior versions.
     json!({
         "version": cert.version.number(),
         "policy": policy_json(cert.policy),
-        "before_hash": cert.before_hash.value(),
-        "after_hash": cert.after_hash.value(),
+        "before_hash": cert.before_hash.to_hex(),
+        "after_hash": cert.after_hash.to_hex(),
         "before_node_count": cert.before_node_count,
         "after_node_count": cert.after_node_count,
-        "fingerprint": cert.fingerprint(),
+        "fingerprint": cert.fingerprint().to_hex(),
         "identity": cert.is_identity(),
         "steps": cert.steps.iter().map(|step| json!({
             "rule": rule_name(step.rule),
@@ -70,8 +73,8 @@ fn compact_certificate_json(compact: &CompactCertificate) -> Value {
     json!({
         "version": compact.version.number(),
         "policy_bits": compact.policy_bits,
-        "before_hash": compact.before_hash.value(),
-        "after_hash": compact.after_hash.value(),
+        "before_hash": compact.before_hash.to_hex(),
+        "after_hash": compact.after_hash.to_hex(),
         "before_node_count": compact.before_node_count,
         "after_node_count": compact.after_node_count,
         "byte_size_bound": compact.byte_size_bound(),

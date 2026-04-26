@@ -391,8 +391,8 @@ impl ExtractionCertificate {
         let actual_hash = PlanHash::of(dag);
         if self.plan_hash != actual_hash {
             return Err(ExtractionVerifyError::HashMismatch {
-                expected: self.plan_hash.value(),
-                actual: actual_hash.value(),
+                expected: self.plan_hash.to_hex(),
+                actual: actual_hash.to_hex(),
             });
         }
 
@@ -510,11 +510,14 @@ pub enum ExtractionVerifyError {
         found: u32,
     },
     /// Plan hash mismatch.
+    ///
+    /// br-asupersync-eyb1s5: hashes are the full SHA-256 digest, encoded
+    /// as a 64-character lowercase hex string.
     HashMismatch {
-        /// Expected hash.
-        expected: u64,
-        /// Actual hash.
-        actual: u64,
+        /// Expected hash (hex).
+        expected: String,
+        /// Actual hash (hex).
+        actual: String,
     },
     /// Node count mismatch.
     NodeCountMismatch {
@@ -1043,8 +1046,8 @@ mod tests {
             found: 2,
         };
         let e2 = ExtractionVerifyError::HashMismatch {
-            expected: 10,
-            actual: 20,
+            expected: "10".to_string(),
+            actual: "20".to_string(),
         };
         let e3 = ExtractionVerifyError::NodeCountMismatch {
             expected: 5,
