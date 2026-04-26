@@ -220,6 +220,20 @@ pub struct TlsConnectorBuilder {
     /// br-asupersync-v24lvi: certificate-pinning set. See
     /// [`Self::with_certificate_pins`].
     pin_set: Option<CertificatePinSet>,
+    /// br-asupersync-gq7l9i: when `true`, `with_native_roots` also
+    /// honours `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE` / `CURL_CA_BUNDLE`
+    /// / `SSL_CERT_DIR` env vars and adds every cert it finds as a
+    /// trust anchor. Default is `false` — the env-var path is a known
+    /// trust-injection vector in CI, container, and shared-host
+    /// deployments, so callers must opt in via
+    /// [`Self::enable_env_cert_loading`].
+    enable_env_certs: bool,
+    /// br-asupersync-p7369s: PEM-encoded CRL bodies the verifier will
+    /// consult when validating the peer certificate chain. When
+    /// non-empty, `build()` swaps the rustls default verifier for a
+    /// `WebPkiServerVerifier` built with these CRLs.
+    #[cfg(feature = "tls")]
+    crl_pems: Vec<Vec<u8>>,
     #[cfg(feature = "tls")]
     min_protocol: Option<rustls::ProtocolVersion>,
     #[cfg(feature = "tls")]
@@ -245,6 +259,9 @@ impl TlsConnectorBuilder {
             enable_sni: true,
             handshake_timeout: None,
             pin_set: None,
+            enable_env_certs: false,
+            #[cfg(feature = "tls")]
+            crl_pems: Vec::new(),
             #[cfg(feature = "tls")]
             min_protocol: None,
             #[cfg(feature = "tls")]
@@ -282,6 +299,21 @@ impl TlsConnectorBuilder {
     /// On macOS, this uses the system keychain.
     /// On Windows, this uses the Windows certificate store.
     ///
+    /// # Environment-variable trust anchors (br-asupersync-gq7l9i)
+    ///
+    /// `with_native_roots` does **not** consult the OpenSSL-style
+    /// `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, or
+    /// `SSL_CERT_DIR` environment variables. Honouring those vars
+    /// silently allows any process able to set the environment (a
+    /// container layer, a CI step, a sibling shell user) to inject
+    /// arbitrary CAs into the trust store — a known root cause of
+    /// supply-chain attacks. Callers who knowingly need the corporate-
+    /// proxy CA pickup must opt in by chaining
+    /// [`enable_env_cert_loading`](Self::enable_env_cert_loading)
+    /// before `with_native_roots`. When that flag is set, every file
+    /// added from an env-var path is logged at `warn!` (not `debug!`)
+    /// with the source path and rejected-vs-loaded count.
+    ///
     /// Requires the `tls-native-roots` feature.
     #[cfg(feature = "tls-native-roots")]
     pub fn with_native_roots(mut self) -> Result<Self, TlsError> {
@@ -304,12 +336,46 @@ impl TlsConnectorBuilder {
             "Loaded native root certificates"
         );
 
-        // Also load custom CA certs from SSL_CERT_FILE / SSL_CERT_DIR if set.
-        // Corporate proxies commonly require a custom CA certificate, and these
-        // env vars are the standard mechanism (supported by OpenSSL, curl, etc.).
-        self.load_env_certs();
+        // br-asupersync-gq7l9i: load custom CA certs from
+        // SSL_CERT_FILE / SSL_CERT_DIR / REQUESTS_CA_BUNDLE /
+        // CURL_CA_BUNDLE only when the caller has explicitly opted in.
+        // Default is no — silent env-var trust injection is a known
+        // supply-chain attack vector.
+        if self.enable_env_certs {
+            self.load_env_certs();
+        }
 
         Ok(self)
+    }
+
+    /// Opt in to OpenSSL-style env-var trust-anchor loading
+    /// (br-asupersync-gq7l9i).
+    ///
+    /// When enabled, the next call to
+    /// [`with_native_roots`](Self::with_native_roots) will also read
+    /// CA certs from these environment variables (in priority order):
+    ///
+    /// * `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE` / `CURL_CA_BUNDLE` —
+    ///   a single PEM bundle file
+    /// * `SSL_CERT_DIR` — a directory of `*.pem` / `*.crt` / `*.cer`
+    ///   files; each file is loaded individually
+    ///
+    /// Each candidate cert is also subjected to the
+    /// br-asupersync-0owoem `BasicConstraints CA:TRUE` gate before
+    /// insertion: leaf certs and otherwise-non-CA certs are rejected
+    /// even when present in the file.
+    ///
+    /// **Security note**: enabling this lets any caller able to set
+    /// the process environment inject arbitrary trust anchors. Use
+    /// only in deployments where the environment is part of your
+    /// trust boundary (e.g., explicitly-configured corporate-proxy
+    /// images), and prefer
+    /// [`add_root_certificate`](Self::add_root_certificate) for
+    /// known-good CA pinning.
+    #[must_use]
+    pub fn enable_env_cert_loading(mut self) -> Self {
+        self.enable_env_certs = true;
+        self
     }
 
     /// Add platform/native root certificates (fallback when feature is disabled).
@@ -320,14 +386,19 @@ impl TlsConnectorBuilder {
         ))
     }
 
-    /// Load additional CA certificates from `SSL_CERT_FILE` and `SSL_CERT_DIR`
-    /// environment variables. This supports corporate proxy environments where
-    /// a custom CA cert must be trusted.
+    /// Load additional CA certificates from the OpenSSL-style env vars.
+    ///
+    /// br-asupersync-gq7l9i: only invoked from `with_native_roots` when
+    /// `self.enable_env_certs == true` (caller-set via
+    /// [`Self::enable_env_cert_loading`]). Logs every loaded file and
+    /// loaded/rejected count at `warn!` so the trust-anchor injection
+    /// is visible in production logs.
     #[allow(dead_code)]
     fn load_env_certs(&mut self) {
-        // Check multiple env vars that various tools use for custom CA bundles.
-        // SSL_CERT_FILE is the most standard (OpenSSL), but REQUESTS_CA_BUNDLE
-        // (Python) and CURL_CA_BUNDLE (curl) are also common in corporate envs.
+        // Check multiple env vars that various tools use for custom CA
+        // bundles. SSL_CERT_FILE is the most standard (OpenSSL),
+        // REQUESTS_CA_BUNDLE (Python) and CURL_CA_BUNDLE (curl) are
+        // also common in corporate envs.
         let cert_file = std::env::var("SSL_CERT_FILE")
             .or_else(|_| std::env::var("REQUESTS_CA_BUNDLE"))
             .or_else(|_| std::env::var("CURL_CA_BUNDLE"));
@@ -335,13 +406,17 @@ impl TlsConnectorBuilder {
             let path = std::path::Path::new(&cert_file);
             if path.exists() {
                 #[allow(unused_variables)]
-                let added = self.load_pem_file(path);
+                let (loaded, rejected) = self.load_pem_file(path);
+                // br-asupersync-gq7l9i: warn level (not debug) so this
+                // shows up in default-config production logs.
                 #[cfg(feature = "tracing-integration")]
-                if added > 0 {
-                    tracing::debug!(
+                if loaded > 0 || rejected > 0 {
+                    tracing::warn!(
                         path = %cert_file,
-                        count = added,
-                        "Loaded CA certificates from SSL_CERT_FILE"
+                        loaded = loaded,
+                        rejected_non_ca = rejected,
+                        "TLS: env-var CA bundle merged into trust store \
+                         (br-asupersync-gq7l9i opt-in is active)"
                     );
                 }
             }
@@ -351,54 +426,108 @@ impl TlsConnectorBuilder {
             let dir = std::path::Path::new(&cert_dir);
             if dir.is_dir() {
                 #[allow(unused_mut, unused_variables, unused_assignments)]
-                let mut added = 0usize;
+                let mut loaded_total = 0usize;
+                #[allow(unused_mut, unused_variables, unused_assignments)]
+                let mut rejected_total = 0usize;
                 if let Ok(entries) = std::fs::read_dir(dir) {
                     for entry in entries.filter_map(Result::ok) {
                         let path = entry.path();
                         if path.is_file() {
                             if let Some(ext) = path.extension() {
                                 if ext == "pem" || ext == "crt" || ext == "cer" {
-                                    added += self.load_pem_file(&path);
+                                    let (loaded, rejected) = self.load_pem_file(&path);
+                                    loaded_total += loaded;
+                                    rejected_total += rejected;
                                 }
                             }
                         } else if path.is_dir() {
-                            // Ignore directories
+                            // Ignore subdirectories.
                         }
                     }
                 }
                 #[cfg(feature = "tracing-integration")]
-                if added > 0 {
-                    tracing::debug!(
+                if loaded_total > 0 || rejected_total > 0 {
+                    tracing::warn!(
                         path = %cert_dir,
-                        count = added,
-                        "Loaded CA certificates from SSL_CERT_DIR"
+                        loaded = loaded_total,
+                        rejected_non_ca = rejected_total,
+                        "TLS: SSL_CERT_DIR merged into trust store \
+                         (br-asupersync-gq7l9i opt-in is active)"
                     );
                 }
             }
         }
     }
 
-    /// Parse PEM-encoded certificates from a file and add them to the root store.
+    /// Parse PEM-encoded certificates from a file and add CAs to the
+    /// root store. Returns `(loaded, rejected_non_ca)`.
+    ///
+    /// br-asupersync-0owoem: previously this used a hand-rolled
+    /// splitter (`split("-----BEGIN CERTIFICATE-----")`) that did not
+    /// require line-boundary anchoring — a crafted PEM file with the
+    /// marker inside a comment could be split into spurious blocks
+    /// whose base64 decoded to attacker-chosen DER, and the resulting
+    /// `Certificate` was added to the trust store with no further
+    /// validation. Worse, a non-CA leaf certificate would be accepted
+    /// as a trust anchor (any cert it had "signed" would then
+    /// validate). The implementation below now (a) parses via
+    /// `rustls_pemfile::certs`, the same path used by
+    /// `Certificate::from_pem`, and (b) gates each candidate on the
+    /// `BasicConstraints CA:TRUE` extension via `x509-parser`. Certs
+    /// that lack the extension or carry `cA=false` are rejected and
+    /// counted in the second return value.
     #[allow(dead_code)]
-    fn load_pem_file(&mut self, path: &std::path::Path) -> usize {
+    #[cfg(feature = "tls")]
+    fn load_pem_file(&mut self, path: &std::path::Path) -> (usize, usize) {
         let Ok(pem_data) = std::fs::read(path) else {
-            return 0;
+            return (0, 0);
         };
 
-        let mut added = 0usize;
-        // Simple PEM parser: extract base64 between BEGIN/END CERTIFICATE markers
-        let pem_str = String::from_utf8_lossy(&pem_data);
-        for block in pem_str.split("-----BEGIN CERTIFICATE-----") {
-            if let Some(end_idx) = block.find("-----END CERTIFICATE-----") {
-                let base64_data = &block[..end_idx];
-                let cleaned: String = base64_data.chars().filter(|c| !c.is_whitespace()).collect();
-                if let Ok(der) = base64::engine::general_purpose::STANDARD.decode(&cleaned) {
-                    let _ = self.root_certs.add(&Certificate::from_der(der));
-                    added += 1;
-                }
+        let mut reader = std::io::BufReader::new(&pem_data[..]);
+        let der_certs: Vec<Vec<u8>> = match rustls_pemfile::certs(&mut reader)
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(certs) => certs.into_iter().map(|c| c.to_vec()).collect(),
+            Err(_e) => {
+                #[cfg(feature = "tracing-integration")]
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %_e,
+                    "TLS: PEM bundle parse failed; skipping file (br-asupersync-0owoem)"
+                );
+                return (0, 0);
+            }
+        };
+
+        let mut loaded = 0usize;
+        let mut rejected = 0usize;
+        for der in der_certs {
+            if !is_ca_certificate(&der) {
+                rejected += 1;
+                #[cfg(feature = "tracing-integration")]
+                tracing::warn!(
+                    path = %path.display(),
+                    "TLS: rejecting non-CA certificate from trust-anchor file \
+                     (basicConstraints CA:TRUE missing or absent — br-asupersync-0owoem)"
+                );
+                continue;
+            }
+            if self
+                .root_certs
+                .add(&Certificate::from_der(der))
+                .is_ok()
+            {
+                loaded += 1;
             }
         }
-        added
+        (loaded, rejected)
+    }
+
+    /// Stub for the `tls`-disabled build — env-var loading is a no-op.
+    #[allow(dead_code)]
+    #[cfg(not(feature = "tls"))]
+    fn load_pem_file(&mut self, _path: &std::path::Path) -> (usize, usize) {
+        (0, 0)
     }
 
     /// Add the standard webpki root certificates.
@@ -572,6 +701,52 @@ impl TlsConnectorBuilder {
         self
     }
 
+    /// Add a PEM-encoded Certificate Revocation List
+    /// (br-asupersync-p7369s).
+    ///
+    /// When at least one CRL is configured, `build()` constructs a
+    /// `WebPkiServerVerifier` that consults the CRLs during peer-cert
+    /// validation. A peer cert whose serial number appears in any CRL
+    /// is rejected with a typed verification error and the connection
+    /// fails before any application bytes flow.
+    ///
+    /// # Tradeoffs
+    ///
+    /// * **Freshness**: rustls only consults the CRLs that were
+    ///   present at `build()` time. CRL refresh requires constructing
+    ///   a fresh `TlsConnector`. Long-lived processes connecting to
+    ///   slowly-rotating PKIs should periodically rebuild the
+    ///   connector with a current CRL.
+    /// * **Coverage**: a CRL covers only the certs issued by the
+    ///   matching CA. Mixing CRLs from multiple CAs is supported;
+    ///   each CRL applies to its issuer. CRLs for CAs that do not
+    ///   appear in the configured roots are silently inert.
+    /// * **OCSP**: rustls 0.23 does not surface OCSP-stapling
+    ///   *enforcement*, only OCSP-response *acceptance* during the
+    ///   handshake. CRL is the more reliable revocation primitive
+    ///   here. When OCSP-must-staple is required, deploy a sidecar
+    ///   that pre-validates the OCSP response and blocklists revoked
+    ///   serials into the CRL set.
+    #[cfg(feature = "tls")]
+    pub fn with_crl_pem(mut self, pem: impl Into<Vec<u8>>) -> Self {
+        self.crl_pems.push(pem.into());
+        self
+    }
+
+    /// Add multiple PEM-encoded CRLs in one call
+    /// (br-asupersync-p7369s).
+    #[cfg(feature = "tls")]
+    pub fn with_crl_pems<I, P>(mut self, pems: I) -> Self
+    where
+        I: IntoIterator<Item = P>,
+        P: Into<Vec<u8>>,
+    {
+        for pem in pems {
+            self.crl_pems.push(pem.into());
+        }
+        self
+    }
+
     /// Build the `TlsConnector`.
     ///
     /// # Errors
@@ -645,7 +820,49 @@ impl TlsConnectorBuilder {
                 .map_err(|e| TlsError::Configuration(e.to_string()))?
         };
 
-        let builder = builder.with_root_certificates(self.root_certs.into_inner());
+        // br-asupersync-p7369s: when at least one CRL is configured,
+        // swap the rustls default verifier for a
+        // `WebPkiServerVerifier` built with the CRLs. The resulting
+        // verifier still uses the same trust roots; CRLs apply per-
+        // issuer at validation time. With no CRLs, the rustls default
+        // verifier path is used (existing behavior preserved).
+        let roots = self.root_certs.into_inner();
+        let builder = if self.crl_pems.is_empty() {
+            builder.with_root_certificates(roots)
+        } else {
+            use rustls::server::WebPkiClientVerifier as _; // ensure rustls in scope
+            let mut crl_ders: Vec<rustls::pki_types::CertificateRevocationListDer<'static>> =
+                Vec::new();
+            for pem in &self.crl_pems {
+                let mut reader = std::io::BufReader::new(&pem[..]);
+                let der_iter = rustls_pemfile::crls(&mut reader);
+                for der in der_iter {
+                    let der = der.map_err(|e| {
+                        TlsError::Configuration(format!("CRL PEM parse error: {e}"))
+                    })?;
+                    crl_ders.push(der);
+                }
+            }
+            if crl_ders.is_empty() {
+                return Err(TlsError::Configuration(
+                    "with_crl_pem called but no CRL blocks were parsed from the supplied PEM(s)"
+                        .into(),
+                ));
+            }
+            let verifier = rustls::client::WebPkiServerVerifier::builder(Arc::new(roots))
+                .with_crls(crl_ders)
+                .build()
+                .map_err(|e| TlsError::Configuration(format!("CRL verifier build: {e}")))?;
+            // The dangerous() name reflects that callers can plug in
+            // an arbitrary verifier — here we plug in webpki's own
+            // verifier with CRLs attached, which is *strictly more*
+            // strict than the default. This is the documented escape
+            // hatch for adding CRL/OCSP enforcement on top of
+            // standard validation.
+            builder
+                .dangerous()
+                .with_custom_certificate_verifier(verifier)
+        };
 
         // Set client identity if provided
         let mut config = if let Some((chain, key)) = self.client_identity {
@@ -690,6 +907,31 @@ impl TlsConnectorBuilder {
     pub fn build(self) -> Result<TlsConnector, TlsError> {
         Err(TlsError::Configuration("tls feature not enabled".into()))
     }
+}
+
+/// Return `true` iff the DER-encoded certificate bears
+/// `BasicConstraints CA:TRUE` and is therefore eligible to act as a
+/// trust anchor (br-asupersync-0owoem).
+///
+/// A cert without the BasicConstraints extension, or with `cA=false`,
+/// is **not** a CA per RFC 5280 §4.2.1.9 and must not be inserted
+/// into the root-cert store: doing so would let any cert chained
+/// underneath it be accepted by webpki — a complete trust bypass.
+/// Self-signed leaf certs (very common in misconfigured deployments)
+/// fall in this category and are rejected.
+#[cfg(feature = "tls")]
+fn is_ca_certificate(der: &[u8]) -> bool {
+    // x509-parser is already an optional dep enabled by the `tls`
+    // feature; reuse it rather than rolling a bespoke ASN.1 walker.
+    let parsed = match x509_parser::parse_x509_certificate(der) {
+        Ok((_, cert)) => cert,
+        Err(_) => return false,
+    };
+    parsed
+        .basic_constraints()
+        .ok()
+        .flatten()
+        .is_some_and(|bc| bc.value.ca)
 }
 
 #[cfg(test)]
@@ -769,12 +1011,137 @@ mod tests {
         assert!(TlsConnector::validate_domain("bücher.example").is_err());
     }
 
+    // br-asupersync-7wnl2l: previously this test asserted that
+    // `TlsConnectorBuilder::new().build()` *succeeded* with no roots
+    // configured — directly contradicting the explicit empty-roots
+    // rejection at the top of `build()` (which exists precisely so a
+    // misconfigured caller doesn't open a no-roots connection that
+    // would skip server-cert validation entirely). The test was dead
+    // (silently failing the .unwrap() in any environment that
+    // exercised it). Inverted to assert the rejection, plus a paired
+    // positive test below using the test fixture's CA.
     #[cfg(feature = "tls")]
     #[test]
-    fn test_build_empty_roots() {
-        // Should build but with a warning
-        let connector = TlsConnectorBuilder::new().build().unwrap();
+    fn test_build_empty_roots_rejected() {
+        let err = TlsConnectorBuilder::new()
+            .build()
+            .expect_err("empty roots must be rejected by build()");
+        match err {
+            TlsError::Certificate(msg) => {
+                assert!(
+                    msg.contains("no root certificates configured"),
+                    "expected empty-roots rejection message, got: {msg}"
+                );
+            }
+            other => panic!("expected TlsError::Certificate, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_build_with_test_root_succeeds() {
+        // Positive control for the empty-roots rejection above. Uses
+        // the test-fixture CA so build() succeeds. Pins the success
+        // path so a future agent removing the empty-roots check
+        // cannot land it without also breaking this test.
+        let certs = Certificate::from_pem(TEST_CERT_PEM).unwrap();
+        let connector = TlsConnectorBuilder::new()
+            .add_root_certificates(certs)
+            .build()
+            .expect("builder with one root should succeed");
         assert!(connector.config().alpn_protocols.is_empty());
+    }
+
+    // --- br-asupersync-gq7l9i: env-var trust anchors are opt-in ----
+
+    #[test]
+    fn test_env_cert_loading_disabled_by_default() {
+        // br-asupersync-gq7l9i: TlsConnectorBuilder::new() must leave
+        // env-var trust-anchor loading disabled. A caller who sets
+        // SSL_CERT_FILE in their environment must NOT have those
+        // certs silently injected; explicit opt-in via
+        // enable_env_cert_loading() is required.
+        let builder = TlsConnectorBuilder::new();
+        assert!(
+            !builder.enable_env_certs,
+            "env-var cert loading must be off by default"
+        );
+    }
+
+    #[test]
+    fn test_enable_env_cert_loading_sets_flag() {
+        // br-asupersync-gq7l9i: explicit opt-in flips the flag.
+        let builder = TlsConnectorBuilder::new().enable_env_cert_loading();
+        assert!(
+            builder.enable_env_certs,
+            "enable_env_cert_loading must flip the opt-in flag"
+        );
+    }
+
+    // --- br-asupersync-0owoem: BasicConstraints CA:TRUE gate -------
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_is_ca_certificate_rejects_self_signed_leaf() {
+        // br-asupersync-0owoem: the test fixture server cert is a
+        // *leaf* — it lacks `basicConstraints CA:TRUE` (it carries
+        // server-auth EKU and is signed by a real CA in test
+        // setups). Adding it to the trust store as a *trust anchor*
+        // would let any cert it "signed" validate, which is exactly
+        // the trust-bypass the gate prevents.
+        let certs = Certificate::from_pem(TEST_CERT_PEM).expect("parse test cert");
+        let cert = certs.first().expect("at least one cert in fixture");
+        let der: &[u8] = cert.as_der();
+        let is_ca = super::is_ca_certificate(der);
+        // The test fixture is a leaf cert (CA:FALSE or BC missing),
+        // so the gate must reject it. If a future fixture rotation
+        // ships a CA cert here, this assertion will fail loudly and
+        // surface the regression — that's the intent.
+        assert!(
+            !is_ca,
+            "test fixture leaf cert must be rejected by CA-gate (br-asupersync-0owoem); \
+             if the fixture was rotated to a CA, update this test"
+        );
+    }
+
+    // --- br-asupersync-p7369s: CRL configuration -------------------
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_with_crl_pem_with_garbage_pem_rejected_at_build() {
+        // br-asupersync-p7369s: garbage that doesn't parse as CRL
+        // PEM must surface a typed Configuration error, not a panic
+        // and not a silent skip-the-CRL.
+        let certs = Certificate::from_pem(TEST_CERT_PEM).unwrap();
+        let err = TlsConnectorBuilder::new()
+            .add_root_certificates(certs)
+            .with_crl_pem(b"not a valid CRL".to_vec())
+            .build()
+            .expect_err("garbage CRL PEM must reject at build()");
+        match err {
+            TlsError::Configuration(msg) => {
+                assert!(
+                    msg.contains("CRL"),
+                    "expected CRL-related Configuration error, got: {msg}"
+                );
+            }
+            other => panic!("expected TlsError::Configuration, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn test_no_crl_means_default_verifier_path() {
+        // br-asupersync-p7369s: callers that don't configure any CRL
+        // must continue to land on the rustls default-verifier code
+        // path (i.e., build() must not regress to requiring CRL
+        // configuration). This test pins the no-CRL no-op behaviour.
+        let certs = Certificate::from_pem(TEST_CERT_PEM).unwrap();
+        let connector = TlsConnectorBuilder::new()
+            .add_root_certificates(certs)
+            .build()
+            .expect("no-CRL build must succeed");
+        let _ = connector.config(); // smoke-check the inner config materialised
     }
 
     #[cfg(feature = "tls")]
