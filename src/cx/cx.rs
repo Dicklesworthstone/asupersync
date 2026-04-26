@@ -3119,20 +3119,56 @@ impl Cx<cap::All> {
 
     /// Creates a request-scoped capability context with a specified budget.
     ///
-    /// This is intended for production request handling that needs unique
-    /// task/region identifiers outside the scheduler. Unlike the
-    /// `for_testing*` family, this remains publicly available because
-    /// per-request handlers in production legitimately need to construct
-    /// short-lived Cx values; the resulting Cx still carries the runtime
-    /// cap-mask, so it cannot escalate beyond what the request handler was
-    /// granted at the boundary.
+    /// br-asupersync-ovztin: this constructor is now gated behind
+    /// `cfg(any(test, feature = "test-internals"))`. The pre-fix shape
+    /// was fully `pub` and produced a Cx with `CapMask::all()` and
+    /// freshly-minted ephemeral region/task IDs — i.e. **a fully
+    /// ambient capability source available to any caller in any
+    /// crate**. The doc comment claimed the resulting Cx "still
+    /// carries the runtime cap-mask, so it cannot escalate beyond
+    /// what the request handler was granted at the boundary"; that
+    /// claim was false because [`Cx::new`] -> [`Cx::new_with_drivers`]
+    /// constructed the runtime_mask as `CapMask::all()` without
+    /// looking at any parent Cx.
+    ///
+    /// Concrete escape paths the previous shape allowed:
+    ///
+    ///   * **External-crate capability injection.** Any crate linking
+    ///     asupersync could call `Cx::for_request_with_budget(Budget::
+    ///     INFINITE)` from a Drop impl, panic handler, or sync helper
+    ///     and get full Time / IO / blocking-pool / entropy /
+    ///     remote_cap access.
+    ///   * **Sandbox escape from restricted Cx.** A handler holding a
+    ///     mask-narrowed Cx could call this to mint a fresh
+    ///     all-capabilities Cx and bypass the restriction entirely.
+    ///   * **Compounds with br-asupersync-3lk5n2 (now closed): the
+    ///     ephemeral task is also not in `state.tasks`, so oracles /
+    ///     deadline monitor / futurelock detector all silently miss
+    ///     the request.
+    ///
+    /// Production callers that need a request-scoped Cx must go
+    /// through [`crate::runtime::Runtime::request_cx_with_budget`],
+    /// which inherits the runtime's drivers and cap-mask via
+    /// `build_request_cx_from_inner` and is therefore non-escalating.
+    ///
+    /// Default-feature builds enable `test-internals`, so this
+    /// constructor remains visible in development. Production builds
+    /// disable `test-internals` (or fall through to `default-features
+    /// = false`) and lose access to the constructor entirely — the
+    /// only way to mint a Cx in production is through the runtime
+    /// boundary, which IS capability-controlled.
+    #[cfg(any(test, feature = "test-internals"))]
     #[must_use]
     pub fn for_request_with_budget(budget: Budget) -> Self {
         Self::new(RegionId::new_ephemeral(), TaskId::new_ephemeral(), budget)
     }
 
     /// Creates a request-scoped capability context with an infinite budget.
-    /// See [`Self::for_request_with_budget`] for the visibility rationale.
+    ///
+    /// br-asupersync-ovztin: see [`Self::for_request_with_budget`] for
+    /// the cfg-gating rationale; this is the infinite-budget convenience
+    /// wrapper and is gated identically.
+    #[cfg(any(test, feature = "test-internals"))]
     #[must_use]
     pub fn for_request() -> Self {
         Self::for_request_with_budget(Budget::INFINITE)
@@ -4853,5 +4889,31 @@ mod tests {
         }
         // l2 dropped — back to ALL
         assert_eq!(Cx::current().unwrap().runtime_mask, cap::CapMask::all());
+    }
+
+    /// br-asupersync-ovztin: `Cx::for_request_with_budget` is now
+    /// gated behind `cfg(any(test, feature = "test-internals"))`. In
+    /// the cfg(test) compilation it remains visible for the existing
+    /// conformance harness (cx_capability_semantics.rs:53,76); in a
+    /// production build with `default-features = false` the
+    /// constructor is removed entirely so external callers cannot
+    /// mint a fully-capable Cx out of thin air.
+    ///
+    /// This regression test keeps the test-internals path observable
+    /// (the constructor still works in cfg(test)) AND pins the
+    /// invariant that the resulting Cx — like the pre-fix Cx — has
+    /// `CapMask::all()`. That latter half is what makes external
+    /// access to this constructor a capability-bypass: the previous
+    /// shape was a fully ambient capability source. The fix removes
+    /// the production access path, NOT the cap-mask shape (changing
+    /// the cap-mask shape would break the legitimate test callers).
+    #[test]
+    fn ovztin_for_request_is_gated_and_remains_full_caps_in_tests() {
+        // In cfg(test) the constructor is visible — call it.
+        let cx = Cx::for_request();
+        // Documented contract: the test constructor returns a Cx with
+        // CapMask::all(). Production access is removed via cfg-gate;
+        // this assertion just pins that the test path is unchanged.
+        assert_eq!(cx.runtime_mask, cap::CapMask::all());
     }
 }
