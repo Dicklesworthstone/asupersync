@@ -33,7 +33,7 @@
 //! ```
 
 use crate::lab::util::stack_trace;
-use crate::trace::distributed::TraceId;
+use crate::trace::distributed::DistTraceId;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -118,7 +118,7 @@ pub enum WakerDedupViolation {
         /// When the wakeup was expected to occur.
         expected_wake_at: SystemTime,
         /// Optional trace ID for correlation.
-        trace_id: Option<TraceId>,
+        trace_id: Option<DistTraceId>,
     },
     /// Waker was woken when it wasn't supposed to be (spurious wakeup)
     SpuriousWakeup {
@@ -131,7 +131,7 @@ pub enum WakerDedupViolation {
         /// Human-readable reason for the spurious wakeup.
         reason: String,
         /// Optional trace ID for correlation.
-        trace_id: Option<TraceId>,
+        trace_id: Option<DistTraceId>,
     },
     /// Waker state inconsistency between oracle tracking and actual state
     InconsistentQueuedState {
@@ -146,7 +146,7 @@ pub enum WakerDedupViolation {
         /// When the inconsistency was detected.
         detected_at: SystemTime,
         /// Optional trace ID for correlation.
-        trace_id: Option<TraceId>,
+        trace_id: Option<DistTraceId>,
     },
     /// Race condition detected between waker registration and wakeup
     RegistrationRace {
@@ -159,7 +159,7 @@ pub enum WakerDedupViolation {
         /// When the wakeup occurred.
         wakeup_time: SystemTime,
         /// Optional trace ID for correlation.
-        trace_id: Option<TraceId>,
+        trace_id: Option<DistTraceId>,
     },
     /// Waker was woken multiple times without re-registration
     DoubleWakeup {
@@ -172,7 +172,7 @@ pub enum WakerDedupViolation {
         /// When the second wakeup occurred.
         second_wake_at: SystemTime,
         /// Optional trace ID for correlation.
-        trace_id: Option<TraceId>,
+        trace_id: Option<DistTraceId>,
     },
     /// Waker was leaked (not properly cleaned up)
     WakerLeak {
@@ -185,7 +185,7 @@ pub enum WakerDedupViolation {
         /// When the leak was detected.
         detected_at: SystemTime,
         /// Optional trace ID for correlation.
-        trace_id: Option<TraceId>,
+        trace_id: Option<DistTraceId>,
     },
     /// Waker operation on unknown or already-dropped waker
     UseAfterDrop {
@@ -200,7 +200,7 @@ pub enum WakerDedupViolation {
         /// Description of the operation that was attempted.
         operation: String,
         /// Optional trace ID for correlation.
-        trace_id: Option<TraceId>,
+        trace_id: Option<DistTraceId>,
     },
 }
 
@@ -333,7 +333,7 @@ pub struct ViolationRecord {
     /// When the violation was recorded.
     pub timestamp: SystemTime,
     /// Optional trace ID for correlation across systems.
-    pub trace_id: Option<TraceId>,
+    pub trace_id: Option<DistTraceId>,
     /// Optional stack trace captured at violation time.
     pub stack_trace: Option<String>,
     /// Optional command to replay the scenario.
@@ -409,7 +409,7 @@ pub struct WakerState {
     /// When this waker was registered.
     pub registered_at: SystemTime,
     /// Optional trace ID for correlation.
-    pub trace_id: Option<TraceId>,
+    pub trace_id: Option<DistTraceId>,
     /// Current status of the waker.
     pub status: WakerStatus,
     /// When the last operation on this waker occurred.
@@ -535,7 +535,7 @@ impl WakerDedupOracle {
         waker_id: WakerId,
         channel_id: ChannelId,
         is_queued: bool,
-        trace_id: Option<TraceId>,
+        trace_id: Option<DistTraceId>,
     ) {
         if !self.config.track_queued_state {
             return;
@@ -584,7 +584,7 @@ impl WakerDedupOracle {
         &mut self,
         waker_id: WakerId,
         _reason: String,
-        trace_id: Option<TraceId>,
+        trace_id: Option<DistTraceId>,
     ) {
         if !self.config.track_wakeup_events {
             return;
@@ -632,7 +632,7 @@ impl WakerDedupOracle {
     }
 
     /// Record an actual waker wakeup event
-    pub fn on_waker_actually_woken(&mut self, waker_id: WakerId, trace_id: Option<TraceId>) {
+    pub fn on_waker_actually_woken(&mut self, waker_id: WakerId, trace_id: Option<DistTraceId>) {
         if !self.config.track_wakeup_events {
             return;
         }
@@ -727,7 +727,7 @@ impl WakerDedupOracle {
         &mut self,
         waker_id: WakerId,
         actual_queued: bool,
-        trace_id: Option<TraceId>,
+        trace_id: Option<DistTraceId>,
     ) {
         if !self.config.track_queued_state {
             return;
@@ -1171,7 +1171,7 @@ mod tests {
             channel_id: ChannelId(1),
             registered_at: SystemTime::now(),
             expected_wake_at: SystemTime::now(),
-            trace_id: Some(TraceId::new_for_test(1)),
+            trace_id: Some(DistTraceId::new_for_test(1)),
         };
 
         let record = ViolationRecord::new(violation, &config);

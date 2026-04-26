@@ -1,6 +1,6 @@
 //! Trace context that propagates with symbols.
 
-use super::id::{SymbolSpanId, TraceId};
+use super::id::{SymbolSpanId, DistTraceId};
 use crate::types::Time;
 use crate::util::DetRng;
 use core::fmt;
@@ -84,7 +84,7 @@ impl fmt::Display for RegionTag {
 /// Trace context embedded in symbol metadata.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SymbolTraceContext {
-    trace_id: TraceId,
+    trace_id: DistTraceId,
     parent_span_id: SymbolSpanId,
     span_id: SymbolSpanId,
     flags: TraceFlags,
@@ -97,7 +97,7 @@ impl SymbolTraceContext {
     /// Creates a new trace context for an object encoding operation.
     #[must_use]
     pub fn new_for_encoding(
-        trace_id: TraceId,
+        trace_id: DistTraceId,
         parent_span_id: SymbolSpanId,
         origin_region: RegionTag,
         rng: &mut DetRng,
@@ -143,7 +143,7 @@ impl SymbolTraceContext {
 
     /// Returns the trace ID.
     #[must_use]
-    pub const fn trace_id(&self) -> TraceId {
+    pub const fn trace_id(&self) -> DistTraceId {
         self.trace_id
     }
 
@@ -243,7 +243,7 @@ impl SymbolTraceContext {
             return None;
         }
 
-        let trace_id = TraceId::new(
+        let trace_id = DistTraceId::new(
             u64::from_be_bytes(data[0..8].try_into().ok()?),
             u64::from_be_bytes(data[8..16].try_into().ok()?),
         );
@@ -314,7 +314,7 @@ mod tests {
     fn trace_context_serialization_roundtrip() {
         let mut rng = DetRng::new(42);
         let ctx = SymbolTraceContext::new_for_encoding(
-            TraceId::new_for_test(1),
+            DistTraceId::new_for_test(1),
             SymbolSpanId::new_for_test(0),
             RegionTag::new("us-east-1"),
             &mut rng,
@@ -364,7 +364,7 @@ mod tests {
     fn child_context_inherits_trace_id_and_flags() {
         let mut rng = DetRng::new(100);
         let parent = SymbolTraceContext::new_for_encoding(
-            TraceId::new_for_test(42),
+            DistTraceId::new_for_test(42),
             SymbolSpanId::new_for_test(0),
             RegionTag::new("eu-west-1"),
             &mut rng,
@@ -383,7 +383,7 @@ mod tests {
     fn child_context_has_unique_span_id_and_correct_parent() {
         let mut rng = DetRng::new(200);
         let parent = SymbolTraceContext::new_for_encoding(
-            TraceId::new_for_test(7),
+            DistTraceId::new_for_test(7),
             SymbolSpanId::new_for_test(0),
             RegionTag::new("test"),
             &mut rng,
@@ -408,7 +408,7 @@ mod tests {
     fn serialization_roundtrip_empty_baggage() {
         let mut rng = DetRng::new(55);
         let ctx = SymbolTraceContext::new_for_encoding(
-            TraceId::new(0xAAAA_BBBB_CCCC_DDDD, 0x1111_2222_3333_4444),
+            DistTraceId::new(0xAAAA_BBBB_CCCC_DDDD, 0x1111_2222_3333_4444),
             SymbolSpanId::new_for_test(99),
             RegionTag::new("ap-south-1"),
             &mut rng,
@@ -431,7 +431,7 @@ mod tests {
     fn serialization_roundtrip_multiple_baggage_items() {
         let mut rng = DetRng::new(66);
         let ctx = SymbolTraceContext::new_for_encoding(
-            TraceId::new_for_test(1),
+            DistTraceId::new_for_test(1),
             SymbolSpanId::NIL,
             RegionTag::new("us-west-2"),
             &mut rng,
@@ -461,7 +461,7 @@ mod tests {
         let make_ctx = || {
             let mut rng = DetRng::new(77);
             SymbolTraceContext::new_for_encoding(
-                TraceId::new_for_test(10),
+                DistTraceId::new_for_test(10),
                 SymbolSpanId::new_for_test(5),
                 RegionTag::new("test-region"),
                 &mut rng,
@@ -489,7 +489,7 @@ mod tests {
     fn get_baggage_returns_none_for_missing_key() {
         let mut rng = DetRng::new(88);
         let ctx = SymbolTraceContext::new_for_encoding(
-            TraceId::new_for_test(1),
+            DistTraceId::new_for_test(1),
             SymbolSpanId::NIL,
             RegionTag::new("test"),
             &mut rng,
@@ -547,7 +547,7 @@ mod tests {
     fn symbol_trace_context_debug_clone_eq() {
         let mut rng = DetRng::new(99);
         let ctx = SymbolTraceContext::new_for_encoding(
-            TraceId::new_for_test(42),
+            DistTraceId::new_for_test(42),
             SymbolSpanId::NIL,
             RegionTag::new("test"),
             &mut rng,

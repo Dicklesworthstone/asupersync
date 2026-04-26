@@ -1,7 +1,7 @@
 //! In-process collector for symbol trace spans.
 
 use super::context::RegionTag;
-use super::id::TraceId;
+use super::id::DistTraceId;
 use super::span::{SymbolSpan, SymbolSpanKind, SymbolSpanStatus};
 use crate::types::Time;
 use crate::types::symbol::ObjectId;
@@ -13,7 +13,7 @@ use std::time::Duration;
 #[derive(Clone, Debug)]
 pub struct TraceRecord {
     /// Trace identifier.
-    pub trace_id: TraceId,
+    pub trace_id: DistTraceId,
     /// Associated object ID (if known).
     pub object_id: Option<ObjectId>,
     /// First time seen.
@@ -32,7 +32,7 @@ pub struct TraceRecord {
 #[derive(Clone, Debug)]
 pub struct TraceSummary {
     /// Trace ID.
-    pub trace_id: TraceId,
+    pub trace_id: DistTraceId,
     /// Object ID.
     pub object_id: Option<ObjectId>,
     /// Total span count.
@@ -63,7 +63,7 @@ pub struct TraceSummary {
 
 /// Collector for symbol-based traces.
 pub struct SymbolTraceCollector {
-    traces: RwLock<HashMap<TraceId, TraceRecord>>,
+    traces: RwLock<HashMap<DistTraceId, TraceRecord>>,
     max_traces: usize,
     max_age: Duration,
     clock_skew_tolerance: Duration,
@@ -158,13 +158,13 @@ impl SymbolTraceCollector {
 
     /// Gets a trace by ID.
     #[must_use]
-    pub fn get_trace(&self, trace_id: TraceId) -> Option<TraceRecord> {
+    pub fn get_trace(&self, trace_id: DistTraceId) -> Option<TraceRecord> {
         self.traces.read().get(&trace_id).cloned()
     }
 
     /// Gets a summary for a trace.
     #[must_use]
-    pub fn get_summary(&self, trace_id: TraceId) -> Option<TraceSummary> {
+    pub fn get_summary(&self, trace_id: DistTraceId) -> Option<TraceSummary> {
         let record = {
             let traces = self.traces.read();
             traces.get(&trace_id)?.clone()
@@ -257,7 +257,7 @@ impl SymbolTraceCollector {
 
     /// Lists active traces (not yet complete).
     #[must_use]
-    pub fn active_traces(&self) -> Vec<TraceId> {
+    pub fn active_traces(&self) -> Vec<DistTraceId> {
         self.traces
             .read()
             .iter()
@@ -268,7 +268,7 @@ impl SymbolTraceCollector {
 
     /// Lists complete traces.
     #[must_use]
-    pub fn complete_traces(&self) -> Vec<TraceId> {
+    pub fn complete_traces(&self) -> Vec<DistTraceId> {
         self.traces
             .read()
             .iter()
@@ -277,7 +277,7 @@ impl SymbolTraceCollector {
             .collect()
     }
 
-    fn evict_oldest(&self, traces: &mut HashMap<TraceId, TraceRecord>, now: Time) {
+    fn evict_oldest(&self, traces: &mut HashMap<DistTraceId, TraceRecord>, now: Time) {
         // First pass: evict oldest complete traces (cheapest to discard).
         let mut to_remove: Vec<_> = traces
             .iter()
@@ -326,7 +326,7 @@ mod tests {
     )]
     use super::*;
     use crate::trace::distributed::context::{RegionTag, SymbolTraceContext};
-    use crate::trace::distributed::id::{SymbolSpanId, TraceId};
+    use crate::trace::distributed::id::{SymbolSpanId, DistTraceId};
     use crate::trace::distributed::span::SymbolSpan;
     use crate::types::symbol::SymbolId;
     use crate::util::DetRng;
@@ -335,7 +335,7 @@ mod tests {
     fn collector_records_spans() {
         let collector = SymbolTraceCollector::new(RegionTag::new("test"));
         let mut rng = DetRng::new(42);
-        let trace_id = TraceId::new_for_test(1);
+        let trace_id = DistTraceId::new_for_test(1);
         let ctx = SymbolTraceContext::new_for_encoding(
             trace_id,
             SymbolSpanId::NIL,
@@ -354,7 +354,7 @@ mod tests {
     fn collector_detects_completion() {
         let collector = SymbolTraceCollector::new(RegionTag::new("test"));
         let mut rng = DetRng::new(7);
-        let trace_id = TraceId::new_for_test(2);
+        let trace_id = DistTraceId::new_for_test(2);
         let ctx = SymbolTraceContext::new_for_encoding(
             trace_id,
             SymbolSpanId::NIL,
@@ -375,7 +375,7 @@ mod tests {
     fn trace_summary_calculations() {
         let collector = SymbolTraceCollector::new(RegionTag::new("test"));
         let mut rng = DetRng::new(42);
-        let trace_id = TraceId::new_for_test(3);
+        let trace_id = DistTraceId::new_for_test(3);
         let object_id = ObjectId::new_for_test(3);
         let ctx = SymbolTraceContext::new_for_encoding(
             trace_id,
@@ -419,7 +419,7 @@ mod tests {
     fn trace_record_debug_clone() {
         let collector = SymbolTraceCollector::new(RegionTag::new("test"));
         let mut rng = DetRng::new(42);
-        let trace_id = TraceId::new_for_test(10);
+        let trace_id = DistTraceId::new_for_test(10);
         let ctx = SymbolTraceContext::new_for_encoding(
             trace_id,
             SymbolSpanId::NIL,
@@ -440,7 +440,7 @@ mod tests {
     fn trace_summary_debug_clone() {
         let collector = SymbolTraceCollector::new(RegionTag::new("test"));
         let mut rng = DetRng::new(42);
-        let trace_id = TraceId::new_for_test(20);
+        let trace_id = DistTraceId::new_for_test(20);
         let ctx = SymbolTraceContext::new_for_encoding(
             trace_id,
             SymbolSpanId::NIL,
@@ -472,7 +472,7 @@ mod tests {
     #[test]
     fn collector_get_nonexistent_trace() {
         let collector = SymbolTraceCollector::new(RegionTag::new("test"));
-        assert!(collector.get_trace(TraceId::new_for_test(999)).is_none());
-        assert!(collector.get_summary(TraceId::new_for_test(999)).is_none());
+        assert!(collector.get_trace(DistTraceId::new_for_test(999)).is_none());
+        assert!(collector.get_summary(DistTraceId::new_for_test(999)).is_none());
     }
 }

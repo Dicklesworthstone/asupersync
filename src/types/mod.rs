@@ -50,10 +50,12 @@ pub use id::{ObligationId, RegionId, TaskId, Time};
 //     auto-counter used purely for in-process cancellation propagation
 //     traces. No timestamp, no cross-process meaning.
 //
-//   * `crate::trace::distributed::id::TraceId` — `{high: u64, low: u64}`
+//   * `crate::trace::distributed::id::DistTraceId` — `{high: u64, low: u64}`
 //     W3C-formatted (32 hex chars) distributed trace context. Locked by
 //     a golden snapshot (`canonical_trace_id_serialization`) so the
-//     wire format cannot drift.
+//     wire format cannot drift. Renamed from `TraceId` in br-asupersync-v4az2y
+//     to remove the name collision with the canonical `franken_kernel::TraceId`
+//     re-exported just below.
 //
 // New code that wants a "TraceId" should reach for this one. Migration
 // of the two purpose-specific types is tracked under follow-up beads

@@ -31,7 +31,7 @@
 //! oracle.on_reservation_aborted(reservation_id, reason);
 //! ```
 
-use crate::trace::distributed::TraceId;
+use crate::trace::distributed::DistTraceId;
 use crate::util::stack_trace;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -111,7 +111,7 @@ pub enum ChannelAtomicityViolation {
         /// Timestamp when the reservation was created.
         created_at: SystemTime,
         /// Optional trace ID for debugging context.
-        trace_id: Option<TraceId>,
+        trace_id: Option<DistTraceId>,
     },
     /// Attempt to commit an already committed reservation
     DoubleCommit {
@@ -124,7 +124,7 @@ pub enum ChannelAtomicityViolation {
         /// Timestamp of the second (invalid) commit.
         second_commit_at: SystemTime,
         /// Optional trace ID for debugging context.
-        trace_id: Option<TraceId>,
+        trace_id: Option<DistTraceId>,
     },
     /// Attempt to abort an already aborted reservation
     DoubleAbort {
@@ -137,7 +137,7 @@ pub enum ChannelAtomicityViolation {
         /// Timestamp of the second (invalid) abort.
         second_abort_at: SystemTime,
         /// Optional trace ID for debugging context.
-        trace_id: Option<TraceId>,
+        trace_id: Option<DistTraceId>,
     },
     /// Attempt to use reservation after commit
     UseAfterCommit {
@@ -152,7 +152,7 @@ pub enum ChannelAtomicityViolation {
         /// Description of the invalid operation attempted.
         operation: String,
         /// Optional trace ID for debugging context.
-        trace_id: Option<TraceId>,
+        trace_id: Option<DistTraceId>,
     },
     /// Attempt to use reservation after abort
     UseAfterAbort {
@@ -167,7 +167,7 @@ pub enum ChannelAtomicityViolation {
         /// Description of the invalid operation attempted.
         operation: String,
         /// Optional trace ID for debugging context.
-        trace_id: Option<TraceId>,
+        trace_id: Option<DistTraceId>,
     },
     /// Wakeup lost during channel operation
     LostWakeup {
@@ -180,7 +180,7 @@ pub enum ChannelAtomicityViolation {
         /// Timestamp when the loss was detected.
         detected_at: SystemTime,
         /// Optional trace ID for debugging context.
-        trace_id: Option<TraceId>,
+        trace_id: Option<DistTraceId>,
     },
     /// Spurious wakeup without corresponding channel event
     SpuriousWakeup {
@@ -191,7 +191,7 @@ pub enum ChannelAtomicityViolation {
         /// Timestamp of the spurious wakeup.
         wakeup_at: SystemTime,
         /// Optional trace ID for debugging context.
-        trace_id: Option<TraceId>,
+        trace_id: Option<DistTraceId>,
     },
     /// Data loss detected during cancellation
     DataLossOnCancel {
@@ -202,7 +202,7 @@ pub enum ChannelAtomicityViolation {
         /// Timestamp when cancellation occurred.
         cancel_at: SystemTime,
         /// Optional trace ID for debugging context.
-        trace_id: Option<TraceId>,
+        trace_id: Option<DistTraceId>,
     },
 }
 
@@ -350,7 +350,7 @@ pub struct ViolationRecord {
     /// Timestamp when the violation was recorded.
     pub timestamp: SystemTime,
     /// Optional trace ID for correlation.
-    pub trace_id: Option<TraceId>,
+    pub trace_id: Option<DistTraceId>,
     /// Optional stack trace at violation time.
     pub stack_trace: Option<String>,
     /// Optional command to replay the violation scenario.
@@ -427,7 +427,7 @@ pub struct ReservationState {
     /// Timestamp when the reservation was created.
     pub created_at: SystemTime,
     /// Optional trace ID for debugging context.
-    pub trace_id: Option<TraceId>,
+    pub trace_id: Option<DistTraceId>,
     /// Current status of the reservation.
     pub status: ReservationStatus,
 }
@@ -467,7 +467,7 @@ pub struct WakerState {
     /// Optional timestamp when wakeup actually occurred.
     pub actual_wakeup_at: Option<SystemTime>,
     /// Optional trace ID for debugging context.
-    pub trace_id: Option<TraceId>,
+    pub trace_id: Option<DistTraceId>,
 }
 
 /// Channel Atomicity Oracle
@@ -564,7 +564,7 @@ impl ChannelAtomicityOracle {
         &mut self,
         reservation_id: ReservationId,
         channel_id: ChannelId,
-        trace_id: Option<TraceId>,
+        trace_id: Option<DistTraceId>,
     ) {
         if !self.config.track_reservations {
             return;
@@ -678,7 +678,7 @@ impl ChannelAtomicityOracle {
         &mut self,
         waker_id: WakerId,
         channel_id: ChannelId,
-        trace_id: Option<TraceId>,
+        trace_id: Option<DistTraceId>,
     ) {
         if !self.config.track_wakers {
             return;
@@ -759,7 +759,7 @@ impl ChannelAtomicityOracle {
         &mut self,
         channel_id: ChannelId,
         data_size: usize,
-        trace_id: Option<TraceId>,
+        trace_id: Option<DistTraceId>,
     ) {
         let violation = ChannelAtomicityViolation::DataLossOnCancel {
             channel_id,
@@ -1079,7 +1079,7 @@ mod tests {
             reservation_id: ReservationId(1),
             channel_id: ChannelId(1),
             created_at: SystemTime::now(),
-            trace_id: Some(TraceId::new_for_test(1)),
+            trace_id: Some(DistTraceId::new_for_test(1)),
         };
 
         let record = ViolationRecord::new(violation, &config);

@@ -1491,7 +1491,32 @@ and known limitations.
 | **Phase 3** | Actors + supervision (GenServer, links, monitors) | ✅ Complete |
 | **Phase 4** | Distributed structured concurrency | ✅ Complete |
 | **Phase 5** | DPOR + TLA+ tooling | ✅ Complete |
-| **Phase 6** | Hardening, policy gates, and adapter surface expansion | ✅ Continuous |
+| **Phase 6** | Hardening, policy gates, and adapter surface expansion | ✅ Continuous (see [Policy Gates](#phase-6-policy-gates)) |
+
+---
+
+## Phase 6 Policy Gates
+
+Phase 6 ships as a continuous hardening track rather than a one-shot release. The methodology bar is enforced at PR review time by [`.github/workflows/methodology-gates.yml`](./.github/workflows/methodology-gates.yml), which runs on every pull request targeting `main`. There are no advisory-only gates in this workflow today: every gate listed below either passes, skips its trigger condition, or fails the PR check (`exit 1`), and the summary job aggregates the results into a single comment on the PR.
+
+### Gate matrix
+
+| Gate | Trigger condition | Enforcement | Failure mode | Required artifact |
+|------|-------------------|-------------|--------------|-------------------|
+| Baseline benchmarks | Every PR to `main` | **CI-blocking** | Fails the PR if any benchmark's p50 regresses by more than **5%** vs `artifacts/baseline.json`. | `artifacts/baseline.json` (committed); criterion output uploaded as `methodology-benchmark-results` for 14 days. |
+| Flamegraph | PR changes any file under `src/runtime/scheduler/`, `src/channel/`, `src/obligation/`, `src/cancel/`, or `src/sync/` | **CI-blocking** when triggered; otherwise skipped | Fails the PR if a hot-path file changed without an accompanying flamegraph. | `artifacts/flamegraphs/pr-<N>.svg` (commit alongside the change). Generate with `cargo flamegraph --freq 997 --bench methodology_baselines -o artifacts/flamegraphs/pr-<N>.svg`. |
+| Golden checksums | Every PR to `main` | **CI-blocking** | Fails the PR on any `[GOLDEN] MISMATCH` from `cargo bench --bench golden_output`, or any non-zero exit from the integration test `cargo test --test golden_outputs`. | `artifacts/golden_checksums.json` (committed). Update intentionally with `GOLDEN_UPDATE=1 cargo bench --bench golden_output` and commit the regenerated file. |
+| Proof notes | PR changes any file under `src/obligation/` or `src/safety/`, or any `.rs` file containing an `unsafe { ... }` block | **CI-blocking** when triggered; otherwise skipped | Fails the PR if no proof note is provided, or if the proof note is shorter than **100 bytes** (sentinel for "not substantive"). | `artifacts/proof_notes/pr-<N>.md`. Must explain what changed, the invariants preserved, the safety argument for any `unsafe`, and the test coverage that backs the change. |
+
+The `summary` job (`needs: [baseline-gate, flamegraph-gate, golden-checksum-gate, proof-note-gate]`, `if: always()`) posts a single PR comment that lists the four gates with `:white_check_mark:` / `:x:` / `:fast_forward:` icons and the per-gate detail strings. The PR-check is "all green" only when every triggered gate is `success` and every untriggered gate is `skipped`. A `failure` on any gate prevents merge under the configured branch protection.
+
+### Rollout
+
+All four gates are **live today** on `pull_request` events targeting `main` — there is no staged or percentage-based rollout, and no opt-out flag. Phase 6 is "continuous" in the sense that new gates are added to this workflow as the methodology evolves; existing gates are tightened (lower regression thresholds, broader trigger directories, stricter proof-note minimums) rather than being relaxed. Two gates (flamegraph, proof note) are conditional on what the PR touches, so a PR limited to docs, configuration, or non-hot-path code typically sees those two as `skip` and only the two unconditional gates (baseline benchmarks, golden checksums) as enforcement.
+
+Concrete escape valves are limited and intentional: a benchmark regression that reflects an intentional algorithmic change is resolved by re-recording `artifacts/baseline.json` (not by waiving the gate); a golden mismatch is resolved by re-running with `GOLDEN_UPDATE=1` and committing the new checksums (not by skipping the bench); a proof note that turns out to be insufficient is resolved by extending the note (not by removing it). The infrastructure intentionally has no `[skip ci]`-style waiver.
+
+If you are landing a change that touches a hot-path or safety-critical directory, generate the artifact (flamegraph or proof note) before opening the PR — the gate fails fast and re-running CI without committing the artifact will not change the outcome.
 
 ---
 

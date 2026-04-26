@@ -255,14 +255,14 @@ mod tests {
     )]
     use super::*;
     use crate::trace::distributed::context::{RegionTag, SymbolTraceContext};
-    use crate::trace::distributed::id::{SymbolSpanId, TraceId};
+    use crate::trace::distributed::id::{SymbolSpanId, DistTraceId};
     use crate::util::DetRng;
 
     #[test]
     fn span_duration_calculates() {
         let mut rng = DetRng::new(42);
         let ctx = SymbolTraceContext::new_for_encoding(
-            TraceId::new_for_test(1),
+            DistTraceId::new_for_test(1),
             SymbolSpanId::NIL,
             RegionTag::new("test"),
             &mut rng,
@@ -278,7 +278,7 @@ mod tests {
     fn span_error_recording() {
         let mut rng = DetRng::new(7);
         let ctx = SymbolTraceContext::new_for_encoding(
-            TraceId::new_for_test(2),
+            DistTraceId::new_for_test(2),
             SymbolSpanId::NIL,
             RegionTag::new("test"),
             &mut rng,
@@ -294,7 +294,7 @@ mod tests {
     fn span_cancelled_status_transition() {
         let mut rng = DetRng::new(10);
         let ctx = SymbolTraceContext::new_for_encoding(
-            TraceId::new_for_test(3),
+            DistTraceId::new_for_test(3),
             SymbolSpanId::NIL,
             RegionTag::new("test"),
             &mut rng,
@@ -312,7 +312,7 @@ mod tests {
     fn span_dropped_status_transition() {
         let mut rng = DetRng::new(11);
         let ctx = SymbolTraceContext::new_for_encoding(
-            TraceId::new_for_test(4),
+            DistTraceId::new_for_test(4),
             SymbolSpanId::NIL,
             RegionTag::new("test"),
             &mut rng,
@@ -330,7 +330,7 @@ mod tests {
     fn span_receive_kind_and_symbol_id() {
         let mut rng = DetRng::new(12);
         let ctx = SymbolTraceContext::new_for_encoding(
-            TraceId::new_for_test(5),
+            DistTraceId::new_for_test(5),
             SymbolSpanId::NIL,
             RegionTag::new("test"),
             &mut rng,
@@ -349,7 +349,7 @@ mod tests {
     fn span_decode_has_symbol_count() {
         let mut rng = DetRng::new(13);
         let ctx = SymbolTraceContext::new_for_encoding(
-            TraceId::new_for_test(6),
+            DistTraceId::new_for_test(6),
             SymbolSpanId::NIL,
             RegionTag::new("test"),
             &mut rng,
@@ -364,7 +364,7 @@ mod tests {
     fn span_set_symbol_count() {
         let mut rng = DetRng::new(14);
         let ctx = SymbolTraceContext::new_for_encoding(
-            TraceId::new_for_test(7),
+            DistTraceId::new_for_test(7),
             SymbolSpanId::NIL,
             RegionTag::new("test"),
             &mut rng,
@@ -380,7 +380,7 @@ mod tests {
     fn span_attributes_set_and_retrieve() {
         let mut rng = DetRng::new(15);
         let ctx = SymbolTraceContext::new_for_encoding(
-            TraceId::new_for_test(8),
+            DistTraceId::new_for_test(8),
             SymbolSpanId::NIL,
             RegionTag::new("test"),
             &mut rng,
@@ -407,7 +407,7 @@ mod tests {
     fn span_attributes_overwrite_existing_key() {
         let mut rng = DetRng::new(16);
         let ctx = SymbolTraceContext::new_for_encoding(
-            TraceId::new_for_test(9),
+            DistTraceId::new_for_test(9),
             SymbolSpanId::NIL,
             RegionTag::new("test"),
             &mut rng,
@@ -428,7 +428,7 @@ mod tests {
     fn span_ok_completion_clears_in_progress() {
         let mut rng = DetRng::new(17);
         let ctx = SymbolTraceContext::new_for_encoding(
-            TraceId::new_for_test(10),
+            DistTraceId::new_for_test(10),
             SymbolSpanId::NIL,
             RegionTag::new("test"),
             &mut rng,
@@ -450,7 +450,7 @@ mod tests {
     #[test]
     fn span_context_is_accessible() {
         let mut rng = DetRng::new(18);
-        let trace_id = TraceId::new_for_test(11);
+        let trace_id = DistTraceId::new_for_test(11);
         let ctx = SymbolTraceContext::new_for_encoding(
             trace_id,
             SymbolSpanId::NIL,
@@ -490,7 +490,7 @@ mod tests {
     fn symbol_span_debug_clone() {
         let mut rng = DetRng::new(99);
         let ctx = SymbolTraceContext::new_for_encoding(
-            TraceId::new_for_test(99),
+            DistTraceId::new_for_test(99),
             SymbolSpanId::NIL,
             RegionTag::new("test"),
             &mut rng,

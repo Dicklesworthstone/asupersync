@@ -23,7 +23,7 @@ pub mod vclock;
 pub use collector::{SymbolTraceCollector, TraceRecord, TraceSummary};
 pub use context::{RegionTag, SymbolTraceContext, TraceFlags};
 pub use crdt::{GCounter, LWWRegister, MVRegister, Merge, ORSet, PNCounter};
-pub use id::{SymbolSpanId, TraceId};
+pub use id::{DistTraceId, SymbolSpanId};
 pub use lattice::{LatticeState, LeaseLatticeState, ObligationEntry, ObligationLattice};
 pub use sheaf::{
     ConsistencyReport, ConstraintViolation, NodeSnapshot, PhantomState, SagaConsistencyChecker,
