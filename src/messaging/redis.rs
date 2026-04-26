@@ -8,11 +8,12 @@ use crate::cx::Cx;
 use crate::io::{AsyncRead, AsyncWriteExt, ReadBuf};
 use crate::net::TcpStream;
 use crate::sync::{GenericPool, Pool as _, PoolConfig, PoolError, PooledResource};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::future::Future;
 use std::io;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Error type for Redis operations.
@@ -30,6 +31,19 @@ pub enum RedisError {
     InvalidUrl(String),
     /// Operation cancelled.
     Cancelled,
+    /// Pub/Sub subscriber fell behind: the configured
+    /// `pubsub_max_backlog` was reached and incoming events were
+    /// dropped to bound memory. Carries the number of events dropped
+    /// since the previous `SubscriberLag` was reported on this
+    /// subscriber. Cumulative drops over the lifetime of the
+    /// connection are available via
+    /// [`RedisPubSub::pubsub_dropped_events`].
+    /// See `RedisConfig::pubsub_max_backlog` (br-asupersync-697arj).
+    SubscriberLag {
+        /// Number of events dropped since the last time `SubscriberLag`
+        /// was returned by `next_event` on this subscriber.
+        dropped: u64,
+    },
 }
 
 impl fmt::Display for RedisError {
@@ -41,6 +55,12 @@ impl fmt::Display for RedisError {
             Self::PoolExhausted => write!(f, "Redis connection pool exhausted"),
             Self::InvalidUrl(url) => write!(f, "Invalid Redis URL: {url}"),
             Self::Cancelled => write!(f, "Redis operation cancelled"),
+            Self::SubscriberLag { dropped } => write!(
+                f,
+                "Redis pub/sub subscriber lag: {dropped} event(s) dropped since last \
+                 report (backlog cap reached; raise RedisConfig.pubsub_max_backlog \
+                 or drain next_event faster)"
+            ),
         }
     }
 }
@@ -766,6 +786,15 @@ pub struct RedisConfig {
     pub password: Option<String>,
     /// Protocol-level limits for the RESP decoder.
     pub protocol_limits: RedisProtocolLimits,
+    /// Maximum number of buffered Pub/Sub events held in memory while
+    /// the caller is between [`RedisPubSub::next_event`] polls. When
+    /// the backlog reaches this size, additional events are dropped to
+    /// bound memory and the next `next_event` call returns
+    /// [`RedisError::SubscriberLag`] carrying the number of events
+    /// dropped since the last report. Cumulative drops are also
+    /// surfaced via [`RedisPubSub::pubsub_dropped_events`] for metrics.
+    /// Default: 4096 (br-asupersync-697arj).
+    pub pubsub_max_backlog: usize,
 }
 
 impl std::fmt::Debug for RedisConfig {
@@ -790,6 +819,10 @@ impl Default for RedisConfig {
             username: None,
             password: None,
             protocol_limits: RedisProtocolLimits::default(),
+            // Default Pub/Sub backlog cap; overflow surfaces via
+            // RedisError::SubscriberLag and pubsub_dropped_events
+            // (br-asupersync-697arj).
+            pubsub_max_backlog: 4096,
         }
     }
 }
@@ -984,10 +1017,51 @@ type RedisFactory = Box<
         + Sync,
 >;
 
-/// Redis client (Phase 1: TCP + RESP decode + pooling).
+/// Maximum number of cluster redirects to follow for a single command before
+/// giving up. Bounds an adversarial / mid-resharding cluster's ability to
+/// trap a caller in a redirect loop. (br-asupersync-hzgugy)
+const MAX_REDIRECTS: u8 = 5;
+
+/// A cluster-mode redirect parsed out of a `-MOVED` or `-ASK` response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Redirect {
+    /// Permanent slot ownership change. Update the slot map and retry on
+    /// the indicated address.
+    Moved { slot: u16, addr: String },
+    /// Transient slot migration. Retry on the indicated address with the
+    /// `ASKING` command prepended; do NOT update the slot map.
+    Ask { slot: u16, addr: String },
+}
+
+/// Parse `MOVED <slot> <host>:<port>` or `ASK <slot> <host>:<port>` out of
+/// a Redis cluster redirect error message. Returns `None` if the message
+/// is not a recognized redirect.
+fn parse_redirect(msg: &str) -> Option<Redirect> {
+    let mut parts = msg.splitn(3, ' ');
+    let kind = parts.next()?;
+    let slot: u16 = parts.next()?.parse().ok()?;
+    let addr = parts.next()?.trim().to_string();
+    if addr.is_empty() {
+        return None;
+    }
+    match kind {
+        "MOVED" => Some(Redirect::Moved { slot, addr }),
+        "ASK" => Some(Redirect::Ask { slot, addr }),
+        _ => None,
+    }
+}
+
+/// Redis client (Phase 1: TCP + RESP decode + pooling; cluster-mode
+/// MOVED/ASK redirect handling per br-asupersync-hzgugy).
 pub struct RedisClient {
     config: RedisConfig,
     pool: GenericPool<RedisConnection, RedisFactory>,
+    /// Slot → node-address map maintained by `-MOVED` redirects. Shared
+    /// across all command invocations so once the cluster stabilizes
+    /// after a reshard, future commands have the freshest target on
+    /// record. Read for diagnostics today; future proactive cluster-
+    /// aware routing can use it. (br-asupersync-hzgugy)
+    slot_map: Arc<parking_lot::Mutex<HashMap<u16, String>>>,
 }
 
 impl fmt::Debug for RedisClient {
@@ -997,6 +1071,7 @@ impl fmt::Debug for RedisClient {
             .field("port", &self.config.port)
             .field("database", &self.config.database)
             .field("has_password", &self.config.password.is_some())
+            .field("known_slot_mappings", &self.slot_map.lock().len())
             .finish_non_exhaustive()
     }
 }
@@ -1016,7 +1091,21 @@ impl RedisClient {
 
         let pool = GenericPool::new(factory, PoolConfig::with_max_size(10));
 
-        Ok(Self { config, pool })
+        Ok(Self {
+            config,
+            pool,
+            slot_map: Arc::new(parking_lot::Mutex::new(HashMap::new())),
+        })
+    }
+
+    /// Snapshot of the current slot → node-address map.
+    ///
+    /// Populated by `-MOVED` redirects; entries reflect the freshest
+    /// target the cluster has reported. Empty for non-cluster
+    /// deployments or until the first redirect lands. (br-asupersync-hzgugy)
+    #[must_use]
+    pub fn slot_map_snapshot(&self) -> HashMap<u16, String> {
+        self.slot_map.lock().clone()
     }
 
     fn map_pool_error(err: PoolError) -> RedisError {
@@ -1032,6 +1121,36 @@ impl RedisClient {
         self.pool.acquire(cx).await.map_err(Self::map_pool_error)
     }
 
+    /// Open a transient connection to a redirect target. Inherits the
+    /// configured auth/database/protocol limits but retargets host/port.
+    /// IPv6 brackets are stripped at connect time. Not pooled — per-node
+    /// pooling would require multi-pool restructuring. (br-asupersync-hzgugy)
+    async fn open_redirect_connection(
+        &self,
+        target_addr: &str,
+        cx: &Cx,
+    ) -> Result<RedisConnection, RedisError> {
+        let (host, port) = target_addr.rsplit_once(':').ok_or_else(|| {
+            RedisError::Protocol(format!(
+                "redis cluster redirect address missing port: {target_addr}"
+            ))
+        })?;
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        let port: u16 = port.parse().map_err(|_| {
+            RedisError::Protocol(format!(
+                "redis cluster redirect address has invalid port: {target_addr}"
+            ))
+        })?;
+
+        let mut redirect_config = self.config.clone();
+        redirect_config.host = host.to_string();
+        redirect_config.port = port;
+
+        let mut conn = RedisConnection::connect(redirect_config).await?;
+        conn.ensure_initialized(cx).await?;
+        Ok(conn)
+    }
+
     /// Execute a raw command (string args).
     pub async fn cmd(&self, cx: &Cx, args: &[&str]) -> Result<RespValue, RedisError> {
         let mut bytes: Vec<&[u8]> = Vec::with_capacity(args.len());
@@ -1042,18 +1161,85 @@ impl RedisClient {
     }
 
     /// Execute a raw command (byte args).
+    ///
+    /// Cluster-aware: on `-MOVED <slot> <addr>` updates the slot map and
+    /// retries against `<addr>`; on `-ASK <slot> <addr>` retries against
+    /// `<addr>` after first sending an `ASKING` prefix (the slot map is
+    /// NOT updated — the migration is transient). Caps the redirect
+    /// chain at `MAX_REDIRECTS = 5` to bound an adversarial cluster's
+    /// ability to trap a caller in a loop. (br-asupersync-hzgugy)
     pub async fn cmd_bytes(&self, cx: &Cx, args: &[&[u8]]) -> Result<RespValue, RedisError> {
-        let mut conn = DiscardOnDropGuard::new(self.acquire(cx).await?);
-        match conn.exec(cx, args).await {
-            Ok(resp) => {
-                conn.return_to_pool();
-                Ok(resp)
+        // First attempt against the pooled conn for the configured node.
+        let initial_err = {
+            let mut conn = DiscardOnDropGuard::new(self.acquire(cx).await?);
+            match conn.exec(cx, args).await {
+                Ok(resp) => {
+                    conn.return_to_pool();
+                    return Ok(resp);
+                }
+                Err(RedisError::Redis(msg)) => {
+                    // Server-level error — connection is still healthy.
+                    conn.return_to_pool();
+                    msg
+                }
+                Err(e) => return Err(e),
             }
-            Err(e @ RedisError::Redis(_)) => {
-                conn.return_to_pool();
-                Err(e)
+        };
+
+        let Some(mut redirect) = parse_redirect(&initial_err) else {
+            return Err(RedisError::Redis(initial_err));
+        };
+
+        let mut redirects = 0u8;
+        loop {
+            redirects = redirects.saturating_add(1);
+            if redirects > MAX_REDIRECTS {
+                return Err(RedisError::Protocol(format!(
+                    "redis cluster redirect chain exceeded maximum of {MAX_REDIRECTS} hops; \
+                     last redirect target: {redirect:?}"
+                )));
             }
-            Err(e) => Err(e),
+
+            let target_addr = match &redirect {
+                Redirect::Moved { addr, .. } | Redirect::Ask { addr, .. } => addr.clone(),
+            };
+            let mut redirect_conn = self.open_redirect_connection(&target_addr, cx).await?;
+
+            let attempt = match &redirect {
+                Redirect::Moved { slot, addr } => {
+                    // Permanent reshard: record the new owner before issuing.
+                    self.slot_map.lock().insert(*slot, addr.clone());
+                    redirect_conn.exec_no_init(cx, args).await
+                }
+                Redirect::Ask { .. } => {
+                    // Transient migration: prepend ASKING (one-shot
+                    // permission for the next command). Slot map unchanged.
+                    match redirect_conn.exec_no_init(cx, &[b"ASKING"]).await {
+                        Ok(RespValue::SimpleString(ref s)) if s == "OK" => {
+                            redirect_conn.exec_no_init(cx, args).await
+                        }
+                        Ok(other) => Err(RedisError::Protocol(format!(
+                            "redis ASKING returned unexpected response: {other:?}"
+                        ))),
+                        Err(e) => Err(e),
+                    }
+                }
+            };
+
+            // Drop the transient connection back to the OS.
+            let _ = redirect_conn.stream.shutdown(std::net::Shutdown::Both);
+
+            match attempt {
+                Ok(resp) => return Ok(resp),
+                Err(RedisError::Redis(msg)) => {
+                    if let Some(next) = parse_redirect(&msg) {
+                        redirect = next;
+                        continue;
+                    }
+                    return Err(RedisError::Redis(msg));
+                }
+                Err(e) => return Err(e),
+            }
         }
     }
 
@@ -1546,6 +1732,19 @@ pub struct RedisPubSub {
     patterns: Vec<String>,
     pending_events: VecDeque<PubSubEvent>,
     poisoned: bool,
+    /// Cumulative count of events dropped because `pending_events`
+    /// reached `config.pubsub_max_backlog`. Monotonic over the lifetime
+    /// of this subscriber. Surfaced to callers via
+    /// [`pubsub_dropped_events`](Self::pubsub_dropped_events) for
+    /// metrics. (br-asupersync-697arj.)
+    pubsub_dropped_events: u64,
+    /// Snapshot of `pubsub_dropped_events` at the most recent
+    /// `RedisError::SubscriberLag` report. Used so that each overflow
+    /// burst surfaces exactly once and the caller can compute the
+    /// delta `pubsub_dropped_events - pubsub_lag_reported` if it later
+    /// wants to confirm no further drops occurred between the lag
+    /// being surfaced and the next read.
+    pubsub_lag_reported: u64,
 }
 
 struct PubSubControlGuard<'a> {
@@ -1624,6 +1823,8 @@ impl RedisPubSub {
             patterns: Vec::new(),
             pending_events: VecDeque::new(),
             poisoned: false,
+            pubsub_dropped_events: 0,
+            pubsub_lag_reported: 0,
         })
     }
 
@@ -1639,10 +1840,38 @@ impl RedisPubSub {
     }
 
     fn push_pending_event(&mut self, event: PubSubEvent) {
-        const MAX_PENDING_EVENTS: usize = 4096;
-        if self.pending_events.len() < MAX_PENDING_EVENTS {
+        // Use the configured backlog cap (default 4096) instead of a
+        // const so production tuning can raise it for slow consumers.
+        // Dropping is still bounded — we increment a counter and let
+        // next_event() surface a `SubscriberLag` error so the silent
+        // data loss the original implementation produced becomes loud
+        // (br-asupersync-697arj).
+        let cap = self.config.pubsub_max_backlog;
+        if cap > 0 && self.pending_events.len() < cap {
             self.pending_events.push_back(event);
+            return;
         }
+        self.pubsub_dropped_events = self.pubsub_dropped_events.saturating_add(1);
+        crate::tracing_compat::warn!(
+            backlog = self.pending_events.len(),
+            cap = cap,
+            cumulative_dropped = self.pubsub_dropped_events,
+            channel_count = self.channels.len(),
+            pattern_count = self.patterns.len(),
+            "redis pubsub backlog full; event dropped — raise \
+             RedisConfig.pubsub_max_backlog or drain next_event faster"
+        );
+    }
+
+    /// Returns the cumulative count of Pub/Sub events that were dropped
+    /// because [`RedisConfig::pubsub_max_backlog`] was reached.
+    /// Intended as a metric: SREs can poll this for an at-most-once
+    /// observability signal independent of the per-call
+    /// [`RedisError::SubscriberLag`] surface returned by
+    /// [`next_event`](Self::next_event). (br-asupersync-697arj.)
+    #[must_use]
+    pub fn pubsub_dropped_events(&self) -> u64 {
+        self.pubsub_dropped_events
     }
 
     fn decode_text(value: RespValue, field: &str) -> Result<String, RedisError> {
@@ -1982,8 +2211,31 @@ impl RedisPubSub {
     }
 
     /// Receive the next Pub/Sub event on this connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RedisError::SubscriberLag`] (carrying the number of
+    /// events dropped since the last lag report) when the configured
+    /// backlog cap [`RedisConfig::pubsub_max_backlog`] has been reached
+    /// since the previous successful poll. The error is delivered
+    /// before any further events so the caller learns about the gap
+    /// before consuming the next message. Calling `next_event` again
+    /// after handling the lag continues delivery from the current
+    /// backlog head. (br-asupersync-697arj.)
     pub async fn next_event(&mut self, cx: &Cx) -> Result<PubSubEvent, RedisError> {
         self.ensure_live()?;
+
+        // Surface backlog overflow before the next event so the gap is
+        // observable. Each overflow burst surfaces exactly once: we
+        // bump pubsub_lag_reported to the current cumulative count.
+        let new_drops = self
+            .pubsub_dropped_events
+            .saturating_sub(self.pubsub_lag_reported);
+        if new_drops > 0 {
+            self.pubsub_lag_reported = self.pubsub_dropped_events;
+            return Err(RedisError::SubscriberLag { dropped: new_drops });
+        }
+
         if let Some(event) = self.pending_events.pop_front() {
             return Ok(event);
         }
