@@ -121,6 +121,22 @@ pub trait EpochCleanupIntegration {
     fn is_epoch_gc_enabled(&self) -> bool;
 }
 
+#[inline]
+fn try_defer_epoch_cleanup(
+    epoch_gc: Option<&EpochGC>,
+    work: CleanupWork,
+) -> Result<(), CleanupWork> {
+    match epoch_gc {
+        Some(epoch_gc) => epoch_gc.defer_cleanup(work),
+        None => Err(work),
+    }
+}
+
+#[inline]
+fn epoch_gc_enabled(epoch_gc: Option<&EpochGC>, config_enabled: bool) -> bool {
+    config_enabled && epoch_gc.is_some()
+}
+
 // ============================================================================
 // Obligation Table Integration
 // ============================================================================
@@ -195,11 +211,7 @@ impl ObligationTableEpochGC {
 
 impl EpochCleanupIntegration for ObligationTableEpochGC {
     fn try_defer_cleanup(&self, work: CleanupWork) -> Result<(), CleanupWork> {
-        if let Some(ref epoch_gc) = self.epoch_gc {
-            epoch_gc.defer_cleanup(work)
-        } else {
-            Err(work)
-        }
+        try_defer_epoch_cleanup(self.epoch_gc.as_deref(), work)
     }
 
     fn direct_cleanup_fallback(&self, work: CleanupWork) {
@@ -209,7 +221,7 @@ impl EpochCleanupIntegration for ObligationTableEpochGC {
     }
 
     fn is_epoch_gc_enabled(&self) -> bool {
-        self.config.enable_obligation_gc && self.epoch_gc.is_some()
+        epoch_gc_enabled(self.epoch_gc.as_deref(), self.config.enable_obligation_gc)
     }
 }
 
@@ -293,11 +305,7 @@ impl IODriverWakerEpochGC {
 
 impl EpochCleanupIntegration for IODriverWakerEpochGC {
     fn try_defer_cleanup(&self, work: CleanupWork) -> Result<(), CleanupWork> {
-        if let Some(ref epoch_gc) = self.epoch_gc {
-            epoch_gc.defer_cleanup(work)
-        } else {
-            Err(work)
-        }
+        try_defer_epoch_cleanup(self.epoch_gc.as_deref(), work)
     }
 
     fn direct_cleanup_fallback(&self, work: CleanupWork) {
@@ -307,7 +315,7 @@ impl EpochCleanupIntegration for IODriverWakerEpochGC {
     }
 
     fn is_epoch_gc_enabled(&self) -> bool {
-        self.config.enable_waker_gc && self.epoch_gc.is_some()
+        epoch_gc_enabled(self.epoch_gc.as_deref(), self.config.enable_waker_gc)
     }
 }
 
@@ -391,11 +399,7 @@ impl RegionStateEpochGC {
 
 impl EpochCleanupIntegration for RegionStateEpochGC {
     fn try_defer_cleanup(&self, work: CleanupWork) -> Result<(), CleanupWork> {
-        if let Some(ref epoch_gc) = self.epoch_gc {
-            epoch_gc.defer_cleanup(work)
-        } else {
-            Err(work)
-        }
+        try_defer_epoch_cleanup(self.epoch_gc.as_deref(), work)
     }
 
     fn direct_cleanup_fallback(&self, work: CleanupWork) {
@@ -409,7 +413,7 @@ impl EpochCleanupIntegration for RegionStateEpochGC {
     }
 
     fn is_epoch_gc_enabled(&self) -> bool {
-        self.config.enable_region_gc && self.epoch_gc.is_some()
+        epoch_gc_enabled(self.epoch_gc.as_deref(), self.config.enable_region_gc)
     }
 }
 
@@ -506,11 +510,7 @@ impl TimerEpochGC {
 
 impl EpochCleanupIntegration for TimerEpochGC {
     fn try_defer_cleanup(&self, work: CleanupWork) -> Result<(), CleanupWork> {
-        if let Some(ref epoch_gc) = self.epoch_gc {
-            epoch_gc.defer_cleanup(work)
-        } else {
-            Err(work)
-        }
+        try_defer_epoch_cleanup(self.epoch_gc.as_deref(), work)
     }
 
     fn direct_cleanup_fallback(&self, work: CleanupWork) {
@@ -524,7 +524,7 @@ impl EpochCleanupIntegration for TimerEpochGC {
     }
 
     fn is_epoch_gc_enabled(&self) -> bool {
-        self.config.enable_timer_gc && self.epoch_gc.is_some()
+        epoch_gc_enabled(self.epoch_gc.as_deref(), self.config.enable_timer_gc)
     }
 }
 
@@ -629,11 +629,7 @@ impl ChannelEpochGC {
 
 impl EpochCleanupIntegration for ChannelEpochGC {
     fn try_defer_cleanup(&self, work: CleanupWork) -> Result<(), CleanupWork> {
-        if let Some(ref epoch_gc) = self.epoch_gc {
-            epoch_gc.defer_cleanup(work)
-        } else {
-            Err(work)
-        }
+        try_defer_epoch_cleanup(self.epoch_gc.as_deref(), work)
     }
 
     fn direct_cleanup_fallback(&self, work: CleanupWork) {
@@ -648,7 +644,7 @@ impl EpochCleanupIntegration for ChannelEpochGC {
     }
 
     fn is_epoch_gc_enabled(&self) -> bool {
-        self.config.enable_channel_gc && self.epoch_gc.is_some()
+        epoch_gc_enabled(self.epoch_gc.as_deref(), self.config.enable_channel_gc)
     }
 }
 
