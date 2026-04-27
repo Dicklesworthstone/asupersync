@@ -384,6 +384,16 @@ test = false
 doc = false
 bench = false
 
+# br-asupersync-t374gm — structured fuzzing for certificate pinning
+# validation in CertificatePinSet plus the builder/connector attachment
+# paths behind with_certificate_pins()/with_pin_set().
+[[bin]]
+name = "tls_cert_pinning"
+path = "fuzz_targets/tls_cert_pinning.rs"
+test = false
+doc = false
+bench = false
+
 [[bin]]
 name = "fuzz_postgres_scram_auth"
 path = "fuzz_targets/postgres_scram_auth.rs"
