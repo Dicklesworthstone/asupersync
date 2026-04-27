@@ -107,7 +107,7 @@ We only use **Cargo** in this project, NEVER any other package manager.
 - **Edition:** Rust 2024 (nightly required — see `rust-toolchain.toml`)
 - **Dependency versions:** Explicit versions for stability; keep the set minimal
 - **Configuration:** Cargo.toml workspace with members pattern
-- **Unsafe code:** Denied by default (`#![deny(unsafe_code)]`) — specific modules that require unsafe (e.g., epoll reactor FFI) can use `#[allow(unsafe_code)]`
+- **Unsafe code:** Denied by default (`#![deny(unsafe_code)]`) — specific modules **or functions** that require unsafe (e.g., epoll reactor FFI, the env-var setter calls in `runtime/builder.rs`, GF(256) SIMD kernels in `raptorq/gf256.rs`) can use `#[allow(unsafe_code)]` at file scope (`#![...]`) or at item scope (`#[...]` on the enclosing fn / impl). Per-function allow is preferred when the unsafe surface is narrow — it keeps the override visible at the actual unsafe block instead of hiding it behind a top-of-file pragma. (br-asupersync-f9i00q)
 
 ### Async Runtime: THIS IS IT (NO TOKIO)
 
@@ -516,7 +516,7 @@ asupersync/
 
 ### Key Design Decisions
 
-- **`#![deny(unsafe_code)]`** with per-module `#[allow(unsafe_code)]` where required (e.g., `pool.rs` for `unsafe impl Send`)
+- **`#![deny(unsafe_code)]`** with per-module OR per-function `#[allow(unsafe_code)]` where required (e.g., `pool.rs` for `unsafe impl Send` — file scope; `runtime/builder.rs` for env-var unsafe — fn scope) (br-asupersync-f9i00q)
 - **Lock ordering enforcement** with `ShardGuard` variants and label system (23 tests)
 - **Channel waker dedup** pattern: `Arc<AtomicBool>` on mpsc `SendWaiter`, broadcast, and watch `WatchWaiter`
 - **`ShardedState`** with `ContendedMutex` for independent locking across task/region/obligation tables
