@@ -206,6 +206,9 @@ impl QuicTlsMachine {
         if phase == self.remote.phase {
             return Ok(KeyUpdateEvent::NoChange);
         }
+        if self.remote.generation > 0 && !phase {
+            return Err(QuicTlsError::StalePeerKeyPhase(phase));
+        }
         self.remote.phase = phase;
         self.remote.generation += 1;
         Ok(KeyUpdateEvent::RemoteUpdateAccepted {
@@ -335,6 +338,28 @@ mod tests {
         let evt = m.on_peer_key_phase(false).expect("same phase");
         assert_eq!(evt, KeyUpdateEvent::NoChange);
         assert!(!m.remote_key_phase());
+    }
+
+    #[test]
+    fn stale_peer_key_phase_rollback_is_rejected() {
+        let mut m = QuicTlsMachine::new();
+        m.on_handshake_keys_available().expect("handshake");
+        m.on_1rtt_keys_available().expect("1rtt");
+        m.on_handshake_confirmed().expect("confirmed");
+
+        let evt = m.on_peer_key_phase(true).expect("first update");
+        assert_eq!(
+            evt,
+            KeyUpdateEvent::RemoteUpdateAccepted {
+                new_phase: true,
+                generation: 1,
+            }
+        );
+
+        let err = m.on_peer_key_phase(false).expect_err("rollback must fail");
+        assert_eq!(err, QuicTlsError::StalePeerKeyPhase(false));
+        assert!(m.remote_key_phase());
+        assert_eq!(m.remote.generation, 1);
     }
 
     #[test]
