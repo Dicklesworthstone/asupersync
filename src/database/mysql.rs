@@ -4084,6 +4084,20 @@ pub fn fuzz_parse_ok_packet_fields(data: &[u8]) -> Result<(u64, u16), MySqlError
     MySqlConnection::parse_ok_packet(data).map(|packet| (packet.affected_rows, packet.status_flags))
 }
 
+#[doc(hidden)]
+pub fn fuzz_decode_packet_header(
+    header: [u8; 4],
+    expected_seq: u8,
+) -> Result<(u32, u8), MySqlError> {
+    MySqlConnection::decode_packet_header(header, expected_seq)
+}
+
+#[doc(hidden)]
+#[must_use]
+pub fn fuzz_parse_error_packet(data: &[u8]) -> MySqlError {
+    MySqlConnection::parse_error(data)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(

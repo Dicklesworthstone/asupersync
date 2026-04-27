@@ -182,6 +182,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "mysql_packet_header_error"
+path = "fuzz_targets/mysql_packet_header_error.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_postgres_wire_protocol"
 path = "fuzz_targets/postgres_wire_protocol.rs"
 test = false
