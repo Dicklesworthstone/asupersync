@@ -3054,9 +3054,12 @@ mod tests {
 
             // After wait(), the process should be reaped (not zombie)
             // Sending signal 0 should fail with ESRCH (No such process)
-            let process_gone = unsafe {
-                libc::kill(pid.cast_signed(), 0) == -1 && *libc::__errno_location() == libc::ESRCH
-            };
+            // SAFETY: kill(pid, 0) is the standard "is this PID still alive"
+            // probe — it does not signal anything, just returns ESRCH if the
+            // PID is gone. last_os_error() reads errno portably across glibc
+            // (__errno_location) and FreeBSD libc (__error).
+            let process_gone = unsafe { libc::kill(pid.cast_signed(), 0) == -1 }
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
 
             crate::assert_with_log!(
                 process_gone,
