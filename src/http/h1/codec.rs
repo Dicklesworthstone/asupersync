@@ -378,8 +378,13 @@ fn validate_request_target(method: &Method, uri: &str) -> Result<(), HttpError> 
         if scheme.is_empty() || !scheme.chars().all(|c| c.is_ascii_alphabetic()) {
             return Err(HttpError::BadRequestLine);
         }
-        // absolute-form MUST have an authority
-        if rest.is_empty() {
+        // absolute-form MUST have a non-empty authority. RFC 3986 defines
+        // authority = [userinfo "@"] host [":" port], and RFC 9112 §3.2.2
+        // requires it. `rest` starts with '/' or '?' or '#' only when the
+        // authority is empty (e.g. "http:///path", "http://?q", "http://#f");
+        // reject those shapes. (br-asupersync-w6u4cn)
+        let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+        if authority_end == 0 {
             return Err(HttpError::BadRequestLine);
         }
         return Ok(());
@@ -1334,9 +1339,7 @@ mod tests {
         // Head with Transfer-Encoding: chunked, then a single chunk of 4
         // bytes containing a bare 0x0D.
         let mut data = Vec::new();
-        data.extend_from_slice(
-            b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n",
-        );
+        data.extend_from_slice(b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n");
         data.extend_from_slice(b"4\r\n");
         data.extend_from_slice(&[0x42, 0x0D, 0x44, 0x45]);
         data.extend_from_slice(b"\r\n0\r\n\r\n");
@@ -1501,6 +1504,44 @@ mod tests {
         assert_eq!(method, Method::Get);
         assert_eq!(uri, "/fast");
         assert_eq!(version, Version::Http11);
+    }
+
+    /// br-asupersync-w6u4cn: absolute-form (RFC 9112 §3.2.2) MUST have a
+    /// non-empty authority. `http:///path` parses cleanly under split_once
+    /// but has no authority and must be rejected; per-RFC the authority is
+    /// the substring of `rest` before the first '/', '?', or '#'.
+    #[test]
+    fn parse_request_line_absolute_form_rejects_empty_authority() {
+        // Empty authority shapes — must all reject.
+        let empty = [
+            "GET http:/// HTTP/1.1",
+            "GET http:///path HTTP/1.1",
+            "GET http://?query HTTP/1.1",
+            "GET http://#fragment HTTP/1.1",
+            "GET http:// HTTP/1.1",
+        ];
+        for line in empty {
+            assert!(
+                matches!(
+                    parse_request_line_bytes(line.as_bytes()),
+                    Err(HttpError::BadRequestLine)
+                ),
+                "expected BadRequestLine for {line:?}"
+            );
+        }
+
+        // Positive controls — well-formed absolute-form must still parse.
+        let ok = [
+            "GET http://host/path HTTP/1.1",
+            "GET http://host:8080/path HTTP/1.1",
+            "GET http://user@host/p HTTP/1.1",
+            "GET http://host HTTP/1.1",
+            "GET https://host/p?q=1 HTTP/1.1",
+        ];
+        for line in ok {
+            let parsed = parse_request_line_bytes(line.as_bytes());
+            assert!(parsed.is_ok(), "expected Ok for {line:?}, got {parsed:?}");
+        }
     }
 
     #[test]
