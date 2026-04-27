@@ -56,12 +56,34 @@ impl HalfCloseGoldenTester {
             Err(_) => false,
         };
 
+        // br-asupersync-njo37t: actually probe the post-shutdown write
+        // path instead of hardcoding `false`. A transport wrapper that
+        // silently dropped shutdown(Write) (or whose Drop / wrapper
+        // re-enabled the write half) used to satisfy the golden
+        // because `local_can_write` was a literal. Now we observe.
+        // Per RFC 9293 §3.10.4 / POSIX shutdown(2): writes attempted
+        // after shutdown(SHUT_WR) MUST fail. On Linux + non-blocking
+        // we expect Err(BrokenPipe) (or in races where the FIN has
+        // not yet been ACKed and the send buffer is full,
+        // Err(WouldBlock) — which still means the write did not
+        // succeed). Either Err counts as "cannot write".
+        let post_shutdown_write = client.write(b"post-shutdown-write-probe");
+        let local_can_write = post_shutdown_write.is_ok();
+        let error = if local_can_write {
+            // The probe wrote bytes after shutdown(Write) — that's
+            // the regression we want to surface, and the golden
+            // string (which pins `err:none`) will fail loudly.
+            Some("shutdown(Write) still allowed local writes".to_string())
+        } else {
+            None
+        };
+
         Ok(HalfCloseResult {
             operation: "shutdown_write".to_string(),
             peer_observes_eof: server_eof,
             local_can_read: client_can_read,
-            local_can_write: false, // Should not be able to write after shutdown(Write)
-            error: None,
+            local_can_write,
+            error,
         })
     }
 
@@ -69,18 +91,45 @@ impl HalfCloseGoldenTester {
     fn test_shutdown_read_discards_data(&self, _test_name: &str) -> io::Result<HalfCloseResult> {
         let (mut client, mut server) = self.create_connected_tcp_pair()?;
 
-        // Server sends data before client shuts down read
+        // Server sends data before client shuts down read. Linux retains
+        // pre-shutdown bytes already in the receive buffer (POSIX leaves
+        // this implementation-defined), so the invariant we want to check
+        // is "data the peer writes *after* our shutdown(Read) is not
+        // delivered" — not "the kernel discards already-buffered bytes".
         let test_data = b"test data before shutdown";
         let _ = server.write(test_data);
+
+        // Drain anything already in flight before the shutdown so the
+        // post-shutdown probe is unambiguous. The drain is best-effort:
+        // WouldBlock means the data hasn't arrived yet, which is fine —
+        // the post-shutdown probe will still flip if delivery sneaks
+        // through.
+        let mut drain_buf = [0u8; 64];
+        let mut drain_attempts = 0;
+        while drain_attempts < 32 {
+            match client.read(&mut drain_buf) {
+                Ok(0) => break,
+                Ok(_) => {} // pre-shutdown bytes consumed
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(_) => break,
+            }
+            drain_attempts += 1;
+        }
 
         // Client shuts down read side
         client.shutdown(Shutdown::Read)?;
 
-        // Server sends more data after client shutdown(Read)
+        // Server sends more data after client shutdown(Read). Allow the
+        // packet to traverse loopback before probing — without this the
+        // probe would see WouldBlock simply because data hasn't arrived,
+        // not because shutdown is enforcing the invariant.
         let more_data = b"data after shutdown read";
         let _write_success = server.write(more_data).is_ok();
+        std::thread::sleep(Duration::from_millis(10));
 
-        // Client should not receive any data after shutdown(Read)
+        // Client should not receive any data after shutdown(Read).
         let mut buf = [0u8; 64];
         let client_reads_data = match client.read(&mut buf) {
             Ok(0) => false,                                       // EOF is expected behavior
