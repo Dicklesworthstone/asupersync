@@ -35,38 +35,24 @@ impl Decoder for BytesCodec {
     }
 }
 
-impl Encoder<Bytes> for BytesCodec {
-    type Error = io::Error;
+macro_rules! impl_bytes_encoder {
+    ($($item:ty),+ $(,)?) => {
+        $(
+            impl Encoder<$item> for BytesCodec {
+                type Error = io::Error;
 
-    #[inline]
-    fn encode(&mut self, item: Bytes, dst: &mut BytesMut) -> Result<(), io::Error> {
-        dst.reserve(item.len());
-        dst.put_slice(&item);
-        Ok(())
-    }
+                #[inline]
+                fn encode(&mut self, item: $item, dst: &mut BytesMut) -> Result<(), io::Error> {
+                    dst.reserve(item.len());
+                    dst.put_slice(&item);
+                    Ok(())
+                }
+            }
+        )+
+    };
 }
 
-impl Encoder<BytesMut> for BytesCodec {
-    type Error = io::Error;
-
-    #[inline]
-    fn encode(&mut self, item: BytesMut, dst: &mut BytesMut) -> Result<(), io::Error> {
-        dst.reserve(item.len());
-        dst.put_slice(&item);
-        Ok(())
-    }
-}
-
-impl Encoder<Vec<u8>> for BytesCodec {
-    type Error = io::Error;
-
-    #[inline]
-    fn encode(&mut self, item: Vec<u8>, dst: &mut BytesMut) -> Result<(), io::Error> {
-        dst.reserve(item.len());
-        dst.put_slice(&item);
-        Ok(())
-    }
-}
+impl_bytes_encoder!(Bytes, BytesMut, Vec<u8>);
 
 #[cfg(test)]
 mod tests {
