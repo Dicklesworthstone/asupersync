@@ -194,12 +194,13 @@ pub async fn mpsc_stress_test(
                     sent, recv_count, violations
                 );
 
-                total_messages += sent;
                 total_violations += violations;
                 max_cancellation_rate = max_cancellation_rate.max(cancel_prob);
                 rounds_completed += 1;
 
-                if !consistency_ok {
+                if consistency_ok {
+                    total_messages += sent;
+                } else {
                     total_violations += 1;
                     eprintln!("CONSISTENCY FAILURE in round {}", round + 1);
                 }
