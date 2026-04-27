@@ -39,10 +39,21 @@ struct FuzzInput {
     source_blocks: u8,
     tail_trim: u16,
     repair_symbols: u8,
+    validation_mode: ValidationMode,
     param_mode: ParamMode,
     symbol_mode: SymbolMode,
     reorder: ReorderMode,
     target_index: u16,
+}
+
+#[derive(Arbitrary, Debug, Clone, Copy, PartialEq, Eq)]
+enum ValidationMode {
+    DecodePath,
+    EmptyObjectZeroLayout,
+    EmptyObjectSentinelBlock,
+    EmptyObjectInvalidLayout,
+    MaxObjectAtLimit,
+    MaxObjectOverflow,
 }
 
 #[derive(Arbitrary, Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +105,11 @@ fn execute(input: FuzzInput) {
     let symbol_size = u16::from(input.symbol_size);
     let max_block_size = usize::from(input.target_k) * usize::from(symbol_size);
     if max_block_size == 0 {
+        return;
+    }
+
+    if input.validation_mode != ValidationMode::DecodePath {
+        exercise_validation_only(input, symbol_size, max_block_size);
         return;
     }
 
@@ -202,7 +218,8 @@ fn execute(input: FuzzInput) {
             SymbolAcceptResult::Rejected(RejectReason::SymbolSizeMismatch) => {
                 saw_symbol_size_mismatch = true;
             }
-            SymbolAcceptResult::Rejected(RejectReason::InvalidMetadata) => {
+            SymbolAcceptResult::Rejected(RejectReason::InvalidMetadata)
+            | SymbolAcceptResult::Rejected(RejectReason::InconsistentEquations) => {
                 saw_invalid_metadata = true;
             }
             SymbolAcceptResult::BlockComplete { .. }
@@ -242,6 +259,57 @@ fn execute(input: FuzzInput) {
         assert_eq!(decoded, payload, "decoded payload drifted from original");
     } else {
         let _ = pipeline.into_data().err();
+    }
+}
+
+fn exercise_validation_only(input: FuzzInput, symbol_size: u16, max_block_size: usize) {
+    let object_id = ObjectId::new_for_test(input.object_seed);
+    let mut pipeline = make_pipeline(symbol_size, max_block_size);
+    let max_total = max_block_size.saturating_mul(usize::from(u8::MAX) + 1);
+    let max_blocks = u16::from(u8::MAX) + 1;
+
+    let (params, should_accept) = match input.validation_mode {
+        ValidationMode::DecodePath => unreachable!("decode path is handled earlier"),
+        ValidationMode::EmptyObjectZeroLayout => {
+            (ObjectParams::new(object_id, 0, symbol_size, 0, 0), true)
+        }
+        ValidationMode::EmptyObjectSentinelBlock => {
+            (ObjectParams::new(object_id, 0, symbol_size, 1, 0), true)
+        }
+        ValidationMode::EmptyObjectInvalidLayout => {
+            (ObjectParams::new(object_id, 0, symbol_size, 2, 1), false)
+        }
+        ValidationMode::MaxObjectAtLimit => (
+            ObjectParams::new(
+                object_id,
+                max_total as u64,
+                symbol_size,
+                max_blocks,
+                input.target_k,
+            ),
+            true,
+        ),
+        ValidationMode::MaxObjectOverflow => (
+            ObjectParams::new(
+                object_id,
+                max_total.saturating_add(1) as u64,
+                symbol_size,
+                max_blocks,
+                input.target_k,
+            ),
+            false,
+        ),
+    };
+
+    let result = pipeline.set_object_params(params);
+    if should_accept {
+        result.expect("boundary object params should be accepted");
+    } else {
+        let err = result.expect_err("invalid boundary object params should be rejected");
+        assert!(
+            matches!(err, DecodingError::InconsistentMetadata { .. }),
+            "unexpected boundary validation error: {err:?}"
+        );
     }
 }
 
@@ -344,13 +412,12 @@ fn apply_symbol_mutation(
 
     let idx = usize::from(target_index) % symbols.len();
     let target = symbols[idx].clone();
-    let mut replacement = target.clone();
 
     match mode {
         SymbolMode::None => {}
         SymbolMode::Duplicate => symbols.push(target),
         SymbolMode::OutOfLayoutSbn => {
-            replacement = Symbol::new(
+            let replacement = Symbol::new(
                 SymbolId::new(target.object_id(), params.source_blocks as u8, target.esi()),
                 target.data().to_vec(),
                 target.kind(),
@@ -358,7 +425,7 @@ fn apply_symbol_mutation(
             symbols[idx] = replacement;
         }
         SymbolMode::RepairEsiOverflow => {
-            replacement = Symbol::new(
+            let replacement = Symbol::new(
                 SymbolId::new(target.object_id(), target.sbn(), u32::MAX),
                 target.data().to_vec(),
                 SymbolKind::Repair,
@@ -366,7 +433,7 @@ fn apply_symbol_mutation(
             symbols[idx] = replacement;
         }
         SymbolMode::SourceEsiOutOfRange => {
-            replacement = Symbol::new(
+            let replacement = Symbol::new(
                 SymbolId::new(
                     target.object_id(),
                     target.sbn(),
@@ -378,7 +445,7 @@ fn apply_symbol_mutation(
             symbols[idx] = replacement;
         }
         SymbolMode::WrongObjectId => {
-            replacement = Symbol::new(
+            let replacement = Symbol::new(
                 SymbolId::new(
                     ObjectId::new_for_test(target.object_id().low().wrapping_add(1)),
                     target.sbn(),
@@ -391,7 +458,8 @@ fn apply_symbol_mutation(
         }
         SymbolMode::TruncatePayload => {
             let keep = target.len().saturating_sub(1);
-            replacement = Symbol::new(target.id(), target.data()[..keep].to_vec(), target.kind());
+            let replacement =
+                Symbol::new(target.id(), target.data()[..keep].to_vec(), target.kind());
             symbols[idx] = replacement;
         }
         SymbolMode::ToggleKind => {
@@ -399,7 +467,7 @@ fn apply_symbol_mutation(
                 SymbolKind::Source => SymbolKind::Repair,
                 SymbolKind::Repair => SymbolKind::Source,
             };
-            replacement = Symbol::new(target.id(), target.data().to_vec(), toggled);
+            let replacement = Symbol::new(target.id(), target.data().to_vec(), toggled);
             symbols[idx] = replacement;
         }
     }
