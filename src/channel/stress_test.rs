@@ -446,14 +446,16 @@ pub async fn watch_stress_test() -> Result<(), Box<dyn std::error::Error>> {
         // Collect results from watchers
         for handle in watchers {
             let (watcher_id, updates_seen, last_value) = handle.await;
-            println!(
-                "Watcher {}: saw {} updates, last value {}",
-                watcher_id, updates_seen, last_value
+            tracing::debug!(
+                watcher_id,
+                updates_seen,
+                last_value,
+                "watch_stress_test: watcher result"
             );
             assert!(last_value > 0, "Watcher should see some updates");
         }
 
-        println!("Watch stress test: sent {} updates", sent);
+        tracing::info!(sent, "watch_stress_test: completed");
     });
 
     Ok(())
