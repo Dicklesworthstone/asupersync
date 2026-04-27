@@ -44,8 +44,13 @@ pub mod pool;
 
 pub use body::{Body, Empty, Frame, Full, HeaderMap, HeaderName, HeaderValue, SizeHint};
 pub use h1::http_client::HttpClientBuilder;
-#[cfg(feature = "http3")]
-pub use h3::H3Error;
+// br-asupersync-um5wbj: H3Error is the public-facing alias for
+// H3NativeError; expose it unconditionally (was previously gated behind
+// `feature = "http3"` while H3NativeError was unconditional, producing
+// surface inconsistency under non-default feature configs where one
+// name was reachable and the other was not). Both names now resolve to
+// the same type regardless of feature flags.
+pub use h3_native::H3NativeError as H3Error;
 pub use h3_native::{
     H3ConnectionConfig, H3ConnectionState, H3ControlState, H3EndpointRole,
     H3Frame as NativeH3Frame, H3NativeError, H3PseudoHeaders, H3QpackMode, H3RequestHead,
