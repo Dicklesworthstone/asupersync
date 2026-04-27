@@ -1518,7 +1518,6 @@ mod tests {
         assert_eq!(err.code, ErrorCode::ProtocolError);
     }
 
-    #[test]
     /// br-asupersync-ujytci: HEADERS PADDED+PRIORITY with BOTH a self-
     /// dependency AND a padding-overflow must surface the connection-level
     /// PROTOCOL_ERROR (padding) and NOT the stream-level error
@@ -1543,7 +1542,7 @@ mod tests {
             10, // pad_length = 10 (overflows)
             0, 0, 0, 1,  // dependency = 1 (self-dep — would be stream error if reached)
             16, // weight
-            0, // 1 byte of "header block" — far less than pad_length=10
+            0,  // 1 byte of "header block" — far less than pad_length=10
         ]);
         let err = HeadersFrame::parse(&header, payload).expect_err("must reject");
         assert_eq!(err.code, ErrorCode::ProtocolError);
@@ -1574,8 +1573,8 @@ mod tests {
         // Post-pad-len-byte: 8 bytes. Priority consumes 5, leaving 3 bytes
         // (1 header block + 2 padding). pad_length=2 fits.
         let payload = Bytes::from_static(&[
-            2,    // pad_length = 2
-            0, 0, 0, 5, // dependency = 5 (≠ stream_id = 1)
+            2, // pad_length = 2
+            0, 0, 0, 5,    // dependency = 5 (≠ stream_id = 1)
             8,    // weight
             0xFE, // 1 byte "header block"
             0, 0, // padding (2 bytes, all zero)
