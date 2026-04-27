@@ -78,14 +78,11 @@ impl SymbolAssigner {
 
     /// Full replication: every replica gets all symbols.
     fn assign_full(symbols: &[Symbol], replicas: &[ReplicaInfo], k: u16) -> Vec<ReplicaAssignment> {
+        let k_usize = k as usize;
         let all_indices: Vec<usize> = (0..symbols.len()).collect();
         replicas
             .iter()
-            .map(|r| ReplicaAssignment {
-                replica_id: r.id.clone(),
-                symbol_indices: all_indices.clone(),
-                can_decode: symbols.len() >= k as usize,
-            })
+            .map(|r| ReplicaAssignment::from_indices(r, all_indices.clone(), k_usize))
             .collect()
     }
 
@@ -95,6 +92,7 @@ impl SymbolAssigner {
         replicas: &[ReplicaInfo],
         k: u16,
     ) -> Vec<ReplicaAssignment> {
+        let k_usize = k as usize;
         let n = replicas.len();
         let mut assignments: Vec<Vec<usize>> = vec![Vec::new(); n];
 
@@ -105,14 +103,7 @@ impl SymbolAssigner {
         replicas
             .iter()
             .enumerate()
-            .map(|(i, r)| {
-                let indices = &assignments[i];
-                ReplicaAssignment {
-                    replica_id: r.id.clone(),
-                    symbol_indices: indices.clone(),
-                    can_decode: indices.len() >= k as usize,
-                }
-            })
+            .map(|(i, r)| ReplicaAssignment::from_indices(r, assignments[i].clone(), k_usize))
             .collect()
     }
 
@@ -172,13 +163,7 @@ impl SymbolAssigner {
                 }
 
                 let symbol_indices: Vec<usize> = indices.into_iter().collect();
-                let can_decode = symbol_indices.len() >= k_usize;
-
-                ReplicaAssignment {
-                    replica_id: r.id.clone(),
-                    can_decode,
-                    symbol_indices,
-                }
+                ReplicaAssignment::from_indices(r, symbol_indices, k_usize)
             })
             .collect()
     }
@@ -218,12 +203,11 @@ impl SymbolAssigner {
             .iter()
             .enumerate()
             .map(|(replica_idx, replica)| {
-                let indices = &assignments[replica_idx];
-                ReplicaAssignment {
-                    replica_id: replica.id.clone(),
-                    symbol_indices: indices.clone(),
-                    can_decode: indices.len() >= k as usize,
-                }
+                ReplicaAssignment::from_indices(
+                    replica,
+                    assignments[replica_idx].clone(),
+                    k as usize,
+                )
             })
             .collect()
     }
@@ -242,6 +226,16 @@ pub struct ReplicaAssignment {
     pub symbol_indices: Vec<usize>,
     /// Whether this replica can decode independently.
     pub can_decode: bool,
+}
+
+impl ReplicaAssignment {
+    fn from_indices(replica: &ReplicaInfo, symbol_indices: Vec<usize>, k_usize: usize) -> Self {
+        Self {
+            replica_id: replica.id.clone(),
+            can_decode: symbol_indices.len() >= k_usize,
+            symbol_indices,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
