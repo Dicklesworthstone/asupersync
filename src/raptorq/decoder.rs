@@ -1964,7 +1964,6 @@ impl InactivationDecoder {
                     None
                 }
             })
-            .copied()
             .collect();
 
         if unsolved.is_empty() {
@@ -2247,7 +2246,6 @@ impl InactivationDecoder {
                     None
                 }
             })
-            .copied()
             .collect();
 
         if unsolved.is_empty() {
@@ -2269,7 +2267,7 @@ impl InactivationDecoder {
         // potentially-fallible validation step. The trace must describe the
         // decoder's intent — what it inactivated — even if we fail-closed on
         // RHS width drift without mutating decoder state. Mutations to
-        // `state.inactive_cols` and `state.active_cols` are deferred until
+        // `state.column_states` updates are deferred until
         // after validation succeeds so callers can roll back deterministically.
         for &col in &unsolved {
             trace.record_inactivation(col);
@@ -4293,14 +4291,19 @@ mod tests {
         right_col: usize,
     ) -> DecoderState {
         let equation = Equation::new(vec![left_col, right_col], vec![Gf256::ONE, Gf256::ONE]);
-        let active_cols = [left_col, right_col].into_iter().collect();
+        let mut column_states = vec![ColumnState::Active; params.l];
+        // Other columns are solved/inactive, leaving only left_col and right_col active
+        for i in 0..params.l {
+            if i != left_col && i != right_col {
+                column_states[i] = ColumnState::Solved;
+            }
+        }
         DecoderState {
             params: params.clone(),
             equations: vec![equation.clone(), equation],
             rhs: vec![vec![0x11; symbol_size], vec![0x22; symbol_size]],
             solved: vec![None; params.l],
-            active_cols,
-            inactive_cols: BTreeSet::new(),
+            column_states,
             stats: DecodeStats::default(),
         }
     }
@@ -4312,14 +4315,19 @@ mod tests {
         right_col: usize,
     ) -> DecoderState {
         let equation = Equation::new(vec![left_col, right_col], vec![Gf256::ONE, Gf256::ONE]);
-        let active_cols = [left_col, right_col].into_iter().collect();
+        let mut column_states = vec![ColumnState::Active; params.l];
+        // Other columns are solved/inactive, leaving only left_col and right_col active
+        for i in 0..params.l {
+            if i != left_col && i != right_col {
+                column_states[i] = ColumnState::Solved;
+            }
+        }
         DecoderState {
             params: params.clone(),
             equations: vec![equation],
             rhs: vec![vec![0x11; symbol_size]],
             solved: vec![None; params.l],
-            active_cols,
-            inactive_cols: BTreeSet::new(),
+            column_states,
             stats: DecodeStats::default(),
         }
     }
@@ -4335,14 +4343,19 @@ mod tests {
             Equation::new(vec![left_col, middle_col], vec![Gf256::ONE, Gf256::ONE]);
         let eq_middle_right =
             Equation::new(vec![middle_col, right_col], vec![Gf256::ONE, Gf256::ONE]);
-        let active_cols = [left_col, middle_col, right_col].into_iter().collect();
+        let mut column_states = vec![ColumnState::Active; params.l];
+        // Other columns are solved/inactive, leaving only left_col, middle_col, and right_col active
+        for i in 0..params.l {
+            if i != left_col && i != middle_col && i != right_col {
+                column_states[i] = ColumnState::Solved;
+            }
+        }
         DecoderState {
             params: params.clone(),
             equations: vec![eq_left_middle, eq_middle_right],
             rhs: vec![vec![0x11; symbol_size], vec![0x22; symbol_size]],
             solved: vec![None; params.l],
-            active_cols,
-            inactive_cols: BTreeSet::new(),
+            column_states,
             stats: DecodeStats::default(),
         }
     }
@@ -4356,7 +4369,13 @@ mod tests {
         let eq_left = Equation::new(vec![left_col], vec![Gf256::ONE]);
         let eq_mix = Equation::new(vec![left_col, right_col], vec![Gf256::ONE, Gf256::ONE]);
         let eq_right = Equation::new(vec![right_col], vec![Gf256::ONE]);
-        let active_cols = [left_col, right_col].into_iter().collect();
+        let mut column_states = vec![ColumnState::Active; params.l];
+        // Other columns are solved/inactive, leaving only left_col and right_col active
+        for i in 0..params.l {
+            if i != left_col && i != right_col {
+                column_states[i] = ColumnState::Solved;
+            }
+        }
         DecoderState {
             params: params.clone(),
             equations: vec![eq_left, eq_mix, eq_right],
@@ -4366,8 +4385,7 @@ mod tests {
                 vec![0x20; symbol_size],
             ],
             solved: vec![None; params.l],
-            active_cols,
-            inactive_cols: BTreeSet::new(),
+            column_states,
             stats: DecodeStats::default(),
         }
     }
@@ -4381,7 +4399,13 @@ mod tests {
         let eq_left = Equation::new(vec![left_col], vec![Gf256::ONE]);
         let eq_right = Equation::new(vec![right_col], vec![Gf256::ONE]);
         let eq_mix = Equation::new(vec![left_col, right_col], vec![Gf256::ONE, Gf256::ONE]);
-        let active_cols = [left_col, right_col].into_iter().collect();
+        let mut column_states = vec![ColumnState::Active; params.l];
+        // Other columns are solved/inactive, leaving only left_col and right_col active
+        for i in 0..params.l {
+            if i != left_col && i != right_col {
+                column_states[i] = ColumnState::Solved;
+            }
+        }
         DecoderState {
             params: params.clone(),
             equations: vec![eq_left, eq_right, eq_mix],
@@ -4391,8 +4415,7 @@ mod tests {
                 vec![0x31; symbol_size], // 0x10 ^ 0x20 = 0x30 => contradiction
             ],
             solved: vec![None; params.l],
-            active_cols,
-            inactive_cols: BTreeSet::new(),
+            column_states,
             stats: DecodeStats::default(),
         }
     }
@@ -4410,7 +4433,13 @@ mod tests {
             terms: Vec::new(),
             used: false,
         };
-        let active_cols = [left_col, right_col].into_iter().collect();
+        let mut column_states = vec![ColumnState::Active; params.l];
+        // Other columns are solved/inactive, leaving only left_col and right_col active
+        for i in 0..params.l {
+            if i != left_col && i != right_col {
+                column_states[i] = ColumnState::Solved;
+            }
+        }
         DecoderState {
             params: params.clone(),
             equations: vec![eq_left, eq_right, eq_empty],
@@ -4420,8 +4449,7 @@ mod tests {
                 vec![empty_rhs_byte; symbol_size],
             ],
             solved: vec![None; params.l],
-            active_cols,
-            inactive_cols: BTreeSet::new(),
+            column_states,
             stats: DecodeStats::default(),
         }
     }
@@ -4445,13 +4473,20 @@ mod tests {
             rhs.push(vec![(i as u8) + 1; symbol_size]);
         }
 
+        let mut column_states = vec![ColumnState::Active; params.l];
+        // Only the specified range of columns should be active
+        for i in 0..params.l {
+            if i < start_col || i >= start_col + width {
+                column_states[i] = ColumnState::Solved;
+            }
+        }
+
         DecoderState {
             params: params.clone(),
             equations,
             rhs,
             solved: vec![None; params.l],
-            active_cols: cols.into_iter().collect(),
-            inactive_cols: BTreeSet::new(),
+            column_states,
             stats: DecodeStats::default(),
         }
     }
@@ -4472,15 +4507,51 @@ mod tests {
             rhs.push(vec![rhs_byte; symbol_size]);
         }
 
+        let mut column_states = vec![ColumnState::Active; params.l];
+        // Only the specified range of columns should be active
+        for i in 0..params.l {
+            if i < start_col || i >= start_col + width {
+                column_states[i] = ColumnState::Solved;
+            }
+        }
+
         DecoderState {
             params: params.clone(),
             equations,
             rhs,
             solved: vec![None; params.l],
-            active_cols: cols.into_iter().collect(),
-            inactive_cols: BTreeSet::new(),
+            column_states,
             stats: DecodeStats::default(),
         }
+    }
+
+    // Helper functions for test compatibility with old BTreeSet-based API
+    fn active_cols(state: &DecoderState) -> BTreeSet<usize> {
+        state.column_states
+            .iter()
+            .enumerate()
+            .filter_map(|(col, &state_val)| {
+                if state_val == ColumnState::Active {
+                    Some(col)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn inactive_cols(state: &DecoderState) -> BTreeSet<usize> {
+        state.column_states
+            .iter()
+            .enumerate()
+            .filter_map(|(col, &state_val)| {
+                if state_val == ColumnState::Inactive {
+                    Some(col)
+                } else {
+                    None
+                }
+            })
+            .collect()
     }
 
     #[test]
@@ -4664,13 +4735,13 @@ mod tests {
         let params = decoder.params().clone();
         let mut state = make_underdetermined_dense_core_state(&params, 16, 3, 7);
         let initial_rhs = state.rhs.clone();
-        let initial_active = state.active_cols.clone();
+        let initial_active = active_cols(&state);
 
         let err = decoder.inactivate_and_solve(&mut state).unwrap_err();
         assert_eq!(err, DecodeError::SingularMatrix { row: 7 });
         assert_eq!(state.rhs, initial_rhs);
-        assert_eq!(state.active_cols, initial_active);
-        assert!(state.inactive_cols.is_empty());
+        assert_eq!(active_cols(&state), initial_active);
+        assert!(inactive_cols(&state).is_empty());
     }
 
     #[test]
@@ -4679,7 +4750,7 @@ mod tests {
         let params = decoder.params().clone();
         let mut state = make_underdetermined_dense_core_state(&params, 16, 3, 7);
         let initial_rhs = state.rhs.clone();
-        let initial_active = state.active_cols.clone();
+        let initial_active = active_cols(&state);
         let mut trace = EliminationTrace::default();
 
         let err = decoder
@@ -4687,8 +4758,8 @@ mod tests {
             .unwrap_err();
         assert_eq!(err, DecodeError::SingularMatrix { row: 7 });
         assert_eq!(state.rhs, initial_rhs);
-        assert_eq!(state.active_cols, initial_active);
-        assert!(state.inactive_cols.is_empty());
+        assert_eq!(active_cols(&state), initial_active);
+        assert!(inactive_cols(&state).is_empty());
         assert_eq!(trace.inactive_cols, vec![3, 7]);
     }
 
@@ -4698,7 +4769,7 @@ mod tests {
         let params = decoder.params().clone();
         let mut state = make_rank_deficient_state(&params, 16, 3, 7);
         let initial_rhs = state.rhs.clone();
-        let initial_active = state.active_cols.clone();
+        let initial_active = active_cols(&state);
 
         let err = decoder.inactivate_and_solve(&mut state).unwrap_err();
         assert_eq!(err, DecodeError::SingularMatrix { row: 7 });
@@ -4707,11 +4778,11 @@ mod tests {
             "dense-failure cleanup must restore RHS rows taken into the dense core"
         );
         assert_eq!(
-            state.active_cols, initial_active,
+            active_cols(&state), initial_active,
             "dense-failure cleanup must reactivate unsolved columns for postmortem inspection"
         );
         assert!(
-            state.inactive_cols.is_empty(),
+            inactive_cols(&state).is_empty(),
             "dense-failure cleanup must not leak inactive-column bookkeeping"
         );
     }

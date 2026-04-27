@@ -27,11 +27,13 @@ use asupersync::lab::runtime::LabRuntime;
 use asupersync::runtime::scheduler::three_lane::{ThreeLaneScheduler, ThreeLaneWorker};
 use asupersync::runtime::{RuntimeState, TaskTable};
 use asupersync::sync::ContendedMutex;
+use asupersync::time::{TimerDriverHandle, VirtualClock};
 use asupersync::types::{TaskId, Time};
 
 /// Test harness for scheduler starvation testing
 struct StarvationTestHarness {
     lab_runtime: LabRuntime,
+    scheduler_clock: Arc<VirtualClock>,
     scheduler: ThreeLaneScheduler,
     /// Workers owned by the harness so phase1/phase2 simulations reuse the
     /// same worker set. `ThreeLaneScheduler::take_workers()` is one-shot
@@ -66,6 +68,13 @@ impl StarvationTestHarness {
         let lab_runtime = LabRuntime::new(config);
 
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let scheduler_clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+        {
+            let mut guard = state.lock().expect("lock state");
+            guard.set_timer_driver(TimerDriverHandle::with_virtual_clock(
+                scheduler_clock.clone(),
+            ));
+        }
         let task_table = Arc::new(ContendedMutex::new("task_table", TaskTable::new()));
         let mut scheduler = ThreeLaneScheduler::new_with_options_and_task_table(
             worker_count,
@@ -85,12 +94,18 @@ impl StarvationTestHarness {
 
         Self {
             lab_runtime,
+            scheduler_clock,
             scheduler,
             workers,
             state,
             task_table,
             cancel_streak_limit,
         }
+    }
+
+    fn advance_virtual_time(&mut self, nanos: u64) {
+        self.lab_runtime.advance_time(nanos);
+        self.scheduler_clock.advance(nanos);
     }
 
     /// Seed a specific worker's local `PriorityScheduler` ready lane.
@@ -180,6 +195,36 @@ impl StarvationTestHarness {
     fn is_cancel_task(task_id: TaskId) -> bool {
         task_id.arena_index().generation() == 0
     }
+}
+
+#[test]
+fn lab_runtime_cancel_promotion_preserves_wait_history() {
+    let mut harness = StarvationTestHarness::new(1, 4);
+    let task = TaskId::new_for_test(9_000, 1);
+
+    harness.workers[0].schedule_local(task, 40);
+    harness.advance_virtual_time(200);
+
+    let before = harness.workers[0]
+        .starvation_stats()
+        .oldest_tracked_task
+        .expect("ready task should be tracked before promotion");
+    assert_eq!(before.task_id, task);
+    assert_eq!(before.current_lane, 2);
+    assert_eq!(before.wait_time_ns, 200);
+
+    harness.workers[0].schedule_local_cancel(task, 120);
+    harness.advance_virtual_time(50);
+
+    let after = harness.workers[0]
+        .starvation_stats()
+        .oldest_tracked_task
+        .expect("promoted task should remain tracked");
+    assert_eq!(after.task_id, task);
+    assert_eq!(after.priority, 120);
+    assert_eq!(after.current_lane, 0);
+    assert_eq!(after.wait_time_ns, 250);
+    assert_eq!(after.total_wait_time_ns, 250);
 }
 
 /// Statistics collector for scheduler behavior analysis

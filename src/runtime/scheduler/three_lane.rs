@@ -1821,6 +1821,14 @@ impl TaskStarvationInfo {
         }
     }
 
+    fn refresh_queue_membership(&mut self, priority: u8, current_time_ns: u64, lane: u8) {
+        self.priority = priority;
+        self.current_lane = lane;
+        self.total_wait_time_ns = self
+            .total_wait_time_ns
+            .max(self.current_wait_time_ns(current_time_ns));
+    }
+
     fn record_skip(&mut self, current_time_ns: u64) {
         self.skip_count = self.skip_count.saturating_add(1);
         self.last_skip_time_ns = current_time_ns;
@@ -1969,6 +1977,9 @@ impl FairnessMonitor {
     }
 
     /// Records a task entering a queue for starvation tracking.
+    ///
+    /// If the task is already being tracked, preserve its accumulated wait/skip
+    /// history and only refresh the current lane + priority metadata.
     pub fn record_task_enqueue(
         &mut self,
         task_id: TaskId,
@@ -1977,6 +1988,11 @@ impl FairnessMonitor {
         lane: u8,
     ) {
         if !self.config.enable_per_task_tracking {
+            return;
+        }
+
+        if let Some(info) = self.tracked_tasks.get_mut(&task_id) {
+            info.refresh_queue_membership(priority, current_time_ns, lane);
             return;
         }
 
@@ -7731,6 +7747,31 @@ mod tests {
         assert_eq!(oldest.skip_count, 1);
         assert_eq!(oldest.wait_time_ns, 250);
         assert_eq!(oldest.total_wait_time_ns, 250);
+    }
+
+    #[test]
+    fn fairness_monitor_reenqueue_preserves_starvation_history() {
+        let mut monitor = FairnessMonitor::with_defaults();
+        let blocked = TaskId::new_for_test(34, 0);
+        let executing = TaskId::new_for_test(35, 0);
+
+        monitor.record_task_enqueue(blocked, 40, 1_000, 2);
+        monitor.record_task_skip(blocked, executing, 10, 1_200);
+
+        // Promote the still-queued task into the cancel lane. This must not
+        // reset the original enqueue timestamp or skip history.
+        monitor.record_task_enqueue(blocked, 200, 1_250, 0);
+
+        let stats = monitor.starvation_stats(1_300);
+        let oldest = stats
+            .oldest_tracked_task
+            .expect("promoted task should remain tracked");
+        assert_eq!(oldest.task_id, blocked);
+        assert_eq!(oldest.priority, 200);
+        assert_eq!(oldest.current_lane, 0);
+        assert_eq!(oldest.skip_count, 1);
+        assert_eq!(oldest.wait_time_ns, 300);
+        assert_eq!(oldest.total_wait_time_ns, 300);
     }
 
     #[test]
