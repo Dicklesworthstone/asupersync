@@ -324,14 +324,20 @@ impl Header {
 struct DynamicTableEntry {
     name: std::sync::Arc<str>,
     value: std::sync::Arc<str>,
+    /// Monotonic generation assigned at insert time. Used by the side
+    /// indices (see `DynamicTable`) to recover an entry's current
+    /// position in O(1) without walking `entries`. See
+    /// `DynamicTable::index_from_generation` for the position formula.
+    generation: u64,
 }
 
 impl DynamicTableEntry {
     /// Construct from owned Strings, paying the allocation once into Arc.
-    fn from_strings(name: String, value: String) -> Self {
+    fn from_strings(name: String, value: String, generation: u64) -> Self {
         Self {
             name: std::sync::Arc::from(name.into_boxed_str()),
             value: std::sync::Arc::from(value.into_boxed_str()),
+            generation,
         }
     }
 
@@ -351,6 +357,106 @@ impl DynamicTableEntry {
     }
 }
 
+/// Side indices for O(1) dynamic-table lookups.
+///
+/// br-asupersync-4pshog: previously `find`/`find_name` walked `entries`
+/// linearly on every encoded header, costing
+/// `O(headers × table_size)` per request. The two HashMaps below let
+/// `find` and `find_name` resolve the matching entry in expected O(1),
+/// trading a few KiB of extra memory for the win.
+///
+/// Both maps store **generations**, not positions, because positions
+/// shift on `push_front`. A generation is the monotonic
+/// `insert_count` value at the moment the entry was inserted; it never
+/// changes. We recover the entry's current 0-indexed position via
+/// `i = (insert_count - 1) - generation` (see
+/// `DynamicTable::index_from_generation`). When the table is mutated:
+///
+/// - **insert** (push_front): assign a new generation = old
+///   `insert_count`, increment `insert_count`, then push the
+///   generation onto the **front** of each side-index `VecDeque`.
+///   Newest entry has the largest generation, so it sits at front.
+/// - **evict** (pop_back): the entry being removed always has the
+///   smallest generation among entries with the same (name, value)
+///   and the smallest among those with the same name (FIFO order),
+///   so we pop from the **back** of the relevant `VecDeque`s. The
+///   `debug_assert_eq!` in `pop_back_with_index_cleanup` enforces
+///   this invariant.
+#[derive(Debug, Default)]
+struct DynamicTableIndex {
+    /// `name → value → deque<generation>` (front = newest).
+    /// Two-level keying lets `find` resolve an exact match in
+    /// `O(1)` expected without scanning entries that share a name.
+    by_name_value: HashMap<std::sync::Arc<str>, HashMap<std::sync::Arc<str>, VecDeque<u64>>>,
+    /// `name → deque<generation>` (front = newest).
+    /// Used by `find_name` to return the most-recent generation for a
+    /// name without a value comparison.
+    by_name: HashMap<std::sync::Arc<str>, VecDeque<u64>>,
+}
+
+impl DynamicTableIndex {
+    fn add(&mut self, name: &std::sync::Arc<str>, value: &std::sync::Arc<str>, generation: u64) {
+        self.by_name_value
+            .entry(std::sync::Arc::clone(name))
+            .or_default()
+            .entry(std::sync::Arc::clone(value))
+            .or_default()
+            .push_front(generation);
+        self.by_name
+            .entry(std::sync::Arc::clone(name))
+            .or_default()
+            .push_front(generation);
+    }
+
+    fn remove_oldest(
+        &mut self,
+        name: &std::sync::Arc<str>,
+        value: &std::sync::Arc<str>,
+        generation: u64,
+    ) {
+        if let Some(inner) = self.by_name_value.get_mut(name.as_ref()) {
+            if let Some(deque) = inner.get_mut(value.as_ref()) {
+                debug_assert_eq!(
+                    deque.back().copied(),
+                    Some(generation),
+                    "evicted generation must be the oldest in by_name_value bucket"
+                );
+                deque.pop_back();
+                if deque.is_empty() {
+                    inner.remove(value.as_ref());
+                }
+            }
+            if inner.is_empty() {
+                self.by_name_value.remove(name.as_ref());
+            }
+        }
+        if let Some(deque) = self.by_name.get_mut(name.as_ref()) {
+            debug_assert_eq!(
+                deque.back().copied(),
+                Some(generation),
+                "evicted generation must be the oldest in by_name bucket"
+            );
+            deque.pop_back();
+            if deque.is_empty() {
+                self.by_name.remove(name.as_ref());
+            }
+        }
+    }
+
+    fn newest_for_pair(&self, name: &str, value: &str) -> Option<u64> {
+        self.by_name_value.get(name)?.get(value)?.front().copied()
+    }
+
+    fn newest_for_name(&self, name: &str) -> Option<u64> {
+        self.by_name.get(name)?.front().copied()
+    }
+
+    fn clear(&mut self) {
+        self.by_name_value.clear();
+        self.by_name.clear();
+    }
+}
+
 /// Dynamic table for HPACK encoding/decoding.
 ///
 /// Uses `VecDeque` so that front insertion (`push_front`) is O(1) amortized
@@ -359,11 +465,23 @@ impl DynamicTableEntry {
 /// br-asupersync-d04pmz: stores `DynamicTableEntry` (Arc<str>) internally
 /// rather than `Header` (String) so post-insert clones cost atomic
 /// refcount bumps instead of full String allocs.
+///
+/// br-asupersync-4pshog: also keeps `DynamicTableIndex` side maps so
+/// that `find` and `find_name` resolve in expected O(1) instead of
+/// scanning every entry on every encoded header.
 #[derive(Debug)]
 pub struct DynamicTable {
     entries: VecDeque<DynamicTableEntry>,
     size: usize,
     max_size: usize,
+    /// Monotonic counter assigned to entries on insert (never decreases,
+    /// even on eviction or `set_max_size`). Combined with an entry's
+    /// `generation` it yields the entry's current 0-indexed position
+    /// without scanning `entries`.
+    insert_count: u64,
+    /// Side indices for O(1) `find` / `find_name`. See
+    /// [`DynamicTableIndex`] for the invariants.
+    index: DynamicTableIndex,
 }
 
 impl DynamicTable {
@@ -380,6 +498,8 @@ impl DynamicTable {
             entries: VecDeque::new(),
             size: 0,
             max_size: max_size.min(MAX_ALLOWED_TABLE_SIZE),
+            insert_count: 0,
+            index: DynamicTableIndex::default(),
         }
     }
 
@@ -406,20 +526,36 @@ impl DynamicTable {
         // br-asupersync-d04pmz: convert at the boundary — pays the
         // Arc::from(String) alloc ONCE; subsequent table accesses are
         // refcount bumps.
-        let entry = DynamicTableEntry::from_strings(header.name, header.value);
+        // br-asupersync-4pshog: stamp the entry with a monotonic
+        // generation so the side index can recover its position later
+        // in O(1).
+        let generation = self.insert_count;
+        let entry = DynamicTableEntry::from_strings(header.name, header.value, generation);
         let entry_size = entry.size();
 
-        // Evict oldest entries (at back) to make room
+        // Evict oldest entries (at back) to make room. Use the
+        // index-aware pop so the side indices stay in sync.
         while self.size.saturating_add(entry_size) > self.max_size && !self.entries.is_empty() {
-            if let Some(evicted) = self.entries.pop_back() {
-                self.size = self.size.saturating_sub(evicted.size());
-            }
+            self.pop_back_with_index_cleanup();
         }
 
-        // Only insert if it fits
+        // Only insert if it fits.
         if entry_size <= self.max_size {
-            self.entries.push_front(entry);
+            self.index.add(&entry.name, &entry.value, generation);
+            // Increment generation counter only when the entry is
+            // actually retained, so unfit-and-skipped inserts don't
+            // poison future position math.
+            self.insert_count = self.insert_count.saturating_add(1);
             self.size = self.size.saturating_add(entry_size);
+            self.entries.push_front(entry);
+        } else {
+            // Entry too large to ever fit; the spec requires the table
+            // to be emptied (RFC 7541 §4.4). The eviction loop above
+            // already drained it, but be explicit so the indices match
+            // and any future regression of the eviction loop can't
+            // leak entries into the indices.
+            debug_assert!(self.entries.is_empty());
+            self.index.clear();
         }
     }
 
@@ -439,33 +575,52 @@ impl DynamicTable {
     }
 
     /// Find an entry by name and value, returning the index if found.
+    ///
+    /// br-asupersync-4pshog: O(1) expected via the side index.
     #[must_use]
     pub fn find(&self, name: &str, value: &str) -> Option<usize> {
-        for (i, entry) in self.entries.iter().enumerate() {
-            if entry.name.as_ref() == name && entry.value.as_ref() == value {
-                return Some(STATIC_TABLE.len() + i + 1);
-            }
-        }
-        None
+        let generation = self.index.newest_for_pair(name, value)?;
+        Some(self.index_from_generation(generation))
     }
 
     /// Find an entry by name only, returning the index if found.
+    ///
+    /// br-asupersync-4pshog: O(1) expected via the side index.
     #[must_use]
     pub fn find_name(&self, name: &str) -> Option<usize> {
-        for (i, entry) in self.entries.iter().enumerate() {
-            if entry.name.as_ref() == name {
-                return Some(STATIC_TABLE.len() + i + 1);
-            }
+        let generation = self.index.newest_for_name(name)?;
+        Some(self.index_from_generation(generation))
+    }
+
+    /// Convert a stored entry generation into its current 1-indexed
+    /// HPACK index (which is `STATIC_TABLE.len() + position + 1`).
+    ///
+    /// Position formula: with `insert_count` monotonically incremented
+    /// on each retained insert and `generation` set to the value of
+    /// `insert_count` at that insert, the entry's 0-indexed position
+    /// in `entries` (front=0) is `(insert_count - 1) - generation`,
+    /// hence the HPACK index is
+    /// `STATIC_TABLE.len() + insert_count - generation`.
+    fn index_from_generation(&self, generation: u64) -> usize {
+        debug_assert!(self.insert_count > generation);
+        STATIC_TABLE.len()
+            + usize::try_from(self.insert_count.saturating_sub(generation))
+                .unwrap_or(self.entries.len())
+    }
+
+    /// Pop the oldest entry and remove it from the side indices.
+    fn pop_back_with_index_cleanup(&mut self) {
+        if let Some(evicted) = self.entries.pop_back() {
+            self.size = self.size.saturating_sub(evicted.size());
+            self.index
+                .remove_oldest(&evicted.name, &evicted.value, evicted.generation);
         }
-        None
     }
 
     /// Evict oldest entries (at back) to fit within max size.
     fn evict(&mut self) {
         while self.size > self.max_size && !self.entries.is_empty() {
-            if let Some(evicted) = self.entries.pop_back() {
-                self.size = self.size.saturating_sub(evicted.size());
-            }
+            self.pop_back_with_index_cleanup();
         }
     }
 }
@@ -1686,6 +1841,181 @@ mod tests {
 
         // First entry should be evicted
         assert!(table.size() <= 100);
+    }
+
+    /// br-asupersync-4pshog: side-index returns the same HPACK index
+    /// the linear scan would have produced. Newest entry sits at
+    /// `STATIC_TABLE.len() + 1`; older entries shift up as new ones
+    /// arrive at the front.
+    #[test]
+    fn dynamic_table_find_matches_linear_scan_after_inserts() {
+        let mut table = DynamicTable::new();
+        table.insert(Header::new("a", "1"));
+        table.insert(Header::new("b", "2"));
+        table.insert(Header::new("c", "3"));
+
+        // After three pushes: c is newest (i=0), then b (i=1), then a (i=2).
+        let base = STATIC_TABLE.len();
+        assert_eq!(table.find("c", "3"), Some(base + 1));
+        assert_eq!(table.find("b", "2"), Some(base + 2));
+        assert_eq!(table.find("a", "1"), Some(base + 3));
+        assert_eq!(table.find("nope", "nope"), None);
+
+        // find_name picks the most recent matching name.
+        assert_eq!(table.find_name("a"), Some(base + 3));
+        assert_eq!(table.find_name("b"), Some(base + 2));
+        assert_eq!(table.find_name("c"), Some(base + 1));
+        assert_eq!(table.find_name("missing"), None);
+    }
+
+    /// br-asupersync-4pshog: when the same (name, value) is inserted
+    /// twice, `find` must return the **newest** index (smallest
+    /// position), matching the linear-scan semantics. After eviction
+    /// of the older duplicate, find still resolves to the surviving
+    /// duplicate.
+    #[test]
+    fn dynamic_table_find_returns_newest_among_duplicates() {
+        let mut table = DynamicTable::new();
+        table.insert(Header::new("a", "1")); // generation 0, will become i=2
+        table.insert(Header::new("b", "2")); // generation 1, will become i=1
+        table.insert(Header::new("a", "1")); // generation 2, i=0 (newest)
+
+        let base = STATIC_TABLE.len();
+        // The newest "a"="1" is at i=0 → HPACK index = base + 1.
+        assert_eq!(table.find("a", "1"), Some(base + 1));
+        // find_name("a") also picks the newest.
+        assert_eq!(table.find_name("a"), Some(base + 1));
+
+        // Force eviction of the OLDEST duplicate (generation 0) by
+        // shrinking max_size. With three ~33-byte entries (a/1, b/2,
+        // a/1 each at 32+1+1=34 bytes), shrinking to 70 keeps the two
+        // newest (b/2, a/1) and evicts the original (a/1).
+        let entry_size = 32 + 1 + 1;
+        table.set_max_size(entry_size * 2);
+        assert!(table.size() <= entry_size * 2);
+
+        // The surviving "a"="1" (generation 2) is still at i=0 because
+        // eviction at the back doesn't shift the front entries.
+        assert_eq!(table.find("a", "1"), Some(base + 1));
+        // find_name still picks it.
+        assert_eq!(table.find_name("a"), Some(base + 1));
+    }
+
+    /// br-asupersync-4pshog: `find_name` ignores the value and returns
+    /// the index of the most recent entry whose name matches, even if
+    /// multiple distinct values share the name.
+    #[test]
+    fn dynamic_table_find_name_picks_newest_for_distinct_values() {
+        let mut table = DynamicTable::new();
+        table.insert(Header::new("a", "old"));
+        table.insert(Header::new("b", "filler"));
+        table.insert(Header::new("a", "new"));
+
+        let base = STATIC_TABLE.len();
+        // Newest "a" is at i=0; "b" at i=1; old "a" at i=2.
+        assert_eq!(table.find_name("a"), Some(base + 1));
+        // Exact-match lookups still distinguish by value.
+        assert_eq!(table.find("a", "new"), Some(base + 1));
+        assert_eq!(table.find("a", "old"), Some(base + 3));
+        assert_eq!(table.find("a", "missing"), None);
+    }
+
+    /// br-asupersync-4pshog: after `insert` evicts an entry to make
+    /// room, the side indices must drop the evicted generation so a
+    /// stale lookup doesn't return a phantom position.
+    #[test]
+    fn dynamic_table_index_drops_evicted_entries() {
+        // Each entry is 32 + 7 + 6 = 45 bytes; cap holds exactly two.
+        let mut table = DynamicTable::with_max_size(90);
+        table.insert(Header::new("header1", "value1"));
+        table.insert(Header::new("header2", "value2"));
+        table.insert(Header::new("header3", "value3")); // evicts header1
+
+        assert!(table.size() <= 90);
+        assert_eq!(table.find("header1", "value1"), None);
+        assert_eq!(table.find_name("header1"), None);
+
+        let base = STATIC_TABLE.len();
+        assert_eq!(table.find("header3", "value3"), Some(base + 1));
+        assert_eq!(table.find("header2", "value2"), Some(base + 2));
+    }
+
+    /// br-asupersync-4pshog: an entry larger than `max_size` must
+    /// empty the table (RFC 7541 §4.4) **and** clear the side
+    /// indices. A subsequent lookup must return None.
+    #[test]
+    fn dynamic_table_oversized_insert_clears_indices() {
+        let mut table = DynamicTable::with_max_size(100);
+        table.insert(Header::new("a", "1"));
+        table.insert(Header::new("b", "2"));
+        assert!(table.find("a", "1").is_some());
+
+        // 200-byte value pushes total entry above the 100-byte cap.
+        let big_value: String = "x".repeat(200);
+        table.insert(Header::new("big", &big_value));
+
+        // Spec: table emptied. Indices must reflect that.
+        assert_eq!(table.size(), 0);
+        assert_eq!(table.find("a", "1"), None);
+        assert_eq!(table.find("b", "2"), None);
+        assert_eq!(table.find("big", &big_value), None);
+        assert_eq!(table.find_name("a"), None);
+        assert_eq!(table.find_name("big"), None);
+    }
+
+    /// br-asupersync-4pshog: `set_max_size` shrinking past the current
+    /// size must evict the oldest entries and update the indices so
+    /// they no longer report the evicted entries.
+    #[test]
+    fn dynamic_table_set_max_size_shrink_updates_indices() {
+        let mut table = DynamicTable::new();
+        table.insert(Header::new("a", "1"));
+        table.insert(Header::new("b", "2"));
+        table.insert(Header::new("c", "3"));
+
+        let entry_size = 32 + 1 + 1;
+        // Keep only the newest entry.
+        table.set_max_size(entry_size);
+        assert_eq!(table.size(), entry_size);
+
+        let base = STATIC_TABLE.len();
+        assert_eq!(table.find("c", "3"), Some(base + 1));
+        assert_eq!(table.find("b", "2"), None);
+        assert_eq!(table.find("a", "1"), None);
+        assert_eq!(table.find_name("a"), None);
+        assert_eq!(table.find_name("b"), None);
+        assert_eq!(table.find_name("c"), Some(base + 1));
+    }
+
+    /// br-asupersync-4pshog: many inserts and evictions must keep
+    /// `entries.len()`, `find`/`find_name`, and `get(i)` mutually
+    /// consistent. Catches drift between the side indices and the
+    /// VecDeque order.
+    #[test]
+    fn dynamic_table_index_consistent_under_churn() {
+        let mut table = DynamicTable::with_max_size(4 * (32 + 4 + 4));
+        for i in 0..32 {
+            table.insert(Header::new(format!("n{i:03}"), format!("v{i:03}")));
+        }
+        // Only the most recent few survive; verify each surviving
+        // entry can be resolved both by `get` and by `find`/`find_name`.
+        let base = STATIC_TABLE.len();
+        for hpack_idx in 1..=table.entries.len() {
+            let header = table.get(hpack_idx).expect("entry must exist");
+            assert_eq!(
+                table.find(&header.name, &header.value),
+                Some(base + hpack_idx),
+                "find disagrees with get at hpack_idx={hpack_idx}"
+            );
+            assert_eq!(
+                table.find_name(&header.name),
+                Some(base + hpack_idx),
+                "find_name disagrees with get at hpack_idx={hpack_idx}"
+            );
+        }
+        // Evicted older entries must report None.
+        assert_eq!(table.find("n000", "v000"), None);
+        assert_eq!(table.find_name("n000"), None);
     }
 
     #[test]
