@@ -362,7 +362,11 @@ fn mr4_concurrent_poison_consistency() {
         // Phase 1: Create multiple waiters
         let waiter_handles = Arc::new(std::sync::Mutex::new(Vec::new()));
         let waiter_results = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let barrier = Arc::new(std::sync::Barrier::new(num_waiters + 1));
+        // br-asupersync-0fqp0s: include the poisoner in the release barrier so
+        // every waiter contends behind an already-held lock instead of racing
+        // ahead of the panic thread during its old fixed sleep.
+        let barrier = Arc::new(std::sync::Barrier::new(num_waiters + 2));
+        let (poison_ready_tx, poison_ready_rx) = std::sync::mpsc::channel();
 
         // Spawn waiter threads
         for i in 0..num_waiters {
@@ -394,27 +398,34 @@ fn mr4_concurrent_poison_consistency() {
 
         // Phase 2: Start poison process in parallel
         let mutex_for_poison = Arc::clone(&mutex);
+        let barrier_for_poison = Arc::clone(&barrier);
         let poison_handle = std::thread::spawn(move || {
-            // Small delay to let some waiters queue up
-            std::thread::sleep(Duration::from_millis(5));
-
             let cx = create_test_context(1, 1);
+            let mut guard =
+                futures_lite::future::block_on(mutex_for_poison.lock(&cx))
+                    .expect("poison thread should lock");
 
-            futures_lite::future::block_on(async {
-                let mut guard = mutex_for_poison.lock(&cx).await.expect("poison thread should lock");
+            poison_ready_tx
+                .send(())
+                .expect("poison thread should signal readiness");
+            barrier_for_poison.wait();
 
-                // Perform operations
-                for _ in 0..operations_before_poison {
-                    guard.counter += 1;
-                    guard.value = guard.value.wrapping_add(1);
-                }
+            // Perform operations while waiters are blocked behind the held lock.
+            for _ in 0..operations_before_poison {
+                guard.counter += 1;
+                guard.value = guard.value.wrapping_add(1);
+            }
 
-                // Poison the mutex
-                panic!("deliberate panic to test concurrent poison consistency");
-            });
+            // Poison the mutex while still holding the guard so queued waiters
+            // observe a consistent poisoned state once they are released.
+            panic!("deliberate panic to test concurrent poison consistency");
         });
 
-        // Phase 3: Let waiters start
+        // Phase 3: Release waiters only after the poisoner is already holding
+        // the mutex.
+        poison_ready_rx
+            .recv()
+            .expect("poison thread should become ready");
         barrier.wait();
 
         // Phase 4: Wait for poison to complete
