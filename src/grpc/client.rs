@@ -424,8 +424,8 @@ impl<C: Codec> GrpcClient<C> {
         self.apply_client_interceptors(&mut metadata_request)?;
 
         let mut metadata = metadata_request.metadata().clone();
-        metadata.insert("x-asupersync-grpc-path", path);
-        metadata.insert("x-asupersync-grpc-transport", "loopback");
+        let _ = metadata.insert("x-asupersync-grpc-path", path);
+        let _ = metadata.insert("x-asupersync-grpc-transport", "loopback");
         Ok(metadata)
     }
 
@@ -439,13 +439,13 @@ impl<C: Codec> GrpcClient<C> {
             _ => self.channel.config.timeout.map(encode_grpc_timeout),
         };
         if let Some(timeout_value) = timeout_value {
-            metadata.insert_or_replace("grpc-timeout", timeout_value);
+            let _ = metadata.insert_or_replace("grpc-timeout", timeout_value);
         }
 
         if metadata.get("grpc-encoding").is_none()
             && let Some(encoding) = effective_send_compression(self.channel.config())
         {
-            metadata.insert("grpc-encoding", encoding.as_header_value());
+            let _ = metadata.insert("grpc-encoding", encoding.as_header_value());
         }
 
         let accept_compression = effective_accept_compressions(self.channel.config());
@@ -455,7 +455,7 @@ impl<C: Codec> GrpcClient<C> {
                 .map(|encoding| encoding.as_header_value())
                 .collect::<Vec<_>>()
                 .join(",");
-            metadata.insert("grpc-accept-encoding", encodings);
+            let _ = metadata.insert("grpc-accept-encoding", encodings);
         }
     }
 
@@ -1239,7 +1239,7 @@ impl MetadataInterceptor {
     /// Add an ASCII metadata value.
     #[must_use]
     pub fn with_metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.metadata.insert(key, value);
+        let _ = self.metadata.insert(key, value);
         self
     }
 }
@@ -1257,10 +1257,10 @@ impl ClientInterceptor for MetadataInterceptor {
         for (key, value) in self.metadata.iter() {
             match value {
                 super::streaming::MetadataValue::Ascii(v) => {
-                    request_metadata.insert(key, v.clone());
+                    let _ = request_metadata.insert(key, v.clone());
                 }
                 super::streaming::MetadataValue::Binary(v) => {
-                    request_metadata.insert_bin(key, v.clone());
+                    let _ = request_metadata.insert_bin(key, v.clone());
                 }
             }
         }
@@ -1276,7 +1276,8 @@ mod tests {
         clippy::expect_fun_call,
         clippy::map_unwrap_or,
         clippy::cast_possible_wrap,
-        clippy::future_not_send
+        clippy::future_not_send,
+        unused_must_use
     )]
     use super::*;
     use crate::codec::Encoder;
@@ -2153,7 +2154,7 @@ mod tests {
         let error = futures_lite::future::block_on(Channel::connect("http://localhost:50051"))
             .expect_err("non-loopback target should fail closed");
         match error {
-            GrpcError::Transport(message) => {
+            GrpcError::Transport(_kind, message) => {
                 assert!(message.contains("loopback-only"));
             }
             other => panic!("expected transport error, got: {other:?}"),
@@ -2172,7 +2173,7 @@ mod tests {
             let error = futures_lite::future::block_on(Channel::connect(uri))
                 .expect_err(&format!("userinfo bypass must fail: {uri}"));
             match error {
-                GrpcError::Transport(msg) => {
+                GrpcError::Transport(_kind, msg) => {
                     assert!(
                         msg.contains("loopback-only"),
                         "expected loopback-only error for {uri}, got: {msg}"

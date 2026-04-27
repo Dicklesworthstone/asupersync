@@ -355,7 +355,7 @@ impl Interceptor for TracingInterceptor {
                 "req-{:016x}",
                 self.next_request_id.fetch_add(1, Ordering::Relaxed)
             );
-            request.metadata_mut().insert("x-request-id", id);
+            let _ = request.metadata_mut().insert("x-request-id", id);
         }
         Ok(())
     }
@@ -389,7 +389,7 @@ impl BearerAuthInterceptor {
 
 impl Interceptor for BearerAuthInterceptor {
     fn intercept_request(&self, request: &mut Request<Bytes>) -> Result<(), Status> {
-        request
+        let _ = request
             .metadata_mut()
             .insert("authorization", format!("Bearer {}", self.token));
         Ok(())
@@ -447,10 +447,10 @@ fn copy_metadata_value(
 ) {
     match value {
         MetadataValue::Ascii(ascii) => {
-            metadata.insert(key, ascii.clone());
+            let _ = metadata.insert(key, ascii.clone());
         }
         MetadataValue::Binary(binary) => {
-            metadata.insert_bin(key, binary.clone());
+            let _ = metadata.insert_bin(key, binary.clone());
         }
     }
 }
@@ -633,7 +633,7 @@ impl Interceptor for MetadataPropagator {
         }
 
         if !keys_to_propagate.is_empty() {
-            request
+            let _ = request
                 .metadata_mut()
                 .insert("x-propagate-keys", keys_to_propagate.join(","));
         }
@@ -806,14 +806,14 @@ impl Interceptor for LoggingInterceptor {
     fn intercept_request(&self, request: &mut Request<Bytes>) -> Result<(), Status> {
         if self.log_requests {
             // Mark the request as logged via metadata
-            request.metadata_mut().insert("x-logged", "true");
+            let _ = request.metadata_mut().insert("x-logged", "true");
         }
         Ok(())
     }
 
     fn intercept_response(&self, response: &mut Response<Bytes>) -> Result<(), Status> {
         if self.log_responses {
-            response.metadata_mut().insert("x-logged", "true");
+            let _ = response.metadata_mut().insert("x-logged", "true");
         }
         Ok(())
     }
@@ -848,7 +848,7 @@ impl Interceptor for TimeoutInterceptor {
             }
             _ => format_grpc_timeout(Duration::from_millis(self.timeout_ms)),
         };
-        request
+        let _ = request
             .metadata_mut()
             .insert_or_replace("grpc-timeout", timeout_value);
         Ok(())
@@ -873,7 +873,8 @@ mod tests {
         clippy::expect_fun_call,
         clippy::map_unwrap_or,
         clippy::cast_possible_wrap,
-        clippy::future_not_send
+        clippy::future_not_send,
+        unused_must_use
     )]
     use super::*;
     use crate::grpc::Code;

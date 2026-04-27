@@ -833,7 +833,7 @@ impl CallContext {
                 .map_or(parent_remaining, |child| child.min(parent_remaining)),
             Some(super::streaming::MetadataValue::Binary(_)) | None => parent_remaining,
         };
-        metadata.insert_or_replace("grpc-timeout", format_grpc_timeout(effective));
+        let _ = metadata.insert_or_replace("grpc-timeout", format_grpc_timeout(effective));
         true
     }
 
@@ -1051,7 +1051,8 @@ mod tests {
         clippy::expect_fun_call,
         clippy::map_unwrap_or,
         clippy::cast_possible_wrap,
-        clippy::future_not_send
+        clippy::future_not_send,
+        unused_must_use
     )]
     use super::*;
     use crate::grpc::service::ServiceDescriptor;
@@ -1162,10 +1163,10 @@ mod tests {
         let result = futures_lite::future::block_on(server.serve("not-an-addr"));
         let err = result.expect_err("invalid listen address should fail");
         crate::assert_with_log!(
-            matches!(err, GrpcError::Transport(_)),
+            matches!(err, GrpcError::Transport(_, _)),
             "transport error for invalid address",
             true,
-            matches!(err, GrpcError::Transport(_))
+            matches!(err, GrpcError::Transport(_, _))
         );
         crate::test_complete!("test_server_serve_rejects_invalid_address");
     }

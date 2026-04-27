@@ -303,11 +303,26 @@ pub(crate) fn normalize_metadata_key(key: &str, binary: bool) -> Option<String> 
     Some(normalized)
 }
 
+fn metadata_ascii_value_is_visible(byte: u8) -> bool {
+    (0x20..=0x7E).contains(&byte)
+}
+
 pub(crate) fn sanitize_metadata_ascii_value(value: &str) -> Cow<'_, str> {
-    if value.contains(['\r', '\n']) {
-        Cow::Owned(value.replace(['\r', '\n'], ""))
-    } else {
+    if value
+        .as_bytes()
+        .iter()
+        .copied()
+        .all(metadata_ascii_value_is_visible)
+    {
         Cow::Borrowed(value)
+    } else {
+        Cow::Owned(
+            value
+                .bytes()
+                .filter(|byte| metadata_ascii_value_is_visible(*byte))
+                .map(char::from)
+                .collect(),
+        )
     }
 }
 
@@ -328,8 +343,10 @@ impl Metadata {
     /// Insert an ASCII value.
     ///
     /// Returns `false` when the metadata key is invalid and the entry is
-    /// rejected. CR/LF are stripped from ASCII values to prevent header or
-    /// trailer injection when metadata is encoded onto the wire.
+    /// rejected. Invalid control and non-ASCII bytes are stripped from ASCII
+    /// values to keep encoded metadata within the visible ASCII range required
+    /// by gRPC over HTTP/2.
+    #[must_use = "check whether the metadata key was valid and the entry was stored"]
     pub fn insert(&mut self, key: impl Into<String>, value: impl Into<String>) -> bool {
         let key = key.into();
         let Some(key) = normalize_metadata_key(&key, false) else {
@@ -344,8 +361,10 @@ impl Metadata {
     /// Insert an ASCII value, replacing any existing entries for the same key.
     ///
     /// Returns `false` when the metadata key is invalid and the entry is
-    /// rejected. CR/LF are stripped from ASCII values to prevent header or
-    /// trailer injection when metadata is encoded onto the wire.
+    /// rejected. Invalid control and non-ASCII bytes are stripped from ASCII
+    /// values to keep encoded metadata within the visible ASCII range required
+    /// by gRPC over HTTP/2.
+    #[must_use = "check whether the metadata key was valid and the entry was stored"]
     pub fn insert_or_replace(&mut self, key: impl Into<String>, value: impl Into<String>) -> bool {
         let key = key.into();
         let Some(key) = normalize_metadata_key(&key, false) else {
@@ -363,6 +382,7 @@ impl Metadata {
     ///
     /// Returns `false` when the metadata key is invalid and the entry is
     /// rejected.
+    #[must_use = "check whether the metadata key was valid and the entry was stored"]
     pub fn insert_bin(&mut self, key: impl Into<String>, value: Bytes) -> bool {
         let key = key.into();
         let Some(key) = normalize_metadata_key(&key, true) else {
@@ -782,7 +802,8 @@ mod tests {
         clippy::expect_fun_call,
         clippy::map_unwrap_or,
         clippy::cast_possible_wrap,
-        clippy::future_not_send
+        clippy::future_not_send,
+        unused_must_use
     )]
     use super::*;
     use crate::grpc::Code;
@@ -1088,6 +1109,28 @@ mod tests {
             _ => panic!("expected sanitized ascii metadata value"),
         }
         crate::test_complete!("test_metadata_insert_strips_ascii_crlf");
+    }
+
+    #[test]
+    fn test_metadata_insert_strips_controls_and_non_ascii() {
+        init_test("test_metadata_insert_strips_controls_and_non_ascii");
+        let mut metadata = Metadata::new();
+
+        let inserted = metadata.insert("x-request-id", "A\x00B\tC\x1FD\x7FEαF");
+        crate::assert_with_log!(inserted, "valid key inserted", true, inserted);
+
+        match metadata.get("x-request-id") {
+            Some(MetadataValue::Ascii(value)) => {
+                crate::assert_with_log!(
+                    value == "ABCDEF",
+                    "ascii metadata strips controls and non-ascii",
+                    "ABCDEF",
+                    value
+                );
+            }
+            _ => panic!("expected sanitized ascii metadata value"),
+        }
+        crate::test_complete!("test_metadata_insert_strips_controls_and_non_ascii");
     }
 
     // =========================================================================
@@ -1923,6 +1966,7 @@ mod tests {
             "value\nwith\nnewlines",
             "value\r\nwith\r\nboth",
             "value\r\n\r\nwith\r\n\r\nmultiple",
+            "A\0B\tC\x1FD\x7FEαF",
             "",
             "single\r",
             "single\n",

@@ -337,13 +337,47 @@ impl From<std::io::Error> for Status {
     }
 }
 
+/// Typed kind for transport-layer errors (br-asupersync-9gg21l).
+///
+/// Replaces the earlier substring-based classification that scanned
+/// free-form error text for "timeout"/"timed out"/"deadline exceeded"/
+/// "http 504" and routed to DeadlineExceeded vs Unavailable based on
+/// what the OS errno or upstream proxy happened to spell. Peer-controlled
+/// or os-controlled error strings could misclassify the status code,
+/// changing client retry semantics (DeadlineExceeded is terminal,
+/// Unavailable is retryable).
+///
+/// Callers at the codec/transport boundary classify the error explicitly
+/// via [`GrpcError::transport_kind`]; the bare [`GrpcError::transport`]
+/// constructor defaults to [`TransportErrorKind::Other`] which maps to
+/// `Unavailable` (safe retryable default).
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum TransportErrorKind {
+    /// Operation timed out (deadline elapsed). Maps to DeadlineExceeded.
+    Timeout,
+    /// Could not establish a connection (DNS failure, connect refused,
+    /// loopback policy violation, etc.). Maps to Unavailable.
+    ConnectFailed,
+    /// Connection was reset or closed by the peer mid-flight.
+    /// Maps to Unavailable.
+    ResetByPeer,
+    /// Wire-protocol violation (malformed frame, invalid HTTP/2 framing,
+    /// schema mismatch). Maps to Internal — gRPC clients should not retry.
+    ProtocolViolation,
+    /// Unclassified transport error. Maps to Unavailable (safe default;
+    /// retryable, matches the historical behavior for non-timeout errors).
+    Other,
+}
+
 /// gRPC error type.
 #[derive(Debug)]
 pub enum GrpcError {
     /// A gRPC status error.
     Status(Status),
-    /// Transport error.
-    Transport(String),
+    /// Transport error with a typed kind that drives the Status mapping
+    /// (br-asupersync-9gg21l). Previously `Transport(String)` with
+    /// substring-driven classification.
+    Transport(TransportErrorKind, String),
     /// Protocol error.
     Protocol(String),
     /// Message too large.
@@ -355,10 +389,24 @@ pub enum GrpcError {
 }
 
 impl GrpcError {
-    /// Create a transport error.
+    /// Create an unclassified transport error.
+    ///
+    /// Defaults to [`TransportErrorKind::Other`] which maps to
+    /// `Unavailable` (retryable). For a typed classification (timeout,
+    /// connect-failed, etc.), use [`Self::transport_kind`].
     #[must_use]
     pub fn transport(message: impl Into<String>) -> Self {
-        Self::Transport(message.into())
+        Self::Transport(TransportErrorKind::Other, message.into())
+    }
+
+    /// Create a typed transport error (br-asupersync-9gg21l).
+    ///
+    /// Callers at the codec/transport boundary should use this to drive
+    /// Status-code classification by the actual error type rather than by
+    /// substring search of free-form text.
+    #[must_use]
+    pub fn transport_kind(kind: TransportErrorKind, message: impl Into<String>) -> Self {
+        Self::Transport(kind, message.into())
     }
 
     /// Create a protocol error.
@@ -384,13 +432,15 @@ impl GrpcError {
     pub fn into_status(self) -> Status {
         match self {
             Self::Status(s) => s,
-            Self::Transport(msg) => {
-                if transport_message_implies_deadline(&msg) {
-                    Status::deadline_exceeded(msg)
-                } else {
-                    Status::unavailable(msg)
-                }
-            }
+            // br-asupersync-9gg21l: drive Status code from the typed
+            // TransportErrorKind, not from a substring-search of msg.
+            Self::Transport(kind, msg) => match kind {
+                TransportErrorKind::Timeout => Status::deadline_exceeded(msg),
+                TransportErrorKind::ProtocolViolation => Status::internal(msg),
+                TransportErrorKind::ConnectFailed
+                | TransportErrorKind::ResetByPeer
+                | TransportErrorKind::Other => Status::unavailable(msg),
+            },
             Self::Protocol(msg) => Status::internal(format!("protocol error: {msg}")),
             Self::MessageTooLarge => Status::resource_exhausted("message too large"),
             Self::InvalidMessage(msg) => Status::invalid_argument(msg),
@@ -399,19 +449,11 @@ impl GrpcError {
     }
 }
 
-fn transport_message_implies_deadline(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    lower.contains("timeout")
-        || lower.contains("timed out")
-        || lower.contains("deadline exceeded")
-        || lower.contains("http 504")
-}
-
 impl fmt::Display for GrpcError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Status(s) => write!(f, "{s}"),
-            Self::Transport(msg) => write!(f, "transport error: {msg}"),
+            Self::Transport(_kind, msg) => write!(f, "transport error: {msg}"),
             Self::Protocol(msg) => write!(f, "protocol error: {msg}"),
             Self::MessageTooLarge => write!(f, "message too large"),
             Self::InvalidMessage(msg) => write!(f, "invalid message: {msg}"),
@@ -430,7 +472,28 @@ impl From<Status> for GrpcError {
 
 impl From<std::io::Error> for GrpcError {
     fn from(err: std::io::Error) -> Self {
-        Self::Transport(err.to_string())
+        // br-asupersync-9gg21l: classify io::Error by ErrorKind. TimedOut
+        // → Timeout (DeadlineExceeded). ConnectionRefused / NotFound /
+        // HostUnreachable / NetworkUnreachable / AddrNotAvailable
+        // → ConnectFailed. ConnectionReset / ConnectionAborted /
+        // BrokenPipe / NotConnected → ResetByPeer. InvalidData →
+        // ProtocolViolation (Internal). Everything else → Other.
+        use std::io::ErrorKind as Ek;
+        let kind = match err.kind() {
+            Ek::TimedOut => TransportErrorKind::Timeout,
+            Ek::ConnectionRefused
+            | Ek::NotFound
+            | Ek::AddrNotAvailable
+            | Ek::AddrInUse => TransportErrorKind::ConnectFailed,
+            Ek::ConnectionReset
+            | Ek::ConnectionAborted
+            | Ek::BrokenPipe
+            | Ek::NotConnected
+            | Ek::UnexpectedEof => TransportErrorKind::ResetByPeer,
+            Ek::InvalidData => TransportErrorKind::ProtocolViolation,
+            _ => TransportErrorKind::Other,
+        };
+        Self::Transport(kind, err.to_string())
     }
 }
 
@@ -835,8 +898,17 @@ mod tests {
         let s = GrpcError::transport("down").into_status();
         assert_eq!(s.code(), Code::Unavailable);
 
-        let s = GrpcError::transport("timed out").into_status();
+        // br-asupersync-9gg21l: substring 'timed out' is no longer
+        // classified as DeadlineExceeded by accident — callers must use
+        // GrpcError::transport_kind(TransportErrorKind::Timeout, ...) to
+        // request that classification.
+        let s = GrpcError::transport_kind(TransportErrorKind::Timeout, "timed out").into_status();
         assert_eq!(s.code(), Code::DeadlineExceeded);
+
+        // Bare unclassified transport defaults to Unavailable even if the
+        // message text happens to contain 'timeout' (no substring magic).
+        let s = GrpcError::transport("the message says timeout but kind is Other").into_status();
+        assert_eq!(s.code(), Code::Unavailable);
 
         let s = GrpcError::protocol("bad").into_status();
         assert_eq!(s.code(), Code::Internal);
@@ -1233,9 +1305,15 @@ mod tests {
 
         let error_cases = vec![
             (GrpcError::MessageTooLarge, Code::ResourceExhausted),
-            (GrpcError::transport("Connection failed"), Code::Unavailable),
             (
-                GrpcError::transport("request timeout"),
+                GrpcError::transport_kind(
+                    TransportErrorKind::ConnectFailed,
+                    "Connection failed",
+                ),
+                Code::Unavailable,
+            ),
+            (
+                GrpcError::transport_kind(TransportErrorKind::Timeout, "request timeout"),
                 Code::DeadlineExceeded,
             ),
             (GrpcError::protocol("Invalid frame"), Code::Internal),

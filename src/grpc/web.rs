@@ -237,10 +237,10 @@ pub fn decode_trailers(body: &[u8]) -> Result<TrailerFrame, GrpcError> {
                 if key.ends_with("-bin") {
                     use base64::Engine;
                     if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(value) {
-                        metadata.insert_bin(&key, Bytes::from(decoded));
+                        let _ = metadata.insert_bin(&key, Bytes::from(decoded));
                     }
                 } else {
-                    metadata.insert(&key, value);
+                    let _ = metadata.insert(&key, value);
                 }
             }
         }
@@ -646,7 +646,8 @@ mod tests {
         clippy::expect_fun_call,
         clippy::map_unwrap_or,
         clippy::cast_possible_wrap,
-        clippy::future_not_send
+        clippy::future_not_send,
+        unused_must_use
     )]
     use super::*;
     use base64::Engine as _;
