@@ -489,6 +489,16 @@ impl OracleSuite {
         }
     }
 
+    /// `RegionLeakOracle` may return `Err` in fail-fast mode after recording
+    /// the underlying violations internally. Preserve those recorded
+    /// violations instead of silently treating the oracle as clean.
+    fn region_leak_violations(&mut self) -> Vec<RegionViolation> {
+        match self.region_leak.check_for_violations() {
+            Ok(violations) => violations,
+            Err(_) => self.region_leak.violations().iter().cloned().collect(),
+        }
+    }
+
     /// Checks all oracles and returns any violations.
     #[must_use]
     pub fn check_all(&mut self, now: Time) -> Vec<OracleViolation> {
@@ -518,14 +528,8 @@ impl OracleSuite {
             violations.push(OracleViolation::RegionTree(v));
         }
 
-        let region_leak_violations = self.region_leak.check_for_violations();
-        if let Ok(violations_vec) = region_leak_violations {
-            for violation in violations_vec {
-                violations.push(OracleViolation::RegionLeak(violation));
-            }
-        } else {
-            // Handle case where oracle fails - this would be a critical error
-            // For now, we'll skip adding violations
+        for violation in self.region_leak_violations() {
+            violations.push(OracleViolation::RegionLeak(violation));
         }
 
         if let Err(v) = self.ambient_authority.check() {
@@ -744,10 +748,9 @@ impl OracleSuite {
             ),
             OracleEntryReport::from_result(
                 "region_leak",
-                self.region_leak
-                    .check_for_violations()
-                    .ok()
-                    .and_then(|violations| violations.first().cloned())
+                self.region_leak_violations()
+                    .into_iter()
+                    .next()
                     .map(OracleViolation::RegionLeak),
                 OracleStats {
                     entities_tracked: self.region_leak.statistics().active_regions as usize,
@@ -1403,6 +1406,57 @@ mod tests {
             violation.unrun_finalizers
         );
         crate::test_complete!("hydrate_temporal_from_state_replays_finalizer_history");
+    }
+
+    #[test]
+    fn oracle_suite_surfaces_fail_fast_region_leak_violations() {
+        init_test("oracle_suite_surfaces_fail_fast_region_leak_violations");
+        let mut suite = OracleSuite::new();
+        suite.region_leak = RegionLeakOracle::with_strict_timeouts();
+
+        let region = crate::types::RegionId::new_for_test(77, 0);
+        suite.region_leak.on_region_created(
+            region,
+            None,
+            Some("suite fail-fast regression".to_string()),
+            crate::types::Budget::INFINITE,
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let violations = suite.check_all(Time::ZERO);
+        let has_region_leak = violations.iter().any(|violation| {
+            matches!(
+                violation,
+                OracleViolation::RegionLeak(RegionViolation {
+                    region_id,
+                    violation_type: ViolationType::StuckCreation,
+                    ..
+                }) if *region_id == region
+            )
+        });
+        crate::assert_with_log!(
+            has_region_leak,
+            "region leak surfaced",
+            true,
+            has_region_leak
+        );
+
+        let report = suite.report(Time::ZERO);
+        let entry = report
+            .entry("region_leak")
+            .expect("region_leak entry must be present");
+        crate::assert_with_log!(entry.passed == false, "entry passed", false, entry.passed);
+        let mentions_stuck_creation = entry
+            .violation
+            .as_deref()
+            .is_some_and(|violation| violation.contains("StuckCreation"));
+        crate::assert_with_log!(
+            mentions_stuck_creation,
+            "report mentions StuckCreation",
+            true,
+            mentions_stuck_creation
+        );
+        crate::test_complete!("oracle_suite_surfaces_fail_fast_region_leak_violations");
     }
 
     // Pure data-type tests (wave 16 – CyanBarn)
