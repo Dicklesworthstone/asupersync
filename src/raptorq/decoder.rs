@@ -20,7 +20,7 @@ use crate::raptorq::systematic::{ConstraintMatrix, SystematicError, SystematicPa
 use crate::raptorq::{decision_contract, decision_contract::GovernanceSnapshot};
 use crate::types::ObjectId;
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -1610,7 +1610,9 @@ impl InactivationDecoder {
 
                 if !queued[i] && eq.degree() == 1 {
                     let next_col = eq.terms[0].0;
-                    if state.column_states[next_col] == ColumnState::Active && solved[next_col].is_none() {
+                    if state.column_states[next_col] == ColumnState::Active
+                        && solved[next_col].is_none()
+                    {
                         queue.push_back(i);
                         queued[i] = true;
                         state.stats.peel_queue_pushes += 1;
@@ -1932,7 +1934,9 @@ impl InactivationDecoder {
 
                 if !queued[i] && !eq.used && eq.degree() == 1 {
                     let next_col = eq.terms[0].0;
-                    if state.column_states[next_col] == ColumnState::Active && solved[next_col].is_none() {
+                    if state.column_states[next_col] == ColumnState::Active
+                        && solved[next_col].is_none()
+                    {
                         queue.push_back(i);
                         queued[i] = true;
                         state.stats.peel_queue_pushes += 1;
@@ -2727,6 +2731,7 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use std::collections::BTreeSet;
 
     use insta::assert_json_snapshot;
     use serde_json::json;
@@ -4527,7 +4532,8 @@ mod tests {
 
     // Helper functions for test compatibility with old BTreeSet-based API
     fn active_cols(state: &DecoderState) -> BTreeSet<usize> {
-        state.column_states
+        state
+            .column_states
             .iter()
             .enumerate()
             .filter_map(|(col, &state_val)| {
@@ -4541,7 +4547,8 @@ mod tests {
     }
 
     fn inactive_cols(state: &DecoderState) -> BTreeSet<usize> {
-        state.column_states
+        state
+            .column_states
             .iter()
             .enumerate()
             .filter_map(|(col, &state_val)| {
@@ -4778,7 +4785,8 @@ mod tests {
             "dense-failure cleanup must restore RHS rows taken into the dense core"
         );
         assert_eq!(
-            active_cols(&state), initial_active,
+            active_cols(&state),
+            initial_active,
             "dense-failure cleanup must reactivate unsolved columns for postmortem inspection"
         );
         assert!(
@@ -4805,11 +4813,12 @@ mod tests {
             "proof dense-failure cleanup must restore RHS rows taken into the dense core"
         );
         assert_eq!(
-            state.active_cols, initial_active,
+            active_cols(&state),
+            initial_active,
             "proof dense-failure cleanup must reactivate unsolved columns for postmortem inspection"
         );
         assert!(
-            state.inactive_cols.is_empty(),
+            inactive_cols(&state).is_empty(),
             "proof dense-failure cleanup must not leak inactive-column bookkeeping"
         );
     }
