@@ -319,7 +319,11 @@ impl PanicIsolator {
         match std::panic::catch_unwind(AssertUnwindSafe(operation)) {
             Ok(result) => PanicIsolationResult::Success(result),
             Err(panic_payload) => {
-                let panic_id = PANIC_COUNTER.fetch_add(1, Ordering::SeqCst);
+                // br-asupersync-h0pfb4: Relaxed suffices for unique-counter
+                // semantics — the returned id is not used as a fence for
+                // any other shared state. Saves a full memory barrier on
+                // weakly-ordered architectures (aarch64, RISC-V).
+                let panic_id = PANIC_COUNTER.fetch_add(1, Ordering::Relaxed);
                 let context = self.create_panic_context(panic_id, location, &panic_payload);
                 self.record_region_panic(&context);
 
@@ -360,7 +364,8 @@ impl PanicIsolator {
             "region {} exceeded panic threshold {} with {} isolated panics",
             region_id, threshold, panic_count
         );
-        let panic_id = PANIC_COUNTER.fetch_add(1, Ordering::SeqCst);
+        // br-asupersync-h0pfb4: Relaxed for unique-counter semantics.
+        let panic_id = PANIC_COUNTER.fetch_add(1, Ordering::Relaxed);
         let context = self.create_skip_context(panic_id, location.clone(), reason.clone());
         Some((reason, context))
     }
