@@ -102,13 +102,11 @@ impl CompiledApp {
             .collect();
         let mut completed = 0;
         for task_id in startup_tasks {
-            if let Some(task) = state.task_mut(task_id) {
-                let reason = task
-                    .cancel_reason()
-                    .cloned()
-                    .unwrap_or_else(CancelReason::shutdown);
-                let _ = task.complete(crate::types::Outcome::Cancelled(reason));
-            }
+            let reason = state
+                .task(task_id)
+                .and_then(|task| task.cancel_reason().cloned())
+                .unwrap_or_else(CancelReason::shutdown);
+            let _ = state.complete_task(task_id, crate::types::Outcome::Cancelled(reason));
             let _ = state.task_completed(task_id);
             completed += 1;
         }
@@ -132,9 +130,7 @@ impl CompiledApp {
             Poll::Ready(outcome) => {
                 let task_outcome = outcome
                     .map_err(|()| crate::error::Error::new(crate::error::ErrorKind::Internal));
-                if let Some(task) = state.task_mut(task_id) {
-                    let _ = task.complete(task_outcome);
-                }
+                let _ = state.complete_task(task_id, task_outcome);
                 let _ = state.task_completed(task_id);
                 true
             }
