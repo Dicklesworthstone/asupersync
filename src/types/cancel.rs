@@ -548,6 +548,22 @@ pub struct CancelReason {
     pub truncated_at_depth: Option<usize>,
 }
 
+macro_rules! cancel_reason_constructors {
+    ($(
+        $(#[$meta:meta])*
+        $name:ident => $kind:ident;
+    )*) => {
+        $(
+            $(#[$meta])*
+            #[inline]
+            #[must_use]
+            pub const fn $name() -> Self {
+                Self::new(CancelKind::$kind)
+            }
+        )*
+    };
+}
+
 impl CancelReason {
     // ========================================================================
     // Constructors
@@ -606,94 +622,37 @@ impl CancelReason {
         }
     }
 
-    /// Creates a timeout cancellation reason.
-    #[inline]
-    #[must_use]
-    pub const fn timeout() -> Self {
-        Self::new(CancelKind::Timeout)
-    }
-
-    /// Creates a deadline cancellation reason (budget deadline exceeded).
-    #[inline]
-    #[must_use]
-    pub const fn deadline() -> Self {
-        Self::new(CancelKind::Deadline)
-    }
-
-    /// Creates a poll quota cancellation reason (budget poll quota exceeded).
-    #[inline]
-    #[must_use]
-    pub const fn poll_quota() -> Self {
-        Self::new(CancelKind::PollQuota)
-    }
-
-    /// Creates a cost budget cancellation reason (budget cost quota exceeded).
-    #[inline]
-    #[must_use]
-    pub const fn cost_budget() -> Self {
-        Self::new(CancelKind::CostBudget)
-    }
-
-    /// Creates a fail-fast cancellation reason (sibling failed).
-    #[inline]
-    #[must_use]
-    pub const fn sibling_failed() -> Self {
-        Self::new(CancelKind::FailFast)
-    }
-
-    /// Creates a fail-fast cancellation reason (alias for sibling_failed).
-    ///
-    /// Used when a task is cancelled because a sibling failed in a fail-fast region.
-    #[inline]
-    #[must_use]
-    pub const fn fail_fast() -> Self {
-        Self::new(CancelKind::FailFast)
-    }
-
-    /// Creates a race loser cancellation reason.
-    ///
-    /// Used when a task is cancelled because another task in a race completed first.
-    #[inline]
-    #[must_use]
-    pub const fn race_loser() -> Self {
-        Self::new(CancelKind::RaceLost)
-    }
-
-    /// Creates a race lost cancellation reason (alias for race_loser).
-    ///
-    /// Used when a task is cancelled because another task in a race completed first.
-    #[inline]
-    #[must_use]
-    pub const fn race_lost() -> Self {
-        Self::new(CancelKind::RaceLost)
-    }
-
-    /// Creates a parent-cancelled cancellation reason.
-    #[inline]
-    #[must_use]
-    pub const fn parent_cancelled() -> Self {
-        Self::new(CancelKind::ParentCancelled)
-    }
-
-    /// Creates a resource unavailable cancellation reason.
-    #[inline]
-    #[must_use]
-    pub const fn resource_unavailable() -> Self {
-        Self::new(CancelKind::ResourceUnavailable)
-    }
-
-    /// Creates a shutdown cancellation reason.
-    #[inline]
-    #[must_use]
-    pub const fn shutdown() -> Self {
-        Self::new(CancelKind::Shutdown)
-    }
-
-    /// Creates a linked-exit cancellation reason (Spork link propagation).
-    #[inline]
-    #[must_use]
-    pub const fn linked_exit() -> Self {
-        Self::new(CancelKind::LinkedExit)
+    cancel_reason_constructors! {
+        /// Creates a timeout cancellation reason.
+        timeout => Timeout;
+        /// Creates a deadline cancellation reason (budget deadline exceeded).
+        deadline => Deadline;
+        /// Creates a poll quota cancellation reason (budget poll quota exceeded).
+        poll_quota => PollQuota;
+        /// Creates a cost budget cancellation reason (budget cost quota exceeded).
+        cost_budget => CostBudget;
+        /// Creates a fail-fast cancellation reason (sibling failed).
+        sibling_failed => FailFast;
+        /// Creates a fail-fast cancellation reason (alias for sibling_failed).
+        ///
+        /// Used when a task is cancelled because a sibling failed in a fail-fast region.
+        fail_fast => FailFast;
+        /// Creates a race loser cancellation reason.
+        ///
+        /// Used when a task is cancelled because another task in a race completed first.
+        race_loser => RaceLost;
+        /// Creates a race lost cancellation reason (alias for race_loser).
+        ///
+        /// Used when a task is cancelled because another task in a race completed first.
+        race_lost => RaceLost;
+        /// Creates a parent-cancelled cancellation reason.
+        parent_cancelled => ParentCancelled;
+        /// Creates a resource unavailable cancellation reason.
+        resource_unavailable => ResourceUnavailable;
+        /// Creates a shutdown cancellation reason.
+        shutdown => Shutdown;
+        /// Creates a linked-exit cancellation reason (Spork link propagation).
+        linked_exit => LinkedExit;
     }
 
     // ========================================================================
