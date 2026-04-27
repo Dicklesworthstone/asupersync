@@ -555,7 +555,7 @@ fn get_stream_states() -> std::collections::HashMap<u64, StreamState> {
     states
 }
 
-fn get_connection_state() -> ConnectionState {
+pub fn get_connection_state() -> ConnectionState {
     // Mock connection state
     ConnectionState::Closing
 }

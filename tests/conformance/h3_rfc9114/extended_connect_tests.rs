@@ -8,6 +8,7 @@
 //! - Capsule format validation
 
 use super::*;
+use asupersync::net::quic_core::{decode_varint, encode_varint};
 
 /// Extended CONNECT protocol types from RFC 9298.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -584,16 +585,17 @@ fn create_connect_response(status: u16, reason: &str) -> Vec<HttpHeader> {
 
 fn create_datagram_capsule(payload: &[u8]) -> Vec<u8> {
     let mut capsule = Vec::new();
-    capsule.push(0x00); // DATAGRAM capsule type
-    capsule.push(payload.len() as u8); // Length
+    encode_varint(0x00, &mut capsule).expect("DATAGRAM capsule type varint");
+    encode_varint(payload.len() as u64, &mut capsule).expect("DATAGRAM capsule length varint");
     capsule.extend_from_slice(payload);
     capsule
 }
 
 fn create_close_webtransport_session_capsule(session_id: u32, reason: &str) -> Vec<u8> {
     let mut capsule = Vec::new();
-    capsule.push(0x2843); // CLOSE_WEBTRANSPORT_SESSION type (simplified)
-    capsule.push((4 + reason.len()) as u8); // Length
+    encode_varint(0x2843, &mut capsule).expect("CLOSE_WEBTRANSPORT_SESSION type varint");
+    encode_varint((4 + reason.len()) as u64, &mut capsule)
+        .expect("CLOSE_WEBTRANSPORT_SESSION length varint");
     capsule.extend_from_slice(&session_id.to_be_bytes());
     capsule.extend_from_slice(reason.as_bytes());
     capsule
@@ -601,8 +603,8 @@ fn create_close_webtransport_session_capsule(session_id: u32, reason: &str) -> V
 
 fn create_drain_webtransport_session_capsule(session_id: u32) -> Vec<u8> {
     let mut capsule = Vec::new();
-    capsule.push(0x2844); // DRAIN_WEBTRANSPORT_SESSION type (simplified)
-    capsule.push(4); // Length
+    encode_varint(0x2844, &mut capsule).expect("DRAIN_WEBTRANSPORT_SESSION type varint");
+    encode_varint(4, &mut capsule).expect("DRAIN_WEBTRANSPORT_SESSION length varint");
     capsule.extend_from_slice(&session_id.to_be_bytes());
     capsule
 }
@@ -646,21 +648,25 @@ fn validate_capsule_format(data: &[u8]) -> bool {
 }
 
 fn parse_capsule(data: &[u8]) -> Result<Capsule, String> {
-    if data.len() < 2 {
-        return Err("Capsule too short".to_string());
-    }
+    let (capsule_type_id, type_len) =
+        decode_varint(data).map_err(|err| format!("Invalid capsule type varint: {}", err))?;
+    let (length, len_len) = decode_varint(&data[type_len..])
+        .map_err(|err| format!("Invalid capsule length varint: {}", err))?;
 
-    let capsule_type = match data[0] {
+    let capsule_type = match capsule_type_id {
         0x00 => CapsuleType::Datagram,
+        0x2843 => CapsuleType::CloseWebTransportSession,
+        0x2844 => CapsuleType::DrainWebTransportSession,
         _ => CapsuleType::Unknown,
     };
 
-    let length = data[1] as u64;
-    if data.len() < 2 + length as usize {
+    let payload_start = type_len + len_len;
+    let payload_len = length as usize;
+    if data.len() != payload_start + payload_len {
         return Err("Capsule length mismatch".to_string());
     }
 
-    let payload = data[2..2 + length as usize].to_vec();
+    let payload = data[payload_start..payload_start + payload_len].to_vec();
 
     Ok(Capsule {
         capsule_type,
@@ -731,6 +737,6 @@ fn get_last_protocol_error() -> Option<ProtocolError> {
     Some(ProtocolError::MalformedHeaders)
 }
 
-fn get_connection_state() -> ConnectionState {
+pub fn get_connection_state() -> ConnectionState {
     ConnectionState::Open
 }
