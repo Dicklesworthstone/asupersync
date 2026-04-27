@@ -438,6 +438,11 @@ proptest! {
         let queues2 = setup_queues();
         let stolen2 = run_steal(&queues2);
 
+        prop_assert_eq!(
+            stolen1.len(),
+            task_count,
+            "MR-WS5 VIOLATION: steal path failed to drain all tasks",
+        );
         prop_assert_eq!(stolen1, stolen2, "MR-WS5 VIOLATION: Identity failed");
     }
 }
@@ -494,6 +499,16 @@ proptest! {
         let mut s2 = stolen2.clone();
         s2.sort();
 
+        prop_assert_eq!(
+            stolen1.len(),
+            task_count,
+            "MR-WS6 VIOLATION: base steal path failed to drain all tasks",
+        );
+        prop_assert_eq!(
+            stolen2.len(),
+            task_count,
+            "MR-WS6 VIOLATION: permuted steal path failed to drain all tasks",
+        );
         prop_assert_eq!(s1, s2, "MR-WS6 VIOLATION: Permutation invariance failed");
     }
 }
