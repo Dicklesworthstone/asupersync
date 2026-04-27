@@ -1,6 +1,10 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
+use asupersync::net::quic_core::{
+    PacketHeader, QUIC_VARINT_MAX, TransportParameters, decode_varint as real_decode_varint,
+    encode_varint as real_encode_varint,
+};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
@@ -573,7 +577,69 @@ fn parse_vlq(data: &[u8], offset: usize) -> Option<(u64, usize)> {
             ]);
             Some((value, 8))
         }
-        _ => unreachable!(),
+        _ => None,
+    }
+}
+
+fn synthetic_cid(seed: u8, frame_bytes: &[u8]) -> [u8; 4] {
+    let first = frame_bytes.first().copied().unwrap_or(seed);
+    [seed, first, frame_bytes.len() as u8, seed ^ first]
+}
+
+fn build_short_header_packet(frame_bytes: &[u8]) -> Vec<u8> {
+    let dcid = synthetic_cid(0x11, frame_bytes);
+    let mut packet = Vec::with_capacity(1 + dcid.len() + 1 + frame_bytes.len());
+    packet.push(0x40); // fixed bit set, 1-byte packet number
+    packet.extend_from_slice(&dcid);
+    packet.push(0x01); // packet number
+    packet.extend_from_slice(frame_bytes);
+    packet
+}
+
+fn build_initial_packet(frame_bytes: &[u8]) -> Vec<u8> {
+    let dst_cid = synthetic_cid(0xa0, frame_bytes);
+    let src_cid = synthetic_cid(0x10, frame_bytes);
+    let mut packet = Vec::new();
+    packet.push(0xc0); // Initial packet, 1-byte packet number
+    packet.extend_from_slice(&1u32.to_be_bytes());
+    packet.push(dst_cid.len() as u8);
+    packet.extend_from_slice(&dst_cid);
+    packet.push(src_cid.len() as u8);
+    packet.extend_from_slice(&src_cid);
+    packet.push(0x00); // zero-length token varint
+
+    let mut payload_len = Vec::new();
+    let total_payload_len = 1 + frame_bytes.len(); // packet number + payload
+    if real_encode_varint(total_payload_len as u64, &mut payload_len).is_err() {
+        return packet;
+    }
+    packet.extend_from_slice(&payload_len);
+    packet.push(0x01); // packet number
+    packet.extend_from_slice(frame_bytes);
+    packet
+}
+
+fn exercise_real_quic_core_boundaries(frame_bytes: &[u8]) {
+    let _ = real_decode_varint(frame_bytes);
+    let _ = TransportParameters::decode(frame_bytes);
+
+    let short_packet = build_short_header_packet(frame_bytes);
+    let _ = PacketHeader::decode(&short_packet, 4);
+
+    let initial_packet = build_initial_packet(frame_bytes);
+    let _ = PacketHeader::decode(&initial_packet, 0);
+}
+
+fn exercise_real_varint_roundtrip(value: u64) {
+    if value > QUIC_VARINT_MAX {
+        let mut out = Vec::new();
+        let _ = real_encode_varint(value, &mut out);
+        return;
+    }
+
+    let mut out = Vec::new();
+    if real_encode_varint(value, &mut out).is_ok() {
+        let _ = real_decode_varint(&out);
     }
 }
 
@@ -582,6 +648,7 @@ fuzz_target!(|input: QuicFrameFuzzInput| {
     for frame_data in &input.frames {
         let packet = build_quic_frame(frame_data);
         test_quic_frame_parsing(&packet);
+        exercise_real_quic_core_boundaries(&packet);
     }
 
     // Test 2: VLQ encoding boundary testing
@@ -590,21 +657,26 @@ fuzz_target!(|input: QuicFrameFuzzInput| {
             VlqEdgeCase::OneByteBoundary { value } => {
                 let encoded = encode_vlq_test(*value as u64, Some(1));
                 test_quic_frame_parsing(&encoded);
+                exercise_real_varint_roundtrip(*value as u64);
             }
             VlqEdgeCase::TwoByteBoundary { value } => {
                 let encoded = encode_vlq_test(*value as u64, Some(2));
                 test_quic_frame_parsing(&encoded);
+                exercise_real_varint_roundtrip(*value as u64);
             }
             VlqEdgeCase::FourByteBoundary { value } => {
                 let encoded = encode_vlq_test(*value as u64, Some(4));
                 test_quic_frame_parsing(&encoded);
+                exercise_real_varint_roundtrip(*value as u64);
             }
             VlqEdgeCase::EightByteBoundary { value } => {
                 let encoded = encode_vlq_test(*value, Some(8));
                 test_quic_frame_parsing(&encoded);
+                exercise_real_varint_roundtrip(*value);
             }
             VlqEdgeCase::Invalid { raw_bytes } => {
                 test_quic_frame_parsing(raw_bytes);
+                exercise_real_quic_core_boundaries(raw_bytes);
             }
             VlqEdgeCase::NonMinimal {
                 value,
@@ -614,6 +686,8 @@ fuzz_target!(|input: QuicFrameFuzzInput| {
                 // Prepend frame type for testing
                 encoded.insert(0, 0x10); // MAX_DATA frame type
                 test_quic_frame_parsing(&encoded);
+                exercise_real_varint_roundtrip(*value);
+                exercise_real_quic_core_boundaries(&encoded);
             }
         }
     }
@@ -623,6 +697,7 @@ fuzz_target!(|input: QuicFrameFuzzInput| {
         let mut frame = vec![0x08]; // STREAM frame type
         frame.extend_from_slice(&encode_vlq_test(stream_test.stream_id, None));
         test_quic_frame_parsing(&frame);
+        exercise_real_quic_core_boundaries(&frame);
     }
 
     // Test 4: ACK frame range validation
@@ -643,6 +718,7 @@ fuzz_target!(|input: QuicFrameFuzzInput| {
         }
 
         test_quic_frame_parsing(&frame);
+        exercise_real_quic_core_boundaries(&frame);
     }
 
     // Test 5: Frame type collision testing
@@ -650,6 +726,7 @@ fuzz_target!(|input: QuicFrameFuzzInput| {
         let mut test_data = collision_test.raw_frame_type.clone();
         test_data.extend_from_slice(&[0x00, 0x01, 0x02]); // Some payload
         test_quic_frame_parsing(&test_data);
+        exercise_real_quic_core_boundaries(&test_data);
     }
 
     // Test 6: Edge case combinations
@@ -663,5 +740,6 @@ fuzz_target!(|input: QuicFrameFuzzInput| {
 
     for edge_case in &edge_cases {
         test_quic_frame_parsing(edge_case);
+        exercise_real_quic_core_boundaries(edge_case);
     }
 });
