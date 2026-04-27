@@ -329,18 +329,26 @@ impl ObligationRecord {
         matches!(self.state, ObligationState::Reserved)
     }
 
+    fn resolve(
+        &mut self,
+        now: Time,
+        state: ObligationState,
+        abort_reason: Option<ObligationAbortReason>,
+    ) -> u64 {
+        assert!(self.is_pending(), "obligation already resolved");
+        self.state = state;
+        self.resolved_at = Some(now);
+        self.abort_reason = abort_reason;
+        now.duration_since(self.reserved_at)
+    }
+
     /// Commits the obligation.
     ///
     /// # Panics
     ///
     /// Panics if already resolved.
     pub fn commit(&mut self, now: Time) -> u64 {
-        assert!(self.is_pending(), "obligation already resolved");
-        self.state = ObligationState::Committed;
-        self.resolved_at = Some(now);
-        self.abort_reason = None;
-
-        let duration_held = now.duration_since(self.reserved_at);
+        let duration_held = self.resolve(now, ObligationState::Committed, None);
         info!(
             obligation_id = ?self.id,
             kind = %self.kind,
@@ -356,12 +364,7 @@ impl ObligationRecord {
     ///
     /// Panics if already resolved.
     pub fn abort(&mut self, now: Time, reason: ObligationAbortReason) -> u64 {
-        assert!(self.is_pending(), "obligation already resolved");
-        self.state = ObligationState::Aborted;
-        self.resolved_at = Some(now);
-        self.abort_reason = Some(reason);
-
-        let duration_held = now.duration_since(self.reserved_at);
+        let duration_held = self.resolve(now, ObligationState::Aborted, Some(reason));
         info!(
             obligation_id = ?self.id,
             kind = %self.kind,
@@ -381,12 +384,7 @@ impl ObligationRecord {
     ///
     /// Panics if already resolved.
     pub fn mark_leaked(&mut self, now: Time) -> u64 {
-        assert!(self.is_pending(), "obligation already resolved");
-        self.state = ObligationState::Leaked;
-        self.resolved_at = Some(now);
-        self.abort_reason = None;
-
-        let duration_held = now.duration_since(self.reserved_at);
+        let duration_held = self.resolve(now, ObligationState::Leaked, None);
         error!(
             obligation_id = ?self.id,
             kind = %self.kind,
