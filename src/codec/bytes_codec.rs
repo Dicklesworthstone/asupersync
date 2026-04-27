@@ -204,4 +204,90 @@ mod tests {
             );
         }
     }
+
+    /// br-asupersync-279dns: golden snapshot pinning the canonical
+    /// encoded byte layout for representative shapes. BytesCodec is
+    /// passthrough (length-of-buffer == length-of-encoded), but the
+    /// snapshot is the explicit contract: any change to layout
+    /// (chunking, framing prefix, padding) requires a deliberate
+    /// `cargo insta accept`.
+    ///
+    /// Encoded output is hex-formatted into a stable string so insta's
+    /// inline snapshot is human-readable on review.
+    fn hex_dump(b: &[u8]) -> String {
+        use std::fmt::Write;
+        let mut s = String::with_capacity(b.len() * 2);
+        for byte in b {
+            write!(&mut s, "{byte:02x}").expect("infallible write to String");
+        }
+        s
+    }
+
+    #[test]
+    fn dns279_encode_bytes_golden_layout() {
+        // Representative shapes: empty, single, alignment boundary,
+        // CRLF-bearing, all-NUL, all-0xFF, embedded NUL, multi-byte UTF-8.
+        let cases: &[(&str, &[u8])] = &[
+            ("empty", &[]),
+            ("single_a", b"a"),
+            ("aligned4_abcd", b"abcd"),
+            ("crlf", b"GET / HTTP/1.1\r\n\r\n"),
+            ("all_nul_8", &[0u8; 8]),
+            ("all_ff_8", &[0xFFu8; 8]),
+            ("embedded_nul", b"AB\x00CD"),
+            ("utf8_emoji", "Hello 🦀\n".as_bytes()),
+        ];
+
+        let mut report = String::new();
+        for (name, payload) in cases {
+            let mut codec = BytesCodec::new();
+            let mut buf = BytesMut::new();
+            codec
+                .encode(Bytes::copy_from_slice(payload), &mut buf)
+                .expect("encode infallible for BytesCodec");
+            use std::fmt::Write;
+            writeln!(
+                &mut report,
+                "{name} ({len} bytes): {hex}",
+                len = buf.len(),
+                hex = hex_dump(&buf)
+            )
+            .expect("infallible");
+        }
+
+        insta::assert_snapshot!("dns279_encode_bytes_golden_layout", report);
+    }
+
+    #[test]
+    fn dns279_decode_buffer_consumed_golden() {
+        // Pin the post-decode buffer state: BytesCodec drains the entire
+        // input buffer; the residual MUST be empty after a successful
+        // decode. A regression that leaves bytes behind would break
+        // framing assumptions for upstream codecs that compose with it.
+        let cases: &[(&str, &[u8])] = &[
+            ("empty_yields_none", &[]),
+            ("nonempty_drains_buffer", b"payload"),
+        ];
+
+        let mut report = String::new();
+        for (name, payload) in cases {
+            let mut codec = BytesCodec::new();
+            let mut buf = BytesMut::from(*payload);
+            let frame = codec.decode(&mut buf).expect("decode infallible");
+            use std::fmt::Write;
+            writeln!(
+                &mut report,
+                "{name}: input_len={input}, frame={frame_state}, residual_len={residual}",
+                input = payload.len(),
+                frame_state = match &frame {
+                    Some(f) => format!("Some({} bytes)", f.len()),
+                    None => "None".to_string(),
+                },
+                residual = buf.len()
+            )
+            .expect("infallible");
+        }
+
+        insta::assert_snapshot!("dns279_decode_buffer_consumed_golden", report);
+    }
 }
