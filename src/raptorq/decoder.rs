@@ -20,7 +20,7 @@ use crate::raptorq::systematic::{ConstraintMatrix, SystematicError, SystematicPa
 use crate::raptorq::{decision_contract, decision_contract::GovernanceSnapshot};
 use crate::types::ObjectId;
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
@@ -4793,7 +4793,7 @@ mod tests {
         let params = decoder.params().clone();
         let mut state = make_rank_deficient_state(&params, 16, 3, 7);
         let initial_rhs = state.rhs.clone();
-        let initial_active = state.active_cols.clone();
+        let initial_active = active_cols(&state);
         let mut trace = EliminationTrace::default();
 
         let err = decoder
@@ -4820,7 +4820,7 @@ mod tests {
         let params = decoder.params().clone();
         let mut state = make_rank_deficient_state(&params, 16, 3, 7);
         let initial_rhs = state.rhs.clone();
-        let initial_active = state.active_cols.clone();
+        let initial_active = active_cols(&state);
         state.rhs[0].truncate(15);
 
         let err = decoder.inactivate_and_solve(&mut state).unwrap_err();
@@ -4834,8 +4834,8 @@ mod tests {
         );
         assert_eq!(state.rhs[0].len(), 15);
         assert_eq!(state.rhs[1], initial_rhs[1]);
-        assert_eq!(state.active_cols, initial_active);
-        assert!(state.inactive_cols.is_empty());
+        assert_eq!(active_cols(&state), initial_active);
+        assert!(inactive_cols(&state).is_empty());
     }
 
     #[test]
@@ -4844,7 +4844,7 @@ mod tests {
         let params = decoder.params().clone();
         let mut state = make_rank_deficient_state(&params, 16, 3, 7);
         let initial_rhs = state.rhs.clone();
-        let initial_active = state.active_cols.clone();
+        let initial_active = active_cols(&state);
         let mut trace = EliminationTrace::default();
         state.rhs[0].truncate(15);
 
@@ -4861,8 +4861,8 @@ mod tests {
         );
         assert_eq!(state.rhs[0].len(), 15);
         assert_eq!(state.rhs[1], initial_rhs[1]);
-        assert_eq!(state.active_cols, initial_active);
-        assert!(state.inactive_cols.is_empty());
+        assert_eq!(active_cols(&state), initial_active);
+        assert!(inactive_cols(&state).is_empty());
         assert_eq!(trace.inactive_cols, vec![3, 7]);
         assert_eq!(trace.inactivated, 2);
         assert!(trace.pivot_events.is_empty());
