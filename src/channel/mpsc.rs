@@ -3518,6 +3518,9 @@ pub mod backpressure_metamorphic {
                                                             counter_clone.fetch_add(1, Ordering::SeqCst);
                                                             break;
                                                         }
+                                                        Err(SendError::Cancelled(_)) | Err(SendError::Full(_)) => {
+                                                            // Continue trying if cancelled or full
+                                                        }
                                                         Ok(()) => {
                                                             // Message was sent before disconnect
                                                         }
