@@ -124,9 +124,23 @@ We only use **Cargo** in this project, NEVER any other package manager.
 1. `asupersync-tokio-compat/` — a deliberate compat-shim crate whose entire purpose is providing tokio-API-shaped wrappers backed by asupersync. By design it depends on tokio (for trait/type signatures) and is opt-in via the `tokio-compat` feature.
 2. `conformance/` — the workspace's RFC-conformance test crate depends on `tokio = { version = "1.0", features = ["time"] }` for sleep/timeout primitives in vendor-comparison test scaffolding only.
 
-Additionally, `cargo tree` (which shows the union of normal + dev-dependency edges) reveals tokio in the dep graph via `opentelemetry_sdk`'s `testing` feature — required for `InMemoryMetricExporter` in our otel test suite. Resolver 3 (Edition 2024) keeps this scoped to dev-dep builds, so production consumers of `asupersync` do not link tokio.
+Additionally, `cargo tree` (which shows the union of normal + dev-dependency edges) reveals tokio in the dep graph via `opentelemetry_sdk`'s `testing` feature — required for `InMemoryMetricExporter` in our otel test suite. Resolver 3 (Edition 2024) keeps this scoped to dev-dep builds, so production consumers of `asupersync` do not link tokio. (br-asupersync-rw21l1: this exact dev-dep edge was filed as a separate "no tokio violation" report; the docs already documented it but the wording above is the canonical answer.)
 
-**Verification**: `cargo tree -e normal --workspace -i tokio` should show ONLY `asupersync-tokio-compat` and `asupersync-conformance` as the depending crates. Any other crate showing up in that output is a regression and must be triaged.
+**Verification** (production consumers — what ships in shipped binaries):
+
+```
+cargo tree -e normal --workspace -i tokio
+```
+
+This must show **only** `asupersync-tokio-compat` and `asupersync-conformance` as depending crates. Any other crate appearing here is a regression and must be triaged.
+
+**Verification** (full graph including dev-deps):
+
+```
+cargo tree -e features --workspace --invert tokio
+```
+
+This is expected to additionally surface `opentelemetry_sdk` (via the dev-dep `testing` feature → `rt-tokio` chain) and `tokio-stream` (re-exported by opentelemetry_sdk). The dev-dep edge is intentional; if it ever shows up under the `cargo tree -e normal` form above, that's the regression to fix.
 
 **Pattern**: All async functions take `&Cx` as first parameter. The `Cx` flows down through structured concurrency scopes.
 

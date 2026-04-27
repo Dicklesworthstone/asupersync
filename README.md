@@ -1468,7 +1468,7 @@ and known limitations.
 
 - **Cooperative cancellation only**: Non-cooperative code requires explicit escalation boundaries
 - **Not a drop-in replacement for other runtimes**: Different API, different guarantees
-- **No Tokio dependency compatibility by default**: runtime-specific crates that assume Tokio need explicit boundary adapters. The asupersync runtime crate itself has no normal-edge dependency on tokio; satellite workspace members (`asupersync-tokio-compat` for opt-in API shims and `conformance` for RFC vendor-comparison harnesses) and the `opentelemetry_sdk` testing feature are the only paths through which tokio appears in `cargo tree`. See AGENTS.md "Documented carve-outs" for the verification command.
+- **No Tokio dependency compatibility by default**: runtime-specific crates that assume Tokio need explicit boundary adapters. The asupersync runtime crate itself has no normal-edge dependency on tokio. Two satellite workspace members carry tokio for documented purposes — `asupersync-tokio-compat` (opt-in API shims) and `conformance` (RFC vendor-comparison harnesses) — and one dev-dep path pulls tokio for `InMemoryMetricExporter` via `opentelemetry_sdk`'s `testing` feature. **For production consumers**, the relevant verification is `cargo tree -e normal -p asupersync -i tokio`; that command shows only the two satellite carve-outs above. The plain `cargo tree -p asupersync` form includes dev-dependencies and so transitively reveals tokio via `opentelemetry_sdk`, which is expected and does not link into shipped binaries. See AGENTS.md "Documented carve-outs" for the canonical verification command and rationale.
 
 ### Design Trade-offs
 
