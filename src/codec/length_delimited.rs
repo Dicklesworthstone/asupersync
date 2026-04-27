@@ -1051,6 +1051,191 @@ mod tests {
         }
     }
 
+    // ── br-asupersync-7y8fm7: edge-case end-to-end frame goldens ────────
+    // The pre-existing goldens above only cover header-byte permutations
+    // for default-shaped payloads. The cases below pin the wire format at
+    // the boundaries where past regressions land: (a) zero-length payload,
+    // (b) at-the-limit max-length payload, (c) the FrameTooBig rejection
+    // trace (state machine MUST drain — see br-asupersync-o7e5xu), and
+    // (d) length_field_offset != 0.
+
+    /// (a) Zero-length payload: default codec encodes a 4-byte big-endian
+    /// length field of 0 and zero payload bytes — exactly four NULs. A
+    /// regression where the encoder added padding or omitted the header
+    /// would change this golden.
+    #[test]
+    fn ld_goldens_zero_payload_default_codec() {
+        let mut codec = LengthDelimitedCodec::new();
+        let mut dst = BytesMut::new();
+        codec.encode(BytesMut::new(), &mut dst).unwrap();
+
+        let expected: &[u8] = include_bytes!("../../tests/goldens/length_delim/zero_payload.bin");
+        assert_eq!(dst.as_ref(), expected, "zero-payload wire format drift");
+
+        // Round-trip: the encoded bytes must decode back to an empty frame.
+        let mut decoder = LengthDelimitedCodec::new();
+        let mut src = dst;
+        let frame = decoder
+            .decode(&mut src)
+            .expect("decode")
+            .expect("frame present");
+        assert!(frame.is_empty(), "decoded zero-payload frame must be empty");
+        assert!(src.is_empty(), "buffer must be drained");
+    }
+
+    /// (b) Max-length payload: encode at exactly the boundary of
+    /// max_frame_length. Payload is 16 bytes of 0xAA so any byte-level
+    /// rotation, off-by-one in the reserve, or accidental insertion of
+    /// header padding shows up immediately.
+    #[test]
+    fn ld_goldens_max_payload_at_boundary() {
+        let mut codec = LengthDelimitedCodec::builder()
+            .max_frame_length(16)
+            .new_codec();
+        let mut dst = BytesMut::new();
+        codec
+            .encode(BytesMut::from(vec![0xAA_u8; 16].as_slice()), &mut dst)
+            .unwrap();
+
+        let expected: &[u8] =
+            include_bytes!("../../tests/goldens/length_delim/max_payload_16b.bin");
+        assert_eq!(
+            dst.as_ref(),
+            expected,
+            "at-limit max-length wire format drift"
+        );
+        assert_eq!(dst.len(), 20, "header(4) + payload(16)");
+
+        // Round-trip with the same max bound.
+        let mut decoder = LengthDelimitedCodec::builder()
+            .max_frame_length(16)
+            .new_codec();
+        let mut src = dst;
+        let frame = decoder
+            .decode(&mut src)
+            .expect("decode")
+            .expect("frame present");
+        assert_eq!(&frame[..], &[0xAA; 16]);
+        assert!(src.is_empty());
+    }
+
+    /// (c) FrameTooBig rejection trace: pinned not just on the error type
+    /// but also on the framing-recovery contract introduced by
+    /// br-asupersync-o7e5xu — the offending header MUST be consumed and a
+    /// follow-up decode() on an empty buffer MUST return Ok(None) (codec
+    /// is in Skip state, waiting to drain the advertised body bytes that
+    /// will never arrive). Without recovery, the prior bug re-emitted the
+    /// same Err on every poll.
+    #[test]
+    fn ld_goldens_frame_too_big_rejection_trace() {
+        let mut codec = LengthDelimitedCodec::builder()
+            .max_frame_length(10)
+            .new_codec();
+        let mut buf = BytesMut::new();
+        // 4-byte BE length field of u32::MAX — definitely exceeds max=10.
+        buf.put_u8(0xFF);
+        buf.put_u8(0xFF);
+        buf.put_u8(0xFF);
+        buf.put_u8(0xFF);
+
+        let err = codec.decode(&mut buf).expect_err("must reject");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(err.to_string(), "frame length exceeds max_frame_length");
+
+        // Framing-recovery contract: header consumed, buffer drained.
+        assert_eq!(buf.len(), 0, "header bytes must be consumed (o7e5xu)");
+
+        // A follow-up decode() on an empty buffer must NOT re-emit the
+        // error — the codec is now in Skip(u32::MAX) state, returning
+        // Ok(None) until the (mythical) body bytes arrive.
+        let followup = codec.decode(&mut buf).expect("no re-emitted error");
+        assert!(
+            followup.is_none(),
+            "Skip state must yield None, not a frame"
+        );
+
+        // Format the trace and compare to the golden file. Doing this in
+        // a stable plaintext format keeps the rejection contract reviewable
+        // by humans and machines without an extra serialization framework.
+        let actual_trace = format!(
+            "# LengthDelimitedCodec FrameTooBig rejection trace\n\
+             # Regression contract for br-asupersync-o7e5xu (framing recovery on\n\
+             # max_frame_length violation). Re-generate by running:\n\
+             #   cargo test --lib codec::length_delimited::ld_goldens_frame_too_big\n\
+             # (with INSTA_UPDATE=auto-equivalent: write expected bytes here verbatim).\n\
+             \n\
+             codec.length_field_length: 4\n\
+             codec.length_field_offset: 0\n\
+             codec.length_adjustment: 0\n\
+             codec.num_skip: 4\n\
+             codec.max_frame_length: 10\n\
+             codec.big_endian: true\n\
+             \n\
+             input.hex: ffffffff\n\
+             input.len: 4\n\
+             \n\
+             decode.result: Err\n\
+             error.kind: {:?}\n\
+             error.message: {}\n\
+             \n\
+             # Framing-recovery contract (br-asupersync-o7e5xu):\n\
+             # - the offending header MUST be consumed from the source buffer\n\
+             # - the codec MUST transition into Skip(raw_len) state, draining the\n\
+             #   advertised body across subsequent decode() calls\n\
+             buffer.len_after_error: {}\n\
+             followup.decode.returns_none: {}\n\
+             followup.decode.error: none\n",
+            err.kind(),
+            err,
+            0,
+            followup.is_none(),
+        );
+
+        let expected: &str =
+            include_str!("../../tests/goldens/length_delim/frame_too_big_trace.txt");
+        assert_eq!(
+            actual_trace, expected,
+            "FrameTooBig rejection trace drift — investigate before regenerating"
+        );
+    }
+
+    /// (d) length_field_offset != 0: encoder writes `offset` zero pad
+    /// bytes, then the length field, then payload. Past audit batches
+    /// fixed two arithmetic bugs in this exact codepath (br-asupersync-
+    /// ooqkxe and qj99nz); freezing the wire format prevents either
+    /// regression from sneaking back in.
+    #[test]
+    fn ld_goldens_length_field_offset_two() {
+        let mut codec = LengthDelimitedCodec::builder()
+            .length_field_offset(2)
+            .length_field_length(4)
+            .num_skip(6)
+            .new_codec();
+        let mut dst = BytesMut::new();
+        codec
+            .encode(BytesMut::from(&b"test"[..]), &mut dst)
+            .unwrap();
+
+        let expected: &[u8] = include_bytes!("../../tests/goldens/length_delim/offset2_u32_be.bin");
+        assert_eq!(dst.as_ref(), expected, "offset=2 wire format drift");
+        assert_eq!(dst.len(), 10, "offset(2) + header(4) + payload(4)");
+
+        // Round-trip: a freshly-built decoder with the same shape must
+        // recover the original payload.
+        let mut decoder = LengthDelimitedCodec::builder()
+            .length_field_offset(2)
+            .length_field_length(4)
+            .num_skip(6)
+            .new_codec();
+        let mut src = dst;
+        let frame = decoder
+            .decode(&mut src)
+            .expect("decode")
+            .expect("frame present");
+        assert_eq!(&frame[..], b"test");
+        assert!(src.is_empty());
+    }
+
     // ================================================================================
     // METAMORPHIC TESTING SUITE
     // ================================================================================

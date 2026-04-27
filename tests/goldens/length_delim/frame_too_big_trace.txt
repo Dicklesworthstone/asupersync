@@ -1,0 +1,27 @@
+# LengthDelimitedCodec FrameTooBig rejection trace
+# Regression contract for br-asupersync-o7e5xu (framing recovery on
+# max_frame_length violation). Re-generate by running:
+#   cargo test --lib codec::length_delimited::ld_goldens_frame_too_big
+# (with INSTA_UPDATE=auto-equivalent: write expected bytes here verbatim).
+
+codec.length_field_length: 4
+codec.length_field_offset: 0
+codec.length_adjustment: 0
+codec.num_skip: 4
+codec.max_frame_length: 10
+codec.big_endian: true
+
+input.hex: ffffffff
+input.len: 4
+
+decode.result: Err
+error.kind: InvalidData
+error.message: frame length exceeds max_frame_length
+
+# Framing-recovery contract (br-asupersync-o7e5xu):
+# - the offending header MUST be consumed from the source buffer
+# - the codec MUST transition into Skip(raw_len) state, draining the
+#   advertised body across subsequent decode() calls
+buffer.len_after_error: 0
+followup.decode.returns_none: true
+followup.decode.error: none
