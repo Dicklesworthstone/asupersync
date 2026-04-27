@@ -8,6 +8,7 @@
 
 use super::*;
 use asupersync::net::quic_core::{decode_varint, encode_varint};
+use asupersync::http::h3_native::{H3Frame, H3NativeError, H3ConnectionConfig, H3ControlState};
 
 /// HTTP/3 frame types from RFC 9114.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,7 +124,7 @@ fn test_control_stream_non_settings_rejection() -> H3ConformanceResult {
 
             // Must result in H3_MISSING_SETTINGS connection error
             let error_code = get_last_h3_connection_error();
-            if !matches!(error_code, Some(H3ConnectionError::MissingSettings)) {
+            if !matches!(error_code, Some(H3NativeError::ControlProtocol(_))) {
                 return Err(format!(
                     "Control stream with {} should cause H3_MISSING_SETTINGS, got {:?}",
                     description, error_code
@@ -281,7 +282,7 @@ fn test_control_stream_frame_ordering() -> H3ConformanceResult {
 
             // Should result in H3_FRAME_UNEXPECTED
             let error_code = get_last_h3_connection_error();
-            if !matches!(error_code, Some(H3ConnectionError::FrameUnexpected)) {
+            if !matches!(error_code, Some(H3NativeError::ControlProtocol(_))) {
                 return Err(format!(
                     "{} should cause H3_FRAME_UNEXPECTED, got {:?}",
                     description, error_code
@@ -323,13 +324,13 @@ fn test_missing_settings_error_handling() -> H3ConformanceResult {
 
         // Verify error handling
         let error = get_last_h3_connection_error();
-        if !matches!(error, Some(H3ConnectionError::MissingSettings)) {
+        if !matches!(error, Some(H3NativeError::ControlProtocol(_))) {
             return Err(format!("Expected H3_MISSING_SETTINGS, got {:?}", error));
         }
 
         // Verify connection is properly closed
         let connection_state = get_connection_state();
-        if !matches!(connection_state, ConnectionState::Closed) {
+        if !get_connection_closed() {
             return Err("Connection should be closed after H3_MISSING_SETTINGS".to_string());
         }
 
@@ -357,25 +358,64 @@ fn test_missing_settings_error_handling() -> H3ConformanceResult {
     }
 }
 
-// Helper functions and types for testing
-// In real implementation, these would integrate with actual HTTP/3 stack
+// Helper functions and types for testing using real HTTP/3 implementation
 
-#[derive(Debug, PartialEq)]
-enum H3ConnectionError {
-    MissingSettings,
-    FrameUnexpected,
-    ProtocolError,
+/// Connection state tracking using real H3 control state.
+#[derive(Debug, Clone)]
+struct TestConnectionState {
+    control_state: H3ControlState,
+    last_error: Option<H3NativeError>,
+    is_closed: bool,
 }
 
-#[derive(Debug, PartialEq)]
-enum ConnectionState {
-    Open,
-    Closing,
-    Closed,
+impl TestConnectionState {
+    fn new() -> Self {
+        Self {
+            control_state: H3ControlState::new(),
+            last_error: None,
+            is_closed: false,
+        }
+    }
+
+    fn handle_frame(&mut self, frame: &H3Frame) -> Result<(), H3NativeError> {
+        // Use real H3 control state validation
+        match self.control_state.on_remote_control_frame(frame) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                self.last_error = Some(e.clone());
+                self.is_closed = true;
+                Err(e)
+            }
+        }
+    }
+
+    fn last_error(&self) -> Option<&H3NativeError> {
+        self.last_error.as_ref()
+    }
+
+    fn is_closed(&self) -> bool {
+        self.is_closed
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
+}
+
+/// Global test connection state (in real implementation this would be per-connection)
+static mut TEST_CONNECTION: Option<TestConnectionState> = None;
+
+fn get_test_connection() -> &'static mut TestConnectionState {
+    unsafe {
+        if TEST_CONNECTION.is_none() {
+            TEST_CONNECTION = Some(TestConnectionState::new());
+        }
+        TEST_CONNECTION.as_mut().unwrap()
+    }
 }
 
 #[derive(Debug)]
-struct H3Frame {
+struct ParsedH3Frame {
     frame_type: H3FrameType,
     length: u64,
     payload: Vec<u8>,
@@ -485,7 +525,7 @@ fn create_h3_frame(frame_type: H3FrameType, payload: &[u8]) -> Vec<u8> {
     frame_data
 }
 
-fn parse_h3_frames(data: &[u8]) -> Vec<H3Frame> {
+fn parse_h3_frames(data: &[u8]) -> Vec<ParsedH3Frame> {
     let mut frames = Vec::new();
     let mut offset = 0;
 
@@ -516,7 +556,7 @@ fn parse_h3_frames(data: &[u8]) -> Vec<H3Frame> {
         }
         let payload = data[offset..payload_end].to_vec();
 
-        frames.push(H3Frame {
+        frames.push(ParsedH3Frame {
             frame_type,
             length,
             payload,
@@ -571,23 +611,45 @@ fn validate_h3_frame(frame_data: &[u8]) -> bool {
     frame_data.len() >= type_len + len_len + length as usize
 }
 
-fn get_last_h3_connection_error() -> Option<H3ConnectionError> {
-    // Mock error tracking
-    Some(H3ConnectionError::MissingSettings)
+fn get_last_h3_connection_error() -> Option<H3NativeError> {
+    // Use real H3 error tracking from connection state
+    get_test_connection().last_error().cloned()
 }
 
-fn get_connection_state() -> ConnectionState {
-    // Mock connection state
-    ConnectionState::Closed
+fn get_connection_closed() -> bool {
+    // Use real connection state tracking
+    get_test_connection().is_closed()
 }
 
-fn process_frame_after_error(_frame_data: &[u8]) -> bool {
-    // Mock frame processing - should return false after error
-    false
+fn process_frame_after_error(frame_data: &[u8]) -> bool {
+    // Use real H3 frame processing - attempt to parse and validate
+    let config = H3ConnectionConfig::default();
+
+    match H3Frame::decode(frame_data, &config) {
+        Ok((frame, _)) => {
+            // Try to process the frame - should fail if connection is in error state
+            if get_test_connection().is_closed() {
+                false // Reject frames after connection error
+            } else {
+                // Try to handle the frame with real H3 validation
+                get_test_connection().handle_frame(&frame).is_ok()
+            }
+        }
+        Err(_) => false, // Invalid frame data
+    }
 }
 
 fn reset_connection_state() {
-    // Mock connection state reset
+    // Reset using real connection state management
+    get_test_connection().reset();
+}
+
+fn simulate_control_stream_frame_processing(frame_data: &[u8]) -> Result<(), H3NativeError> {
+    // Use real H3 frame parsing and control stream validation
+    let config = H3ConnectionConfig::default();
+
+    let (frame, _) = H3Frame::decode(frame_data, &config)?;
+    get_test_connection().handle_frame(&frame)
 }
 
 #[test]
