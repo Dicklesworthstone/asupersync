@@ -21,6 +21,7 @@ pub use crate::encoding::{EncodedSymbol, EncodingError, EncodingPipeline, Encodi
 mod golden_tests {
     use super::*;
     use crate::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
+    use crate::raptorq::systematic::SystematicParams;
     use crate::types::ObjectId;
     use crate::types::resource::{PoolConfig, SymbolPool};
     use insta::assert_json_snapshot;
@@ -29,7 +30,6 @@ mod golden_tests {
 
     const CANONICAL_SYMBOL_SIZE: usize = 8;
     const CANONICAL_MAX_BLOCK_SIZE: usize = 4096;
-    const CANONICAL_REPAIR_OVERHEAD: f64 = 1.05;
 
     #[derive(Serialize)]
     struct CanonicalPacketGolden {
@@ -50,6 +50,7 @@ mod golden_tests {
         packet_count: usize,
         source_symbols: usize,
         repair_symbols: usize,
+        requested_repairs: usize,
         packets: Vec<CanonicalPacketGolden>,
     }
 
@@ -181,17 +182,20 @@ mod golden_tests {
     ) -> CanonicalVectorGolden {
         let payload = deterministic_payload(payload_size, object_value as u8);
         let object_id = ObjectId::new_for_test(object_value);
-        let mut pipeline = pinned_pipeline_with_overhead(
-            CANONICAL_SYMBOL_SIZE as u16,
-            CANONICAL_MAX_BLOCK_SIZE,
-            CANONICAL_REPAIR_OVERHEAD,
-        );
+        let params = SystematicParams::for_source_block(expected_k, CANONICAL_SYMBOL_SIZE);
+        let requested_repairs = params.s + params.h;
+        let mut pipeline = pinned_pipeline(CANONICAL_SYMBOL_SIZE as u16, CANONICAL_MAX_BLOCK_SIZE);
         let encoded: Vec<_> = pipeline
-            .encode(object_id, &payload)
+            .encode_with_repair(object_id, &payload, requested_repairs)
             .collect::<Result<Vec<_>, _>>()
             .expect("canonical golden encode should succeed");
         let stats = pipeline.stats();
 
+        assert_eq!(
+            payload_size.div_ceil(CANONICAL_SYMBOL_SIZE),
+            expected_k,
+            "{case_name} fixture drifted away from its expected source-symbol count"
+        );
         assert_eq!(
             stats.blocks, 1,
             "{case_name} must stay single-block so packet bytes remain canonical"
@@ -199,6 +203,10 @@ mod golden_tests {
         assert_eq!(
             stats.source_symbols, expected_k,
             "{case_name} emitted unexpected source-symbol count"
+        );
+        assert_eq!(
+            stats.repair_symbols, requested_repairs,
+            "{case_name} emitted unexpected repair-symbol count"
         );
 
         let seed = seed_for_block(object_id, 0);
@@ -222,6 +230,7 @@ mod golden_tests {
             packet_count: encoded.len(),
             source_symbols: stats.source_symbols,
             repair_symbols: stats.repair_symbols,
+            requested_repairs,
             packets: encoded
                 .into_iter()
                 .map(|encoded_symbol| {
