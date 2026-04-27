@@ -5354,6 +5354,101 @@ impl crate::database::pool::AsyncConnectionManager for PgConnectionManager {
     }
 }
 
+#[cfg(feature = "test-internals")]
+fn fuzz_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
+    let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => listener,
+        Err(err) => panic!("bind fuzz test listener: {err}"),
+    };
+    let addr = match listener.local_addr() {
+        Ok(addr) => addr,
+        Err(err) => panic!("read fuzz test listener addr: {err}"),
+    };
+    let std_stream = match std::net::TcpStream::connect(addr) {
+        Ok(stream) => stream,
+        Err(err) => panic!("connect fuzz test stream: {err}"),
+    };
+    let (peer_stream, _) = match listener.accept() {
+        Ok(pair) => pair,
+        Err(err) => panic!("accept fuzz test stream: {err}"),
+    };
+    let stream = match crate::net::TcpStream::from_std(std_stream) {
+        Ok(stream) => stream,
+        Err(err) => panic!("convert fuzz test stream: {err}"),
+    };
+    (
+        PgConnection {
+            inner: PgConnectionInner {
+                stream: PgStream::Plain(stream),
+                process_id: 0,
+                secret_key: 0,
+                parameters: BTreeMap::new(),
+                transaction_status: b'I',
+                closed: false,
+                needs_rollback: false,
+                needs_discard: false,
+                next_stmt_id: 0,
+                max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                prepared_cache: PreparedStatementCache::new(DEFAULT_MAX_PREPARED_STATEMENTS),
+                deallocate_retry_queue: VecDeque::new(),
+                consecutive_deallocate_failures: 0,
+                unhealthy: false,
+            },
+        },
+        peer_stream,
+    )
+}
+
+/// br-asupersync-eoixvy — fuzz-target re-exporter for PostgreSQL backend
+/// message framing. Uses the real `read_message()` path behind a
+/// `test-internals` seam so libFuzzer can exercise length validation and
+/// truncation handling against production code.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub async fn fuzz_read_backend_message(cx: &Cx, frame: &[u8]) -> Result<(u8, Vec<u8>), PgError> {
+    let (mut conn, mut peer) = fuzz_test_connection_with_peer();
+    std::io::Write::write_all(&mut peer, frame).map_err(PgError::Io)?;
+    peer.shutdown(std::net::Shutdown::Write)
+        .map_err(PgError::Io)?;
+    conn.read_message(cx).await
+}
+
+/// br-asupersync-eoixvy — fuzz-target re-exporter for the RowDescription
+/// parser.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_parse_row_description(
+    data: &[u8],
+) -> Result<(Vec<PgColumn>, BTreeMap<String, usize>), PgError> {
+    let (conn, _peer) = fuzz_test_connection_with_peer();
+    conn.parse_row_description(data)
+}
+
+/// br-asupersync-eoixvy — fuzz-target re-exporter for the DataRow parser.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_parse_data_row(data: &[u8], columns: &[PgColumn]) -> Result<Vec<PgValue>, PgError> {
+    let (conn, _peer) = fuzz_test_connection_with_peer();
+    conn.parse_data_row(data, columns)
+}
+
+/// br-asupersync-eoixvy — fuzz-target re-exporter for the ErrorResponse
+/// parser.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_parse_error_response(data: &[u8]) -> Result<PgError, PgError> {
+    let (conn, _peer) = fuzz_test_connection_with_peer();
+    conn.parse_error_response(data)
+}
+
+/// br-asupersync-eoixvy — fuzz-target re-exporter for the
+/// ParameterDescription parser.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_parse_parameter_description(data: &[u8]) -> Result<Vec<u32>, PgError> {
+    PgConnection::parse_parameter_description(data)
+}
+
 #[cfg(test)]
 #[allow(
     clippy::approx_constant,

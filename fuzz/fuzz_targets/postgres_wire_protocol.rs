@@ -16,6 +16,13 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
+use asupersync::Cx;
+use asupersync::database::PgColumn;
+use asupersync::database::postgres::{
+    fuzz_parse_data_row, fuzz_parse_error_response, fuzz_parse_parameter_description,
+    fuzz_parse_row_description, fuzz_read_backend_message,
+};
+use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
 
 const MAX_MESSAGE_SIZE: usize = 1024 * 1024; // 1MB limit for fuzzing
@@ -444,6 +451,8 @@ fn fuzz_message_framing(
 
     message.extend_from_slice(&actual_length.to_be_bytes());
     message.extend_from_slice(&body_data);
+    let cx = Cx::for_testing();
+    let _ = block_on(fuzz_read_backend_message(&cx, &message));
 
     // Test message length validation
     if actual_length < 4 {
@@ -467,6 +476,8 @@ fn fuzz_message_framing(
     for scenario in truncation_scenarios.iter().take(8) {
         let truncate_point = scenario.truncate_at.min(message.len());
         let truncated = &message[..truncate_point];
+        let cx = Cx::for_testing();
+        let _ = block_on(fuzz_read_backend_message(&cx, truncated));
 
         // Validate that truncation detection works correctly
         match scenario.expected_behavior {
@@ -601,6 +612,8 @@ fn fuzz_row_description_parsing(
         apply_malformed_data(&mut data, malformation);
     }
 
+    let _ = fuzz_parse_row_description(&data);
+
     // Test field count vs actual fields mismatch
     let expected_fields = num_fields as usize;
     if expected_fields != actual_fields {
@@ -632,6 +645,7 @@ fn fuzz_data_row_parsing(
     data.extend_from_slice(&column_count.to_be_bytes());
 
     let actual_count = values.len().min(MAX_COLUMNS);
+    let mut columns = Vec::with_capacity(actual_count);
 
     for (i, value) in values.iter().enumerate().take(actual_count) {
         // Field length (-1 for NULL, 0+ for data)
@@ -653,6 +667,21 @@ fn fuzz_data_row_parsing(
             // Test type-specific parsing
             let type_oid = type_oids.get(i).copied().unwrap_or(25); // Default to TEXT
             let format = format_codes.get(i).unwrap_or(&FormatCode::Text);
+            let format_code = match format {
+                FormatCode::Text => 0i16,
+                FormatCode::Binary => 1i16,
+                FormatCode::Invalid(raw) => i16::from_be_bytes(raw.to_be_bytes()),
+            };
+
+            columns.push(PgColumn {
+                name: format!("col_{i}"),
+                table_oid: 0,
+                column_id: i16::try_from(i).unwrap_or(i16::MAX),
+                type_oid,
+                type_size: -1,
+                type_modifier: -1,
+                format_code,
+            });
 
             test_type_conversion(actual_data, type_oid, format, &value.expected_type);
         } else if value.length != -1 {
@@ -662,7 +691,28 @@ fn fuzz_data_row_parsing(
                 "Invalid field length"
             );
         }
+
+        if value.length < 0 {
+            let type_oid = type_oids.get(i).copied().unwrap_or(25);
+            let format = format_codes.get(i).unwrap_or(&FormatCode::Text);
+            let format_code = match format {
+                FormatCode::Text => 0i16,
+                FormatCode::Binary => 1i16,
+                FormatCode::Invalid(raw) => i16::from_be_bytes(raw.to_be_bytes()),
+            };
+            columns.push(PgColumn {
+                name: format!("col_{i}"),
+                table_oid: 0,
+                column_id: i16::try_from(i).unwrap_or(i16::MAX),
+                type_oid,
+                type_size: -1,
+                type_modifier: -1,
+                format_code,
+            });
+        }
     }
+
+    let _ = fuzz_parse_data_row(&data, &columns);
 
     // Test column count vs actual values mismatch
     if (column_count as usize) != actual_count {
@@ -727,6 +777,7 @@ fn fuzz_error_response_parsing(
 
     // Message terminator
     data.push(0);
+    let _ = fuzz_parse_error_response(&data);
 
     // Test SQLSTATE validation
     for sqlstate_test in sqlstate_tests.iter().take(16) {
@@ -835,6 +886,17 @@ fn fuzz_query_preparation(
         param_oids.len() <= MAX_PARAMETERS,
         "Parameter count should be bounded"
     );
+
+    let mut parameter_description = Vec::with_capacity(2 + param_oids.len() * 4);
+    parameter_description.extend_from_slice(
+        &u16::try_from(param_oids.len())
+            .unwrap_or(u16::MAX)
+            .to_be_bytes(),
+    );
+    for oid in &param_oids {
+        parameter_description.extend_from_slice(&oid.to_be_bytes());
+    }
+    let _ = fuzz_parse_parameter_description(&parameter_description);
 
     // Test preparation options
     test_preparation_options(&preparation_options);
