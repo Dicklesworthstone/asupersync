@@ -78,8 +78,17 @@ enum Tamper {
 }
 
 fuzz_target!(|input: AuthenticatedMacInput| {
-    let signing_key = AuthKey::from_bytes(input.signing_key);
-    let alternate_key = AuthKey::from_bytes(input.alternate_key);
+    // br-asupersync-ombirt: post-q3terg AuthKey::from_bytes returns
+    // Result; reject low-entropy keys so only valid-entropy material
+    // exercises the MAC verification machinery below.
+    let signing_key = match AuthKey::from_bytes(input.signing_key) {
+        Ok(k) => k,
+        Err(_) => return,
+    };
+    let alternate_key = match AuthKey::from_bytes(input.alternate_key) {
+        Ok(k) => k,
+        Err(_) => return,
+    };
     let symbol = build_symbol(
         input.object_id,
         input.sbn,

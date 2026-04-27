@@ -51,7 +51,13 @@ fuzz_target!(|input: TagVerifierFuzzInput| {
         input.kind,
         &input.payload,
     );
-    let key = AuthKey::from_bytes(input.key_bytes);
+    // br-asupersync-ombirt: post-q3terg AuthKey::from_bytes returns
+    // Result; reject low-entropy keys to keep the entropy-validation
+    // contract intact.
+    let key = match AuthKey::from_bytes(input.key_bytes) {
+        Ok(k) => k,
+        Err(_) => return,
+    };
 
     let computed = AuthenticationTag::compute(&key, &symbol);
     let reference = reference_tag_bytes(&key, &symbol);
@@ -119,7 +125,14 @@ fn apply_mutation(
             let idx = (*byte_index as usize) % AUTH_KEY_SIZE;
             let mask = if *xor_mask == 0 { 1 } else { *xor_mask };
             key_bytes[idx] ^= mask;
-            (*computed, AuthKey::from_bytes(key_bytes), symbol.clone())
+            // br-asupersync-ombirt: post-q3terg from_bytes is fallible.
+            // If the single-byte XOR produced a low-entropy key (rare —
+            // requires the original key to be near the entropy bound),
+            // fall back to the original `key` so the wrong-key mutation
+            // degenerates into a same-key no-op (still safe; just less
+            // discriminating for that specific input).
+            let mutated_key = AuthKey::from_bytes(key_bytes).unwrap_or_else(|_| *key);
+            (*computed, mutated_key, symbol.clone())
         }
         Mutation::MutatePayload {
             byte_index,

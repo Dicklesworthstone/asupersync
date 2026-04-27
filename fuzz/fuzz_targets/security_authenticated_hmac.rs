@@ -107,8 +107,18 @@ fuzz_target!(|input: FuzzInput| {
         msg.truncate(16 * 1024);
     }
 
-    let key_a = AuthKey::from_bytes(input.key_a);
-    let key_b = AuthKey::from_bytes(input.key_b);
+    // br-asupersync-ombirt: post-q3terg AuthKey::from_bytes returns
+    // Result; reject low-entropy fuzz inputs so the entropy-validation
+    // contract stays intact and only valid-entropy keys exercise the
+    // HMAC-SHA256 path below.
+    let key_a = match AuthKey::from_bytes(input.key_a) {
+        Ok(k) => k,
+        Err(_) => return,
+    };
+    let key_b = match AuthKey::from_bytes(input.key_b) {
+        Ok(k) => k,
+        Err(_) => return,
+    };
 
     // -------------------------------------------------------------------
     // Property 1: KeyRing::verify never panics on adversarial signatures

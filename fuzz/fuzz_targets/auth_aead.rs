@@ -65,7 +65,15 @@ fuzz_target!(|input: AeadFuzzInput| {
 /// Property 1: Round-trip consistency
 /// For any valid symbol and key, compute() followed by verify() should always succeed
 fn test_round_trip_consistency(input: &AeadFuzzInput) {
-    let key = AuthKey::from_bytes(input.key_bytes);
+    // br-asupersync-ombirt: post-q3terg AuthKey::from_bytes returns
+    // Result; reject low-entropy inputs (libfuzzer's mutator is biased
+    // enough that valid-entropy keys appear in ~all uniform-random 32B
+    // buffers — the Err branch only catches the all-zero / all-one /
+    // single-pattern outliers).
+    let key = match AuthKey::from_bytes(input.key_bytes) {
+        Ok(k) => k,
+        Err(_) => return,
+    };
 
     // Create symbol from fuzz input
     let symbol_id = SymbolId::new_for_test(
@@ -99,7 +107,15 @@ fn test_round_trip_consistency(input: &AeadFuzzInput) {
 /// Property 2: Tag mismatch returns error with no plaintext leak
 /// Corrupted tags should fail verification without revealing information
 fn test_tag_mismatch_security(input: &AeadFuzzInput) {
-    let key = AuthKey::from_bytes(input.key_bytes);
+    // br-asupersync-ombirt: post-q3terg AuthKey::from_bytes returns
+    // Result; reject low-entropy inputs (libfuzzer's mutator is biased
+    // enough that valid-entropy keys appear in ~all uniform-random 32B
+    // buffers — the Err branch only catches the all-zero / all-one /
+    // single-pattern outliers).
+    let key = match AuthKey::from_bytes(input.key_bytes) {
+        Ok(k) => k,
+        Err(_) => return,
+    };
 
     let symbol_id = SymbolId::new_for_test(input.object_id.wrapping_add(1), input.sbn, input.esi);
     let symbol_kind = if input.is_source {
@@ -184,12 +200,19 @@ fn test_tag_mismatch_security(input: &AeadFuzzInput) {
 /// Different keys should produce different tags for the same symbol
 fn test_key_isolation(input: &AeadFuzzInput) {
     if let TagModificationScenario::WrongKey { key_offset } = &input.tag_scenario {
-        let key1 = AuthKey::from_bytes(input.key_bytes);
+        // br-asupersync-ombirt: reject low-entropy keys (Result API).
+        let key1 = match AuthKey::from_bytes(input.key_bytes) {
+            Ok(k) => k,
+            Err(_) => return,
+        };
 
         // Create different key by modifying one byte
         let mut key2_bytes = input.key_bytes;
         key2_bytes[0] = key2_bytes[0].wrapping_add(*key_offset);
-        let key2 = AuthKey::from_bytes(key2_bytes);
+        let key2 = match AuthKey::from_bytes(key2_bytes) {
+            Ok(k) => k,
+            Err(_) => return,
+        };
 
         // Only test if keys are actually different
         if key1 != key2 {
@@ -234,7 +257,15 @@ fn test_aad_tamper_detection(input: &AeadFuzzInput) {
         tamper_esi,
     } = &input.tag_scenario
     {
-        let key = AuthKey::from_bytes(input.key_bytes);
+        // br-asupersync-ombirt: post-q3terg AuthKey::from_bytes returns
+    // Result; reject low-entropy inputs (libfuzzer's mutator is biased
+    // enough that valid-entropy keys appear in ~all uniform-random 32B
+    // buffers — the Err branch only catches the all-zero / all-one /
+    // single-pattern outliers).
+    let key = match AuthKey::from_bytes(input.key_bytes) {
+        Ok(k) => k,
+        Err(_) => return,
+    };
 
         let original_id =
             SymbolId::new_for_test(input.object_id.wrapping_add(1), input.sbn, input.esi);
@@ -278,7 +309,15 @@ fn test_aad_tamper_detection(input: &AeadFuzzInput) {
 /// Property 5: Constant-time verification
 /// Basic check that verify() doesn't panic or behave obviously differently based on input
 fn test_constant_time_verification(input: &AeadFuzzInput) {
-    let key = AuthKey::from_bytes(input.key_bytes);
+    // br-asupersync-ombirt: post-q3terg AuthKey::from_bytes returns
+    // Result; reject low-entropy inputs (libfuzzer's mutator is biased
+    // enough that valid-entropy keys appear in ~all uniform-random 32B
+    // buffers — the Err branch only catches the all-zero / all-one /
+    // single-pattern outliers).
+    let key = match AuthKey::from_bytes(input.key_bytes) {
+        Ok(k) => k,
+        Err(_) => return,
+    };
 
     let symbol_id = SymbolId::new_for_test(input.object_id.wrapping_add(1), input.sbn, input.esi);
     let symbol_kind = if input.is_source {
