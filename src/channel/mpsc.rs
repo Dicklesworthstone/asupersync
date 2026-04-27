@@ -3724,14 +3724,12 @@ pub mod backpressure_metamorphic {
     }
 
     fn compute_expected_multiset(producer_count: usize, messages_per_producer: usize) -> std::collections::BTreeMap<u32, usize> {
-        let mut expected = std::collections::BTreeMap::new();
-        for producer_id in 0..producer_count {
-            for msg_ordinal in 0..messages_per_producer {
-                let encoded = encode_sender_message(producer_id, msg_ordinal);
-                *expected.entry(encoded).or_insert(0) += 1;
-            }
-        }
-        expected
+        (0..producer_count)
+            .flat_map(|producer_id| (0..messages_per_producer).map(move |msg_ordinal| encode_sender_message(producer_id, msg_ordinal)))
+            .fold(std::collections::BTreeMap::new(), |mut acc, encoded| {
+                *acc.entry(encoded).or_insert(0) += 1;
+                acc
+            })
     }
 
     /// Composite metamorphic test: All relations together
