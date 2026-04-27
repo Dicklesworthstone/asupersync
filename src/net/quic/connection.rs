@@ -226,6 +226,9 @@ mod tests {
             future.as_mut().poll(&mut poll_cx),
             Poll::Ready(Err(QuicError::Cancelled))
         );
-        assert!(cancelled, "future should return cancelled after Cx cancellation");
+        assert!(
+            cancelled,
+            "future should return cancelled after Cx cancellation"
+        );
     }
 }
