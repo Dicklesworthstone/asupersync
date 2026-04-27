@@ -790,6 +790,14 @@ fn parse_chunk_size_line(line: &[u8]) -> Result<usize, HttpError> {
     {
         return Err(HttpError::BadChunkedEncoding);
     }
+    // br-asupersync-usvn1p: RFC 9112 §7.1 — chunk-size = 1*HEXDIG (no
+    // sign). Rust's usize::from_str_radix accepts '+1A' which can
+    // disagree with stricter intermediaries (nginx, envoy) and create
+    // a request-smuggling primitive. Reject any non-hexdigit prefix
+    // before parsing.
+    if size_part.is_empty() || !size_part.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(HttpError::BadChunkedEncoding);
+    }
     usize::from_str_radix(size_part, 16).map_err(|_| HttpError::BadChunkedEncoding)
 }
 
@@ -917,11 +925,16 @@ fn decode_head_parts(
             BodyKind::Chunked
         }
         (None, Some(cl_idx)) => {
-            let len: usize = headers[cl_idx]
-                .1
-                .trim()
-                .parse()
-                .map_err(|_| HttpError::BadContentLength)?;
+            // br-asupersync-lbhaf2: RFC 9112 §6.1 — Content-Length is
+            // 1*DIGIT (no leading sign). Rust's usize::parse() accepts
+            // '+5' which can disagree with stricter intermediaries
+            // (nginx, envoy) and create a request-smuggling primitive.
+            // Reject any non-digit prefix before parsing.
+            let cl_str = headers[cl_idx].1.trim();
+            if cl_str.is_empty() || !cl_str.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(HttpError::BadContentLength);
+            }
+            let len: usize = cl_str.parse().map_err(|_| HttpError::BadContentLength)?;
             BodyKind::ContentLength(len)
         }
         (None, None) => BodyKind::ContentLength(0),
@@ -1155,7 +1168,14 @@ impl Encoder<Response> for Http1Codec {
 
         if !chunked {
             if let Some(cl) = cl {
-                let declared: usize = cl.trim().parse().map_err(|_| HttpError::BadContentLength)?;
+                // br-asupersync-lbhaf2: same digit-only validation on the
+                // encode side. Reject Content-Length values like '+5' that
+                // Rust parse accepts but the spec rejects.
+                let cl_str = cl.trim();
+                if cl_str.is_empty() || !cl_str.bytes().all(|b| b.is_ascii_digit()) {
+                    return Err(HttpError::BadContentLength);
+                }
+                let declared: usize = cl_str.parse().map_err(|_| HttpError::BadContentLength)?;
                 // Allow empty bodies with non-zero Content-Length for HEAD responses.
                 if declared != resp.body.len() && !resp.body.is_empty() {
                     return Err(HttpError::BadContentLength);
