@@ -28,18 +28,18 @@
 //! # Cancellation Semantics
 //!
 //! All QUIC operations respect Cx cancellation:
-//! - Endpoint operations check cancellation at entry
-//! - Stream operations check cancellation before I/O
+//! - Endpoint operations re-check cancellation while connect/accept/handshake waits are pending
+//! - Stream operations re-check cancellation while pending I/O is polled
 //! - On connection shutdown, streams are reset/stopped appropriately
 //! - Connection close marks streams for cleanup
 //!
 //! # Feature Flag
 //!
-//! This compatibility wrapper requires the `quic-compat` feature to be enabled:
+//! This wrapper requires the `quic` feature to be enabled:
 //!
 //! ```toml
 //! [dependencies]
-//! asupersync = { version = "0.1", features = ["quic-compat"] }
+//! asupersync = { version = "0.1", features = ["quic"] }
 //! ```
 
 mod config;
