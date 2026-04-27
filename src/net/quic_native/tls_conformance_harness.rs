@@ -541,6 +541,30 @@ mod differential_tests {
                 "check_0rtt_disabled",
             ],
             // Scenario 3: Multiple key updates
+            //
+            // br-asupersync-zbljb1: previously this scenario chained
+            // ["peer_key_update_true", "peer_key_update_false"] and
+            // asserted both were accepted. That codified a stale
+            // key-phase rollback as valid behavior — once the remote
+            // has advanced past phase=true, a subsequent phase=false
+            // packet is either (a) a stale/replayed packet from before
+            // the update (RFC 9001 §6.3 requires the receiver use the
+            // packet number to disambiguate, then either accept the
+            // new update on a higher PN or REJECT the stale packet on
+            // a lower PN), or (b) a third phase change. The harness
+            // does not model packet numbers, so it cannot disambiguate
+            // these cases — chaining the two steps without packet-
+            // number context simply locks in whatever the impl
+            // happens to do.
+            //
+            // The companion impl-side bead (br-asupersync-ss3l6s)
+            // tracks adding RFC 9001 §6.3 stale-rollback rejection
+            // to QuicTlsMachine::on_peer_key_phase. Once that lands,
+            // re-introduce a packet-number-aware scenario here that
+            // asserts the rollback path returns Err. Until then,
+            // omit the stale rollback step from scenario 3 so the
+            // harness does not codify the buggy always-accept
+            // behavior.
             vec![
                 "handshake_keys",
                 "1rtt_keys",
@@ -549,7 +573,6 @@ mod differential_tests {
                 "local_key_update_2",
                 "local_key_update_3",
                 "peer_key_update_true",
-                "peer_key_update_false",
             ],
         ];
 
