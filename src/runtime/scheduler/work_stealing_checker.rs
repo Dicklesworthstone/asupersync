@@ -207,6 +207,7 @@ impl WorkStealingChecker {
             to_worker,
             start_time: Instant::now(),
             checker: self,
+            completed: false,
         })
     }
 
@@ -263,7 +264,27 @@ impl WorkStealingChecker {
     }
 
     /// Records failed steal operation.
-    fn track_steal_failure(&self, _task_id: TaskId, _from_worker: WorkerId, _to_worker: WorkerId) {
+    fn track_steal_failure(&self, task_id: TaskId, from_worker: WorkerId, to_worker: WorkerId) {
+        {
+            let mut owners = self.task_owners.write();
+            if let Some(state) = owners.get_mut(&task_id) {
+                match state {
+                    OwnershipState::Stealing { from, to }
+                        if *from == from_worker && *to == to_worker =>
+                    {
+                        *state = OwnershipState::Owned(from_worker);
+                    }
+                    _ => {
+                        self.record_violation(ViolationType::LostWork {
+                            task_id,
+                            last_owner: from_worker,
+                        });
+                        return;
+                    }
+                }
+            }
+        }
+
         let mut stats = self.stats.write();
         stats.failed_steals += 1;
     }
@@ -412,28 +433,32 @@ pub struct StealTracker<'a> {
     to_worker: WorkerId,
     start_time: Instant,
     checker: &'a WorkStealingChecker,
+    completed: bool,
 }
 
 impl StealTracker<'_> {
     /// Records successful steal completion.
-    pub fn success(self) {
+    pub fn success(mut self) {
         let duration = self.start_time.elapsed();
         self.checker
             .track_steal_success(self.task_id, self.from_worker, self.to_worker, duration);
+        self.completed = true;
     }
 
     /// Records failed steal attempt.
-    pub fn failure(self) {
+    pub fn failure(mut self) {
         self.checker
             .track_steal_failure(self.task_id, self.from_worker, self.to_worker);
+        self.completed = true;
     }
 }
 
 impl Drop for StealTracker<'_> {
     fn drop(&mut self) {
-        // If not explicitly completed, assume failure
-        self.checker
-            .track_steal_failure(self.task_id, self.from_worker, self.to_worker);
+        if !self.completed {
+            self.checker
+                .track_steal_failure(self.task_id, self.from_worker, self.to_worker);
+        }
     }
 }
 
@@ -490,6 +515,51 @@ mod tests {
 
         let stats = checker.stats();
         assert_eq!(stats.successful_steals, 1);
+        assert_eq!(stats.failed_steals, 0);
+        assert!(!checker.has_violations());
+    }
+
+    #[test]
+    fn test_failed_steal_restores_original_owner() {
+        let checker = WorkStealingChecker::new();
+        let worker1 = 1;
+        let worker2 = 2;
+        let task = TaskId::new_for_test(101, 0);
+
+        checker.track_task_queued(task, worker1);
+
+        if let Some(tracker) = checker.track_steal_start(task, worker1, worker2) {
+            tracker.failure();
+        }
+
+        checker.track_task_execution_start(task, worker1);
+        checker.track_task_execution_complete(task, worker1);
+
+        let stats = checker.stats();
+        assert_eq!(stats.failed_steals, 1);
+        assert_eq!(stats.successful_steals, 0);
+        assert!(!checker.has_violations());
+    }
+
+    #[test]
+    fn test_dropped_tracker_counts_single_failure() {
+        let checker = WorkStealingChecker::new();
+        let worker1 = 1;
+        let worker2 = 2;
+        let task = TaskId::new_for_test(102, 0);
+
+        checker.track_task_queued(task, worker1);
+        let tracker = checker
+            .track_steal_start(task, worker1, worker2)
+            .expect("steal tracker should be created");
+        drop(tracker);
+
+        let stats = checker.stats();
+        assert_eq!(stats.failed_steals, 1);
+        assert_eq!(stats.successful_steals, 0);
+
+        checker.track_task_execution_start(task, worker1);
+        checker.track_task_execution_complete(task, worker1);
         assert!(!checker.has_violations());
     }
 
