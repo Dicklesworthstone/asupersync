@@ -115,10 +115,18 @@ mod tests {
 
     impl TlsRecord {
         fn new(content_type: u8, version: u16, payload: Vec<u8>) -> Self {
+            // br-asupersync-lp1dpt: was `payload.len() as u16` which silently
+            // truncates on overflow. All current callers stay under
+            // MAX_ENCRYPTED_RECORD_LENGTH (16640), well below u16::MAX, but
+            // a future test that constructs a >64KiB payload would silently
+            // get a wrong header length and a 'malformed record rejected'
+            // assertion could pass for the wrong reason. Fail loudly.
+            let length = u16::try_from(payload.len())
+                .expect("TlsRecord payload length exceeds u16; record header cannot encode it");
             Self {
                 content_type,
                 version,
-                length: payload.len() as u16,
+                length,
                 payload,
             }
         }
@@ -420,7 +428,7 @@ mod tests {
                 result_oversized.is_err(),
                 "oversized record rejected",
                 true,
-                format!("Record exceeding maximum length by 1 byte MUST be rejected")
+                "Record exceeding maximum length by 1 byte MUST be rejected"
             );
 
             // Test significantly oversized record
