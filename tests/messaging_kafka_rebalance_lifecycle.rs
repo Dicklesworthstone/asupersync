@@ -24,30 +24,18 @@
 
 #[cfg(feature = "kafka")]
 mod rebalance_lifecycle {
-    use asupersync::cx::Cx;
-    use asupersync::messaging::{
-        ConsumerConfig, KafkaConsumer, RebalanceResult, TopicPartitionOffset,
+    use asupersync::{
+        messaging::kafka_consumer::{
+            ConsumerConfig, KafkaConsumer, RebalanceResult, TopicPartitionOffset,
+        },
+        test_utils::run_test_with_cx,
     };
-    use std::time::Duration;
-
-    fn run<F, Fut, R>(f: F) -> R
-    where
-        F: FnOnce(Cx) -> Fut,
-        Fut: std::future::Future<Output = R>,
-    {
-        // Reuse the same lab-runtime harness pattern as e2e_messaging.rs;
-        // runs the future to completion on a dedicated LabRuntime.
-        let mut runtime = asupersync::lab::LabRuntime::with_seed(0xDEAD_BEEF);
-        let region = runtime.root_region();
-        let cx = Cx::for_testing(region);
-        runtime.block_on(f(cx))
-    }
 
     /// didz98: assigning a fresh partition emits the partition in
     /// RebalanceResult.assigned and an empty revoked list.
     #[test]
     fn didz98_initial_assignment_reports_no_revocations() {
-        run(|cx| async move {
+        run_test_with_cx(|cx| async move {
             let consumer = match KafkaConsumer::new(ConsumerConfig::default()) {
                 Ok(c) => c,
                 Err(_) => {
@@ -80,7 +68,7 @@ mod rebalance_lifecycle {
     /// as assigned.
     #[test]
     fn didz98_revocation_reports_removed_partition_and_clears_assignment() {
-        run(|cx| async move {
+        run_test_with_cx(|cx| async move {
             let consumer = match KafkaConsumer::new(ConsumerConfig::default()) {
                 Ok(c) => c,
                 Err(_) => {
@@ -142,7 +130,7 @@ mod rebalance_lifecycle {
     /// consumer's view reflects the new ownership.
     #[test]
     fn didz98_re_assignment_after_revocation_succeeds() {
-        run(|cx| async move {
+        run_test_with_cx(|cx| async move {
             let consumer = match KafkaConsumer::new(ConsumerConfig::default()) {
                 Ok(c) => c,
                 Err(_) => {

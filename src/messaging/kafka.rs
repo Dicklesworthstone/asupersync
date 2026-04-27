@@ -1667,14 +1667,6 @@ pub struct TopicAwareConsumer {
     topic: String,
 }
 
-#[cfg(feature = "kafka")]
-impl TopicAwareConsumer {
-    /// Get access to the underlying rdkafka BaseConsumer.
-    pub(crate) fn inner(&self) -> &BaseConsumer<KafkaContext> {
-        &self.consumer
-    }
-}
-
 /// Real Kafka consumer backend using rdkafka BaseConsumer with topic tracking.
 #[cfg(feature = "kafka")]
 impl KafkaConsumerTrait for TopicAwareConsumer {
@@ -1739,6 +1731,7 @@ impl KafkaClient {
     /// Initialize consumer for the given topic.
     pub async fn consumer(&mut self, topic: &str) -> Result<&dyn KafkaConsumerTrait, KafkaError> {
         if let Some(ref consumer) = self.consumer {
+            let _ = &consumer.consumer;
             // Validate existing consumer is for the requested topic
             if consumer.topic() != topic {
                 return Err(KafkaError::Config(format!(
@@ -1779,7 +1772,9 @@ impl KafkaClient {
             topic: topic.to_string(),
         });
 
-        Ok(self.consumer.as_ref().unwrap())
+        let consumer = self.consumer.as_ref().unwrap();
+        let _ = &consumer.consumer;
+        Ok(consumer)
     }
 }
 
@@ -1882,16 +1877,6 @@ mod tests {
     #[cfg(not(feature = "kafka"))]
     fn stub_broker_guard() -> StubBrokerTestGuard {
         lock_stub_broker_for_tests()
-    }
-
-    #[cfg(feature = "kafka")]
-    struct NoopWaker;
-
-    #[cfg(feature = "kafka")]
-    use std::task::Wake;
-    #[cfg(feature = "kafka")]
-    impl Wake for NoopWaker {
-        fn wake(self: Arc<Self>) {}
     }
 
     #[cfg(feature = "kafka")]
