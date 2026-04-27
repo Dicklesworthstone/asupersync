@@ -121,7 +121,6 @@ mod decoder_fuzz {
         /// Property: decode should work correctly with pre-reserved capacity
         #[test]
         fn decode_with_reserved_capacity(buf in arb_bytes_mut_with_capacity()) {
-            let _codec = BytesMut::new();
             let mut input = buf.clone();
             let original_data = input.to_vec();
             let original_capacity = input.capacity();
