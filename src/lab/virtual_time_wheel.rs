@@ -175,8 +175,12 @@ impl VirtualTimerWheel {
 
     /// Inserts a timer to fire at the given deadline tick.
     ///
+    /// Deadlines behind the current virtual tick are clamped to `current_tick`
+    /// so already-due timers remain observable through `advance_to_next()`.
+    ///
     /// Returns a handle that can be used to cancel the timer.
     pub fn insert(&mut self, deadline: u64, waker: Waker) -> VirtualTimerHandle {
+        let deadline = deadline.max(self.current_tick);
         let timer_id = self.next_timer_id;
         self.next_timer_id = self
             .next_timer_id
@@ -585,6 +589,22 @@ mod tests {
 
         // Next deadline should be 100, not 50
         assert_eq!(wheel.next_deadline(), Some(100));
+    }
+
+    #[test]
+    fn overdue_insertions_fire_at_current_tick() {
+        let mut wheel = VirtualTimerWheel::starting_at(100);
+        let (_, waker) = counting_waker();
+
+        let handle = wheel.insert(50, waker);
+        assert_eq!(handle.deadline(), 100);
+        assert_eq!(wheel.next_deadline(), Some(100));
+
+        let expired = wheel.advance_to_next();
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].deadline, 100);
+        assert_eq!(expired[0].timer_id, handle.timer_id());
+        assert_eq!(wheel.current_tick(), 100);
     }
 
     #[test]
