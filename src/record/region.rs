@@ -4,6 +4,7 @@
 //! When a region closes, it waits for all children to complete.
 
 use crate::record::finalizer::{Finalizer, FinalizerStack};
+use crate::record::task::TaskOutcome;
 use crate::runtime::region_heap::{HeapIndex, RegionHeap};
 use crate::tracing_compat::{Span, debug, info_span};
 use crate::types::rref::{RRef, RRefAccessWitness, RRefError};
@@ -82,7 +83,10 @@ pub enum RegionState {
     /// Implements `rule.region.close_run_finalizer` (#25, SEM-INV-002).
     /// Note: TLA+ omits this step per ADR-004.
     Finalizing,
-    /// Terminal state with aggregated outcome.
+    /// Terminal close phase.
+    ///
+    /// The aggregated close outcome is stored separately on the record via
+    /// [`RegionRecord::close_outcome`] so the phase stays atomically encoded.
     Closed,
 }
 
@@ -305,6 +309,7 @@ struct RegionInner {
     tasks: Vec<TaskId>,
     finalizers: FinalizerStack,
     cancel_reason: Option<CancelReason>,
+    close_outcome: Option<TaskOutcome>,
     limits: RegionLimits,
     pending_obligations: usize,
     /// Region-owned heap for task allocations.
@@ -390,6 +395,7 @@ impl RegionRecord {
                 tasks: Vec::new(),
                 finalizers: FinalizerStack::new(),
                 cancel_reason: None,
+                close_outcome: None,
                 limits: RegionLimits::UNLIMITED,
                 pending_obligations: 0,
                 heap: RegionHeap::new(),
@@ -447,6 +453,21 @@ impl RegionRecord {
     #[must_use]
     pub fn cancel_reason(&self) -> Option<CancelReason> {
         self.inner.read().cancel_reason.clone()
+    }
+
+    /// Returns the aggregated close outcome, if one has been observed.
+    #[must_use]
+    pub fn close_outcome(&self) -> Option<TaskOutcome> {
+        self.inner.read().close_outcome.clone()
+    }
+
+    /// Merges a terminal child/finalizer outcome into the region close outcome.
+    pub fn record_close_outcome(&self, outcome: TaskOutcome) {
+        let mut inner = self.inner.write();
+        inner.close_outcome = Some(match inner.close_outcome.take() {
+            Some(existing) => existing.join(outcome),
+            None => outcome,
+        });
     }
 
     /// Strengthens or sets the cancel reason.
@@ -925,6 +946,10 @@ impl RegionRecord {
         {
             return false;
         }
+
+        inner
+            .close_outcome
+            .get_or_insert(crate::types::Outcome::Ok(()));
 
         let transitioned = self
             .state
@@ -1571,6 +1596,38 @@ mod tests {
 
         assert!(!region.begin_close(Some(CancelReason::resource_unavailable())));
         assert_eq!(region.cancel_reason(), Some(initial_reason));
+    }
+
+    #[test]
+    fn complete_close_defaults_close_outcome_to_ok() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+
+        assert!(region.begin_close(None));
+        assert!(region.begin_finalize());
+        assert!(region.complete_close());
+
+        assert!(matches!(
+            region.close_outcome(),
+            Some(crate::types::Outcome::Ok(()))
+        ));
+    }
+
+    #[test]
+    fn record_close_outcome_keeps_worst_severity() {
+        let region = RegionRecord::new(test_region_id(), None, Budget::default());
+
+        region.record_close_outcome(crate::types::Outcome::Err(crate::error::Error::new(
+            crate::error::ErrorKind::Internal,
+        )));
+        region.record_close_outcome(crate::types::Outcome::Cancelled(CancelReason::timeout()));
+        region.record_close_outcome(crate::types::Outcome::Panicked(
+            crate::types::PanicPayload::new("boom"),
+        ));
+
+        assert!(matches!(
+            region.close_outcome(),
+            Some(crate::types::Outcome::Panicked(payload)) if payload.message() == "boom"
+        ));
     }
 
     #[test]

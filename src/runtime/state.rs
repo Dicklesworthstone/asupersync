@@ -426,6 +426,7 @@ pub struct RuntimeState {
     /// regions eagerly. Keep a bounded tombstone set so those handles can still
     /// distinguish "closed and cleaned up" from "never existed in this state".
     recently_closed_regions: HashSet<RegionId>,
+    recently_closed_region_outcomes: HashMap<RegionId, crate::record::task::TaskOutcome>,
     recently_closed_region_order: VecDeque<RegionId>,
     /// Finalizer ids pending per region, mirroring the runtime's LIFO stack.
     pending_finalizer_ids: HashMap<RegionId, Vec<u64>>,
@@ -561,6 +562,7 @@ impl RuntimeState {
             in_flight_leak_ids: HashSet::new(),
             finalizing_regions: SmallVec::new(),
             recently_closed_regions: HashSet::new(),
+            recently_closed_region_outcomes: HashMap::new(),
             recently_closed_region_order: VecDeque::new(),
             pending_finalizer_ids: HashMap::new(),
             async_finalizer_tasks: HashMap::new(),
@@ -675,6 +677,7 @@ impl RuntimeState {
             in_flight_leak_ids: HashSet::new(),
             finalizing_regions: SmallVec::new(),
             recently_closed_regions: HashSet::new(),
+            recently_closed_region_outcomes: HashMap::new(),
             recently_closed_region_order: VecDeque::new(),
             pending_finalizer_ids: HashMap::new(),
             async_finalizer_tasks: HashMap::new(),
@@ -1057,6 +1060,22 @@ impl RuntimeState {
     #[must_use]
     pub fn region_was_closed(&self, region_id: RegionId) -> bool {
         self.recently_closed_regions.contains(&region_id)
+    }
+
+    /// Returns the aggregated close outcome for a live or recently closed region.
+    #[inline]
+    #[must_use]
+    pub fn region_close_outcome(
+        &self,
+        region_id: RegionId,
+    ) -> Option<crate::record::task::TaskOutcome> {
+        self.region(region_id)
+            .and_then(RegionRecord::close_outcome)
+            .or_else(|| {
+                self.recently_closed_region_outcomes
+                    .get(&region_id)
+                    .cloned()
+            })
     }
 
     /// Returns a mutable reference to a region record by ID.
@@ -2595,7 +2614,7 @@ impl RuntimeState {
             return SmallVec::new();
         };
 
-        let (owner, completion, outcome_kind) = {
+        let (owner, completion, outcome_kind, close_outcome) = {
             let Some(task) = self.task(task_id) else {
                 // Defensive: if the task vanished between the
                 // update_task above and here, return the waiters we
@@ -2643,9 +2662,13 @@ impl RuntimeState {
                 },
                 _ => "Unknown",
             };
+            let close_outcome = match &task.state {
+                crate::record::task::TaskState::Completed(outcome) => Some(outcome.clone()),
+                _ => None,
+            };
             let owner = task.owner;
             let completion = TaskCompletionKind::from_state(&task.state);
-            (owner, completion, outcome_kind)
+            (owner, completion, outcome_kind, close_outcome)
         };
         // br-asupersync-ndhjfj: `waiters` was already taken atomically
         // at the top of the function under `update_task`. The previous
@@ -2699,6 +2722,9 @@ impl RuntimeState {
 
         // Remove task from owning region to prevent memory leak
         if let Some(region) = self.regions.get(owner.arena_index()) {
+            if let Some(outcome) = close_outcome {
+                region.record_close_outcome(outcome);
+            }
             region.remove_task(task_id);
         }
 
@@ -3025,9 +3051,17 @@ impl RuntimeState {
                     // Run synchronously, catching panics to ensure remaining
                     // finalizers still execute and the region is not permanently
                     // stuck in Finalizing state.
-                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err() {
+                    if let Err(payload) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+                    {
                         // Log but continue — a panicking finalizer must not
                         // block region close or skip sibling finalizers.
+                        if let Some(region) = self.regions.get(region_id.arena_index()) {
+                            region.record_close_outcome(Outcome::Panicked(
+                                crate::types::outcome::PanicPayload::new(payload_to_string(
+                                    &payload,
+                                )),
+                            ));
+                        }
                     }
                     self.record_finalizer_run(finalizer_id);
                 }
@@ -3352,7 +3386,11 @@ impl RuntimeState {
                                 current = Some(parent_id);
                             }
 
-                            self.remember_closed_region(region_id);
+                            let close_outcome = self
+                                .regions
+                                .get(region_id.arena_index())
+                                .and_then(|region| region.close_outcome());
+                            self.remember_closed_region(region_id, close_outcome);
                             // Cleanup: Remove the closed region from the arena to prevent memory leaks
                             self.regions.remove(region_id.arena_index());
                             self.notify_runtime_epoch_advance(
@@ -3366,15 +3404,25 @@ impl RuntimeState {
         }
     }
 
-    fn remember_closed_region(&mut self, region_id: RegionId) {
+    fn remember_closed_region(
+        &mut self,
+        region_id: RegionId,
+        outcome: Option<crate::record::task::TaskOutcome>,
+    ) {
         if !self.recently_closed_regions.insert(region_id) {
             return;
+        }
+
+        if let Some(outcome) = outcome {
+            self.recently_closed_region_outcomes
+                .insert(region_id, outcome);
         }
 
         self.recently_closed_region_order.push_back(region_id);
         while self.recently_closed_region_order.len() > Self::RECENTLY_CLOSED_REGION_CAPACITY {
             if let Some(evicted) = self.recently_closed_region_order.pop_front() {
                 self.recently_closed_regions.remove(&evicted);
+                self.recently_closed_region_outcomes.remove(&evicted);
             }
         }
     }
@@ -7643,6 +7691,15 @@ mod tests {
             2usize,
             cancelled_count
         );
+        crate::assert_with_log!(
+            matches!(
+                state.region_close_outcome(root),
+                Some(Outcome::Cancelled(reason)) if reason == CancelReason::timeout()
+            ),
+            "region close outcome preserved after teardown",
+            true,
+            format!("{:?}", state.region_close_outcome(root))
+        );
 
         // Verify trace contains both CancelRequest and task completion events
         let events = state.trace.snapshot();
@@ -7657,6 +7714,175 @@ mod tests {
             cancel_events >= 1
         );
         crate::test_complete!("cancel_drain_finalize_full_lifecycle");
+    }
+
+    #[test]
+    fn region_close_outcome_tracks_error_after_region_teardown() {
+        init_test("region_close_outcome_tracks_error_after_region_teardown");
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+        let task = insert_task(&mut state, region);
+
+        let _ = state.cancel_request(region, &CancelReason::timeout(), None);
+        state
+            .task_mut(task)
+            .expect("task")
+            .complete(Outcome::Err(Error::new(ErrorKind::Internal)));
+        let _ = state.task_completed(task);
+
+        crate::assert_with_log!(
+            state.region_was_closed(region),
+            "region torn down after last task completed",
+            true,
+            state.region_was_closed(region)
+        );
+        crate::assert_with_log!(
+            matches!(state.region_close_outcome(region), Some(Outcome::Err(_))),
+            "error close outcome preserved after teardown",
+            true,
+            format!("{:?}", state.region_close_outcome(region))
+        );
+        crate::test_complete!("region_close_outcome_tracks_error_after_region_teardown");
+    }
+
+    #[test]
+    fn sync_finalizer_panic_strengthens_region_close_outcome() {
+        init_test("sync_finalizer_panic_strengthens_region_close_outcome");
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+
+        state.register_sync_finalizer(region, || panic!("finalizer boom"));
+
+        let region_record = state.regions.get(region.arena_index()).expect("region");
+        assert!(region_record.begin_close(None));
+        assert!(region_record.begin_finalize());
+
+        state.advance_region_state(region);
+
+        crate::assert_with_log!(
+            state.region_was_closed(region),
+            "region closed despite finalizer panic",
+            true,
+            state.region_was_closed(region)
+        );
+        crate::assert_with_log!(
+            matches!(
+                state.region_close_outcome(region),
+                Some(Outcome::Panicked(payload)) if payload.message().contains("finalizer boom")
+            ),
+            "finalizer panic captured in region close outcome",
+            true,
+            format!("{:?}", state.region_close_outcome(region))
+        );
+        crate::test_complete!("sync_finalizer_panic_strengthens_region_close_outcome");
+    }
+
+    #[test]
+    fn sync_finalizer_panic_preserved_with_successful_task() {
+        init_test("sync_finalizer_panic_preserved_with_successful_task");
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+
+        // Register a panicking sync finalizer
+        state.register_sync_finalizer(region, || panic!("finalizer boom"));
+
+        // Add a task that will complete successfully
+        let task = insert_task(&mut state, region);
+
+        // Begin region close
+        let region_record = state.regions.get(region.arena_index()).expect("region");
+        assert!(region_record.begin_close(None));
+
+        // Complete the task successfully
+        state
+            .task_mut(task)
+            .expect("task")
+            .complete(Outcome::Ok(()));
+        let _ = state.task_completed(task);
+
+        crate::assert_with_log!(
+            state.region_was_closed(region),
+            "region closed with task and panicking finalizer",
+            true,
+            state.region_was_closed(region)
+        );
+
+        // The key test: panic should still be preserved despite successful task
+        crate::assert_with_log!(
+            matches!(
+                state.region_close_outcome(region),
+                Some(Outcome::Panicked(payload)) if payload.message().contains("finalizer boom")
+            ),
+            "finalizer panic preserved despite successful task completion",
+            true,
+            format!("{:?}", state.region_close_outcome(region))
+        );
+        crate::test_complete!("sync_finalizer_panic_preserved_with_successful_task");
+    }
+
+    #[test]
+    fn finalizer_panic_observable_in_closed_region() {
+        init_test("finalizer_panic_observable_in_closed_region");
+        let mut state = RuntimeState::new();
+        let region = state.create_root_region(Budget::INFINITE);
+
+        // Register multiple finalizers: one panics, others succeed
+        let panic_finalizer_called = Arc::new(AtomicBool::new(false));
+        let success_finalizer_called = Arc::new(AtomicBool::new(false));
+
+        let panic_flag = Arc::clone(&panic_finalizer_called);
+        let success_flag = Arc::clone(&success_finalizer_called);
+
+        state.register_sync_finalizer(region, move || {
+            success_flag.store(true, Ordering::SeqCst);
+        });
+
+        state.register_sync_finalizer(region, move || {
+            panic_flag.store(true, Ordering::SeqCst);
+            panic!("finalizer boom");
+        });
+
+        // Begin close sequence
+        let region_record = state.regions.get(region.arena_index()).expect("region");
+        assert!(region_record.begin_close(None));
+        assert!(region_record.begin_finalize());
+
+        // Advance region state to run finalizers
+        state.advance_region_state(region);
+
+        // Verify the region closed (transitions to Closed state)
+        crate::assert_with_log!(
+            state.region_was_closed(region),
+            "region must complete close despite finalizer panic",
+            true,
+            state.region_was_closed(region)
+        );
+
+        // Verify both finalizers ran
+        crate::assert_with_log!(
+            panic_finalizer_called.load(Ordering::SeqCst),
+            "panic finalizer must execute",
+            true,
+            panic_finalizer_called.load(Ordering::SeqCst)
+        );
+
+        crate::assert_with_log!(
+            success_finalizer_called.load(Ordering::SeqCst),
+            "success finalizer must execute despite sibling panic",
+            true,
+            success_finalizer_called.load(Ordering::SeqCst)
+        );
+
+        // CRITICAL TEST: panic outcome must be observable even after close
+        let outcome = state.region_close_outcome(region);
+        crate::assert_with_log!(
+            matches!(outcome, Some(Outcome::Panicked(ref payload)) if payload.message().contains("finalizer boom")),
+            "finalizer panic must remain observable in closed region outcome",
+            true,
+            format!("{:?}", outcome)
+        );
+
+        crate::test_complete!("finalizer_panic_observable_in_closed_region");
     }
 
     #[test]
