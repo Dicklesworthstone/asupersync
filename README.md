@@ -1454,6 +1454,7 @@ and known limitations.
 | Parallel scheduler + work-stealing | ✅ Implemented (three-lane scheduler) |
 | I/O reactor (epoll + io_uring) | ✅ Implemented |
 | TCP, HTTP/1.1, HTTP/2, WebSocket, TLS | ✅ Implemented |
+| HTTP/3 (QPACK static-only mode) | ⚠️ Partial implementation (dynamic table, Huffman encoding not supported) |
 | Database clients (SQLite, PostgreSQL, MySQL) | ✅ Implemented |
 | Actor supervision (GenServer, links, monitors) | ✅ Implemented |
 | DPOR schedule exploration | ✅ Implemented |
@@ -1487,7 +1488,7 @@ and known limitations.
 |-------|-------|--------|
 | **Phase 0** | Single-thread deterministic kernel | ✅ Complete |
 | **Phase 1** | Parallel scheduler + region heap | ✅ Complete |
-| **Phase 2** | I/O integration (epoll, io_uring, TCP, HTTP, TLS) | ✅ Complete |
+| **Phase 2** | I/O integration (epoll, io_uring, TCP, HTTP/1.1-2, TLS, HTTP/3 static-only) | ✅ Complete |
 | **Phase 3** | Actors + supervision (GenServer, links, monitors) | ✅ Complete |
 | **Phase 4** | Distributed structured concurrency | ✅ Complete |
 | **Phase 5** | DPOR + TLA+ tooling | ✅ Complete |
