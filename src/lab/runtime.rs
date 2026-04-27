@@ -1797,14 +1797,33 @@ impl LabRuntime {
                 // Notify waiters
                 let waiters = self.state.task_completed(task_id);
 
-                // Schedule waiters
+                // br-asupersync-iwqn3q: hoist priority lookup OUT of
+                // the scheduler-locked scope. cx_inner is an
+                // E(Config)-tier RwLock; the scheduler is an A(Tasks)
+                // mutex. The project's lock ordering requires
+                // E → D → B → A → C, so cx_inner.read() must precede
+                // scheduler.lock(). Acquiring them in the loop
+                // body inverted the order and could deadlock against
+                // any thread holding cx_inner.write() while waiting
+                // for the scheduler. Snapshot the (waiter, priority)
+                // tuples first, THEN acquire the scheduler.
+                //
+                // The sibling pattern at schedule_for_cancel
+                // (line ~2002) already gets this right; this site
+                // was the asymmetric outlier.
+                let scheduled: Vec<(TaskId, u8)> = waiters
+                    .into_iter()
+                    .map(|w| {
+                        let prio = self
+                            .state
+                            .task(w)
+                            .and_then(|t| t.cx_inner.as_ref())
+                            .map_or(0, |inner| inner.read().budget.priority);
+                        (w, prio)
+                    })
+                    .collect();
                 let mut sched = self.scheduler.lock();
-                for waiter in waiters {
-                    let prio = self
-                        .state
-                        .task(waiter)
-                        .and_then(|t| t.cx_inner.as_ref())
-                        .map_or(0, |inner| inner.read().budget.priority);
+                for (waiter, prio) in scheduled {
                     sched.schedule(waiter, prio);
                 }
             }
