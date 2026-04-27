@@ -4,7 +4,7 @@
 //! This module implements metamorphic relations for testing the priority inversion
 //! oracle's behavior under uniform priority shifts. When all task priorities are
 //! shifted by the same constant while preserving relative ordering, inversion
-//! detection, gap tracking, and certificate invalidation should behave identically.
+//! detection should behave identically.
 //!
 //! # Core Metamorphic Relation
 //!
@@ -14,9 +14,8 @@
 //!
 //! 1. Same set of priority inversions detected (modulo priority values)
 //! 2. Same inversion severity classifications
-//! 3. Same gap tracking behavior for ready-lane starvation
-//! 4. Same certificate invalidation events
-//! 5. Same resource contention patterns
+//! 3. Same total inversion counts reported by the production oracle
+//! 4. Same resource contention patterns
 //!
 //! # Testing Strategy
 //!
@@ -26,13 +25,14 @@
 
 #![allow(dead_code)]
 
+use crate::runtime::scheduler::priority::DispatchLane;
 use crate::runtime::scheduler::priority_inversion_oracle::{
-    InversionId, InversionImpact, InversionSeverity, InversionType, Priority, PriorityInversion,
-    ResourceId,
+    InversionOracleConfig, InversionSeverity, InversionType, Priority, PriorityInversion,
+    PriorityInversionOracle, ResourceId,
 };
 use crate::types::TaskId;
 use crate::util::DetRng;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Configuration for priority shift metamorphic testing.
 #[derive(Debug, Clone)]
@@ -87,12 +87,12 @@ pub struct ShiftTestTask {
 /// Inversion detection results for a single test run.
 #[derive(Debug, Clone)]
 pub struct InversionResults {
-    /// All inversions detected during execution.
+    /// All active inversions detected during execution.
     pub detected_inversions: Vec<PriorityInversion>,
-    /// Maximum gaps observed in ready lane dispatch.
-    pub max_ready_gap: u64,
-    /// Total number of certificate invalidations.
-    pub certificate_invalidations: u64,
+    /// Total inversion count reported by the production oracle.
+    pub total_inversions: u64,
+    /// Active inversion count reported by the production oracle.
+    pub active_inversions: u64,
     /// Resource contention events detected.
     pub resource_contentions: HashMap<ResourceId, u64>,
     /// Overall inversion severity distribution (Minor, Moderate, Severe, Critical).
@@ -121,12 +121,12 @@ pub struct ShiftComparisonResults {
 pub struct ComparisonMetrics {
     /// Number of inversions detected in both runs.
     pub inversion_count_match: bool,
+    /// Whether the same blocked-task/blocking-task/resource signatures were detected.
+    pub inversion_signature_match: bool,
     /// Whether severity distributions match.
     pub severity_distribution_match: bool,
-    /// Whether ready gap patterns are equivalent.
-    pub ready_gap_pattern_match: bool,
-    /// Whether certificate invalidation counts match.
-    pub certificate_invalidation_match: bool,
+    /// Whether the oracle reported the same total inversion count.
+    pub total_inversion_match: bool,
     /// Whether resource contention patterns match.
     pub resource_contention_match: bool,
 }
@@ -180,116 +180,127 @@ impl PriorityShiftConfig {
     }
 }
 
+fn shift_preserves_ordering(tasks: &[ShiftTestTask], shift_value: i32) -> bool {
+    tasks.iter().all(|task| {
+        i32::from(task.original_priority) + shift_value == i32::from(task.shifted_priority)
+    })
+}
+
+fn inversion_signature(inversion: &PriorityInversion) -> (TaskId, TaskId, ResourceId, bool) {
+    (
+        inversion.blocked_task,
+        inversion.blocking_task,
+        inversion.resource,
+        matches!(inversion.inversion_type, InversionType::Chain),
+    )
+}
+
 /// Run inversion detection for a task scenario with given priorities.
+///
+/// Drives the real `PriorityInversionOracle` rather than computing a
+/// hand-rolled priority diff: the metamorphic invariant we want to
+/// pin is that the *production* oracle is shift-invariant, not that
+/// `(a - b)` is shift-invariant (which is trivially true).
+///
+/// Construction sequence per scenario:
+///  1. Spawn every task into the oracle (`track_task_spawned`).
+///  2. For each resource referenced by ≥2 tasks: have the lowest-
+///     priority sharer acquire the resource, then have every other
+///     sharer call `track_resource_waiting` in priority-ascending
+///     order. Each waiting call where the waiter's priority exceeds
+///     the holder's plus `priority_threshold` is what the oracle
+///     reports as a `PriorityInversion`.
+///  3. Read `get_active_inversions()` and `get_stats()` and project
+///     into the metamorphic-test struct.
 pub fn run_inversion_detection(
     tasks: &[ShiftTestTask],
     use_shifted_priorities: bool,
     _config: &PriorityShiftConfig,
 ) -> InversionResults {
-    // Create a mock oracle for testing (in a real implementation, this would
-    // integrate with the actual PriorityInversionOracle)
-    let mut detected_inversions = Vec::new();
-    let mut resource_contentions = HashMap::new();
-    let mut severity_distribution = [0u64; 4]; // [Minor, Moderate, Severe, Critical]
+    let oracle = PriorityInversionOracle::with_config(InversionOracleConfig {
+        min_inversion_duration_us: 0,
+        priority_threshold: 1,
+        detect_chain_inversions: false,
+        enable_impact_analysis: true,
+        ..InversionOracleConfig::default()
+    });
 
-    // Simulate inversion detection based on task priorities and resource conflicts
-    for (i, task_a) in tasks.iter().enumerate() {
-        for (j, task_b) in tasks.iter().enumerate() {
-            if i == j {
-                continue;
+    let priority_of = |task: &ShiftTestTask| -> Priority {
+        if use_shifted_priorities {
+            task.shifted_priority
+        } else {
+            task.original_priority
+        }
+    };
+
+    // Step 1: spawn every task. DispatchLane::Ready and worker_id=None
+    // are placeholders — the oracle uses them only for reporting;
+    // inversion detection only inspects `priority`.
+    for task in tasks {
+        oracle.track_task_spawned(task.task_id, priority_of(task), DispatchLane::Ready, None);
+    }
+
+    // Step 2: build per-resource sharer lists while keeping a stable
+    // discovery order. `ResourceId` is hashable but not orderable, so
+    // we cannot use a `BTreeMap` here.
+    let mut sharers: HashMap<ResourceId, Vec<(Priority, TaskId)>> = HashMap::new();
+    let mut resource_order = Vec::new();
+    for task in tasks {
+        for &resource in &task.required_resources {
+            if !sharers.contains_key(&resource) {
+                resource_order.push(resource);
             }
-
-            let priority_a = if use_shifted_priorities {
-                task_a.shifted_priority
-            } else {
-                task_a.original_priority
-            };
-
-            let priority_b = if use_shifted_priorities {
-                task_b.shifted_priority
-            } else {
-                task_b.original_priority
-            };
-
-            // Check for shared resources that could cause inversion
-            let shared_resources: Vec<_> = task_a
-                .required_resources
-                .iter()
-                .filter(|&res| task_b.required_resources.contains(res))
-                .collect();
-
-            if !shared_resources.is_empty() && priority_a > priority_b {
-                // Higher priority task (a) could be blocked by lower priority task (b)
-                // This represents a potential priority inversion
-
-                for &resource in &shared_resources {
-                    *resource_contentions.entry(*resource).or_insert(0) += 1;
-                }
-
-                let severity = calculate_inversion_severity(priority_a, priority_b);
-                let severity_index = match severity {
-                    InversionSeverity::Minor => 0,
-                    InversionSeverity::Moderate => 1,
-                    InversionSeverity::Severe => 2,
-                    InversionSeverity::Critical => 3,
-                };
-                severity_distribution[severity_index] += 1;
-
-                let inversion = PriorityInversion {
-                    inversion_id: InversionId::new(detected_inversions.len() as u64),
-                    blocked_task: task_a.task_id,
-                    blocked_priority: priority_a,
-                    blocking_task: task_b.task_id,
-                    blocking_priority: priority_b,
-                    resource: *shared_resources[0],
-                    start_time: std::time::Instant::now(),
-                    duration: Some(std::time::Duration::from_millis(10)),
-                    inversion_type: if shared_resources.len() > 1 {
-                        InversionType::Chain
-                    } else {
-                        InversionType::Direct
-                    },
-                    task_chain: vec![task_a.task_id, task_b.task_id],
-                    impact: InversionImpact {
-                        delay_us: 100,
-                        affected_tasks: 1,
-                        severity,
-                        throughput_impact: 0.1,
-                        fairness_impact: 0.2,
-                    },
-                };
-
-                detected_inversions.push(inversion);
-            }
+            sharers
+                .entry(resource)
+                .or_default()
+                .push((priority_of(task), task.task_id));
         }
     }
 
-    // Simulate ready gap tracking (simplified)
-    let max_ready_gap = if detected_inversions.is_empty() { 0 } else { 5 };
+    for resource in resource_order {
+        let Some(users) = sharers.get_mut(&resource) else {
+            continue;
+        };
+        if users.len() < 2 {
+            continue;
+        }
 
-    // Simulate certificate invalidations
-    let certificate_invalidations = detected_inversions.len() as u64;
+        // Lowest priority owns first; on tie, lowest task id.
+        users.sort();
+        let (_, owner_task) = users[0];
+        oracle.track_resource_acquired(owner_task, resource);
+        // Every higher-priority sharer waits — each call may register
+        // an inversion on the owner. priority-ascending wait order
+        // matches the deterministic sort, so the oracle's per-resource
+        // detection sequence is identical between the original and
+        // shifted runs (modulo the priority numbers themselves).
+        for &(_, waiter) in &users[1..] {
+            oracle.track_resource_waiting(waiter, resource);
+        }
+    }
+
+    // Step 3: harvest the oracle's view.
+    let detected_inversions = oracle.get_active_inversions();
+    let stats = oracle.get_stats();
+    let mut resource_contentions: HashMap<ResourceId, u64> = HashMap::new();
+    let mut severity_distribution = [0u64; 4];
+    for inv in &detected_inversions {
+        *resource_contentions.entry(inv.resource).or_insert(0) += 1;
+        let idx = match inv.impact.severity {
+            InversionSeverity::Minor => 0,
+            InversionSeverity::Moderate => 1,
+            InversionSeverity::Severe => 2,
+            InversionSeverity::Critical => 3,
+        };
+        severity_distribution[idx] += 1;
+    }
 
     InversionResults {
         detected_inversions,
-        max_ready_gap,
-        certificate_invalidations,
+        total_inversions: stats.total_inversions,
+        active_inversions: stats.active_inversions,
         resource_contentions,
         severity_distribution,
-    }
-}
-
-/// Calculate inversion severity based on priority difference.
-fn calculate_inversion_severity(
-    high_priority: Priority,
-    low_priority: Priority,
-) -> InversionSeverity {
-    let priority_diff = high_priority - low_priority;
-    match priority_diff {
-        0..=10 => InversionSeverity::Minor,
-        11..=50 => InversionSeverity::Moderate,
-        51..=100 => InversionSeverity::Severe,
-        _ => InversionSeverity::Critical,
     }
 }
 
@@ -305,24 +316,30 @@ pub fn compare_inversion_results(
 ) -> ComparisonMetrics {
     let inversion_count_match =
         original.detected_inversions.len() == shifted.detected_inversions.len();
+    let inversion_signature_match = original
+        .detected_inversions
+        .iter()
+        .map(inversion_signature)
+        .collect::<HashSet<_>>()
+        == shifted
+            .detected_inversions
+            .iter()
+            .map(inversion_signature)
+            .collect::<HashSet<_>>();
 
     let severity_distribution_match = compare_severity_distributions(
         &original.severity_distribution,
         &shifted.severity_distribution,
     );
-
-    let ready_gap_pattern_match = original.max_ready_gap == shifted.max_ready_gap;
-
-    let certificate_invalidation_match =
-        original.certificate_invalidations == shifted.certificate_invalidations;
+    let total_inversion_match = original.total_inversions == shifted.total_inversions;
 
     let resource_contention_match = original.resource_contentions == shifted.resource_contentions;
 
     ComparisonMetrics {
         inversion_count_match,
+        inversion_signature_match,
         severity_distribution_match,
-        ready_gap_pattern_match,
-        certificate_invalidation_match,
+        total_inversion_match,
         resource_contention_match,
     }
 }
@@ -338,9 +355,21 @@ pub fn verify_uniform_priority_shift_invariance(
 
     for &shift_value in &config.shift_values {
         let tasks = config.generate_test_scenario(shift_value);
+        if !shift_preserves_ordering(&tasks, shift_value) {
+            return Err(format!(
+                "Uniform priority shift invariance requires unclamped priorities for shift {}",
+                shift_value
+            ));
+        }
 
         // Run detection with original priorities
         let original_results = run_inversion_detection(&tasks, false, config);
+        if original_results.total_inversions == 0 {
+            return Err(format!(
+                "Priority shift scenario for shift {} did not exercise the production oracle",
+                shift_value
+            ));
+        }
 
         // Run detection with shifted priorities
         let shifted_results = run_inversion_detection(&tasks, true, config);
@@ -349,9 +378,9 @@ pub fn verify_uniform_priority_shift_invariance(
         let comparison_metrics = compare_inversion_results(&original_results, &shifted_results);
 
         let results_equivalent = comparison_metrics.inversion_count_match
+            && comparison_metrics.inversion_signature_match
             && comparison_metrics.severity_distribution_match
-            && comparison_metrics.ready_gap_pattern_match
-            && comparison_metrics.certificate_invalidation_match
+            && comparison_metrics.total_inversion_match
             && comparison_metrics.resource_contention_match;
 
         if !results_equivalent {
@@ -398,20 +427,23 @@ mod tests {
             seed: 42,
         };
 
-        match verify_uniform_priority_shift_invariance(&config) {
-            Ok(results) => {
-                assert_eq!(results.len(), config.shift_values.len());
-                for result in &results {
-                    assert!(
-                        result.results_equivalent,
-                        "Priority shift invariance violated for shift {}",
-                        result.shift_value
-                    );
-                }
-            }
-            Err(e) => {
-                panic!("Uniform priority shift invariance test failed: {}", e);
-            }
+        let results = verify_uniform_priority_shift_invariance(&config);
+        assert!(
+            results.is_ok(),
+            "Uniform priority shift invariance test failed: {:?}",
+            results
+        );
+        let Ok(results) = results else {
+            return;
+        };
+
+        assert_eq!(results.len(), config.shift_values.len());
+        for result in &results {
+            assert!(
+                result.results_equivalent,
+                "Priority shift invariance violated for shift {}",
+                result.shift_value
+            );
         }
     }
 
@@ -447,17 +479,40 @@ mod tests {
 
     #[test]
     fn test_inversion_severity_calculation() {
+        let config = PriorityShiftConfig {
+            task_count: 3,
+            priority_range: (10, 12),
+            shift_values: vec![5],
+            resource_count: 1,
+            contention_probability: 1.0,
+            max_execution_ns: 1_000_000,
+            seed: 7,
+        };
+        let tasks = config.generate_test_scenario(5);
+        let results = run_inversion_detection(&tasks, false, &config);
+
+        assert_eq!(results.total_inversions, results.active_inversions);
+        assert!(!results.detected_inversions.is_empty());
         assert_eq!(
-            calculate_inversion_severity(100, 95),
-            InversionSeverity::Minor
+            results.severity_distribution.iter().sum::<u64>(),
+            results.detected_inversions.len() as u64
         );
-        assert_eq!(
-            calculate_inversion_severity(100, 50),
-            InversionSeverity::Moderate
-        );
-        assert_eq!(
-            calculate_inversion_severity(200, 50),
-            InversionSeverity::Critical
-        );
+    }
+
+    #[test]
+    fn test_uniform_shift_rejects_clamped_priorities() {
+        let config = PriorityShiftConfig {
+            task_count: 4,
+            priority_range: (250, 255),
+            shift_values: vec![10],
+            resource_count: 1,
+            contention_probability: 1.0,
+            max_execution_ns: 1_000_000,
+            seed: 11,
+        };
+
+        let error = verify_uniform_priority_shift_invariance(&config)
+            .expect_err("clamped shifts should be rejected");
+        assert!(error.contains("requires unclamped priorities"));
     }
 }
