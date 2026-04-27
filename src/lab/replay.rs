@@ -854,10 +854,11 @@ impl DivergenceCorpusEntry {
     #[must_use]
     pub fn default_bundle_root(&self) -> String {
         format!(
-            "artifacts/differential/{}/{}/{}",
+            "artifacts/differential/{}/{}/{}/{}",
             sanitize_registry_component(&self.surface_id),
             sanitize_registry_component(&self.scenario_id),
-            sanitize_registry_component(&self.seed_lineage.seed_lineage_id)
+            sanitize_registry_component(&self.seed_lineage.seed_lineage_id),
+            self.policy_class.as_str()
         )
     }
 
@@ -2332,7 +2333,7 @@ mod tests {
 
         assert_eq!(
             entry.default_bundle_root(),
-            "artifacts/differential/z-3-202f20/z-3-3a3a3a/___"
+            "artifacts/differential/z-3-202f20/z-3-3a3a3a/___/runtime_semantic_bug"
         );
 
         crate::test_complete!(
@@ -2429,6 +2430,78 @@ mod tests {
         assert_eq!(registry.entries[1].surface_id, "surface-b");
 
         crate::test_complete!("divergence_registry_entry_id_includes_surface_id");
+    }
+
+    #[test]
+    fn divergence_default_bundle_root_includes_policy_class() {
+        init_test("divergence_default_bundle_root_includes_policy_class");
+
+        let make_entry = |policy_class| DivergenceCorpusEntry {
+            schema_version: DIVERGENCE_CORPUS_SCHEMA_VERSION.to_string(),
+            entry_id: DivergenceCorpusEntry::entry_id_for(
+                "surface",
+                "scenario",
+                "seed",
+                policy_class,
+            ),
+            scenario_id: "scenario".to_string(),
+            surface_id: "surface".to_string(),
+            surface_contract_version: "v1".to_string(),
+            divergence_class: "semantic".to_string(),
+            policy_class,
+            first_seen: DivergenceFirstSeenContext {
+                runner_profile: "nightly".to_string(),
+                attempt_index: 0,
+                rerun_count: 0,
+            },
+            seed_lineage: crate::lab::dual_run::SeedLineageRecord {
+                seed_lineage_id: "seed".to_string(),
+                canonical_seed: 1,
+                lab_effective_seed: 1,
+                live_effective_seed: 1,
+                lab_seed_mode: crate::lab::dual_run::SeedMode::Inherit,
+                live_seed_mode: crate::lab::dual_run::SeedMode::Inherit,
+                lab_entropy_seed: 1,
+                live_entropy_seed: 1,
+                replay_policy: crate::lab::dual_run::ReplayPolicy::SingleSeed,
+                seeds_match: true,
+                annotations: BTreeMap::new(),
+            },
+            mismatch_fields: Vec::new(),
+            artifact_bundle: DivergenceArtifactBundle::under("artifacts/differential/test"),
+            minimization_lineage: DivergenceMinimizationLineage::from_seed_lineage(
+                &crate::lab::dual_run::SeedLineageRecord {
+                    seed_lineage_id: "seed".to_string(),
+                    canonical_seed: 1,
+                    lab_effective_seed: 1,
+                    live_effective_seed: 1,
+                    lab_seed_mode: crate::lab::dual_run::SeedMode::Inherit,
+                    live_seed_mode: crate::lab::dual_run::SeedMode::Inherit,
+                    lab_entropy_seed: 1,
+                    live_entropy_seed: 1,
+                    replay_policy: crate::lab::dual_run::ReplayPolicy::SingleSeed,
+                    seeds_match: true,
+                    annotations: BTreeMap::new(),
+                },
+            ),
+            regression_promotion_state: RegressionPromotionState::Investigating,
+            retention: DivergenceRetentionMetadata::for_policy_class(policy_class),
+            metadata: BTreeMap::new(),
+        };
+
+        let runtime_semantic_bug =
+            make_entry(DifferentialPolicyClass::RuntimeSemanticBug).default_bundle_root();
+        let unsupported_surface =
+            make_entry(DifferentialPolicyClass::UnsupportedSurface).default_bundle_root();
+
+        assert_ne!(
+            runtime_semantic_bug, unsupported_surface,
+            "different policy classes must not alias to the same retained bundle path"
+        );
+        assert!(runtime_semantic_bug.ends_with("/runtime_semantic_bug"));
+        assert!(unsupported_surface.ends_with("/unsupported_surface"));
+
+        crate::test_complete!("divergence_default_bundle_root_includes_policy_class");
     }
 
     #[test]
