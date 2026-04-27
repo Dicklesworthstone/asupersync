@@ -1,0 +1,1 @@
+invalid configuration: symbol_size must be non-zero

@@ -1,0 +1,4 @@
+symbol idx=00 sbn=000 esi=0000 kind=Source len=8 data_hex=0001020304050607
+symbol idx=01 sbn=000 esi=0001 kind=Source len=8 data_hex=08090a0b0c0d0e0f
+symbol idx=02 sbn=000 esi=0002 kind=Repair len=8 data_hex=f9932d474c2698f2
+stats bytes_in=16 blocks=1 source_symbols=2 repair_symbols=1
