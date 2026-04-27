@@ -1300,7 +1300,21 @@ fn sanitize_registry_component(input: &str) -> String {
             out.push('_');
         }
     }
-    out.trim_matches('_').to_string()
+    let trimmed = out.trim_matches('_');
+    if !trimmed.is_empty() {
+        return trimmed.to_string();
+    }
+    if input.is_empty() {
+        return "empty".to_string();
+    }
+
+    let mut escaped = String::with_capacity(input.len() * 2 + 1);
+    escaped.push('x');
+    for byte in input.as_bytes() {
+        use std::fmt::Write as _;
+        let _ = write!(&mut escaped, "{byte:02x}");
+    }
+    escaped
 }
 
 // ============================================================================
@@ -2202,6 +2216,101 @@ mod tests {
         );
 
         crate::test_complete!("divergence_registry_upsert_is_deterministic");
+    }
+
+    #[test]
+    fn sanitize_registry_component_never_returns_empty() {
+        init_test("sanitize_registry_component_never_returns_empty");
+
+        assert_eq!(sanitize_registry_component(""), "empty");
+        assert_eq!(sanitize_registry_component(":::"), "x3a3a3a");
+        assert_eq!(sanitize_registry_component(" / "), "x202f20");
+        assert_eq!(sanitize_registry_component("___"), "x5f5f5f");
+        assert_eq!(sanitize_registry_component("scenario-1"), "scenario-1");
+
+        crate::test_complete!("sanitize_registry_component_never_returns_empty");
+    }
+
+    #[test]
+    fn divergence_registry_components_do_not_alias_empty_sanitized_segments() {
+        init_test("divergence_registry_components_do_not_alias_empty_sanitized_segments");
+
+        let colon_entry_id = DivergenceCorpusEntry::entry_id_for(
+            ":::",
+            " / ",
+            DifferentialPolicyClass::RuntimeSemanticBug,
+        );
+        let underscore_entry_id = DivergenceCorpusEntry::entry_id_for(
+            "___",
+            " / ",
+            DifferentialPolicyClass::RuntimeSemanticBug,
+        );
+
+        assert_ne!(
+            colon_entry_id, underscore_entry_id,
+            "distinct raw IDs must not collapse to the same registry entry id"
+        );
+        assert!(colon_entry_id.starts_with("x3a3a3a."));
+        assert!(underscore_entry_id.starts_with("x5f5f5f."));
+
+        let entry = DivergenceCorpusEntry {
+            schema_version: DIVERGENCE_CORPUS_SCHEMA_VERSION.to_string(),
+            entry_id: colon_entry_id,
+            scenario_id: ":::".to_string(),
+            surface_id: " / ".to_string(),
+            surface_contract_version: "v1".to_string(),
+            divergence_class: "semantic".to_string(),
+            policy_class: DifferentialPolicyClass::RuntimeSemanticBug,
+            first_seen: DivergenceFirstSeenContext {
+                runner_profile: "nightly".to_string(),
+                attempt_index: 0,
+                rerun_count: 0,
+            },
+            seed_lineage: crate::lab::dual_run::SeedLineageRecord {
+                seed_lineage_id: "___".to_string(),
+                canonical_seed: 7,
+                lab_effective_seed: 7,
+                live_effective_seed: 7,
+                lab_seed_mode: crate::lab::dual_run::SeedMode::Inherit,
+                live_seed_mode: crate::lab::dual_run::SeedMode::Inherit,
+                lab_entropy_seed: 7,
+                live_entropy_seed: 7,
+                replay_policy: crate::lab::dual_run::ReplayPolicy::SingleSeed,
+                seeds_match: true,
+                annotations: BTreeMap::new(),
+            },
+            mismatch_fields: Vec::new(),
+            artifact_bundle: DivergenceArtifactBundle::under("artifacts/differential/test"),
+            minimization_lineage: DivergenceMinimizationLineage::from_seed_lineage(
+                &crate::lab::dual_run::SeedLineageRecord {
+                    seed_lineage_id: "___".to_string(),
+                    canonical_seed: 7,
+                    lab_effective_seed: 7,
+                    live_effective_seed: 7,
+                    lab_seed_mode: crate::lab::dual_run::SeedMode::Inherit,
+                    live_seed_mode: crate::lab::dual_run::SeedMode::Inherit,
+                    lab_entropy_seed: 7,
+                    live_entropy_seed: 7,
+                    replay_policy: crate::lab::dual_run::ReplayPolicy::SingleSeed,
+                    seeds_match: true,
+                    annotations: BTreeMap::new(),
+                },
+            ),
+            regression_promotion_state: RegressionPromotionState::Investigating,
+            retention: DivergenceRetentionMetadata::for_policy_class(
+                DifferentialPolicyClass::RuntimeSemanticBug,
+            ),
+            metadata: BTreeMap::new(),
+        };
+
+        assert_eq!(
+            entry.default_bundle_root(),
+            "artifacts/differential/x202f20/x3a3a3a/x5f5f5f"
+        );
+
+        crate::test_complete!(
+            "divergence_registry_components_do_not_alias_empty_sanitized_segments"
+        );
     }
 
     #[test]
