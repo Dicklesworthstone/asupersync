@@ -168,11 +168,14 @@ pub fn negotiate_encoding(
     let mut best: Option<(ContentEncoding, f32)> = None;
 
     for &encoding in supported {
-        let enc_str = encoding.as_token(); // ubs:ignore - not a hardcoded secret
-
+        // br-asupersync-ipsu2a: match Accept-Encoding tokens against the
+        // canonical encoding via from_token rather than equality on as_token's
+        // canonical name. Otherwise legacy aliases (e.g. RFC 7230 §4.2 lists
+        // "x-gzip" as a deprecated-but-valid synonym for "gzip") never bind to
+        // their target ContentEncoding and silently fall through to wildcard.
         let explicit_quality = preferences
             .iter()
-            .find(|q| q.encoding == enc_str)
+            .find(|q| ContentEncoding::from_token(&q.encoding) == Some(encoding))
             .map(|q| q.quality);
 
         let quality = match encoding {
@@ -835,6 +838,49 @@ mod tests {
             Some(ContentEncoding::Identity)
         );
         assert_eq!(ContentEncoding::from_token("unknown"), None);
+    }
+
+    /// br-asupersync-ipsu2a: negotiate_encoding must bind the legacy
+    /// `x-gzip` Accept-Encoding token to ContentEncoding::Gzip. Previously
+    /// `q.encoding == as_token()` ("gzip") never matched the
+    /// preference's encoding string ("x-gzip") so the server fell through
+    /// to identity, dropping a legitimate gzip request.
+    ///
+    /// RFC 9110 §12.5.3: identity is acceptable by default at q=1.0 unless
+    /// excluded by `*;q=0` or `identity;q=0`. So a bare "x-gzip" request
+    /// (without disabling identity) ties with identity at q=1.0 and
+    /// identity wins by listing order. To verify alias matching, exclude
+    /// identity OR ask for x-gzip at higher quality.
+    #[test]
+    fn ipsu2a_negotiate_x_gzip_with_identity_excluded_picks_gzip() {
+        let supported = &[ContentEncoding::Identity, ContentEncoding::Gzip];
+        let chosen = negotiate_encoding(Some("x-gzip, identity;q=0"), supported);
+        assert_eq!(
+            chosen,
+            Some(ContentEncoding::Gzip),
+            "with identity excluded, x-gzip alias must bind to Gzip per RFC 7230 §4.2"
+        );
+    }
+
+    #[test]
+    fn ipsu2a_negotiate_x_gzip_via_wildcard_zero_picks_gzip() {
+        let supported = &[ContentEncoding::Identity, ContentEncoding::Gzip];
+        // *;q=0 disables identity per RFC 9110 §12.5.3.
+        let chosen = negotiate_encoding(Some("x-gzip;q=1.0, *;q=0"), supported);
+        assert_eq!(
+            chosen,
+            Some(ContentEncoding::Gzip),
+            "with wildcard at q=0, x-gzip alias must bind to Gzip"
+        );
+    }
+
+    #[test]
+    fn ipsu2a_negotiate_canonical_gzip_still_works_after_alias_change() {
+        // Positive control: the canonical 'gzip' token must still resolve
+        // to Gzip after the from_token-based alias matching change.
+        let supported = &[ContentEncoding::Identity, ContentEncoding::Gzip];
+        let chosen = negotiate_encoding(Some("gzip, identity;q=0"), supported);
+        assert_eq!(chosen, Some(ContentEncoding::Gzip));
     }
 
     #[test]
