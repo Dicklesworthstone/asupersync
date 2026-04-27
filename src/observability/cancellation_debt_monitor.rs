@@ -35,6 +35,10 @@ const QUEUE_DEPTH_OVERFLOW_BUCKET: &str = "__overflow__";
 /// entry of that work type is evicted and an Emergency alert is generated.
 const DEFAULT_MAX_PENDING_PER_WORK_TYPE: usize = 10_000;
 
+fn saturating_system_time_sub(time: SystemTime, duration: Duration) -> SystemTime {
+    time.checked_sub(duration).unwrap_or(SystemTime::UNIX_EPOCH)
+}
+
 /// Truncate a string at a UTF-8 boundary not exceeding `max_bytes` bytes.
 /// If truncated, append `…` (which costs 3 bytes in UTF-8). The returned
 /// string therefore never exceeds `max_bytes + 3` bytes.
@@ -258,7 +262,7 @@ impl ProcessingStats {
             .fetch_add(count as u64, Ordering::Relaxed);
 
         // Keep only samples within the window
-        let cutoff = now - Duration::from_secs(60); // 1 minute window
+        let cutoff = saturating_system_time_sub(now, Duration::from_secs(60)); // 1 minute window
         while let Some(&(time, _)) = self.items_processed.front() {
             if time < cutoff {
                 self.items_processed.pop_front();
@@ -278,7 +282,7 @@ impl ProcessingStats {
             return self.last_rate;
         }
 
-        let cutoff = now - window;
+        let cutoff = saturating_system_time_sub(now, window);
         let total_in_window: usize = self
             .items_processed
             .iter()
@@ -684,14 +688,14 @@ impl CancellationDebtMonitor {
 
     /// Clear old alerts beyond a certain age.
     pub fn clear_old_alerts(&self, max_age: Duration) {
-        let cutoff = super::replayable_system_time() - max_age;
+        let cutoff = saturating_system_time_sub(super::replayable_system_time(), max_age);
         let mut alerts = self.recent_alerts.lock();
         alerts.retain(|alert| alert.generated_at > cutoff);
     }
 
     /// Force cleanup of old pending work (emergency debt relief).
     pub fn emergency_cleanup(&self, max_age: Duration) -> usize {
-        let cutoff = super::replayable_system_time() - max_age;
+        let cutoff = saturating_system_time_sub(super::replayable_system_time(), max_age);
         let mut cleaned_count = 0;
 
         {
@@ -1043,8 +1047,9 @@ mod tests {
     fn test_emergency_cleanup() {
         let monitor = CancellationDebtMonitor::default();
 
-        // Queue some work and artificially age it
-        monitor.queue_work(
+        // Queue some work and explicitly age it; relying on a 1 ms wall-clock
+        // gap is scheduler- and platform-dependent.
+        let work_id = monitor.queue_work(
             WorkType::ChannelCleanup,
             "old-work".to_string(),
             1,
@@ -1053,6 +1058,14 @@ mod tests {
             CancelKind::User,
             Vec::new(),
         );
+        {
+            let mut pending = monitor.pending_work.lock();
+            let work = pending
+                .get_mut(&WorkType::ChannelCleanup)
+                .and_then(|work_map| work_map.get_mut(&work_id))
+                .expect("queued work must be present");
+            work.queued_at = SystemTime::UNIX_EPOCH;
+        }
 
         // Emergency cleanup with very short age (should clean everything)
         let cleaned = monitor.emergency_cleanup(Duration::from_millis(1));
@@ -1214,6 +1227,48 @@ mod tests {
         assert!(out.ends_with('…'));
         // Cap exceeding the input length leaves it untouched.
         assert_eq!(truncate_to_bytes("hi", 100), "hi");
+    }
+
+    #[test]
+    fn system_time_windows_do_not_underflow_near_epoch() {
+        let mut stats = ProcessingStats {
+            items_processed: VecDeque::new(),
+            total_processed: AtomicU64::new(0),
+            last_rate: 0.0,
+            last_rate_time: SystemTime::UNIX_EPOCH,
+        };
+
+        stats.record_processing(1, SystemTime::UNIX_EPOCH);
+        let rate = stats.calculate_rate(
+            Duration::MAX,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(6),
+        );
+
+        assert_eq!(
+            saturating_system_time_sub(SystemTime::UNIX_EPOCH, Duration::MAX),
+            SystemTime::UNIX_EPOCH
+        );
+        assert!(rate.is_finite());
+    }
+
+    #[test]
+    fn age_based_cleanup_tolerates_oversized_windows() {
+        let monitor = CancellationDebtMonitor::default();
+        let id = monitor.queue_work(
+            WorkType::ChannelCleanup,
+            "epoch-safe-work".to_string(),
+            1,
+            10,
+            &CancelReason::user("epoch-safe"),
+            CancelKind::User,
+            Vec::new(),
+        );
+
+        monitor.clear_old_alerts(Duration::MAX);
+        let cleaned = monitor.emergency_cleanup(Duration::MAX);
+
+        assert_eq!(cleaned, 0);
+        assert!(monitor.complete_work(id));
     }
 
     /// br-asupersync-af24n5 — entity_queue_depths in DebtSnapshot

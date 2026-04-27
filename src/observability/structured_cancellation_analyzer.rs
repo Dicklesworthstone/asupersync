@@ -10,9 +10,18 @@ use crate::observability::{
     cancellation_visualizer::{CancellationDashboard, CancellationVisualizer, VisualizerConfig},
 };
 use crate::types::{CancelKind, CancelReason, Time};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
+
+fn saturating_system_time_sub(
+    time: std::time::SystemTime,
+    duration: Duration,
+) -> std::time::SystemTime {
+    time.checked_sub(duration)
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+}
 
 /// Configuration for the complete structured cancellation analyzer.
 #[derive(Debug, Clone)]
@@ -277,20 +286,20 @@ impl StructuredCancellationAnalyzer {
 
     /// Get recent alerts.
     pub fn get_recent_alerts(&self, limit: usize) -> Vec<CancellationAlert> {
-        let alerts = self.alerts.lock().unwrap();
+        let alerts = self.alerts.lock();
         alerts.iter().rev().take(limit).cloned().collect()
     }
 
     /// Clear alerts older than the specified duration.
     pub fn clear_old_alerts(&self, max_age: Duration) {
-        let mut alerts = self.alerts.lock().unwrap();
-        let cutoff = super::replayable_system_time() - max_age;
+        let cutoff = saturating_system_time_sub(super::replayable_system_time(), max_age);
+        let mut alerts = self.alerts.lock();
         alerts.retain(|alert| alert.triggered_at > cutoff);
     }
 
     /// Get current real-time statistics.
     pub fn get_real_time_stats(&self) -> RealTimeStats {
-        let stats = self.stats.lock().unwrap();
+        let stats = self.stats.lock();
         stats.clone()
     }
 
@@ -304,7 +313,7 @@ impl StructuredCancellationAnalyzer {
     /// Update active traces count for real-time stats.
     fn update_active_traces_count(&self) {
         let stats = self.tracer.stats();
-        let mut real_time_stats = self.stats.lock().unwrap();
+        let mut real_time_stats = self.stats.lock();
         real_time_stats.active_traces = stats.traces_collected as usize;
 
         // Calculate memory usage estimate
@@ -318,7 +327,7 @@ impl StructuredCancellationAnalyzer {
 
     /// Update completed traces count for real-time stats.
     fn update_completed_traces_count(&self) {
-        let mut real_time_stats = self.stats.lock().unwrap();
+        let mut real_time_stats = self.stats.lock();
         real_time_stats.traces_completed_last_minute += 1;
 
         // Update current average latency
@@ -412,7 +421,7 @@ impl StructuredCancellationAnalyzer {
     /// Trigger a new alert.
     fn trigger_alert(&self, alert: &CancellationAlert) {
         {
-            let mut alerts = self.alerts.lock().unwrap();
+            let mut alerts = self.alerts.lock();
             alerts.push(alert.clone());
 
             // Keep alerts bounded
@@ -424,7 +433,7 @@ impl StructuredCancellationAnalyzer {
 
         // Update alert count in stats
         {
-            let mut stats = self.stats.lock().unwrap();
+            let mut stats = self.stats.lock();
             stats.alerts_last_hour += 1;
         }
 
@@ -466,8 +475,8 @@ impl StructuredCancellationAnalyzer {
 
     /// Clean up old traces to manage memory usage.
     fn maybe_cleanup_old_traces(&self) {
-        let mut last_cleanup = self.last_cleanup.lock().unwrap();
         let now = super::replayable_system_time();
+        let mut last_cleanup = self.last_cleanup.lock();
 
         // Only cleanup every 5 minutes
         if now.duration_since(*last_cleanup).unwrap_or(Duration::ZERO) < Duration::from_secs(300) {
@@ -517,7 +526,7 @@ impl LabRuntimeIntegration {
 
     /// Advance deterministic time (for testing).
     pub fn advance_time(&self, delta: Duration) {
-        let mut time = self.deterministic_time.lock().unwrap();
+        let mut time = self.deterministic_time.lock();
         *time = *time + delta;
     }
 
@@ -605,5 +614,17 @@ mod tests {
         });
 
         assert_eq!(analysis.traces_analyzed, 1);
+    }
+
+    #[test]
+    fn clear_old_alerts_tolerates_oversized_window() {
+        let analyzer = StructuredCancellationAnalyzer::default();
+
+        analyzer.clear_old_alerts(Duration::MAX);
+
+        assert_eq!(
+            saturating_system_time_sub(std::time::SystemTime::UNIX_EPOCH, Duration::MAX),
+            std::time::SystemTime::UNIX_EPOCH
+        );
     }
 }
