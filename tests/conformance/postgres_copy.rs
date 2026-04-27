@@ -37,15 +37,8 @@
 //! - Per-column format codes: 0 = text, 1 = binary
 //! - Binary format includes PGCOPY signature and structured headers
 
-use proptest::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
-
-use asupersync::bytes::{Bytes, BytesMut};
-use asupersync::database::postgres::{
-    BackendMessage, FrontendMessage, PostgresConnection, PostgresError,
-};
+use std::time::Instant;
 
 /// Test result for a single COPY protocol conformance requirement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,7 +54,7 @@ pub struct PostgresCopyResult {
 }
 
 /// Conformance test categories for PostgreSQL COPY protocol.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub enum TestCategory {
     /// CopyInResponse format specifier validation
@@ -81,7 +74,7 @@ pub enum TestCategory {
 }
 
 /// Protocol requirement level.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub enum RequirementLevel {
     Must,   // Protocol requirement
@@ -90,7 +83,7 @@ pub enum RequirementLevel {
 }
 
 /// Test execution result.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub enum TestVerdict {
     Pass,
@@ -323,7 +316,9 @@ impl CopyProtocolState {
     #[allow(dead_code)]
 
     pub fn validate_format_honored(&self) -> Result<(), String> {
-        let format = self.format.as_ref()
+        let format = self
+            .format
+            .as_ref()
             .ok_or("No format specification received")?;
 
         // Validate that received data matches declared format
@@ -485,40 +480,32 @@ impl PostgresCopyConformanceHarness {
         }));
 
         // MR3: CopyDone terminates COPY IN
-        self.tests.push(Box::new(|| {
-            Self::mr3_copy_done_terminates_copy_in()
-        }));
+        self.tests
+            .push(Box::new(|| Self::mr3_copy_done_terminates_copy_in()));
 
         // MR4: CopyFail rolls back
-        self.tests.push(Box::new(|| {
-            Self::mr4_copy_fail_rolls_back()
-        }));
+        self.tests
+            .push(Box::new(|| Self::mr4_copy_fail_rolls_back()));
 
         // MR5: COPY OUT sends CopyOutResponse then CopyData stream then CopyDone
-        self.tests.push(Box::new(|| {
-            Self::mr5_copy_out_sequence_conformance()
-        }));
+        self.tests
+            .push(Box::new(|| Self::mr5_copy_out_sequence_conformance()));
 
         // Additional conformance tests
-        self.tests.push(Box::new(|| {
-            Self::test_binary_format_signature_validation()
-        }));
+        self.tests
+            .push(Box::new(|| Self::test_binary_format_signature_validation()));
 
-        self.tests.push(Box::new(|| {
-            Self::test_mixed_format_column_specification()
-        }));
+        self.tests
+            .push(Box::new(|| Self::test_mixed_format_column_specification()));
 
-        self.tests.push(Box::new(|| {
-            Self::test_copy_data_chunk_size_limits()
-        }));
+        self.tests
+            .push(Box::new(|| Self::test_copy_data_chunk_size_limits()));
 
-        self.tests.push(Box::new(|| {
-            Self::test_copy_protocol_state_transitions()
-        }));
+        self.tests
+            .push(Box::new(|| Self::test_copy_protocol_state_transitions()));
 
-        self.tests.push(Box::new(|| {
-            Self::test_copy_fail_error_message_encoding()
-        }));
+        self.tests
+            .push(Box::new(|| Self::test_copy_fail_error_message_encoding()));
     }
 
     #[allow(dead_code)]
@@ -608,9 +595,9 @@ impl PostgresCopyConformanceHarness {
         // Test with various chunk sizes
         let test_chunks = vec![
             b"small".to_vec(),
-            vec![b'A'; 1024],          // 1KB chunk
-            vec![b'B'; 64 * 1024],     // 64KB chunk
-            vec![b'C'; 512 * 1024],    // 512KB chunk
+            vec![b'A'; 1024],       // 1KB chunk
+            vec![b'B'; 64 * 1024],  // 64KB chunk
+            vec![b'C'; 512 * 1024], // 512KB chunk
         ];
 
         for chunk in test_chunks {
@@ -638,7 +625,10 @@ impl PostgresCopyConformanceHarness {
 
             // Verify declared length matches actual payload
             let declared_length = u32::from_be_bytes([
-                copy_data_msg[1], copy_data_msg[2], copy_data_msg[3], copy_data_msg[4]
+                copy_data_msg[1],
+                copy_data_msg[2],
+                copy_data_msg[3],
+                copy_data_msg[4],
             ]);
 
             if declared_length as usize != chunk.len() {
@@ -650,7 +640,8 @@ impl PostgresCopyConformanceHarness {
                     verdict: TestVerdict::Fail,
                     error_message: Some(format!(
                         "Declared length {} does not match actual payload size {}",
-                        declared_length, chunk.len()
+                        declared_length,
+                        chunk.len()
                     )),
                     execution_time_ms: start.elapsed().as_millis() as u64,
                 };
@@ -741,7 +732,10 @@ impl PostgresCopyConformanceHarness {
 
         // Verify length field is 0 (no payload)
         let payload_length = u32::from_be_bytes([
-            copy_done_msg[1], copy_done_msg[2], copy_done_msg[3], copy_done_msg[4]
+            copy_done_msg[1],
+            copy_done_msg[2],
+            copy_done_msg[3],
+            copy_done_msg[4],
         ]);
 
         if payload_length != 0 {
@@ -831,7 +825,10 @@ impl PostgresCopyConformanceHarness {
 
         // Verify error message encoding
         let declared_length = u32::from_be_bytes([
-            copy_fail_msg[1], copy_fail_msg[2], copy_fail_msg[3], copy_fail_msg[4]
+            copy_fail_msg[1],
+            copy_fail_msg[2],
+            copy_fail_msg[3],
+            copy_fail_msg[4],
         ]);
 
         if declared_length as usize != error_message.len() + 1 {
@@ -941,7 +938,8 @@ impl PostgresCopyConformanceHarness {
             if copy_data_msg[0] != CopyMessageType::CopyData as u8 {
                 return PostgresCopyResult {
                     test_id: "mr5_copy_out_sequence_conformance".to_string(),
-                    description: "COPY OUT must send CopyOutResponse → CopyData → CopyDone".to_string(),
+                    description: "COPY OUT must send CopyOutResponse → CopyData → CopyDone"
+                        .to_string(),
                     category: TestCategory::CopyOutSequence,
                     requirement_level: RequirementLevel::Must,
                     verdict: TestVerdict::Fail,
@@ -1000,7 +998,8 @@ impl PostgresCopyConformanceHarness {
             if sent != received {
                 return PostgresCopyResult {
                     test_id: "mr5_copy_out_sequence_conformance".to_string(),
-                    description: "COPY OUT must send CopyOutResponse → CopyData → CopyDone".to_string(),
+                    description: "COPY OUT must send CopyOutResponse → CopyData → CopyDone"
+                        .to_string(),
                     category: TestCategory::CopyOutSequence,
                     requirement_level: RequirementLevel::Must,
                     verdict: TestVerdict::Fail,
@@ -1075,7 +1074,10 @@ impl PostgresCopyConformanceHarness {
 
         // Verify format codes are correctly encoded
         let format_section_start = 6; // After type(1) + length(4) + overall_format(1)
-        let column_count = u16::from_be_bytes([copy_in_msg[format_section_start], copy_in_msg[format_section_start + 1]]);
+        let column_count = u16::from_be_bytes([
+            copy_in_msg[format_section_start],
+            copy_in_msg[format_section_start + 1],
+        ]);
 
         if column_count != 3 {
             return PostgresCopyResult {
@@ -1084,7 +1086,10 @@ impl PostgresCopyConformanceHarness {
                 category: TestCategory::FormatCompliance,
                 requirement_level: RequirementLevel::Must,
                 verdict: TestVerdict::Fail,
-                error_message: Some(format!("Column count mismatch: expected 3, got {}", column_count)),
+                error_message: Some(format!(
+                    "Column count mismatch: expected 3, got {}",
+                    column_count
+                )),
                 execution_time_ms: start.elapsed().as_millis() as u64,
             };
         }
@@ -1100,7 +1105,10 @@ impl PostgresCopyConformanceHarness {
                     category: TestCategory::FormatCompliance,
                     requirement_level: RequirementLevel::Must,
                     verdict: TestVerdict::Fail,
-                    error_message: Some(format!("Format code {} mismatch: expected {}, got {}", i, expected, actual)),
+                    error_message: Some(format!(
+                        "Format code {} mismatch: expected {}, got {}",
+                        i, expected, actual
+                    )),
                     execution_time_ms: start.elapsed().as_millis() as u64,
                 };
             }
@@ -1144,7 +1152,10 @@ impl PostgresCopyConformanceHarness {
 
             // Verify declared length matches
             let declared_length = u32::from_be_bytes([
-                copy_data_msg[1], copy_data_msg[2], copy_data_msg[3], copy_data_msg[4]
+                copy_data_msg[1],
+                copy_data_msg[2],
+                copy_data_msg[3],
+                copy_data_msg[4],
             ]) as usize;
 
             if declared_length != size {
@@ -1254,11 +1265,11 @@ impl PostgresCopyConformanceHarness {
         let start = Instant::now();
 
         let test_messages = vec![
-            "",                                    // Empty message
-            "Simple error",                        // ASCII message
-            "Błąd podczas kopiowania danych",     // UTF-8 message
-            "Error with\nnewline",                // Multi-line message
-            "Error with\ttab",                    // Message with tab
+            "",                               // Empty message
+            "Simple error",                   // ASCII message
+            "Błąd podczas kopiowania danych", // UTF-8 message
+            "Error with\nnewline",            // Multi-line message
+            "Error with\ttab",                // Message with tab
         ];
 
         for error_msg in test_messages {
@@ -1279,7 +1290,10 @@ impl PostgresCopyConformanceHarness {
 
             // Verify length includes null terminator
             let declared_length = u32::from_be_bytes([
-                copy_fail_msg[1], copy_fail_msg[2], copy_fail_msg[3], copy_fail_msg[4]
+                copy_fail_msg[1],
+                copy_fail_msg[2],
+                copy_fail_msg[3],
+                copy_fail_msg[4],
             ]) as usize;
 
             if declared_length != error_msg.len() + 1 {
@@ -1302,7 +1316,10 @@ impl PostgresCopyConformanceHarness {
                     category: TestCategory::ErrorHandling,
                     requirement_level: RequirementLevel::Must,
                     verdict: TestVerdict::Fail,
-                    error_message: Some(format!("Missing null terminator for error: '{}'", error_msg)),
+                    error_message: Some(format!(
+                        "Missing null terminator for error: '{}'",
+                        error_msg
+                    )),
                     execution_time_ms: start.elapsed().as_millis() as u64,
                 };
             }
@@ -1460,13 +1477,22 @@ mod tests {
         for result in &results {
             assert!(!result.test_id.is_empty());
             assert!(!result.description.is_empty());
-            assert!(result.execution_time_ms > 0);
+            assert!(
+                result.execution_time_ms < 60_000,
+                "conformance case should report a bounded execution time"
+            );
         }
 
         // Check for any failed tests
-        let failures: Vec<_> = results.iter().filter(|r| r.verdict == TestVerdict::Fail).collect();
+        let failures: Vec<_> = results
+            .iter()
+            .filter(|r| r.verdict == TestVerdict::Fail)
+            .collect();
         for failure in &failures {
-            println!("Test failed: {} - {:?}", failure.test_id, failure.error_message);
+            println!(
+                "Test failed: {} - {:?}",
+                failure.test_id, failure.error_message
+            );
         }
     }
 

@@ -1,5 +1,6 @@
 #![allow(warnings)]
 #![allow(clippy::all)]
+#![cfg(feature = "mysql")]
 //! MySQL AuthSwitchRequest Conformance Tests
 //!
 //! This module provides comprehensive conformance testing for MySQL wire protocol
@@ -59,7 +60,7 @@ pub struct MySqlAuthConformanceResult {
 }
 
 /// Conformance test categories for MySQL authentication.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[allow(dead_code)]
 pub enum TestCategory {
     PacketFormat,
@@ -71,7 +72,7 @@ pub enum TestCategory {
 }
 
 /// Protocol requirement level.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[allow(dead_code)]
 pub enum RequirementLevel {
     Must,   // Protocol requirement
@@ -80,7 +81,7 @@ pub enum RequirementLevel {
 }
 
 /// Test execution result.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[allow(dead_code)]
 pub enum TestVerdict {
     Pass,
@@ -149,8 +150,15 @@ impl MySqlAuthConformanceHarness {
 
     #[allow(dead_code)]
 
-    fn record_result(&mut self, test_id: &str, description: &str, category: TestCategory,
-                    requirement: RequirementLevel, verdict: TestVerdict, notes: Option<String>) {
+    fn record_result(
+        &mut self,
+        test_id: &str,
+        description: &str,
+        category: TestCategory,
+        requirement: RequirementLevel,
+        verdict: TestVerdict,
+        notes: Option<String>,
+    ) {
         self.results.push(MySqlAuthConformanceResult {
             test_id: test_id.to_string(),
             description: description.to_string(),
@@ -187,7 +195,11 @@ impl MySqlAuthConformanceHarness {
             assert!(!auth_data.is_empty());
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-AUTH-001",
             "AuthSwitchRequest packet format MUST follow wire protocol",
@@ -217,13 +229,22 @@ impl MySqlAuthConformanceHarness {
 
                 // Parse plugin name
                 let plugin_start = 1;
-                let plugin_end = packet.iter().skip(plugin_start).position(|&b| b == 0).unwrap() + plugin_start;
+                let plugin_end = packet
+                    .iter()
+                    .skip(plugin_start)
+                    .position(|&b| b == 0)
+                    .unwrap()
+                    + plugin_start;
                 let parsed_plugin = std::str::from_utf8(&packet[plugin_start..plugin_end]).unwrap();
                 assert_eq!(parsed_plugin, plugin);
             }
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-AUTH-002",
             "Plugin name extraction MUST handle standard authentication plugins",
@@ -259,7 +280,11 @@ impl MySqlAuthConformanceHarness {
             assert_eq!(auth_data_stripped, &[0x01, 0x02, 0x03, 0x04, 0x05]);
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-AUTH-003",
             "Auth data parsing MUST handle optional null termination",
@@ -285,10 +310,17 @@ impl MySqlAuthConformanceHarness {
             // No null terminator (malformed)
             let malformed_packet = vec![0xFE, b'p', b'l', b'u', b'g', b'i', b'n'];
             let no_null = malformed_packet.iter().skip(1).position(|&b| b == 0);
-            assert!(no_null.is_none(), "Should not find null terminator in malformed packet");
+            assert!(
+                no_null.is_none(),
+                "Should not find null terminator in malformed packet"
+            );
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-AUTH-004",
             "Null termination handling MUST detect malformed packets",
@@ -310,7 +342,7 @@ impl MySqlAuthConformanceHarness {
             let nonce = b"12345678901234567890";
 
             // Simulate the algorithm: SHA256(password) XOR SHA256(SHA256(SHA256(password)) + nonce)
-            use sha2::{Sha256, Digest};
+            use sha2::{Digest, Sha256};
 
             let password_hash = Sha256::digest(password.as_bytes());
             let double_hash = Sha256::digest(&password_hash);
@@ -334,7 +366,11 @@ impl MySqlAuthConformanceHarness {
             assert!(empty_result.is_empty());
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-AUTH-005",
             "caching_sha2_password algorithm MUST follow specification",
@@ -354,7 +390,7 @@ impl MySqlAuthConformanceHarness {
             let nonce = b"12345678901234567890";
 
             // Simulate the algorithm: SHA1(password) XOR SHA1(SHA1(SHA1(password)) + nonce)
-            use sha1::{Sha1, Digest};
+            use sha1::{Digest, Sha1};
 
             let password_hash = Sha1::digest(password.as_bytes());
             let double_hash = Sha1::digest(&password_hash);
@@ -374,7 +410,11 @@ impl MySqlAuthConformanceHarness {
             assert_eq!(expected_result.len(), 20);
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-AUTH-006",
             "mysql_native_password algorithm MUST follow specification",
@@ -390,8 +430,8 @@ impl MySqlAuthConformanceHarness {
     fn test_algorithm_test_vectors(&mut self) {
         let result = std::panic::catch_unwind(|| {
             // Known test vectors for algorithm validation
-            let test_cases = vec![
-                ("", b"", true),  // Empty password
+            let test_cases: [(&str, &[u8], bool); 4] = [
+                ("", b"", true), // Empty password
                 ("password", b"12345678901234567890", false),
                 ("mysecret", b"abcdefghijklmnopqrst", false),
                 ("123456", b"nonce_data_example__", false),
@@ -409,7 +449,11 @@ impl MySqlAuthConformanceHarness {
             }
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-AUTH-007",
             "Authentication algorithms MUST pass known test vectors",
@@ -435,7 +479,11 @@ impl MySqlAuthConformanceHarness {
             // which is a security requirement
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-AUTH-008",
             "Empty password handling MUST return empty auth response",
@@ -455,17 +503,23 @@ impl MySqlAuthConformanceHarness {
             let nonce = b"12345678901234567890";
 
             // Multiple calls with same input must produce same output
-            use sha2::{Sha256, Digest};
+            use sha2::{Digest, Sha256};
 
             let compute_caching_sha2 = |pwd: &str, n: &[u8]| -> Vec<u8> {
-                if pwd.is_empty() { return Vec::new(); }
+                if pwd.is_empty() {
+                    return Vec::new();
+                }
                 let password_hash = Sha256::digest(pwd.as_bytes());
                 let double_hash = Sha256::digest(&password_hash);
                 let mut combined = Vec::with_capacity(32 + n.len());
                 combined.extend_from_slice(&double_hash);
                 combined.extend_from_slice(n);
                 let scramble_hash = Sha256::digest(&combined);
-                password_hash.iter().zip(scramble_hash.iter()).map(|(a, b)| a ^ b).collect()
+                password_hash
+                    .iter()
+                    .zip(scramble_hash.iter())
+                    .map(|(a, b)| a ^ b)
+                    .collect()
             };
 
             let result1 = compute_caching_sha2(password, nonce);
@@ -474,7 +528,11 @@ impl MySqlAuthConformanceHarness {
             assert_eq!(result1.len(), 32);
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-AUTH-009",
             "Authentication algorithms MUST be deterministic",
@@ -524,7 +582,11 @@ impl MySqlAuthConformanceHarness {
             assert_eq!(state, AuthState::Authenticated);
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-AUTH-010",
             "AuthSwitch state machine MUST follow protocol transitions",
@@ -570,7 +632,11 @@ impl MySqlAuthConformanceHarness {
             }
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-AUTH-011",
             "Multi-step authentication flow MUST handle all packet types",
@@ -594,7 +660,11 @@ impl MySqlAuthConformanceHarness {
             assert_eq!(ok_packet, 0x00);
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-AUTH-012",
             "Fast auth success (0x03) MUST be followed by OK packet",
@@ -622,7 +692,11 @@ impl MySqlAuthConformanceHarness {
             }
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-AUTH-013",
             "Full auth required (0x04) MUST be handled securely",
@@ -641,10 +715,10 @@ impl MySqlAuthConformanceHarness {
         let result = std::panic::catch_unwind(|| {
             // Test rejection of malformed AuthSwitch packets
             let malformed_cases = vec![
-                vec![],                    // Empty packet
-                vec![0xFE],                // No plugin name
-                vec![0xFF],                // Wrong packet type
-                vec![0xFE, 0x00],          // Empty plugin name
+                vec![],           // Empty packet
+                vec![0xFE],       // No plugin name
+                vec![0xFF],       // Wrong packet type
+                vec![0xFE, 0x00], // Empty plugin name
             ];
 
             for case in malformed_cases {
@@ -659,7 +733,11 @@ impl MySqlAuthConformanceHarness {
             }
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-AUTH-014",
             "Malformed AuthSwitch packets MUST be rejected",
@@ -679,20 +757,21 @@ impl MySqlAuthConformanceHarness {
                 "unknown_plugin",
                 "deprecated_plugin",
                 "custom_plugin_v1",
-                "",  // Empty plugin name
+                "", // Empty plugin name
             ];
 
-            let supported_plugins = vec![
-                "mysql_native_password",
-                "caching_sha2_password",
-            ];
+            let supported_plugins = vec!["mysql_native_password", "caching_sha2_password"];
 
             for plugin in unsupported_plugins {
                 assert!(!supported_plugins.contains(&plugin));
             }
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-AUTH-015",
             "Unsupported authentication plugins MUST be rejected",
@@ -709,7 +788,7 @@ impl MySqlAuthConformanceHarness {
         let result = std::panic::catch_unwind(|| {
             // Test handling of invalid authentication data
             let invalid_cases = vec![
-                vec![], // Empty auth data (valid for empty password)
+                vec![],           // Empty auth data (valid for empty password)
                 vec![0xFF; 1000], // Oversized auth data
             ];
 
@@ -724,7 +803,11 @@ impl MySqlAuthConformanceHarness {
             }
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-AUTH-016",
             "Invalid authentication data MUST be handled appropriately",
@@ -762,7 +845,11 @@ impl MySqlAuthConformanceHarness {
             assert_eq!(test_seq, 0); // Should wrap around
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-AUTH-017",
             "Packet sequence numbers MUST be validated and incremented",
@@ -792,7 +879,11 @@ impl MySqlAuthConformanceHarness {
             assert!(client_supports.contains(&final_plugin));
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-AUTH-018",
             "Plugin fallback mechanism MUST negotiate compatible plugin",
@@ -809,19 +900,24 @@ impl MySqlAuthConformanceHarness {
         let result = std::panic::catch_unwind(|| {
             // Test plugin compatibility matrix
             let compatibility_matrix = vec![
-                ("mysql_native_password", true),   // Always supported
-                ("caching_sha2_password", true),   // Modern default
-                ("sha256_password", false),        // Not implemented
-                ("unknown_plugin", false),         // Unknown
+                ("mysql_native_password", true), // Always supported
+                ("caching_sha2_password", true), // Modern default
+                ("sha256_password", false),      // Not implemented
+                ("unknown_plugin", false),       // Unknown
             ];
 
             for (plugin, should_support) in compatibility_matrix {
-                let is_supported = matches!(plugin, "mysql_native_password" | "caching_sha2_password");
+                let is_supported =
+                    matches!(plugin, "mysql_native_password" | "caching_sha2_password");
                 assert_eq!(is_supported, should_support);
             }
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-AUTH-019",
             "Plugin compatibility matrix MUST be correctly implemented",
@@ -858,13 +954,16 @@ impl MySqlAuthConformanceHarness {
             ];
 
             for case in test_cases {
-                let final_method = case.server_request.as_ref()
-                    .unwrap_or(&case.client_default);
+                let final_method = case.server_request.as_ref().unwrap_or(&case.client_default);
                 assert_eq!(&case.final_method, final_method);
             }
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-AUTH-020",
             "Authentication method negotiation MUST follow protocol",
@@ -887,13 +986,17 @@ impl MySqlAuthConformanceHarness {
             let nonce3 = b"12345678901234567890"; // Same as nonce1
 
             assert_ne!(nonce1, nonce2); // Different nonces
-            assert_eq!(nonce1, nonce3);  // Same nonces (bad for security)
+            assert_eq!(nonce1, nonce3); // Same nonces (bad for security)
 
             // In practice, server should generate unique nonces
             assert_ne!(nonce1.as_ptr(), nonce2.as_ptr()); // Different memory
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-AUTH-021",
             "Nonce uniqueness SHOULD be enforced for security",
@@ -912,11 +1015,13 @@ impl MySqlAuthConformanceHarness {
             let password = "plaintext_password";
             let nonce = b"random_nonce_12345__";
 
-            use sha2::{Sha256, Digest};
+            use sha2::{Digest, Sha256};
 
             // Simulate scrambling - result should not contain plaintext
             let password_hash = Sha256::digest(password.as_bytes());
-            let scrambled_data: Vec<u8> = password_hash.iter().enumerate()
+            let scrambled_data: Vec<u8> = password_hash
+                .iter()
+                .enumerate()
                 .map(|(i, &b)| b ^ nonce[i % nonce.len()])
                 .collect();
 
@@ -925,7 +1030,11 @@ impl MySqlAuthConformanceHarness {
             assert_ne!(scrambled_data, password_hash.as_slice());
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-AUTH-022",
             "Authentication data MUST be scrambled, not sent as plaintext",
@@ -954,7 +1063,11 @@ impl MySqlAuthConformanceHarness {
             assert!(empty_auth_response.is_empty());
         });
 
-        let verdict = if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail };
+        let verdict = if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        };
         self.record_result(
             "MYSQL-AUTH-023",
             "Plaintext password transmission MUST be prevented",
@@ -976,6 +1089,220 @@ impl Default for MySqlAuthConformanceHarness {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use asupersync::database::{MySqlConnectOptions, MySqlError};
+    use asupersync::test_utils::init_test_logging;
+    use asupersync::types::Outcome;
+    use sha1::{Digest as _, Sha1};
+    use sha2::{Digest as _, Sha256};
+    use std::io::{Read, Write};
+    use std::time::Duration;
+
+    const CLIENT_CONNECT_WITH_DB: u32 = 0x0000_0008;
+    const CLIENT_PROTOCOL_41: u32 = 0x0000_0200;
+    const CLIENT_SECURE_CONNECTION: u32 = 0x0000_8000;
+    const CLIENT_PLUGIN_AUTH: u32 = 0x0008_0000;
+
+    struct HandshakeResponse {
+        username: String,
+        auth_response: Vec<u8>,
+        plugin_name: String,
+    }
+
+    fn mysql_packet(sequence: u8, payload: &[u8]) -> Vec<u8> {
+        assert!(payload.len() <= 0x00FF_FFFF);
+        let len = payload.len();
+        let mut packet = Vec::with_capacity(4 + len);
+        packet.push((len & 0xFF) as u8);
+        packet.push(((len >> 8) & 0xFF) as u8);
+        packet.push(((len >> 16) & 0xFF) as u8);
+        packet.push(sequence);
+        packet.extend_from_slice(payload);
+        packet
+    }
+
+    fn mysql_handshake_packet(plugin_name: &str, auth_data: &[u8]) -> Vec<u8> {
+        assert!(
+            auth_data.len() >= 20,
+            "handshake auth data must provide at least 20 bytes"
+        );
+
+        let capabilities = CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION | CLIENT_PLUGIN_AUTH;
+        let mut payload = Vec::new();
+        payload.push(10);
+        payload.extend_from_slice(b"8.0.0-asupersync-test\0");
+        payload.extend_from_slice(&42_u32.to_le_bytes());
+        payload.extend_from_slice(&auth_data[..8]);
+        payload.push(0);
+        payload.extend_from_slice(&(capabilities as u16).to_le_bytes());
+        payload.push(33);
+        payload.extend_from_slice(&0_u16.to_le_bytes());
+        payload.extend_from_slice(&((capabilities >> 16) as u16).to_le_bytes());
+        payload.push((auth_data.len() + 1) as u8);
+        payload.extend_from_slice(&[0; 10]);
+        payload.extend_from_slice(&auth_data[8..]);
+        payload.push(0);
+        payload.extend_from_slice(plugin_name.as_bytes());
+        payload.push(0);
+        mysql_packet(0, &payload)
+    }
+
+    fn auth_switch_request_packet(
+        sequence: u8,
+        plugin_name: &str,
+        auth_data: &[u8],
+        terminate_auth_data: bool,
+    ) -> Vec<u8> {
+        let mut payload = vec![0xFE];
+        payload.extend_from_slice(plugin_name.as_bytes());
+        payload.push(0);
+        payload.extend_from_slice(auth_data);
+        if terminate_auth_data {
+            payload.push(0);
+        }
+        mysql_packet(sequence, &payload)
+    }
+
+    fn ok_packet(sequence: u8) -> Vec<u8> {
+        mysql_packet(sequence, &[0x00])
+    }
+
+    fn read_mysql_packet(stream: &mut std::net::TcpStream) -> Vec<u8> {
+        let mut header = [0; 4];
+        stream.read_exact(&mut header).expect("read packet header");
+        let len =
+            usize::from(header[0]) | (usize::from(header[1]) << 8) | (usize::from(header[2]) << 16);
+        let mut payload = vec![0; len];
+        stream
+            .read_exact(&mut payload)
+            .expect("read packet payload");
+        payload
+    }
+
+    fn parse_handshake_response(payload: &[u8]) -> HandshakeResponse {
+        let capabilities = u32::from_le_bytes(payload[..4].try_into().expect("capabilities"));
+        let mut cursor = 4 + 4 + 1 + 23;
+
+        let username = read_null_terminated(payload, &mut cursor);
+        let auth_len = read_lenenc_int(payload, &mut cursor) as usize;
+        let auth_response = payload[cursor..cursor + auth_len].to_vec();
+        cursor += auth_len;
+
+        if capabilities & CLIENT_CONNECT_WITH_DB != 0 {
+            let _ = read_null_terminated(payload, &mut cursor);
+        }
+
+        let plugin_name = read_null_terminated(payload, &mut cursor);
+        HandshakeResponse {
+            username,
+            auth_response,
+            plugin_name,
+        }
+    }
+
+    fn read_null_terminated(payload: &[u8], cursor: &mut usize) -> String {
+        let start = *cursor;
+        let end = payload[start..]
+            .iter()
+            .position(|&byte| byte == 0)
+            .map(|offset| start + offset)
+            .expect("null-terminated field");
+        *cursor = end + 1;
+        String::from_utf8(payload[start..end].to_vec()).expect("utf8 field")
+    }
+
+    fn read_lenenc_int(payload: &[u8], cursor: &mut usize) -> u64 {
+        let first = payload[*cursor];
+        *cursor += 1;
+        match first {
+            0x00..=0xFA => u64::from(first),
+            0xFC => {
+                let bytes = &payload[*cursor..*cursor + 2];
+                *cursor += 2;
+                u64::from(u16::from_le_bytes(bytes.try_into().expect("u16 lenenc")))
+            }
+            0xFD => {
+                let bytes = &payload[*cursor..*cursor + 3];
+                *cursor += 3;
+                u64::from(bytes[0]) | (u64::from(bytes[1]) << 8) | (u64::from(bytes[2]) << 16)
+            }
+            0xFE => {
+                let bytes = &payload[*cursor..*cursor + 8];
+                *cursor += 8;
+                u64::from_le_bytes(bytes.try_into().expect("u64 lenenc"))
+            }
+            0xFB | 0xFF => panic!("unexpected length-encoded integer prefix: {first:#x}"),
+        }
+    }
+
+    fn caching_sha2_auth(password: &str, nonce: &[u8]) -> Vec<u8> {
+        if password.is_empty() {
+            return Vec::new();
+        }
+
+        let password_hash = Sha256::digest(password.as_bytes());
+        let double_hash = Sha256::digest(password_hash);
+        let mut combined = Vec::with_capacity(double_hash.len() + nonce.len());
+        combined.extend_from_slice(&double_hash);
+        combined.extend_from_slice(nonce);
+        let scramble_hash = Sha256::digest(&combined);
+
+        password_hash
+            .iter()
+            .zip(scramble_hash.iter())
+            .map(|(left, right)| left ^ right)
+            .collect()
+    }
+
+    fn mysql_native_auth(password: &str, nonce: &[u8]) -> Vec<u8> {
+        if password.is_empty() {
+            return Vec::new();
+        }
+
+        let password_hash = Sha1::digest(password.as_bytes());
+        let double_hash = Sha1::digest(password_hash);
+        let mut combined = Vec::with_capacity(nonce.len() + double_hash.len());
+        combined.extend_from_slice(nonce);
+        combined.extend_from_slice(&double_hash);
+        let scramble_hash = Sha1::digest(&combined);
+
+        password_hash
+            .iter()
+            .zip(scramble_hash.iter())
+            .map(|(left, right)| left ^ right)
+            .collect()
+    }
+
+    fn connect_options(addr: std::net::SocketAddr) -> MySqlConnectOptions {
+        let mut options = MySqlConnectOptions::parse(&format!(
+            "mysql://user:pass@{}:{}/db",
+            addr.ip(),
+            addr.port()
+        ))
+        .expect("parse mysql options");
+        options.connect_timeout = Some(Duration::from_secs(2));
+        options
+    }
+
+    fn assert_no_auth_switch_response(stream: &mut std::net::TcpStream) {
+        let mut header = [0; 4];
+        let read = stream.read(&mut header).unwrap_or_else(|err| {
+            assert!(
+                matches!(
+                    err.kind(),
+                    std::io::ErrorKind::UnexpectedEof
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::WouldBlock
+                ),
+                "unexpected server read error: {err}"
+            );
+            0
+        });
+        assert_eq!(
+            read, 0,
+            "client must not send an auth-switch response after rejecting the plugin"
+        );
+    }
 
     #[test]
     #[allow(dead_code)]
@@ -998,15 +1325,246 @@ mod tests {
         assert!(categories.contains(&TestCategory::SecurityValidation));
 
         // All MUST requirements should pass
-        let must_failures: Vec<_> = results.iter()
-            .filter(|r| r.requirement_level == RequirementLevel::Must && r.verdict == TestVerdict::Fail)
+        let must_failures: Vec<_> = results
+            .iter()
+            .filter(|r| {
+                r.requirement_level == RequirementLevel::Must && r.verdict == TestVerdict::Fail
+            })
             .collect();
 
         if !must_failures.is_empty() {
             panic!("MUST requirements failed: {:#?}", must_failures);
         }
 
-        println!("✅ MySQL AuthSwitch conformance: {} tests passed", results.len());
+        println!(
+            "✅ MySQL AuthSwitch conformance: {} tests passed",
+            results.len()
+        );
+    }
+
+    #[test]
+    fn test_auth_switch_reenabled_for_live_caching_sha2_negotiation() {
+        init_test_logging();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let switch_nonce = *b"switch-auth-nonce-42";
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+
+            stream
+                .write_all(&mysql_handshake_packet(
+                    "caching_sha2_password",
+                    b"initial-auth-nonce-42",
+                ))
+                .expect("write handshake");
+            stream.flush().expect("flush handshake");
+
+            let handshake_response = parse_handshake_response(&read_mysql_packet(&mut stream));
+            assert_eq!(handshake_response.username, "user");
+            assert_eq!(handshake_response.plugin_name, "caching_sha2_password");
+            assert_eq!(
+                handshake_response.auth_response.len(),
+                32,
+                "initial caching_sha2 response should be SHA-256 sized"
+            );
+
+            stream
+                .write_all(&auth_switch_request_packet(
+                    2,
+                    "caching_sha2_password",
+                    &switch_nonce,
+                    true,
+                ))
+                .expect("write auth switch");
+            stream.flush().expect("flush auth switch");
+
+            let auth_switch_response = read_mysql_packet(&mut stream);
+            assert_eq!(
+                auth_switch_response,
+                caching_sha2_auth("pass", &switch_nonce),
+                "auth-switch response must use the switch nonce without the trailing NUL"
+            );
+
+            stream.write_all(&ok_packet(4)).expect("write ok");
+            stream.flush().expect("flush ok");
+        });
+
+        let outcome = futures_lite::future::block_on(async {
+            MySqlConnection::connect_with_options(&Cx::for_testing(), connect_options(addr)).await
+        });
+
+        match outcome {
+            Outcome::Ok(_) => {}
+            other => panic!("expected auth-switch connect success, got {other:?}"),
+        }
+
+        server.join().expect("join server");
+    }
+
+    #[test]
+    fn test_auth_switch_rejects_unknown_plugin_over_wire() {
+        init_test_logging();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+
+            stream
+                .write_all(&mysql_handshake_packet(
+                    "caching_sha2_password",
+                    b"initial-auth-nonce-42",
+                ))
+                .expect("write handshake");
+            stream.flush().expect("flush handshake");
+            let _ = read_mysql_packet(&mut stream);
+
+            stream
+                .write_all(&auth_switch_request_packet(
+                    2,
+                    "sha256_password",
+                    b"unsupported-switch-nc",
+                    true,
+                ))
+                .expect("write auth switch");
+            stream.flush().expect("flush auth switch");
+
+            assert_no_auth_switch_response(&mut stream);
+        });
+
+        let outcome = futures_lite::future::block_on(async {
+            MySqlConnection::connect_with_options(&Cx::for_testing(), connect_options(addr)).await
+        });
+
+        match outcome {
+            Outcome::Err(MySqlError::UnsupportedAuthPlugin(plugin)) => {
+                assert_eq!(plugin, "sha256_password");
+            }
+            other => panic!("expected UnsupportedAuthPlugin for auth switch, got {other:?}"),
+        }
+
+        server.join().expect("join server");
+    }
+
+    #[test]
+    fn test_auth_switch_mysql_native_password_requires_opt_in() {
+        init_test_logging();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+
+            stream
+                .write_all(&mysql_handshake_packet(
+                    "caching_sha2_password",
+                    b"initial-auth-nonce-42",
+                ))
+                .expect("write handshake");
+            stream.flush().expect("flush handshake");
+            let _ = read_mysql_packet(&mut stream);
+
+            stream
+                .write_all(&auth_switch_request_packet(
+                    2,
+                    "mysql_native_password",
+                    b"legacy-switch-nonce!",
+                    true,
+                ))
+                .expect("write auth switch");
+            stream.flush().expect("flush auth switch");
+
+            assert_no_auth_switch_response(&mut stream);
+        });
+
+        let outcome = futures_lite::future::block_on(async {
+            MySqlConnection::connect_with_options(&Cx::for_testing(), connect_options(addr)).await
+        });
+
+        match outcome {
+            Outcome::Err(MySqlError::UnsupportedAuthPlugin(message)) => {
+                assert!(
+                    message.contains("insecure_legacy_mysql_native_password"),
+                    "expected opt-in guidance in error, got {message:?}"
+                );
+            }
+            other => panic!("expected mysql_native_password auth-switch rejection, got {other:?}"),
+        }
+
+        server.join().expect("join server");
+    }
+
+    #[test]
+    fn test_auth_switch_mysql_native_password_opt_in_negotiates() {
+        init_test_logging();
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let switch_nonce = *b"legacy-switch-nonce!";
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+
+            stream
+                .write_all(&mysql_handshake_packet(
+                    "caching_sha2_password",
+                    b"initial-auth-nonce-42",
+                ))
+                .expect("write handshake");
+            stream.flush().expect("flush handshake");
+
+            let handshake_response = parse_handshake_response(&read_mysql_packet(&mut stream));
+            assert_eq!(handshake_response.plugin_name, "caching_sha2_password");
+
+            stream
+                .write_all(&auth_switch_request_packet(
+                    2,
+                    "mysql_native_password",
+                    &switch_nonce,
+                    true,
+                ))
+                .expect("write auth switch");
+            stream.flush().expect("flush auth switch");
+
+            let auth_switch_response = read_mysql_packet(&mut stream);
+            assert_eq!(
+                auth_switch_response,
+                mysql_native_auth("pass", &switch_nonce),
+                "opted-in legacy auth-switch should send the mysql_native_password scramble"
+            );
+
+            stream.write_all(&ok_packet(4)).expect("write ok");
+            stream.flush().expect("flush ok");
+        });
+
+        let mut options = connect_options(addr);
+        options.insecure_legacy_mysql_native_password = true;
+        let outcome = futures_lite::future::block_on(async {
+            MySqlConnection::connect_with_options(&Cx::for_testing(), options).await
+        });
+
+        match outcome {
+            Outcome::Ok(_) => {}
+            other => panic!("expected opted-in mysql_native auth switch success, got {other:?}"),
+        }
+
+        server.join().expect("join server");
     }
 
     #[test]
@@ -1014,8 +1572,8 @@ mod tests {
     fn test_auth_algorithm_coverage() {
         // Verify we test all required authentication algorithms
         let required_algorithms = vec![
-            "mysql_native_password",  // Legacy but widely used
-            "caching_sha2_password",  // Modern default
+            "mysql_native_password", // Legacy but widely used
+            "caching_sha2_password", // Modern default
         ];
 
         for algorithm in required_algorithms {
@@ -1066,9 +1624,12 @@ mod tests {
 
         for check in security_checks {
             assert!(
-                matches!(check,
-                    "nonce_uniqueness" | "auth_data_scrambling" |
-                    "plaintext_prevention" | "empty_password_handling"
+                matches!(
+                    check,
+                    "nonce_uniqueness"
+                        | "auth_data_scrambling"
+                        | "plaintext_prevention"
+                        | "empty_password_handling"
                 ),
                 "Security check {} should be tested",
                 check

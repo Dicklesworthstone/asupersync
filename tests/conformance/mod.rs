@@ -51,17 +51,20 @@ pub mod dns_message;
 pub mod hpack_rfc7541;
 pub mod kafka_offsets;
 pub mod kafka_record_batch_v2;
+#[cfg(feature = "mysql")]
+pub mod mysql_auth_switch;
+pub mod mysql_stmt_prepare_execute;
+pub mod obligation_invariants;
 pub mod obligation_lifecycle_metamorphic;
+pub mod phase_encoding_stable;
+pub mod plan_latency;
+pub mod postgres_copy;
+pub mod postgres_extended_query;
+pub mod postgres_logical_replication;
 pub mod quic_retry_rfc9000;
 pub mod race_loser_drain_metamorphic;
 pub mod tls_0rtt_replay_rfc8446;
 pub mod trace_replay_idempotency_metamorphic;
-// pub mod mysql_auth_switch;
-pub mod mysql_stmt_prepare_execute;
-pub mod obligation_invariants;
-pub mod phase_encoding_stable;
-pub mod plan_latency;
-pub mod postgres_logical_replication;
 // TODO: SQLite conformance tests - module has unresolved dependencies
 // pub mod sqlite_prepared_statements;
 // pub mod websocket_rfc6455;
@@ -113,8 +116,6 @@ pub mod tls_sni;
 // pub mod h3_settings;              // bit-rot vs current h3 API (Setting enum is private)
 // pub mod http_h1_chunked_rfc9112;  // crate::http and crate::io reorganised
 // pub mod obligation_recovery;      // FailFast type moved out of asupersync::cx::scope
-// pub mod postgres_copy;            // asupersync::database module path changed
-// pub mod postgres_extended_query;  // asupersync::database + asupersync::outcome moved
 // pub mod quic_initial;             // bit-rot vs current quic API
 // pub mod task_inspector_wire;      // crate::observability + crate::types not in scope here
 // pub mod tls_alpn;                 // asupersync::tls module path changed
@@ -125,19 +126,23 @@ pub mod tls_sni;
 //
 // h1_* siblings (h1_body_framing, h1_chunked, h1_content_encoding,
 // h1_expect_continue, h1_keepalive, h1_methods, h1_request_chunked) and
-// h2_stream_state_machine_rfc7540, hpack_metamorphic, mysql_auth_switch,
+// h2_stream_state_machine_rfc7540, hpack_metamorphic,
 // sqlite_prepared_statements, websocket_rfc6455 are already individually
 // commented out earlier in this file with bit-rot rationale; deliberately
 // not re-declared here.
 // The h1_* siblings (h1_body_framing, h1_chunked, h1_content_encoding,
 // h1_expect_continue, h1_keepalive, h1_methods, h1_request_chunked) and
-// h2_stream_state_machine_rfc7540, hpack_metamorphic, mysql_auth_switch,
+// h2_stream_state_machine_rfc7540, hpack_metamorphic,
 // sqlite_prepared_statements, websocket_rfc6455 are already individually
 // commented out earlier in this file with bit-rot rationale; deliberately
 // not re-declared here.
 
 // Re-export main conformance test functionality
 pub use aggregator_flush::AggregatorFlushConformanceHarness;
+#[cfg(feature = "deterministic-mode")]
+pub use cancel_dag_determinism::{
+    CancelDagDeterminismHarness, CancelDagDeterminismResult, TestCategory as CancelDagTestCategory,
+};
 pub use h1_rfc9112::{H1ConformanceHarness, RequirementLevel, TestVerdict};
 #[cfg(feature = "tls")]
 pub use h2_alpn_negotiation_rfc7540::{
@@ -148,16 +153,15 @@ pub use h2_rst_stream_ping_rfc9113::H2ConformanceHarness;
 pub use h2_settings_flow_continuation::H2SettingsFlowContinuationHarness;
 pub use h3_rfc9114::{H3ConformanceHarness, H3ConformanceResult};
 pub use hpack_rfc7541::HpackConformanceHarness;
-// pub use mysql_auth_switch::{MySqlAuthConformanceHarness, MySqlAuthConformanceResult};
-#[cfg(feature = "deterministic-mode")]
-pub use cancel_dag_determinism::{
-    CancelDagDeterminismHarness, CancelDagDeterminismResult, TestCategory as CancelDagTestCategory,
-};
+#[cfg(feature = "mysql")]
+pub use mysql_auth_switch::{MySqlAuthConformanceHarness, MySqlAuthConformanceResult};
 #[cfg(feature = "deterministic-mode")]
 pub use obligation_lifecycle_metamorphic::{
     ObligationLifecycleMetamorphicHarness, ObligationLifecycleMetamorphicResult,
     TestCategory as ObligationLifecycleTestCategory,
 };
+pub use postgres_copy::PostgresCopyConformanceHarness;
+pub use postgres_extended_query::PostgresExtendedQueryConformanceHarness;
 pub use quic_retry_rfc9000::QuicRetryConformanceHarness;
 #[cfg(feature = "deterministic-mode")]
 pub use race_loser_drain_metamorphic::{
@@ -899,6 +903,87 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
         .collect();
     results.extend(hpack_results);
 
+    // PostgreSQL extended-query conformance
+    let pg_extended_harness = PostgresExtendedQueryConformanceHarness::new();
+    let pg_extended_results: Vec<ConformanceTestResult> = pg_extended_harness
+        .run_all_tests()
+        .into_iter()
+        .map(|r| ConformanceTestResult {
+            test_id: r.test_id,
+            description: r.description,
+            category: match r.category {
+                postgres_extended_query::TestCategory::PipelineSequencing => {
+                    TestCategory::ProtocolOrdering
+                }
+                postgres_extended_query::TestCategory::StatementLifecycle => {
+                    TestCategory::StateMachine
+                }
+                postgres_extended_query::TestCategory::ErrorRecovery => {
+                    TestCategory::ErrorHandling
+                }
+                postgres_extended_query::TestCategory::RowDescriptionMetadata => {
+                    TestCategory::MessageEncoding
+                }
+                postgres_extended_query::TestCategory::ProtocolDistinction => {
+                    TestCategory::ProtocolOrdering
+                }
+                postgres_extended_query::TestCategory::TransactionStatus => {
+                    TestCategory::ConnectionHandling
+                }
+            },
+            requirement_level: match r.requirement_level {
+                postgres_extended_query::RequirementLevel::Must => RequirementLevel::Must,
+                postgres_extended_query::RequirementLevel::Should => RequirementLevel::Should,
+                postgres_extended_query::RequirementLevel::May => RequirementLevel::May,
+            },
+            verdict: match r.verdict {
+                postgres_extended_query::TestVerdict::Pass => TestVerdict::Pass,
+                postgres_extended_query::TestVerdict::Fail => TestVerdict::Fail,
+                postgres_extended_query::TestVerdict::Skipped => TestVerdict::Skipped,
+                postgres_extended_query::TestVerdict::ExpectedFailure => {
+                    TestVerdict::ExpectedFailure
+                }
+            },
+            error_message: r.error_message,
+            execution_time_ms: r.execution_time_ms,
+        })
+        .collect();
+    results.extend(pg_extended_results);
+
+    // PostgreSQL COPY protocol conformance
+    let pg_copy_harness = PostgresCopyConformanceHarness::new();
+    let pg_copy_results: Vec<ConformanceTestResult> = pg_copy_harness
+        .run_all_tests()
+        .into_iter()
+        .map(|r| ConformanceTestResult {
+            test_id: r.test_id,
+            description: r.description,
+            category: match r.category {
+                postgres_copy::TestCategory::FormatSpecification => TestCategory::MessageEncoding,
+                postgres_copy::TestCategory::MessageBoundaries => TestCategory::Framing,
+                postgres_copy::TestCategory::CopyTermination => TestCategory::ProtocolOrdering,
+                postgres_copy::TestCategory::ErrorHandling => TestCategory::ErrorHandling,
+                postgres_copy::TestCategory::CopyOutSequence => TestCategory::ProtocolOrdering,
+                postgres_copy::TestCategory::FormatCompliance => TestCategory::MessageEncoding,
+                postgres_copy::TestCategory::ProtocolOrdering => TestCategory::ProtocolOrdering,
+            },
+            requirement_level: match r.requirement_level {
+                postgres_copy::RequirementLevel::Must => RequirementLevel::Must,
+                postgres_copy::RequirementLevel::Should => RequirementLevel::Should,
+                postgres_copy::RequirementLevel::May => RequirementLevel::May,
+            },
+            verdict: match r.verdict {
+                postgres_copy::TestVerdict::Pass => TestVerdict::Pass,
+                postgres_copy::TestVerdict::Fail => TestVerdict::Fail,
+                postgres_copy::TestVerdict::Skipped => TestVerdict::Skipped,
+                postgres_copy::TestVerdict::ExpectedFailure => TestVerdict::ExpectedFailure,
+            },
+            error_message: r.error_message,
+            execution_time_ms: r.execution_time_ms,
+        })
+        .collect();
+    results.extend(pg_copy_results);
+
     // TODO: Add other conformance suites when implemented:
     /*
     // HTTP/2 RFC 7540 conformance
@@ -1203,6 +1288,16 @@ pub fn generate_compliance_report() -> serde_json::Value {
                     "status": "implemented",
                     "coverage": "systematic",
                     "reference": "MySQL Client/Server Protocol authentication mechanisms"
+                },
+                "postgres_extended_query": {
+                    "status": "implemented",
+                    "coverage": "systematic",
+                    "reference": "PostgreSQL Frontend/Backend Protocol extended-query flow and ReadyForQuery resynchronization"
+                },
+                "postgres_copy": {
+                    "status": "implemented",
+                    "coverage": "systematic",
+                    "reference": "PostgreSQL Frontend/Backend Protocol COPY IN and COPY OUT sequencing"
                 }
             }
         }
@@ -1241,6 +1336,116 @@ mod tests {
         assert!(
             report["conformance_report"]["must_clause_coverage"].is_object(),
             "Report should have MUST coverage"
+        );
+    }
+
+    #[test]
+    #[allow(dead_code)]
+    fn test_postgres_extended_query_conformance_integration() {
+        let harness = PostgresExtendedQueryConformanceHarness::new();
+        let results = harness.run_all_tests();
+
+        assert!(
+            !results.is_empty(),
+            "PostgreSQL extended-query conformance should have tests"
+        );
+
+        let has_category = |category| results.iter().any(|r| r.category == category);
+        assert!(
+            has_category(postgres_extended_query::TestCategory::PipelineSequencing),
+            "Should test Parse/Bind/Describe/Execute/Sync sequencing"
+        );
+        assert!(
+            has_category(postgres_extended_query::TestCategory::ErrorRecovery),
+            "Should test ErrorResponse recovery to ReadyForQuery"
+        );
+        assert!(
+            has_category(postgres_extended_query::TestCategory::RowDescriptionMetadata),
+            "Should test RowDescription metadata"
+        );
+
+        let ids: std::collections::HashSet<_> =
+            results.iter().map(|r| r.test_id.as_str()).collect();
+        assert!(
+            ids.contains("pg_extended_parse_bind_describe_execute_sync_pipeline"),
+            "Missing extended-query pipeline test"
+        );
+        assert!(
+            ids.contains("pg_extended_error_response_drains_to_ready"),
+            "Missing extended-query ReadyForQuery recovery test"
+        );
+
+        let failures: Vec<_> = results
+            .iter()
+            .filter(|r| r.verdict == postgres_extended_query::TestVerdict::Fail)
+            .collect();
+        if !failures.is_empty() {
+            panic!(
+                "PostgreSQL extended-query conformance tests failed: {:#?}",
+                failures
+            );
+        }
+    }
+
+    #[test]
+    #[allow(dead_code)]
+    fn test_postgres_copy_conformance_integration() {
+        let harness = PostgresCopyConformanceHarness::new();
+        let results = harness.run_all_tests();
+
+        assert!(
+            !results.is_empty(),
+            "PostgreSQL COPY conformance should have tests"
+        );
+
+        let has_category = |category| results.iter().any(|r| r.category == category);
+        assert!(
+            has_category(postgres_copy::TestCategory::FormatSpecification),
+            "Should test CopyInResponse format specification"
+        );
+        assert!(
+            has_category(postgres_copy::TestCategory::CopyOutSequence),
+            "Should test COPY OUT sequencing"
+        );
+        assert!(
+            has_category(postgres_copy::TestCategory::ErrorHandling),
+            "Should test CopyFail rollback handling"
+        );
+
+        let ids: std::collections::HashSet<_> =
+            results.iter().map(|r| r.test_id.as_str()).collect();
+        assert!(
+            ids.contains("mr1_copy_in_response_format_specifier_honored"),
+            "Missing CopyInResponse format conformance test"
+        );
+        assert!(
+            ids.contains("mr5_copy_out_sequence_conformance"),
+            "Missing COPY OUT sequencing conformance test"
+        );
+
+        let failures: Vec<_> = results
+            .iter()
+            .filter(|r| r.verdict == postgres_copy::TestVerdict::Fail)
+            .collect();
+        if !failures.is_empty() {
+            panic!("PostgreSQL COPY conformance tests failed: {:#?}", failures);
+        }
+    }
+
+    #[test]
+    #[allow(dead_code)]
+    fn test_postgres_conformance_registry_integration() {
+        let results = run_all_conformance_tests();
+        let ids: std::collections::HashSet<_> =
+            results.iter().map(|r| r.test_id.as_str()).collect();
+
+        assert!(
+            ids.contains("pg_extended_parse_bind_describe_execute_sync_pipeline"),
+            "Registry should include PostgreSQL extended-query tests"
+        );
+        assert!(
+            ids.contains("mr5_copy_out_sequence_conformance"),
+            "Registry should include PostgreSQL COPY tests"
         );
     }
 
