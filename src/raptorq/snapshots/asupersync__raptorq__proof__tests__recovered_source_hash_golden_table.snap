@@ -1,0 +1,53 @@
+---
+source: src/raptorq/proof.rs
+expression: "serde_json::Value::Object(table)"
+---
+{
+  "empty": {
+    "hash": 1887552871734532270,
+    "shape": []
+  },
+  "empty_symbol_then_full_symbol": {
+    "hash": 1498760399424659466,
+    "shape": [
+      0,
+      16
+    ]
+  },
+  "irregular_symbol_lengths": {
+    "hash": 12595403193779331083,
+    "shape": [
+      2,
+      4,
+      8
+    ]
+  },
+  "k10_symbol_size_64_deterministic_fill": {
+    "hash": 5662435988654333381,
+    "shape": [
+      64,
+      64,
+      64,
+      64,
+      64,
+      64,
+      64,
+      64,
+      64,
+      64
+    ]
+  },
+  "single_zero_symbol_size_64": {
+    "hash": 6839432910377734197,
+    "shape": [
+      64
+    ]
+  },
+  "two_symbols_distinct_pattern": {
+    "hash": 7437480698990901026,
+    "shape": [
+      32,
+      32
+    ]
+  }
+}

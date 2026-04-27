@@ -1,0 +1,55 @@
+---
+source: src/raptorq/proof.rs
+expression: "serde_json::Value::Object(catalog)"
+---
+{
+  "column_index_out_of_range": {
+    "column": 99,
+    "esi": 33,
+    "kind": "ColumnIndexOutOfRange",
+    "max_valid": 15
+  },
+  "corrupt_decoded_output": {
+    "actual": 55,
+    "byte_index": 17,
+    "esi": 9,
+    "expected": 171,
+    "kind": "CorruptDecodedOutput"
+  },
+  "insufficient_symbols": {
+    "kind": "InsufficientSymbols",
+    "received": 7,
+    "required": 15
+  },
+  "invalid_source_symbol_equation": {
+    "esi": 5,
+    "expected_column": 5,
+    "kind": "InvalidSourceSymbolEquation"
+  },
+  "singular_matrix": {
+    "attempted_cols": [
+      3,
+      8,
+      12,
+      14
+    ],
+    "kind": "SingularMatrix",
+    "row": 11
+  },
+  "source_esi_out_of_range": {
+    "esi": 42,
+    "kind": "SourceEsiOutOfRange",
+    "max_valid": 10
+  },
+  "symbol_equation_arity_mismatch": {
+    "coefficients": 3,
+    "columns": 4,
+    "esi": 21,
+    "kind": "SymbolEquationArityMismatch"
+  },
+  "symbol_size_mismatch": {
+    "actual": 48,
+    "expected": 64,
+    "kind": "SymbolSizeMismatch"
+  }
+}

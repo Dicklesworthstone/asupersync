@@ -1291,6 +1291,185 @@ mod tests {
         assert_eq!(failure1.content_hash(), failure2.content_hash());
     }
 
+    /// Pin the JSON shape of every `FailureReason` variant individually so that
+    /// adding/renaming/reshaping a variant trips the golden. The constructed
+    /// values use distinct, non-default field values per variant to avoid
+    /// accidental equality if two variants are confused during refactoring.
+    #[test]
+    fn failure_reason_variants_scrubbed() {
+        let variants: Vec<(&'static str, FailureReason)> = vec![
+            (
+                "insufficient_symbols",
+                FailureReason::InsufficientSymbols {
+                    received: 7,
+                    required: 15,
+                },
+            ),
+            (
+                "singular_matrix",
+                FailureReason::SingularMatrix {
+                    row: 11,
+                    attempted_cols: vec![3, 8, 12, 14],
+                },
+            ),
+            (
+                "symbol_size_mismatch",
+                FailureReason::SymbolSizeMismatch {
+                    expected: 64,
+                    actual: 48,
+                },
+            ),
+            (
+                "symbol_equation_arity_mismatch",
+                FailureReason::SymbolEquationArityMismatch {
+                    esi: 21,
+                    columns: 4,
+                    coefficients: 3,
+                },
+            ),
+            (
+                "column_index_out_of_range",
+                FailureReason::ColumnIndexOutOfRange {
+                    esi: 33,
+                    column: 99,
+                    max_valid: 15,
+                },
+            ),
+            (
+                "source_esi_out_of_range",
+                FailureReason::SourceEsiOutOfRange {
+                    esi: 42,
+                    max_valid: 10,
+                },
+            ),
+            (
+                "invalid_source_symbol_equation",
+                FailureReason::InvalidSourceSymbolEquation {
+                    esi: 5,
+                    expected_column: 5,
+                },
+            ),
+            (
+                "corrupt_decoded_output",
+                FailureReason::CorruptDecodedOutput {
+                    esi: 9,
+                    byte_index: 17,
+                    expected: 0xAB,
+                    actual: 0x37,
+                },
+            ),
+        ];
+
+        let mut catalog = serde_json::Map::with_capacity(variants.len());
+        for (key, reason) in &variants {
+            catalog.insert(
+                (*key).to_string(),
+                scrub_failure_reason_for_snapshot_test(reason),
+            );
+        }
+
+        insta::assert_json_snapshot!(
+            "failure_reason_variants_scrubbed",
+            serde_json::Value::Object(catalog)
+        );
+    }
+
+    /// Pin the JSON differential between `ProofOutcome::Success` and
+    /// `ProofOutcome::Failure` so a refactor that drops `symbols_recovered`
+    /// or `source_payload_hash` from the success arm — or that promotes a
+    /// failure into a success without re-running the hash — trips the golden.
+    #[test]
+    fn proof_outcome_success_vs_failure_scrubbed() {
+        let success_proof = make_success_proof_for_snapshot_test();
+        let failure_proof = make_degraded_singular_proof_for_snapshot_test();
+
+        let success_outcome = match &success_proof.outcome {
+            ProofOutcome::Success {
+                symbols_recovered,
+                source_payload_hash,
+            } => json!({
+                "kind": "Success",
+                "symbols_recovered": symbols_recovered,
+                "source_payload_hash": source_payload_hash,
+            }),
+            ProofOutcome::Failure { .. } => panic!("success fixture must be Success"),
+        };
+        let failure_outcome = match &failure_proof.outcome {
+            ProofOutcome::Failure { reason } => json!({
+                "kind": "Failure",
+                "reason": scrub_failure_reason_for_snapshot_test(reason),
+            }),
+            ProofOutcome::Success { .. } => panic!("failure fixture must be Failure"),
+        };
+
+        insta::assert_json_snapshot!(
+            "proof_outcome_success_vs_failure_scrubbed",
+            json!({
+                "success": success_outcome,
+                "failure": failure_outcome,
+            })
+        );
+    }
+
+    /// Pin the determinism of `recovered_source_hash` across a fixed table of
+    /// shapes so that any change to the hash function (algorithm choice, salt,
+    /// length-prefix encoding, byte order) trips the golden. Catches s2jxu0
+    /// hash-binding regressions that would otherwise let a divergent decoder
+    /// silently bind a stale hash to a successful decode certificate.
+    #[test]
+    fn recovered_source_hash_golden_table() {
+        let cases: Vec<(&'static str, Vec<Vec<u8>>)> = vec![
+            ("empty", Vec::new()),
+            ("single_zero_symbol_size_64", vec![vec![0u8; 64]]),
+            (
+                "two_symbols_distinct_pattern",
+                vec![
+                    (0..32).map(|i| i as u8).collect(),
+                    (0..32).map(|i| (255 - i) as u8).collect(),
+                ],
+            ),
+            (
+                "k10_symbol_size_64_deterministic_fill",
+                (0..10)
+                    .map(|i| {
+                        (0..64)
+                            .map(|j| ((i * 37 + j * 19 + 0x21) % 256) as u8)
+                            .collect()
+                    })
+                    .collect(),
+            ),
+            (
+                "irregular_symbol_lengths",
+                vec![
+                    vec![0xDE, 0xAD],
+                    vec![0xBE, 0xEF, 0x00, 0x01],
+                    vec![0xFE; 8],
+                ],
+            ),
+            (
+                "empty_symbol_then_full_symbol",
+                vec![Vec::new(), vec![0xFFu8; 16]],
+            ),
+        ];
+
+        let mut table = serde_json::Map::with_capacity(cases.len());
+        for (label, source) in &cases {
+            let hash = recovered_source_hash(source);
+            table.insert(
+                (*label).to_string(),
+                json!({
+                    "shape": source.iter().map(Vec::len).collect::<Vec<_>>(),
+                    "hash": hash,
+                }),
+            );
+        }
+
+        insta::assert_json_snapshot!(
+            "recovered_source_hash_golden_table",
+            serde_json::Value::Object(table)
+        );
+    }
+
     #[test]
     fn received_summary_truncation() {
         let symbols = (0..2000).map(|i| (i, i < 1000));

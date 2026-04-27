@@ -1,0 +1,23 @@
+---
+source: src/raptorq/proof.rs
+expression: "json!({ \"success\": success_outcome, \"failure\": failure_outcome, })"
+---
+{
+  "failure": {
+    "kind": "Failure",
+    "reason": {
+      "attempted_cols": [
+        8,
+        9,
+        12
+      ],
+      "kind": "SingularMatrix",
+      "row": 6
+    }
+  },
+  "success": {
+    "kind": "Success",
+    "source_payload_hash": 12876649971060094004,
+    "symbols_recovered": 10
+  }
+}
