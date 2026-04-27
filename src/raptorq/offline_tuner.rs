@@ -57,7 +57,8 @@ use crate::time::wall_now;
 use crate::types::Time;
 use crate::util::DetHashSet;
 use std::collections::BTreeMap;
-use std::time::Instant;
+// br-asupersync-hq1o4l: std::time::Instant import removed; all time
+// readings in this module now go through crate::time::wall_now (Cx-aware).
 
 /// Represents a candidate kernel configuration for offline tuning.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -853,7 +854,14 @@ impl OfflineTuner {
         let mut latencies = Vec::with_capacity(iterations);
 
         for _ in 0..iterations {
-            let start = Instant::now();
+            // br-asupersync-hq1o4l: route latency probes through wall_now()
+            // (Cx-aware time source) instead of std::time::Instant::now() so
+            // that under replay/lab the per-iteration timings are
+            // deterministic. Other timestamps in this module already use
+            // wall_now (per br-asupersync-3wxmb3); this loop was missed.
+            // wall_now() returns Time (nanoseconds since module init);
+            // duration_since() yields a saturating-subtraction u64 ns.
+            let start = wall_now();
 
             // Simulate kernel execution - would call actual optimized kernels
             match workload.operation {
@@ -868,7 +876,8 @@ impl OfflineTuner {
                 }
             }
 
-            latencies.push(start.elapsed().as_nanos() as f64);
+            #[allow(clippy::cast_precision_loss)]
+            latencies.push(wall_now().duration_since(start) as f64);
         }
 
         // Calculate statistics
