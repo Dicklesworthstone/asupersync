@@ -7,6 +7,7 @@
 //! - Non-SETTINGS first frame must close connection with H3_MISSING_SETTINGS
 
 use super::*;
+use asupersync::net::quic_core::{decode_varint, encode_varint};
 
 /// HTTP/3 frame types from RFC 9114.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,10 +67,7 @@ fn test_control_stream_settings_first() -> H3ConformanceResult {
                 // Correct - SETTINGS first
             }
             other => {
-                return Err(format!(
-                    "First frame should be SETTINGS, got {:?}",
-                    other
-                ));
+                return Err(format!("First frame should be SETTINGS, got {:?}", other));
             }
         }
 
@@ -88,7 +86,11 @@ fn test_control_stream_settings_first() -> H3ConformanceResult {
         description: "SETTINGS frame must be first on control stream".to_string(),
         category: TestCategory::ControlStream,
         requirement_level: RequirementLevel::Must,
-        verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+        verdict: if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        },
         elapsed_ms,
         notes: result.err(),
     }
@@ -137,7 +139,11 @@ fn test_control_stream_non_settings_rejection() -> H3ConformanceResult {
         description: "Non-SETTINGS first frame must cause H3_MISSING_SETTINGS".to_string(),
         category: TestCategory::ControlStream,
         requirement_level: RequirementLevel::Must,
-        verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+        verdict: if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        },
         elapsed_ms,
         notes: result.err(),
     }
@@ -152,11 +158,11 @@ fn test_settings_frame_validation() -> H3ConformanceResult {
             (create_settings_frame(&[]), "empty SETTINGS"),
             (
                 create_settings_frame(&[(0x01, 100), (0x06, 1024)]),
-                "SETTINGS with QPACK_MAX_TABLE_CAPACITY and MAX_HEADER_LIST_SIZE"
+                "SETTINGS with QPACK_MAX_TABLE_CAPACITY and MAX_HEADER_LIST_SIZE",
             ),
             (
                 create_settings_frame(&[(0x33, 1)]),
-                "SETTINGS with H3_DATAGRAM"
+                "SETTINGS with H3_DATAGRAM",
             ),
         ];
 
@@ -174,8 +180,14 @@ fn test_settings_frame_validation() -> H3ConformanceResult {
         // Test invalid SETTINGS frame structures
         let invalid_settings = vec![
             (b"\x04\x02\xFF".to_vec(), "truncated SETTINGS frame"),
-            (b"\x04\x03\x01\x02".to_vec(), "odd number of bytes in SETTINGS"),
-            (b"\x04\x00".to_vec(), "SETTINGS with zero length but content"),
+            (
+                b"\x04\x03\x01\x02".to_vec(),
+                "odd number of bytes in SETTINGS",
+            ),
+            (
+                b"\x04\x01".to_vec(),
+                "SETTINGS declares a 1-byte payload but provides none",
+            ),
         ];
 
         for (invalid_data, description) in invalid_settings {
@@ -197,7 +209,11 @@ fn test_settings_frame_validation() -> H3ConformanceResult {
         description: "SETTINGS frame structure validation".to_string(),
         category: TestCategory::Settings,
         requirement_level: RequirementLevel::Must,
-        verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+        verdict: if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        },
         elapsed_ms,
         notes: result.err(),
     }
@@ -211,19 +227,19 @@ fn test_control_stream_frame_ordering() -> H3ConformanceResult {
         let valid_frame_sequences = vec![
             (
                 vec![H3FrameType::Settings, H3FrameType::Goaway],
-                "SETTINGS + GOAWAY"
+                "SETTINGS + GOAWAY",
             ),
             (
                 vec![H3FrameType::Settings, H3FrameType::MaxPushId],
-                "SETTINGS + MAX_PUSH_ID"
+                "SETTINGS + MAX_PUSH_ID",
             ),
             (
                 vec![
                     H3FrameType::Settings,
                     H3FrameType::MaxPushId,
-                    H3FrameType::Goaway
+                    H3FrameType::Goaway,
                 ],
-                "SETTINGS + MAX_PUSH_ID + GOAWAY"
+                "SETTINGS + MAX_PUSH_ID + GOAWAY",
             ),
         ];
 
@@ -244,7 +260,10 @@ fn test_control_stream_frame_ordering() -> H3ConformanceResult {
         let invalid_frames_after_settings = vec![
             (H3FrameType::Data, "DATA frame on control stream"),
             (H3FrameType::Headers, "HEADERS frame on control stream"),
-            (H3FrameType::PushPromise, "PUSH_PROMISE frame on control stream"),
+            (
+                H3FrameType::PushPromise,
+                "PUSH_PROMISE frame on control stream",
+            ),
         ];
 
         for (invalid_frame, description) in invalid_frames_after_settings {
@@ -278,7 +297,11 @@ fn test_control_stream_frame_ordering() -> H3ConformanceResult {
         description: "Control stream frame ordering after SETTINGS".to_string(),
         category: TestCategory::ControlStream,
         requirement_level: RequirementLevel::Must,
-        verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+        verdict: if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        },
         elapsed_ms,
         notes: result.err(),
     }
@@ -291,7 +314,8 @@ fn test_missing_settings_error_handling() -> H3ConformanceResult {
         // Test immediate connection closure on H3_MISSING_SETTINGS
         reset_connection_state();
 
-        let control_stream_no_settings = create_control_stream_with_frame_first(H3FrameType::Goaway);
+        let control_stream_no_settings =
+            create_control_stream_with_frame_first(H3FrameType::Goaway);
 
         if validate_control_stream_creation(&control_stream_no_settings) {
             return Err("Control stream without SETTINGS was accepted".to_string());
@@ -300,10 +324,7 @@ fn test_missing_settings_error_handling() -> H3ConformanceResult {
         // Verify error handling
         let error = get_last_h3_connection_error();
         if !matches!(error, Some(H3ConnectionError::MissingSettings)) {
-            return Err(format!(
-                "Expected H3_MISSING_SETTINGS, got {:?}",
-                error
-            ));
+            return Err(format!("Expected H3_MISSING_SETTINGS, got {:?}", error));
         }
 
         // Verify connection is properly closed
@@ -326,7 +347,11 @@ fn test_missing_settings_error_handling() -> H3ConformanceResult {
         description: "H3_MISSING_SETTINGS error handling validation".to_string(),
         category: TestCategory::ControlStream,
         requirement_level: RequirementLevel::Must,
-        verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+        verdict: if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        },
         elapsed_ms,
         notes: result.err(),
     }
@@ -445,11 +470,9 @@ fn create_settings_frame(parameters: &[(u64, u64)]) -> Vec<u8> {
 fn create_h3_frame(frame_type: H3FrameType, payload: &[u8]) -> Vec<u8> {
     let mut frame_data = Vec::new();
 
-    // Frame type
-    frame_data.push(frame_type as u8);
-
-    // Frame length
-    frame_data.push(payload.len() as u8);
+    // RFC 9114 §7.1: frame type and frame length are QUIC varints.
+    encode_varint(frame_type as u64, &mut frame_data).expect("HTTP/3 frame type varint");
+    encode_varint(payload.len() as u64, &mut frame_data).expect("HTTP/3 frame length varint");
 
     // Payload
     frame_data.extend_from_slice(payload);
@@ -462,11 +485,12 @@ fn parse_h3_frames(data: &[u8]) -> Vec<H3Frame> {
     let mut offset = 0;
 
     while offset < data.len() {
-        if offset + 1 >= data.len() {
+        let Ok((frame_type_id, type_len)) = decode_varint(&data[offset..]) else {
             break;
-        }
+        };
+        offset += type_len;
 
-        let frame_type = match data[offset] {
+        let frame_type = match frame_type_id {
             0x00 => H3FrameType::Data,
             0x01 => H3FrameType::Headers,
             0x04 => H3FrameType::Settings,
@@ -476,12 +500,16 @@ fn parse_h3_frames(data: &[u8]) -> Vec<H3Frame> {
             _ => H3FrameType::Reserved,
         };
 
-        let length = data[offset + 1] as u64;
-        let payload = if length > 0 && offset + 2 + length as usize <= data.len() {
-            data[offset + 2..offset + 2 + length as usize].to_vec()
-        } else {
-            Vec::new()
+        let Ok((length, len_len)) = decode_varint(&data[offset..]) else {
+            break;
         };
+        offset += len_len;
+
+        let payload_end = offset.saturating_add(length as usize);
+        if payload_end > data.len() {
+            break;
+        }
+        let payload = data[offset..payload_end].to_vec();
 
         frames.push(H3Frame {
             frame_type,
@@ -489,7 +517,7 @@ fn parse_h3_frames(data: &[u8]) -> Vec<H3Frame> {
             payload,
         });
 
-        offset += 2 + length as usize;
+        offset = payload_end;
     }
 
     frames
@@ -511,12 +539,14 @@ fn validate_control_stream_creation(stream_data: &[u8]) -> bool {
 
 fn validate_h3_frame(frame_data: &[u8]) -> bool {
     // Basic frame validation
-    if frame_data.len() < 2 {
+    let Ok((_frame_type, type_len)) = decode_varint(frame_data) else {
         return false;
-    }
+    };
+    let Ok((length, len_len)) = decode_varint(&frame_data[type_len..]) else {
+        return false;
+    };
 
-    let length = frame_data[1] as usize;
-    frame_data.len() >= 2 + length
+    frame_data.len() >= type_len + len_len + length as usize
 }
 
 fn get_last_h3_connection_error() -> Option<H3ConnectionError> {
@@ -536,4 +566,35 @@ fn process_frame_after_error(_frame_data: &[u8]) -> bool {
 
 fn reset_connection_state() {
     // Mock connection state reset
+}
+
+#[test]
+fn create_h3_frame_encodes_multibyte_varint_lengths() {
+    let payload = vec![0xAB; 64];
+    let frame = create_h3_frame(H3FrameType::Data, &payload);
+
+    let (frame_type, type_len) = decode_varint(&frame).expect("frame type varint");
+    let (length, len_len) = decode_varint(&frame[type_len..]).expect("frame length varint");
+
+    assert_eq!(frame_type, H3FrameType::Data as u64);
+    assert_eq!(length, payload.len() as u64);
+    assert_eq!(len_len, 2, "length 64 must use a 2-byte QUIC varint");
+    assert_eq!(&frame[type_len + len_len..], payload.as_slice());
+}
+
+#[test]
+fn parse_and_validate_h3_frame_accept_multibyte_varint_lengths() {
+    let payload = vec![0x11; 70];
+    let frame = create_h3_frame(H3FrameType::Headers, &payload);
+
+    assert!(
+        validate_h3_frame(&frame),
+        "helper validation must accept frames with multi-byte length varints"
+    );
+
+    let parsed = parse_h3_frames(&frame);
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0].frame_type, H3FrameType::Headers);
+    assert_eq!(parsed[0].length, payload.len() as u64);
+    assert_eq!(parsed[0].payload, payload);
 }
