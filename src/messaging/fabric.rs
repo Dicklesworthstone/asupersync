@@ -1145,14 +1145,48 @@ fn evaluate_fabric_decision(
     posterior: &Posterior,
     ctx: &EvalContext,
 ) -> FabricDecisionRecord {
-    let outcome = evaluate(contract, posterior, ctx);
+    let audit = match evaluate(contract, posterior, ctx) {
+        Ok(outcome) => outcome.audit_entry,
+        Err(error) => fabric_decision_validation_error_audit(contract, posterior, ctx, &error),
+    };
     FabricDecisionRecord {
         kind: input.kind,
         cell_id: input.cell_id,
         subject: input.subject.to_owned(),
         delivery_class: input.delivery_class,
         annotations: input.annotations,
-        audit: outcome.audit_entry,
+        audit,
+    }
+}
+
+fn fabric_decision_validation_error_audit(
+    contract: &impl DecisionContract,
+    posterior: &Posterior,
+    ctx: &EvalContext,
+    error: &franken_decision::ValidationError,
+) -> DecisionAuditEntry {
+    let expected_loss_by_action = contract.loss_matrix().expected_losses(posterior);
+    let action_chosen = contract
+        .action_set()
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "decision_validation_error".to_owned());
+    let expected_loss = expected_loss_by_action
+        .get(&action_chosen)
+        .copied()
+        .unwrap_or(0.0);
+
+    DecisionAuditEntry {
+        decision_id: ctx.decision_id,
+        trace_id: ctx.trace_id,
+        contract_name: format!("{}:validation_error:{error}", contract.name()),
+        action_chosen,
+        expected_loss,
+        calibration_score: ctx.calibration_score,
+        fallback_active: true,
+        posterior_snapshot: posterior.probs().to_vec(),
+        expected_loss_by_action,
+        ts_unix_ms: ctx.ts_unix_ms,
     }
 }
 
@@ -6756,7 +6790,7 @@ fn discovery_pattern_covers_pattern(granted: &SubjectPattern, requested: &Subjec
 
 fn discovery_pattern_covers_segments(granted: &[SubjectToken], requested: &[SubjectToken]) -> bool {
     match (granted.split_first(), requested.split_first()) {
-        (Some((SubjectToken::Tail, _)), _) | (None, None) => true,
+        (Some((SubjectToken::Tail, _)), Some(_)) | (None, None) => true,
         (None, Some(_))
         | (Some(_), None)
         | (
@@ -8584,6 +8618,89 @@ mod tests {
             DiscoveryError::CapabilityEscalation {
                 node: NodeId::new("peer-b"),
                 capability: escalated,
+            }
+        );
+    }
+
+    #[test]
+    fn discovery_tail_wildcard_capability_does_not_cover_bare_prefix() {
+        let granted = subscribe_capability("tenant.alpha.>");
+        let bare_prefix = subscribe_capability("tenant.alpha");
+        let bare_interest = SubjectPattern::parse("tenant.alpha").expect("bare interest");
+
+        assert!(
+            !fabric_capability_covers(&granted, &bare_prefix),
+            "tail wildcard grants require at least one requested suffix token"
+        );
+        assert!(
+            !capabilities_cover_interest_subject(std::slice::from_ref(&granted), &bare_interest),
+            "peer interest summaries must not widen tail wildcard grants to the bare prefix"
+        );
+        assert!(
+            !capabilities_allow_interest_visibility(&[granted], &bare_interest),
+            "viewer visibility must use the same fail-closed subject coverage"
+        );
+    }
+
+    #[test]
+    fn discovery_session_rejects_bare_prefix_capability_under_tail_admission() {
+        let admitted = subscribe_capability("tenant.alpha.>");
+        let escalated = subscribe_capability("tenant.alpha");
+        let hello = discovery_hello(
+            "peer-b2",
+            DiscoveryBootstrap::SelfDiscover,
+            vec![escalated.clone()],
+            vec![admitted],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+
+        let err = DiscoverySession::establish(
+            NodeId::new("local-a"),
+            &hello,
+            &discovery_policy(vec![subscribe_capability("tenant.alpha.>")]),
+        )
+        .expect_err("tail wildcard admission must not authorize the bare prefix");
+
+        assert_eq!(
+            err,
+            DiscoveryError::CapabilityEscalation {
+                node: NodeId::new("peer-b2"),
+                capability: escalated,
+            }
+        );
+    }
+
+    #[test]
+    fn discovery_rejects_bare_prefix_interest_under_tail_capability() {
+        let capability = subscribe_capability("tenant.alpha.>");
+        let bare_interest = SubjectPattern::parse("tenant.alpha").expect("bare interest");
+        let hello = discovery_hello(
+            "peer-c1",
+            DiscoveryBootstrap::SelfDiscover,
+            vec![capability.clone()],
+            vec![capability],
+            vec![DiscoveryInterestSummaryEntry {
+                subject: bare_interest.clone(),
+                subscribers: 4,
+            }],
+            Vec::new(),
+            Vec::new(),
+        );
+
+        let err = DiscoverySession::establish(
+            NodeId::new("local-a"),
+            &hello,
+            &discovery_policy(vec![subscribe_capability("tenant.alpha.>")]),
+        )
+        .expect_err("tail wildcard capability must not authorize bare prefix interest");
+
+        assert_eq!(
+            err,
+            DiscoveryError::InterestSummaryOutsideCapabilitySet {
+                node: NodeId::new("peer-c1"),
+                subject: bare_interest,
             }
         );
     }

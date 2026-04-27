@@ -1582,6 +1582,40 @@ pub struct ConsumerDecisionRecord {
     pub audit: DecisionAuditEntry,
 }
 
+fn evaluate_consumer_decision(
+    contract: &impl DecisionContract,
+    posterior: &Posterior,
+    ctx: &EvalContext,
+    fallback_action: &str,
+) -> (String, DecisionAuditEntry) {
+    match evaluate(contract, posterior, ctx) {
+        Ok(outcome) => (outcome.action_name, outcome.audit_entry),
+        Err(error) => {
+            let action_name = fallback_action.to_owned();
+            let expected_loss_by_action = contract.loss_matrix().expected_losses(posterior);
+            let expected_loss = expected_loss_by_action
+                .get(fallback_action)
+                .copied()
+                .unwrap_or(0.0);
+            (
+                action_name.clone(),
+                DecisionAuditEntry {
+                    decision_id: ctx.decision_id,
+                    trace_id: ctx.trace_id,
+                    contract_name: format!("{}:validation_error:{error}", contract.name()),
+                    action_chosen: action_name,
+                    expected_loss,
+                    calibration_score: ctx.calibration_score,
+                    fallback_active: true,
+                    posterior_snapshot: posterior.probs().to_vec(),
+                    expected_loss_by_action,
+                    ts_unix_ms: ctx.ts_unix_ms,
+                },
+            )
+        }
+    }
+}
+
 /// High-level policy-driven consumer engine layered on top of cursor leases.
 #[derive(Debug)]
 pub struct FabricConsumer {
@@ -2083,18 +2117,22 @@ impl FabricConsumer {
                 snapshot.e_process(),
                 snapshot.ci_width(),
             );
-            let outcome = evaluate(&contract, &posterior, &ctx);
+            let (action_name, audit) = evaluate_consumer_decision(
+                &contract,
+                &posterior,
+                &ctx,
+                ConsumerOverflowDecisionAction::RejectNew.label(),
+            );
 
-            replaced = outcome.action_name
-                == ConsumerOverflowDecisionAction::ReplaceLowestPriority.label();
+            replaced = action_name == ConsumerOverflowDecisionAction::ReplaceLowestPriority.label();
 
             self.push_decision(ConsumerDecisionRecord {
                 kind: ConsumerDecisionKind::Overflow,
-                action_name: outcome.action_name,
+                action_name,
                 demand_class: Some(request.demand_class),
                 obligation_id: None,
                 pinned_client: request.pinned_client.clone(),
-                audit: outcome.audit_entry,
+                audit,
             });
         }
 
@@ -2342,14 +2380,15 @@ impl FabricConsumer {
             snapshot.e_process(),
             snapshot.ci_width(),
         );
-        let outcome = evaluate(&contract, &posterior, &ctx);
+        let (action_name, audit) =
+            evaluate_consumer_decision(&contract, &posterior, &ctx, chosen_action.label());
         Some(ConsumerDecisionRecord {
             kind: ConsumerDecisionKind::PullScheduling,
-            action_name: outcome.action_name,
+            action_name,
             demand_class: Some(request.demand_class),
             obligation_id: Some(obligation_id),
             pinned_client: request.pinned_client.clone(),
-            audit: outcome.audit_entry,
+            audit,
         })
     }
 
@@ -2385,16 +2424,17 @@ impl FabricConsumer {
             snapshot.e_process(),
             snapshot.ci_width(),
         );
-        let outcome = evaluate(&contract, &posterior, &ctx);
+        let (action_name, audit) =
+            evaluate_consumer_decision(&contract, &posterior, &ctx, action.label());
         (
             action,
             Some(ConsumerDecisionRecord {
                 kind: ConsumerDecisionKind::Redelivery,
-                action_name: outcome.action_name,
+                action_name,
                 demand_class: None,
                 obligation_id: Some(obligation_id),
                 pinned_client: None,
-                audit: outcome.audit_entry,
+                audit,
             }),
         )
     }

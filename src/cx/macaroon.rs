@@ -118,13 +118,14 @@ pub enum CaveatPredicate {
     Custom(String, String),
 }
 
-/// br-asupersync-5i331u — error returned by [`CaveatPredicate::validate`]
-/// when a string-bearing variant carries a payload too large to encode
-/// in the caveat wire format (which uses a `u16` length prefix). Without
-/// this gate, calling `to_bytes()` on such a caveat would panic at
-/// `u16::try_from(...).expect(...)` — a process-level DoS reachable from
-/// any code path that constructs a `Custom` or `ResourceScope` caveat
-/// from attacker-influenced input.
+/// br-asupersync-5i331u — error returned by [`CaveatPredicate::validate`].
+///
+/// This covers string-bearing variants with payloads too large to encode in
+/// the caveat wire format, which uses a `u16` length prefix. Without this
+/// gate, calling `to_bytes()` on such a caveat would panic at
+/// `u16::try_from(...).expect(...)` — a process-level DoS reachable from any
+/// code path that constructs a `Custom` or `ResourceScope` caveat from
+/// attacker-influenced input.
 ///
 /// Callers that handle externally-supplied caveat content MUST call
 /// `validate()` before passing the predicate to `Macaroon` issuance /

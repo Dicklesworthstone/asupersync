@@ -2552,12 +2552,14 @@ mod tests {
         assert_eq!(incremental.mode(), PropagationMode::Incremental);
         assert_eq!(snapshot.mode(), PropagationMode::AntiEntropy);
 
-        let incremental_counts = match incremental.delta() {
-            InterestSummaryDelta { counts } => counts.len(),
-        };
-        let snapshot_counts = match snapshot.delta() {
-            InterestSummaryDelta { counts } => counts.len(),
-        };
+        let InterestSummaryDelta {
+            counts: incremental_counts,
+        } = incremental.delta();
+        let InterestSummaryDelta {
+            counts: snapshot_counts,
+        } = snapshot.delta();
+        let incremental_counts = incremental_counts.len();
+        let snapshot_counts = snapshot_counts.len();
 
         assert_eq!(incremental_counts, 1);
         assert_eq!(snapshot_counts, 2);

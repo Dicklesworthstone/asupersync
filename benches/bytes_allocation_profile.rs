@@ -4,7 +4,8 @@
 //! focusing on allocation-heavy operations that dominate real-world usage.
 
 use asupersync::bytes::{Bytes, BytesMut};
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use std::hint::black_box;
 
 /// Scenario A: Incremental BytesMut growth (network buffer simulation)
 ///
@@ -24,7 +25,6 @@ fn bench_bytes_mut_incremental_growth(c: &mut Criterion) {
     for (chunk_size, total_size) in test_cases {
         group.throughput(Throughput::Bytes(total_size as u64));
 
-        let test_data = vec![0u8; chunk_size];
         let iterations = total_size / chunk_size;
 
         group.bench_with_input(
@@ -75,7 +75,6 @@ fn bench_bytes_mut_splitting(c: &mut Criterion) {
     ];
 
     for (buffer_size, frame_size) in test_cases {
-        let num_frames = buffer_size / frame_size;
         group.throughput(Throughput::Bytes(buffer_size as u64));
 
         group.bench_with_input(
@@ -131,8 +130,6 @@ fn bench_bytes_creation(c: &mut Criterion) {
 
     for size in test_sizes {
         group.throughput(Throughput::Bytes(size as u64));
-
-        let test_data = vec![0u8; size];
 
         group.bench_with_input(
             BenchmarkId::new("copy_from_slice", size),
@@ -210,7 +207,7 @@ fn bench_mixed_allocation_patterns(c: &mut Criterion) {
             let headers = buf.split_to(header_end);
 
             // Convert to immutable bytes
-            let header_bytes = Bytes::from(headers.freeze());
+            let header_bytes = headers.freeze();
             let body_bytes = buf.freeze();
 
             black_box((header_bytes, body_bytes))

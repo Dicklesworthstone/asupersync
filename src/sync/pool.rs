@@ -2528,9 +2528,7 @@ mod tests {
         let msg = rx.recv().expect("return message");
         match msg {
             PoolReturn::Return {
-                resource: value,
-                hold_duration: _,
-                ..
+                resource: value, ..
             } => {
                 crate::assert_with_log!(value == 42, "return value", 42u8, value);
             }
@@ -2626,9 +2624,7 @@ mod tests {
         let msg = rx.recv().expect("return message");
         match msg {
             PoolReturn::Return {
-                resource: value,
-                hold_duration: _,
-                ..
+                resource: value, ..
             } => {
                 crate::assert_with_log!(value == 7, "return value", 7u8, value);
             }
@@ -3077,9 +3073,7 @@ mod tests {
         let msg = rx.recv().expect("should receive return message");
         match msg {
             PoolReturn::Return {
-                resource: value,
-                hold_duration: _,
-                ..
+                resource: value, ..
             } => {
                 crate::assert_with_log!(value == 99, "returned value", 99u8, value);
             }
@@ -3114,9 +3108,7 @@ mod tests {
         let msg = rx.recv().expect("should receive return message");
         match msg {
             PoolReturn::Return {
-                resource: value,
-                hold_duration: _,
-                ..
+                resource: value, ..
             } => {
                 crate::assert_with_log!(value == 77, "returned value", 77u8, value);
             }
