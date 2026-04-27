@@ -1610,6 +1610,58 @@ pub struct TraceEvent {
     pub data: TraceData,
 }
 
+macro_rules! trace_event_constructors {
+    ($(
+        $(#[$meta:meta])*
+        $name:ident($($arg:ident: $ty:ty),* $(,)?) => $kind:ident, $data:expr;
+    )*) => {
+        $(
+            $(#[$meta])*
+            #[must_use]
+            pub fn $name(seq: u64, time: Time, $($arg: $ty),*) -> Self {
+                Self::new(seq, time, TraceEventKind::$kind, $data)
+            }
+        )*
+    };
+}
+
+macro_rules! worker_lifecycle_constructors {
+    ($(
+        $(#[$meta:meta])*
+        $name:ident => $kind:ident;
+    )*) => {
+        $(
+            $(#[$meta])*
+            #[allow(clippy::too_many_arguments)]
+            #[must_use]
+            pub fn $name(
+                seq: u64,
+                time: Time,
+                worker_id: impl Into<String>,
+                job_id: u64,
+                decision_seq: u64,
+                replay_hash: u64,
+                task: TaskId,
+                region: RegionId,
+                obligation: ObligationId,
+            ) -> Self {
+                Self::worker_lifecycle(
+                    seq,
+                    time,
+                    TraceEventKind::$kind,
+                    worker_id,
+                    job_id,
+                    decision_seq,
+                    replay_hash,
+                    task,
+                    region,
+                    obligation,
+                )
+            }
+        )*
+    };
+}
+
 impl TraceEvent {
     /// Creates a new trace event.
     #[must_use]
@@ -1633,91 +1685,22 @@ impl TraceEvent {
         self
     }
 
-    /// Creates a spawn event.
-    #[must_use]
-    pub fn spawn(seq: u64, time: Time, task: TaskId, region: RegionId) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::Spawn,
-            TraceData::Task { task, region },
-        )
-    }
-
-    /// Creates a schedule event.
-    #[must_use]
-    pub fn schedule(seq: u64, time: Time, task: TaskId, region: RegionId) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::Schedule,
-            TraceData::Task { task, region },
-        )
-    }
-
-    /// Creates a yield event.
-    #[must_use]
-    pub fn yield_task(seq: u64, time: Time, task: TaskId, region: RegionId) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::Yield,
-            TraceData::Task { task, region },
-        )
-    }
-
-    /// Creates a wake event.
-    #[must_use]
-    pub fn wake(seq: u64, time: Time, task: TaskId, region: RegionId) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::Wake,
-            TraceData::Task { task, region },
-        )
-    }
-
-    /// Creates a poll event.
-    #[must_use]
-    pub fn poll(seq: u64, time: Time, task: TaskId, region: RegionId) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::Poll,
-            TraceData::Task { task, region },
-        )
-    }
-
-    /// Creates a complete event.
-    #[must_use]
-    pub fn complete(seq: u64, time: Time, task: TaskId, region: RegionId) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::Complete,
-            TraceData::Task { task, region },
-        )
-    }
-
-    /// Creates a cancel request event.
-    #[must_use]
-    pub fn cancel_request(
-        seq: u64,
-        time: Time,
-        task: TaskId,
-        region: RegionId,
-        reason: CancelReason,
-    ) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::CancelRequest,
-            TraceData::Cancel {
-                task,
-                region,
-                reason,
-            },
-        )
+    trace_event_constructors! {
+        /// Creates a spawn event.
+        spawn(task: TaskId, region: RegionId) => Spawn, TraceData::Task { task, region };
+        /// Creates a schedule event.
+        schedule(task: TaskId, region: RegionId) => Schedule, TraceData::Task { task, region };
+        /// Creates a yield event.
+        yield_task(task: TaskId, region: RegionId) => Yield, TraceData::Task { task, region };
+        /// Creates a wake event.
+        wake(task: TaskId, region: RegionId) => Wake, TraceData::Task { task, region };
+        /// Creates a poll event.
+        poll(task: TaskId, region: RegionId) => Poll, TraceData::Task { task, region };
+        /// Creates a complete event.
+        complete(task: TaskId, region: RegionId) => Complete, TraceData::Task { task, region };
+        /// Creates a cancel request event.
+        cancel_request(task: TaskId, region: RegionId, reason: CancelReason) => CancelRequest,
+            TraceData::Cancel { task, region, reason };
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1749,327 +1732,59 @@ impl TraceEvent {
         )
     }
 
-    /// Creates a worker-offload cancel-requested event.
-    #[allow(clippy::too_many_arguments)]
-    #[must_use]
-    pub fn worker_cancel_requested(
-        seq: u64,
-        time: Time,
-        worker_id: impl Into<String>,
-        job_id: u64,
-        decision_seq: u64,
-        replay_hash: u64,
-        task: TaskId,
-        region: RegionId,
-        obligation: ObligationId,
-    ) -> Self {
-        Self::worker_lifecycle(
-            seq,
-            time,
-            TraceEventKind::WorkerCancelRequested,
-            worker_id,
-            job_id,
-            decision_seq,
-            replay_hash,
-            task,
-            region,
-            obligation,
-        )
+    worker_lifecycle_constructors! {
+        /// Creates a worker-offload cancel-requested event.
+        worker_cancel_requested => WorkerCancelRequested;
+        /// Creates a worker-offload cancel-acknowledged event.
+        worker_cancel_acknowledged => WorkerCancelAcknowledged;
+        /// Creates a worker-offload drain-started event.
+        worker_drain_started => WorkerDrainStarted;
+        /// Creates a worker-offload drain-completed event.
+        worker_drain_completed => WorkerDrainCompleted;
+        /// Creates a worker-offload finalize-completed event.
+        worker_finalize_completed => WorkerFinalizeCompleted;
     }
 
-    /// Creates a worker-offload cancel-acknowledged event.
-    #[allow(clippy::too_many_arguments)]
-    #[must_use]
-    pub fn worker_cancel_acknowledged(
-        seq: u64,
-        time: Time,
-        worker_id: impl Into<String>,
-        job_id: u64,
-        decision_seq: u64,
-        replay_hash: u64,
-        task: TaskId,
-        region: RegionId,
-        obligation: ObligationId,
-    ) -> Self {
-        Self::worker_lifecycle(
-            seq,
-            time,
-            TraceEventKind::WorkerCancelAcknowledged,
-            worker_id,
-            job_id,
-            decision_seq,
-            replay_hash,
-            task,
-            region,
-            obligation,
-        )
-    }
-
-    /// Creates a worker-offload drain-started event.
-    #[allow(clippy::too_many_arguments)]
-    #[must_use]
-    pub fn worker_drain_started(
-        seq: u64,
-        time: Time,
-        worker_id: impl Into<String>,
-        job_id: u64,
-        decision_seq: u64,
-        replay_hash: u64,
-        task: TaskId,
-        region: RegionId,
-        obligation: ObligationId,
-    ) -> Self {
-        Self::worker_lifecycle(
-            seq,
-            time,
-            TraceEventKind::WorkerDrainStarted,
-            worker_id,
-            job_id,
-            decision_seq,
-            replay_hash,
-            task,
-            region,
-            obligation,
-        )
-    }
-
-    /// Creates a worker-offload drain-completed event.
-    #[allow(clippy::too_many_arguments)]
-    #[must_use]
-    pub fn worker_drain_completed(
-        seq: u64,
-        time: Time,
-        worker_id: impl Into<String>,
-        job_id: u64,
-        decision_seq: u64,
-        replay_hash: u64,
-        task: TaskId,
-        region: RegionId,
-        obligation: ObligationId,
-    ) -> Self {
-        Self::worker_lifecycle(
-            seq,
-            time,
-            TraceEventKind::WorkerDrainCompleted,
-            worker_id,
-            job_id,
-            decision_seq,
-            replay_hash,
-            task,
-            region,
-            obligation,
-        )
-    }
-
-    /// Creates a worker-offload finalize-completed event.
-    #[allow(clippy::too_many_arguments)]
-    #[must_use]
-    pub fn worker_finalize_completed(
-        seq: u64,
-        time: Time,
-        worker_id: impl Into<String>,
-        job_id: u64,
-        decision_seq: u64,
-        replay_hash: u64,
-        task: TaskId,
-        region: RegionId,
-        obligation: ObligationId,
-    ) -> Self {
-        Self::worker_lifecycle(
-            seq,
-            time,
-            TraceEventKind::WorkerFinalizeCompleted,
-            worker_id,
-            job_id,
-            decision_seq,
-            replay_hash,
-            task,
-            region,
-            obligation,
-        )
-    }
-
-    /// Creates a region created event.
-    #[must_use]
-    pub fn region_created(
-        seq: u64,
-        time: Time,
-        region: RegionId,
-        parent: Option<RegionId>,
-    ) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::RegionCreated,
-            TraceData::Region { region, parent },
-        )
-    }
-
-    /// Creates a region cancelled event.
-    #[must_use]
-    pub fn region_cancelled(seq: u64, time: Time, region: RegionId, reason: CancelReason) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::RegionCancelled,
-            TraceData::RegionCancel { region, reason },
-        )
-    }
-
-    /// Creates a time advance event.
-    #[must_use]
-    pub fn time_advance(seq: u64, time: Time, old: Time, new: Time) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::TimeAdvance,
-            TraceData::Time { old, new },
-        )
-    }
-
-    /// Creates a timer scheduled event.
-    #[must_use]
-    pub fn timer_scheduled(seq: u64, time: Time, timer_id: u64, deadline: Time) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::TimerScheduled,
-            TraceData::Timer {
-                timer_id,
-                deadline: Some(deadline),
-            },
-        )
-    }
-
-    /// Creates a timer fired event.
-    #[must_use]
-    pub fn timer_fired(seq: u64, time: Time, timer_id: u64) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::TimerFired,
-            TraceData::Timer {
-                timer_id,
-                deadline: None,
-            },
-        )
-    }
-
-    /// Creates a timer cancelled event.
-    #[must_use]
-    pub fn timer_cancelled(seq: u64, time: Time, timer_id: u64) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::TimerCancelled,
-            TraceData::Timer {
-                timer_id,
-                deadline: None,
-            },
-        )
-    }
-
-    /// Creates an I/O requested event.
-    #[must_use]
-    pub fn io_requested(seq: u64, time: Time, token: u64, interest: u8) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::IoRequested,
-            TraceData::IoRequested { token, interest },
-        )
-    }
-
-    /// Creates an I/O ready event.
-    #[must_use]
-    pub fn io_ready(seq: u64, time: Time, token: u64, readiness: u8) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::IoReady,
-            TraceData::IoReady { token, readiness },
-        )
-    }
-
-    /// Creates an I/O result event.
-    #[must_use]
-    pub fn io_result(seq: u64, time: Time, token: u64, bytes: i64) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::IoResult,
-            TraceData::IoResult { token, bytes },
-        )
-    }
-
-    /// Creates an I/O error event.
-    #[must_use]
-    pub fn io_error(seq: u64, time: Time, token: u64, kind: u8) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::IoError,
-            TraceData::IoError { token, kind },
-        )
-    }
-
-    /// Creates an RNG seed event.
-    #[must_use]
-    pub fn rng_seed(seq: u64, time: Time, seed: u64) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::RngSeed,
-            TraceData::RngSeed { seed },
-        )
-    }
-
-    /// Creates an RNG value event.
-    #[must_use]
-    pub fn rng_value(seq: u64, time: Time, value: u64) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::RngValue,
-            TraceData::RngValue { value },
-        )
-    }
-
-    /// Creates a checkpoint event.
-    #[must_use]
-    pub fn checkpoint(
-        seq: u64,
-        time: Time,
-        sequence: u64,
-        active_tasks: u32,
-        active_regions: u32,
-    ) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::Checkpoint,
-            TraceData::Checkpoint {
-                sequence,
-                active_tasks,
-                active_regions,
-            },
-        )
-    }
-
-    /// Creates an obligation reserve event.
-    #[must_use]
-    pub fn obligation_reserve(
-        seq: u64,
-        time: Time,
-        obligation: ObligationId,
-        task: TaskId,
-        region: RegionId,
-        kind: ObligationKind,
-    ) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::ObligationReserve,
+    trace_event_constructors! {
+        /// Creates a region created event.
+        region_created(region: RegionId, parent: Option<RegionId>) => RegionCreated,
+            TraceData::Region { region, parent };
+        /// Creates a region cancelled event.
+        region_cancelled(region: RegionId, reason: CancelReason) => RegionCancelled,
+            TraceData::RegionCancel { region, reason };
+        /// Creates a time advance event.
+        time_advance(old: Time, new: Time) => TimeAdvance, TraceData::Time { old, new };
+        /// Creates a timer scheduled event.
+        timer_scheduled(timer_id: u64, deadline: Time) => TimerScheduled,
+            TraceData::Timer { timer_id, deadline: Some(deadline) };
+        /// Creates a timer fired event.
+        timer_fired(timer_id: u64) => TimerFired, TraceData::Timer { timer_id, deadline: None };
+        /// Creates a timer cancelled event.
+        timer_cancelled(timer_id: u64) => TimerCancelled,
+            TraceData::Timer { timer_id, deadline: None };
+        /// Creates an I/O requested event.
+        io_requested(token: u64, interest: u8) => IoRequested,
+            TraceData::IoRequested { token, interest };
+        /// Creates an I/O ready event.
+        io_ready(token: u64, readiness: u8) => IoReady, TraceData::IoReady { token, readiness };
+        /// Creates an I/O result event.
+        io_result(token: u64, bytes: i64) => IoResult, TraceData::IoResult { token, bytes };
+        /// Creates an I/O error event.
+        io_error(token: u64, kind: u8) => IoError, TraceData::IoError { token, kind };
+        /// Creates an RNG seed event.
+        rng_seed(seed: u64) => RngSeed, TraceData::RngSeed { seed };
+        /// Creates an RNG value event.
+        rng_value(value: u64) => RngValue, TraceData::RngValue { value };
+        /// Creates a checkpoint event.
+        checkpoint(sequence: u64, active_tasks: u32, active_regions: u32) => Checkpoint,
+            TraceData::Checkpoint { sequence, active_tasks, active_regions };
+        /// Creates an obligation reserve event.
+        obligation_reserve(
+            obligation: ObligationId,
+            task: TaskId,
+            region: RegionId,
+            kind: ObligationKind,
+        ) => ObligationReserve,
             TraceData::Obligation {
                 obligation,
                 task,
@@ -2078,25 +1793,15 @@ impl TraceEvent {
                 state: ObligationState::Reserved,
                 duration_ns: None,
                 abort_reason: None,
-            },
-        )
-    }
-
-    /// Creates an obligation commit event.
-    #[must_use]
-    pub fn obligation_commit(
-        seq: u64,
-        time: Time,
-        obligation: ObligationId,
-        task: TaskId,
-        region: RegionId,
-        kind: ObligationKind,
-        duration_ns: u64,
-    ) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::ObligationCommit,
+            };
+        /// Creates an obligation commit event.
+        obligation_commit(
+            obligation: ObligationId,
+            task: TaskId,
+            region: RegionId,
+            kind: ObligationKind,
+            duration_ns: u64,
+        ) => ObligationCommit,
             TraceData::Obligation {
                 obligation,
                 task,
@@ -2105,27 +1810,17 @@ impl TraceEvent {
                 state: ObligationState::Committed,
                 duration_ns: Some(duration_ns),
                 abort_reason: None,
-            },
-        )
-    }
-
-    /// Creates an obligation abort event.
-    #[must_use]
-    #[allow(clippy::too_many_arguments)]
-    pub fn obligation_abort(
-        seq: u64,
-        time: Time,
-        obligation: ObligationId,
-        task: TaskId,
-        region: RegionId,
-        kind: ObligationKind,
-        duration_ns: u64,
-        reason: ObligationAbortReason,
-    ) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::ObligationAbort,
+            };
+        /// Creates an obligation abort event.
+        #[allow(clippy::too_many_arguments)]
+        obligation_abort(
+            obligation: ObligationId,
+            task: TaskId,
+            region: RegionId,
+            kind: ObligationKind,
+            duration_ns: u64,
+            reason: ObligationAbortReason,
+        ) => ObligationAbort,
             TraceData::Obligation {
                 obligation,
                 task,
@@ -2134,25 +1829,15 @@ impl TraceEvent {
                 state: ObligationState::Aborted,
                 duration_ns: Some(duration_ns),
                 abort_reason: Some(reason),
-            },
-        )
-    }
-
-    /// Creates an obligation leak event.
-    #[must_use]
-    pub fn obligation_leak(
-        seq: u64,
-        time: Time,
-        obligation: ObligationId,
-        task: TaskId,
-        region: RegionId,
-        kind: ObligationKind,
-        duration_ns: u64,
-    ) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::ObligationLeak,
+            };
+        /// Creates an obligation leak event.
+        obligation_leak(
+            obligation: ObligationId,
+            task: TaskId,
+            region: RegionId,
+            kind: ObligationKind,
+            duration_ns: u64,
+        ) => ObligationLeak,
             TraceData::Obligation {
                 obligation,
                 task,
@@ -2161,165 +1846,55 @@ impl TraceEvent {
                 state: ObligationState::Leaked,
                 duration_ns: Some(duration_ns),
                 abort_reason: None,
-            },
-        )
-    }
-
-    /// Creates a monitor created event.
-    #[must_use]
-    pub fn monitor_created(
-        seq: u64,
-        time: Time,
-        monitor_ref: u64,
-        watcher: TaskId,
-        watcher_region: RegionId,
-        monitored: TaskId,
-    ) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::MonitorCreated,
-            TraceData::Monitor {
-                monitor_ref,
-                watcher,
-                watcher_region,
-                monitored,
-            },
-        )
-    }
-
-    /// Creates a monitor dropped event.
-    #[must_use]
-    pub fn monitor_dropped(
-        seq: u64,
-        time: Time,
-        monitor_ref: u64,
-        watcher: TaskId,
-        watcher_region: RegionId,
-        monitored: TaskId,
-    ) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::MonitorDropped,
-            TraceData::Monitor {
-                monitor_ref,
-                watcher,
-                watcher_region,
-                monitored,
-            },
-        )
-    }
-
-    /// Creates a down delivered event.
-    #[must_use]
-    pub fn down_delivered(
-        seq: u64,
-        time: Time,
-        monitor_ref: u64,
-        watcher: TaskId,
-        monitored: TaskId,
-        completion_vt: Time,
-        reason: DownReason,
-    ) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::DownDelivered,
-            TraceData::Down {
-                monitor_ref,
-                watcher,
-                monitored,
-                completion_vt,
-                reason,
-            },
-        )
-    }
-
-    /// Creates a link created event.
-    #[must_use]
-    pub fn link_created(
-        seq: u64,
-        time: Time,
-        link_ref: u64,
-        task_a: TaskId,
-        region_a: RegionId,
-        task_b: TaskId,
-        region_b: RegionId,
-    ) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::LinkCreated,
-            TraceData::Link {
-                link_ref,
-                task_a,
-                region_a,
-                task_b,
-                region_b,
-            },
-        )
-    }
-
-    /// Creates a link dropped event.
-    #[must_use]
-    pub fn link_dropped(
-        seq: u64,
-        time: Time,
-        link_ref: u64,
-        task_a: TaskId,
-        region_a: RegionId,
-        task_b: TaskId,
-        region_b: RegionId,
-    ) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::LinkDropped,
-            TraceData::Link {
-                link_ref,
-                task_a,
-                region_a,
-                task_b,
-                region_b,
-            },
-        )
-    }
-
-    /// Creates an exit delivered event.
-    #[must_use]
-    pub fn exit_delivered(
-        seq: u64,
-        time: Time,
-        link_ref: u64,
-        from: TaskId,
-        to: TaskId,
-        failure_vt: Time,
-        reason: DownReason,
-    ) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::ExitDelivered,
-            TraceData::Exit {
-                link_ref,
-                from,
-                to,
-                failure_vt,
-                reason,
-            },
-        )
-    }
-
-    /// Creates a user trace event.
-    #[must_use]
-    pub fn user_trace(seq: u64, time: Time, message: impl Into<String>) -> Self {
-        Self::new(
-            seq,
-            time,
-            TraceEventKind::UserTrace,
-            TraceData::Message(message.into()),
-        )
+            };
+        /// Creates a monitor created event.
+        monitor_created(
+            monitor_ref: u64,
+            watcher: TaskId,
+            watcher_region: RegionId,
+            monitored: TaskId,
+        ) => MonitorCreated,
+            TraceData::Monitor { monitor_ref, watcher, watcher_region, monitored };
+        /// Creates a monitor dropped event.
+        monitor_dropped(
+            monitor_ref: u64,
+            watcher: TaskId,
+            watcher_region: RegionId,
+            monitored: TaskId,
+        ) => MonitorDropped,
+            TraceData::Monitor { monitor_ref, watcher, watcher_region, monitored };
+        /// Creates a down delivered event.
+        down_delivered(
+            monitor_ref: u64,
+            watcher: TaskId,
+            monitored: TaskId,
+            completion_vt: Time,
+            reason: DownReason,
+        ) => DownDelivered,
+            TraceData::Down { monitor_ref, watcher, monitored, completion_vt, reason };
+        /// Creates a link created event.
+        link_created(
+            link_ref: u64,
+            task_a: TaskId,
+            region_a: RegionId,
+            task_b: TaskId,
+            region_b: RegionId,
+        ) => LinkCreated,
+            TraceData::Link { link_ref, task_a, region_a, task_b, region_b };
+        /// Creates a link dropped event.
+        link_dropped(
+            link_ref: u64,
+            task_a: TaskId,
+            region_a: RegionId,
+            task_b: TaskId,
+            region_b: RegionId,
+        ) => LinkDropped,
+            TraceData::Link { link_ref, task_a, region_a, task_b, region_b };
+        /// Creates an exit delivered event.
+        exit_delivered(link_ref: u64, from: TaskId, to: TaskId, failure_vt: Time, reason: DownReason)
+            => ExitDelivered, TraceData::Exit { link_ref, from, to, failure_vt, reason };
+        /// Creates a user trace event.
+        user_trace(message: impl Into<String>) => UserTrace, TraceData::Message(message.into());
     }
 }
 
