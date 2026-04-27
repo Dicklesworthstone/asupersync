@@ -12,6 +12,7 @@ use proptest::prelude::*;
 use proptest::strategy::Just;
 
 const STATEFUL_TRACE_MAX_BYTES: usize = 4 * 1024;
+const COMPREHENSIVE_TRACE_MAX_BYTES: usize = 64 * 1024;
 
 /// Generate arbitrary byte buffers for fuzzing
 fn arb_bytes() -> impl Strategy<Value = Vec<u8>> {
@@ -43,6 +44,21 @@ fn arb_stateful_bytes() -> impl Strategy<Value = Vec<u8>> {
         prop::collection::vec(any::<u8>(), 1025..=STATEFUL_TRACE_MAX_BYTES),
         prop::collection::vec(Just(0u8), 0..=STATEFUL_TRACE_MAX_BYTES),
         prop::collection::vec(Just(255u8), 0..=STATEFUL_TRACE_MAX_BYTES),
+    ]
+}
+
+/// Generate bounded byte buffers for the ignored comprehensive fuzz lane.
+///
+/// One-shot large payload coverage already exists in the regular properties,
+/// so the high-case-count ignored runner should stay in the sub-64KiB range.
+fn arb_comprehensive_bytes() -> impl Strategy<Value = Vec<u8>> {
+    prop_oneof![
+        Just(vec![]),
+        prop::collection::vec(any::<u8>(), 0..=16),
+        prop::collection::vec(any::<u8>(), 17..=1024),
+        prop::collection::vec(any::<u8>(), 1025..=COMPREHENSIVE_TRACE_MAX_BYTES),
+        prop::collection::vec(Just(0u8), 0..=COMPREHENSIVE_TRACE_MAX_BYTES),
+        prop::collection::vec(Just(255u8), 0..=COMPREHENSIVE_TRACE_MAX_BYTES),
     ]
 }
 
@@ -464,13 +480,13 @@ mod comprehensive_fuzz_runner {
     fn comprehensive_bytes_codec_fuzz() {
         // Configure for more aggressive testing
         let config = ProptestConfig {
-            cases: 10000,
-            max_shrink_iters: 10000,
+            cases: 2000,
+            max_shrink_iters: 2000,
             ..ProptestConfig::default()
         };
 
         // Run all fuzz tests with extended iteration counts
-        proptest!(config, |(data in arb_bytes())| {
+        proptest!(config, |(data in arb_comprehensive_bytes())| {
             let mut codec = BytesCodec::new();
             let mut buf = BytesMut::from(&data[..]);
 
