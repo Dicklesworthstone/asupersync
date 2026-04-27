@@ -158,19 +158,8 @@ pub const RFC9000_HANDSHAKE_CASES: &[ConformanceCase] = &[
 // =============================================================================
 
 fn test_tls_version_requirement() -> ConformanceResult {
-    // Test that our QuicEndpoint enforces TLS 1.3
-    let cx = test_cx();
-    let config = QuicConfig::default();
-
-    match QuicEndpoint::client(&cx, &config) {
-        Ok(endpoint) => {
-            // Verify that the inner endpoint is configured for TLS 1.3
-            // Quinn enforces TLS 1.3, so this should always pass
-            ConformanceResult::Pass
-        }
-        Err(e) => ConformanceResult::Fail {
-            reason: format!("Failed to create client endpoint: {}", e),
-        },
+    ConformanceResult::Skipped {
+        reason: "Requires a harness that can observe configured or negotiated TLS version".to_string(),
     }
 }
 
