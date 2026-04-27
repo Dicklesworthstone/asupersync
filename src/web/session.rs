@@ -1221,7 +1221,7 @@ mod tests {
         assert!(header.contains("Path=/"));
         assert!(header.contains("HttpOnly"));
         assert!(header.contains("SameSite=Lax"));
-        assert!(!header.contains("Secure"));
+        assert!(header.contains("Secure"));
     }
 
     #[test]
@@ -1412,7 +1412,7 @@ mod tests {
         pre_auth.insert("pre_auth_marker", "still here");
         store.save(attacker_planted_id, &pre_auth);
 
-        let layer = SessionLayer::new(store.clone());
+        let layer = SessionLayer::new(store.clone()).csrf_protection(false);
         let handler = layer.wrap(LoginHandler);
 
         // Victim arrives with the attacker's planted cookie and "logs in".
@@ -1740,7 +1740,7 @@ mod tests {
     #[test]
     fn regenerate_guard_fails_closed_when_handler_panics() {
         let store = MemoryStore::new();
-        let layer = SessionLayer::new(store.clone());
+        let layer = SessionLayer::new(store.clone()).csrf_protection(false);
 
         // Seed an existing session so the request is loading-mode
         // (is_new = false). The fail-closed branch only runs for
@@ -1842,7 +1842,7 @@ mod tests {
     #[test]
     fn regenerate_guard_disarmed_on_happy_path_rotates_normally() {
         let store = MemoryStore::new();
-        let layer = SessionLayer::new(store.clone());
+        let layer = SessionLayer::new(store.clone()).csrf_protection(false);
 
         let original_id = "1111222233334444aaaabbbbccccdddd".to_string();
         let mut seeded = SessionData::new();
