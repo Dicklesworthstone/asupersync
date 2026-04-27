@@ -770,6 +770,7 @@ impl DivergenceCorpusEntry {
     ) -> Self {
         let seed_lineage = result.seed_lineage.clone();
         let entry_id = Self::entry_id_for(
+            &result.verdict.surface_id,
             &result.verdict.scenario_id,
             &seed_lineage.seed_lineage_id,
             policy_class,
@@ -832,15 +833,17 @@ impl DivergenceCorpusEntry {
         }
     }
 
-    /// Stable entry id from the scenario, seed lineage, and final policy class.
+    /// Stable entry id from the surface, scenario, seed lineage, and final policy class.
     #[must_use]
     pub fn entry_id_for(
+        surface_id: &str,
         scenario_id: &str,
         seed_lineage_id: &str,
         policy_class: DifferentialPolicyClass,
     ) -> String {
         format!(
-            "{}.{}.{}",
+            "{}.{}.{}.{}",
+            sanitize_registry_component(surface_id),
             sanitize_registry_component(scenario_id),
             sanitize_registry_component(seed_lineage_id),
             policy_class.as_str()
@@ -1292,26 +1295,21 @@ impl DifferentialBundleArtifacts {
 }
 
 fn sanitize_registry_component(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for ch in input.chars() {
-        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-            out.push(ch);
-        } else {
-            out.push('_');
-        }
-    }
-    let trimmed = out.trim_matches('_');
-    if !trimmed.is_empty() {
-        return trimmed.to_string();
-    }
-    if input.is_empty() {
-        return "empty".to_string();
+    const ESCAPED_PREFIX: &str = "z-";
+
+    let safe_literal = !input.is_empty()
+        && !input.starts_with(ESCAPED_PREFIX)
+        && input
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_');
+    if safe_literal {
+        return input.to_string();
     }
 
-    let mut escaped = String::with_capacity(input.len() * 2 + 1);
-    escaped.push('x');
+    let mut escaped = String::with_capacity(input.len().saturating_mul(2).saturating_add(18));
+    use std::fmt::Write as _;
+    let _ = write!(&mut escaped, "{ESCAPED_PREFIX}{:x}-", input.len());
     for byte in input.as_bytes() {
-        use std::fmt::Write as _;
         let _ = write!(&mut escaped, "{byte:02x}");
     }
     escaped
@@ -2222,25 +2220,27 @@ mod tests {
     fn sanitize_registry_component_never_returns_empty() {
         init_test("sanitize_registry_component_never_returns_empty");
 
-        assert_eq!(sanitize_registry_component(""), "empty");
-        assert_eq!(sanitize_registry_component(":::"), "x3a3a3a");
-        assert_eq!(sanitize_registry_component(" / "), "x202f20");
-        assert_eq!(sanitize_registry_component("___"), "x5f5f5f");
+        assert_eq!(sanitize_registry_component(""), "z-0-");
+        assert_eq!(sanitize_registry_component(":::"), "z-3-3a3a3a");
+        assert_eq!(sanitize_registry_component(" / "), "z-3-202f20");
+        assert_eq!(sanitize_registry_component("___"), "___");
         assert_eq!(sanitize_registry_component("scenario-1"), "scenario-1");
 
         crate::test_complete!("sanitize_registry_component_never_returns_empty");
     }
 
     #[test]
-    fn divergence_registry_components_do_not_alias_empty_sanitized_segments() {
-        init_test("divergence_registry_components_do_not_alias_empty_sanitized_segments");
+    fn divergence_registry_components_do_not_alias_escaped_or_literal_segments() {
+        init_test("divergence_registry_components_do_not_alias_escaped_or_literal_segments");
 
         let colon_entry_id = DivergenceCorpusEntry::entry_id_for(
+            "surface",
             ":::",
             " / ",
             DifferentialPolicyClass::RuntimeSemanticBug,
         );
         let underscore_entry_id = DivergenceCorpusEntry::entry_id_for(
+            "surface",
             "___",
             " / ",
             DifferentialPolicyClass::RuntimeSemanticBug,
@@ -2250,8 +2250,30 @@ mod tests {
             colon_entry_id, underscore_entry_id,
             "distinct raw IDs must not collapse to the same registry entry id"
         );
-        assert!(colon_entry_id.starts_with("x3a3a3a."));
-        assert!(underscore_entry_id.starts_with("x5f5f5f."));
+        assert!(colon_entry_id.starts_with("z-3-3a3a3a."));
+        assert!(underscore_entry_id.starts_with("___."));
+
+        let slash_entry_id = DivergenceCorpusEntry::entry_id_for(
+            "surface",
+            "a/b",
+            "seed",
+            DifferentialPolicyClass::RuntimeSemanticBug,
+        );
+        let underscore_entry_id = DivergenceCorpusEntry::entry_id_for(
+            "surface",
+            "a_b",
+            "seed",
+            DifferentialPolicyClass::RuntimeSemanticBug,
+        );
+        let escaped_looking_entry_id = DivergenceCorpusEntry::entry_id_for(
+            "surface",
+            "z-3-616263",
+            "seed",
+            DifferentialPolicyClass::RuntimeSemanticBug,
+        );
+        assert_ne!(slash_entry_id, underscore_entry_id);
+        assert_ne!(slash_entry_id, escaped_looking_entry_id);
+        assert_ne!(underscore_entry_id, escaped_looking_entry_id);
 
         let entry = DivergenceCorpusEntry {
             schema_version: DIVERGENCE_CORPUS_SCHEMA_VERSION.to_string(),
@@ -2305,12 +2327,103 @@ mod tests {
 
         assert_eq!(
             entry.default_bundle_root(),
-            "artifacts/differential/x202f20/x3a3a3a/x5f5f5f"
+            "artifacts/differential/z-3-202f20/z-3-3a3a3a/___"
         );
 
         crate::test_complete!(
-            "divergence_registry_components_do_not_alias_empty_sanitized_segments"
+            "divergence_registry_components_do_not_alias_escaped_or_literal_segments"
         );
+    }
+
+    #[test]
+    fn divergence_registry_entry_id_includes_surface_id() {
+        init_test("divergence_registry_entry_id_includes_surface_id");
+
+        let first = DivergenceCorpusEntry::entry_id_for(
+            "surface-a",
+            "scenario",
+            "seed",
+            DifferentialPolicyClass::RuntimeSemanticBug,
+        );
+        let second = DivergenceCorpusEntry::entry_id_for(
+            "surface-b",
+            "scenario",
+            "seed",
+            DifferentialPolicyClass::RuntimeSemanticBug,
+        );
+
+        assert_ne!(
+            first, second,
+            "different surfaces must not alias to the same registry entry id"
+        );
+        assert!(first.starts_with("surface-a."));
+        assert!(second.starts_with("surface-b."));
+
+        let mut registry = DivergenceCorpusRegistry::new();
+        let make_entry = |surface_id: &str| DivergenceCorpusEntry {
+            schema_version: DIVERGENCE_CORPUS_SCHEMA_VERSION.to_string(),
+            entry_id: DivergenceCorpusEntry::entry_id_for(
+                surface_id,
+                "scenario",
+                "seed",
+                DifferentialPolicyClass::RuntimeSemanticBug,
+            ),
+            scenario_id: "scenario".to_string(),
+            surface_id: surface_id.to_string(),
+            surface_contract_version: "v1".to_string(),
+            divergence_class: "semantic".to_string(),
+            policy_class: DifferentialPolicyClass::RuntimeSemanticBug,
+            first_seen: DivergenceFirstSeenContext {
+                runner_profile: "nightly".to_string(),
+                attempt_index: 0,
+                rerun_count: 0,
+            },
+            seed_lineage: crate::lab::dual_run::SeedLineageRecord {
+                seed_lineage_id: "seed".to_string(),
+                canonical_seed: 7,
+                lab_effective_seed: 7,
+                live_effective_seed: 7,
+                lab_seed_mode: crate::lab::dual_run::SeedMode::Inherit,
+                live_seed_mode: crate::lab::dual_run::SeedMode::Inherit,
+                lab_entropy_seed: 7,
+                live_entropy_seed: 7,
+                replay_policy: crate::lab::dual_run::ReplayPolicy::SingleSeed,
+                seeds_match: true,
+                annotations: BTreeMap::new(),
+            },
+            mismatch_fields: Vec::new(),
+            artifact_bundle: DivergenceArtifactBundle::under(format!(
+                "artifacts/differential/{surface_id}"
+            )),
+            minimization_lineage: DivergenceMinimizationLineage::from_seed_lineage(
+                &crate::lab::dual_run::SeedLineageRecord {
+                    seed_lineage_id: "seed".to_string(),
+                    canonical_seed: 7,
+                    lab_effective_seed: 7,
+                    live_effective_seed: 7,
+                    lab_seed_mode: crate::lab::dual_run::SeedMode::Inherit,
+                    live_seed_mode: crate::lab::dual_run::SeedMode::Inherit,
+                    lab_entropy_seed: 7,
+                    live_entropy_seed: 7,
+                    replay_policy: crate::lab::dual_run::ReplayPolicy::SingleSeed,
+                    seeds_match: true,
+                    annotations: BTreeMap::new(),
+                },
+            ),
+            regression_promotion_state: RegressionPromotionState::Investigating,
+            retention: DivergenceRetentionMetadata::for_policy_class(
+                DifferentialPolicyClass::RuntimeSemanticBug,
+            ),
+            metadata: BTreeMap::new(),
+        };
+
+        registry.upsert(make_entry("surface-a"));
+        registry.upsert(make_entry("surface-b"));
+        assert_eq!(registry.entries.len(), 2);
+        assert_eq!(registry.entries[0].surface_id, "surface-a");
+        assert_eq!(registry.entries[1].surface_id, "surface-b");
+
+        crate::test_complete!("divergence_registry_entry_id_includes_surface_id");
     }
 
     #[test]
