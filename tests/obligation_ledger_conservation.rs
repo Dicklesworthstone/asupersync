@@ -226,9 +226,14 @@ fn run_scenario_with_schedule(scenario: &ConcurrentScenario, seed: u64) -> Resul
                         drop(tokens); // Release lock before ledger operation
 
                         if let Some(tok) = taken_token {
+                            let obligation_id = tok.id();
                             let mut ledger_lock = ledger.lock().unwrap();
-                            // Use try_commit to handle race with cancellation gracefully
-                            let _ = ledger_lock.try_commit(tok, now);
+                            ledger_lock.try_commit(tok, now).map_err(|err| {
+                                format!(
+                                    "checkpoint {}: commit for obligation {:?} failed: {:?}",
+                                    op_idx, obligation_id, err
+                                )
+                            })?;
                         }
                     }
                 }
@@ -243,9 +248,14 @@ fn run_scenario_with_schedule(scenario: &ConcurrentScenario, seed: u64) -> Resul
                         drop(tokens); // Release lock before ledger operation
 
                         if let Some(tok) = taken_token {
+                            let obligation_id = tok.id();
                             let mut ledger_lock = ledger.lock().unwrap();
-                            // Use try_abort to handle race with cancellation gracefully
-                            let _ = ledger_lock.try_abort(tok, now, *reason);
+                            ledger_lock.try_abort(tok, now, *reason).map_err(|err| {
+                                format!(
+                                    "checkpoint {}: abort for obligation {:?} failed: {:?}",
+                                    op_idx, obligation_id, err
+                                )
+                            })?;
                         }
                     }
                 }
@@ -259,7 +269,21 @@ fn run_scenario_with_schedule(scenario: &ConcurrentScenario, seed: u64) -> Resul
 
                 // Cancel all pending obligations (concurrent cancel scenario)
                 for obligation_id in pending_ids {
-                    let _ = ledger_lock.abort_by_id(obligation_id, now, ObligationAbortReason::Cancel);
+                    if ledger_lock.abort_by_id(obligation_id, now, ObligationAbortReason::Cancel)
+                        == 0
+                    {
+                        return Err(format!(
+                            "checkpoint {}: cancel for region {:?} left obligation {:?} unresolved",
+                            op_idx, region_id, obligation_id
+                        ));
+                    }
+                }
+                let pending_after = ledger_lock.pending_for_region(*region_id);
+                if pending_after != 0 {
+                    return Err(format!(
+                        "checkpoint {}: cancel for region {:?} left {} pending obligations",
+                        op_idx, region_id, pending_after
+                    ));
                 }
             }
 
@@ -269,8 +293,10 @@ fn run_scenario_with_schedule(scenario: &ConcurrentScenario, seed: u64) -> Resul
                 let ledger_lock = ledger.lock().unwrap();
                 let pending_count = ledger_lock.pending_for_region(*region_id);
                 if pending_count > 0 {
-                    eprintln!("Warning: {} pending obligations when finalizing region {:?}",
-                            pending_count, region_id);
+                    return Err(format!(
+                        "checkpoint {}: finalized region {:?} with {} pending obligations",
+                        op_idx, region_id, pending_count
+                    ));
                 }
             }
 
