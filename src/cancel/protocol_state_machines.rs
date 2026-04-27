@@ -263,7 +263,6 @@ impl CancelStateMachine for RegionStateMachine {
     }
 
     fn transition(&mut self, event: Self::Event, context: &Self::Context) -> TransitionResult {
-        let old_state = self.state.clone();
         let new_state = match (&self.state, &event) {
             // Created -> Active
             (RegionState::Created, RegionEvent::Activate) => RegionState::Active {
@@ -625,6 +624,7 @@ impl CancelStateMachine for TaskStateMachine {
     }
 
     fn transition(&mut self, event: Self::Event, _context: &Self::Context) -> TransitionResult {
+        let old_state = self.state.clone();
         let new_state = match (&self.state, &event) {
             // Spawned -> Running
             (TaskState::Spawned, TaskEvent::Start) => TaskState::Running,
@@ -824,6 +824,7 @@ impl CancelStateMachine for ObligationStateMachine {
     }
 
     fn transition(&mut self, event: Self::Event, _context: &Self::Context) -> TransitionResult {
+        let old_state = self.state.clone();
         let new_state = match (&self.state, &event) {
             // Created -> Reserved
             (ObligationState::Created, ObligationEvent::Reserve { token }) => {
@@ -872,6 +873,17 @@ impl CancelStateMachine for ObligationStateMachine {
         };
 
         self.state = new_state;
+        if let Err(invariant_error) = self.check_invariants(_context) {
+            self.state = ObligationState::Error {
+                violation: invariant_error.clone(),
+            };
+            return TransitionResult::InvariantViolation {
+                invariant: "Obligation invariant".to_string(),
+                context: format!(
+                    "{invariant_error}; previous state: {old_state:?}, attempted transition: {event:?}"
+                ),
+            };
+        }
         TransitionResult::Valid
     }
 
@@ -1609,11 +1621,14 @@ impl CancelProtocolValidator {
             }
             result
         } else {
-            TransitionResult::Invalid {
+            let result = TransitionResult::Invalid {
                 reason: format!("Region {region_id:?} not registered with validator"),
                 current_state: "Unknown".to_string(),
                 attempted_transition: format!("{event:?}"),
-            }
+            };
+            self.violation_count += 1;
+            self.log_violation("region", &region_id, &result);
+            result
         }
     }
 
@@ -1635,11 +1650,14 @@ impl CancelProtocolValidator {
             }
             result
         } else {
-            TransitionResult::Invalid {
+            let result = TransitionResult::Invalid {
                 reason: format!("Task {task_id:?} not registered with validator"),
                 current_state: "Unknown".to_string(),
                 attempted_transition: format!("{event:?}"),
-            }
+            };
+            self.violation_count += 1;
+            self.log_violation("task", &task_id, &result);
+            result
         }
     }
 
@@ -1682,11 +1700,14 @@ impl CancelProtocolValidator {
             }
             result
         } else {
-            TransitionResult::Invalid {
+            let result = TransitionResult::Invalid {
                 reason: format!("Obligation {obligation_id:?} not registered with validator"),
                 current_state: "Unknown".to_string(),
                 attempted_transition: format!("{event:?}"),
-            }
+            };
+            self.violation_count += 1;
+            self.log_violation("obligation", &obligation_id, &result);
+            result
         }
     }
 
@@ -1707,11 +1728,14 @@ impl CancelProtocolValidator {
             }
             result
         } else {
-            TransitionResult::Invalid {
+            let result = TransitionResult::Invalid {
                 reason: format!("Channel {channel_id} not registered with validator"),
                 current_state: "Unknown".to_string(),
                 attempted_transition: format!("{event:?}"),
-            }
+            };
+            self.violation_count += 1;
+            self.log_violation("channel", &channel_id, &result);
+            result
         }
     }
 
@@ -1732,11 +1756,14 @@ impl CancelProtocolValidator {
             }
             result
         } else {
-            TransitionResult::Invalid {
+            let result = TransitionResult::Invalid {
                 reason: format!("IO operation {operation_id} not registered with validator"),
                 current_state: "Unknown".to_string(),
                 attempted_transition: format!("{event:?}"),
-            }
+            };
+            self.violation_count += 1;
+            self.log_violation("io", &operation_id, &result);
+            result
         }
     }
 
@@ -1757,11 +1784,14 @@ impl CancelProtocolValidator {
             }
             result
         } else {
-            TransitionResult::Invalid {
+            let result = TransitionResult::Invalid {
                 reason: format!("Timer {timer_id} not registered with validator"),
                 current_state: "Unknown".to_string(),
                 attempted_transition: format!("{event:?}"),
-            }
+            };
+            self.violation_count += 1;
+            self.log_violation("timer", &timer_id, &result);
+            result
         }
     }
 
@@ -2035,6 +2065,28 @@ mod tests {
     }
 
     #[test]
+    fn test_obligation_zero_token_is_invariant_violation() {
+        let obligation_id = ObligationId::new_for_test(7, 0);
+        let mut machine = ObligationStateMachine::new(obligation_id, ValidationLevel::Full);
+        let context = ObligationContext {
+            obligation_id,
+            region_id: RegionId::new_for_test(1, 0),
+            created_at: Time::ZERO,
+            validation_level: ValidationLevel::Full,
+        };
+
+        let result = machine.transition(ObligationEvent::Reserve { token: 0 }, &context);
+        assert!(matches!(
+            result,
+            TransitionResult::InvariantViolation { .. }
+        ));
+        assert!(matches!(
+            machine.current_state(),
+            ObligationState::Error { .. }
+        ));
+    }
+
+    #[test]
     fn test_channel_lifecycle() {
         let channel_id = 1;
         let mut machine = ChannelStateMachine::new(channel_id, ValidationLevel::Full);
@@ -2233,6 +2285,25 @@ mod tests {
         let region_id = RegionId::new_for_test(1, 0);
 
         validator.register_task(task_id, region_id);
+
+        let task_context = TaskContext {
+            task_id,
+            region_id,
+            spawned_at: Time::ZERO,
+            validation_level: ValidationLevel::Full,
+        };
+
+        let result =
+            validator.validate_task_transition(task_id, TaskEvent::Complete, &task_context);
+        assert!(matches!(result, TransitionResult::Invalid { .. }));
+        assert_eq!(validator.violation_count(), 1);
+    }
+
+    #[test]
+    fn test_validator_counts_unregistered_transition() {
+        let mut validator = CancelProtocolValidator::new(ValidationLevel::Full);
+        let task_id = TaskId::new_for_test(11, 0);
+        let region_id = RegionId::new_for_test(1, 0);
 
         let task_context = TaskContext {
             task_id,
