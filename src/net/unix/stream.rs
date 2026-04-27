@@ -53,7 +53,7 @@ async fn wait_for_connect(socket: &Socket) -> io::Result<Option<IoRegistration>>
     let mut registration: Option<IoRegistration> = None;
     let mut fallback = false;
     std::future::poll_fn(|cx| {
-        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return cancelled_poll();
         }
 
@@ -123,7 +123,7 @@ fn rearm_connect_registration(
 
 async fn wait_for_connect_fallback(socket: &Socket) -> io::Result<()> {
     std::future::poll_fn(|cx| {
-        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return cancelled_poll();
         }
 
@@ -507,7 +507,7 @@ impl UnixStream {
         use std::os::unix::io::AsRawFd;
 
         std::future::poll_fn(|cx| {
-            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 return cancelled_poll();
             }
 
@@ -576,7 +576,7 @@ impl UnixStream {
         use std::os::unix::io::AsRawFd;
 
         std::future::poll_fn(|cx| {
-            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 return cancelled_poll();
             }
 
@@ -636,7 +636,7 @@ impl AsyncRead for UnixStream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return cancelled_poll();
         }
         let inner: &net::UnixStream = &self.inner;
@@ -660,7 +660,7 @@ impl AsyncReadVectored for UnixStream {
         cx: &mut Context<'_>,
         bufs: &mut [IoSliceMut<'_>],
     ) -> Poll<io::Result<usize>> {
-        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return cancelled_poll();
         }
         let inner: &net::UnixStream = &self.inner;
@@ -680,7 +680,7 @@ impl AsyncWrite for UnixStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return cancelled_poll();
         }
         let inner: &net::UnixStream = &self.inner;
@@ -698,7 +698,7 @@ impl AsyncWrite for UnixStream {
         cx: &mut Context<'_>,
         bufs: &[IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
-        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return cancelled_poll();
         }
         let inner: &net::UnixStream = &self.inner;
@@ -716,7 +716,7 @@ impl AsyncWrite for UnixStream {
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return cancelled_poll();
         }
         let inner: &net::UnixStream = &self.inner;
@@ -730,7 +730,7 @@ impl AsyncWrite for UnixStream {
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return cancelled_poll();
         }
         match self.inner.shutdown(Shutdown::Write) {

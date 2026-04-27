@@ -191,7 +191,7 @@ impl AsyncRead for VirtualTcpStream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
         let this = self.get_mut();
@@ -239,7 +239,7 @@ impl AsyncWrite for VirtualTcpStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
         let this = self.get_mut();
@@ -601,7 +601,7 @@ impl TcpListenerApi for VirtualTcpListener {
     }
 
     fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<io::Result<(Self::Stream, SocketAddr)>> {
-        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
         let mut state = self.state.lock();

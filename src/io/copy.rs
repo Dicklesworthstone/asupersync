@@ -140,7 +140,7 @@ where
         let mut steps = 0;
 
         loop {
-            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 // br-asupersync-8ww5b0: best-effort drain of the buffered
                 // prefix BEFORE returning Err. Without this, bytes already
                 // pulled from `reader` but not yet pushed to `writer` are
@@ -331,7 +331,7 @@ where
         let mut steps = 0;
 
         loop {
-            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 this.completed = true;
                 return Poll::Ready(Err(std::io::Error::new(
                     std::io::ErrorKind::Interrupted,
@@ -484,7 +484,7 @@ where
         let mut steps = 0;
 
         loop {
-            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 // br-asupersync-8ww5b0: best-effort drain of the buffered
                 // prefix on cancel. Progress callback fires for the drained
                 // bytes so the caller's progress accounting matches `total`.
@@ -844,7 +844,7 @@ where
 
         // Poll both directions, interleaved, until both block or are done
         loop {
-            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 // br-asupersync-8ww5b0: drain both per-direction buffered
                 // prefixes BEFORE returning Err. A->B drains to writer `b`,
                 // B->A drains to writer `a`. Each direction is independent

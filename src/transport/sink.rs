@@ -147,7 +147,7 @@ impl<S: SymbolSink + Unpin + ?Sized> Future for SendFuture<'_, S> {
             return Poll::Ready(Err(SinkError::PolledAfterCompletion));
         }
 
-        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             this.completed = true;
             return Poll::Ready(Err(SinkError::Io {
                 source: std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled"),
@@ -209,7 +209,7 @@ where
             return Poll::Ready(Err(SinkError::PolledAfterCompletion));
         }
 
-        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             self.completed = true;
             return Poll::Ready(Err(SinkError::Io {
                 source: std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled"),
@@ -291,7 +291,7 @@ impl<S: SymbolSink + Unpin + ?Sized> Future for FlushFuture<'_, S> {
             return Poll::Ready(Err(SinkError::PolledAfterCompletion));
         }
 
-        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             self.completed = true;
             return Poll::Ready(Err(SinkError::Io {
                 source: std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled"),
@@ -322,7 +322,7 @@ impl<S: SymbolSink + Unpin + ?Sized> Future for CloseFuture<'_, S> {
             return Poll::Ready(Err(SinkError::PolledAfterCompletion));
         }
 
-        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             self.completed = true;
             return Poll::Ready(Err(SinkError::Io {
                 source: std::io::Error::new(std::io::ErrorKind::Interrupted, "cancelled"),

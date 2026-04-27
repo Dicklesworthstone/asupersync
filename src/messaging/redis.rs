@@ -1366,7 +1366,7 @@ impl RedisConnection {
 
             let mut tmp = [0u8; 4096];
             let n = std::future::poll_fn(|task_cx| {
-                if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                     return std::task::Poll::Ready(Err(std::io::Error::new(
                         std::io::ErrorKind::Interrupted,
                         "cancelled",

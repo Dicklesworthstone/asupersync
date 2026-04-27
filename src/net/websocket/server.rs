@@ -635,7 +635,7 @@ where
         is_open
             && match op_cx {
                 Some(cx) => cx.checkpoint().is_err(),
-                None => crate::cx::Cx::current().is_some_and(|cx| cx.checkpoint().is_err()),
+                None => crate::cx::Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false),
             }
     }
 

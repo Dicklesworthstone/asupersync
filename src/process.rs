@@ -1005,7 +1005,7 @@ impl Child {
         let mut stderr_done = stderr_handle.is_none();
 
         while status.is_none() || !stdout_done || !stderr_done {
-            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 return Err(ProcessError::Io(io::Error::new(
                     io::ErrorKind::Interrupted,
                     "cancelled",
@@ -1313,7 +1313,7 @@ fn kill_on_drop_reap_strategy() -> KillOnDropReapStrategy {
     if blocking_pool_for_kill_on_drop_reap().is_some() {
         return KillOnDropReapStrategy::BlockingPool;
     }
-    if Cx::current().is_some() || crate::runtime::Runtime::current_handle().is_some() {
+    if Cx::is_active() || crate::runtime::Runtime::current_handle().is_some() {
         return KillOnDropReapStrategy::DetachedThread;
     }
     KillOnDropReapStrategy::DirectWait
@@ -1382,7 +1382,7 @@ fn reap_kill_on_drop_child(mut child: std_process::Child) {
                 }
             }
 
-            if Cx::current().is_some() || crate::runtime::Runtime::current_handle().is_some() {
+            if Cx::is_active() || crate::runtime::Runtime::current_handle().is_some() {
                 match spawn_detached_kill_on_drop_reaper(child) {
                     Ok(()) => {}
                     Err(mut recovered_child) => {
@@ -1544,7 +1544,7 @@ impl AsyncWrite for ChildStdin {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
         let this = self.get_mut();
@@ -1585,7 +1585,7 @@ impl AsyncWrite for ChildStdin {
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
         let this = self.get_mut();
@@ -1623,7 +1623,7 @@ impl AsyncWrite for ChildStdin {
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
         let this = self.get_mut();
@@ -1698,7 +1698,7 @@ impl AsyncRead for ChildStdout {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
         let this = self.get_mut();
@@ -1800,7 +1800,7 @@ impl AsyncRead for ChildStderr {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
         let this = self.get_mut();
@@ -2627,7 +2627,7 @@ mod tests {
             runtime.block_on(runtime.handle().spawn(async {
                 (
                     crate::runtime::Runtime::current_handle().is_some(),
-                    Cx::current().is_some(),
+                    Cx::is_active(),
                     kill_on_drop_reap_strategy(),
                 )
             }));

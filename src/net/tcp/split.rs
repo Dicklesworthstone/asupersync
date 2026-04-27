@@ -69,7 +69,7 @@ impl AsyncRead for ReadHalf<'_> {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        if Cx::current().is_some_and(|cx| cx.checkpoint().is_err()) {
+        if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
         let mut inner = self.inner;
@@ -108,7 +108,7 @@ impl AsyncReadVectored for ReadHalf<'_> {
         cx: &mut Context<'_>,
         bufs: &mut [IoSliceMut<'_>],
     ) -> Poll<io::Result<usize>> {
-        if Cx::current().is_some_and(|cx| cx.checkpoint().is_err()) {
+        if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
         let mut inner = self.inner;
@@ -169,7 +169,7 @@ impl AsyncWrite for WriteHalf<'_> {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        if Cx::current().is_some_and(|cx| cx.checkpoint().is_err()) {
+        if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
         let mut inner = self.inner;
@@ -188,7 +188,7 @@ impl AsyncWrite for WriteHalf<'_> {
         cx: &mut Context<'_>,
         bufs: &[std::io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
-        if Cx::current().is_some_and(|cx| cx.checkpoint().is_err()) {
+        if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
         let mut inner = self.inner;
@@ -207,7 +207,7 @@ impl AsyncWrite for WriteHalf<'_> {
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if Cx::current().is_some_and(|cx| cx.checkpoint().is_err()) {
+        if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
         let mut inner = self.inner;
@@ -222,7 +222,7 @@ impl AsyncWrite for WriteHalf<'_> {
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if Cx::current().is_some_and(|cx| cx.checkpoint().is_err()) {
+        if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
         match self.inner.shutdown(Shutdown::Write) {
@@ -685,7 +685,7 @@ impl AsyncRead for OwnedReadHalf {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        if Cx::current().is_some_and(|cx| cx.checkpoint().is_err()) {
+        if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
         let inner: &net::TcpStream = &self.inner.stream;
@@ -724,7 +724,7 @@ impl AsyncReadVectored for OwnedReadHalf {
         cx: &mut Context<'_>,
         bufs: &mut [IoSliceMut<'_>],
     ) -> Poll<io::Result<usize>> {
-        if Cx::current().is_some_and(|cx| cx.checkpoint().is_err()) {
+        if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
         let inner: &net::TcpStream = &self.inner.stream;
@@ -806,7 +806,7 @@ impl AsyncWrite for OwnedWriteHalf {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        if Cx::current().is_some_and(|cx| cx.checkpoint().is_err()) {
+        if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
         let inner: &net::TcpStream = &self.inner.stream;
@@ -827,7 +827,7 @@ impl AsyncWrite for OwnedWriteHalf {
         cx: &mut Context<'_>,
         bufs: &[std::io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
-        if Cx::current().is_some_and(|cx| cx.checkpoint().is_err()) {
+        if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
         let inner: &net::TcpStream = &self.inner.stream;
@@ -848,7 +848,7 @@ impl AsyncWrite for OwnedWriteHalf {
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if Cx::current().is_some_and(|cx| cx.checkpoint().is_err()) {
+        if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
         let inner: &net::TcpStream = &self.inner.stream;
@@ -865,7 +865,7 @@ impl AsyncWrite for OwnedWriteHalf {
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if Cx::current().is_some_and(|cx| cx.checkpoint().is_err()) {
+        if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
         match self.inner.stream.shutdown(Shutdown::Write) {

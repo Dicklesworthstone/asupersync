@@ -502,7 +502,7 @@ impl TcpStream {
 #[inline]
 fn connect_error_is_cancellation(err: &io::Error) -> bool {
     err.kind() == io::ErrorKind::Interrupted
-        && Cx::current().is_some_and(|cx| cx.checkpoint().is_err())
+        && Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -657,7 +657,7 @@ async fn wait_for_connect(socket: &Socket) -> io::Result<Option<IoRegistration>>
     let mut registration: Option<IoRegistration> = None;
     let mut fallback = false;
     std::future::poll_fn(|cx| {
-        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
 
@@ -735,7 +735,7 @@ fn rearm_connect_registration(
 #[cfg(not(target_arch = "wasm32"))]
 async fn wait_for_connect_fallback(socket: &Socket) -> io::Result<()> {
     std::future::poll_fn(|cx| {
-        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
 
@@ -763,7 +763,7 @@ impl AsyncRead for TcpStream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
         let this = self.get_mut();
@@ -806,7 +806,7 @@ impl AsyncReadVectored for TcpStream {
         cx: &mut Context<'_>,
         bufs: &mut [IoSliceMut<'_>],
     ) -> Poll<io::Result<usize>> {
-        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
 
@@ -846,7 +846,7 @@ impl AsyncWrite for TcpStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
 
@@ -870,7 +870,7 @@ impl AsyncWrite for TcpStream {
         cx: &mut Context<'_>,
         bufs: &[IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
-        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
 
@@ -895,7 +895,7 @@ impl AsyncWrite for TcpStream {
 
     #[inline]
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
         let this = self.get_mut();
@@ -914,7 +914,7 @@ impl AsyncWrite for TcpStream {
 
     #[inline]
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
         }
         match self.inner.shutdown(Shutdown::Write) {

@@ -364,6 +364,23 @@ impl FullCx {
             .unwrap_or(None)
     }
 
+    /// Returns `true` iff a task context is installed on the current
+    /// thread, without cloning any of the cx's internal `Arc`s.
+    ///
+    /// br-asupersync-xqt7dj: zero-Arc-clone existence check. Equivalent
+    /// to `Cx::current().is_some()` but avoids the 3 atomic ops on the
+    /// strong-count fields (inner, observability, handles) that
+    /// `Cx::current` performs to materialize a returnable owned value.
+    /// Use this for tight async polls that only need to detect whether
+    /// they are running under a task context (e.g., diagnostic hooks).
+    #[inline]
+    #[must_use]
+    pub fn is_active() -> bool {
+        CURRENT_CX_STACK
+            .try_with(|slot| !slot.borrow().is_empty())
+            .unwrap_or(false)
+    }
+
     /// Borrows the current task context for the duration of the closure.
     ///
     /// br-asupersync-xqt7dj — zero-Arc-clone hot path for callers that
@@ -3250,7 +3267,7 @@ mod tests {
 
     impl Drop for CurrentCxDtorProbe {
         fn drop(&mut self) {
-            let state = if Cx::current().is_some() { 1 } else { 2 };
+            let state = if Cx::is_active() { 1 } else { 2 };
             CURRENT_CX_DTOR_STATE.store(state as u8, Ordering::SeqCst);
         }
     }
@@ -3467,7 +3484,7 @@ mod tests {
 
             let cx = test_cx();
             let _guard = Cx::set_current(Some(cx));
-            assert!(Cx::current().is_some(), "current cx should be installed");
+            assert!(Cx::is_active(), "current cx should be installed");
         });
 
         join.join()

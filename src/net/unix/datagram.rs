@@ -373,7 +373,7 @@ impl UnixDatagram {
     pub async fn send_to<P: AsRef<Path>>(&mut self, buf: &[u8], path: P) -> io::Result<usize> {
         let path_ref = path.as_ref();
         std::future::poll_fn(|cx| {
-            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 return cancelled_poll();
             }
             match self.inner.send_to(buf, path_ref) {
@@ -420,7 +420,7 @@ impl UnixDatagram {
         }
 
         std::future::poll_fn(|cx| {
-            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 return cancelled_poll();
             }
             match self.inner.recv_from(buf) {
@@ -467,7 +467,7 @@ impl UnixDatagram {
     /// ```
     pub async fn send(&mut self, buf: &[u8]) -> io::Result<usize> {
         std::future::poll_fn(|cx| {
-            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 return cancelled_poll();
             }
             match self.inner.send(buf) {
@@ -513,7 +513,7 @@ impl UnixDatagram {
     /// ```
     pub async fn recv(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         std::future::poll_fn(|cx| {
-            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 return cancelled_poll();
             }
             match self.inner.recv(buf) {
@@ -627,7 +627,7 @@ impl UnixDatagram {
     pub fn poll_recv_ready(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         use std::os::unix::io::AsRawFd;
 
-        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return cancelled_poll();
         }
 
@@ -653,7 +653,7 @@ impl UnixDatagram {
         use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
         use std::os::unix::io::AsFd;
 
-        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             return cancelled_poll();
         }
 
@@ -691,7 +691,7 @@ impl UnixDatagram {
         use std::os::unix::io::AsRawFd;
 
         std::future::poll_fn(|cx| {
-            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 return cancelled_poll();
             }
             match socket::recv(
@@ -749,7 +749,7 @@ impl UnixDatagram {
         use std::os::unix::io::AsRawFd;
 
         std::future::poll_fn(|cx| {
-            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 return cancelled_poll();
             }
             let mut iov = [IoSliceMut::new(buf)];

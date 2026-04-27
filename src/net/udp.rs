@@ -116,7 +116,7 @@ impl UdpSocket {
 
             let mut last_err = None;
             for addr in addrs {
-                if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                     return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
                 }
                 match self.inner.connect(addr) {
@@ -173,7 +173,7 @@ impl UdpSocket {
         {
             let mut last_err = None;
             for addr in addrs {
-                if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                     return Poll::Ready(Err(io::Error::new(
                         io::ErrorKind::Interrupted,
                         "cancelled",
@@ -228,7 +228,7 @@ impl UdpSocket {
                 return Poll::Ready(Err(empty_udp_receive_buffer_error("recv_from")));
             }
 
-            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
             }
             match self.inner.recv_from(buf) {
@@ -266,7 +266,7 @@ impl UdpSocket {
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
             }
             match self.inner.send(buf) {
@@ -308,7 +308,7 @@ impl UdpSocket {
                 return Poll::Ready(Err(empty_udp_receive_buffer_error("recv")));
             }
 
-            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
             }
             match self.inner.recv(buf) {
@@ -354,7 +354,7 @@ impl UdpSocket {
                 return Poll::Ready(Err(empty_udp_receive_buffer_error("peek_from")));
             }
 
-            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 return Poll::Ready(Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled")));
             }
             match self.inner.peek_from(buf) {

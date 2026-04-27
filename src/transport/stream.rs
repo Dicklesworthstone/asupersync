@@ -225,7 +225,7 @@ impl<S: SymbolStream + Unpin + ?Sized> Future for CollectToSetFuture<'_, S> {
             return Poll::Ready(Err(StreamError::PolledAfterCompletion));
         }
 
-        if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+        if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
             this.completed = true;
             return Poll::Ready(Err(StreamError::Cancelled));
         }
@@ -371,7 +371,7 @@ where
         }
         let mut rejected = 0usize;
         loop {
-            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 return Poll::Ready(Some(Err(StreamError::Cancelled)));
             }
 
@@ -438,7 +438,7 @@ impl<S: SymbolStream + Unpin> SymbolStream for MergedStream<S> {
         let mut idx = self.current;
 
         while checked < self.streams.len() {
-            if crate::cx::Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+            if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                 return Poll::Ready(Some(Err(StreamError::Cancelled)));
             }
 

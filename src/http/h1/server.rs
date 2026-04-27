@@ -380,7 +380,7 @@ where
         cx: &mut Context<'_>,
         mut shutdown_fut: Option<&mut ShutdownWaitFuture<'_>>,
     ) -> bool {
-        Cx::current().is_some_and(|current| current.checkpoint().is_err())
+        Cx::with_current(|current| current.checkpoint().is_err()).unwrap_or(false)
             || self
                 .shutdown_signal
                 .as_ref()
@@ -435,7 +435,7 @@ where
                 break;
             }
 
-            if Cx::current().is_some_and(|cx| cx.checkpoint().is_err()) {
+            if Cx::with_current(|cx| cx.checkpoint().is_err()).unwrap_or(false) {
                 state.phase = ConnectionPhase::Closing;
                 break;
             }
@@ -531,7 +531,7 @@ where
                 };
                 framed.send(reject_resp)?;
                 poll_fn(|cx| {
-                    if Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                    if Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                         return Poll::Ready(Err(HttpError::Io(std::io::Error::new(
                             std::io::ErrorKind::Interrupted,
                             "connection cancelled",
@@ -552,7 +552,7 @@ where
                     .expect("reject expectation should build a response");
                 framed.send(reject)?;
                 poll_fn(|cx| {
-                    if Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                    if Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                         return Poll::Ready(Err(HttpError::Io(std::io::Error::new(
                             std::io::ErrorKind::Interrupted,
                             "connection cancelled",
@@ -577,7 +577,7 @@ where
                     .expect("continue expectation should build a response");
                 framed.send(interim)?;
                 poll_fn(|cx| {
-                    if Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                    if Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                         return Poll::Ready(Err(HttpError::Io(std::io::Error::new(
                             std::io::ErrorKind::Interrupted,
                             "connection cancelled",
@@ -640,7 +640,7 @@ where
             framed.send(resp)?;
             // `Framed::send` only encodes into the internal write buffer; flush to the socket.
             poll_fn(|cx| {
-                if Cx::current().is_some_and(|c| c.checkpoint().is_err()) {
+                if Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
                     return Poll::Ready(Err(HttpError::Io(std::io::Error::new(
                         std::io::ErrorKind::Interrupted,
                         "connection cancelled",
