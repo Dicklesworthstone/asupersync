@@ -334,9 +334,9 @@ fn is_prime(n: usize) -> bool {
 /// metadata that is the wrong shape — a hostile peer crafting an
 /// invalid FEC-OTI could DoS the receiver via a crash. The fix
 /// mirrors the established fail-closed pattern for tuple_indices
-/// (br-asupersync-hiimy9): downgrade the validity checks to
-/// `debug_assert!` (development-time signal only) and return a
-/// SENTINEL `LtTuple::default()` (all zeros) on invalid input.
+/// (br-asupersync-hiimy9): remove assertion panics entirely and
+/// return a SENTINEL `LtTuple::default()` (all zeros) on invalid
+/// input.
 /// Downstream `tuple_indices` then sees the zeroed tuple, fails its
 /// own validity check (zero degrees), and returns an empty Vec —
 /// the encoder/decoder naturally surfaces an "invalid encoding"
@@ -363,12 +363,12 @@ pub fn tuple(
     .unwrap_or_default()
 }
 
-/// br-asupersync-pphjvo: fallible variant of [`tuple`] that returns
-/// `None` on any input that fails the RFC 6330 validity gate
-/// (W <= 1, P == 0, P1 != smallest_prime_ge(P), J/W/P1 exceeding
-/// u32::MAX). Use this from receiver paths that handle attacker-
-/// influenced FEC-OTI and want to reject malformed inputs without
-/// crashing.
+/// Fallible variant of [`tuple`] for malformed RFC 6330 inputs.
+///
+/// br-asupersync-pphjvo: returns `None` when the RFC 6330 validity
+/// gate fails (W <= 1, P == 0, P1 != smallest_prime_ge(P), or
+/// J/W/P1 exceeding u32::MAX). The fail-closed contract applies in
+/// all build modes, including debug/test builds.
 #[must_use]
 pub fn try_tuple(
     systematic_index: usize,
@@ -386,10 +386,6 @@ pub fn try_tuple(
         && u32::try_from(systematic_index).is_ok()
         && u32::try_from(lt_width).is_ok()
         && u32::try_from(pi_modulus).is_ok();
-    debug_assert!(
-        valid,
-        "tuple: malformed input — check FEC-OTI validation"
-    );
     if !valid {
         return None;
     }
@@ -467,12 +463,12 @@ pub fn tuple_indices(tuple: LtTuple, w: usize, p: usize, p1: usize) -> Vec<usize
     // receivable FEC code that is the wrong shape: a hostile peer
     // sending a malformed FEC-OTI that routed to this function
     // could DoS the receiver via a crash. The fix downgrades the
-    // assertions to `debug_assert!` (development-time signal only)
-    // AND adds an early-return-empty-Vec at the top of the
-    // function for any input that violates the documented
-    // pre-conditions. The caller (encoder/decoder) sees an empty
-    // schedule and naturally surfaces an "invalid encoding" error
-    // up the public boundary instead of crashing the process.
+    // assertion panics entirely and adds an early-return-empty-Vec
+    // at the top of the function for any input that violates the
+    // documented pre-conditions. The caller (encoder/decoder) sees
+    // an empty schedule and naturally surfaces an "invalid
+    // encoding" error up the public boundary instead of crashing
+    // the process.
     let expected_p1 = next_prime_ge(p);
     let valid = w > 1
         && p > 0
@@ -486,10 +482,6 @@ pub fn tuple_indices(tuple: LtTuple, w: usize, p: usize, p1: usize) -> Vec<usize
         && tuple.a1 < p1
         && tuple.b < w
         && tuple.b1 < p1;
-    debug_assert!(
-        valid,
-        "tuple_indices: malformed input — check FEC-OTI validation"
-    );
     if !valid {
         return Vec::new();
     }
@@ -855,76 +847,78 @@ mod tests {
     }
 
     #[test]
-    fn tuple_rejects_non_canonical_prime_p1() {
-        let result = std::panic::catch_unwind(|| tuple(254, 17, 10, 13, 0));
-        assert!(
-            result.is_err(),
-            "tuple should reject larger prime P1 values that drift from RFC 6330"
+    fn tuple_returns_zero_sentinel_for_non_canonical_prime_p1() {
+        let tuple = tuple(254, 17, 10, 13, 0);
+        assert_eq!(
+            tuple,
+            LtTuple::default(),
+            "tuple should fail closed with the zero sentinel for larger prime P1 values"
         );
     }
 
     #[test]
-    fn tuple_rejects_composite_p1() {
-        let result = std::panic::catch_unwind(|| tuple(254, 17, 10, 12, 0));
-        assert!(
-            result.is_err(),
-            "tuple should reject composite P1 values instead of silently drifting"
+    fn tuple_returns_zero_sentinel_for_composite_p1() {
+        let tuple = tuple(254, 17, 10, 12, 0);
+        assert_eq!(
+            tuple,
+            LtTuple::default(),
+            "tuple should fail closed with the zero sentinel for composite P1 values"
         );
     }
 
     #[cfg(target_pointer_width = "64")]
     #[test]
-    fn tuple_rejects_oversized_width_before_u32_truncation() {
+    fn tuple_returns_zero_sentinel_for_oversized_width_before_u32_truncation() {
         let too_wide = (u32::MAX as usize) + 1;
-        let result = std::panic::catch_unwind(|| tuple(5, too_wide, 17, 17, 0));
-        assert!(
-            result.is_err(),
-            "tuple should fail closed when W exceeds RFC 6330 u32 arithmetic"
+        let tuple = tuple(5, too_wide, 17, 17, 0);
+        assert_eq!(
+            tuple,
+            LtTuple::default(),
+            "tuple should fail closed with the zero sentinel when W exceeds RFC 6330 u32 arithmetic"
         );
     }
 
     #[cfg(target_pointer_width = "64")]
     #[test]
-    fn tuple_rejects_oversized_systematic_index_before_u32_truncation() {
+    fn tuple_returns_zero_sentinel_for_oversized_systematic_index_before_u32_truncation() {
         let too_large_j = (u32::MAX as usize) + 1;
-        let result = std::panic::catch_unwind(|| tuple(too_large_j, 17, 10, 11, 0));
-        assert!(
-            result.is_err(),
-            "tuple should fail closed when J exceeds RFC 6330 u32 arithmetic"
+        let tuple = tuple(too_large_j, 17, 10, 11, 0);
+        assert_eq!(
+            tuple,
+            LtTuple::default(),
+            "tuple should fail closed with the zero sentinel when J exceeds RFC 6330 u32 arithmetic"
         );
     }
 
     #[test]
-    fn tuple_indices_reject_non_canonical_p1() {
-        let result = std::panic::catch_unwind(|| {
-            tuple_indices(
-                LtTuple {
-                    d: 2,
-                    a: 4,
-                    b: 9,
-                    d1: 2,
-                    a1: 5,
-                    b1: 1,
-                },
-                17,
-                10,
-                13,
-            )
-        });
+    fn tuple_indices_return_empty_vec_for_non_canonical_p1() {
+        let result = tuple_indices(
+            LtTuple {
+                d: 2,
+                a: 4,
+                b: 9,
+                d1: 2,
+                a1: 5,
+                b1: 1,
+            },
+            17,
+            10,
+            13,
+        );
         assert!(
-            result.is_err(),
-            "tuple_indices should reject non-canonical P1 values"
+            result.is_empty(),
+            "tuple_indices should fail closed with an empty schedule for non-canonical P1 values"
         );
     }
 
-    fn assert_tuple_indices_rejects_invalid_tuple(tuple: LtTuple, message: &str) {
-        let result = std::panic::catch_unwind(|| tuple_indices(tuple, 17, 10, 11));
-        assert!(result.is_err(), "{message}");
+    fn assert_tuple_indices_returns_empty_on_invalid_tuple(tuple: LtTuple, message: &str) {
+        let result = tuple_indices(tuple, 17, 10, 11);
+        assert!(result.is_empty(), "{message}");
     }
 
     #[test]
     fn tuple_indices_reject_zero_degrees() {
-        assert_tuple_indices_rejects_invalid_tuple(
+        assert_tuple_indices_returns_empty_on_invalid_tuple(
             LtTuple {
                 d: 0,
                 a: 4,
@@ -935,7 +929,7 @@ mod tests {
             },
             "tuple_indices should reject zero LT degree instead of silently emitting an extra LT index",
         );
-        assert_tuple_indices_rejects_invalid_tuple(
+        assert_tuple_indices_returns_empty_on_invalid_tuple(
             LtTuple {
                 d: 2,
                 a: 4,
@@ -950,7 +944,7 @@ mod tests {
 
     #[test]
     fn tuple_indices_reject_zero_steps_before_iteration() {
-        assert_tuple_indices_rejects_invalid_tuple(
+        assert_tuple_indices_returns_empty_on_invalid_tuple(
             LtTuple {
                 d: 2,
                 a: 0,
@@ -961,7 +955,7 @@ mod tests {
             },
             "tuple_indices should reject zero LT step instead of producing degenerate duplicate walks",
         );
-        assert_tuple_indices_rejects_invalid_tuple(
+        assert_tuple_indices_returns_empty_on_invalid_tuple(
             LtTuple {
                 d: 2,
                 a: 4,
@@ -976,7 +970,7 @@ mod tests {
 
     #[test]
     fn tuple_indices_reject_oversized_degrees() {
-        assert_tuple_indices_rejects_invalid_tuple(
+        assert_tuple_indices_returns_empty_on_invalid_tuple(
             LtTuple {
                 d: RFC6330_MAX_LT_DEGREE + 1,
                 a: 4,
@@ -987,7 +981,7 @@ mod tests {
             },
             "tuple_indices should reject oversized LT degree instead of expanding an out-of-contract walk",
         );
-        assert_tuple_indices_rejects_invalid_tuple(
+        assert_tuple_indices_returns_empty_on_invalid_tuple(
             LtTuple {
                 d: 2,
                 a: 4,
@@ -1611,7 +1605,10 @@ mod tests {
         // sentinel via its existing validity gate (zero degrees fail
         // the matches!(d1, 2 | 3) check).
         let indices = tuple_indices(sentinel, 4, 1, 2);
-        assert!(indices.is_empty(), "tuple_indices must reject zero sentinel");
+        assert!(
+            indices.is_empty(),
+            "tuple_indices must reject zero sentinel"
+        );
     }
 
     /// br-asupersync-pphjvo: for VALID inputs, try_tuple returns
