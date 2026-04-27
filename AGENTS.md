@@ -111,7 +111,7 @@ We only use **Cargo** in this project, NEVER any other package manager.
 
 ### Async Runtime: THIS IS IT (NO TOKIO)
 
-**This project IS the async runtime. Tokio and the entire tokio ecosystem are FORBIDDEN.**
+**The asupersync runtime crate has no transitive dependency on tokio.** Inside `src/`, `tokio`, `hyper`, `reqwest`, `axum`, `tower` (tokio adapter only — the `tower` feature flag exists for trait compat), `async-std`, and `smol` are forbidden, as are any crates that transitively depend on tokio.
 
 - **Structured concurrency**: `Cx`, `Scope`, `region()` — no orphan tasks
 - **Cancel-correct channels**: Two-phase `reserve()/send()` — no data loss on cancellation
@@ -119,7 +119,14 @@ We only use **Cargo** in this project, NEVER any other package manager.
 - **Deterministic testing**: `LabRuntime` with virtual time, DPOR, oracles
 - **Capability security**: All effects flow through explicit `Cx`; no ambient authority
 
-**Forbidden crates**: `tokio`, `hyper`, `reqwest`, `axum`, `tower` (tokio adapter only — the `tower` feature flag exists for trait compat), `async-std`, `smol`, or any crate that transitively depends on tokio.
+**Documented carve-outs** (br-asupersync-g7a0a9): the tokio prohibition applies to the asupersync *runtime crate*. Two satellite workspace members legitimately depend on tokio for purposes that are scoped away from the runtime:
+
+1. `asupersync-tokio-compat/` — a deliberate compat-shim crate whose entire purpose is providing tokio-API-shaped wrappers backed by asupersync. By design it depends on tokio (for trait/type signatures) and is opt-in via the `tokio-compat` feature.
+2. `conformance/` — the workspace's RFC-conformance test crate depends on `tokio = { version = "1.0", features = ["time"] }` for sleep/timeout primitives in vendor-comparison test scaffolding only.
+
+Additionally, `cargo tree` (which shows the union of normal + dev-dependency edges) reveals tokio in the dep graph via `opentelemetry_sdk`'s `testing` feature — required for `InMemoryMetricExporter` in our otel test suite. Resolver 3 (Edition 2024) keeps this scoped to dev-dep builds, so production consumers of `asupersync` do not link tokio.
+
+**Verification**: `cargo tree -e normal --workspace -i tokio` should show ONLY `asupersync-tokio-compat` and `asupersync-conformance` as the depending crates. Any other crate showing up in that output is a regression and must be triaged.
 
 **Pattern**: All async functions take `&Cx` as first parameter. The `Cx` flows down through structured concurrency scopes.
 
