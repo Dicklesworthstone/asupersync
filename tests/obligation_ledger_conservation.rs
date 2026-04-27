@@ -291,6 +291,15 @@ fn run_scenario_in_runtime(runtime: &mut LabRuntime, scenario: &ConcurrentScenar
                         op_idx, region_id, pending_after
                     ));
                 }
+
+                // Clear all tokens to prevent double-resolution attempts after region cancellation.
+                // In the real runtime, tokens become unusable after their region is cancelled.
+                let mut tokens = tokens_by_task.lock().unwrap();
+                for task_tokens in tokens.values_mut() {
+                    for token_slot in task_tokens.iter_mut() {
+                        *token_slot = None;
+                    }
+                }
             }
 
             OperationType::FinalizeRegion { region_id } => {
