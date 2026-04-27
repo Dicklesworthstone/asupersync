@@ -875,10 +875,18 @@ impl WorkerCoordinator {
                 self.enqueue_job_message(*job_id, WorkerOp::FinalizeJob { job_id: *job_id })
             }
             WorkerOp::FinalizeCompleted { job_id } => {
-                if !self.jobs.contains_key(job_id) {
-                    return Err(WorkerChannelError::UnknownJobId(*job_id));
+                let job = self
+                    .jobs
+                    .get_mut(job_id)
+                    .ok_or(WorkerChannelError::UnknownJobId(*job_id))?;
+                if job.state != JobState::Finalizing {
+                    return Err(WorkerChannelError::InvalidTransition {
+                        job_id: *job_id,
+                        from: job.state,
+                        to: JobState::Completed,
+                    });
                 }
-                self.remove_job(*job_id);
+                job.transition_to(JobState::Completed)?;
                 Ok(())
             }
             WorkerOp::ShutdownCompleted => {
@@ -1414,6 +1422,28 @@ mod tests {
         let finalize = test_worker_envelope(5, 5, 4, WorkerOp::FinalizeCompleted { job_id: 1 });
         coord.handle_inbound(&finalize).unwrap();
         assert_eq!(coord.job_state(1), Some(JobState::Completed));
+        assert_eq!(coord.inflight_count(), 0);
+        assert_eq!(coord.remove_job(1), Some(JobState::Completed));
+        assert_eq!(coord.job_state(1), None);
+    }
+
+    #[test]
+    fn coordinator_rejects_finalize_completed_before_finalize_phase() {
+        let mut coord = WorkerCoordinator::new(42);
+        coord.handle_inbound(&bootstrap_ready_envelope(1)).unwrap();
+        coord.spawn_job(1, 100, 200, 300, vec![]).unwrap();
+        let _ = coord.drain_outbox();
+
+        let finalize = test_worker_envelope(2, 2, 1, WorkerOp::FinalizeCompleted { job_id: 1 });
+        assert_eq!(
+            coord.handle_inbound(&finalize),
+            Err(WorkerChannelError::InvalidTransition {
+                job_id: 1,
+                from: JobState::Queued,
+                to: JobState::Completed,
+            })
+        );
+        assert_eq!(coord.job_state(1), Some(JobState::Queued));
     }
 
     #[test]
