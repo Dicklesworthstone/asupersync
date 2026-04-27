@@ -85,8 +85,39 @@ pub fn metadata_byte_size(metadata: &super::streaming::Metadata) -> usize {
     total
 }
 
-/// Reject `metadata` with `Status::resource_exhausted` when its aggregate byte
-/// size exceeds `limit`.
+fn metadata_key_uses_grpc_prefix(key: &str) -> bool {
+    key.get(..5)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("grpc-"))
+}
+
+fn grpc_request_header_is_allowed(key: &str) -> bool {
+    key.eq_ignore_ascii_case("grpc-timeout")
+        || key.eq_ignore_ascii_case("grpc-encoding")
+        || key.eq_ignore_ascii_case("grpc-accept-encoding")
+        || key.eq_ignore_ascii_case("grpc-message-type")
+}
+
+fn validate_inbound_metadata(metadata: &super::streaming::Metadata) -> Result<(), Status> {
+    for (key, value) in metadata.iter() {
+        if metadata_key_uses_grpc_prefix(key) && !grpc_request_header_is_allowed(key) {
+            return Err(Status::invalid_argument(format!(
+                "client metadata key uses reserved grpc-* prefix: {key}"
+            )));
+        }
+
+        if let super::streaming::MetadataValue::Ascii(text) = value {
+            if super::streaming::sanitize_metadata_ascii_value(text).as_ref() != text {
+                return Err(Status::invalid_argument(format!(
+                    "metadata value for {key} contains disallowed control or non-ASCII bytes"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Reject inbound `metadata` when it violates the gRPC header-content rules or
+/// when its aggregate byte size exceeds `limit`.
 ///
 /// Transport adapters MUST call this on inbound HEADERS and TRAILERS frames
 /// before storing them in long-lived `CallContext`s, so a hostile peer cannot
@@ -98,15 +129,17 @@ pub fn metadata_byte_size(metadata: &super::streaming::Metadata) -> usize {
 /// 0 disables enforcement (matches the convention used elsewhere in
 /// this crate where 0 means "no cap").
 ///
-/// Returns `Ok(())` when the metadata is within bounds, or
-/// `Err(Status::resource_exhausted(...))` carrying both the actual
-/// and the configured limit so SREs can diagnose the rejection.
+/// Returns `Ok(())` when the metadata is valid and within bounds, or
+/// `Err(Status::invalid_argument(...))` for invalid header content or reserved
+/// client metadata, or `Err(Status::resource_exhausted(...))` carrying both the
+/// actual and the configured limit so SREs can diagnose size-based rejections.
 ///
 /// br-asupersync-i2bae8.
 pub fn enforce_metadata_size_limit(
     metadata: &super::streaming::Metadata,
     limit: usize,
 ) -> Result<(), Status> {
+    validate_inbound_metadata(metadata)?;
     if limit == 0 {
         return Ok(());
     }
@@ -1713,6 +1746,56 @@ mod tests {
     }
 
     #[test]
+    fn enforce_metadata_size_limit_rejects_ascii_control_chars() {
+        init_test("enforce_metadata_size_limit_rejects_ascii_control_chars");
+        let metadata = super::super::streaming::Metadata::from_raw_entries_for_tests(vec![(
+            "x-request-id".to_string(),
+            super::super::streaming::MetadataValue::Ascii("line1\r\nline2".to_string()),
+        )]);
+
+        let status = enforce_metadata_size_limit(&metadata, 8 * 1024)
+            .expect_err("CRLF-bearing metadata must be rejected");
+        assert_eq!(status.code(), super::super::status::Code::InvalidArgument);
+        let msg = format!("{status}");
+        assert!(
+            msg.contains("x-request-id") && msg.contains("disallowed"),
+            "error message must mention the offending header, got: {msg}"
+        );
+        crate::test_complete!("enforce_metadata_size_limit_rejects_ascii_control_chars");
+    }
+
+    #[test]
+    fn enforce_metadata_size_limit_rejects_reserved_grpc_header() {
+        init_test("enforce_metadata_size_limit_rejects_reserved_grpc_header");
+        let mut metadata = super::super::streaming::Metadata::new();
+        metadata.insert("grpc-status", "0");
+
+        let status = enforce_metadata_size_limit(&metadata, 8 * 1024)
+            .expect_err("client grpc-status metadata must be rejected");
+        assert_eq!(status.code(), super::super::status::Code::InvalidArgument);
+        let msg = format!("{status}");
+        assert!(
+            msg.contains("grpc-status") && msg.contains("reserved grpc-* prefix"),
+            "error message must mention reserved grpc-* prefix, got: {msg}"
+        );
+        crate::test_complete!("enforce_metadata_size_limit_rejects_reserved_grpc_header");
+    }
+
+    #[test]
+    fn enforce_metadata_size_limit_allows_grpc_request_protocol_headers() {
+        init_test("enforce_metadata_size_limit_allows_grpc_request_protocol_headers");
+        let mut metadata = super::super::streaming::Metadata::new();
+        metadata.insert("grpc-timeout", "5S");
+        metadata.insert("grpc-encoding", "identity");
+        metadata.insert("grpc-accept-encoding", "identity,gzip");
+        metadata.insert("grpc-message-type", "test.EchoRequest");
+
+        enforce_metadata_size_limit(&metadata, 8 * 1024)
+            .expect("protocol-owned request grpc-* headers must remain allowed");
+        crate::test_complete!("enforce_metadata_size_limit_allows_grpc_request_protocol_headers");
+    }
+
+    #[test]
     fn server_builder_max_metadata_size_overrides_default() {
         init_test("server_builder_max_metadata_size_overrides_default");
         let server = ServerBuilder::new().max_metadata_size(16 * 1024).build();
@@ -2395,5 +2478,32 @@ mod tests {
         let response = result.expect("call within cap must succeed");
         assert_eq!(response.get_ref().as_ref(), b"ok");
         crate::test_complete!("test_dispatch_unary_within_metadata_cap_succeeds");
+    }
+
+    #[test]
+    fn test_dispatch_unary_rejects_invalid_metadata_before_handler() {
+        use futures_lite::future::block_on;
+        init_test("test_dispatch_unary_rejects_invalid_metadata_before_handler");
+        let server = Server::builder().max_metadata_size(8 * 1024).build();
+        let metadata = Metadata::from_raw_entries_for_tests(vec![(
+            "x-request-id".to_string(),
+            crate::grpc::MetadataValue::Ascii("line1\r\nline2".to_string()),
+        )]);
+        let request = Request::with_metadata(Bytes::new(), metadata);
+
+        let handler_invoked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handler_invoked_clone = std::sync::Arc::clone(&handler_invoked);
+        let result = block_on(server.dispatch_unary(request, move |_req| {
+            handler_invoked_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+            async move { Ok(Response::new(Bytes::from_static(b"ok"))) }
+        }));
+
+        let err = result.expect_err("invalid metadata must reject");
+        assert_eq!(err.code(), crate::grpc::status::Code::InvalidArgument);
+        assert!(
+            !handler_invoked.load(std::sync::atomic::Ordering::Relaxed),
+            "handler must NOT be invoked when inbound metadata is malformed"
+        );
+        crate::test_complete!("test_dispatch_unary_rejects_invalid_metadata_before_handler");
     }
 }

@@ -335,6 +335,12 @@ impl Metadata {
         }
     }
 
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn from_raw_entries_for_tests(entries: Vec<(String, MetadataValue)>) -> Self {
+        Self { entries }
+    }
+
     /// Reserve capacity for at least `additional` more entries.
     pub fn reserve(&mut self, additional: usize) {
         self.entries.reserve(additional);
