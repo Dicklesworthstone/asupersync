@@ -205,11 +205,20 @@ pub async fn mpsc_stress_test(
                     eprintln!("CONSISTENCY FAILURE in round {}", round + 1);
                 }
             }
+            // br-asupersync-xzqhw3: a round that fails to drive the
+            // consumer to completion (panic, send/recv error, runtime
+            // shutdown) used to be silently logged — total_violations
+            // stayed 0, so result.atomicity_maintained remained true
+            // and the unit test passed even when a round's consumer
+            // never returned. Count both incomplete-round shapes as
+            // violations so the test surfaces them.
             Ok(None) => {
                 eprintln!("Round {} failed to complete properly", round + 1);
+                total_violations += 1;
             }
             Err(_) => {
                 eprintln!("Round {} timed out", round + 1);
+                total_violations += 1;
             }
         }
     }
