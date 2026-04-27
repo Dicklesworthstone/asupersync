@@ -109,6 +109,17 @@ fn test_opcode_validation() -> WsConformanceResult {
                     opcode_byte
                 ));
             }
+
+            let mut codec = FrameCodec::new();
+            let mut buf = BytesMut::from(&[0x80 | *opcode_byte, 0x00][..]);
+            match codec.decode(&mut buf) {
+                Err(WsError::InvalidOpcode(actual)) if actual == *opcode_byte => {}
+                other => {
+                    return Err(format!(
+                        "Reserved opcode 0x{opcode_byte:X} should fail frame decode, got {other:?}"
+                    ));
+                }
+            }
         }
 
         Ok(())
@@ -128,50 +139,24 @@ fn test_opcode_validation() -> WsConformanceResult {
 #[allow(dead_code)]
 fn test_reserved_bits() -> WsConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
-        // Reserved bits (RSV1, RSV2, RSV3) must be 0 unless extension defines meaning
-
-        // Test frame with reserved bits set (should be accepted but noted)
-        let frame = Frame {
-            fin: true,
-            rsv1: true, // Extension may use this
-            rsv2: false,
-            rsv3: false,
-            opcode: Opcode::Text,
-            masked: false,
-            mask: None,
-            payload: b"test".to_vec().into(),
-        };
-
-        // Frame structure should allow reserved bits
-        // (Extensions can define meaning for these bits)
-        if frame.rsv1 != true {
-            return Err("RSV1 bit should be preserved".to_string());
-        }
-
-        // Test all combinations of reserved bits
-        let rsv_combinations = [
-            (false, false, false),
-            (true, false, false),
-            (false, true, false),
-            (false, false, true),
-            (true, true, true),
+        // RFC 6455 §5.2: non-zero RSV bits without a negotiated extension MUST fail.
+        let test_cases = [
+            (0xC1, "RSV1"),
+            (0xA1, "RSV2"),
+            (0x91, "RSV3"),
+            (0xF1, "RSV1+RSV2+RSV3"),
         ];
 
-        for (rsv1, rsv2, rsv3) in &rsv_combinations {
-            let frame = Frame {
-                fin: true,
-                rsv1: *rsv1,
-                rsv2: *rsv2,
-                rsv3: *rsv3,
-                opcode: Opcode::Binary,
-                masked: false,
-                mask: None,
-                payload: Vec::new().into(),
-            };
-
-            // All combinations should be structurally valid
-            if frame.rsv1 != *rsv1 || frame.rsv2 != *rsv2 || frame.rsv3 != *rsv3 {
-                return Err("Reserved bits not preserved correctly".to_string());
+        for (first_byte, label) in test_cases {
+            let mut codec = FrameCodec::new();
+            let mut buf = BytesMut::from(&[first_byte, 0x00][..]);
+            match codec.decode(&mut buf) {
+                Err(WsError::ReservedBitsSet) => {}
+                other => {
+                    return Err(format!(
+                        "{label} set without extension should fail decode, got {other:?}"
+                    ));
+                }
             }
         }
 
@@ -325,47 +310,9 @@ fn test_masking_key_format() -> WsConformanceResult {
 #[allow(dead_code)]
 fn test_control_frame_constraints() -> WsConformanceResult {
     let (result, elapsed) = timed_test(|| -> Result<(), String> {
-        // Control frames have specific constraints
-
         let control_opcodes = [Opcode::Close, Opcode::Ping, Opcode::Pong];
 
         for opcode in &control_opcodes {
-            // Control frames must have FIN=1
-            let frame_without_fin = Frame {
-                fin: false, // Invalid for control frames
-                rsv1: false,
-                rsv2: false,
-                rsv3: false,
-                opcode: *opcode,
-                masked: false,
-                mask: None,
-                payload: Vec::new().into(),
-            };
-
-            // This should be structurally valid but semantically invalid
-            if frame_without_fin.fin {
-                return Err("Test setup error: FIN should be false".to_string());
-            }
-
-            // Control frames must not exceed 125 bytes payload
-            let large_payload = vec![0u8; 126]; // Too large for control frame
-            let oversized_frame = Frame {
-                fin: true,
-                rsv1: false,
-                rsv2: false,
-                rsv3: false,
-                opcode: *opcode,
-                masked: false,
-                mask: None,
-                payload: large_payload.into(),
-            };
-
-            // This should be detected as invalid
-            if oversized_frame.payload.len() <= 125 {
-                return Err("Test setup error: payload should be oversized".to_string());
-            }
-
-            // Valid control frame
             let valid_frame = Frame {
                 fin: true,
                 rsv1: false,
@@ -383,6 +330,32 @@ fn test_control_frame_constraints() -> WsConformanceResult {
 
             if valid_frame.payload.len() > 125 {
                 return Err(format!("Valid {:?} frame payload too large", opcode));
+            }
+
+            let fragmented_first_byte = (*opcode as u8) & 0x0F;
+            let mut fragmented_codec = FrameCodec::new();
+            let mut fragmented = BytesMut::from(&[fragmented_first_byte, 0x00][..]);
+            match fragmented_codec.decode(&mut fragmented) {
+                Err(WsError::FragmentedControlFrame) => {}
+                other => {
+                    return Err(format!(
+                        "Fragmented {:?} should fail decode, got {other:?}",
+                        opcode
+                    ));
+                }
+            }
+
+            let mut oversized_codec = FrameCodec::new();
+            let mut oversized = BytesMut::new();
+            oversized.extend_from_slice(&[0x80 | (*opcode as u8), 0x7E, 0x00, 0x7E]);
+            match oversized_codec.decode(&mut oversized) {
+                Err(WsError::ControlFrameTooLarge(126)) => {}
+                other => {
+                    return Err(format!(
+                        "Oversized {:?} should fail with 125-byte limit, got {other:?}",
+                        opcode
+                    ));
+                }
             }
         }
 
