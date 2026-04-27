@@ -462,6 +462,12 @@ pub trait Streaming: Send {
 /// backpressure is applied to the sender.
 pub(crate) const MAX_STREAM_BUFFERED: usize = 1024;
 
+fn wake_waiter(waiter: &mut Option<Waker>) {
+    if let Some(waiter) = waiter.take() {
+        waiter.wake();
+    }
+}
+
 /// A streaming request body.
 #[derive(Debug)]
 pub struct StreamingRequest<T> {
@@ -517,18 +523,14 @@ impl<T> StreamingRequest<T> {
             ));
         }
         self.items.push_back(item);
-        if let Some(waiter) = self.waiter.take() {
-            waiter.wake();
-        }
+        wake_waiter(&mut self.waiter);
         Ok(())
     }
 
     /// Closes the stream. Remaining buffered items can still be consumed.
     pub fn close(&mut self) {
         self.closed = true;
-        if let Some(waiter) = self.waiter.take() {
-            waiter.wake();
-        }
+        wake_waiter(&mut self.waiter);
     }
 }
 
@@ -709,18 +711,14 @@ impl<T> ResponseStream<T> {
             ));
         }
         self.items.push_back(item);
-        if let Some(waiter) = self.waiter.take() {
-            waiter.wake();
-        }
+        wake_waiter(&mut self.waiter);
         Ok(())
     }
 
     /// Mark stream completion.
     pub fn close(&mut self) {
         self.closed = true;
-        if let Some(waiter) = self.waiter.take() {
-            waiter.wake();
-        }
+        wake_waiter(&mut self.waiter);
     }
 }
 
