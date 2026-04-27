@@ -11,6 +11,8 @@ use crate::codec::{Decoder, Encoder};
 use proptest::prelude::*;
 use proptest::strategy::Just;
 
+const STATEFUL_TRACE_MAX_BYTES: usize = 4 * 1024;
+
 /// Generate arbitrary byte buffers for fuzzing
 fn arb_bytes() -> impl Strategy<Value = Vec<u8>> {
     prop_oneof![
@@ -26,6 +28,21 @@ fn arb_bytes() -> impl Strategy<Value = Vec<u8>> {
         prop::collection::vec(any::<u8>(), 65537..=1048576), // Very large
         prop::collection::vec(Just(0u8), 0..=1024),          // All zeros
         prop::collection::vec(Just(255u8), 0..=1024),        // All 0xFF
+    ]
+}
+
+/// Generate bounded byte buffers for stateful fuzz traces.
+///
+/// Stateful traces compose many operations in one case, so per-operation payloads
+/// need a tighter cap than the one-shot codec stress tests.
+fn arb_stateful_bytes() -> impl Strategy<Value = Vec<u8>> {
+    prop_oneof![
+        Just(vec![]),
+        prop::collection::vec(any::<u8>(), 0..=16),
+        prop::collection::vec(any::<u8>(), 17..=1024),
+        prop::collection::vec(any::<u8>(), 1025..=STATEFUL_TRACE_MAX_BYTES),
+        prop::collection::vec(Just(0u8), 0..=STATEFUL_TRACE_MAX_BYTES),
+        prop::collection::vec(Just(255u8), 0..=STATEFUL_TRACE_MAX_BYTES),
     ]
 }
 
@@ -280,7 +297,7 @@ mod stress_fuzz {
         fn rapid_cycles(
             operations in prop::collection::vec(
                 prop_oneof![
-                    arb_bytes().prop_map(Operation::Encode),
+                    arb_stateful_bytes().prop_map(Operation::Encode),
                     Just(Operation::Decode),
                     Just(Operation::Reset)
                 ],
