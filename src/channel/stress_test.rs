@@ -455,7 +455,17 @@ pub async fn watch_stress_test() -> Result<(), Box<dyn std::error::Error>> {
 
         let sent = sender_handle.await;
 
-        // Collect results from watchers
+        // Collect results from watchers.
+        //
+        // br-asupersync-86m7dx: once the sender path was hardened to
+        // stop cleanly when all watchers have already exited, `sent`
+        // can legitimately be 0. The old unconditional
+        // `assert!(last_value > 0)` then turned that benign early-exit
+        // path into a harness failure. The honest invariant is:
+        // - no watcher may report a value beyond the last accepted send
+        // - if at least one send was accepted, at least one watcher
+        //   must have observed some update
+        let mut any_updates_seen = false;
         for handle in watchers {
             let (watcher_id, updates_seen, last_value) = handle.await;
             tracing::debug!(
@@ -464,7 +474,22 @@ pub async fn watch_stress_test() -> Result<(), Box<dyn std::error::Error>> {
                 last_value,
                 "watch_stress_test: watcher result"
             );
-            assert!(last_value > 0, "Watcher should see some updates");
+            assert!(
+                updates_seen <= sent,
+                "Watcher reported more updates than were accepted: watcher={watcher_id} updates_seen={updates_seen} sent={sent}"
+            );
+            assert!(
+                usize::try_from(last_value).is_ok_and(|value| value <= sent),
+                "Watcher observed value beyond accepted send range: watcher={watcher_id} last_value={last_value} sent={sent}"
+            );
+            any_updates_seen |= last_value > 0;
+        }
+
+        if sent > 0 {
+            assert!(
+                any_updates_seen,
+                "At least one watcher must observe an accepted update when sent={sent}"
+            );
         }
 
         tracing::info!(sent, "watch_stress_test: completed");
