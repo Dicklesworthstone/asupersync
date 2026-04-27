@@ -344,12 +344,12 @@ fn nats_real_queue_group_single_delivery() {
             })
             .await
             {
-                Ok(Ok(Some(message))) => Some(message),
-                Ok(Ok(None)) | Err(_) => None,
-                Ok(Err(err)) => panic!("worker receive failed: {err}"),
+                Ok(Ok(Some(message))) => Ok(Some(message)),
+                Ok(Ok(None)) | Err(_) => Ok(None),
+                Ok(Err(err)) => Err(err.to_string()),
             };
 
-            if received.is_some() {
+            if received.as_ref().ok().and_then(Option::as_ref).is_some() {
                 client
                     .unsubscribe(&cx, sub.sid())
                     .await
@@ -388,6 +388,8 @@ fn nats_real_queue_group_single_delivery() {
     publisher.join().expect("publisher thread");
     let result_a = worker_a.join().expect("worker a thread");
     let result_b = worker_b.join().expect("worker b thread");
+    let result_a = result_a.expect("worker a receive result");
+    let result_b = result_b.expect("worker b receive result");
 
     let delivered = [result_a.as_ref(), result_b.as_ref()]
         .into_iter()
