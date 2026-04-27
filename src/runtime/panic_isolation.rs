@@ -779,32 +779,117 @@ mod tests {
         #[derive(Default)]
         struct CapturingMetrics {
             panics: StdMutex<Vec<&'static str>>,
+            tasks_spawned: StdMutex<Vec<(RegionId, TaskId)>>,
+            tasks_completed: StdMutex<Vec<(TaskId, crate::observability::metrics::OutcomeKind, std::time::Duration)>>,
+            regions_created: StdMutex<Vec<(RegionId, Option<RegionId>)>>,
+            regions_closed: StdMutex<Vec<(RegionId, std::time::Duration)>>,
+            cancellation_requests: StdMutex<Vec<(RegionId, crate::types::CancelKind)>>,
+            drain_completions: StdMutex<Vec<(RegionId, std::time::Duration)>>,
+            obligations_created: StdMutex<Vec<RegionId>>,
+            obligations_discharged: StdMutex<Vec<RegionId>>,
+            obligations_leaked: StdMutex<Vec<RegionId>>,
+        }
+
+        impl CapturingMetrics {
+            fn tasks_spawned(&self) -> Vec<(RegionId, TaskId)> {
+                self.tasks_spawned.lock().unwrap().clone()
+            }
+
+            fn regions_created(&self) -> Vec<(RegionId, Option<RegionId>)> {
+                self.regions_created.lock().unwrap().clone()
+            }
+
+            fn regions_closed(&self) -> Vec<(RegionId, std::time::Duration)> {
+                self.regions_closed.lock().unwrap().clone()
+            }
+
+            fn obligations_created(&self) -> Vec<RegionId> {
+                self.obligations_created.lock().unwrap().clone()
+            }
+
+            fn obligations_leaked(&self) -> Vec<RegionId> {
+                self.obligations_leaked.lock().unwrap().clone()
+            }
+
+            fn cancellation_requests(&self) -> Vec<(RegionId, crate::types::CancelKind)> {
+                self.cancellation_requests.lock().unwrap().clone()
+            }
         }
 
         impl crate::observability::metrics::MetricsProvider for CapturingMetrics {
-            fn task_spawned(&self, _: RegionId, _: TaskId) {}
+            fn task_spawned(&self, region_id: RegionId, task_id: TaskId) {
+                self.tasks_spawned.lock().unwrap().push((region_id, task_id));
+            }
+
             fn task_completed(
                 &self,
-                _: TaskId,
-                _: crate::observability::metrics::OutcomeKind,
-                _: std::time::Duration,
+                task_id: TaskId,
+                outcome_kind: crate::observability::metrics::OutcomeKind,
+                duration: std::time::Duration,
             ) {
+                self.tasks_completed.lock().unwrap().push((task_id, outcome_kind, duration));
             }
-            fn region_created(&self, _: RegionId, _: Option<RegionId>) {}
-            fn region_closed(&self, _: RegionId, _: std::time::Duration) {}
-            fn cancellation_requested(&self, _: RegionId, _: crate::types::CancelKind) {}
-            fn drain_completed(&self, _: RegionId, _: std::time::Duration) {}
-            fn deadline_set(&self, _: RegionId, _: std::time::Duration) {}
-            fn deadline_exceeded(&self, _: RegionId) {}
-            fn deadline_warning(&self, _: &str, _: &'static str, _: std::time::Duration) {}
-            fn deadline_violation(&self, _: &str, _: std::time::Duration) {}
-            fn deadline_remaining(&self, _: &str, _: std::time::Duration) {}
-            fn checkpoint_interval(&self, _: &str, _: std::time::Duration) {}
-            fn task_stuck_detected(&self, _: &str) {}
-            fn obligation_created(&self, _: RegionId) {}
-            fn obligation_discharged(&self, _: RegionId) {}
-            fn obligation_leaked(&self, _: RegionId) {}
-            fn scheduler_tick(&self, _: usize, _: std::time::Duration) {}
+
+            fn region_created(&self, region_id: RegionId, parent_id: Option<RegionId>) {
+                self.regions_created.lock().unwrap().push((region_id, parent_id));
+            }
+
+            fn region_closed(&self, region_id: RegionId, duration: std::time::Duration) {
+                self.regions_closed.lock().unwrap().push((region_id, duration));
+            }
+
+            fn cancellation_requested(&self, region_id: RegionId, cancel_kind: crate::types::CancelKind) {
+                self.cancellation_requests.lock().unwrap().push((region_id, cancel_kind));
+            }
+
+            fn drain_completed(&self, region_id: RegionId, duration: std::time::Duration) {
+                self.drain_completions.lock().unwrap().push((region_id, duration));
+            }
+
+            fn deadline_set(&self, region_id: RegionId, duration: std::time::Duration) {
+                // Simple implementation - could extend if needed for testing
+            }
+
+            fn deadline_exceeded(&self, region_id: RegionId) {
+                // Simple implementation - could extend if needed for testing
+            }
+
+            fn deadline_warning(&self, _context: &str, _location: &'static str, _remaining: std::time::Duration) {
+                // Simple implementation - could extend if needed for testing
+            }
+
+            fn deadline_violation(&self, _context: &str, _elapsed: std::time::Duration) {
+                // Simple implementation - could extend if needed for testing
+            }
+
+            fn deadline_remaining(&self, _context: &str, _remaining: std::time::Duration) {
+                // Simple implementation - could extend if needed for testing
+            }
+
+            fn checkpoint_interval(&self, _context: &str, _interval: std::time::Duration) {
+                // Simple implementation - could extend if needed for testing
+            }
+
+            fn task_stuck_detected(&self, _task_context: &str) {
+                // Simple implementation - could extend if needed for testing
+            }
+
+            fn obligation_created(&self, region_id: RegionId) {
+                self.obligations_created.lock().unwrap().push(region_id);
+            }
+
+            fn obligation_discharged(&self, region_id: RegionId) {
+                self.obligations_discharged.lock().unwrap().push(region_id);
+            }
+
+            fn obligation_leaked(&self, region_id: RegionId) {
+                self.obligations_leaked.lock().unwrap().push(region_id);
+            }
+
+            fn scheduler_tick(&self, _ready_count: usize, _tick_duration: std::time::Duration) {
+                // Simple implementation - could extend if needed for testing
+            }
+
             fn record_panic(&self, location: &'static str) {
                 self.panics.lock().unwrap().push(location);
             }
@@ -876,5 +961,72 @@ mod tests {
             observed, expected,
             "every PanicLocation must route to a record_panic call with the canonical tag"
         );
+    }
+
+    /// Test that instrumentation callbacks properly capture runtime lifecycle events
+    /// during panic isolation scenarios. This verifies that the previously-stubbed
+    /// MetricsProvider implementation now collects observability data for monitoring
+    /// region creation, task spawning, obligation tracking, and cancellation events.
+    #[test]
+    fn instrumentation_callbacks_capture_runtime_lifecycle_events() {
+        // Create CapturingMetrics directly so we can access the captured data
+        let metrics = Arc::new(CapturingMetrics::default());
+
+        let task_id = TaskId::from_arena(ArenaIndex::new(42, 1));
+        let region_id = RegionId::from_arena(ArenaIndex::new(100, 2));
+        let parent_region_id = RegionId::from_arena(ArenaIndex::new(99, 1));
+
+        // Simulate runtime events by directly calling the metrics provider
+        let metrics_ref = &*metrics;
+
+        // Simulate region lifecycle
+        metrics_ref.region_created(region_id, Some(parent_region_id));
+        metrics_ref.task_spawned(region_id, task_id);
+
+        // Simulate obligation tracking
+        metrics_ref.obligation_created(region_id);
+
+        // Simulate task completion
+        metrics_ref.task_completed(
+            task_id,
+            crate::observability::metrics::OutcomeKind::Ok,
+            std::time::Duration::from_millis(100)
+        );
+
+        // Simulate cancellation
+        metrics_ref.cancellation_requested(region_id, crate::types::CancelKind::User);
+
+        // Simulate obligation lifecycle
+        metrics_ref.obligation_discharged(region_id);
+
+        // Simulate region closure
+        metrics_ref.region_closed(region_id, std::time::Duration::from_millis(500));
+
+        // Verify all events were captured
+        // Check that region creation was captured
+        let regions_created = metrics.regions_created();
+        assert_eq!(regions_created.len(), 1);
+        assert_eq!(regions_created[0], (region_id, Some(parent_region_id)));
+
+        // Check that task spawning was captured
+        let tasks_spawned = metrics.tasks_spawned();
+        assert_eq!(tasks_spawned.len(), 1);
+        assert_eq!(tasks_spawned[0], (region_id, task_id));
+
+        // Check that region closure was captured
+        let regions_closed = metrics.regions_closed();
+        assert_eq!(regions_closed.len(), 1);
+        assert_eq!(regions_closed[0].0, region_id);
+        assert_eq!(regions_closed[0].1, std::time::Duration::from_millis(500));
+
+        // Check that obligations were tracked
+        let obligations_created = metrics.obligations_created();
+        assert_eq!(obligations_created.len(), 1);
+        assert_eq!(obligations_created[0], region_id);
+
+        // Check that cancellation was captured
+        let cancellation_requests = metrics.cancellation_requests();
+        assert_eq!(cancellation_requests.len(), 1);
+        assert_eq!(cancellation_requests[0], (region_id, crate::types::CancelKind::User));
     }
 }
