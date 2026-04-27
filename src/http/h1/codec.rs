@@ -453,6 +453,57 @@ fn parse_header_line_bounds(line_bytes: &[u8]) -> Result<(usize, usize, usize), 
     Ok((colon, value_start, value_end))
 }
 
+/// br-asupersync-135g0e: returns `true` for header field names that RFC 9110
+/// §6.5.1 forbids in the trailer section. The list is conservative — it
+/// covers framing, routing, request-modifier, authentication, payload-
+/// processing, and cache-control fields that an intermediary might rely on
+/// when forwarding the message. Comparison is case-insensitive per RFC 9110
+/// §5.1 ("field names are case-insensitive").
+fn is_forbidden_trailer(name: &str) -> bool {
+    // Sorted alphabetically for review. Keep in sync with RFC 9110 §6.5.1
+    // and the related security guidance in §17.13.
+    const FORBIDDEN: &[&str] = &[
+        // Authentication / authorization.
+        "authorization",
+        // Cache control.
+        "age",
+        "cache-control",
+        // Payload processing & message framing.
+        "content-encoding",
+        "content-length",
+        "content-range",
+        "content-type",
+        // Cookies / session credentials.
+        "cookie",
+        // Response control data.
+        "date",
+        "expect",
+        "expires",
+        // Routing.
+        "host",
+        // Request modifiers.
+        "max-forwards",
+        "pragma",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "range",
+        "retry-after",
+        "set-cookie",
+        // Tracking / interception.
+        "te",
+        // Framing-critical.
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+        "vary",
+        "warning",
+        "www-authenticate",
+    ];
+    FORBIDDEN
+        .iter()
+        .any(|&forbidden| name.eq_ignore_ascii_case(forbidden))
+}
+
 fn parse_header_line_bytes(line_bytes: &[u8]) -> Result<(String, String), HttpError> {
     let (colon, value_start, value_end) = parse_header_line_bounds(line_bytes)?;
     let name_bytes = &line_bytes[..colon];
@@ -747,7 +798,17 @@ impl ChunkedBodyDecoder {
                         return Err(HttpError::HeadersTooLarge);
                     }
 
-                    self.trailers.push(parse_header_line_bytes(line.as_ref())?);
+                    let (name, value) = parse_header_line_bytes(line.as_ref())?;
+                    // br-asupersync-135g0e: RFC 9110 §6.5.1 forbids trailers
+                    // that affect framing, routing, request modifiers, auth,
+                    // payload processing, or cache control. Some middleware
+                    // merges trailers into the header set, which would let a
+                    // malicious trailer smuggle a Content-Length / TE override
+                    // past the intermediary. Reject at the parser.
+                    if is_forbidden_trailer(&name) {
+                        return Err(HttpError::BadHeader);
+                    }
+                    self.trailers.push((name, value));
                     if self.trailers.len() > MAX_HEADERS {
                         return Err(HttpError::TooManyHeaders);
                     }
@@ -1420,6 +1481,75 @@ mod tests {
         assert_eq!(req.trailers.len(), 2);
         assert_eq!(req.trailers[0].0, "X-Trailer");
         assert_eq!(req.trailers[0].1, "one");
+    }
+
+    /// br-asupersync-135g0e: trailers carrying RFC 9110 §6.5.1 forbidden
+    /// header names must be rejected at the parser. A trailer carrying
+    /// `Content-Length` or `Transfer-Encoding` is the canonical smuggling
+    /// vector when downstream middleware merges trailers into the header
+    /// set.
+    #[test]
+    fn decode_chunked_rejects_forbidden_trailers() {
+        // Each entry is a forbidden trailer name. `decode_one` must reach
+        // chunked-trailer parsing and return BadHeader.
+        let forbidden = [
+            "Content-Length",
+            "Transfer-Encoding",
+            "transfer-encoding",
+            "TRANSFER-ENCODING",
+            "Content-Encoding",
+            "Content-Type",
+            "Content-Range",
+            "Trailer",
+            "Host",
+            "Authorization",
+            "Cookie",
+            "Set-Cookie",
+            "Cache-Control",
+            "Range",
+            "TE",
+            "Pragma",
+            "Max-Forwards",
+            "Expect",
+            "Proxy-Authorization",
+            "Proxy-Authenticate",
+            "WWW-Authenticate",
+            "Upgrade",
+        ];
+        for name in forbidden {
+            let raw = format!(
+                "POST /u HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n{name}: x\r\n\r\n"
+            );
+            let mut codec = Http1Codec::new();
+            let result = decode_one(&mut codec, raw.as_bytes());
+            assert!(
+                matches!(result, Err(HttpError::BadHeader)),
+                "expected BadHeader for forbidden trailer {name:?}, got {result:?}"
+            );
+        }
+    }
+
+    /// Positive control: benign trailers must still parse after the filter
+    /// is in place. Drift here would silently neuter a legitimate use case.
+    #[test]
+    fn decode_chunked_accepts_safe_trailers() {
+        let safe = [
+            "X-Trailer-Checksum",
+            "X-Custom-Metadata",
+            "X-Request-Id",
+            "ETag",
+        ];
+        for name in safe {
+            let raw = format!(
+                "POST /u HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n{name}: ok\r\n\r\n"
+            );
+            let mut codec = Http1Codec::new();
+            let req = decode_one(&mut codec, raw.as_bytes())
+                .unwrap_or_else(|e| panic!("safe trailer {name:?} rejected: {e:?}"))
+                .unwrap();
+            assert_eq!(req.trailers.len(), 1, "expected one trailer for {name:?}");
+            assert_eq!(req.trailers[0].0, name);
+        }
     }
 
     #[test]
