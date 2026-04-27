@@ -849,6 +849,7 @@ impl Drop for TraceWriter {
 ///     println!("{:?}", event);
 /// }
 /// ```
+#[derive(Debug)]
 pub struct TraceReader {
     reader: BufReader<File>,
     metadata: TraceMetadata,

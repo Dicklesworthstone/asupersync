@@ -637,6 +637,15 @@ mod tests {
             self.regions_closed.lock().unwrap().clone()
         }
 
+        fn obligations_created(&self) -> Vec<RegionId> {
+            self.obligations_created.lock().unwrap().clone()
+        }
+
+        fn cancellation_requests(&self) -> Vec<(RegionId, crate::types::CancelKind)> {
+            self.cancellation_requests.lock().unwrap().clone()
+        }
+
+        #[allow(dead_code)]
         fn panics_captured(&self) -> Vec<&'static str> {
             self.panics.lock().unwrap().clone()
         }
@@ -941,6 +950,7 @@ mod tests {
             obligations_leaked: StdMutex<Vec<RegionId>>,
         }
 
+        #[allow(dead_code)]
         impl CapturingMetrics {
             fn tasks_spawned(&self) -> Vec<(RegionId, TaskId)> {
                 self.tasks_spawned.lock().unwrap().clone()
