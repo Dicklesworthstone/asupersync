@@ -555,7 +555,7 @@ fn generate_minimal_cert_der(variant: u8) -> Result<Vec<u8>, Box<dyn std::error:
 
     // Certificate body (placeholder with some variation)
     for i in 0..length {
-        cert.push((i + variant as usize) as u8 % 256);
+        cert.push((i + variant as usize) as u8);
     }
 
     Ok(cert)
