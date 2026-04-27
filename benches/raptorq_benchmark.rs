@@ -1272,6 +1272,12 @@ fn build_decode_received(
     received
 }
 
+fn build_decode_source(k: usize, symbol_size: usize, seed: u64) -> Vec<Vec<u8>> {
+    (0..k)
+        .map(|index| deterministic_bytes(symbol_size, seed.wrapping_add(index as u64)))
+        .collect()
+}
+
 fn bench_encode_decode(c: &mut Criterion) {
     let mut group = c.benchmark_group("raptorq_e2e");
 
@@ -1699,12 +1705,6 @@ fn bench_decoder_microbench(c: &mut Criterion) {
         bytes: usize,
     }
 
-    let make_source = |k: usize, symbol_size: usize, seed: u64| -> Vec<Vec<u8>> {
-        (0..k)
-            .map(|index| deterministic_bytes(symbol_size, seed.wrapping_add(index as u64)))
-            .collect()
-    };
-
     let make_case = |label: &'static str,
                      k: usize,
                      symbol_size: usize,
@@ -1712,7 +1712,7 @@ fn bench_decoder_microbench(c: &mut Criterion) {
                      drop_source_indices: Vec<usize>,
                      extra_repair: usize,
                      batch_size: Option<usize>| {
-        let source = make_source(k, symbol_size, seed);
+        let source = build_decode_source(k, symbol_size, seed);
         let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
         let received = build_decode_received(
@@ -1789,6 +1789,109 @@ fn bench_decoder_microbench(c: &mut Criterion) {
     group.finish();
 }
 
+/// Microbenchmark the large repair-heavy decode cases that exercise dense-state
+/// transitions in the former active/inactive live-set hot path.
+fn bench_decoder_dense_state(c: &mut Criterion) {
+    let mut group = c.benchmark_group("raptorq_decoder_dense_state");
+    group.sample_size(10);
+    group.warm_up_time(std::time::Duration::from_millis(20));
+    group.measurement_time(std::time::Duration::from_millis(80));
+
+    struct DenseStateCase {
+        label: &'static str,
+        decoder: InactivationDecoder,
+        received: Vec<ReceivedSymbol>,
+        batch_size: Option<usize>,
+        bytes: usize,
+    }
+
+    let make_case = |label: &'static str,
+                     k: usize,
+                     symbol_size: usize,
+                     seed: u64,
+                     drop_source_indices: Vec<usize>,
+                     extra_repair: usize,
+                     batch_size: Option<usize>| {
+        let source = build_decode_source(k, symbol_size, seed);
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let received = build_decode_received(
+            &source,
+            &encoder,
+            &decoder,
+            &drop_source_indices,
+            extra_repair,
+        );
+
+        let probe = match batch_size {
+            Some(batch_size) => decoder.decode_wavefront(&received, batch_size),
+            None => decoder.decode(&received),
+        }
+        .unwrap_or_else(|err| {
+            panic!("dense-state benchmark case {label} failed to decode: {err:?}")
+        });
+        assert!(
+            probe.stats.inactivated > 0,
+            "dense-state benchmark case {label} never hit inactivation"
+        );
+
+        DenseStateCase {
+            label,
+            decoder,
+            received,
+            batch_size,
+            bytes: k * symbol_size,
+        }
+    };
+
+    let cases = [
+        make_case(
+            "decode_repair_only_k128",
+            128,
+            1024,
+            0xD00D_E001,
+            (0..128).collect(),
+            32,
+            None,
+        ),
+        make_case(
+            "decode_repair_only_k256",
+            256,
+            1024,
+            0xD00D_E002,
+            (0..256).collect(),
+            64,
+            None,
+        ),
+        make_case(
+            "decode_wavefront_repair_only_k256_batch32",
+            256,
+            1024,
+            0xD00D_E003,
+            (0..256).collect(),
+            64,
+            Some(32),
+        ),
+    ];
+
+    for case in &cases {
+        group.throughput(Throughput::Bytes(case.bytes as u64));
+        group.bench_function(case.label, |b| {
+            b.iter(|| {
+                let result = match case.batch_size {
+                    Some(batch_size) => case
+                        .decoder
+                        .decode_wavefront(std::hint::black_box(&case.received), batch_size),
+                    None => case.decoder.decode(std::hint::black_box(&case.received)),
+                };
+                std::hint::black_box(result)
+            });
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_gf256_primitives,
@@ -1798,6 +1901,7 @@ criterion_group!(
     bench_encode_decode,
     bench_repair_campaign,
     bench_decoder_microbench,
+    bench_decoder_dense_state,
 );
 
 criterion_main!(benches);

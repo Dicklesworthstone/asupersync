@@ -30,20 +30,15 @@ use std::sync::Arc;
 
 /// Dense column state for O(1) membership and transitions.
 /// Replaces BTreeSet<usize> lookups with direct array indexing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum ColumnState {
     /// Column is active (unsolved, not inactivated).
+    #[default]
     Active,
     /// Column has been solved during peeling phase.
     Solved,
     /// Column has been inactivated (deferred to Gaussian elimination).
     Inactive,
-}
-
-impl Default for ColumnState {
-    fn default() -> Self {
-        Self::Active
-    }
 }
 
 // ============================================================================
