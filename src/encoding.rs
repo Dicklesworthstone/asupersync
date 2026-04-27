@@ -601,6 +601,35 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_multiple_blocks_preserves_non_aligned_boundaries() {
+        let mut pipeline = EncodingPipeline::new(
+            test_config(4, 6, 1.0),
+            SymbolPool::new(PoolConfig::default()),
+        );
+        let data = b"ABCDEFGHIJKLM";
+        let symbols: Vec<_> = pipeline
+            .encode(ObjectId::new_for_test(13), data)
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        let expected = [
+            (0u8, 0u32, b"ABCD".to_vec()),
+            (0u8, 1u32, vec![b'E', b'F', 0, 0]),
+            (1u8, 0u32, b"GHIJ".to_vec()),
+            (1u8, 1u32, vec![b'K', b'L', 0, 0]),
+            (2u8, 0u32, vec![b'M', 0, 0, 0]),
+        ];
+
+        assert_eq!(symbols.len(), expected.len());
+        for (symbol, (expected_sbn, expected_esi, expected_bytes)) in symbols.iter().zip(expected) {
+            assert_eq!(symbol.kind(), SymbolKind::Source);
+            assert_eq!(symbol.id().sbn(), expected_sbn);
+            assert_eq!(symbol.id().esi(), expected_esi);
+            assert_eq!(symbol.symbol().data(), expected_bytes.as_slice());
+        }
+    }
+
+    #[test]
     fn test_encode_empty_data() {
         let mut pipeline = EncodingPipeline::new(
             test_config(8, 32, 1.0),

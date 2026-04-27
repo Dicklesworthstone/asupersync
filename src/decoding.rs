@@ -2267,6 +2267,87 @@ mod tests {
     }
 
     #[test]
+    fn multi_block_roundtrip_respects_partial_last_block_metadata() {
+        init_test("multi_block_roundtrip_respects_partial_last_block_metadata");
+        let config = crate::config::EncodingConfig {
+            symbol_size: 4,
+            max_block_size: 6,
+            repair_overhead: 1.0,
+            encoding_parallelism: 1,
+            decoding_parallelism: 1,
+        };
+        let encoder_pool = SymbolPool::new(PoolConfig {
+            symbol_size: config.symbol_size,
+            initial_size: 16,
+            max_size: 16,
+            allow_growth: false,
+            growth_increment: 0,
+        });
+        let mut encoder = EncodingPipeline::new(config.clone(), encoder_pool);
+        let object_id = ObjectId::new_for_test(112);
+        let data = b"ABCDEFGHIJKLM".to_vec();
+
+        let symbols: Vec<Symbol> = encoder
+            .encode_with_repair(object_id, &data, 0)
+            .map(|res| res.expect("encode").into_symbol())
+            .collect();
+
+        let mut decoder = DecodingPipeline::new(DecodingConfig {
+            symbol_size: config.symbol_size,
+            max_block_size: config.max_block_size,
+            repair_overhead: 1.0,
+            min_overhead: 0,
+            max_buffered_symbols: 8192,
+            block_timeout: Duration::from_secs(30),
+            verify_auth: false,
+        });
+        decoder
+            .set_object_params(ObjectParams::new(
+                object_id,
+                data.len() as u64,
+                config.symbol_size,
+                3,
+                2,
+            ))
+            .expect("set params for uneven multi-block object");
+
+        let expected_blocks = Some(3usize);
+        let blocks_total = decoder.progress().blocks_total;
+        crate::assert_with_log!(
+            blocks_total == expected_blocks,
+            "partial last block count",
+            expected_blocks,
+            blocks_total
+        );
+
+        for symbol in symbols {
+            let auth = AuthenticatedSymbol::from_parts(
+                symbol,
+                crate::security::tag::AuthenticationTag::zero(),
+            );
+            let _ = decoder.feed(auth).expect("feed");
+        }
+
+        let complete = decoder.is_complete();
+        crate::assert_with_log!(
+            complete,
+            "partial last block roundtrip is_complete",
+            true,
+            complete
+        );
+
+        let decoded_data = decoder.into_data().expect("decoded");
+        let ok = decoded_data == data;
+        crate::assert_with_log!(
+            ok,
+            "partial last block roundtrip data",
+            data.len(),
+            decoded_data.len()
+        );
+        crate::test_complete!("multi_block_roundtrip_respects_partial_last_block_metadata");
+    }
+
+    #[test]
     fn multi_block_progress_retains_cumulative_symbols_after_block_completion() {
         init_test("multi_block_progress_retains_cumulative_symbols_after_block_completion");
         let config = crate::config::EncodingConfig {

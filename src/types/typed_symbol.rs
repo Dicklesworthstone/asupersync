@@ -1144,6 +1144,16 @@ mod tests {
     }
 
     #[test]
+    fn object_params_for_payload_uses_max_per_block_k_for_partial_multi_block_payload() {
+        let params = object_params_for_payload(ObjectId::new_for_test(9), 13, 4, 6);
+
+        assert_eq!(params.source_blocks, 3);
+        assert_eq!(params.symbols_per_block, 2);
+        assert_eq!(params.total_source_symbols(), 4);
+        assert_eq!(params.min_symbols_for_decode(), 4);
+    }
+
+    #[test]
     #[allow(clippy::similar_names)]
     fn typed_decoder_accepts_small_single_block_payload_with_large_max_block_size() {
         let value: u64 = 42;
