@@ -26,10 +26,10 @@ expression: plan
     ReplicaAssignment {
         replica_id: "r2",
         symbol_indices: [
+            0,
             5,
             6,
             7,
-            0,
         ],
         can_decode: true,
     },
