@@ -2457,9 +2457,10 @@ impl RedisPubSub {
     fn parse_event(value: RespValue) -> Result<PubSubEvent, RedisError> {
         let items = match value {
             RespValue::Array(Some(items)) => items,
+            RespValue::Push(items) => items,
             other => {
                 return Err(RedisError::Protocol(format!(
-                    "pubsub expected array event, got {other:?}"
+                    "pubsub expected array or push event, got {other:?}"
                 )));
             }
         };
@@ -3251,6 +3252,25 @@ mod tests {
             RespValue::BulkString(Some(b"payload".to_vec())),
         ])))
         .expect("message event should parse");
+
+        assert_eq!(
+            event,
+            PubSubEvent::Message(PubSubMessage {
+                channel: "chan-1".to_string(),
+                pattern: None,
+                payload: b"payload".to_vec(),
+            })
+        );
+    }
+
+    #[test]
+    fn pubsub_parse_resp3_push_message_event() {
+        let event = RedisPubSub::parse_event(RespValue::Push(vec![
+            RespValue::BulkString(Some(b"message".to_vec())),
+            RespValue::BulkString(Some(b"chan-1".to_vec())),
+            RespValue::BulkString(Some(b"payload".to_vec())),
+        ]))
+        .expect("RESP3 push message event should parse");
 
         assert_eq!(
             event,
