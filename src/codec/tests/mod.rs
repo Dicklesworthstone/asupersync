@@ -139,9 +139,9 @@ mod regression_tests {
         let mut codec = LinesCodec::new();
         let mut src = BytesMut::new();
 
-        // Add invalid UTF-8 followed by a newline so the codec emits a
-        // frame and can validate it.
-        src.extend_from_slice(b"\xff\xfe\xfd\n");
+        // Queue an invalid line followed immediately by a valid line so
+        // recovery exercises the codec's live post-error state.
+        src.extend_from_slice(b"\xff\xfe\xfd\nrecovery_line\n");
 
         // Should fail gracefully with InvalidUtf8.
         let result = codec.decode(&mut src);
@@ -150,10 +150,11 @@ mod regression_tests {
             "Should fail on invalid UTF-8, got {:?}",
             result
         );
-
-        // Recovery: add valid UTF-8 line
-        src.clear();
-        src.extend_from_slice(b"recovery_line\n");
+        assert_eq!(
+            src.as_ref(),
+            b"recovery_line\n",
+            "valid tail should remain queued after InvalidUtf8"
+        );
 
         // Should recover and work normally
         let decoded = codec
