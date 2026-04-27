@@ -3986,6 +3986,91 @@ mod tests {
     }
 
     #[test]
+    fn report_hydrates_quiescence_from_finalizers_and_obligations() {
+        init_test("report_hydrates_quiescence_from_finalizers_and_obligations");
+        let mut runtime = LabRuntime::with_seed(32);
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+        let (task_id, _handle) = runtime
+            .state
+            .create_task(root, Budget::INFINITE, async {})
+            .expect("create task");
+
+        runtime.state.now = Time::from_nanos(10);
+        let registered = runtime.state.register_sync_finalizer(root, || {});
+        crate::assert_with_log!(registered, "registered finalizer", true, registered);
+
+        runtime.state.now = Time::from_nanos(20);
+        let _obligation = runtime
+            .state
+            .create_obligation(ObligationKind::SendPermit, task_id, root, None)
+            .expect("create obligation");
+
+        runtime.state.now = Time::from_nanos(30);
+        runtime
+            .state
+            .update_task(task_id, |record| record.complete(Outcome::Ok(())))
+            .expect("complete task without auto-resolving obligation");
+
+        runtime.state.now = Time::from_nanos(40);
+        runtime.state.record_finalizer_close_for_test(root);
+        runtime
+            .state
+            .region(root)
+            .expect("region exists")
+            .set_state(crate::record::region::RegionState::Closed);
+
+        let report = runtime.report();
+        let quiescence = report
+            .oracle_report
+            .entry("quiescence")
+            .expect("quiescence entry");
+        let finalizer = report
+            .oracle_report
+            .entry("finalizer")
+            .expect("finalizer entry");
+        let obligation_leak = report
+            .oracle_report
+            .entry("obligation_leak")
+            .expect("obligation entry");
+
+        crate::assert_with_log!(
+            !quiescence.passed,
+            "quiescence failed",
+            false,
+            quiescence.passed
+        );
+        let quiescence_text = quiescence
+            .violation
+            .as_deref()
+            .expect("quiescence violation text");
+        crate::assert_with_log!(
+            quiescence_text.contains("1 unrun finalizers"),
+            "quiescence mentions finalizers",
+            true,
+            quiescence_text.contains("1 unrun finalizers")
+        );
+        crate::assert_with_log!(
+            quiescence_text.contains("1 leaked obligations"),
+            "quiescence mentions obligations",
+            true,
+            quiescence_text.contains("1 leaked obligations")
+        );
+        crate::assert_with_log!(
+            !finalizer.passed,
+            "finalizer failed",
+            false,
+            finalizer.passed
+        );
+        crate::assert_with_log!(
+            !obligation_leak.passed,
+            "obligation_leak failed",
+            false,
+            obligation_leak.passed
+        );
+        crate::test_complete!("report_hydrates_quiescence_from_finalizers_and_obligations");
+    }
+
+    #[test]
     fn report_hydrates_cancellation_propagation_from_state_snapshot() {
         init_test("report_hydrates_cancellation_propagation_from_state_snapshot");
         // This test intentionally drives a cancellation-propagation violation
