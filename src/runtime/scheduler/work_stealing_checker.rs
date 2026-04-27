@@ -174,32 +174,44 @@ impl WorkStealingChecker {
             return None;
         }
 
-        {
-            let mut owners = self.task_owners.write();
-            if let Some(state) = owners.get_mut(&task_id) {
-                match state {
-                    OwnershipState::Owned(owner) if *owner == from_worker => {
-                        *state = OwnershipState::Stealing {
-                            from: from_worker,
-                            to: to_worker,
-                        };
-                    }
-                    _ => {
-                        // Ownership violation - task not owned by expected worker
-                        self.record_violation(ViolationType::MultipleOwners {
-                            task_id,
-                            owners: vec![from_worker, to_worker],
-                        });
-                        return None;
-                    }
-                }
-            } else {
-                self.record_violation(ViolationType::LostWork {
+        let steal_start_violation = {
+            let executing = self.executing_tasks.read();
+            if executing.contains_key(&task_id) {
+                Some(ViolationType::MultipleOwners {
                     task_id,
-                    last_owner: from_worker,
-                });
-                return None;
+                    owners: vec![from_worker, to_worker],
+                })
+            } else {
+                let mut owners = self.task_owners.write();
+                if let Some(state) = owners.get_mut(&task_id) {
+                    match state {
+                        OwnershipState::Owned(owner) if *owner == from_worker => {
+                            *state = OwnershipState::Stealing {
+                                from: from_worker,
+                                to: to_worker,
+                            };
+                            None
+                        }
+                        _ => {
+                            // Ownership violation - task not owned by expected worker
+                            Some(ViolationType::MultipleOwners {
+                                task_id,
+                                owners: vec![from_worker, to_worker],
+                            })
+                        }
+                    }
+                } else {
+                    Some(ViolationType::LostWork {
+                        task_id,
+                        last_owner: from_worker,
+                    })
+                }
             }
+        };
+
+        if let Some(violation) = steal_start_violation {
+            self.record_violation(violation);
+            return None;
         }
 
         {
@@ -313,48 +325,43 @@ impl WorkStealingChecker {
             return;
         }
 
-        // Check for double execution
-        {
+        let execution_violation = {
             let mut executing = self.executing_tasks.write();
             if let Some(&existing_worker) = executing.get(&task_id) {
-                self.record_violation(ViolationType::DoubleExecution {
+                Some(ViolationType::DoubleExecution {
                     task_id,
                     first_worker: existing_worker,
                     second_worker: worker_id,
-                });
-                return;
-            }
-            executing.insert(task_id, worker_id);
-        }
-
-        // Verify task is owned by this worker
-        {
-            let owners = self.task_owners.read();
-            if let Some(state) = owners.get(&task_id) {
-                match state {
-                    OwnershipState::Owned(owner) if *owner != worker_id => {
-                        self.record_violation(ViolationType::MultipleOwners {
-                            task_id,
-                            owners: vec![*owner, worker_id],
-                        });
+                })
+            } else {
+                let owners = self.task_owners.read();
+                match owners.get(&task_id) {
+                    Some(OwnershipState::Owned(owner)) if *owner == worker_id => {
+                        executing.insert(task_id, worker_id);
+                        None
                     }
-                    OwnershipState::Stealing { .. } => {
-                        // Task is being stolen - this shouldn't happen
-                        self.record_violation(ViolationType::MultipleOwners {
+                    Some(OwnershipState::Owned(owner)) => Some(ViolationType::MultipleOwners {
+                        task_id,
+                        owners: vec![*owner, worker_id],
+                    }),
+                    Some(OwnershipState::Stealing { from, to }) => {
+                        Some(ViolationType::MultipleOwners {
                             task_id,
-                            owners: vec![worker_id],
-                        });
+                            owners: vec![*from, *to, worker_id],
+                        })
                     }
-                    _ => {
-                        // Completed or cancelled - this is fine
+                    Some(OwnershipState::Completed | OwnershipState::Cancelled) | None => {
+                        Some(ViolationType::LostWork {
+                            task_id,
+                            last_owner: worker_id,
+                        })
                     }
                 }
-            } else {
-                self.record_violation(ViolationType::LostWork {
-                    task_id,
-                    last_owner: worker_id,
-                });
             }
+        };
+
+        if let Some(violation) = execution_violation {
+            self.record_violation(violation);
         }
     }
 
@@ -401,17 +408,18 @@ impl WorkStealingChecker {
 
     /// Records a violation.
     fn record_violation(&self, violation: ViolationType) {
-        let mut violations = self.violations.write();
-        violations.push(violation);
-
         let mut stats = self.stats.write();
-        match violations.last().unwrap() {
+        match &violation {
             ViolationType::MultipleOwners { .. } => stats.ownership_violations += 1,
             ViolationType::DoubleExecution { .. } => stats.double_execution_violations += 1,
             ViolationType::LostWork { .. } => stats.lost_work_violations += 1,
             ViolationType::SlowSteal { .. } => {} // Not counted as violation, just warning
             ViolationType::OrderingViolation { .. } => {} // Not counted as violation, just warning
         }
+        drop(stats);
+
+        let mut violations = self.violations.write();
+        violations.push(violation);
     }
 
     /// Gets current statistics.
@@ -674,9 +682,43 @@ mod tests {
     }
 
     #[test]
+    fn test_steal_start_rejects_currently_executing_task() {
+        let checker = WorkStealingChecker::new();
+        let worker1 = 1;
+        let worker2 = 2;
+        let task = TaskId::new_for_test(104, 0);
+
+        checker.track_task_queued(task, worker1);
+        checker.track_task_execution_start(task, worker1);
+
+        let tracker = checker.track_steal_start(task, worker1, worker2);
+        assert!(tracker.is_none());
+
+        let stats = checker.stats();
+        assert_eq!(stats.steal_attempts, 0);
+        assert_eq!(stats.successful_steals, 0);
+        assert_eq!(stats.failed_steals, 0);
+        assert_eq!(stats.ownership_violations, 1);
+        assert_eq!(stats.lost_work_violations, 0);
+        assert_eq!(checker.executing_tasks.read().get(&task), Some(&worker1));
+        assert_eq!(
+            checker.task_owners.read().get(&task),
+            Some(&OwnershipState::Owned(worker1))
+        );
+
+        let violations = checker.violations();
+        assert_eq!(violations.len(), 1);
+        assert!(matches!(
+            violations[0],
+            ViolationType::MultipleOwners { ref owners, task_id }
+                if task_id == task && owners == &vec![worker1, worker2]
+        ));
+    }
+
+    #[test]
     fn test_steal_success_without_tracked_owner_is_not_counted() {
         let checker = WorkStealingChecker::new();
-        let task = TaskId::new_for_test(104, 0);
+        let task = TaskId::new_for_test(105, 0);
 
         checker.track_steal_success(task, 1, 2, Duration::ZERO);
 
@@ -688,7 +730,7 @@ mod tests {
     #[test]
     fn test_execution_of_unknown_task_detects_lost_work() {
         let checker = WorkStealingChecker::new();
-        let task = TaskId::new_for_test(105, 0);
+        let task = TaskId::new_for_test(106, 0);
 
         checker.track_task_execution_start(task, 7);
 
@@ -705,6 +747,58 @@ mod tests {
                 last_owner
             } if task_id == task && last_owner == 7
         ));
+        assert_eq!(checker.executing_tasks.read().get(&task), None);
+        assert_eq!(checker.task_owners.read().get(&task), None);
+    }
+
+    #[test]
+    fn test_wrong_owner_execution_start_does_not_poison_active_execution() {
+        let checker = WorkStealingChecker::new();
+        let worker1 = 1;
+        let worker2 = 2;
+        let task = TaskId::new_for_test(109, 0);
+
+        checker.track_task_queued(task, worker1);
+        checker.track_task_execution_start(task, worker2);
+
+        let stats = checker.stats();
+        assert_eq!(stats.ownership_violations, 1);
+        assert_eq!(stats.double_execution_violations, 0);
+        assert_eq!(checker.executing_tasks.read().get(&task), None);
+        assert_eq!(
+            checker.task_owners.read().get(&task),
+            Some(&OwnershipState::Owned(worker1))
+        );
+
+        checker.track_task_execution_start(task, worker1);
+        checker.track_task_execution_complete(task, worker1);
+        assert_eq!(
+            checker.task_owners.read().get(&task),
+            Some(&OwnershipState::Completed)
+        );
+    }
+
+    #[test]
+    fn test_completed_task_execution_start_does_not_poison_active_execution() {
+        let checker = WorkStealingChecker::new();
+        let worker1 = 1;
+        let task = TaskId::new_for_test(110, 0);
+
+        checker.track_task_queued(task, worker1);
+        checker.track_task_execution_start(task, worker1);
+        checker.track_task_execution_complete(task, worker1);
+        assert!(!checker.has_violations());
+
+        checker.track_task_execution_start(task, worker1);
+
+        let stats = checker.stats();
+        assert_eq!(stats.lost_work_violations, 1);
+        assert_eq!(stats.double_execution_violations, 0);
+        assert_eq!(checker.executing_tasks.read().get(&task), None);
+        assert_eq!(
+            checker.task_owners.read().get(&task),
+            Some(&OwnershipState::Completed)
+        );
     }
 
     #[test]
@@ -712,7 +806,7 @@ mod tests {
         let checker = WorkStealingChecker::new();
         let worker1 = 1;
         let worker2 = 2;
-        let task = TaskId::new_for_test(106, 0);
+        let task = TaskId::new_for_test(107, 0);
 
         checker.track_task_queued(task, worker1);
         checker.track_task_execution_start(task, worker1);
@@ -738,7 +832,7 @@ mod tests {
     fn test_completion_without_execution_start_detects_lost_work() {
         let checker = WorkStealingChecker::new();
         let worker1 = 1;
-        let task = TaskId::new_for_test(107, 0);
+        let task = TaskId::new_for_test(108, 0);
 
         checker.track_task_queued(task, worker1);
         checker.track_task_execution_complete(task, worker1);
