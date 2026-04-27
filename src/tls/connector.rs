@@ -74,6 +74,30 @@ impl TlsConnector {
         self.handshake_timeout
     }
 
+    /// br-asupersync-m209nx — Attach a `CertificatePinSet` to a
+    /// connector built from a raw `ClientConfig` (i.e., one that
+    /// did not flow through `TlsConnectorBuilder::with_certificate_pins`).
+    /// Useful for tests that need to combine a custom rustls
+    /// `ClientConfig` (e.g., a permissive `ServerCertVerifier` for
+    /// self-signed fixtures) with the v24lvi pinning gate; also
+    /// useful for production callers that bring their own
+    /// `ClientConfig` and want to layer pinning on top.
+    #[cfg(feature = "tls")]
+    #[must_use]
+    pub fn with_pin_set(mut self, pin_set: CertificatePinSet) -> Self {
+        self.pin_set = Some(Arc::new(pin_set));
+        self
+    }
+
+    /// br-asupersync-m209nx — Attach a handshake timeout to a
+    /// connector built from a raw `ClientConfig`. Mirrors the
+    /// builder-side `TlsConnectorBuilder::handshake_timeout`.
+    #[must_use]
+    pub fn with_handshake_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.handshake_timeout = Some(timeout);
+        self
+    }
+
     /// Get the inner configuration (for advanced use).
     #[cfg(feature = "tls")]
     pub fn config(&self) -> &Arc<ClientConfig> {
