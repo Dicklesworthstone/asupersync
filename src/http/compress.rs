@@ -415,6 +415,14 @@ pub struct GzipDecompressor {
     max_size: Option<usize>,
     total: usize,
     decoder: flate2::write::GzDecoder<LimitedWriter>,
+    /// br-asupersync-8vcp64: once any error path runs, no further calls
+    /// to decompress/finish are accepted. Without this flag, a caller
+    /// that ignored the first error and called decompress again would
+    /// drain stale bytes the decoder produced before the bomb-cap rejection
+    /// (via `mem::take` of the LimitedWriter's inner buffer), and update
+    /// self.total for them — letting an attacker smuggle bytes past the
+    /// cap by triggering a near-cap error then continuing.
+    poisoned: bool,
 }
 
 #[cfg(feature = "compression")]
@@ -426,6 +434,7 @@ impl GzipDecompressor {
             max_size,
             total: 0,
             decoder: flate2::write::GzDecoder::new(LimitedWriter::new(max_size)),
+            poisoned: false,
         }
     }
 }
@@ -433,27 +442,54 @@ impl GzipDecompressor {
 #[cfg(feature = "compression")]
 impl Decompressor for GzipDecompressor {
     fn decompress(&mut self, input: &[u8], output: &mut Vec<u8>) -> io::Result<()> {
+        if self.poisoned {
+            return Err(io::Error::other(
+                "GzipDecompressor poisoned by prior error (br-asupersync-8vcp64)",
+            ));
+        }
         use io::Write;
 
         let remaining = self.max_size.map(|m| m.saturating_sub(self.total));
         self.decoder.get_mut().max_size = remaining;
 
-        self.decoder.write_all(input)?;
-        self.decoder.flush()?;
-        let mut buf = std::mem::take(&mut self.decoder.get_mut().inner);
-        update_decompressed_total(&mut self.total, buf.len(), self.max_size)?;
-        output.append(&mut buf);
+        // Run the decompression as a fallible inner expression; on any error,
+        // mark poisoned and clear stale partial bytes from the inner buffer.
+        let result: io::Result<()> = (|| {
+            self.decoder.write_all(input)?;
+            self.decoder.flush()?;
+            let mut buf = std::mem::take(&mut self.decoder.get_mut().inner);
+            update_decompressed_total(&mut self.total, buf.len(), self.max_size)?;
+            output.append(&mut buf);
+            Ok(())
+        })();
+        if let Err(e) = result {
+            self.poisoned = true;
+            self.decoder.get_mut().inner.clear();
+            return Err(e);
+        }
         Ok(())
     }
 
     fn finish(&mut self, output: &mut Vec<u8>) -> io::Result<()> {
+        if self.poisoned {
+            return Err(io::Error::other(
+                "GzipDecompressor poisoned by prior error (br-asupersync-8vcp64)",
+            ));
+        }
         let mut dummy = flate2::write::GzDecoder::new(LimitedWriter::new(None));
         std::mem::swap(&mut self.decoder, &mut dummy);
         dummy.get_mut().max_size = self.max_size.map(|m| m.saturating_sub(self.total));
 
-        let mut buf = dummy.finish()?.inner;
-        update_decompressed_total(&mut self.total, buf.len(), self.max_size)?;
-        output.append(&mut buf);
+        let result: io::Result<()> = (|| {
+            let mut buf = dummy.finish()?.inner;
+            update_decompressed_total(&mut self.total, buf.len(), self.max_size)?;
+            output.append(&mut buf);
+            Ok(())
+        })();
+        if let Err(e) = result {
+            self.poisoned = true;
+            return Err(e);
+        }
         Ok(())
     }
 
@@ -537,6 +573,8 @@ pub struct DeflateDecompressor {
     max_size: Option<usize>,
     total: usize,
     decoder: flate2::write::DeflateDecoder<LimitedWriter>,
+    /// br-asupersync-8vcp64: see [`GzipDecompressor::poisoned`].
+    poisoned: bool,
 }
 
 #[cfg(feature = "compression")]
@@ -548,6 +586,7 @@ impl DeflateDecompressor {
             max_size,
             total: 0,
             decoder: flate2::write::DeflateDecoder::new(LimitedWriter::new(max_size)),
+            poisoned: false,
         }
     }
 }
@@ -555,27 +594,52 @@ impl DeflateDecompressor {
 #[cfg(feature = "compression")]
 impl Decompressor for DeflateDecompressor {
     fn decompress(&mut self, input: &[u8], output: &mut Vec<u8>) -> io::Result<()> {
+        if self.poisoned {
+            return Err(io::Error::other(
+                "DeflateDecompressor poisoned by prior error (br-asupersync-8vcp64)",
+            ));
+        }
         use io::Write;
 
         let remaining = self.max_size.map(|m| m.saturating_sub(self.total));
         self.decoder.get_mut().max_size = remaining;
 
-        self.decoder.write_all(input)?;
-        self.decoder.flush()?;
-        let mut buf = std::mem::take(&mut self.decoder.get_mut().inner);
-        update_decompressed_total(&mut self.total, buf.len(), self.max_size)?;
-        output.append(&mut buf);
+        let result: io::Result<()> = (|| {
+            self.decoder.write_all(input)?;
+            self.decoder.flush()?;
+            let mut buf = std::mem::take(&mut self.decoder.get_mut().inner);
+            update_decompressed_total(&mut self.total, buf.len(), self.max_size)?;
+            output.append(&mut buf);
+            Ok(())
+        })();
+        if let Err(e) = result {
+            self.poisoned = true;
+            self.decoder.get_mut().inner.clear();
+            return Err(e);
+        }
         Ok(())
     }
 
     fn finish(&mut self, output: &mut Vec<u8>) -> io::Result<()> {
+        if self.poisoned {
+            return Err(io::Error::other(
+                "DeflateDecompressor poisoned by prior error (br-asupersync-8vcp64)",
+            ));
+        }
         let mut dummy = flate2::write::DeflateDecoder::new(LimitedWriter::new(None));
         std::mem::swap(&mut self.decoder, &mut dummy);
         dummy.get_mut().max_size = self.max_size.map(|m| m.saturating_sub(self.total));
 
-        let mut buf = dummy.finish()?.inner;
-        update_decompressed_total(&mut self.total, buf.len(), self.max_size)?;
-        output.append(&mut buf);
+        let result: io::Result<()> = (|| {
+            let mut buf = dummy.finish()?.inner;
+            update_decompressed_total(&mut self.total, buf.len(), self.max_size)?;
+            output.append(&mut buf);
+            Ok(())
+        })();
+        if let Err(e) = result {
+            self.poisoned = true;
+            return Err(e);
+        }
         Ok(())
     }
 
@@ -668,6 +732,8 @@ pub struct BrotliDecompressor {
     total: usize,
     decoder: brotli::DecompressorWriter<LimitedWriter>,
     finished: bool,
+    /// br-asupersync-8vcp64: see [`GzipDecompressor::poisoned`].
+    poisoned: bool,
 }
 
 #[cfg(feature = "compression")]
@@ -683,6 +749,7 @@ impl BrotliDecompressor {
                 BROTLI_BUFFER_SIZE,
             ),
             finished: false,
+            poisoned: false,
         }
     }
 }
@@ -690,20 +757,38 @@ impl BrotliDecompressor {
 #[cfg(feature = "compression")]
 impl Decompressor for BrotliDecompressor {
     fn decompress(&mut self, input: &[u8], output: &mut Vec<u8>) -> io::Result<()> {
+        if self.poisoned {
+            return Err(io::Error::other(
+                "BrotliDecompressor poisoned by prior error (br-asupersync-8vcp64)",
+            ));
+        }
         use io::Write;
 
         let remaining = self.max_size.map(|m| m.saturating_sub(self.total));
         self.decoder.get_mut().max_size = remaining;
 
-        self.decoder.write_all(input)?;
-        self.decoder.flush()?;
-        let mut buf = std::mem::take(&mut self.decoder.get_mut().inner);
-        update_decompressed_total(&mut self.total, buf.len(), self.max_size)?;
-        output.append(&mut buf);
+        let result: io::Result<()> = (|| {
+            self.decoder.write_all(input)?;
+            self.decoder.flush()?;
+            let mut buf = std::mem::take(&mut self.decoder.get_mut().inner);
+            update_decompressed_total(&mut self.total, buf.len(), self.max_size)?;
+            output.append(&mut buf);
+            Ok(())
+        })();
+        if let Err(e) = result {
+            self.poisoned = true;
+            self.decoder.get_mut().inner.clear();
+            return Err(e);
+        }
         Ok(())
     }
 
     fn finish(&mut self, output: &mut Vec<u8>) -> io::Result<()> {
+        if self.poisoned {
+            return Err(io::Error::other(
+                "BrotliDecompressor poisoned by prior error (br-asupersync-8vcp64)",
+            ));
+        }
         use io::Write;
         if self.finished {
             return Ok(());
@@ -712,11 +797,19 @@ impl Decompressor for BrotliDecompressor {
         let remaining = self.max_size.map(|m| m.saturating_sub(self.total));
         self.decoder.get_mut().max_size = remaining;
 
-        self.decoder.flush()?;
-        self.decoder.close()?;
-        let mut buf = std::mem::take(&mut self.decoder.get_mut().inner);
-        update_decompressed_total(&mut self.total, buf.len(), self.max_size)?;
-        output.append(&mut buf);
+        let result: io::Result<()> = (|| {
+            self.decoder.flush()?;
+            self.decoder.close()?;
+            let mut buf = std::mem::take(&mut self.decoder.get_mut().inner);
+            update_decompressed_total(&mut self.total, buf.len(), self.max_size)?;
+            output.append(&mut buf);
+            Ok(())
+        })();
+        if let Err(e) = result {
+            self.poisoned = true;
+            self.decoder.get_mut().inner.clear();
+            return Err(e);
+        }
         self.finished = true;
         Ok(())
     }
@@ -1300,6 +1393,101 @@ mod tests {
     // Gzip compressor/decompressor tests
     // ====================================================================
 
+    /// br-asupersync-8vcp64: once a decompressor returns Err on any path,
+    /// subsequent calls to decompress/finish must return an "already
+    /// poisoned" error rather than silently producing stale partial bytes.
+    #[cfg(feature = "compression")]
+    #[test]
+    fn vcp64_gzip_decompressor_poisoned_after_bomb_cap_rejection() {
+        // Build a small but valid gzip payload, decompress with a tiny cap
+        // that's smaller than the payload to force LimitedWriter::write to
+        // reject; then verify a second call returns Err and does not drain
+        // any bytes.
+        let original = b"Hello, World! Some compressible text payload.";
+        let mut compressor = GzipCompressor::new();
+        let mut compressed = Vec::new();
+        compressor.compress(original, &mut compressed).unwrap();
+        compressor.finish(&mut compressed).unwrap();
+
+        // Cap of 4 is well below the decompressed length (~45 bytes).
+        let mut decompressor = GzipDecompressor::new(Some(4));
+        let mut output = Vec::new();
+        // First call must error out (cap exceeded).
+        let first = decompressor.decompress(&compressed, &mut output);
+        assert!(first.is_err(), "first call must reject by cap, got {first:?}");
+
+        // Second call MUST be rejected with the poisoned-error message and
+        // MUST NOT push any further bytes into output.
+        let len_before = output.len();
+        let second = decompressor.decompress(&compressed, &mut output);
+        match second {
+            Err(e) => assert!(
+                e.to_string().contains("poisoned"),
+                "second call must surface poisoned-error, got: {e}"
+            ),
+            Ok(()) => panic!("second call must NOT succeed after first error"),
+        }
+        assert_eq!(
+            output.len(),
+            len_before,
+            "second call must not append stale bytes after poisoning"
+        );
+
+        // finish() must also reject after poisoning.
+        let after = decompressor.finish(&mut output);
+        assert!(
+            after.is_err()
+                && after.as_ref().unwrap_err().to_string().contains("poisoned"),
+            "finish() after poisoned must surface poisoned-error, got: {after:?}"
+        );
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn vcp64_deflate_decompressor_poisoned_after_bomb_cap_rejection() {
+        let original = b"Hello, World! Some compressible payload for deflate.";
+        let mut compressor = DeflateCompressor::new();
+        let mut compressed = Vec::new();
+        compressor.compress(original, &mut compressed).unwrap();
+        compressor.finish(&mut compressed).unwrap();
+
+        let mut decompressor = DeflateDecompressor::new(Some(4));
+        let mut output = Vec::new();
+        let first = decompressor.decompress(&compressed, &mut output);
+        assert!(first.is_err());
+
+        let len_before = output.len();
+        let second = decompressor.decompress(&compressed, &mut output);
+        match second {
+            Err(e) => assert!(e.to_string().contains("poisoned")),
+            Ok(()) => panic!("second call must NOT succeed after first error"),
+        }
+        assert_eq!(output.len(), len_before);
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn vcp64_brotli_decompressor_poisoned_after_bomb_cap_rejection() {
+        let original = b"Hello, World! Some compressible payload for brotli.";
+        let mut compressor = BrotliCompressor::new();
+        let mut compressed = Vec::new();
+        compressor.compress(original, &mut compressed).unwrap();
+        compressor.finish(&mut compressed).unwrap();
+
+        let mut decompressor = BrotliDecompressor::new(Some(4));
+        let mut output = Vec::new();
+        let first = decompressor.decompress(&compressed, &mut output);
+        assert!(first.is_err());
+
+        let len_before = output.len();
+        let second = decompressor.decompress(&compressed, &mut output);
+        match second {
+            Err(e) => assert!(e.to_string().contains("poisoned")),
+            Ok(()) => panic!("second call must NOT succeed after first error"),
+        }
+        assert_eq!(output.len(), len_before);
+    }
+
     #[cfg(feature = "compression")]
     #[test]
     fn gzip_decompressor_state_across_chunks() {
@@ -1388,6 +1576,7 @@ mod tests {
             max_size: None,
             total: usize::MAX,
             decoder: flate2::write::GzDecoder::new(LimitedWriter::new(None)),
+            poisoned: false,
         };
         let mut decompressed = Vec::new();
         let result = dec.decompress(&compressed, &mut decompressed);
@@ -1547,6 +1736,7 @@ mod tests {
             max_size: None,
             total: usize::MAX,
             decoder: flate2::write::DeflateDecoder::new(LimitedWriter::new(None)),
+            poisoned: false,
         };
         let mut decompressed = Vec::new();
         let result = dec.decompress(&compressed, &mut decompressed);
@@ -1732,6 +1922,7 @@ mod tests {
             total: usize::MAX,
             decoder: brotli::DecompressorWriter::new(LimitedWriter::new(None), BROTLI_BUFFER_SIZE),
             finished: false,
+            poisoned: false,
         };
         let mut decompressed = Vec::new();
         let result = dec.decompress(&compressed, &mut decompressed);
