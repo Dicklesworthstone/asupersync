@@ -234,13 +234,39 @@ pub fn decode_trailers(body: &[u8]) -> Result<TrailerFrame, GrpcError> {
                     .replace("%25", "%");
             }
             _ => {
+                // br-asupersync-ngnnc3: surface invalid metadata keys and
+                // malformed base64 as GrpcError::protocol instead of
+                // silently dropping the entry. Matches the project's
+                // fail-closed defaults and the decode_trailers policy
+                // for duplicate grpc-status / grpc-message (which IS
+                // strict). Previously a peer supplying a non-token key
+                // or malformed base64 in -bin metadata had the entry
+                // silently elided while the rest of the trailer block
+                // accepted; under fail-closed the whole frame should
+                // reject.
                 if key.ends_with("-bin") {
                     use base64::Engine;
-                    if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(value) {
-                        let _ = metadata.insert_bin(&key, Bytes::from(decoded));
+                    let decoded = base64::engine::general_purpose::STANDARD
+                        .decode(value)
+                        .map_err(|e| {
+                            GrpcError::protocol(format!(
+                                "malformed base64 in -bin trailer metadata for key with \
+                                 length {}: {}",
+                                key.len(),
+                                e
+                            ))
+                        })?;
+                    if !metadata.insert_bin(&key, Bytes::from(decoded)) {
+                        return Err(GrpcError::protocol(format!(
+                            "invalid -bin metadata key in trailer block (length {})",
+                            key.len()
+                        )));
                     }
-                } else {
-                    let _ = metadata.insert(&key, value);
+                } else if !metadata.insert(&key, value) {
+                    return Err(GrpcError::protocol(format!(
+                        "invalid metadata key in trailer block (length {})",
+                        key.len()
+                    )));
                 }
             }
         }
