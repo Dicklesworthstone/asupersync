@@ -104,10 +104,10 @@ mod regression_tests {
     #[test]
     fn capacity_growth_bounded() {
         let mut codec = BytesCodec::new();
-        let mut buffer = BytesMut::with_capacity(64);
 
         // Encode progressively larger inputs
         for size in [100, 1000, 10000] {
+            let mut buffer = BytesMut::with_capacity(64);
             let large_input = Bytes::from(vec![0x42u8; size]);
             let cap_before = buffer.capacity();
 
@@ -117,13 +117,15 @@ mod regression_tests {
 
             let cap_after = buffer.capacity();
 
-            // Capacity invariants from fuzzing
+            // Each case starts from a fresh destination so per-call
+            // over-allocation cannot hide behind cumulative buffer growth.
+            assert_eq!(buffer.len(), size, "encoded length drifted");
             assert!(cap_after >= cap_before, "Capacity decreased!");
             assert!(
-                cap_after <= buffer.len() * 4,
-                "Excessive capacity growth: cap={}, len={}",
+                cap_after <= size * 4,
+                "Excessive capacity growth for size {}: cap={}",
+                size,
                 cap_after,
-                buffer.len()
             );
         }
     }
