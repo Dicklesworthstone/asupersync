@@ -135,8 +135,8 @@ fn rfc9110_section_6_1_te_without_chunked_terminator_with_cl() {
     // and decode "hello" through gzip (which would fail).
     let result = harness.decode_chunked_request(request);
     let _ = result; // any verdict is acceptable except a smuggling-enabling
-                    // outcome; the test exists to LOCK IN that the
-                    // parser doesn't have a "TE absent → use CL" bug.
+    // outcome; the test exists to LOCK IN that the
+    // parser doesn't have a "TE absent → use CL" bug.
 }
 
 // ===================================================================

@@ -33,8 +33,7 @@ impl RealMySqlConfig {
         let url = std::env::var("MYSQL_URL")
             .unwrap_or_else(|_| "mysql://root:password@localhost:3306/mysql".to_string());
         let toggle = std::env::var("REAL_MYSQL_TESTS").unwrap_or_default() == "true";
-        let allow_remote =
-            std::env::var("ALLOW_NON_LOCALHOST_MYSQL").unwrap_or_default() == "true";
+        let allow_remote = std::env::var("ALLOW_NON_LOCALHOST_MYSQL").unwrap_or_default() == "true";
         let node_env = std::env::var("NODE_ENV").unwrap_or_default();
 
         let url_lc = url.to_ascii_lowercase();
@@ -180,7 +179,11 @@ fn mysql_real_ping_query_and_prepared_roundtrip() {
 
     run_test_with_cx(|cx| async move {
         log.phase("connect");
-        let mut conn = unwrap_mysql(MySqlConnection::connect(&cx, &cfg.url).await, "connect", &log);
+        let mut conn = unwrap_mysql(
+            MySqlConnection::connect(&cx, &cfg.url).await,
+            "connect",
+            &log,
+        );
         log.line(
             "connection",
             &[
@@ -194,7 +197,8 @@ fn mysql_real_ping_query_and_prepared_roundtrip() {
 
         log.phase("select_one");
         let rows = unwrap_mysql(
-            conn.query_unchecked(&cx, "SELECT 1 AS v, 'ok' AS name").await,
+            conn.query_unchecked(&cx, "SELECT 1 AS v, 'ok' AS name")
+                .await,
             "query",
             &log,
         );
@@ -226,15 +230,19 @@ fn mysql_real_ping_query_and_prepared_roundtrip() {
         assert_eq!(insert_stmt.param_count(), 2, "insert param_count");
         assert_eq!(insert_stmt.column_count(), 0, "insert column_count");
         unwrap_mysql(
-            conn.execute_prepared(&cx, &insert_stmt, &[&1_i32, &"alpha"]).await,
+            conn.execute_prepared(&cx, &insert_stmt, &[&1_i32, &"alpha"])
+                .await,
             "execute_prepared",
             &log,
         );
 
         log.phase("prepare_select");
         let select_stmt = unwrap_mysql(
-            conn.prepare(&cx, "SELECT id, name FROM asupersync_real_stmt WHERE id = ?")
-                .await,
+            conn.prepare(
+                &cx,
+                "SELECT id, name FROM asupersync_real_stmt WHERE id = ?",
+            )
+            .await,
             "prepare_select",
             &log,
         );
@@ -261,12 +269,18 @@ fn mysql_real_transaction_isolation_and_rollback() {
         return;
     }
 
-    let log =
-        MySqlTestLogger::new("mysql_real", "mysql_real_transaction_isolation_and_rollback");
+    let log = MySqlTestLogger::new(
+        "mysql_real",
+        "mysql_real_transaction_isolation_and_rollback",
+    );
 
     run_test_with_cx(|cx| async move {
         log.phase("connect");
-        let mut conn = unwrap_mysql(MySqlConnection::connect(&cx, &cfg.url).await, "connect", &log);
+        let mut conn = unwrap_mysql(
+            MySqlConnection::connect(&cx, &cfg.url).await,
+            "connect",
+            &log,
+        );
 
         log.phase("temp_table");
         unwrap_mysql(

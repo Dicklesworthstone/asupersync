@@ -894,8 +894,7 @@ impl StreamStore {
             // base_id advances and the gap may fit. After this
             // base_id may have moved; recheck.
             self.prune_closed();
-            if id < self.base_id
-                || id.saturating_sub(self.base_id) > Self::MAX_STREAM_GAP_FROM_BASE
+            if id < self.base_id || id.saturating_sub(self.base_id) > Self::MAX_STREAM_GAP_FROM_BASE
             {
                 return Err(H2Error::stream(
                     id,
@@ -926,9 +925,7 @@ impl StreamStore {
     /// obvious DoS pattern before any state mutation.
     #[inline]
     fn precheck_stream_gap(&self, id: u32) -> Result<(), H2Error> {
-        if id >= self.base_id
-            && id - self.base_id > Self::MAX_STREAM_GAP_FROM_BASE
-        {
+        if id >= self.base_id && id - self.base_id > Self::MAX_STREAM_GAP_FROM_BASE {
             return Err(H2Error::stream(
                 id,
                 ErrorCode::RefusedStream,
@@ -1459,7 +1456,11 @@ mod tests {
         // new (larger) base_id and the same id will fit.
         let target_id = 1 + StreamStore::MAX_STREAM_GAP_FROM_BASE + 1;
         // Make sure target_id has client (odd) parity for is_client=false.
-        let target_id = if target_id % 2 == 1 { target_id } else { target_id + 1 };
+        let target_id = if target_id % 2 == 1 {
+            target_id
+        } else {
+            target_id + 1
+        };
         let result = store.get_or_create(target_id);
         // First time: pre-check rejects (no prune in pre-check).
         let err = result.expect_err("pre-check refuses uncompacted gap");

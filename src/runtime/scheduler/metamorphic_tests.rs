@@ -37,17 +37,11 @@ fn create_test_scheduler(worker_count: usize) -> ThreeLaneScheduler {
 /// `pop_timed_if_due(now)` and `pop_timed_only_with_hint(rng, now)`
 /// always return None, and the EDF/timed-lane assertions become
 /// vacuous.
-fn create_test_scheduler_with_clock(
-    worker_count: usize,
-    now: Time,
-) -> ThreeLaneScheduler {
+fn create_test_scheduler_with_clock(worker_count: usize, now: Time) -> ThreeLaneScheduler {
     let clock = Arc::new(VirtualClock::starting_at(now));
     let mut state = RuntimeState::new();
     state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
-    let state = Arc::new(ContendedMutex::new(
-        "metamorphic.runtime_state",
-        state,
-    ));
+    let state = Arc::new(ContendedMutex::new("metamorphic.runtime_state", state));
     ThreeLaneScheduler::new(worker_count, &state)
 }
 
@@ -746,8 +740,7 @@ fn mr_priority_lane_ordering() {
     // when next_task() is called. Without this, `now = Time::ZERO`
     // and the timed task at deadline=1000 would never be considered
     // "due" (causing the second assertion to fail).
-    let mut scheduler =
-        create_test_scheduler_with_clock(1, Time::from_nanos(2000));
+    let mut scheduler = create_test_scheduler_with_clock(1, Time::from_nanos(2000));
     let mut workers = scheduler.take_workers();
     let worker = &mut workers[0];
 

@@ -44,8 +44,8 @@ impl RealPgConfig {
     fn from_env() -> Self {
         let url = std::env::var("POSTGRES_URL")
             .unwrap_or_else(|_| "postgres://postgres:postgres@localhost:5432/postgres".to_string());
-        let allow_remote = std::env::var("ALLOW_NON_LOCALHOST_POSTGRES").unwrap_or_default()
-            == "true";
+        let allow_remote =
+            std::env::var("ALLOW_NON_LOCALHOST_POSTGRES").unwrap_or_default() == "true";
         let toggle = std::env::var("REAL_POSTGRES_TESTS").unwrap_or_default() == "true";
         let node_env = std::env::var("NODE_ENV").unwrap_or_default();
 
@@ -61,7 +61,9 @@ impl RealPgConfig {
         } else if node_env == "production" {
             Some("BLOCKED: NODE_ENV=production".into())
         } else if looks_prod {
-            Some(format!("BLOCKED: POSTGRES_URL looks like production: {url}"))
+            Some(format!(
+                "BLOCKED: POSTGRES_URL looks like production: {url}"
+            ))
         } else if !host_looks_local && !allow_remote {
             Some(format!(
                 "BLOCKED: non-localhost POSTGRES_URL without ALLOW_NON_LOCALHOST_POSTGRES=true: {url}"
@@ -175,7 +177,10 @@ fn unwrap_pg<T>(out: Outcome<T, PgError>, log: &PgTestLogger, op: &str) -> T {
             panic!("{op} returned error: {e}");
         }
         Outcome::Cancelled(reason) => {
-            log.line("pg_cancelled", &[("op", op), ("kind", &format!("{:?}", reason.kind))]);
+            log.line(
+                "pg_cancelled",
+                &[("op", op), ("kind", &format!("{:?}", reason.kind))],
+            );
             log.end("fail");
             panic!("{op} was cancelled: {:?}", reason.kind);
         }
@@ -285,7 +290,10 @@ fn pg_real_unique_violation_sqlstate_classification() {
     if skip_if_disabled(&cfg, "pg_real_unique_violation_sqlstate_classification") {
         return;
     }
-    let log = PgTestLogger::new("postgres_real", "pg_real_unique_violation_sqlstate_classification");
+    let log = PgTestLogger::new(
+        "postgres_real",
+        "pg_real_unique_violation_sqlstate_classification",
+    );
 
     run_test_with_cx(|cx| async move {
         log.phase("connect");
@@ -324,8 +332,14 @@ fn pg_real_unique_violation_sqlstate_classification() {
                 let code = e.error_code().unwrap_or("");
                 log.assert_match("sqlstate", "23505", code);
                 assert_eq!(code, "23505", "expected unique_violation SQLSTATE");
-                assert!(e.is_unique_violation(), "is_unique_violation() should be true");
-                assert!(e.is_constraint_violation(), "is_constraint_violation() should be true");
+                assert!(
+                    e.is_unique_violation(),
+                    "is_unique_violation() should be true"
+                );
+                assert!(
+                    e.is_constraint_violation(),
+                    "is_constraint_violation() should be true"
+                );
                 assert!(!e.is_serialization_failure());
                 assert!(!e.is_deadlock());
             }

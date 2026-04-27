@@ -1260,6 +1260,55 @@ mod tests {
         assert_eq!(p.w, 19);
     }
 
+    /// br-asupersync-0frehk: lower-edge K' ladder boundary coverage.
+    /// Existing tests pin K=4 (smallest tested input → K'=10), K=11
+    /// (rounds up to K'=12), K=100, etc., but the smallest valid K
+    /// inputs (K=1, 2, 3) are not explicitly checked. Every K in
+    /// 1..=10 must map to K'=10 (the first row of
+    /// SYSTEMATIC_INDEX_TABLE: 10, 254, 7, 10, 17). A regression that
+    /// shifted partition_point's predicate from `<` to `<=` (causing
+    /// K=10 to skip to K'=12) would silently break the lower edge
+    /// without tripping the existing K=4 / K=11 tests.
+    ///
+    /// Pin each lower-edge K with the FULL (k, k_prime, j, s, h, w,
+    /// l) tuple so any drift in either the partition-point logic OR
+    /// the table data file (rfc6330_systematic_index_table.inc) is
+    /// caught.
+    #[test]
+    fn params_k_prime_ladder_lower_edge_boundary() {
+        // The first row of SYSTEMATIC_INDEX_TABLE is
+        // (10, 254, 7, 10, 17). Every K in 1..=10 must round up to
+        // this row; K=11 jumps to (12, 630, 7, 10, 19) which is
+        // covered by params_lookup_uses_smallest_k_prime_ge_k.
+        const FIRST_ROW_K_PRIME: usize = 10;
+        const FIRST_ROW_J: usize = 254;
+        const FIRST_ROW_S: usize = 7;
+        const FIRST_ROW_H: usize = 10;
+        const FIRST_ROW_W: usize = 17;
+        const SYMBOL_SIZE: usize = 64;
+
+        for k in 1..=10 {
+            let p = SystematicParams::for_source_block(k, SYMBOL_SIZE);
+            assert_eq!(p.k, k, "k field must echo input for K={k}");
+            assert_eq!(
+                p.k_prime, FIRST_ROW_K_PRIME,
+                "K={k}: K' must round up to {FIRST_ROW_K_PRIME} (first table row)"
+            );
+            assert_eq!(p.j, FIRST_ROW_J, "K={k}: J(K')");
+            assert_eq!(p.s, FIRST_ROW_S, "K={k}: S(K')");
+            assert_eq!(p.h, FIRST_ROW_H, "K={k}: H(K')");
+            assert_eq!(p.w, FIRST_ROW_W, "K={k}: W(K')");
+            assert_eq!(
+                p.l,
+                FIRST_ROW_K_PRIME + FIRST_ROW_S + FIRST_ROW_H,
+                "K={k}: L = K' + S + H invariant"
+            );
+            assert_eq!(p.b, p.w - p.s, "K={k}: B = W - S invariant");
+            assert_eq!(p.p, p.l - p.w, "K={k}: P = L - W invariant");
+            assert_eq!(p.symbol_size, SYMBOL_SIZE);
+        }
+    }
+
     /// br-asupersync-eri4b3: K' systematic-index-table coverage.
     /// Iterate a stratified sample of K values spanning the full
     /// RFC 6330 §5.6 Table 2 range (K=4..56403) and assert that for
