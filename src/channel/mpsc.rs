@@ -2282,6 +2282,23 @@ pub mod backpressure_metamorphic {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    /// Helper to assert that LabRunReport indicates successful execution.
+    ///
+    /// Metamorphic tests must verify that the lab runtime detected no oracle
+    /// failures or invariant violations during execution.
+    fn assert_lab_report_success(report: crate::lab::runtime::LabRunReport) {
+        assert!(
+            report.oracle_report.all_passed(),
+            "Oracle failures detected: {:?}",
+            report.oracle_report.failures()
+        );
+        assert!(
+            report.invariant_violations.is_empty(),
+            "Invariant violations detected: {:?}",
+            report.invariant_violations
+        );
+    }
+
     /// Configuration for MPSC backpressure metamorphic tests.
     #[derive(Debug, Clone)]
     pub struct BackpressureTestConfig {
@@ -2665,7 +2682,8 @@ pub mod backpressure_metamorphic {
                         }.await;
                     }).unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
-                    let _ = lab.run_until_quiescent_with_report();
+                    let report = lab.run_until_quiescent_with_report();
+                    assert_lab_report_success(report);
                 });
                 Ok(())
             })
@@ -2746,7 +2764,8 @@ pub mod backpressure_metamorphic {
                         }.await;
                     }).unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
-                    let _ = lab.run_until_quiescent_with_report();
+                    let report = lab.run_until_quiescent_with_report();
+                    assert_lab_report_success(report);
                 });
                 Ok(())
             })
@@ -2843,7 +2862,8 @@ pub mod backpressure_metamorphic {
                         .await;
                     }).unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
-                    let _ = lab.run_until_quiescent_with_report();
+                    let report = lab.run_until_quiescent_with_report();
+                    assert_lab_report_success(report);
                 });
                 Ok(())
             })
@@ -2909,7 +2929,8 @@ pub mod backpressure_metamorphic {
                         })
                         .unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
-                    let _ = lab.run_until_quiescent_with_report();
+                    let report = lab.run_until_quiescent_with_report();
+                    assert_lab_report_success(report);
                 });
                 Ok(())
             })
@@ -2994,7 +3015,8 @@ pub mod backpressure_metamorphic {
                         }.await;
                     }).unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
-                    let _ = lab.run_until_quiescent_with_report();
+                    let report = lab.run_until_quiescent_with_report();
+                    assert_lab_report_success(report);
                 });
                 Ok(())
             })
@@ -3097,7 +3119,8 @@ pub mod backpressure_metamorphic {
                         .await;
                     }).unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
-                    let _ = lab.run_until_quiescent_with_report();
+                    let report = lab.run_until_quiescent_with_report();
+                    assert_lab_report_success(report);
                 });
                 Ok(())
             })
@@ -3200,7 +3223,8 @@ pub mod backpressure_metamorphic {
                         })
                         .unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
-                    let _ = lab.run_until_quiescent_with_report();
+                    let report = lab.run_until_quiescent_with_report();
+                    assert_lab_report_success(report);
                 });
                 Ok(())
             })
@@ -3267,7 +3291,8 @@ pub mod backpressure_metamorphic {
                         }.await;
                     }).unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
-                    let _ = lab.run_until_quiescent_with_report();
+                    let report = lab.run_until_quiescent_with_report();
+                    assert_lab_report_success(report);
                 });
                 Ok(())
             })
@@ -3357,7 +3382,8 @@ pub mod backpressure_metamorphic {
                         })
                         .unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
-                    let _ = lab.run_until_quiescent_with_report();
+                    let report = lab.run_until_quiescent_with_report();
+                    assert_lab_report_success(report);
                 });
                 Ok(())
             })
@@ -3463,7 +3489,8 @@ pub mod backpressure_metamorphic {
                         })
                         .unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
-                    let _ = lab.run_until_quiescent_with_report();
+                    let report = lab.run_until_quiescent_with_report();
+                    assert_lab_report_success(report);
                 });
                 Ok(())
             })
@@ -3567,7 +3594,8 @@ pub mod backpressure_metamorphic {
                         })
                         .unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
-                    let _ = lab.run_until_quiescent_with_report();
+                    let report = lab.run_until_quiescent_with_report();
+                    assert_lab_report_success(report);
                 });
                 Ok(())
             })
@@ -3833,7 +3861,8 @@ pub mod backpressure_metamorphic {
                         }.await;
                     }).unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
-                    let _ = lab.run_until_quiescent_with_report();
+                    let report = lab.run_until_quiescent_with_report();
+                    assert_lab_report_success(report);
                 });
                 Ok(())
             })
