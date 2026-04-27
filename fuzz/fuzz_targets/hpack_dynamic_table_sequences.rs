@@ -159,9 +159,7 @@ fn test_dynamic_table_consistency(sequence: &DynamicTableSequence) -> Result<(),
                 // Encode the header
                 let header = Header { name: name.clone(), value: value.clone() };
                 let mut encoded_buf = BytesMut::new();
-                if let Err(_) = encoder.encode(&mut encoded_buf, &[header.clone()]) {
-                    continue; // Skip on encoding error
-                }
+                encoder.encode(&[header.clone()], &mut encoded_buf);
 
                 // Decode and verify
                 let mut encoded_bytes = encoded_buf.freeze();
@@ -195,11 +193,9 @@ fn test_dynamic_table_consistency(sequence: &DynamicTableSequence) -> Result<(),
                     _ => "x-indexed",
                 };
 
-                let header = Header::new(name.to_string(), value.clone());
+                let header = Header { name: name.to_string(), value: value.clone() };
                 let mut encoded_buf = BytesMut::new();
-                if let Err(_) = encoder.encode(&mut encoded_buf, &[header.clone()]) {
-                    continue;
-                }
+                encoder.encode(&[header.clone()], &mut encoded_buf);
 
                 let mut encoded_bytes = encoded_buf.freeze();
                 if let Ok(decoded_headers) = decoder.decode(&mut encoded_bytes) {
@@ -243,7 +239,8 @@ fn test_dynamic_table_consistency(sequence: &DynamicTableSequence) -> Result<(),
                 for (name, value) in headers {
                     let header = Header { name: name.clone(), value: value.clone() };
                     let mut encoded_buf = BytesMut::new();
-                    if let Ok(_) = encoder.encode(&mut encoded_buf, &[header]) {
+                    encoder.encode(&[header], &mut encoded_buf);
+                    {
                         let mut encoded_bytes = encoded_buf.freeze();
                         if let Ok(_) = decoder.decode(&mut encoded_bytes) {
                             simulate_dynamic_table_insertion(&mut expected_dynamic_entries,
@@ -260,7 +257,8 @@ fn test_dynamic_table_consistency(sequence: &DynamicTableSequence) -> Result<(),
                     .collect();
 
                 let mut encoded_buf = BytesMut::new();
-                if let Ok(_) = encoder.encode(&mut encoded_buf, &header_list) {
+                encoder.encode(&header_list, &mut encoded_buf);
+                {
                     let mut encoded_bytes = encoded_buf.freeze();
                     if let Ok(decoded_headers) = decoder.decode(&mut encoded_bytes) {
                         // Verify all headers round-tripped correctly
