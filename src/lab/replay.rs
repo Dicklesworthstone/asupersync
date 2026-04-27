@@ -2277,7 +2277,12 @@ mod tests {
 
         let entry = DivergenceCorpusEntry {
             schema_version: DIVERGENCE_CORPUS_SCHEMA_VERSION.to_string(),
-            entry_id: colon_entry_id,
+            entry_id: DivergenceCorpusEntry::entry_id_for(
+                " / ",
+                ":::",
+                "___",
+                DifferentialPolicyClass::RuntimeSemanticBug,
+            ),
             scenario_id: ":::".to_string(),
             surface_id: " / ".to_string(),
             surface_contract_version: "v1".to_string(),
