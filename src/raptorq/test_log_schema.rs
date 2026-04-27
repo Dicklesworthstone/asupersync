@@ -221,13 +221,13 @@ impl E2eLogEntry {
     /// br-asupersync-zmzwof: gated to `cfg(test)` because the only callers
     /// are inside this module's test suite — keeping it `pub` on the prod
     /// crate surface invites accidental serialization of test-only schemas.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-internals"))]
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
     }
 
     /// Serialize to pretty-printed JSON string.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-internals"))]
     pub fn to_json_pretty(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(self)
     }
@@ -470,13 +470,13 @@ impl UnitLogEntry {
     /// Serialize to JSON string.
     ///
     /// br-asupersync-zmzwof: gated to `cfg(test)` (see `E2eLogEntry::to_json`).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-internals"))]
     pub fn to_json(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
     }
 
     /// Serialize to pretty-printed JSON string.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-internals"))]
     pub fn to_json_pretty(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(self)
     }
