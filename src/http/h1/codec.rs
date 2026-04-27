@@ -816,8 +816,19 @@ fn decode_head_parts(
     // waiting for a CRLF that will never arrive. A trailing single `\r` with
     // no successor byte yet may still be completed, so we only fire when the
     // next byte is already buffered.
-    for idx in memchr_iter(b'\r', src) {
-        if idx + 1 < src.len() && src[idx + 1] != b'\n' {
+    //
+    // br-asupersync-2ovm8z: bound the scan to the HEAD region only. The
+    // previous unbounded scan over `src` would inspect body bytes (or
+    // pipelined-next-request bytes) and reject any 0x0D byte as a bare-CR,
+    // poisoning the connection on virtually all binary uploads (gRPC,
+    // protobuf, images, octet-stream — any payload contains 0x0D in ~1/256
+    // bytes). The scan must apply ONLY to head bytes.
+    let head_scan_limit = match find_headers_end(src) {
+        Some(end) => end, // complete head — scan exactly the head bytes
+        None => src.len().min(max_headers_size),
+    };
+    for idx in memchr_iter(b'\r', &src[..head_scan_limit]) {
+        if idx + 1 < head_scan_limit && src[idx + 1] != b'\n' {
             return Err(HttpError::BadRequestLine);
         }
     }
@@ -1264,6 +1275,72 @@ mod tests {
         let mut buf = BytesMut::with_capacity(1024);
         codec.encode(resp, &mut buf).unwrap();
         buf.to_vec()
+    }
+
+    /// br-asupersync-2ovm8z: a complete request whose body contains a
+    /// bare 0x0D byte (any binary upload — gRPC, protobuf, image — has
+    /// 0x0D appearing in ~1/256 random bytes) must NOT poison the
+    /// codec. Previously the bare-CR scan ran over the entire `src`
+    /// buffer (head + body), rejecting any 0x0D in the body as
+    /// BadRequestLine and tripping the codec into Poisoned state.
+    #[test]
+    fn ovm8z_body_with_bare_cr_byte_decodes_cleanly() {
+        let mut codec = Http1Codec::new();
+        // Build a request with Content-Length=4 and a body containing a
+        // bare 0x0D (no \n successor) — the kind of byte sequence that
+        // appears in any binary payload.
+        let mut data = Vec::new();
+        data.extend_from_slice(b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\n");
+        data.extend_from_slice(&[0x42, 0x0D, 0x44, 0x45]); // 4-byte body with bare \r
+        let mut buf = BytesMut::from(&data[..]);
+        let result = codec.decode(&mut buf);
+        assert!(
+            result.is_ok(),
+            "binary body with bare 0x0D must NOT poison the codec, got: {result:?}"
+        );
+        let req = result.unwrap().expect("complete request decodes");
+        assert_eq!(
+            AsRef::<[u8]>::as_ref(&req.body),
+            &[0x42, 0x0D, 0x44, 0x45][..]
+        );
+    }
+
+    /// br-asupersync-2ovm8z: a chunked request where the body chunk
+    /// contains 0x0D bytes must also decode cleanly (covers the
+    /// pipelined / chunked pathway).
+    #[test]
+    fn ovm8z_chunked_body_with_bare_cr_byte_does_not_poison() {
+        let mut codec = Http1Codec::new();
+        // Head with Transfer-Encoding: chunked, then a single chunk of 4
+        // bytes containing a bare 0x0D.
+        let mut data = Vec::new();
+        data.extend_from_slice(
+            b"POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n",
+        );
+        data.extend_from_slice(b"4\r\n");
+        data.extend_from_slice(&[0x42, 0x0D, 0x44, 0x45]);
+        data.extend_from_slice(b"\r\n0\r\n\r\n");
+        let mut buf = BytesMut::from(&data[..]);
+        let result = codec.decode(&mut buf);
+        assert!(
+            result.is_ok(),
+            "chunked body with bare 0x0D must decode cleanly, got: {result:?}"
+        );
+    }
+
+    /// br-asupersync-2ovm8z: bare-CR within the HEAD itself must STILL
+    /// be rejected (the original smuggling-defense intent).
+    #[test]
+    fn ovm8z_bare_cr_in_head_still_rejected() {
+        let mut codec = Http1Codec::new();
+        // Bare 0x0D in the request line (not followed by \n) — must be
+        // rejected as BadRequestLine.
+        let data = b"GET /\rsmuggle HTTP/1.1\r\nHost: x\r\n\r\n";
+        let mut buf = BytesMut::from(&data[..]);
+        let err = codec
+            .decode(&mut buf)
+            .expect_err("bare CR in head must still reject");
+        assert!(matches!(err, HttpError::BadRequestLine));
     }
 
     #[test]
