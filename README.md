@@ -436,7 +436,7 @@ It maps common Tokio ecosystem crates to the corresponding Asupersync modules.
 | TLS | `tokio-rustls`, `native-tls` | `src/tls/` (`tls`, `tls-native-roots`, `tls-webpki-roots`) | Feature-gated | Active | Mixed | Medium |
 | WebSocket | `tokio-tungstenite` | `src/net/websocket/` | Built-in | Active | Mixed | Medium |
 | HTTP stack (HTTP/1.1 + HTTP/2) | `hyper`, `h2`, `http-body`, `hyper-util` | `src/http/h1/`, `src/http/h2/`, `src/http/body.rs`, `src/http/pool.rs` | Built-in | Active | Mixed | Medium |
-| QUIC + HTTP/3 | `quinn`, `h3`, `h3-quinn` | `src/net/quic_core/`, `src/net/quic_native/`, `src/http/h3_native.rs` (native core feature surfaces exposed via `quic`/`http3`; historical wrapper sources in `src/net/quic/` and `src/http/h3/` remain parked outside the core feature graph) | In progress | Active | Mixed | High |
+| QUIC + HTTP/3 (static-only QPACK) | `quinn`, `h3`, `h3-quinn` | `src/net/quic_core/`, `src/net/quic_native/`, `src/http/h3_native.rs` (native core feature surfaces exposed via `quic`/`http3`; historical wrapper sources in `src/net/quic/` and `src/http/h3/` remain parked outside the core feature graph) | Feature-gated | Active | Mixed | Medium |
 | Web framework | `axum`, `warp`, `tower-http` | `src/web/`, `src/service/`, `src/server/` | In progress | Active | Mixed | Medium |
 | gRPC | `tonic` + `prost` + `tower` + `hyper` | `src/grpc/` | Built-in | Active | Mixed | Medium |
 | Database clients | `tokio-postgres`, `mysql_async`, `sqlx` | `src/database/{postgres,mysql,sqlite}.rs` | Feature-gated | Active | Mixed | Medium |
@@ -453,6 +453,8 @@ It maps common Tokio ecosystem crates to the corresponding Asupersync modules.
 This map is about capability coverage, not API compatibility. Asupersync intentionally uses a different model centered on `Cx`, regions, explicit cancellation, and deterministic replay.
 
 The reactor export contract is narrower than the directory listing suggests: `runtime::reactor` exports `EpollReactor` on Linux, `IoUringReactor` on Linux only (real with `io-uring`, intentional `Unsupported` without it), `KqueueReactor` on BSD-family targets, `IocpReactor` on Windows, `BrowserReactor` on `wasm32`, and `LabReactor` for deterministic testing. Historical files such as `src/runtime/reactor/uring.rs` and `src/runtime/reactor/macos.rs` are not part of the live export graph.
+
+Interest-flag parity is also narrower than the shared `Interest` bitflag type suggests: Linux `EpollReactor` supports the full shipped readiness/mode surface used by the native runtime, `KqueueReactor` rejects `Interest::DISPATCH` and `Interest::PRIORITY`, and `IocpReactor` currently accepts only `READABLE` / `WRITABLE`. Treat Linux `epoll` plus optional `io_uring` as the primary production path, with BSD and Windows reactors available but intentionally narrower today.
 
 ---
 
@@ -1452,7 +1454,7 @@ and known limitations.
 |------------|--------|
 | Single-thread deterministic kernel | ✅ Complete |
 | Parallel scheduler + work-stealing | ✅ Implemented (three-lane scheduler) |
-| I/O reactor (epoll + io_uring) | ✅ Implemented |
+| I/O reactor (Linux epoll + optional io_uring primary path; BSD/Windows reactors have narrower interest support) | ✅ Implemented |
 | TCP, HTTP/1.1, HTTP/2, WebSocket, TLS | ✅ Implemented |
 | HTTP/3 (QPACK static-only mode) | ⚠️ Partial implementation (dynamic table, Huffman encoding not supported) |
 | Database clients (SQLite, PostgreSQL, MySQL) | ✅ Implemented |
@@ -1488,7 +1490,7 @@ and known limitations.
 |-------|-------|--------|
 | **Phase 0** | Single-thread deterministic kernel | ✅ Complete |
 | **Phase 1** | Parallel scheduler + region heap | ✅ Complete |
-| **Phase 2** | I/O integration (epoll, io_uring, TCP, HTTP/1.1-2, TLS, HTTP/3 static-only) | ✅ Complete |
+| **Phase 2** | I/O integration (Linux epoll, optional io_uring, TCP, HTTP/1.1-2, TLS, HTTP/3 static-only; BSD/Windows reactors currently expose narrower interest support) | ✅ Complete |
 | **Phase 3** | Actors + supervision (GenServer, links, monitors) | ✅ Complete |
 | **Phase 4** | Distributed structured concurrency | ✅ Complete |
 | **Phase 5** | DPOR + TLA+ tooling | ✅ Complete |

@@ -1,0 +1,4974 @@
+---
+source: tests/raptorq_encoding_roundtrip_metamorphic.rs
+expression: vectors
+---
+[
+  {
+    "case_name": "k1_payload7",
+    "payload_size": 7,
+    "symbol_size": 8,
+    "k": 1,
+    "k_prime": 10,
+    "repair_count": 4,
+    "packet_count": 5,
+    "packets": [
+      {
+        "esi": 0,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "01264b7095badf00"
+      },
+      {
+        "esi": 1,
+        "kind": "repair",
+        "degree": 4,
+        "data_hex": "d8e8ff079628b100"
+      },
+      {
+        "esi": 2,
+        "kind": "repair",
+        "degree": 4,
+        "data_hex": "75251c09a778ce00"
+      },
+      {
+        "esi": 3,
+        "kind": "repair",
+        "degree": 12,
+        "data_hex": "371cbdb83eb0b400"
+      },
+      {
+        "esi": 4,
+        "kind": "repair",
+        "degree": 5,
+        "data_hex": "2d278dac700fd000"
+      }
+    ]
+  },
+  {
+    "case_name": "k10_payload80",
+    "payload_size": 80,
+    "symbol_size": 8,
+    "k": 10,
+    "k_prime": 10,
+    "repair_count": 4,
+    "packet_count": 14,
+    "packets": [
+      {
+        "esi": 0,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "0a2f54799ec3e80d"
+      },
+      {
+        "esi": 1,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "32577ca1c6eb1035"
+      },
+      {
+        "esi": 2,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "5a7fa4c9ee13385d"
+      },
+      {
+        "esi": 3,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "82a7ccf1163b6085"
+      },
+      {
+        "esi": 4,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "aacff4193e6388ad"
+      },
+      {
+        "esi": 5,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d2f71c41668bb0d5"
+      },
+      {
+        "esi": 6,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "fa1f44698eb3d8fd"
+      },
+      {
+        "esi": 7,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "22476c91b6db0025"
+      },
+      {
+        "esi": 8,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "4a6f94b9de03284d"
+      },
+      {
+        "esi": 9,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "7297bce1062b5075"
+      },
+      {
+        "esi": 10,
+        "kind": "repair",
+        "degree": 4,
+        "data_hex": "2359130cd24b47c0"
+      },
+      {
+        "esi": 11,
+        "kind": "repair",
+        "degree": 4,
+        "data_hex": "1309d808b7ae2b2b"
+      },
+      {
+        "esi": 12,
+        "kind": "repair",
+        "degree": 12,
+        "data_hex": "e483645704a49857"
+      },
+      {
+        "esi": 13,
+        "kind": "repair",
+        "degree": 5,
+        "data_hex": "6731ef95c23d2397"
+      }
+    ]
+  },
+  {
+    "case_name": "k11_payload81",
+    "payload_size": 81,
+    "symbol_size": 8,
+    "k": 11,
+    "k_prime": 12,
+    "repair_count": 4,
+    "packet_count": 15,
+    "packets": [
+      {
+        "esi": 0,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "0b30557a9fc4e90e"
+      },
+      {
+        "esi": 1,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "33587da2c7ec1136"
+      },
+      {
+        "esi": 2,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "5b80a5caef14395e"
+      },
+      {
+        "esi": 3,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "83a8cdf2173c6186"
+      },
+      {
+        "esi": 4,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "abd0f51a3f6489ae"
+      },
+      {
+        "esi": 5,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d3f81d42678cb1d6"
+      },
+      {
+        "esi": 6,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "fb20456a8fb4d9fe"
+      },
+      {
+        "esi": 7,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "23486d92b7dc0126"
+      },
+      {
+        "esi": 8,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "4b7095badf04294e"
+      },
+      {
+        "esi": 9,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "7398bde2072c5176"
+      },
+      {
+        "esi": 10,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "9b00000000000000"
+      },
+      {
+        "esi": 11,
+        "kind": "repair",
+        "degree": 5,
+        "data_hex": "c5904cbe4f2756a8"
+      },
+      {
+        "esi": 12,
+        "kind": "repair",
+        "degree": 5,
+        "data_hex": "71141be7feae9a49"
+      },
+      {
+        "esi": 13,
+        "kind": "repair",
+        "degree": 7,
+        "data_hex": "272532a0fbbc2929"
+      },
+      {
+        "esi": 14,
+        "kind": "repair",
+        "degree": 5,
+        "data_hex": "285ad84ed44ec015"
+      }
+    ]
+  },
+  {
+    "case_name": "k256_payload2048",
+    "payload_size": 2048,
+    "symbol_size": 8,
+    "k": 256,
+    "k_prime": 257,
+    "repair_count": 4,
+    "packet_count": 260,
+    "packets": [
+      {
+        "esi": 0,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "00254a6f94b9de03"
+      },
+      {
+        "esi": 1,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "284d7297bce1062b"
+      },
+      {
+        "esi": 2,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "50759abfe4092e53"
+      },
+      {
+        "esi": 3,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "789dc2e70c31567b"
+      },
+      {
+        "esi": 4,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a0c5ea0f34597ea3"
+      },
+      {
+        "esi": 5,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c8ed12375c81a6cb"
+      },
+      {
+        "esi": 6,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f0153a5f84a9cef3"
+      },
+      {
+        "esi": 7,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "183d6287acd1f61b"
+      },
+      {
+        "esi": 8,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "40658aafd4f91e43"
+      },
+      {
+        "esi": 9,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "688db2d7fc21466b"
+      },
+      {
+        "esi": 10,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "90b5daff24496e93"
+      },
+      {
+        "esi": 11,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b8dd02274c7196bb"
+      },
+      {
+        "esi": 12,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e0052a4f7499bee3"
+      },
+      {
+        "esi": 13,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "082d52779cc1e60b"
+      },
+      {
+        "esi": 14,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "30557a9fc4e90e33"
+      },
+      {
+        "esi": 15,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "587da2c7ec11365b"
+      },
+      {
+        "esi": 16,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "80a5caef14395e83"
+      },
+      {
+        "esi": 17,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a8cdf2173c6186ab"
+      },
+      {
+        "esi": 18,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d0f51a3f6489aed3"
+      },
+      {
+        "esi": 19,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f81d42678cb1d6fb"
+      },
+      {
+        "esi": 20,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "20456a8fb4d9fe23"
+      },
+      {
+        "esi": 21,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "486d92b7dc01264b"
+      },
+      {
+        "esi": 22,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "7095badf04294e73"
+      },
+      {
+        "esi": 23,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "98bde2072c51769b"
+      },
+      {
+        "esi": 24,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c0e50a2f54799ec3"
+      },
+      {
+        "esi": 25,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e80d32577ca1c6eb"
+      },
+      {
+        "esi": 26,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "10355a7fa4c9ee13"
+      },
+      {
+        "esi": 27,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "385d82a7ccf1163b"
+      },
+      {
+        "esi": 28,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "6085aacff4193e63"
+      },
+      {
+        "esi": 29,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "88add2f71c41668b"
+      },
+      {
+        "esi": 30,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b0d5fa1f44698eb3"
+      },
+      {
+        "esi": 31,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d8fd22476c91b6db"
+      },
+      {
+        "esi": 32,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "00254a6f94b9de03"
+      },
+      {
+        "esi": 33,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "284d7297bce1062b"
+      },
+      {
+        "esi": 34,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "50759abfe4092e53"
+      },
+      {
+        "esi": 35,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "789dc2e70c31567b"
+      },
+      {
+        "esi": 36,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a0c5ea0f34597ea3"
+      },
+      {
+        "esi": 37,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c8ed12375c81a6cb"
+      },
+      {
+        "esi": 38,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f0153a5f84a9cef3"
+      },
+      {
+        "esi": 39,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "183d6287acd1f61b"
+      },
+      {
+        "esi": 40,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "40658aafd4f91e43"
+      },
+      {
+        "esi": 41,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "688db2d7fc21466b"
+      },
+      {
+        "esi": 42,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "90b5daff24496e93"
+      },
+      {
+        "esi": 43,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b8dd02274c7196bb"
+      },
+      {
+        "esi": 44,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e0052a4f7499bee3"
+      },
+      {
+        "esi": 45,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "082d52779cc1e60b"
+      },
+      {
+        "esi": 46,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "30557a9fc4e90e33"
+      },
+      {
+        "esi": 47,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "587da2c7ec11365b"
+      },
+      {
+        "esi": 48,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "80a5caef14395e83"
+      },
+      {
+        "esi": 49,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a8cdf2173c6186ab"
+      },
+      {
+        "esi": 50,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d0f51a3f6489aed3"
+      },
+      {
+        "esi": 51,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f81d42678cb1d6fb"
+      },
+      {
+        "esi": 52,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "20456a8fb4d9fe23"
+      },
+      {
+        "esi": 53,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "486d92b7dc01264b"
+      },
+      {
+        "esi": 54,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "7095badf04294e73"
+      },
+      {
+        "esi": 55,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "98bde2072c51769b"
+      },
+      {
+        "esi": 56,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c0e50a2f54799ec3"
+      },
+      {
+        "esi": 57,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e80d32577ca1c6eb"
+      },
+      {
+        "esi": 58,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "10355a7fa4c9ee13"
+      },
+      {
+        "esi": 59,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "385d82a7ccf1163b"
+      },
+      {
+        "esi": 60,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "6085aacff4193e63"
+      },
+      {
+        "esi": 61,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "88add2f71c41668b"
+      },
+      {
+        "esi": 62,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b0d5fa1f44698eb3"
+      },
+      {
+        "esi": 63,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d8fd22476c91b6db"
+      },
+      {
+        "esi": 64,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "00254a6f94b9de03"
+      },
+      {
+        "esi": 65,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "284d7297bce1062b"
+      },
+      {
+        "esi": 66,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "50759abfe4092e53"
+      },
+      {
+        "esi": 67,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "789dc2e70c31567b"
+      },
+      {
+        "esi": 68,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a0c5ea0f34597ea3"
+      },
+      {
+        "esi": 69,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c8ed12375c81a6cb"
+      },
+      {
+        "esi": 70,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f0153a5f84a9cef3"
+      },
+      {
+        "esi": 71,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "183d6287acd1f61b"
+      },
+      {
+        "esi": 72,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "40658aafd4f91e43"
+      },
+      {
+        "esi": 73,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "688db2d7fc21466b"
+      },
+      {
+        "esi": 74,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "90b5daff24496e93"
+      },
+      {
+        "esi": 75,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b8dd02274c7196bb"
+      },
+      {
+        "esi": 76,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e0052a4f7499bee3"
+      },
+      {
+        "esi": 77,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "082d52779cc1e60b"
+      },
+      {
+        "esi": 78,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "30557a9fc4e90e33"
+      },
+      {
+        "esi": 79,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "587da2c7ec11365b"
+      },
+      {
+        "esi": 80,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "80a5caef14395e83"
+      },
+      {
+        "esi": 81,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a8cdf2173c6186ab"
+      },
+      {
+        "esi": 82,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d0f51a3f6489aed3"
+      },
+      {
+        "esi": 83,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f81d42678cb1d6fb"
+      },
+      {
+        "esi": 84,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "20456a8fb4d9fe23"
+      },
+      {
+        "esi": 85,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "486d92b7dc01264b"
+      },
+      {
+        "esi": 86,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "7095badf04294e73"
+      },
+      {
+        "esi": 87,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "98bde2072c51769b"
+      },
+      {
+        "esi": 88,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c0e50a2f54799ec3"
+      },
+      {
+        "esi": 89,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e80d32577ca1c6eb"
+      },
+      {
+        "esi": 90,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "10355a7fa4c9ee13"
+      },
+      {
+        "esi": 91,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "385d82a7ccf1163b"
+      },
+      {
+        "esi": 92,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "6085aacff4193e63"
+      },
+      {
+        "esi": 93,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "88add2f71c41668b"
+      },
+      {
+        "esi": 94,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b0d5fa1f44698eb3"
+      },
+      {
+        "esi": 95,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d8fd22476c91b6db"
+      },
+      {
+        "esi": 96,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "00254a6f94b9de03"
+      },
+      {
+        "esi": 97,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "284d7297bce1062b"
+      },
+      {
+        "esi": 98,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "50759abfe4092e53"
+      },
+      {
+        "esi": 99,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "789dc2e70c31567b"
+      },
+      {
+        "esi": 100,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a0c5ea0f34597ea3"
+      },
+      {
+        "esi": 101,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c8ed12375c81a6cb"
+      },
+      {
+        "esi": 102,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f0153a5f84a9cef3"
+      },
+      {
+        "esi": 103,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "183d6287acd1f61b"
+      },
+      {
+        "esi": 104,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "40658aafd4f91e43"
+      },
+      {
+        "esi": 105,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "688db2d7fc21466b"
+      },
+      {
+        "esi": 106,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "90b5daff24496e93"
+      },
+      {
+        "esi": 107,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b8dd02274c7196bb"
+      },
+      {
+        "esi": 108,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e0052a4f7499bee3"
+      },
+      {
+        "esi": 109,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "082d52779cc1e60b"
+      },
+      {
+        "esi": 110,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "30557a9fc4e90e33"
+      },
+      {
+        "esi": 111,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "587da2c7ec11365b"
+      },
+      {
+        "esi": 112,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "80a5caef14395e83"
+      },
+      {
+        "esi": 113,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a8cdf2173c6186ab"
+      },
+      {
+        "esi": 114,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d0f51a3f6489aed3"
+      },
+      {
+        "esi": 115,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f81d42678cb1d6fb"
+      },
+      {
+        "esi": 116,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "20456a8fb4d9fe23"
+      },
+      {
+        "esi": 117,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "486d92b7dc01264b"
+      },
+      {
+        "esi": 118,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "7095badf04294e73"
+      },
+      {
+        "esi": 119,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "98bde2072c51769b"
+      },
+      {
+        "esi": 120,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c0e50a2f54799ec3"
+      },
+      {
+        "esi": 121,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e80d32577ca1c6eb"
+      },
+      {
+        "esi": 122,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "10355a7fa4c9ee13"
+      },
+      {
+        "esi": 123,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "385d82a7ccf1163b"
+      },
+      {
+        "esi": 124,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "6085aacff4193e63"
+      },
+      {
+        "esi": 125,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "88add2f71c41668b"
+      },
+      {
+        "esi": 126,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b0d5fa1f44698eb3"
+      },
+      {
+        "esi": 127,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d8fd22476c91b6db"
+      },
+      {
+        "esi": 128,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "00254a6f94b9de03"
+      },
+      {
+        "esi": 129,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "284d7297bce1062b"
+      },
+      {
+        "esi": 130,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "50759abfe4092e53"
+      },
+      {
+        "esi": 131,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "789dc2e70c31567b"
+      },
+      {
+        "esi": 132,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a0c5ea0f34597ea3"
+      },
+      {
+        "esi": 133,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c8ed12375c81a6cb"
+      },
+      {
+        "esi": 134,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f0153a5f84a9cef3"
+      },
+      {
+        "esi": 135,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "183d6287acd1f61b"
+      },
+      {
+        "esi": 136,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "40658aafd4f91e43"
+      },
+      {
+        "esi": 137,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "688db2d7fc21466b"
+      },
+      {
+        "esi": 138,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "90b5daff24496e93"
+      },
+      {
+        "esi": 139,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b8dd02274c7196bb"
+      },
+      {
+        "esi": 140,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e0052a4f7499bee3"
+      },
+      {
+        "esi": 141,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "082d52779cc1e60b"
+      },
+      {
+        "esi": 142,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "30557a9fc4e90e33"
+      },
+      {
+        "esi": 143,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "587da2c7ec11365b"
+      },
+      {
+        "esi": 144,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "80a5caef14395e83"
+      },
+      {
+        "esi": 145,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a8cdf2173c6186ab"
+      },
+      {
+        "esi": 146,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d0f51a3f6489aed3"
+      },
+      {
+        "esi": 147,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f81d42678cb1d6fb"
+      },
+      {
+        "esi": 148,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "20456a8fb4d9fe23"
+      },
+      {
+        "esi": 149,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "486d92b7dc01264b"
+      },
+      {
+        "esi": 150,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "7095badf04294e73"
+      },
+      {
+        "esi": 151,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "98bde2072c51769b"
+      },
+      {
+        "esi": 152,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c0e50a2f54799ec3"
+      },
+      {
+        "esi": 153,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e80d32577ca1c6eb"
+      },
+      {
+        "esi": 154,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "10355a7fa4c9ee13"
+      },
+      {
+        "esi": 155,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "385d82a7ccf1163b"
+      },
+      {
+        "esi": 156,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "6085aacff4193e63"
+      },
+      {
+        "esi": 157,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "88add2f71c41668b"
+      },
+      {
+        "esi": 158,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b0d5fa1f44698eb3"
+      },
+      {
+        "esi": 159,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d8fd22476c91b6db"
+      },
+      {
+        "esi": 160,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "00254a6f94b9de03"
+      },
+      {
+        "esi": 161,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "284d7297bce1062b"
+      },
+      {
+        "esi": 162,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "50759abfe4092e53"
+      },
+      {
+        "esi": 163,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "789dc2e70c31567b"
+      },
+      {
+        "esi": 164,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a0c5ea0f34597ea3"
+      },
+      {
+        "esi": 165,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c8ed12375c81a6cb"
+      },
+      {
+        "esi": 166,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f0153a5f84a9cef3"
+      },
+      {
+        "esi": 167,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "183d6287acd1f61b"
+      },
+      {
+        "esi": 168,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "40658aafd4f91e43"
+      },
+      {
+        "esi": 169,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "688db2d7fc21466b"
+      },
+      {
+        "esi": 170,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "90b5daff24496e93"
+      },
+      {
+        "esi": 171,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b8dd02274c7196bb"
+      },
+      {
+        "esi": 172,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e0052a4f7499bee3"
+      },
+      {
+        "esi": 173,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "082d52779cc1e60b"
+      },
+      {
+        "esi": 174,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "30557a9fc4e90e33"
+      },
+      {
+        "esi": 175,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "587da2c7ec11365b"
+      },
+      {
+        "esi": 176,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "80a5caef14395e83"
+      },
+      {
+        "esi": 177,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a8cdf2173c6186ab"
+      },
+      {
+        "esi": 178,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d0f51a3f6489aed3"
+      },
+      {
+        "esi": 179,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f81d42678cb1d6fb"
+      },
+      {
+        "esi": 180,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "20456a8fb4d9fe23"
+      },
+      {
+        "esi": 181,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "486d92b7dc01264b"
+      },
+      {
+        "esi": 182,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "7095badf04294e73"
+      },
+      {
+        "esi": 183,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "98bde2072c51769b"
+      },
+      {
+        "esi": 184,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c0e50a2f54799ec3"
+      },
+      {
+        "esi": 185,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e80d32577ca1c6eb"
+      },
+      {
+        "esi": 186,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "10355a7fa4c9ee13"
+      },
+      {
+        "esi": 187,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "385d82a7ccf1163b"
+      },
+      {
+        "esi": 188,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "6085aacff4193e63"
+      },
+      {
+        "esi": 189,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "88add2f71c41668b"
+      },
+      {
+        "esi": 190,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b0d5fa1f44698eb3"
+      },
+      {
+        "esi": 191,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d8fd22476c91b6db"
+      },
+      {
+        "esi": 192,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "00254a6f94b9de03"
+      },
+      {
+        "esi": 193,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "284d7297bce1062b"
+      },
+      {
+        "esi": 194,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "50759abfe4092e53"
+      },
+      {
+        "esi": 195,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "789dc2e70c31567b"
+      },
+      {
+        "esi": 196,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a0c5ea0f34597ea3"
+      },
+      {
+        "esi": 197,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c8ed12375c81a6cb"
+      },
+      {
+        "esi": 198,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f0153a5f84a9cef3"
+      },
+      {
+        "esi": 199,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "183d6287acd1f61b"
+      },
+      {
+        "esi": 200,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "40658aafd4f91e43"
+      },
+      {
+        "esi": 201,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "688db2d7fc21466b"
+      },
+      {
+        "esi": 202,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "90b5daff24496e93"
+      },
+      {
+        "esi": 203,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b8dd02274c7196bb"
+      },
+      {
+        "esi": 204,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e0052a4f7499bee3"
+      },
+      {
+        "esi": 205,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "082d52779cc1e60b"
+      },
+      {
+        "esi": 206,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "30557a9fc4e90e33"
+      },
+      {
+        "esi": 207,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "587da2c7ec11365b"
+      },
+      {
+        "esi": 208,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "80a5caef14395e83"
+      },
+      {
+        "esi": 209,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a8cdf2173c6186ab"
+      },
+      {
+        "esi": 210,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d0f51a3f6489aed3"
+      },
+      {
+        "esi": 211,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f81d42678cb1d6fb"
+      },
+      {
+        "esi": 212,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "20456a8fb4d9fe23"
+      },
+      {
+        "esi": 213,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "486d92b7dc01264b"
+      },
+      {
+        "esi": 214,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "7095badf04294e73"
+      },
+      {
+        "esi": 215,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "98bde2072c51769b"
+      },
+      {
+        "esi": 216,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c0e50a2f54799ec3"
+      },
+      {
+        "esi": 217,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e80d32577ca1c6eb"
+      },
+      {
+        "esi": 218,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "10355a7fa4c9ee13"
+      },
+      {
+        "esi": 219,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "385d82a7ccf1163b"
+      },
+      {
+        "esi": 220,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "6085aacff4193e63"
+      },
+      {
+        "esi": 221,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "88add2f71c41668b"
+      },
+      {
+        "esi": 222,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b0d5fa1f44698eb3"
+      },
+      {
+        "esi": 223,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d8fd22476c91b6db"
+      },
+      {
+        "esi": 224,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "00254a6f94b9de03"
+      },
+      {
+        "esi": 225,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "284d7297bce1062b"
+      },
+      {
+        "esi": 226,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "50759abfe4092e53"
+      },
+      {
+        "esi": 227,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "789dc2e70c31567b"
+      },
+      {
+        "esi": 228,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a0c5ea0f34597ea3"
+      },
+      {
+        "esi": 229,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c8ed12375c81a6cb"
+      },
+      {
+        "esi": 230,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f0153a5f84a9cef3"
+      },
+      {
+        "esi": 231,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "183d6287acd1f61b"
+      },
+      {
+        "esi": 232,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "40658aafd4f91e43"
+      },
+      {
+        "esi": 233,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "688db2d7fc21466b"
+      },
+      {
+        "esi": 234,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "90b5daff24496e93"
+      },
+      {
+        "esi": 235,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b8dd02274c7196bb"
+      },
+      {
+        "esi": 236,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e0052a4f7499bee3"
+      },
+      {
+        "esi": 237,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "082d52779cc1e60b"
+      },
+      {
+        "esi": 238,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "30557a9fc4e90e33"
+      },
+      {
+        "esi": 239,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "587da2c7ec11365b"
+      },
+      {
+        "esi": 240,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "80a5caef14395e83"
+      },
+      {
+        "esi": 241,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a8cdf2173c6186ab"
+      },
+      {
+        "esi": 242,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d0f51a3f6489aed3"
+      },
+      {
+        "esi": 243,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f81d42678cb1d6fb"
+      },
+      {
+        "esi": 244,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "20456a8fb4d9fe23"
+      },
+      {
+        "esi": 245,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "486d92b7dc01264b"
+      },
+      {
+        "esi": 246,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "7095badf04294e73"
+      },
+      {
+        "esi": 247,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "98bde2072c51769b"
+      },
+      {
+        "esi": 248,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c0e50a2f54799ec3"
+      },
+      {
+        "esi": 249,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e80d32577ca1c6eb"
+      },
+      {
+        "esi": 250,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "10355a7fa4c9ee13"
+      },
+      {
+        "esi": 251,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "385d82a7ccf1163b"
+      },
+      {
+        "esi": 252,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "6085aacff4193e63"
+      },
+      {
+        "esi": 253,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "88add2f71c41668b"
+      },
+      {
+        "esi": 254,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b0d5fa1f44698eb3"
+      },
+      {
+        "esi": 255,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d8fd22476c91b6db"
+      },
+      {
+        "esi": 256,
+        "kind": "repair",
+        "degree": 6,
+        "data_hex": "d0d07030b09010d0"
+      },
+      {
+        "esi": 257,
+        "kind": "repair",
+        "degree": 6,
+        "data_hex": "8897ed8fdfc0d8c1"
+      },
+      {
+        "esi": 258,
+        "kind": "repair",
+        "degree": 6,
+        "data_hex": "3846f44426d4592f"
+      },
+      {
+        "esi": 259,
+        "kind": "repair",
+        "degree": 5,
+        "data_hex": "f0b0f03010d050f0"
+      }
+    ]
+  },
+  {
+    "case_name": "k257_payload2056",
+    "payload_size": 2056,
+    "symbol_size": 8,
+    "k": 257,
+    "k_prime": 257,
+    "repair_count": 4,
+    "packet_count": 261,
+    "packets": [
+      {
+        "esi": 0,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "01264b7095badf04"
+      },
+      {
+        "esi": 1,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "294e7398bde2072c"
+      },
+      {
+        "esi": 2,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "51769bc0e50a2f54"
+      },
+      {
+        "esi": 3,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "799ec3e80d32577c"
+      },
+      {
+        "esi": 4,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a1c6eb10355a7fa4"
+      },
+      {
+        "esi": 5,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c9ee13385d82a7cc"
+      },
+      {
+        "esi": 6,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f1163b6085aacff4"
+      },
+      {
+        "esi": 7,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "193e6388add2f71c"
+      },
+      {
+        "esi": 8,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "41668bb0d5fa1f44"
+      },
+      {
+        "esi": 9,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "698eb3d8fd22476c"
+      },
+      {
+        "esi": 10,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "91b6db00254a6f94"
+      },
+      {
+        "esi": 11,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b9de03284d7297bc"
+      },
+      {
+        "esi": 12,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e1062b50759abfe4"
+      },
+      {
+        "esi": 13,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "092e53789dc2e70c"
+      },
+      {
+        "esi": 14,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "31567ba0c5ea0f34"
+      },
+      {
+        "esi": 15,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "597ea3c8ed12375c"
+      },
+      {
+        "esi": 16,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "81a6cbf0153a5f84"
+      },
+      {
+        "esi": 17,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a9cef3183d6287ac"
+      },
+      {
+        "esi": 18,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d1f61b40658aafd4"
+      },
+      {
+        "esi": 19,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f91e43688db2d7fc"
+      },
+      {
+        "esi": 20,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "21466b90b5daff24"
+      },
+      {
+        "esi": 21,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "496e93b8dd02274c"
+      },
+      {
+        "esi": 22,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "7196bbe0052a4f74"
+      },
+      {
+        "esi": 23,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "99bee3082d52779c"
+      },
+      {
+        "esi": 24,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c1e60b30557a9fc4"
+      },
+      {
+        "esi": 25,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e90e33587da2c7ec"
+      },
+      {
+        "esi": 26,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "11365b80a5caef14"
+      },
+      {
+        "esi": 27,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "395e83a8cdf2173c"
+      },
+      {
+        "esi": 28,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "6186abd0f51a3f64"
+      },
+      {
+        "esi": 29,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "89aed3f81d42678c"
+      },
+      {
+        "esi": 30,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b1d6fb20456a8fb4"
+      },
+      {
+        "esi": 31,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d9fe23486d92b7dc"
+      },
+      {
+        "esi": 32,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "01264b7095badf04"
+      },
+      {
+        "esi": 33,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "294e7398bde2072c"
+      },
+      {
+        "esi": 34,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "51769bc0e50a2f54"
+      },
+      {
+        "esi": 35,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "799ec3e80d32577c"
+      },
+      {
+        "esi": 36,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a1c6eb10355a7fa4"
+      },
+      {
+        "esi": 37,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c9ee13385d82a7cc"
+      },
+      {
+        "esi": 38,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f1163b6085aacff4"
+      },
+      {
+        "esi": 39,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "193e6388add2f71c"
+      },
+      {
+        "esi": 40,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "41668bb0d5fa1f44"
+      },
+      {
+        "esi": 41,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "698eb3d8fd22476c"
+      },
+      {
+        "esi": 42,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "91b6db00254a6f94"
+      },
+      {
+        "esi": 43,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b9de03284d7297bc"
+      },
+      {
+        "esi": 44,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e1062b50759abfe4"
+      },
+      {
+        "esi": 45,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "092e53789dc2e70c"
+      },
+      {
+        "esi": 46,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "31567ba0c5ea0f34"
+      },
+      {
+        "esi": 47,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "597ea3c8ed12375c"
+      },
+      {
+        "esi": 48,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "81a6cbf0153a5f84"
+      },
+      {
+        "esi": 49,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a9cef3183d6287ac"
+      },
+      {
+        "esi": 50,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d1f61b40658aafd4"
+      },
+      {
+        "esi": 51,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f91e43688db2d7fc"
+      },
+      {
+        "esi": 52,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "21466b90b5daff24"
+      },
+      {
+        "esi": 53,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "496e93b8dd02274c"
+      },
+      {
+        "esi": 54,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "7196bbe0052a4f74"
+      },
+      {
+        "esi": 55,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "99bee3082d52779c"
+      },
+      {
+        "esi": 56,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c1e60b30557a9fc4"
+      },
+      {
+        "esi": 57,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e90e33587da2c7ec"
+      },
+      {
+        "esi": 58,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "11365b80a5caef14"
+      },
+      {
+        "esi": 59,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "395e83a8cdf2173c"
+      },
+      {
+        "esi": 60,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "6186abd0f51a3f64"
+      },
+      {
+        "esi": 61,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "89aed3f81d42678c"
+      },
+      {
+        "esi": 62,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b1d6fb20456a8fb4"
+      },
+      {
+        "esi": 63,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d9fe23486d92b7dc"
+      },
+      {
+        "esi": 64,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "01264b7095badf04"
+      },
+      {
+        "esi": 65,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "294e7398bde2072c"
+      },
+      {
+        "esi": 66,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "51769bc0e50a2f54"
+      },
+      {
+        "esi": 67,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "799ec3e80d32577c"
+      },
+      {
+        "esi": 68,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a1c6eb10355a7fa4"
+      },
+      {
+        "esi": 69,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c9ee13385d82a7cc"
+      },
+      {
+        "esi": 70,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f1163b6085aacff4"
+      },
+      {
+        "esi": 71,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "193e6388add2f71c"
+      },
+      {
+        "esi": 72,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "41668bb0d5fa1f44"
+      },
+      {
+        "esi": 73,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "698eb3d8fd22476c"
+      },
+      {
+        "esi": 74,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "91b6db00254a6f94"
+      },
+      {
+        "esi": 75,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b9de03284d7297bc"
+      },
+      {
+        "esi": 76,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e1062b50759abfe4"
+      },
+      {
+        "esi": 77,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "092e53789dc2e70c"
+      },
+      {
+        "esi": 78,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "31567ba0c5ea0f34"
+      },
+      {
+        "esi": 79,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "597ea3c8ed12375c"
+      },
+      {
+        "esi": 80,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "81a6cbf0153a5f84"
+      },
+      {
+        "esi": 81,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a9cef3183d6287ac"
+      },
+      {
+        "esi": 82,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d1f61b40658aafd4"
+      },
+      {
+        "esi": 83,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f91e43688db2d7fc"
+      },
+      {
+        "esi": 84,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "21466b90b5daff24"
+      },
+      {
+        "esi": 85,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "496e93b8dd02274c"
+      },
+      {
+        "esi": 86,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "7196bbe0052a4f74"
+      },
+      {
+        "esi": 87,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "99bee3082d52779c"
+      },
+      {
+        "esi": 88,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c1e60b30557a9fc4"
+      },
+      {
+        "esi": 89,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e90e33587da2c7ec"
+      },
+      {
+        "esi": 90,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "11365b80a5caef14"
+      },
+      {
+        "esi": 91,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "395e83a8cdf2173c"
+      },
+      {
+        "esi": 92,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "6186abd0f51a3f64"
+      },
+      {
+        "esi": 93,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "89aed3f81d42678c"
+      },
+      {
+        "esi": 94,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b1d6fb20456a8fb4"
+      },
+      {
+        "esi": 95,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d9fe23486d92b7dc"
+      },
+      {
+        "esi": 96,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "01264b7095badf04"
+      },
+      {
+        "esi": 97,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "294e7398bde2072c"
+      },
+      {
+        "esi": 98,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "51769bc0e50a2f54"
+      },
+      {
+        "esi": 99,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "799ec3e80d32577c"
+      },
+      {
+        "esi": 100,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a1c6eb10355a7fa4"
+      },
+      {
+        "esi": 101,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c9ee13385d82a7cc"
+      },
+      {
+        "esi": 102,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f1163b6085aacff4"
+      },
+      {
+        "esi": 103,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "193e6388add2f71c"
+      },
+      {
+        "esi": 104,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "41668bb0d5fa1f44"
+      },
+      {
+        "esi": 105,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "698eb3d8fd22476c"
+      },
+      {
+        "esi": 106,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "91b6db00254a6f94"
+      },
+      {
+        "esi": 107,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b9de03284d7297bc"
+      },
+      {
+        "esi": 108,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e1062b50759abfe4"
+      },
+      {
+        "esi": 109,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "092e53789dc2e70c"
+      },
+      {
+        "esi": 110,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "31567ba0c5ea0f34"
+      },
+      {
+        "esi": 111,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "597ea3c8ed12375c"
+      },
+      {
+        "esi": 112,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "81a6cbf0153a5f84"
+      },
+      {
+        "esi": 113,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a9cef3183d6287ac"
+      },
+      {
+        "esi": 114,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d1f61b40658aafd4"
+      },
+      {
+        "esi": 115,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f91e43688db2d7fc"
+      },
+      {
+        "esi": 116,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "21466b90b5daff24"
+      },
+      {
+        "esi": 117,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "496e93b8dd02274c"
+      },
+      {
+        "esi": 118,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "7196bbe0052a4f74"
+      },
+      {
+        "esi": 119,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "99bee3082d52779c"
+      },
+      {
+        "esi": 120,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c1e60b30557a9fc4"
+      },
+      {
+        "esi": 121,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e90e33587da2c7ec"
+      },
+      {
+        "esi": 122,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "11365b80a5caef14"
+      },
+      {
+        "esi": 123,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "395e83a8cdf2173c"
+      },
+      {
+        "esi": 124,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "6186abd0f51a3f64"
+      },
+      {
+        "esi": 125,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "89aed3f81d42678c"
+      },
+      {
+        "esi": 126,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b1d6fb20456a8fb4"
+      },
+      {
+        "esi": 127,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d9fe23486d92b7dc"
+      },
+      {
+        "esi": 128,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "01264b7095badf04"
+      },
+      {
+        "esi": 129,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "294e7398bde2072c"
+      },
+      {
+        "esi": 130,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "51769bc0e50a2f54"
+      },
+      {
+        "esi": 131,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "799ec3e80d32577c"
+      },
+      {
+        "esi": 132,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a1c6eb10355a7fa4"
+      },
+      {
+        "esi": 133,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c9ee13385d82a7cc"
+      },
+      {
+        "esi": 134,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f1163b6085aacff4"
+      },
+      {
+        "esi": 135,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "193e6388add2f71c"
+      },
+      {
+        "esi": 136,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "41668bb0d5fa1f44"
+      },
+      {
+        "esi": 137,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "698eb3d8fd22476c"
+      },
+      {
+        "esi": 138,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "91b6db00254a6f94"
+      },
+      {
+        "esi": 139,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b9de03284d7297bc"
+      },
+      {
+        "esi": 140,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e1062b50759abfe4"
+      },
+      {
+        "esi": 141,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "092e53789dc2e70c"
+      },
+      {
+        "esi": 142,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "31567ba0c5ea0f34"
+      },
+      {
+        "esi": 143,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "597ea3c8ed12375c"
+      },
+      {
+        "esi": 144,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "81a6cbf0153a5f84"
+      },
+      {
+        "esi": 145,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a9cef3183d6287ac"
+      },
+      {
+        "esi": 146,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d1f61b40658aafd4"
+      },
+      {
+        "esi": 147,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f91e43688db2d7fc"
+      },
+      {
+        "esi": 148,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "21466b90b5daff24"
+      },
+      {
+        "esi": 149,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "496e93b8dd02274c"
+      },
+      {
+        "esi": 150,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "7196bbe0052a4f74"
+      },
+      {
+        "esi": 151,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "99bee3082d52779c"
+      },
+      {
+        "esi": 152,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c1e60b30557a9fc4"
+      },
+      {
+        "esi": 153,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e90e33587da2c7ec"
+      },
+      {
+        "esi": 154,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "11365b80a5caef14"
+      },
+      {
+        "esi": 155,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "395e83a8cdf2173c"
+      },
+      {
+        "esi": 156,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "6186abd0f51a3f64"
+      },
+      {
+        "esi": 157,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "89aed3f81d42678c"
+      },
+      {
+        "esi": 158,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b1d6fb20456a8fb4"
+      },
+      {
+        "esi": 159,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d9fe23486d92b7dc"
+      },
+      {
+        "esi": 160,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "01264b7095badf04"
+      },
+      {
+        "esi": 161,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "294e7398bde2072c"
+      },
+      {
+        "esi": 162,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "51769bc0e50a2f54"
+      },
+      {
+        "esi": 163,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "799ec3e80d32577c"
+      },
+      {
+        "esi": 164,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a1c6eb10355a7fa4"
+      },
+      {
+        "esi": 165,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c9ee13385d82a7cc"
+      },
+      {
+        "esi": 166,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f1163b6085aacff4"
+      },
+      {
+        "esi": 167,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "193e6388add2f71c"
+      },
+      {
+        "esi": 168,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "41668bb0d5fa1f44"
+      },
+      {
+        "esi": 169,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "698eb3d8fd22476c"
+      },
+      {
+        "esi": 170,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "91b6db00254a6f94"
+      },
+      {
+        "esi": 171,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b9de03284d7297bc"
+      },
+      {
+        "esi": 172,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e1062b50759abfe4"
+      },
+      {
+        "esi": 173,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "092e53789dc2e70c"
+      },
+      {
+        "esi": 174,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "31567ba0c5ea0f34"
+      },
+      {
+        "esi": 175,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "597ea3c8ed12375c"
+      },
+      {
+        "esi": 176,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "81a6cbf0153a5f84"
+      },
+      {
+        "esi": 177,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a9cef3183d6287ac"
+      },
+      {
+        "esi": 178,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d1f61b40658aafd4"
+      },
+      {
+        "esi": 179,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f91e43688db2d7fc"
+      },
+      {
+        "esi": 180,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "21466b90b5daff24"
+      },
+      {
+        "esi": 181,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "496e93b8dd02274c"
+      },
+      {
+        "esi": 182,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "7196bbe0052a4f74"
+      },
+      {
+        "esi": 183,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "99bee3082d52779c"
+      },
+      {
+        "esi": 184,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c1e60b30557a9fc4"
+      },
+      {
+        "esi": 185,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e90e33587da2c7ec"
+      },
+      {
+        "esi": 186,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "11365b80a5caef14"
+      },
+      {
+        "esi": 187,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "395e83a8cdf2173c"
+      },
+      {
+        "esi": 188,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "6186abd0f51a3f64"
+      },
+      {
+        "esi": 189,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "89aed3f81d42678c"
+      },
+      {
+        "esi": 190,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b1d6fb20456a8fb4"
+      },
+      {
+        "esi": 191,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d9fe23486d92b7dc"
+      },
+      {
+        "esi": 192,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "01264b7095badf04"
+      },
+      {
+        "esi": 193,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "294e7398bde2072c"
+      },
+      {
+        "esi": 194,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "51769bc0e50a2f54"
+      },
+      {
+        "esi": 195,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "799ec3e80d32577c"
+      },
+      {
+        "esi": 196,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a1c6eb10355a7fa4"
+      },
+      {
+        "esi": 197,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c9ee13385d82a7cc"
+      },
+      {
+        "esi": 198,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f1163b6085aacff4"
+      },
+      {
+        "esi": 199,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "193e6388add2f71c"
+      },
+      {
+        "esi": 200,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "41668bb0d5fa1f44"
+      },
+      {
+        "esi": 201,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "698eb3d8fd22476c"
+      },
+      {
+        "esi": 202,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "91b6db00254a6f94"
+      },
+      {
+        "esi": 203,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b9de03284d7297bc"
+      },
+      {
+        "esi": 204,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e1062b50759abfe4"
+      },
+      {
+        "esi": 205,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "092e53789dc2e70c"
+      },
+      {
+        "esi": 206,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "31567ba0c5ea0f34"
+      },
+      {
+        "esi": 207,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "597ea3c8ed12375c"
+      },
+      {
+        "esi": 208,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "81a6cbf0153a5f84"
+      },
+      {
+        "esi": 209,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a9cef3183d6287ac"
+      },
+      {
+        "esi": 210,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d1f61b40658aafd4"
+      },
+      {
+        "esi": 211,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f91e43688db2d7fc"
+      },
+      {
+        "esi": 212,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "21466b90b5daff24"
+      },
+      {
+        "esi": 213,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "496e93b8dd02274c"
+      },
+      {
+        "esi": 214,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "7196bbe0052a4f74"
+      },
+      {
+        "esi": 215,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "99bee3082d52779c"
+      },
+      {
+        "esi": 216,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c1e60b30557a9fc4"
+      },
+      {
+        "esi": 217,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e90e33587da2c7ec"
+      },
+      {
+        "esi": 218,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "11365b80a5caef14"
+      },
+      {
+        "esi": 219,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "395e83a8cdf2173c"
+      },
+      {
+        "esi": 220,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "6186abd0f51a3f64"
+      },
+      {
+        "esi": 221,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "89aed3f81d42678c"
+      },
+      {
+        "esi": 222,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b1d6fb20456a8fb4"
+      },
+      {
+        "esi": 223,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d9fe23486d92b7dc"
+      },
+      {
+        "esi": 224,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "01264b7095badf04"
+      },
+      {
+        "esi": 225,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "294e7398bde2072c"
+      },
+      {
+        "esi": 226,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "51769bc0e50a2f54"
+      },
+      {
+        "esi": 227,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "799ec3e80d32577c"
+      },
+      {
+        "esi": 228,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a1c6eb10355a7fa4"
+      },
+      {
+        "esi": 229,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c9ee13385d82a7cc"
+      },
+      {
+        "esi": 230,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f1163b6085aacff4"
+      },
+      {
+        "esi": 231,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "193e6388add2f71c"
+      },
+      {
+        "esi": 232,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "41668bb0d5fa1f44"
+      },
+      {
+        "esi": 233,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "698eb3d8fd22476c"
+      },
+      {
+        "esi": 234,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "91b6db00254a6f94"
+      },
+      {
+        "esi": 235,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b9de03284d7297bc"
+      },
+      {
+        "esi": 236,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e1062b50759abfe4"
+      },
+      {
+        "esi": 237,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "092e53789dc2e70c"
+      },
+      {
+        "esi": 238,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "31567ba0c5ea0f34"
+      },
+      {
+        "esi": 239,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "597ea3c8ed12375c"
+      },
+      {
+        "esi": 240,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "81a6cbf0153a5f84"
+      },
+      {
+        "esi": 241,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a9cef3183d6287ac"
+      },
+      {
+        "esi": 242,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d1f61b40658aafd4"
+      },
+      {
+        "esi": 243,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f91e43688db2d7fc"
+      },
+      {
+        "esi": 244,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "21466b90b5daff24"
+      },
+      {
+        "esi": 245,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "496e93b8dd02274c"
+      },
+      {
+        "esi": 246,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "7196bbe0052a4f74"
+      },
+      {
+        "esi": 247,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "99bee3082d52779c"
+      },
+      {
+        "esi": 248,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c1e60b30557a9fc4"
+      },
+      {
+        "esi": 249,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e90e33587da2c7ec"
+      },
+      {
+        "esi": 250,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "11365b80a5caef14"
+      },
+      {
+        "esi": 251,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "395e83a8cdf2173c"
+      },
+      {
+        "esi": 252,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "6186abd0f51a3f64"
+      },
+      {
+        "esi": 253,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "89aed3f81d42678c"
+      },
+      {
+        "esi": 254,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b1d6fb20456a8fb4"
+      },
+      {
+        "esi": 255,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d9fe23486d92b7dc"
+      },
+      {
+        "esi": 256,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "01264b7095badf04"
+      },
+      {
+        "esi": 257,
+        "kind": "repair",
+        "degree": 6,
+        "data_hex": "d1f63b80252acfd4"
+      },
+      {
+        "esi": 258,
+        "kind": "repair",
+        "degree": 6,
+        "data_hex": "01156c0b46404996"
+      },
+      {
+        "esi": 259,
+        "kind": "repair",
+        "degree": 6,
+        "data_hex": "30ef8338d0abd018"
+      },
+      {
+        "esi": 260,
+        "kind": "repair",
+        "degree": 5,
+        "data_hex": "f0b0f09010d050f0"
+      }
+    ]
+  },
+  {
+    "case_name": "k258_payload2057",
+    "payload_size": 2057,
+    "symbol_size": 8,
+    "k": 258,
+    "k_prime": 263,
+    "repair_count": 4,
+    "packet_count": 262,
+    "packets": [
+      {
+        "esi": 0,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "02274c7196bbe005"
+      },
+      {
+        "esi": 1,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "2a4f7499bee3082d"
+      },
+      {
+        "esi": 2,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "52779cc1e60b3055"
+      },
+      {
+        "esi": 3,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "7a9fc4e90e33587d"
+      },
+      {
+        "esi": 4,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a2c7ec11365b80a5"
+      },
+      {
+        "esi": 5,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "caef14395e83a8cd"
+      },
+      {
+        "esi": 6,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f2173c6186abd0f5"
+      },
+      {
+        "esi": 7,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "1a3f6489aed3f81d"
+      },
+      {
+        "esi": 8,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "42678cb1d6fb2045"
+      },
+      {
+        "esi": 9,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "6a8fb4d9fe23486d"
+      },
+      {
+        "esi": 10,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "92b7dc01264b7095"
+      },
+      {
+        "esi": 11,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "badf04294e7398bd"
+      },
+      {
+        "esi": 12,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e2072c51769bc0e5"
+      },
+      {
+        "esi": 13,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "0a2f54799ec3e80d"
+      },
+      {
+        "esi": 14,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "32577ca1c6eb1035"
+      },
+      {
+        "esi": 15,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "5a7fa4c9ee13385d"
+      },
+      {
+        "esi": 16,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "82a7ccf1163b6085"
+      },
+      {
+        "esi": 17,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "aacff4193e6388ad"
+      },
+      {
+        "esi": 18,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d2f71c41668bb0d5"
+      },
+      {
+        "esi": 19,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "fa1f44698eb3d8fd"
+      },
+      {
+        "esi": 20,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "22476c91b6db0025"
+      },
+      {
+        "esi": 21,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "4a6f94b9de03284d"
+      },
+      {
+        "esi": 22,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "7297bce1062b5075"
+      },
+      {
+        "esi": 23,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "9abfe4092e53789d"
+      },
+      {
+        "esi": 24,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c2e70c31567ba0c5"
+      },
+      {
+        "esi": 25,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "ea0f34597ea3c8ed"
+      },
+      {
+        "esi": 26,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "12375c81a6cbf015"
+      },
+      {
+        "esi": 27,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "3a5f84a9cef3183d"
+      },
+      {
+        "esi": 28,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "6287acd1f61b4065"
+      },
+      {
+        "esi": 29,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "8aafd4f91e43688d"
+      },
+      {
+        "esi": 30,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b2d7fc21466b90b5"
+      },
+      {
+        "esi": 31,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "daff24496e93b8dd"
+      },
+      {
+        "esi": 32,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "02274c7196bbe005"
+      },
+      {
+        "esi": 33,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "2a4f7499bee3082d"
+      },
+      {
+        "esi": 34,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "52779cc1e60b3055"
+      },
+      {
+        "esi": 35,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "7a9fc4e90e33587d"
+      },
+      {
+        "esi": 36,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a2c7ec11365b80a5"
+      },
+      {
+        "esi": 37,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "caef14395e83a8cd"
+      },
+      {
+        "esi": 38,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f2173c6186abd0f5"
+      },
+      {
+        "esi": 39,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "1a3f6489aed3f81d"
+      },
+      {
+        "esi": 40,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "42678cb1d6fb2045"
+      },
+      {
+        "esi": 41,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "6a8fb4d9fe23486d"
+      },
+      {
+        "esi": 42,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "92b7dc01264b7095"
+      },
+      {
+        "esi": 43,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "badf04294e7398bd"
+      },
+      {
+        "esi": 44,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e2072c51769bc0e5"
+      },
+      {
+        "esi": 45,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "0a2f54799ec3e80d"
+      },
+      {
+        "esi": 46,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "32577ca1c6eb1035"
+      },
+      {
+        "esi": 47,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "5a7fa4c9ee13385d"
+      },
+      {
+        "esi": 48,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "82a7ccf1163b6085"
+      },
+      {
+        "esi": 49,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "aacff4193e6388ad"
+      },
+      {
+        "esi": 50,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d2f71c41668bb0d5"
+      },
+      {
+        "esi": 51,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "fa1f44698eb3d8fd"
+      },
+      {
+        "esi": 52,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "22476c91b6db0025"
+      },
+      {
+        "esi": 53,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "4a6f94b9de03284d"
+      },
+      {
+        "esi": 54,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "7297bce1062b5075"
+      },
+      {
+        "esi": 55,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "9abfe4092e53789d"
+      },
+      {
+        "esi": 56,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c2e70c31567ba0c5"
+      },
+      {
+        "esi": 57,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "ea0f34597ea3c8ed"
+      },
+      {
+        "esi": 58,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "12375c81a6cbf015"
+      },
+      {
+        "esi": 59,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "3a5f84a9cef3183d"
+      },
+      {
+        "esi": 60,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "6287acd1f61b4065"
+      },
+      {
+        "esi": 61,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "8aafd4f91e43688d"
+      },
+      {
+        "esi": 62,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b2d7fc21466b90b5"
+      },
+      {
+        "esi": 63,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "daff24496e93b8dd"
+      },
+      {
+        "esi": 64,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "02274c7196bbe005"
+      },
+      {
+        "esi": 65,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "2a4f7499bee3082d"
+      },
+      {
+        "esi": 66,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "52779cc1e60b3055"
+      },
+      {
+        "esi": 67,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "7a9fc4e90e33587d"
+      },
+      {
+        "esi": 68,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a2c7ec11365b80a5"
+      },
+      {
+        "esi": 69,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "caef14395e83a8cd"
+      },
+      {
+        "esi": 70,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f2173c6186abd0f5"
+      },
+      {
+        "esi": 71,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "1a3f6489aed3f81d"
+      },
+      {
+        "esi": 72,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "42678cb1d6fb2045"
+      },
+      {
+        "esi": 73,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "6a8fb4d9fe23486d"
+      },
+      {
+        "esi": 74,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "92b7dc01264b7095"
+      },
+      {
+        "esi": 75,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "badf04294e7398bd"
+      },
+      {
+        "esi": 76,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e2072c51769bc0e5"
+      },
+      {
+        "esi": 77,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "0a2f54799ec3e80d"
+      },
+      {
+        "esi": 78,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "32577ca1c6eb1035"
+      },
+      {
+        "esi": 79,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "5a7fa4c9ee13385d"
+      },
+      {
+        "esi": 80,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "82a7ccf1163b6085"
+      },
+      {
+        "esi": 81,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "aacff4193e6388ad"
+      },
+      {
+        "esi": 82,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d2f71c41668bb0d5"
+      },
+      {
+        "esi": 83,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "fa1f44698eb3d8fd"
+      },
+      {
+        "esi": 84,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "22476c91b6db0025"
+      },
+      {
+        "esi": 85,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "4a6f94b9de03284d"
+      },
+      {
+        "esi": 86,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "7297bce1062b5075"
+      },
+      {
+        "esi": 87,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "9abfe4092e53789d"
+      },
+      {
+        "esi": 88,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c2e70c31567ba0c5"
+      },
+      {
+        "esi": 89,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "ea0f34597ea3c8ed"
+      },
+      {
+        "esi": 90,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "12375c81a6cbf015"
+      },
+      {
+        "esi": 91,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "3a5f84a9cef3183d"
+      },
+      {
+        "esi": 92,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "6287acd1f61b4065"
+      },
+      {
+        "esi": 93,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "8aafd4f91e43688d"
+      },
+      {
+        "esi": 94,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b2d7fc21466b90b5"
+      },
+      {
+        "esi": 95,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "daff24496e93b8dd"
+      },
+      {
+        "esi": 96,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "02274c7196bbe005"
+      },
+      {
+        "esi": 97,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "2a4f7499bee3082d"
+      },
+      {
+        "esi": 98,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "52779cc1e60b3055"
+      },
+      {
+        "esi": 99,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "7a9fc4e90e33587d"
+      },
+      {
+        "esi": 100,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a2c7ec11365b80a5"
+      },
+      {
+        "esi": 101,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "caef14395e83a8cd"
+      },
+      {
+        "esi": 102,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f2173c6186abd0f5"
+      },
+      {
+        "esi": 103,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "1a3f6489aed3f81d"
+      },
+      {
+        "esi": 104,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "42678cb1d6fb2045"
+      },
+      {
+        "esi": 105,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "6a8fb4d9fe23486d"
+      },
+      {
+        "esi": 106,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "92b7dc01264b7095"
+      },
+      {
+        "esi": 107,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "badf04294e7398bd"
+      },
+      {
+        "esi": 108,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e2072c51769bc0e5"
+      },
+      {
+        "esi": 109,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "0a2f54799ec3e80d"
+      },
+      {
+        "esi": 110,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "32577ca1c6eb1035"
+      },
+      {
+        "esi": 111,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "5a7fa4c9ee13385d"
+      },
+      {
+        "esi": 112,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "82a7ccf1163b6085"
+      },
+      {
+        "esi": 113,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "aacff4193e6388ad"
+      },
+      {
+        "esi": 114,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d2f71c41668bb0d5"
+      },
+      {
+        "esi": 115,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "fa1f44698eb3d8fd"
+      },
+      {
+        "esi": 116,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "22476c91b6db0025"
+      },
+      {
+        "esi": 117,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "4a6f94b9de03284d"
+      },
+      {
+        "esi": 118,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "7297bce1062b5075"
+      },
+      {
+        "esi": 119,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "9abfe4092e53789d"
+      },
+      {
+        "esi": 120,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c2e70c31567ba0c5"
+      },
+      {
+        "esi": 121,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "ea0f34597ea3c8ed"
+      },
+      {
+        "esi": 122,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "12375c81a6cbf015"
+      },
+      {
+        "esi": 123,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "3a5f84a9cef3183d"
+      },
+      {
+        "esi": 124,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "6287acd1f61b4065"
+      },
+      {
+        "esi": 125,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "8aafd4f91e43688d"
+      },
+      {
+        "esi": 126,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b2d7fc21466b90b5"
+      },
+      {
+        "esi": 127,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "daff24496e93b8dd"
+      },
+      {
+        "esi": 128,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "02274c7196bbe005"
+      },
+      {
+        "esi": 129,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "2a4f7499bee3082d"
+      },
+      {
+        "esi": 130,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "52779cc1e60b3055"
+      },
+      {
+        "esi": 131,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "7a9fc4e90e33587d"
+      },
+      {
+        "esi": 132,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a2c7ec11365b80a5"
+      },
+      {
+        "esi": 133,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "caef14395e83a8cd"
+      },
+      {
+        "esi": 134,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f2173c6186abd0f5"
+      },
+      {
+        "esi": 135,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "1a3f6489aed3f81d"
+      },
+      {
+        "esi": 136,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "42678cb1d6fb2045"
+      },
+      {
+        "esi": 137,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "6a8fb4d9fe23486d"
+      },
+      {
+        "esi": 138,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "92b7dc01264b7095"
+      },
+      {
+        "esi": 139,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "badf04294e7398bd"
+      },
+      {
+        "esi": 140,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e2072c51769bc0e5"
+      },
+      {
+        "esi": 141,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "0a2f54799ec3e80d"
+      },
+      {
+        "esi": 142,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "32577ca1c6eb1035"
+      },
+      {
+        "esi": 143,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "5a7fa4c9ee13385d"
+      },
+      {
+        "esi": 144,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "82a7ccf1163b6085"
+      },
+      {
+        "esi": 145,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "aacff4193e6388ad"
+      },
+      {
+        "esi": 146,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d2f71c41668bb0d5"
+      },
+      {
+        "esi": 147,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "fa1f44698eb3d8fd"
+      },
+      {
+        "esi": 148,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "22476c91b6db0025"
+      },
+      {
+        "esi": 149,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "4a6f94b9de03284d"
+      },
+      {
+        "esi": 150,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "7297bce1062b5075"
+      },
+      {
+        "esi": 151,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "9abfe4092e53789d"
+      },
+      {
+        "esi": 152,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c2e70c31567ba0c5"
+      },
+      {
+        "esi": 153,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "ea0f34597ea3c8ed"
+      },
+      {
+        "esi": 154,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "12375c81a6cbf015"
+      },
+      {
+        "esi": 155,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "3a5f84a9cef3183d"
+      },
+      {
+        "esi": 156,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "6287acd1f61b4065"
+      },
+      {
+        "esi": 157,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "8aafd4f91e43688d"
+      },
+      {
+        "esi": 158,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b2d7fc21466b90b5"
+      },
+      {
+        "esi": 159,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "daff24496e93b8dd"
+      },
+      {
+        "esi": 160,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "02274c7196bbe005"
+      },
+      {
+        "esi": 161,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "2a4f7499bee3082d"
+      },
+      {
+        "esi": 162,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "52779cc1e60b3055"
+      },
+      {
+        "esi": 163,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "7a9fc4e90e33587d"
+      },
+      {
+        "esi": 164,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a2c7ec11365b80a5"
+      },
+      {
+        "esi": 165,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "caef14395e83a8cd"
+      },
+      {
+        "esi": 166,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f2173c6186abd0f5"
+      },
+      {
+        "esi": 167,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "1a3f6489aed3f81d"
+      },
+      {
+        "esi": 168,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "42678cb1d6fb2045"
+      },
+      {
+        "esi": 169,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "6a8fb4d9fe23486d"
+      },
+      {
+        "esi": 170,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "92b7dc01264b7095"
+      },
+      {
+        "esi": 171,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "badf04294e7398bd"
+      },
+      {
+        "esi": 172,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e2072c51769bc0e5"
+      },
+      {
+        "esi": 173,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "0a2f54799ec3e80d"
+      },
+      {
+        "esi": 174,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "32577ca1c6eb1035"
+      },
+      {
+        "esi": 175,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "5a7fa4c9ee13385d"
+      },
+      {
+        "esi": 176,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "82a7ccf1163b6085"
+      },
+      {
+        "esi": 177,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "aacff4193e6388ad"
+      },
+      {
+        "esi": 178,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d2f71c41668bb0d5"
+      },
+      {
+        "esi": 179,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "fa1f44698eb3d8fd"
+      },
+      {
+        "esi": 180,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "22476c91b6db0025"
+      },
+      {
+        "esi": 181,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "4a6f94b9de03284d"
+      },
+      {
+        "esi": 182,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "7297bce1062b5075"
+      },
+      {
+        "esi": 183,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "9abfe4092e53789d"
+      },
+      {
+        "esi": 184,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c2e70c31567ba0c5"
+      },
+      {
+        "esi": 185,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "ea0f34597ea3c8ed"
+      },
+      {
+        "esi": 186,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "12375c81a6cbf015"
+      },
+      {
+        "esi": 187,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "3a5f84a9cef3183d"
+      },
+      {
+        "esi": 188,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "6287acd1f61b4065"
+      },
+      {
+        "esi": 189,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "8aafd4f91e43688d"
+      },
+      {
+        "esi": 190,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b2d7fc21466b90b5"
+      },
+      {
+        "esi": 191,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "daff24496e93b8dd"
+      },
+      {
+        "esi": 192,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "02274c7196bbe005"
+      },
+      {
+        "esi": 193,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "2a4f7499bee3082d"
+      },
+      {
+        "esi": 194,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "52779cc1e60b3055"
+      },
+      {
+        "esi": 195,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "7a9fc4e90e33587d"
+      },
+      {
+        "esi": 196,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a2c7ec11365b80a5"
+      },
+      {
+        "esi": 197,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "caef14395e83a8cd"
+      },
+      {
+        "esi": 198,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f2173c6186abd0f5"
+      },
+      {
+        "esi": 199,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "1a3f6489aed3f81d"
+      },
+      {
+        "esi": 200,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "42678cb1d6fb2045"
+      },
+      {
+        "esi": 201,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "6a8fb4d9fe23486d"
+      },
+      {
+        "esi": 202,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "92b7dc01264b7095"
+      },
+      {
+        "esi": 203,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "badf04294e7398bd"
+      },
+      {
+        "esi": 204,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e2072c51769bc0e5"
+      },
+      {
+        "esi": 205,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "0a2f54799ec3e80d"
+      },
+      {
+        "esi": 206,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "32577ca1c6eb1035"
+      },
+      {
+        "esi": 207,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "5a7fa4c9ee13385d"
+      },
+      {
+        "esi": 208,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "82a7ccf1163b6085"
+      },
+      {
+        "esi": 209,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "aacff4193e6388ad"
+      },
+      {
+        "esi": 210,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d2f71c41668bb0d5"
+      },
+      {
+        "esi": 211,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "fa1f44698eb3d8fd"
+      },
+      {
+        "esi": 212,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "22476c91b6db0025"
+      },
+      {
+        "esi": 213,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "4a6f94b9de03284d"
+      },
+      {
+        "esi": 214,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "7297bce1062b5075"
+      },
+      {
+        "esi": 215,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "9abfe4092e53789d"
+      },
+      {
+        "esi": 216,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c2e70c31567ba0c5"
+      },
+      {
+        "esi": 217,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "ea0f34597ea3c8ed"
+      },
+      {
+        "esi": 218,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "12375c81a6cbf015"
+      },
+      {
+        "esi": 219,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "3a5f84a9cef3183d"
+      },
+      {
+        "esi": 220,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "6287acd1f61b4065"
+      },
+      {
+        "esi": 221,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "8aafd4f91e43688d"
+      },
+      {
+        "esi": 222,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b2d7fc21466b90b5"
+      },
+      {
+        "esi": 223,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "daff24496e93b8dd"
+      },
+      {
+        "esi": 224,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "02274c7196bbe005"
+      },
+      {
+        "esi": 225,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "2a4f7499bee3082d"
+      },
+      {
+        "esi": 226,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "52779cc1e60b3055"
+      },
+      {
+        "esi": 227,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "7a9fc4e90e33587d"
+      },
+      {
+        "esi": 228,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "a2c7ec11365b80a5"
+      },
+      {
+        "esi": 229,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "caef14395e83a8cd"
+      },
+      {
+        "esi": 230,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "f2173c6186abd0f5"
+      },
+      {
+        "esi": 231,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "1a3f6489aed3f81d"
+      },
+      {
+        "esi": 232,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "42678cb1d6fb2045"
+      },
+      {
+        "esi": 233,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "6a8fb4d9fe23486d"
+      },
+      {
+        "esi": 234,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "92b7dc01264b7095"
+      },
+      {
+        "esi": 235,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "badf04294e7398bd"
+      },
+      {
+        "esi": 236,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "e2072c51769bc0e5"
+      },
+      {
+        "esi": 237,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "0a2f54799ec3e80d"
+      },
+      {
+        "esi": 238,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "32577ca1c6eb1035"
+      },
+      {
+        "esi": 239,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "5a7fa4c9ee13385d"
+      },
+      {
+        "esi": 240,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "82a7ccf1163b6085"
+      },
+      {
+        "esi": 241,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "aacff4193e6388ad"
+      },
+      {
+        "esi": 242,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "d2f71c41668bb0d5"
+      },
+      {
+        "esi": 243,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "fa1f44698eb3d8fd"
+      },
+      {
+        "esi": 244,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "22476c91b6db0025"
+      },
+      {
+        "esi": 245,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "4a6f94b9de03284d"
+      },
+      {
+        "esi": 246,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "7297bce1062b5075"
+      },
+      {
+        "esi": 247,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "9abfe4092e53789d"
+      },
+      {
+        "esi": 248,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "c2e70c31567ba0c5"
+      },
+      {
+        "esi": 249,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "ea0f34597ea3c8ed"
+      },
+      {
+        "esi": 250,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "12375c81a6cbf015"
+      },
+      {
+        "esi": 251,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "3a5f84a9cef3183d"
+      },
+      {
+        "esi": 252,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "6287acd1f61b4065"
+      },
+      {
+        "esi": 253,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "8aafd4f91e43688d"
+      },
+      {
+        "esi": 254,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "b2d7fc21466b90b5"
+      },
+      {
+        "esi": 255,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "daff24496e93b8dd"
+      },
+      {
+        "esi": 256,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "02274c7196bbe005"
+      },
+      {
+        "esi": 257,
+        "kind": "source",
+        "degree": 1,
+        "data_hex": "2a00000000000000"
+      },
+      {
+        "esi": 258,
+        "kind": "repair",
+        "degree": 32,
+        "data_hex": "28e8382868986828"
+      },
+      {
+        "esi": 259,
+        "kind": "repair",
+        "degree": 6,
+        "data_hex": "07ff64492eceb800"
+      },
+      {
+        "esi": 260,
+        "kind": "repair",
+        "degree": 4,
+        "data_hex": "4aefd4395e83a84d"
+      },
+      {
+        "esi": 261,
+        "kind": "repair",
+        "degree": 8,
+        "data_hex": "81adf090035eb1cc"
+      }
+    ]
+  }
+]

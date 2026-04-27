@@ -267,19 +267,22 @@ impl CrashController {
 
     /// Trigger a crash. Returns `true` if the actor was running and is now crashed.
     pub fn crash(&self) -> bool {
-        let mut state = self.state.lock();
-        if state.crashed || state.exhausted {
-            return false;
-        }
-        state.crashed = true;
-        self.crashed.store(true, Ordering::Release);
-        state.crash_count += 1;
-        self.stats.crashes.fetch_add(1, Ordering::Relaxed);
+        let crash_count = {
+            let mut state = self.state.lock();
+            if state.crashed || state.exhausted {
+                return false;
+            }
+            state.crashed = true;
+            self.crashed.store(true, Ordering::Release);
+            state.crash_count += 1;
+            self.stats.crashes.fetch_add(1, Ordering::Relaxed);
+            state.crash_count
+        };
         emit_crash_evidence(
             &self.evidence_sink,
             self.next_evidence_ts(),
             "crash",
-            state.crash_count,
+            crash_count,
         );
         true
     }
@@ -290,37 +293,40 @@ impl CrashController {
     /// - The actor is not crashed (already running)
     /// - The restart limit is exhausted
     pub fn restart(&self) -> bool {
-        let mut state = self.state.lock();
-        if !state.crashed || state.exhausted {
-            return false;
-        }
-
-        // Check restart limit.
-        if let Some(max) = state.max_restarts {
-            if state.restart_count >= max {
-                state.exhausted = true;
-                self.exhausted.store(true, Ordering::Release);
-                emit_crash_evidence(
-                    &self.evidence_sink,
-                    self.next_evidence_ts(),
-                    "restart_exhausted",
-                    state.restart_count,
-                );
+        let (action, count, restarted) = {
+            let mut state = self.state.lock();
+            if !state.crashed || state.exhausted {
                 return false;
             }
-        }
 
-        state.crashed = false;
-        self.crashed.store(false, Ordering::Release);
-        state.restart_count += 1;
-        self.stats.restarts.fetch_add(1, Ordering::Relaxed);
+            // Check restart limit.
+            if let Some(max) = state.max_restarts {
+                if state.restart_count >= max {
+                    state.exhausted = true;
+                    self.exhausted.store(true, Ordering::Release);
+                    ("restart_exhausted", state.restart_count, false)
+                } else {
+                    state.crashed = false;
+                    self.crashed.store(false, Ordering::Release);
+                    state.restart_count += 1;
+                    self.stats.restarts.fetch_add(1, Ordering::Relaxed);
+                    ("restart", state.restart_count, true)
+                }
+            } else {
+                state.crashed = false;
+                self.crashed.store(false, Ordering::Release);
+                state.restart_count += 1;
+                self.stats.restarts.fetch_add(1, Ordering::Relaxed);
+                ("restart", state.restart_count, true)
+            }
+        };
         emit_crash_evidence(
             &self.evidence_sink,
             self.next_evidence_ts(),
-            "restart",
-            state.restart_count,
+            action,
+            count,
         );
-        true
+        restarted
     }
 
     /// Returns `true` if the actor is currently crashed.
@@ -582,7 +588,8 @@ mod tests {
     use crate::util::ArenaIndex;
     use crate::{RegionId, TaskId};
     use std::future::Future;
-    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex as StdMutex, Weak};
     use std::task::{Context, Poll};
 
     fn test_cx() -> Cx {
@@ -617,6 +624,50 @@ mod tests {
         let sink: Arc<dyn EvidenceSink> = collector.clone();
         let (tx, rx, ctrl) = crash_channel::<u32>(16, config, sink);
         (tx, rx, ctrl, collector)
+    }
+
+    #[derive(Debug, Default)]
+    struct ControllerLockProbeSink {
+        controller: StdMutex<Weak<CrashController>>,
+        lock_free_observations: StdMutex<Vec<bool>>,
+        timestamp_seq: AtomicU64,
+    }
+
+    impl ControllerLockProbeSink {
+        fn attach(&self, controller: &Arc<CrashController>) {
+            *self
+                .controller
+                .lock()
+                .expect("probe controller mutex should not poison") = Arc::downgrade(controller);
+        }
+
+        fn observations(&self) -> Vec<bool> {
+            self.lock_free_observations
+                .lock()
+                .expect("probe observations mutex should not poison")
+                .clone()
+        }
+    }
+
+    impl EvidenceSink for ControllerLockProbeSink {
+        fn emit(&self, _entry: &EvidenceLedger) {
+            let controller = self
+                .controller
+                .lock()
+                .expect("probe controller mutex should not poison")
+                .upgrade()
+                .expect("controller should still be alive during emit");
+            self.lock_free_observations
+                .lock()
+                .expect("probe observations mutex should not poison")
+                .push(controller.state.try_lock().is_some());
+        }
+
+        fn next_evidence_ts(&self) -> u64 {
+            self.timestamp_seq
+                .fetch_add(1, Ordering::Relaxed)
+                .wrapping_add(1)
+        }
     }
 
     // --- Config validation ---
@@ -824,6 +875,28 @@ mod tests {
             .map(|entry| entry.ts_unix_ms)
             .collect();
         assert_eq!(timestamps, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn crash_controller_emits_evidence_after_releasing_state_lock() {
+        let normal_probe = Arc::new(ControllerLockProbeSink::default());
+        let normal_sink: Arc<dyn EvidenceSink> = normal_probe.clone();
+        let normal_ctrl = Arc::new(CrashController::new(&CrashConfig::new(42), normal_sink));
+        normal_probe.attach(&normal_ctrl);
+
+        assert!(normal_ctrl.crash());
+        assert!(normal_ctrl.restart());
+        assert_eq!(normal_probe.observations(), vec![true, true]);
+
+        let exhausted_probe = Arc::new(ControllerLockProbeSink::default());
+        let exhausted_sink: Arc<dyn EvidenceSink> = exhausted_probe.clone();
+        let exhausted_config = CrashConfig::new(42).with_max_restarts(0);
+        let exhausted_ctrl = Arc::new(CrashController::new(&exhausted_config, exhausted_sink));
+        exhausted_probe.attach(&exhausted_ctrl);
+
+        assert!(exhausted_ctrl.crash());
+        assert!(!exhausted_ctrl.restart());
+        assert_eq!(exhausted_probe.observations(), vec![true, true]);
     }
 
     // --- Cold vs warm restart ---
