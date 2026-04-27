@@ -142,12 +142,8 @@ impl ShadowChannel {
             }
         }
 
-        // No message available
-        if self.closed && self.all_messages.is_empty() {
-            Err((false, None)) // Channel closed and drained
-        } else {
-            Err((false, None)) // Channel empty but not closed
-        }
+        // No message available yet, or the channel is closed and drained.
+        Err((false, None))
     }
 
     fn close(&mut self) {
@@ -176,27 +172,24 @@ fuzz_target!(|input: BroadcastLagFuzz| {
         return;
     }
 
-    let capacity = (input.capacity as usize).max(1).min(MAX_CAPACITY);
-    let initial_receivers = (input.initial_receivers as usize).max(1).min(MAX_RECEIVERS);
+    let capacity = (input.capacity as usize).clamp(1, MAX_CAPACITY);
+    let initial_receivers = (input.initial_receivers as usize).clamp(1, MAX_RECEIVERS);
 
     // Create test context
     let cx = Cx::for_testing();
 
     // Create channel and receivers
     let (sender, main_receiver) = broadcast::channel::<u8>(capacity);
-    let mut receivers = vec![main_receiver];
+    let mut receivers = vec![Some(main_receiver)];
     let mut senders = vec![sender];
 
     // Create additional receivers
     for _ in 1..initial_receivers {
-        receivers.push(senders[0].subscribe());
+        receivers.push(Some(senders[0].subscribe()));
     }
 
     // Create shadow model
     let mut shadow = ShadowChannel::new(capacity, initial_receivers);
-
-    // Track active receivers (some may be dropped)
-    let mut receiver_active = vec![true; initial_receivers];
 
     // Execute operations
     for op in input.operations.iter().take(MAX_OPERATIONS) {
@@ -204,25 +197,27 @@ fuzz_target!(|input: BroadcastLagFuzz| {
             BroadcastOperation::Send { msg_value } => {
                 if !senders.is_empty() {
                     let result = senders[0].send(&cx, *msg_value);
-                    let should_succeed = receiver_active.iter().any(|&active| active);
+                    let active_receiver_count = receivers.iter().filter(|r| r.is_some()).count();
+                    let should_succeed = active_receiver_count > 0;
 
                     match result {
                         Ok(live_count) => {
                             shadow.send_message(*msg_value);
-                            let expected_live =
-                                receiver_active.iter().filter(|&&active| active).count();
                             assert_eq!(
-                                live_count, expected_live,
+                                live_count, active_receiver_count,
                                 "Live receiver count mismatch: got {}, expected {}",
-                                live_count, expected_live
+                                live_count, active_receiver_count
                             );
                         }
                         Err(broadcast::SendError::Closed(_)) => {
                             assert!(
                                 !should_succeed,
                                 "Send failed but {} receivers are active",
-                                receiver_active.iter().filter(|&&active| active).count()
+                                active_receiver_count
                             );
+                        }
+                        Err(broadcast::SendError::Cancelled) => {
+                            assert!(false, "broadcast send unexpectedly cancelled under test Cx");
                         }
                     }
                 }
@@ -237,27 +232,24 @@ fuzz_target!(|input: BroadcastLagFuzz| {
                 }
 
                 let new_receiver = senders[0].subscribe();
-                receivers.push(new_receiver);
-                receiver_active.push(true);
+                receivers.push(Some(new_receiver));
                 shadow.subscribe_receiver();
             }
 
             BroadcastOperation::DropReceiver { receiver_index } => {
                 let index = (*receiver_index as usize) % receivers.len();
-                if receiver_active[index] {
-                    receiver_active[index] = false;
+                if receivers[index].take().is_some() {
                     shadow.drop_receiver(index);
-                    // Note: We don't actually drop the receiver object to keep indices stable
                 }
             }
 
             BroadcastOperation::TryRecv { receiver_index } => {
                 let index = (*receiver_index as usize) % receivers.len();
-                if !receiver_active[index] {
+                let Some(receiver) = receivers[index].as_mut() else {
                     continue; // Skip inactive receivers
-                }
+                };
 
-                let actual_result = receivers[index].try_recv();
+                let actual_result = receiver.try_recv();
                 let shadow_result = shadow.try_recv(index);
 
                 match (actual_result, shadow_result) {
@@ -294,7 +286,8 @@ fuzz_target!(|input: BroadcastLagFuzz| {
 
                     _ => {
                         // Mismatch - this is a bug
-                        panic!(
+                        assert!(
+                            false,
                             "Receive result mismatch: actual={:?}, shadow={:?}",
                             actual_result, shadow_result
                         );
@@ -304,7 +297,7 @@ fuzz_target!(|input: BroadcastLagFuzz| {
 
             BroadcastOperation::CheckLag { receiver_index } => {
                 let index = (*receiver_index as usize) % receivers.len();
-                if !receiver_active[index] {
+                if receivers[index].is_none() {
                     continue;
                 }
 
@@ -357,7 +350,7 @@ fuzz_target!(|input: BroadcastLagFuzz| {
                 amount,
             } => {
                 let index = (*receiver_index as usize) % receivers.len();
-                if !receiver_active[index] {
+                if receivers[index].is_none() {
                     continue;
                 }
 
@@ -372,7 +365,7 @@ fuzz_target!(|input: BroadcastLagFuzz| {
 
         // Invariant checks after each operation
         let sender_count = senders.len();
-        let active_receiver_count = receiver_active.iter().filter(|&&active| active).count();
+        let active_receiver_count = receivers.iter().filter(|r| r.is_some()).count();
 
         // Channel should be closed iff no senders exist
         if sender_count == 0 {
@@ -394,10 +387,10 @@ fuzz_target!(|input: BroadcastLagFuzz| {
     }
 
     // Final consistency check - try to receive all remaining messages
-    for (i, active) in receiver_active.iter().enumerate() {
-        if *active && i < receivers.len() {
+    for (i, receiver) in receivers.iter_mut().enumerate() {
+        if let Some(receiver) = receiver.as_mut() {
             // Drain receiver and verify against shadow
-            while let Ok(_msg) = receivers[i].try_recv() {
+            while let Ok(_msg) = receiver.try_recv() {
                 // Messages should match shadow expectations
                 match shadow.try_recv(i) {
                     Ok(_shadow_msg) => {
