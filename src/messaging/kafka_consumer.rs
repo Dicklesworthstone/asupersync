@@ -582,9 +582,6 @@ fn apply_broker_snapshot(state: &mut ConsumerState, snapshot: BrokerSnapshot) {
             state.positions.insert(key, offset);
         }
     }
-    state
-        .committed_offsets
-        .retain(|key, _| state.assigned_partitions.contains(key));
 }
 
 impl KafkaConsumer {
@@ -700,7 +697,6 @@ impl KafkaConsumer {
             }
         }
         state.positions.clear();
-        state.committed_offsets.clear();
         state.rebalance_generation = 0;
         state.last_revoked_partitions.clear();
         drop(state);
@@ -805,9 +801,6 @@ impl KafkaConsumer {
         let retained_assignments = state.assigned_partitions.clone();
         state
             .positions
-            .retain(|key, _| retained_assignments.contains(key));
-        state
-            .committed_offsets
             .retain(|key, _| retained_assignments.contains(key));
         for (partition, offset) in normalized {
             state.positions.insert(partition, offset);
@@ -2081,6 +2074,40 @@ mod tests {
                 .unwrap_err();
             assert!(matches!(err, KafkaError::Config(msg) if msg.contains("duplicate")));
             assert_eq!(consumer.committed_offset("orders", 0), None);
+        });
+    }
+
+    #[cfg(not(feature = "kafka"))]
+    #[test]
+    fn consumer_resubscribe_preserves_committed_offsets_across_topic_changes() {
+        let _broker = stub_broker_guard();
+        run_test_with_cx(|cx| async move {
+            let topic = "consumer-resubscribe-preserves-committed-offsets";
+            let other_topic = "consumer-resubscribe-preserves-committed-offsets-other";
+            let consumer = KafkaConsumer::new(
+                ConsumerConfig::new(vec!["localhost:9092".to_string()], "group-resubscribe")
+                    .auto_offset_reset(AutoOffsetReset::None),
+            )
+            .unwrap();
+
+            consumer.subscribe(&cx, &[topic]).await.unwrap();
+            consumer
+                .commit_offsets(&cx, &[TopicPartitionOffset::new(topic, 0, 7)])
+                .await
+                .unwrap();
+
+            consumer.subscribe(&cx, &[other_topic]).await.unwrap();
+            assert_eq!(consumer.position(topic, 0), None);
+            assert_eq!(consumer.committed_offset(topic, 0), Some(7));
+
+            consumer.subscribe(&cx, &[topic]).await.unwrap();
+
+            assert_eq!(consumer.committed_offset(topic, 0), Some(7));
+            assert!(
+                consumer.poll(&cx, Duration::ZERO).await.unwrap().is_none(),
+                "existing committed offset should satisfy auto_offset_reset=None after resubscribe"
+            );
+            assert_eq!(consumer.position(topic, 0), Some(7));
         });
     }
 
