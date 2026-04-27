@@ -669,6 +669,84 @@ mod tests {
         );
     }
 
+    /// br-asupersync-9gg21l: Status mapping is now driven by the typed
+    /// TransportErrorKind, not by substring search of free-form msg text.
+    #[test]
+    fn gg21l_typed_transport_kind_drives_status_code() {
+        // Each kind round-trips to its expected Status code.
+        let table = [
+            (TransportErrorKind::Timeout, Code::DeadlineExceeded),
+            (TransportErrorKind::ConnectFailed, Code::Unavailable),
+            (TransportErrorKind::ResetByPeer, Code::Unavailable),
+            (TransportErrorKind::ProtocolViolation, Code::Internal),
+            (TransportErrorKind::Other, Code::Unavailable),
+        ];
+        for (kind, expected) in table {
+            let s =
+                GrpcError::transport_kind(kind, "msg with substring 'timeout'")
+                    .into_status();
+            assert_eq!(
+                s.code(),
+                expected,
+                "kind {kind:?} must map to {expected:?}, got {:?}",
+                s.code()
+            );
+        }
+    }
+
+    /// br-asupersync-9gg21l: bare GrpcError::transport(msg) defaults to
+    /// Other → Unavailable, regardless of message text. The previous
+    /// substring-classifier (timeout/timed out/deadline exceeded/http 504)
+    /// is removed.
+    #[test]
+    fn gg21l_bare_transport_no_substring_classification() {
+        for msg in [
+            "request timeout",
+            "deadline exceeded by 100ms",
+            "http 504 gateway timeout",
+            "operation timed out",
+        ] {
+            let s = GrpcError::transport(msg).into_status();
+            assert_eq!(
+                s.code(),
+                Code::Unavailable,
+                "bare transport must NOT classify by substring; \
+                 expected Unavailable for {msg:?}, got {:?}",
+                s.code()
+            );
+        }
+    }
+
+    /// br-asupersync-9gg21l: io::Error → GrpcError::Transport mapping
+    /// preserves the relevant ErrorKind classification.
+    #[test]
+    fn gg21l_io_error_kind_maps_to_typed_transport_kind() {
+        use std::io::ErrorKind as Ek;
+        let mappings: &[(Ek, TransportErrorKind)] = &[
+            (Ek::TimedOut, TransportErrorKind::Timeout),
+            (Ek::ConnectionRefused, TransportErrorKind::ConnectFailed),
+            (Ek::AddrNotAvailable, TransportErrorKind::ConnectFailed),
+            (Ek::ConnectionReset, TransportErrorKind::ResetByPeer),
+            (Ek::ConnectionAborted, TransportErrorKind::ResetByPeer),
+            (Ek::BrokenPipe, TransportErrorKind::ResetByPeer),
+            (Ek::NotConnected, TransportErrorKind::ResetByPeer),
+            (Ek::UnexpectedEof, TransportErrorKind::ResetByPeer),
+            (Ek::InvalidData, TransportErrorKind::ProtocolViolation),
+            (Ek::Other, TransportErrorKind::Other),
+        ];
+        for (io_kind, expected) in mappings {
+            let io_err = std::io::Error::new(*io_kind, "test");
+            let grpc: GrpcError = io_err.into();
+            match grpc {
+                GrpcError::Transport(actual, _) => assert_eq!(
+                    actual, *expected,
+                    "io::ErrorKind::{io_kind:?} must map to TransportErrorKind::{expected:?}, got {actual:?}"
+                ),
+                other => panic!("io::Error must convert to Transport variant, got {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn test_grpc_error_into_status() {
         init_test("test_grpc_error_into_status");
