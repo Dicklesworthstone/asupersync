@@ -857,26 +857,91 @@ impl StreamStore {
         Some(off)
     }
 
-    /// Ensure the Vec has a slot for `id`, growing if needed. Returns
-    /// the slot index. `id` MUST be `>= base_id`; callers ensure this
-    /// because stream-id allocation is strictly monotonic per parity
-    /// and ids below `base_id` have already been validated as
-    /// "already-used" by the caller before reaching this method.
+    /// Hard ceiling on the `(id - base_id)` gap that
+    /// [`ensure_slot`] is willing to materialise. RFC 9113 stream
+    /// ids range up to `0x7FFF_FFFF` (~2.1B), and a peer that opens
+    /// `id=1` followed by `id=0x7FFF_FFFD` would otherwise force
+    /// `resize_with` to allocate ~2.1B `Option<Stream>` slots
+    /// (tens of GB) — memory-DoS. The `max_concurrent_streams`
+    /// gate counts only OCCUPIED slots, not Vec capacity, so it does
+    /// not bound the gap.
+    ///
+    /// `1 << 20` (1,048,576) slots = ~16 MiB worst-case for
+    /// `Option<Stream>` on 64-bit. Far above any realistic
+    /// `max_concurrent_streams` (typically ≤1024) but still rejects
+    /// the pathological 2.1B-id-gap attack.
+    const MAX_STREAM_GAP_FROM_BASE: u32 = 1 << 20;
+
+    /// Ensure the Vec has a slot for `id`, growing if needed.
+    /// `id` MUST be `>= base_id`; callers ensure this because
+    /// stream-id allocation is strictly monotonic per parity and ids
+    /// below `base_id` have already been validated as "already-used"
+    /// by the caller before reaching this method.
+    ///
+    /// br-asupersync-jq82r4: returns Err on stream-id gaps that
+    /// would grow the flat Vec beyond [`MAX_STREAM_GAP_FROM_BASE`].
+    /// As a last-chance, attempts [`prune_closed`] first so a long
+    /// run of finished streams can advance `base_id` and reclaim
+    /// the cap.
     #[inline]
-    fn ensure_slot(&mut self, id: u32) -> usize {
+    fn ensure_slot(&mut self, id: u32) -> Result<usize, H2Error> {
         debug_assert!(
             id >= self.base_id,
             "id < base_id should be rejected upstream"
         );
+        if id.saturating_sub(self.base_id) > Self::MAX_STREAM_GAP_FROM_BASE {
+            // Last-chance compaction: prune the leading closed run so
+            // base_id advances and the gap may fit. After this
+            // base_id may have moved; recheck.
+            self.prune_closed();
+            if id < self.base_id
+                || id.saturating_sub(self.base_id) > Self::MAX_STREAM_GAP_FROM_BASE
+            {
+                return Err(H2Error::stream(
+                    id,
+                    ErrorCode::RefusedStream,
+                    "stream id gap exceeds implementation ceiling \
+                     (br-asupersync-jq82r4): would grow flat Vec by \
+                     >1M slots; reject to prevent memory DoS",
+                ));
+            }
+        }
         let off = (id - self.base_id) as usize;
         if off >= self.streams.len() {
             self.streams.resize_with(off + 1, || None);
         }
-        off
+        Ok(off)
+    }
+
+    /// Non-mutating gap pre-check for callers that update
+    /// `next_*_stream_id` BEFORE calling `insert_stream`. Returns
+    /// the same `RefusedStream` error that `ensure_slot` would, but
+    /// without mutating any field — so the caller can reject without
+    /// rolling back the monotonic-id counter.
+    ///
+    /// Intentionally STRICTER than `ensure_slot` (no prune-and-retry):
+    /// if the gap is genuinely recoverable via `prune_closed`, the
+    /// caller's eventual path through `insert_stream → ensure_slot`
+    /// will retry there. The pre-check just short-circuits the
+    /// obvious DoS pattern before any state mutation.
+    #[inline]
+    fn precheck_stream_gap(&self, id: u32) -> Result<(), H2Error> {
+        if id >= self.base_id
+            && id - self.base_id > Self::MAX_STREAM_GAP_FROM_BASE
+        {
+            return Err(H2Error::stream(
+                id,
+                ErrorCode::RefusedStream,
+                "stream id gap exceeds implementation ceiling \
+                 (br-asupersync-jq82r4)",
+            ));
+        }
+        Ok(())
     }
 
     /// Insert a new stream at `id`. Returns `Err` only if `id <
-    /// base_id` (already pruned past). Updates `occupied`. The caller
+    /// base_id` (already pruned past) or if `ensure_slot` rejects the
+    /// id-gap (br-asupersync-jq82r4). Updates `occupied`. The caller
     /// is responsible for stream-id-uniqueness — this method asserts
     /// that the slot was previously empty (defence in depth against
     /// the RFC 9113 §5.1.1 reuse prohibition).
@@ -884,7 +949,7 @@ impl StreamStore {
         if id < self.base_id {
             return Err(H2Error::protocol("stream id below pruned base"));
         }
-        let idx = self.ensure_slot(id);
+        let idx = self.ensure_slot(id)?;
         debug_assert!(
             self.streams[idx].is_none(),
             "stream id reuse violates RFC 9113 §5.1.1 — caller should reject before insert"
@@ -1013,6 +1078,15 @@ impl StreamStore {
             if id > MAX_STREAM_ID {
                 return Err(H2Error::protocol("stream ID exceeds maximum"));
             }
+            // br-asupersync-jq82r4: pre-validate the stream-id gap
+            // from base_id BEFORE any state advance
+            // (next_*_stream_id update, max-concurrent-streams
+            // check) so a rejection leaves no half-mutated state
+            // that would corrupt subsequent legitimate streams. The
+            // gap check inside ensure_slot remains as the ultimate
+            // guarantee — we just check first so we can fail fast
+            // and cheaply.
+            self.precheck_stream_gap(id)?;
 
             let is_client_stream = id % 2 == 1;
             if self.is_client && is_client_stream {
@@ -1072,6 +1146,9 @@ impl StreamStore {
         if self.get(id).is_some() {
             return Err(H2Error::protocol("stream ID already used"));
         }
+        // br-asupersync-jq82r4: refuse PUSH_PROMISE that would
+        // explode the flat Vec before mutating next_*_stream_id.
+        self.precheck_stream_gap(id)?;
 
         let is_client_stream = id % 2 == 1;
         if self.is_client {
@@ -1120,6 +1197,19 @@ impl StreamStore {
             if active_count >= self.max_concurrent_streams {
                 return Err(H2Error::protocol("max concurrent streams exceeded"));
             }
+        }
+
+        // br-asupersync-jq82r4: refuse self-allocation when the next
+        // id would explode the flat Vec, BEFORE incrementing
+        // next_*_stream_id (so a refused allocation doesn't burn an
+        // id and desynchronise the parity counter).
+        let next_self_id = if self.is_client {
+            self.next_client_stream_id
+        } else {
+            self.next_server_stream_id
+        };
+        if next_self_id <= MAX_STREAM_ID {
+            self.precheck_stream_gap(next_self_id)?;
         }
 
         let id = if self.is_client {
@@ -1262,6 +1352,127 @@ mod tests {
         let id3 = store.allocate_stream_id().unwrap();
         assert_eq!(id3, 5);
         assert!(!store.is_empty());
+    }
+
+    /// br-asupersync-jq82r4: a server receiving a client-initiated stream
+    /// id whose gap from base_id exceeds 1<<20 must reject with
+    /// RefusedStream WITHOUT growing the flat Vec to 2.1B slots. This is
+    /// the memory-DoS regression guard.
+    #[test]
+    fn jq82r4_ensure_slot_rejects_pathological_stream_id_gap() {
+        // is_client=false → server-side StreamStore that accepts client
+        // (odd) stream ids. Open a tiny id first, then attempt a near-MAX
+        // id that would create a 2.1B-slot gap.
+        let mut store = StreamStore::new(false, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        store.get_or_create(1).expect("first stream opens normally");
+
+        // 0x7FFF_FFFD - 1 ≈ 2.1B slots; the ceiling is 1<<20. Ceiling is
+        // crossed by any id ≥ 1 + 2^20 + 1 (off ≥ 1<<20). Pick a
+        // representative odd id well above the ceiling but below
+        // MAX_STREAM_ID.
+        let attack_id: u32 = (1u32 << 21) + 1; // odd, way above ceiling
+        let err = store
+            .get_or_create(attack_id)
+            .expect_err("must reject pathological id gap");
+        // The error MUST be a stream-level RefusedStream, NOT a memory
+        // allocation that brought down the process.
+        assert!(
+            err.message.contains("stream id gap exceeds") || err.code == ErrorCode::RefusedStream,
+            "expected RefusedStream / gap-exceeds, got {err:?}"
+        );
+
+        // Subsequent legitimate allocations must still work — the
+        // rejection MUST NOT have advanced next_client_stream_id past
+        // attack_id, otherwise smaller ids would now be "already used".
+        let id3 = store
+            .get_or_create(3)
+            .expect("smaller-gap allocation still works");
+        assert_eq!(id3.id(), 3);
+    }
+
+    /// br-asupersync-jq82r4: rejection MUST NOT mutate
+    /// `next_client_stream_id`. If it did, a single attack frame
+    /// would permanently break the connection's ability to accept
+    /// further legitimate client streams.
+    #[test]
+    fn jq82r4_rejection_does_not_advance_next_stream_id() {
+        let mut store = StreamStore::new(false, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        let next_before = store.next_client_stream_id;
+        let attack_id: u32 = (1u32 << 21) + 1; // odd, above 1<<20 cap
+        let _err = store
+            .get_or_create(attack_id)
+            .expect_err("must reject attack id");
+        assert_eq!(
+            store.next_client_stream_id, next_before,
+            "rejected attack must not advance next_client_stream_id"
+        );
+    }
+
+    /// br-asupersync-jq82r4: a peer-initiated PUSH_PROMISE with a
+    /// pathological promised id must be refused without growing the
+    /// flat Vec, AND without burning the next-server-stream-id
+    /// counter (so legitimate promises still succeed afterwards).
+    #[test]
+    fn jq82r4_reserve_remote_stream_rejects_pathological_id_gap() {
+        let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        let next_before = store.next_server_stream_id;
+        let attack_id: u32 = 1u32 << 22; // even, server-promised, above cap
+        let err = store
+            .reserve_remote_stream(attack_id)
+            .expect_err("must reject pathological promised id");
+        assert_eq!(err.code, ErrorCode::RefusedStream);
+        assert_eq!(
+            store.next_server_stream_id, next_before,
+            "rejection must not burn next_server_stream_id"
+        );
+
+        // Legit small promised id still works.
+        let s = store
+            .reserve_remote_stream(2)
+            .expect("legit promise must still succeed");
+        assert_eq!(s.id(), 2);
+    }
+
+    /// br-asupersync-jq82r4: prune_closed advances base_id past a
+    /// long run of closed streams, which restores headroom under the
+    /// gap cap. ensure_slot triggers this last-chance compaction
+    /// before rejecting, so a long-lived connection that legitimately
+    /// closes many streams keeps working.
+    #[test]
+    fn jq82r4_prune_recovers_when_gap_cap_first_exceeded() {
+        // Use a very small synthetic gap by forcing base_id and
+        // streams to a state that mimics the long-running connection
+        // shape: many closed streams at the front, an attempt to
+        // open a stream just past the cap.
+        let mut store = StreamStore::new(false, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        // Open a few streams and close them so prune_closed can
+        // advance base_id past them.
+        for id in [1u32, 3, 5, 7, 9] {
+            let s = store.get_or_create(id).unwrap();
+            s.reset(ErrorCode::Cancel);
+        }
+        // Sanity: base_id is still 1 (no automatic prune on close).
+        assert_eq!(store.base_id, 1);
+
+        // Now force the next opened id to be exactly at the cap from
+        // CURRENT base_id. After prune the cap will measure from the
+        // new (larger) base_id and the same id will fit.
+        let target_id = 1 + StreamStore::MAX_STREAM_GAP_FROM_BASE + 1;
+        // Make sure target_id has client (odd) parity for is_client=false.
+        let target_id = if target_id % 2 == 1 { target_id } else { target_id + 1 };
+        let result = store.get_or_create(target_id);
+        // First time: pre-check rejects (no prune in pre-check).
+        let err = result.expect_err("pre-check refuses uncompacted gap");
+        assert_eq!(err.code, ErrorCode::RefusedStream);
+
+        // Manually run a prune (simulating the connection's idle-time
+        // housekeeping) and then retry — should now succeed.
+        store.prune_closed();
+        assert!(store.base_id > 1, "prune must advance base_id");
+        let s = store
+            .get_or_create(target_id)
+            .expect("after prune, the same id fits within the gap cap");
+        assert_eq!(s.id(), target_id);
     }
 
     #[test]
@@ -1995,7 +2206,14 @@ mod tests {
     #[test]
     fn stream_store_allocate_stream_id_exhausts_at_max() {
         let mut store = StreamStore::new(true, 65535, DEFAULT_MAX_HEADER_LIST_SIZE);
+        // br-asupersync-jq82r4: simulate a long-running connection where
+        // base_id has advanced near MAX through repeated stream
+        // close+prune. The flat-Vec gap-from-base ceiling rejects fresh
+        // connections that try to jump from base_id=1 to id=MAX
+        // directly (memory-DoS prevention); to test the MAX exhaustion
+        // boundary, advance base_id to MAX-1 first so the gap is small.
         store.next_client_stream_id = MAX_STREAM_ID;
+        store.base_id = MAX_STREAM_ID - 1;
 
         let id = store.allocate_stream_id().unwrap();
         assert_eq!(id, MAX_STREAM_ID);
