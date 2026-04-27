@@ -1443,6 +1443,135 @@ mod tests {
         }
     }
 
+    /// br-asupersync-bqhtau: byte-exact regression pin for the
+    /// ConstraintMatrix LDPC / HDPC / LT bands. The existing
+    /// `rfc6330_constraint_matrix_structural_dimensions_per_band`
+    /// test pins the matrix DIMENSIONS (rows/cols/L/W/P/B) but not
+    /// the actual byte contents of each row. A regression that, e.g.,
+    /// flipped the LDPC circulant step from `a = 1 + i/S` to
+    /// `a = 1 + i/(S+1)`, or that re-ordered the HDPC GAMMA exponents,
+    /// would silently emit non-RFC-conformant matrices that round-
+    /// trip locally (encoder + decoder both wrong in lockstep) but
+    /// fail to interoperate with any other RFC 6330 implementation.
+    ///
+    /// Hash each band separately (domain-separated by band name +
+    /// K value, length-prefixed by row dims) so a one-cell change in
+    /// any band trips its specific pin and pinpoints which builder
+    /// regressed.
+    ///
+    /// First-run mode: when the EXPECTED_*_HASH constants are zero
+    /// the test panics with the observed values so a future port to
+    /// a different reference can capture the new pins explicitly.
+    #[test]
+    fn rfc6330_constraint_matrix_band_byte_exact() {
+        use crate::util::det_hash::DetHasher;
+        use std::hash::Hasher;
+
+        fn hash_band(
+            label: &'static str,
+            k: usize,
+            matrix: &ConstraintMatrix,
+            row_start: usize,
+            row_end: usize,
+        ) -> u64 {
+            let mut h = DetHasher::default();
+            // Domain-separate by band name + K so a swapped band would
+            // still trip even if the swapped bands happened to hash-
+            // equal each other.
+            h.write(label.as_bytes());
+            h.write_usize(k);
+            h.write_usize(row_end - row_start);
+            h.write_usize(matrix.cols);
+            for r in row_start..row_end {
+                for c in 0..matrix.cols {
+                    h.write_u8(matrix.get(r, c).0);
+                }
+            }
+            h.finish()
+        }
+
+        // Per RFC 6330 §5.3.3.3 the matrix is laid out as:
+        //   rows 0..S        — LDPC band
+        //   rows S..S+H      — HDPC band
+        //   rows S+H..S+H+K' — LT band
+        // We pin the hash of each band for two K values: the smallest
+        // (K=10) and a representative mid-range (K=100). The "0xC0FFEE"
+        // seed matches the existing dimensions test for parity.
+        const SEED: u64 = 0xC0FFEE;
+
+        struct BandPin {
+            k: usize,
+            ldpc: u64,
+            hdpc: u64,
+            lt: u64,
+        }
+
+        let pins = [
+            BandPin {
+                k: 10,
+                ldpc: 0x4ab3_9ddb_ea43_8fec,
+                hdpc: 0x6266_f09d_4cef_4599,
+                lt: 0x8a2b_ddc3_a2e1_fcdf,
+            },
+            BandPin {
+                k: 100,
+                ldpc: 0x0bcf_007c_cfcc_0527,
+                hdpc: 0x85dc_e719_ccaa_f643,
+                lt: 0xeb88_ae5a_4f0e_ce2f,
+            },
+        ];
+
+        let mut first_run_lines: Vec<String> = Vec::new();
+
+        for pin in &pins {
+            let params = SystematicParams::for_source_block(pin.k, 4);
+            let matrix = ConstraintMatrix::build(&params, SEED);
+            let s = params.s;
+            let h = params.h;
+            let k_prime = params.k_prime;
+
+            let ldpc_hash = hash_band("LDPC", pin.k, &matrix, 0, s);
+            let hdpc_hash = hash_band("HDPC", pin.k, &matrix, s, s + h);
+            let lt_hash = hash_band("LT", pin.k, &matrix, s + h, s + h + k_prime);
+
+            if pin.ldpc == 0 || pin.hdpc == 0 || pin.lt == 0 {
+                first_run_lines.push(format!(
+                    "  K={}: ldpc=0x{ldpc_hash:016x}u64, hdpc=0x{hdpc_hash:016x}u64, lt=0x{lt_hash:016x}u64",
+                    pin.k
+                ));
+                continue;
+            }
+
+            assert_eq!(
+                ldpc_hash, pin.ldpc,
+                "K={}: LDPC band byte-exact regression — \
+                 build_ldpc_rows changed without updating the pin",
+                pin.k
+            );
+            assert_eq!(
+                hdpc_hash, pin.hdpc,
+                "K={}: HDPC band byte-exact regression — \
+                 build_hdpc_rows changed without updating the pin",
+                pin.k
+            );
+            assert_eq!(
+                lt_hash, pin.lt,
+                "K={}: LT band byte-exact regression — \
+                 build_lt_rows changed without updating the pin",
+                pin.k
+            );
+        }
+
+        if !first_run_lines.is_empty() {
+            panic!(
+                "br-asupersync-bqhtau: ConstraintMatrix band pins not \
+                 yet captured. Update the BandPin entries with these \
+                 observed values:\n{}",
+                first_run_lines.join("\n")
+            );
+        }
+    }
+
     /// br-asupersync-eri4b3: K-boundary fail-cleanly conformance.
     /// K=0 is invalid; K=56404 (one past the last K' table row) MUST
     /// return UnsupportedSourceBlockSize cleanly without panic.
