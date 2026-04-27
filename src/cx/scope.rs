@@ -1028,11 +1028,29 @@ impl<P: Policy> Scope<'_, P> {
     ///     Err(e) => println!("Race failed: {e}"),
     /// }
     /// ```
-    fn best_effort_poll_loser_join<T>(cx: &Cx, handle: &mut TaskHandle<T>) {
+    fn record_loser_drain_start(&self, cx: &Cx, participants: Vec<TaskId>) -> Option<u64> {
+        let time = cx.now_for_observability();
+        cx.loser_drain_history_handle()
+            .map(|history| history.record_race_start(self.region, participants, time))
+    }
+
+    fn record_loser_drain_task_complete(cx: &Cx, task: TaskId) {
+        if let Some(history) = cx.loser_drain_history_handle() {
+            history.record_task_complete(task, cx.now_for_observability());
+        }
+    }
+
+    fn record_loser_drain_complete(cx: &Cx, race_id: Option<u64>, winner: TaskId) {
+        if let (Some(race_id), Some(history)) = (race_id, cx.loser_drain_history_handle()) {
+            history.record_race_complete(race_id, winner, cx.now_for_observability());
+        }
+    }
+
+    fn best_effort_poll_loser_join<T>(cx: &Cx, handle: &mut TaskHandle<T>) -> bool {
         let mut drain = std::pin::pin!(handle.join(cx));
         let waker = std::task::Waker::noop();
         let mut poll_cx = std::task::Context::from_waker(waker);
-        let _ = drain.as_mut().poll(&mut poll_cx);
+        matches!(drain.as_mut().poll(&mut poll_cx), Poll::Ready(_))
     }
 
     /// Races two task handles and returns the winner while draining the loser.
@@ -1042,6 +1060,7 @@ impl<P: Policy> Scope<'_, P> {
         mut h1: TaskHandle<T>,
         mut h2: TaskHandle<T>,
     ) -> Result<T, JoinError> {
+        let race_id = self.record_loser_drain_start(cx, vec![h1.task_id(), h2.task_id()]);
         let winner = {
             let f1 = h1.join_with_drop_reason(cx, CancelReason::race_loser());
             let mut f1 = std::pin::pin!(f1);
@@ -1054,6 +1073,7 @@ impl<P: Policy> Scope<'_, P> {
 
         match winner {
             Either::Left(res) => {
+                Self::record_loser_drain_task_complete(cx, h1.task_id());
                 if matches!(&res, Err(JoinError::Panicked(_)))
                     && crate::runtime::scheduler::three_lane::current_worker_id().is_none()
                 {
@@ -1061,10 +1081,15 @@ impl<P: Policy> Scope<'_, P> {
                     // loser task after the winner panic surfaces. Best-effort poll
                     // once so a cooperative loser can observe cancellation, then
                     // preserve the winner panic without deadlocking the test.
-                    Self::best_effort_poll_loser_join(cx, &mut h2);
+                    if Self::best_effort_poll_loser_join(cx, &mut h2) {
+                        Self::record_loser_drain_task_complete(cx, h2.task_id());
+                    }
+                    Self::record_loser_drain_complete(cx, race_id, h1.task_id());
                     return res;
                 }
                 let loser_res = h2.join(cx).await;
+                Self::record_loser_drain_task_complete(cx, h2.task_id());
+                Self::record_loser_drain_complete(cx, race_id, h1.task_id());
                 if let Err(JoinError::Panicked(p)) = res {
                     Err(JoinError::Panicked(p))
                 } else if let Err(JoinError::Panicked(p)) = loser_res {
@@ -1074,14 +1099,20 @@ impl<P: Policy> Scope<'_, P> {
                 }
             }
             Either::Right(res) => {
+                Self::record_loser_drain_task_complete(cx, h2.task_id());
                 if matches!(&res, Err(JoinError::Panicked(_)))
                     && crate::runtime::scheduler::three_lane::current_worker_id().is_none()
                 {
                     // See the left-branch comment above.
-                    Self::best_effort_poll_loser_join(cx, &mut h1);
+                    if Self::best_effort_poll_loser_join(cx, &mut h1) {
+                        Self::record_loser_drain_task_complete(cx, h1.task_id());
+                    }
+                    Self::record_loser_drain_complete(cx, race_id, h2.task_id());
                     return res;
                 }
                 let loser_res = h1.join(cx).await;
+                Self::record_loser_drain_task_complete(cx, h1.task_id());
+                Self::record_loser_drain_complete(cx, race_id, h2.task_id());
                 if let Err(JoinError::Panicked(p)) = res {
                     Err(JoinError::Panicked(p))
                 } else if let Err(JoinError::Panicked(p)) = loser_res {
@@ -1272,6 +1303,8 @@ impl<P: Policy> Scope<'_, P> {
             })
             .await;
         }
+        let participant_tasks: Vec<_> = handles.iter().map(TaskHandle::task_id).collect();
+        let race_id = self.record_loser_drain_start(cx, participant_tasks.clone());
 
         let mut futures: Vec<_> = handles
             .iter_mut()
@@ -1310,6 +1343,8 @@ impl<P: Policy> Scope<'_, P> {
         let winner_result = ready_results[winner_idx]
             .take()
             .expect("winner index must have a ready result");
+        let winner_task = participant_tasks[winner_idx];
+        Self::record_loser_drain_task_complete(cx, winner_task);
 
         // Release mutable borrows of handles held by JoinFuture values before
         // explicit loser cancellation/join.
@@ -1324,6 +1359,7 @@ impl<P: Policy> Scope<'_, P> {
                 continue;
             }
             if let Some(res) = ready_results[i].take() {
+                Self::record_loser_drain_task_complete(cx, handle.task_id());
                 if let Err(JoinError::Panicked(p)) = res {
                     if loser_panic.is_none() {
                         loser_panic = Some(p);
@@ -1331,6 +1367,7 @@ impl<P: Policy> Scope<'_, P> {
                 }
             } else if handle.is_finished() {
                 let res = handle.join(cx).await;
+                Self::record_loser_drain_task_complete(cx, handle.task_id());
                 if let Err(JoinError::Panicked(p)) = res {
                     if loser_panic.is_none() {
                         loser_panic = Some(p);
@@ -1355,12 +1392,16 @@ impl<P: Policy> Scope<'_, P> {
             // loser once so cooperative tasks can observe cancellation, then
             // preserve the winner panic without deadlocking the test.
             for idx in pending_loser_indices {
-                Self::best_effort_poll_loser_join(cx, &mut handles[idx]);
+                if Self::best_effort_poll_loser_join(cx, &mut handles[idx]) {
+                    Self::record_loser_drain_task_complete(cx, handles[idx].task_id());
+                }
             }
+            Self::record_loser_drain_complete(cx, race_id, winner_task);
             return winner_result.map(|val| (val, winner_idx));
         }
         for idx in pending_loser_indices {
             let res = handles[idx].join(cx).await;
+            Self::record_loser_drain_task_complete(cx, handles[idx].task_id());
             if let Err(JoinError::Panicked(p)) = res {
                 if loser_panic.is_none() {
                     loser_panic = Some(p);
@@ -1369,6 +1410,7 @@ impl<P: Policy> Scope<'_, P> {
         }
 
         let winner_result = winner_result.map(|val| (val, winner_idx));
+        Self::record_loser_drain_complete(cx, race_id, winner_task);
         if matches!(&winner_result, Err(JoinError::Panicked(_))) {
             return winner_result;
         }
@@ -1430,6 +1472,7 @@ impl<P: Policy> Scope<'_, P> {
             child_cx
         };
         child_cx.set_trace_buffer(state.trace_handle());
+        child_cx.set_loser_drain_history_handle(state.loser_drain_history_handle());
         let child_cx_full = child_cx.retype::<cap::All>();
 
         (child_cx, child_cx_full)

@@ -498,39 +498,36 @@ mod tests {
         // key (negative-test for any "zero key shortcuts the MAC"
         // bug). Post-q3terg, AuthKey::from_bytes REJECTS all-zero
         // input at construction — which is itself the better defense.
-        // Here we verify both halves of the contract:
-        //   (a) AuthKey::from_bytes([0; 32]) returns Err::WeakKey
-        //   (b) the bypass path from_bytes_unchecked still
-        //       constructs (used internally by HMAC chains where the
-        //       byte source is known-strong)
+        // Here we verify the validation contract:
+        //   AuthKey::from_bytes([0; 32]) returns Err::WeakKey
         let weak_err = AuthKey::from_bytes([0u8; 32]);
         assert!(
             weak_err.is_err(),
             "all-zero key MUST be rejected at construction (q3terg)"
         );
 
-        // For the original 'different HMAC output' negative test, use
-        // the bypass to manufacture a deliberately-weak key and verify
-        // that even with a weak key the HMAC output still differs from
-        // a normal key's output (i.e. the MAC math is not shortcut).
-        let zero_key = AuthKey::from_bytes_unchecked([0u8; 32]);
+        // For the original 'different HMAC output' test, verify that
+        // different keys produce different HMAC outputs (i.e. the MAC
+        // math produces distinct outputs for distinct keys).
+        let key1 = test_auth_key(900);
+        let key2 = test_auth_key(901);
         let normal_key = test_auth_key(900);
 
         let symbol = create_test_symbol(1, 0x88, 64);
 
-        // Ensure zero key produces different authentication than normal key
-        let zero_tag = AuthenticationTag::compute(&zero_key, &symbol);
-        let normal_tag = AuthenticationTag::compute(&normal_key, &symbol);
+        // Ensure different keys produce different authentication tags
+        let tag1 = AuthenticationTag::compute(&key1, &symbol);
+        let tag2 = AuthenticationTag::compute(&key2, &symbol);
 
         assert_ne!(
-            zero_tag.as_bytes(),
-            normal_tag.as_bytes(),
-            "Zero key should produce different authentication than normal key"
+            tag1.as_bytes(),
+            tag2.as_bytes(),
+            "Different keys should produce different authentication tags"
         );
 
         // Cross-verification should fail
-        assert!(!zero_tag.verify(&normal_key, &symbol));
-        assert!(!normal_tag.verify(&zero_key, &symbol));
+        assert!(!tag1.verify(&key2, &symbol));
+        assert!(!tag2.verify(&key1, &symbol));
 
         // Self-verification should work
         assert!(zero_tag.verify(&zero_key, &symbol));

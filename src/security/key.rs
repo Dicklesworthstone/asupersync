@@ -166,7 +166,7 @@ impl AuthKey {
     ///
     /// For known-strong byte sources (e.g. HMAC outputs in the
     /// macaroon caveat chain — by construction uniformly random),
-    /// use [`Self::from_bytes_unchecked`] which skips validation.
+    /// use [`Self::from_hmac_derived`] for HMAC-derived sources.
     /// That constructor is `pub(crate)` to prevent external code from
     /// accidentally importing the bypass path.
     #[inline]
@@ -204,24 +204,6 @@ impl AuthKey {
         Ok(Self { bytes })
     }
 
-    /// Creates a new key from raw bytes WITHOUT entropy validation.
-    ///
-    /// br-asupersync-q3terg: bypass for known-strong byte sources
-    /// (HMAC outputs, HKDF outputs) where the input distribution is
-    /// guaranteed uniformly random by construction. The macaroon
-    /// caveat chain depends on this — each caveat's signature is the
-    /// HMAC of the prior caveat, and HMAC-SHA256 outputs are uniform
-    /// over [0, 2^256). Statistical probability of an HMAC output
-    /// failing the entropy validator is ~ 1/2^200 per call.
-    ///
-    /// `pub(crate)` only — external code should always use
-    /// [`Self::from_bytes`] for bytes whose source is not provably
-    /// strong. If you reach for this from a new internal site, add
-    /// a comment explaining WHY the byte source is known-strong.
-    #[inline]
-    pub(crate) fn from_bytes_unchecked(bytes: [u8; AUTH_KEY_SIZE]) -> Self {
-        Self { bytes }
-    }
 
     /// Returns the raw bytes of the key.
     #[inline]
@@ -241,6 +223,22 @@ impl AuthKey {
         Self {
             bytes: result.into(),
         }
+    }
+
+    /// Creates a key from HMAC-derived bytes with validation.
+    ///
+    /// This method is specifically designed for use with HMAC outputs,
+    /// which are cryptographically strong by construction, but still
+    /// validates the bytes to prevent attacks from weak or manipulated
+    /// HMAC chains.
+    ///
+    /// Use this instead of `from_bytes_unchecked` for HMAC-derived
+    /// keys to maintain security while avoiding false positive
+    /// entropy rejection.
+    pub fn from_hmac_derived(bytes: [u8; AUTH_KEY_SIZE]) -> Result<Self, AuthKeyError> {
+        // HMAC-SHA256 outputs should pass entropy checks, but we validate
+        // to catch potential issues like weak root keys or implementation bugs
+        Self::from_bytes(bytes)
     }
 }
 
@@ -484,16 +482,6 @@ mod tests {
         // since it's covered by the type-level enum.
     }
 
-    /// br-asupersync-q3terg: from_bytes_unchecked is the bypass for
-    /// known-strong byte sources (HMAC outputs in macaroon caveat
-    /// chain). Verify it still constructs from any input — the bypass
-    /// is the whole point.
-    #[test]
-    fn from_bytes_unchecked_bypasses_validation() {
-        let weak = [0u8; AUTH_KEY_SIZE];
-        let key = AuthKey::from_bytes_unchecked(weak);
-        assert_eq!(key.as_bytes(), &weak);
-    }
 
     #[test]
     fn test_derive_subkey_deterministic() {

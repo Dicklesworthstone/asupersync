@@ -1145,6 +1145,12 @@ impl<Caps> Cx<Caps> {
                     "discharge macaroon chain too deep"
                 );
             }
+            Err(VerificationError::WeakCaveatKey) => {
+                error!(
+                    token_id = %token.identifier(),
+                    "caveat key failed entropy validation — possible weak key attack"
+                );
+            }
         }
 
         result
@@ -1179,6 +1185,9 @@ impl<Caps> Cx<Caps> {
             }
             Err(VerificationError::DischargeChainTooDeep { depth }) => {
                 (format!("verify_fail_discharge_chain_too_deep_{depth}"), 1.0)
+            }
+            Err(VerificationError::WeakCaveatKey) => {
+                ("verify_fail_weak_caveat_key".to_string(), 1.0)
             }
         };
 
