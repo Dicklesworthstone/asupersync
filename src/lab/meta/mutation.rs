@@ -519,6 +519,12 @@ fn mutation_ambient_authority(harness: &mut MetaHarness) {
         .oracles
         .ambient_authority
         .on_spawn_effect(task, child, now);
+    // Re-grant after the effect. A correct oracle must evaluate authority at
+    // effect time, not against the final capability set at check time.
+    harness
+        .oracles
+        .ambient_authority
+        .on_capability_granted(task, CapabilityKind::Spawn, now);
 }
 
 fn baseline_deadline_monotone(harness: &mut MetaHarness) {

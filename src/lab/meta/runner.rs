@@ -360,11 +360,7 @@ mod tests {
     fn meta_runner_all_mutations_pass() {
         let runner = MetaRunner::new(42);
         let report = runner.run(builtin_mutations());
-        let failures: Vec<_> = report
-            .failures()
-            .into_iter()
-            .filter(|f| f.mutation != "mutation_ambient_authority_spawn_without_capability")
-            .collect();
+        let failures = report.failures();
         assert!(
             failures.is_empty(),
             "expected no failures, got: {:?}",

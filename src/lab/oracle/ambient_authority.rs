@@ -131,6 +131,19 @@ impl CapabilitySet {
     }
 }
 
+#[derive(Debug, Clone)]
+struct CapabilitySnapshot {
+    time: Time,
+    event_sequence: u128,
+    capabilities: CapabilitySet,
+}
+
+#[derive(Debug, Clone)]
+struct RecordedEffect {
+    effect: Effect,
+    event_sequence: u128,
+}
+
 /// An ambient authority violation.
 ///
 /// This indicates that a task performed an effect without the required
@@ -174,14 +187,18 @@ impl std::error::Error for AmbientAuthorityViolation {}
 pub struct AmbientAuthorityOracle {
     /// Capabilities granted to each task.
     capabilities: HashMap<TaskId, CapabilitySet>,
-    /// Effects performed by tasks.
-    effects: Vec<Effect>,
+    /// Historical capability snapshots for each task.
+    capability_history: HashMap<TaskId, Vec<CapabilitySnapshot>>,
+    /// Effects performed by tasks, paired with their event ordering.
+    effects: Vec<RecordedEffect>,
     /// Parent task relationships for capability inheritance.
     parent_task: HashMap<TaskId, TaskId>,
     /// Region ownership for tasks.
     task_region: HashMap<TaskId, RegionId>,
     /// Root tasks (have full capabilities by default).
     root_tasks: HashSet<TaskId>,
+    /// Monotonic event sequence used to order same-timestamp events.
+    next_event_sequence: u128,
 }
 
 impl AmbientAuthorityOracle {
@@ -189,6 +206,57 @@ impl AmbientAuthorityOracle {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn next_sequence(&mut self) -> u128 {
+        let sequence = self.next_event_sequence;
+        self.next_event_sequence = self
+            .next_event_sequence
+            .checked_add(1)
+            .expect("ambient authority oracle event sequence overflow");
+        sequence
+    }
+
+    fn snapshot_capabilities(&mut self, task: TaskId, time: Time, event_sequence: u128) {
+        let capabilities = self.capabilities.get(&task).cloned().unwrap_or_default();
+        self.capability_history
+            .entry(task)
+            .or_default()
+            .push(CapabilitySnapshot {
+                time,
+                event_sequence,
+                capabilities,
+            });
+    }
+
+    fn capabilities_at(
+        &self,
+        task: TaskId,
+        time: Time,
+        event_sequence: u128,
+    ) -> Option<&CapabilitySet> {
+        self.capability_history.get(&task).and_then(|snapshots| {
+            snapshots
+                .iter()
+                .filter(|snapshot| {
+                    snapshot.time < time
+                        || (snapshot.time == time && snapshot.event_sequence <= event_sequence)
+                })
+                .max_by(|a, b| {
+                    a.time
+                        .cmp(&b.time)
+                        .then_with(|| a.event_sequence.cmp(&b.event_sequence))
+                })
+                .map(|snapshot| &snapshot.capabilities)
+        })
+    }
+
+    fn record_effect(&mut self, effect: Effect) {
+        let event_sequence = self.next_sequence();
+        self.effects.push(RecordedEffect {
+            effect,
+            event_sequence,
+        });
     }
 
     /// Records a task creation event.
@@ -200,8 +268,9 @@ impl AmbientAuthorityOracle {
         task: TaskId,
         region: RegionId,
         parent: Option<TaskId>,
-        _time: Time,
+        time: Time,
     ) {
+        let event_sequence = self.next_sequence();
         self.task_region.insert(task, region);
 
         if let Some(parent_id) = parent {
@@ -220,23 +289,29 @@ impl AmbientAuthorityOracle {
             self.root_tasks.insert(task);
             self.capabilities.insert(task, CapabilitySet::full());
         }
+
+        self.snapshot_capabilities(task, time, event_sequence);
     }
 
     /// Grants an explicit capability to a task.
-    pub fn on_capability_granted(&mut self, task: TaskId, cap: CapabilityKind, _time: Time) {
+    pub fn on_capability_granted(&mut self, task: TaskId, cap: CapabilityKind, time: Time) {
+        let event_sequence = self.next_sequence();
         self.capabilities.entry(task).or_default().grant(cap);
+        self.snapshot_capabilities(task, time, event_sequence);
     }
 
     /// Revokes a capability from a task.
-    pub fn on_capability_revoked(&mut self, task: TaskId, cap: CapabilityKind, _time: Time) {
+    pub fn on_capability_revoked(&mut self, task: TaskId, cap: CapabilityKind, time: Time) {
+        let event_sequence = self.next_sequence();
         if let Some(caps) = self.capabilities.get_mut(&task) {
             caps.revoke(cap);
         }
+        self.snapshot_capabilities(task, time, event_sequence);
     }
 
     /// Records a spawn effect.
     pub fn on_spawn_effect(&mut self, task: TaskId, _child: TaskId, time: Time) {
-        self.effects.push(Effect {
+        self.record_effect(Effect {
             task,
             required: CapabilityKind::Spawn,
             description: "spawn child task".to_string(),
@@ -246,7 +321,7 @@ impl AmbientAuthorityOracle {
 
     /// Records a time access effect (now() or sleep()).
     pub fn on_time_access(&mut self, task: TaskId, time: Time) {
-        self.effects.push(Effect {
+        self.record_effect(Effect {
             task,
             required: CapabilityKind::Time,
             description: "access time".to_string(),
@@ -256,7 +331,7 @@ impl AmbientAuthorityOracle {
 
     /// Records a trace effect.
     pub fn on_trace(&mut self, task: TaskId, message: &str, time: Time) {
-        self.effects.push(Effect {
+        self.record_effect(Effect {
             task,
             required: CapabilityKind::Trace,
             description: format!("trace: {message}"),
@@ -266,7 +341,7 @@ impl AmbientAuthorityOracle {
 
     /// Records a region creation effect.
     pub fn on_region_create(&mut self, task: TaskId, _region: RegionId, time: Time) {
-        self.effects.push(Effect {
+        self.record_effect(Effect {
             task,
             required: CapabilityKind::Region,
             description: "create region".to_string(),
@@ -281,7 +356,7 @@ impl AmbientAuthorityOracle {
         _obligation: crate::types::ObligationId,
         time: Time,
     ) {
-        self.effects.push(Effect {
+        self.record_effect(Effect {
             task,
             required: CapabilityKind::Obligation,
             description: "create obligation".to_string(),
@@ -297,7 +372,7 @@ impl AmbientAuthorityOracle {
         description: &str,
         time: Time,
     ) {
-        self.effects.push(Effect {
+        self.record_effect(Effect {
             task,
             required,
             description: description.to_string(),
@@ -328,8 +403,9 @@ impl AmbientAuthorityOracle {
     /// * `Ok(())` if no violations are found
     /// * `Err(AmbientAuthorityViolation)` if a violation is detected
     pub fn check(&self) -> Result<(), AmbientAuthorityViolation> {
-        for effect in &self.effects {
-            let caps = self.capabilities.get(&effect.task);
+        for recorded in &self.effects {
+            let effect = &recorded.effect;
+            let caps = self.capabilities_at(effect.task, effect.time, recorded.event_sequence);
 
             let has_cap = caps.is_some_and(|c| c.has(effect.required));
 
@@ -354,10 +430,12 @@ impl AmbientAuthorityOracle {
     /// Resets the oracle to its initial state.
     pub fn reset(&mut self) {
         self.capabilities.clear();
+        self.capability_history.clear();
         self.effects.clear();
         self.parent_task.clear();
         self.task_region.clear();
         self.root_tasks.clear();
+        self.next_event_sequence = 0;
     }
 
     /// Returns the number of tracked effects.
@@ -571,6 +649,58 @@ mod tests {
         let ok = oracle.check().is_ok();
         crate::assert_with_log!(ok, "oracle ok", true, ok);
         crate::test_complete!("regranting_capability_passes");
+    }
+
+    #[test]
+    fn later_grant_does_not_retroactively_authorize_effect() {
+        init_test("later_grant_does_not_retroactively_authorize_effect");
+        let mut oracle = AmbientAuthorityOracle::new();
+
+        oracle.on_task_created(task(1), region(0), None, t(0));
+        oracle.on_capability_revoked(task(1), CapabilityKind::Spawn, t(5));
+        oracle.on_spawn_effect(task(1), task(2), t(10));
+        oracle.on_capability_granted(task(1), CapabilityKind::Spawn, t(20));
+
+        let result = oracle.check();
+        let err = result.is_err();
+        crate::assert_with_log!(err, "result err", true, err);
+        let violation = result.unwrap_err();
+        crate::assert_with_log!(
+            violation.time == t(10),
+            "violation time",
+            t(10),
+            violation.time
+        );
+        crate::test_complete!("later_grant_does_not_retroactively_authorize_effect");
+    }
+
+    #[test]
+    fn later_revoke_does_not_retroactively_invalidate_effect() {
+        init_test("later_revoke_does_not_retroactively_invalidate_effect");
+        let mut oracle = AmbientAuthorityOracle::new();
+
+        oracle.on_task_created(task(1), region(0), None, t(0));
+        oracle.on_spawn_effect(task(1), task(2), t(10));
+        oracle.on_capability_revoked(task(1), CapabilityKind::Spawn, t(20));
+
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        crate::test_complete!("later_revoke_does_not_retroactively_invalidate_effect");
+    }
+
+    #[test]
+    fn capability_lookup_uses_latest_timestamp_not_insertion_order() {
+        init_test("capability_lookup_uses_latest_timestamp_not_insertion_order");
+        let mut oracle = AmbientAuthorityOracle::new();
+
+        oracle.on_task_created(task(1), region(0), None, t(0));
+        oracle.on_capability_granted(task(1), CapabilityKind::Spawn, t(8));
+        oracle.on_capability_revoked(task(1), CapabilityKind::Spawn, t(5));
+        oracle.on_spawn_effect(task(1), task(2), t(10));
+
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        crate::test_complete!("capability_lookup_uses_latest_timestamp_not_insertion_order");
     }
 
     #[test]

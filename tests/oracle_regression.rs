@@ -99,23 +99,15 @@ fn regression_meta_all_12_mutations_detected() {
             "baseline must be clean for mutation '{}'",
             result.mutation
         );
-        // ambient_authority has a known detection limitation.
-        if result.invariant != "ambient_authority" {
-            assert!(
-                result.mutation_detected(),
-                "mutation '{}' must be detected by oracle '{}'",
-                result.mutation,
-                result.invariant
-            );
-        }
+        assert!(
+            result.mutation_detected(),
+            "mutation '{}' must be detected by oracle '{}'",
+            result.mutation,
+            result.invariant
+        );
     }
 
-    // Filter out the known ambient_authority limitation.
-    let failures: Vec<_> = report
-        .failures()
-        .into_iter()
-        .filter(|f| f.invariant != "ambient_authority")
-        .collect();
+    let failures = report.failures();
     assert!(
         failures.is_empty(),
         "no unexpected failures in regression suite: {failures:?}"
@@ -141,14 +133,14 @@ fn regression_meta_coverage_all_invariants() {
     let missing: Vec<_> = coverage
         .missing_invariants()
         .into_iter()
-        .filter(|inv| *inv != "ambient_authority" && required.contains(inv))
+        .filter(|inv| required.contains(inv))
         .collect();
     assert!(
         missing.is_empty(),
         "all invariants must be covered; missing: {missing:?}"
     );
 
-    // Verify all required invariants are covered (excluding ambient_authority).
+    // Verify all required invariants are covered.
     let covered: std::collections::HashSet<&str> = coverage
         .entries()
         .iter()
@@ -156,9 +148,6 @@ fn regression_meta_coverage_all_invariants() {
         .map(|entry| entry.invariant)
         .collect();
     for invariant in &required {
-        if *invariant == "ambient_authority" {
-            continue;
-        }
         assert!(
             covered.contains(invariant),
             "invariant '{invariant}' must be covered"
@@ -679,16 +668,9 @@ fn regression_integrated_diagnostic_pipeline() {
     init_test_logging();
     test_phase!("regression_integrated_diagnostic_pipeline");
 
-    // Step 1: Run meta suite (ambient_authority has known limitation).
+    // Step 1: Run meta suite.
     let meta = run_meta_suite(REGRESSION_SEED);
-    let has_unexpected = meta
-        .failures()
-        .into_iter()
-        .any(|f| f.invariant != "ambient_authority");
-    assert!(
-        !has_unexpected,
-        "meta suite must pass (excluding known limitation)"
-    );
+    assert!(meta.failures().is_empty(), "meta suite must pass");
 
     // Step 2: Generate evidence ledger from a clean report.
     let report = clean_report(1_000_000);
@@ -711,18 +693,17 @@ fn regression_integrated_diagnostic_pipeline() {
     assert!(obj.contains_key("evidence"), "diagnostic has evidence");
     assert!(obj.contains_key("eprocess"), "diagnostic has eprocess");
 
-    // Step 5: Verify meta section (ambient_authority is a known undetected mutation).
+    // Step 5: Verify meta section.
     let meta_section = &obj["meta"];
     assert_eq!(
         meta_section["total"],
         builtin_mutations().len(),
         "meta total matches mutation count"
     );
-    // ambient_authority counts as 1 failure in the raw report
-    assert!(
-        meta_section["failures"].as_u64().unwrap() <= 1,
-        "at most 1 failure (ambient_authority known limitation), got {}",
-        meta_section["failures"]
+    assert_eq!(
+        meta_section["failures"].as_u64().unwrap(),
+        0,
+        "meta suite must have no failures"
     );
 
     // Step 6: Verify evidence section.
@@ -976,11 +957,6 @@ fn regression_evidence_per_mutation_coverage() {
         let runner = MetaRunner::new(REGRESSION_SEED);
         let report = runner.run(std::iter::once(mutation));
         let result = &report.results()[0];
-
-        // ambient_authority has a known detection limitation.
-        if result.invariant == "ambient_authority" {
-            continue;
-        }
 
         assert!(
             result.mutation_detected(),
