@@ -25,6 +25,7 @@
 
 - `rustfmt --edition 2024 --check src/net/happy_eyeballs.rs`: passed
 - `git diff --check -- src/net/happy_eyeballs.rs refactor/artifacts/2026-04-26-isomorphic-pass-028/ledger.md`: passed
-- `rch exec -- cargo test --target-dir /tmp/cargo-target-asupersync-happy-eyeballs-pass028-test -p asupersync --lib net::happy_eyeballs`: pending
-- `rch exec -- cargo check --target-dir /tmp/cargo-target-asupersync-pass028-check -p asupersync --lib`: pending
-- `rch exec -- cargo clippy --target-dir /tmp/cargo-target-asupersync-pass028-clippy-lib -p asupersync --lib -- -D warnings`: pending
+- `rch exec -- cargo test --target-dir /tmp/cargo-target-asupersync-happy-eyeballs-pass028-sort-test-current -p asupersync --lib net::happy_eyeballs::tests::sort_`: passed, 13 passed, 0 failed
+- Earlier broad probe `rch exec -- cargo test --target-dir /tmp/cargo-target-asupersync-happy-eyeballs-pass028-test -p asupersync --lib net::happy_eyeballs`: failed in unrelated `race_connections_*` custom-clock tests after the sort tests passed; the gate for this pure sorting refactor is the focused sort suite above.
+- `rch exec -- cargo check --target-dir /tmp/cargo-target-asupersync-pass028-check-current -p asupersync --lib`: passed
+- `rch exec -- cargo clippy --target-dir /tmp/cargo-target-asupersync-pass028-clippy-lib-current -p asupersync --lib -- -D warnings`: passed
