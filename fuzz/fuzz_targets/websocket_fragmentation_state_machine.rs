@@ -11,11 +11,10 @@
 
 #![no_main]
 
-use asupersync::bytes::{Bytes, BytesMut};
+use asupersync::bytes::BytesMut;
 use asupersync::codec::Decoder;
-use asupersync::net::websocket::frame::{FrameCodec, Opcode, Role};
+use asupersync::net::websocket::{FrameCodec, Opcode, Role};
 use libfuzzer_sys::fuzz_target;
-use std::collections::VecDeque;
 
 /// Represents a frame in the fuzz test sequence
 #[derive(Debug, Clone)]
