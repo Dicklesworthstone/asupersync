@@ -525,6 +525,104 @@ mod tests {
     )]
     use super::*;
 
+    /// br-asupersync-hkjvy1: byte-exact regression pin for the V0-V3
+    /// lookup tables (RFC 6330 §5.5.2). Any single-byte transcription
+    /// error in V0/V1/V2/V3 silently corrupts every Rand(y,i,m) call
+    /// and therefore every encode/decode operation. The existing
+    /// rand-function tests use sample (y,i,m) triples which only
+    /// probabilistically catch table corruption — a deterministic
+    /// fingerprint of the raw arrays catches it on the FIRST table
+    /// access regardless of which value moved.
+    ///
+    /// We hash each table with the project's DetHasher (used
+    /// elsewhere for replay-deterministic hashes) and pin the
+    /// resulting u64. The expected values were captured from the
+    /// current src/raptorq/rfc6330.rs definitions, which themselves
+    /// reproduce the RFC 6330 §5.5.2 canonical tables — so any
+    /// regression that mutates a table value MUST update both the
+    /// table AND the expected hash, making the change explicit in
+    /// review.
+    ///
+    /// Counts are also pinned as belt-and-suspenders against a
+    /// truncation regression (e.g. someone accidentally dropping a
+    /// row of 8 values).
+    #[test]
+    fn v0_v3_lookup_tables_byte_exact() {
+        use crate::util::det_hash::DetHasher;
+        use std::hash::Hasher;
+
+        fn hash_table(name: &'static str, table: &[u32; 256]) -> u64 {
+            let mut h = DetHasher::default();
+            // Domain-separate so a future refactor that swapped
+            // table contents would still trip even if the swapped
+            // tables happened to hash-equal each other.
+            h.write(name.as_bytes());
+            h.write_usize(table.len());
+            for &v in table {
+                h.write_u32(v);
+            }
+            h.finish()
+        }
+
+        // Length sanity: the RFC mandates exactly 256 entries per
+        // table (indexed by an 8-bit byte).
+        assert_eq!(
+            V0.len(),
+            256,
+            "V0 must have 256 entries per RFC 6330 §5.5.2"
+        );
+        assert_eq!(
+            V1.len(),
+            256,
+            "V1 must have 256 entries per RFC 6330 §5.5.2"
+        );
+        assert_eq!(
+            V2.len(),
+            256,
+            "V2 must have 256 entries per RFC 6330 §5.5.2"
+        );
+        assert_eq!(
+            V3.len(),
+            256,
+            "V3 must have 256 entries per RFC 6330 §5.5.2"
+        );
+
+        // Byte-exact regression pins. Captured from the canonical
+        // tables defined above (which themselves reproduce the RFC
+        // 6330 §5.5.2 values). Any mutation in V0/V1/V2/V3 will
+        // change these hashes; updating a table requires updating
+        // the corresponding pin in the same commit, making the
+        // change explicit in code review.
+        const EXPECTED_V0_HASH: u64 = 0xeab2_902a_a719_eff6;
+        const EXPECTED_V1_HASH: u64 = 0x5c31_223d_15cd_98f4;
+        const EXPECTED_V2_HASH: u64 = 0x46c9_f312_3cd9_532e;
+        const EXPECTED_V3_HASH: u64 = 0xc2d7_9e10_36cd_4bfc;
+
+        assert_eq!(
+            hash_table("V0", &V0),
+            EXPECTED_V0_HASH,
+            "V0 lookup table byte-exact regression: deterministic \
+             hash diverged from the RFC 6330 §5.5.2 pin. Either a \
+             value moved (table is now wrong) or someone updated \
+             the table without updating the pin."
+        );
+        assert_eq!(
+            hash_table("V1", &V1),
+            EXPECTED_V1_HASH,
+            "V1 lookup table byte-exact regression"
+        );
+        assert_eq!(
+            hash_table("V2", &V2),
+            EXPECTED_V2_HASH,
+            "V2 lookup table byte-exact regression"
+        );
+        assert_eq!(
+            hash_table("V3", &V3),
+            EXPECTED_V3_HASH,
+            "V3 lookup table byte-exact regression"
+        );
+    }
+
     #[derive(Clone, Copy)]
     struct TupleScenario {
         scenario_id: &'static str,
