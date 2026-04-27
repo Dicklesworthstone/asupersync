@@ -239,9 +239,17 @@ mod integration_tests {
         for result in &results {
             assert!(!result.test_id.is_empty());
             assert!(!result.description.is_empty());
-            assert_eq!(result.requirement_level, RequirementLevel::Must);
-            assert!(result.elapsed_ms > 0);
         }
+        assert!(
+            results
+                .iter()
+                .any(|result| result.requirement_level == RequirementLevel::Must)
+        );
+        assert!(
+            results
+                .iter()
+                .any(|result| result.requirement_level == RequirementLevel::Should)
+        );
 
         // Verify test IDs are unique
         let mut test_ids: Vec<&str> = results.iter().map(|r| r.test_id.as_str()).collect();

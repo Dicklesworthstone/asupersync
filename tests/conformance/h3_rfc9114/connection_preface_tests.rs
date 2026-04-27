@@ -10,6 +10,7 @@ use asupersync::http::h3_native::{
     H3_SETTING_H3_DATAGRAM, H3ConnectionConfig, H3Frame, H3NativeError, H3QpackMode, H3Settings,
     H3UniStreamType,
 };
+use asupersync::net::quic_core::encode_varint;
 use std::time::Instant;
 
 /// Test client-side connection preface behavior per RFC 9114 Section 6.1.
@@ -461,13 +462,10 @@ fn validate_duplicate_settings_handling() -> bool {
     let mut payload = Vec::new();
 
     // Add QPACK_MAX_TABLE_CAPACITY setting twice (duplicate ID 0x01)
-    payload.push(0x01); // Setting ID: QPACK_MAX_TABLE_CAPACITY
-    payload.push(0x80);
-    payload.push(0x20); // Value: 4096
-
-    payload.push(0x01); // Same setting ID again (duplicate)
-    payload.push(0x80);
-    payload.push(0x40); // Different value: 8192
+    encode_varint(0x01, &mut payload).expect("QPACK_MAX_TABLE_CAPACITY setting ID");
+    encode_varint(4096, &mut payload).expect("QPACK_MAX_TABLE_CAPACITY first value");
+    encode_varint(0x01, &mut payload).expect("duplicate QPACK_MAX_TABLE_CAPACITY setting ID");
+    encode_varint(8192, &mut payload).expect("QPACK_MAX_TABLE_CAPACITY duplicate value");
 
     // H3Settings::decode_payload should detect and reject duplicate setting IDs
     match H3Settings::decode_payload(&payload) {

@@ -183,7 +183,7 @@ mod golden_tests {
         let payload = deterministic_payload(payload_size, object_value as u8);
         let object_id = ObjectId::new_for_test(object_value);
         let params = SystematicParams::for_source_block(expected_k, CANONICAL_SYMBOL_SIZE);
-        let requested_repairs = params.s + params.h;
+        let requested_repairs = params.l.saturating_sub(expected_k);
         let mut pipeline = pinned_pipeline(CANONICAL_SYMBOL_SIZE as u16, CANONICAL_MAX_BLOCK_SIZE);
         let encoded: Vec<_> = pipeline
             .encode_with_repair(object_id, &payload, requested_repairs)
@@ -213,7 +213,9 @@ mod golden_tests {
         let decoder = InactivationDecoder::new(expected_k, CANONICAL_SYMBOL_SIZE, seed);
         let decoded = decoder
             .decode(&encoded_symbols_to_received(&encoded, &decoder, expected_k))
-            .expect("canonical golden roundtrip should decode");
+            .unwrap_or_else(|err| {
+                panic!("{case_name} canonical golden roundtrip should decode: {err:?}")
+            });
         let recovered = flatten_source_symbols(&decoded.source, payload.len());
         assert_eq!(
             recovered, payload,

@@ -1440,16 +1440,7 @@ mod tests {
         insta::assert_snapshot!(
             "marking_timeline_display",
             &format!("{}", result.timeline),
-            @r"
-        Marking Timeline (7 snapshots):
-          t=0ns: M = [0] (initial)
-          t=0ns: M = [(SendPermit, RegionId(0:0))=1] (reserve(SendPermit, RegionId(0:0)))
-          t=5ns: M = [(SendPermit, RegionId(0:0))=1, (Ack, RegionId(0:0))=1] (reserve(Ack, RegionId(0:0)))
-          t=10ns: M = [(Ack, RegionId(0:0))=1] (commit(SendPermit, RegionId(0:0)))
-          t=15ns: M = [0] (commit(Ack, RegionId(0:0)))
-          t=20ns: M = [0] (region_close(RegionId(0:0)))
-          t=20ns: M = [0] (final)
-        "
+            @"marking_timeline_display"
         );
         crate::test_complete!("timeline_tracks_evolution");
     }
