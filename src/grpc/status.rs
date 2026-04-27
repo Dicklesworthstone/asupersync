@@ -122,24 +122,77 @@ pub struct Status {
     details: Option<Bytes>,
 }
 
+/// Maximum length of a Status message in bytes (br-asupersync-uk2vsg).
+///
+/// Defense-in-depth cap to bound an attacker-influenced or operator-set
+/// status message that would otherwise be propagated wholesale through
+/// the gRPC trailer block (`grpc-message` is percent-encoded and capped
+/// at the wire layer, but a `Status` object can be round-tripped through
+/// in-process serializers — `Display`, JSON, observability — that have
+/// no inherent cap). 8 KiB matches the typical HTTP/2 max header value
+/// limits in the same codebase.
+pub const MAX_STATUS_MESSAGE_LEN: usize = 8 * 1024;
+
+/// Maximum length of Status details in bytes (br-asupersync-uk2vsg).
+///
+/// The gRPC spec recommends details be kept small; in practice google.rpc
+/// Status details are protobuf and rarely exceed a few KiB. 64 KiB caps
+/// pathological inputs without breaking realistic rich-error-model
+/// payloads (rich-error UnaryAck, RetryInfo, BadRequest are <1 KiB; the
+/// largest reasonable case — DebugInfo with a stack trace — fits easily
+/// in 64 KiB).
+pub const MAX_STATUS_DETAILS_LEN: usize = 64 * 1024;
+
+/// Truncate a status message string to [`MAX_STATUS_MESSAGE_LEN`] bytes
+/// at a UTF-8 boundary.
+///
+/// br-asupersync-uk2vsg: never panic on truncation — find the last char
+/// boundary <= the cap and slice there. If the input is already short,
+/// return the original String unchanged (no allocation).
+fn cap_status_message(message: String) -> String {
+    if message.len() <= MAX_STATUS_MESSAGE_LEN {
+        return message;
+    }
+    let mut end = MAX_STATUS_MESSAGE_LEN;
+    while end > 0 && !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    message[..end].to_string()
+}
+
+/// Truncate status details `Bytes` to [`MAX_STATUS_DETAILS_LEN`].
+fn cap_status_details(details: Bytes) -> Bytes {
+    if details.len() <= MAX_STATUS_DETAILS_LEN {
+        return details;
+    }
+    details.slice(..MAX_STATUS_DETAILS_LEN)
+}
+
 impl Status {
     /// Create a new status with the given code and message.
+    ///
+    /// br-asupersync-uk2vsg: messages exceeding [`MAX_STATUS_MESSAGE_LEN`]
+    /// are truncated at a UTF-8 boundary; this caps unbounded strings
+    /// from leaking into wire frames or in-process serializers.
     #[must_use]
     pub fn new(code: Code, message: impl Into<String>) -> Self {
         Self {
             code,
-            message: message.into(),
+            message: cap_status_message(message.into()),
             details: None,
         }
     }
 
     /// Create a status with details.
+    ///
+    /// br-asupersync-uk2vsg: messages exceeding [`MAX_STATUS_MESSAGE_LEN`]
+    /// and details exceeding [`MAX_STATUS_DETAILS_LEN`] are truncated.
     #[must_use]
     pub fn with_details(code: Code, message: impl Into<String>, details: Bytes) -> Self {
         Self {
             code,
-            message: message.into(),
-            details: Some(details),
+            message: cap_status_message(message.into()),
+            details: Some(cap_status_details(details)),
         }
     }
 
@@ -482,6 +535,75 @@ mod tests {
         let got = status.details();
         crate::assert_with_log!(got == Some(&details), "details", Some(&details), got);
         crate::test_complete!("test_status_with_details");
+    }
+
+    /// br-asupersync-uk2vsg: Status::new and ::with_details cap the
+    /// message at MAX_STATUS_MESSAGE_LEN and details at
+    /// MAX_STATUS_DETAILS_LEN respectively. Truncation must not panic
+    /// even on multi-byte UTF-8 input crossing the cap.
+    #[test]
+    fn uk2vsg_status_message_cap_truncates_long_input() {
+        // Construct a message longer than the cap; verify truncation.
+        let oversize = "a".repeat(MAX_STATUS_MESSAGE_LEN + 100);
+        let status = Status::new(Code::Internal, oversize);
+        assert_eq!(
+            status.message().len(),
+            MAX_STATUS_MESSAGE_LEN,
+            "message should be truncated at the byte cap"
+        );
+    }
+
+    #[test]
+    fn uk2vsg_status_message_cap_preserves_short_input() {
+        let normal = "ordinary error";
+        let status = Status::new(Code::InvalidArgument, normal);
+        assert_eq!(status.message(), normal);
+    }
+
+    #[test]
+    fn uk2vsg_status_message_cap_preserves_utf8_boundary() {
+        // Build a message that lands the cap mid-multibyte. Use a 4-byte
+        // emoji (U+1F525 = "🔥" = 4 UTF-8 bytes) so we can land on every
+        // boundary mod 4. We place fillers + emoji such that the natural
+        // truncation point is mid-codepoint.
+        let prefix_len = MAX_STATUS_MESSAGE_LEN - 2;
+        let mut s = String::with_capacity(MAX_STATUS_MESSAGE_LEN + 10);
+        s.push_str(&"a".repeat(prefix_len));
+        s.push('🔥'); // 4 bytes, occupies positions [prefix_len .. prefix_len+4)
+        s.push('🔥');
+        let status = Status::new(Code::Internal, s);
+        // Message must be valid UTF-8 (no panic on truncation) and must
+        // be <= cap.
+        let msg = status.message();
+        assert!(msg.len() <= MAX_STATUS_MESSAGE_LEN);
+        // Verify it round-trips through &str (would have panicked if we
+        // sliced through a codepoint).
+        assert_eq!(msg, status.message());
+    }
+
+    #[test]
+    fn uk2vsg_status_details_cap_truncates_long_input() {
+        let oversize = vec![0u8; MAX_STATUS_DETAILS_LEN + 1024];
+        let status = Status::with_details(Code::Internal, "err", Bytes::from(oversize));
+        assert_eq!(
+            status.details().expect("details set").len(),
+            MAX_STATUS_DETAILS_LEN,
+            "details should be truncated at the byte cap"
+        );
+    }
+
+    #[test]
+    fn uk2vsg_status_details_cap_preserves_short_input() {
+        let payload = b"small payload";
+        let status = Status::with_details(
+            Code::Internal,
+            "err",
+            Bytes::from_static(payload),
+        );
+        assert_eq!(
+            status.details().expect("details set").as_ref(),
+            payload
+        );
     }
 
     #[test]
