@@ -308,15 +308,21 @@ mod tests {
                     // This is acceptable behavior
                 }
                 (Err(RecvError::Lagged(_)), Ok(after_msg)) => {
-                    // Receiver was lagged before but recovered after. The
-                    // recovered value must correspond to a real sent message,
-                    // not a phantom/uninitialised slot value. Sent payloads
-                    // are small monotonically-assigned counters, so any valid
-                    // recovery message fits within a generous sanity bound.
+                    // br-asupersync-w7g55u: replace the previous
+                    // 'after_msg < u64::MAX' tautology with a bound
+                    // tied to the actual range of values this test
+                    // ever sends. Sent payloads are
+                    // (0..messages_before_drop + messages_after_drop),
+                    // so any recovery value at or above that bound
+                    // came from somewhere we did not write — exactly
+                    // the phantom/uninitialised-slot regression the
+                    // assertion was supposed to catch.
+                    let max_sent_value =
+                        (messages_before_drop + messages_after_drop) as u64;
                     prop_assert!(
-                        after_msg < u64::MAX,
-                        "MR3 VIOLATION: invalid message after recovery: {}",
-                        after_msg
+                        after_msg < max_sent_value,
+                        "MR3 VIOLATION: recovery returned {} which is outside the sent range [0, {})",
+                        after_msg, max_sent_value
                     );
                 }
                 (Err(RecvError::Lagged(_)), Err(RecvError::Lagged(_))) => {
