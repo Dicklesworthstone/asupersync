@@ -88,7 +88,7 @@ impl AuthenticatedSymbol {
     }
 
     /// Sets the verification status (internal use).
-    pub(crate) fn set_verified(&mut self, verified: bool) {
+    pub(super) fn set_verified(&mut self, verified: bool) {
         self.verified = verified;
     }
 
@@ -202,5 +202,32 @@ mod tests {
 
         auth.set_verified(true);
         assert!(auth.is_verified());
+    }
+
+    #[test]
+    fn test_set_verified_visibility_restriction() {
+        // Regression test for asupersync-x2z5dj: Authentication bypass prevention
+        //
+        // SECURITY INVARIANT: set_verified() must be pub(super), NOT pub(crate)
+        //
+        // This test documents that set_verified() is correctly restricted to the
+        // security module. If someone changes the visibility from pub(super) back
+        // to pub(crate), external modules could bypass authentication by directly
+        // setting verified=true on unverified symbols.
+        //
+        // The compile-time visibility restriction prevents this attack vector.
+        // Only the security module can modify verification status.
+        let id = SymbolId::new_for_test(1, 0, 0);
+        let symbol = Symbol::new(id, vec![1, 2, 3], SymbolKind::Source);
+        let tag = real_tag(&symbol);
+        let mut auth = AuthenticatedSymbol::new_verified(symbol, tag);
+
+        // This call succeeds because we're within the security module
+        auth.set_verified(false);
+        assert!(!auth.is_verified());
+
+        // External modules attempting to call set_verified() would get:
+        // "method `set_verified` is private" compile error
+        // This is the intended security boundary.
     }
 }

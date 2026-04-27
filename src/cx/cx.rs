@@ -78,6 +78,7 @@ use crate::runtime::io_driver::IoDriverHandle;
 use crate::runtime::io_driver::IoRegistration;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::runtime::reactor::{Interest, Source};
+use crate::runtime::state::LoserDrainHistoryHandle;
 use crate::runtime::task_handle::JoinError;
 use crate::time::{TimerDriverHandle, timeout};
 use crate::trace::distributed::{LogicalClockHandle, LogicalTime};
@@ -220,6 +221,7 @@ pub struct ObservabilityState {
     collector: Option<LogCollector>,
     context: DiagnosticContext,
     trace: Option<TraceBufferHandle>,
+    loser_drain_history: Option<LoserDrainHistoryHandle>,
     include_timestamps: bool,
 }
 
@@ -233,6 +235,7 @@ impl ObservabilityState {
             collector: None,
             context,
             trace: None,
+            loser_drain_history: None,
             include_timestamps: true,
         }
     }
@@ -252,6 +255,7 @@ impl ObservabilityState {
             collector,
             context,
             trace: None,
+            loser_drain_history: None,
             include_timestamps: config.include_timestamps(),
         }
     }
@@ -263,6 +267,7 @@ impl ObservabilityState {
             collector: self.collector.clone(),
             context,
             trace: self.trace.clone(),
+            loser_drain_history: self.loser_drain_history.clone(),
             include_timestamps: self.include_timestamps,
         }
     }
@@ -2325,11 +2330,24 @@ impl<Caps> Cx<Caps> {
         obs.trace = Some(trace);
     }
 
+    /// Attaches the shared loser-drain history recorder to this context.
+    pub(crate) fn set_loser_drain_history_handle(&self, history: LoserDrainHistoryHandle) {
+        let mut obs = self.observability.write();
+        obs.loser_drain_history = Some(history);
+    }
+
     /// Returns the current trace buffer handle, if attached.
     #[inline]
     #[must_use]
     pub fn trace_buffer(&self) -> Option<TraceBufferHandle> {
         self.observability.read().trace.clone()
+    }
+
+    #[inline]
+    #[must_use]
+    #[allow(dead_code)]
+    pub(crate) fn loser_drain_history_handle(&self) -> Option<LoserDrainHistoryHandle> {
+        self.observability.read().loser_drain_history.clone()
     }
 
     /// Derives an observability state for a child task.

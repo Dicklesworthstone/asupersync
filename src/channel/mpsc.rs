@@ -3612,6 +3612,7 @@ pub mod backpressure_metamorphic {
     #[derive(Debug)]
     struct DrainTestResult {
         received_messages: Vec<u32>,
+        #[allow(dead_code)]
         final_channel_state: (usize, usize, usize, usize),
     }
 
@@ -3644,7 +3645,7 @@ pub mod backpressure_metamorphic {
         let producer_handles: Vec<_> = (0..producer_count).map(|producer_id| {
             let sender_clone = sender.clone();
             let producer_cx = cx.clone();
-            let message_sequence = match ordering {
+            let message_sequence: Vec<usize> = match ordering {
                 ProducerOrdering::Sequential => (0..messages_per_producer).collect(),
                 ProducerOrdering::Interleaved | ProducerOrdering::RoundRobin => {
                     send_sequence.iter()
