@@ -25,6 +25,7 @@ mod imp {
     use super::super::{Event, Events, Interest, Reactor, Source, Token};
     use io_uring::{IoUring, opcode, types};
     use parking_lot::Mutex;
+    use smallvec::SmallVec;
     use std::collections::HashMap;
     use std::io;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -225,6 +226,57 @@ mod imp {
                 wake_pending: AtomicBool::new(false),
                 buffer_pool: Mutex::new(None),
             })
+        }
+
+        /// Seeds synthetic poll-registration state for test/benchmark harnesses.
+        #[cfg(any(test, feature = "test-internals"))]
+        #[doc(hidden)]
+        pub fn bench_seed_registration(
+            &self,
+            token: Token,
+            interest: Interest,
+            active_poll_user_data: u64,
+        ) {
+            let mut state = self.state.lock();
+            state.poll_ops.insert(active_poll_user_data, token);
+            state.registrations.insert(
+                token,
+                RegistrationInfo {
+                    raw_fd: self.wake_fd.as_raw_fd(),
+                    interest,
+                    active_poll_user_data: Some(active_poll_user_data),
+                },
+            );
+        }
+
+        /// Runs the batched CQE bookkeeping path against synthetic completions.
+        #[cfg(any(test, feature = "test-internals"))]
+        #[doc(hidden)]
+        #[must_use]
+        pub fn bench_process_completion_batch(
+            &self,
+            completions: &[(u64, i32)],
+            events: &mut Events,
+        ) -> usize {
+            events.clear();
+            let mut emitted_events = SmallVec::<[Event; 64]>::new();
+            let mut deferred_poll_removes = SmallVec::<[u64; 16]>::new();
+            {
+                let mut state = self.state.lock();
+                process_completion_batch_locked(
+                    &mut state,
+                    completions,
+                    &mut emitted_events,
+                    &mut deferred_poll_removes,
+                );
+            }
+            for poll_user_data in deferred_poll_removes {
+                let _ = self.submit_poll_remove(poll_user_data);
+            }
+            for event in emitted_events {
+                events.push(event);
+            }
+            events.len()
         }
 
         fn submit_poll_add(
@@ -564,13 +616,14 @@ mod imp {
                 }
             }
 
-            let mut completions = smallvec::SmallVec::<[(u64, i32); 64]>::new();
+            let mut completions = SmallVec::<[(u64, i32); 64]>::new();
             for cqe in ring.completion() {
                 completions.push((cqe.user_data(), cqe.result()));
             }
 
             drop(ring);
 
+            let mut poll_completions = SmallVec::<[(u64, i32); 64]>::new();
             for (user_data, res) in completions {
                 if user_data == WAKE_USER_DATA {
                     // Clear the coalescing flag before draining so concurrent
@@ -607,48 +660,26 @@ mod imp {
                 if user_data == REMOVE_USER_DATA {
                     continue;
                 }
+                poll_completions.push((user_data, res));
+            }
 
-                let action = {
-                    let mut state = self.state.lock();
-                    let Some(token) = state.poll_ops.remove(&user_data) else {
-                        continue;
-                    };
-                    let Some(info) = state.registrations.get(&token).copied() else {
-                        continue;
-                    };
-                    if info.active_poll_user_data != Some(user_data) {
-                        continue;
-                    }
-                    if let Some(info) = state.registrations.get_mut(&token) {
-                        info.active_poll_user_data = None;
-                    }
+            let mut emitted_events = SmallVec::<[Event; 64]>::new();
+            let mut deferred_poll_removes = SmallVec::<[u64; 16]>::new();
+            if !poll_completions.is_empty() {
+                let mut state = self.state.lock();
+                process_completion_batch_locked(
+                    &mut state,
+                    &poll_completions,
+                    &mut emitted_events,
+                    &mut deferred_poll_removes,
+                );
+            }
 
-                    completion_errno(res).map_or_else(
-                        || {
-                            let interest = poll_mask_to_interest(res as u32);
-                            (!interest.is_empty()).then_some(Event::new(token, interest))
-                        },
-                        |errno| {
-                            if is_poll_cancellation_errno(errno) {
-                                None
-                            } else if is_terminal_fd_errno(errno) {
-                                let stale_user_data =
-                                    remove_registration_poll_ops(&mut state, token);
-                                state.registrations.remove(&token);
-                                for poll_user_data in stale_user_data {
-                                    let _ = self.submit_poll_remove(poll_user_data);
-                                }
-                                None
-                            } else {
-                                Some(Event::errored(token))
-                            }
-                        },
-                    )
-                };
-
-                if let Some(event) = action {
-                    events.push(event);
-                }
+            for poll_user_data in deferred_poll_removes {
+                let _ = self.submit_poll_remove(poll_user_data);
+            }
+            for event in emitted_events {
+                events.push(event);
             }
 
             Ok(events.len())
@@ -786,6 +817,43 @@ mod imp {
         removed
     }
 
+    fn process_completion_batch_locked(
+        state: &mut ReactorState,
+        completions: &[(u64, i32)],
+        emitted_events: &mut SmallVec<[Event; 64]>,
+        deferred_poll_removes: &mut SmallVec<[u64; 16]>,
+    ) {
+        for &(user_data, res) in completions {
+            let Some(token) = state.poll_ops.remove(&user_data) else {
+                continue;
+            };
+            let Some(info) = state.registrations.get(&token).copied() else {
+                continue;
+            };
+            if info.active_poll_user_data != Some(user_data) {
+                continue;
+            }
+            if let Some(info) = state.registrations.get_mut(&token) {
+                info.active_poll_user_data = None;
+            }
+
+            match completion_errno(res) {
+                None => {
+                    let interest = poll_mask_to_interest(res as u32);
+                    if !interest.is_empty() {
+                        emitted_events.push(Event::new(token, interest));
+                    }
+                }
+                Some(errno) if is_poll_cancellation_errno(errno) => {}
+                Some(errno) if is_terminal_fd_errno(errno) => {
+                    deferred_poll_removes.extend(remove_registration_poll_ops(state, token));
+                    state.registrations.remove(&token);
+                }
+                Some(_) => emitted_events.push(Event::errored(token)),
+            }
+        }
+    }
+
     fn create_eventfd() -> io::Result<OwnedFd> {
         let fd = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
         if fd < 0 {
@@ -828,6 +896,64 @@ mod imp {
                     None
                 }
             }
+        }
+
+        #[test]
+        fn test_batched_completion_bookkeeping_preserves_mixed_outcomes() {
+            let Some(reactor) = new_or_skip() else {
+                return;
+            };
+
+            let readable_token = Token::new(11);
+            let cancelled_token = Token::new(12);
+            let terminal_token = Token::new(13);
+            reactor.bench_seed_registration(readable_token, Interest::READABLE, 101);
+            reactor.bench_seed_registration(cancelled_token, Interest::WRITABLE, 102);
+            reactor.bench_seed_registration(terminal_token, Interest::READABLE, 103);
+
+            let mut events = Events::with_capacity(4);
+            let count = reactor.bench_process_completion_batch(
+                &[
+                    (101, libc::POLLIN as i32),
+                    (102, -libc::ECANCELED),
+                    (103, -libc::EBADF),
+                ],
+                &mut events,
+            );
+            assert_eq!(count, 1, "only the readable CQE should emit an event");
+            assert_eq!(events.len(), 1, "one readable event should be surfaced");
+
+            let state = reactor.state.lock();
+            assert_eq!(
+                state.poll_ops.len(),
+                0,
+                "all completed poll ops should be removed"
+            );
+            assert_eq!(
+                state.registrations.len(),
+                2,
+                "terminal fd errors should remove the dead registration",
+            );
+            assert_eq!(
+                state
+                    .registrations
+                    .get(&readable_token)
+                    .and_then(|info| info.active_poll_user_data),
+                None,
+                "readable completion should clear the active poll slot",
+            );
+            assert_eq!(
+                state
+                    .registrations
+                    .get(&cancelled_token)
+                    .and_then(|info| info.active_poll_user_data),
+                None,
+                "cancellation completion should clear the active poll slot",
+            );
+            assert!(
+                !state.registrations.contains_key(&terminal_token),
+                "terminal fd completion should drop the registration",
+            );
         }
 
         // ======================================================================

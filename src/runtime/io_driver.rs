@@ -362,7 +362,10 @@ impl IoDriver {
     pub(crate) fn extract_wakers_and_event_data(
         &mut self,
         events: Events,
-    ) -> (smallvec::SmallVec<[Waker; 64]>, smallvec::SmallVec<[(Event, Option<Interest>); 64]>) {
+    ) -> (
+        smallvec::SmallVec<[Waker; 64]>,
+        smallvec::SmallVec<[(Event, Option<Interest>); 64]>,
+    ) {
         struct Restorer<'a> {
             driver: &'a mut IoDriver,
             events: Option<Events>,

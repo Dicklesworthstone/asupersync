@@ -320,12 +320,7 @@ impl CrashController {
                 ("restart", state.restart_count, true)
             }
         };
-        emit_crash_evidence(
-            &self.evidence_sink,
-            self.next_evidence_ts(),
-            action,
-            count,
-        );
+        emit_crash_evidence(&self.evidence_sink, self.next_evidence_ts(), action, count);
         restarted
     }
 

@@ -29,6 +29,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use asupersync::runtime::reactor::Interest;
+#[cfg(all(target_os = "linux", feature = "io-uring", feature = "test-internals"))]
+use asupersync::runtime::reactor::IoUringReactor;
 use asupersync::runtime::{Events, LabReactor, Reactor, Token};
 
 // =============================================================================
@@ -524,6 +526,48 @@ fn bench_lab_reactor(c: &mut Criterion) {
     group.finish();
 }
 
+#[cfg(all(target_os = "linux", feature = "io-uring", feature = "test-internals"))]
+fn bench_io_uring_cqe_bookkeeping(c: &mut Criterion) {
+    if IoUringReactor::new().is_err() {
+        return;
+    }
+
+    let mut group = c.benchmark_group("reactor/io_uring_cqe_bookkeeping");
+    for &count in &[64usize, 256, 1024, 4096] {
+        group.throughput(Throughput::Elements(count as u64));
+        group.bench_with_input(
+            BenchmarkId::new("readable_batch", count),
+            &count,
+            |b, &count| {
+                b.iter_batched(
+                    || {
+                        let reactor = IoUringReactor::new().expect("io_uring reactor");
+                        let mut completions = Vec::with_capacity(count);
+                        for i in 0..count {
+                            let token = Token::new(i);
+                            let user_data = u64::try_from(i + 1).expect("bench user data fits u64");
+                            reactor.bench_seed_registration(token, Interest::READABLE, user_data);
+                            completions.push((user_data, libc::POLLIN as i32));
+                        }
+                        (reactor, completions, Events::with_capacity(count))
+                    },
+                    |(reactor, completions, mut events)| {
+                        let emitted =
+                            reactor.bench_process_completion_batch(&completions, &mut events);
+                        std::hint::black_box(emitted);
+                        std::hint::black_box(events.len());
+                    },
+                    criterion::BatchSize::SmallInput,
+                )
+            },
+        );
+    }
+    group.finish();
+}
+
+#[cfg(not(all(target_os = "linux", feature = "io-uring", feature = "test-internals")))]
+fn bench_io_uring_cqe_bookkeeping(_c: &mut Criterion) {}
+
 // =============================================================================
 // MAIN
 // =============================================================================
@@ -539,6 +583,7 @@ criterion_group!(
     bench_scalability,
     bench_token_operations,
     bench_lab_reactor,
+    bench_io_uring_cqe_bookkeeping,
 );
 
 criterion_main!(benches);

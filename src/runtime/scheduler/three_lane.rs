@@ -2823,7 +2823,7 @@ impl ThreeLaneWorker {
                     // Deferred from the spin/yield phases to avoid 160 mutex
                     // round-trips per backoff cycle.
                     let (local_has_runnable, local_deadline) = {
-                        let local = self.local.lock();
+                        let mut local = self.local.lock();
                         (local.has_runnable_work(now), local.next_deadline())
                     };
                     let local_ready_has_work = !self.local_ready.lock().is_empty();

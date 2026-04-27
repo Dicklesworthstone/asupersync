@@ -602,6 +602,151 @@ mod tests {
     use crate::observability::metrics::NoOpMetrics;
     use crate::types::{RegionId, TaskId};
     use crate::util::ArenaIndex;
+    use std::sync::Mutex as StdMutex;
+
+    #[derive(Default)]
+    struct CapturingMetrics {
+        panics: StdMutex<Vec<&'static str>>,
+        tasks_spawned: StdMutex<Vec<(RegionId, TaskId)>>,
+        tasks_completed: StdMutex<
+            Vec<(
+                TaskId,
+                crate::observability::metrics::OutcomeKind,
+                std::time::Duration,
+            )>,
+        >,
+        regions_created: StdMutex<Vec<(RegionId, Option<RegionId>)>>,
+        regions_closed: StdMutex<Vec<(RegionId, std::time::Duration)>>,
+        cancellation_requests: StdMutex<Vec<(RegionId, crate::types::CancelKind)>>,
+        drain_completions: StdMutex<Vec<(RegionId, std::time::Duration)>>,
+        obligations_created: StdMutex<Vec<RegionId>>,
+        obligations_discharged: StdMutex<Vec<RegionId>>,
+        obligations_leaked: StdMutex<Vec<RegionId>>,
+    }
+
+    impl CapturingMetrics {
+        fn tasks_spawned(&self) -> Vec<(RegionId, TaskId)> {
+            self.tasks_spawned.lock().unwrap().clone()
+        }
+
+        fn regions_created(&self) -> Vec<(RegionId, Option<RegionId>)> {
+            self.regions_created.lock().unwrap().clone()
+        }
+
+        fn regions_closed(&self) -> Vec<(RegionId, std::time::Duration)> {
+            self.regions_closed.lock().unwrap().clone()
+        }
+
+        fn panics_captured(&self) -> Vec<&'static str> {
+            self.panics.lock().unwrap().clone()
+        }
+    }
+
+    impl crate::observability::metrics::MetricsProvider for CapturingMetrics {
+        fn task_spawned(&self, region_id: RegionId, task_id: TaskId) {
+            self.tasks_spawned
+                .lock()
+                .unwrap()
+                .push((region_id, task_id));
+        }
+
+        fn task_completed(
+            &self,
+            task_id: TaskId,
+            outcome: crate::observability::metrics::OutcomeKind,
+            duration: std::time::Duration,
+        ) {
+            self.tasks_completed
+                .lock()
+                .unwrap()
+                .push((task_id, outcome, duration));
+        }
+
+        fn region_created(&self, region_id: RegionId, parent_id: Option<RegionId>) {
+            self.regions_created
+                .lock()
+                .unwrap()
+                .push((region_id, parent_id));
+        }
+
+        fn region_closed(&self, region_id: RegionId, duration: std::time::Duration) {
+            self.regions_closed
+                .lock()
+                .unwrap()
+                .push((region_id, duration));
+        }
+
+        fn cancellation_requested(
+            &self,
+            region_id: RegionId,
+            cancel_kind: crate::types::CancelKind,
+        ) {
+            self.cancellation_requests
+                .lock()
+                .unwrap()
+                .push((region_id, cancel_kind));
+        }
+
+        fn drain_completed(&self, region_id: RegionId, duration: std::time::Duration) {
+            self.drain_completions
+                .lock()
+                .unwrap()
+                .push((region_id, duration));
+        }
+
+        fn deadline_set(&self, _region_id: RegionId, _duration: std::time::Duration) {
+            // Simple implementation - could extend if needed for testing
+        }
+
+        fn deadline_exceeded(&self, _region_id: RegionId) {
+            // Simple implementation - could extend if needed for testing
+        }
+
+        fn deadline_warning(
+            &self,
+            _context: &str,
+            _location: &'static str,
+            _remaining: std::time::Duration,
+        ) {
+            // Simple implementation - could extend if needed for testing
+        }
+
+        fn deadline_violation(&self, _context: &str, _elapsed: std::time::Duration) {
+            // Simple implementation - could extend if needed for testing
+        }
+
+        fn deadline_remaining(&self, _context: &str, _remaining: std::time::Duration) {
+            // Simple implementation - could extend if needed for testing
+        }
+
+        fn checkpoint_interval(&self, _context: &str, _interval: std::time::Duration) {
+            // Simple implementation - could extend if needed for testing
+        }
+
+        fn task_stuck_detected(&self, _task_context: &str) {
+            // Simple implementation - could extend if needed for testing
+        }
+
+        fn obligation_created(&self, region_id: RegionId) {
+            self.obligations_created.lock().unwrap().push(region_id);
+        }
+
+        fn obligation_discharged(&self, region_id: RegionId) {
+            self.obligations_discharged.lock().unwrap().push(region_id);
+        }
+
+        fn obligation_leaked(&self, region_id: RegionId) {
+            self.obligations_leaked.lock().unwrap().push(region_id);
+        }
+
+        fn scheduler_tick(&self, _ready_count: usize, _tick_duration: std::time::Duration) {
+            // Simple implementation - could extend if needed for testing
+        }
+
+        fn record_panic(&self, location: &'static str) {
+            self.panics.lock().unwrap().push(location);
+        }
+    }
 
     #[test]
     fn test_panic_isolation_success() {
@@ -780,7 +925,13 @@ mod tests {
         struct CapturingMetrics {
             panics: StdMutex<Vec<&'static str>>,
             tasks_spawned: StdMutex<Vec<(RegionId, TaskId)>>,
-            tasks_completed: StdMutex<Vec<(TaskId, crate::observability::metrics::OutcomeKind, std::time::Duration)>>,
+            tasks_completed: StdMutex<
+                Vec<(
+                    TaskId,
+                    crate::observability::metrics::OutcomeKind,
+                    std::time::Duration,
+                )>,
+            >,
             regions_created: StdMutex<Vec<(RegionId, Option<RegionId>)>>,
             regions_closed: StdMutex<Vec<(RegionId, std::time::Duration)>>,
             cancellation_requests: StdMutex<Vec<(RegionId, crate::types::CancelKind)>>,
@@ -818,7 +969,10 @@ mod tests {
 
         impl crate::observability::metrics::MetricsProvider for CapturingMetrics {
             fn task_spawned(&self, region_id: RegionId, task_id: TaskId) {
-                self.tasks_spawned.lock().unwrap().push((region_id, task_id));
+                self.tasks_spawned
+                    .lock()
+                    .unwrap()
+                    .push((region_id, task_id));
             }
 
             fn task_completed(
@@ -827,23 +981,42 @@ mod tests {
                 outcome_kind: crate::observability::metrics::OutcomeKind,
                 duration: std::time::Duration,
             ) {
-                self.tasks_completed.lock().unwrap().push((task_id, outcome_kind, duration));
+                self.tasks_completed
+                    .lock()
+                    .unwrap()
+                    .push((task_id, outcome_kind, duration));
             }
 
             fn region_created(&self, region_id: RegionId, parent_id: Option<RegionId>) {
-                self.regions_created.lock().unwrap().push((region_id, parent_id));
+                self.regions_created
+                    .lock()
+                    .unwrap()
+                    .push((region_id, parent_id));
             }
 
             fn region_closed(&self, region_id: RegionId, duration: std::time::Duration) {
-                self.regions_closed.lock().unwrap().push((region_id, duration));
+                self.regions_closed
+                    .lock()
+                    .unwrap()
+                    .push((region_id, duration));
             }
 
-            fn cancellation_requested(&self, region_id: RegionId, cancel_kind: crate::types::CancelKind) {
-                self.cancellation_requests.lock().unwrap().push((region_id, cancel_kind));
+            fn cancellation_requested(
+                &self,
+                region_id: RegionId,
+                cancel_kind: crate::types::CancelKind,
+            ) {
+                self.cancellation_requests
+                    .lock()
+                    .unwrap()
+                    .push((region_id, cancel_kind));
             }
 
             fn drain_completed(&self, region_id: RegionId, duration: std::time::Duration) {
-                self.drain_completions.lock().unwrap().push((region_id, duration));
+                self.drain_completions
+                    .lock()
+                    .unwrap()
+                    .push((region_id, duration));
             }
 
             fn deadline_set(&self, region_id: RegionId, duration: std::time::Duration) {
@@ -854,7 +1027,12 @@ mod tests {
                 // Simple implementation - could extend if needed for testing
             }
 
-            fn deadline_warning(&self, _context: &str, _location: &'static str, _remaining: std::time::Duration) {
+            fn deadline_warning(
+                &self,
+                _context: &str,
+                _location: &'static str,
+                _remaining: std::time::Duration,
+            ) {
                 // Simple implementation - could extend if needed for testing
             }
 
@@ -990,7 +1168,7 @@ mod tests {
         metrics_ref.task_completed(
             task_id,
             crate::observability::metrics::OutcomeKind::Ok,
-            std::time::Duration::from_millis(100)
+            std::time::Duration::from_millis(100),
         );
 
         // Simulate cancellation
@@ -1027,6 +1205,9 @@ mod tests {
         // Check that cancellation was captured
         let cancellation_requests = metrics.cancellation_requests();
         assert_eq!(cancellation_requests.len(), 1);
-        assert_eq!(cancellation_requests[0], (region_id, crate::types::CancelKind::User));
+        assert_eq!(
+            cancellation_requests[0],
+            (region_id, crate::types::CancelKind::User)
+        );
     }
 }

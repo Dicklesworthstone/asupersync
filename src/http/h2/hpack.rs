@@ -1136,7 +1136,7 @@ const fn build_bit_masks() -> [u64; 65] {
 const BIT_MASKS: [u64; 65] = build_bit_masks();
 
 /// Calculate the size of Huffman-encoded data without actually encoding it.
-fn huffman_encoded_size(src: &[u8]) -> usize {
+pub(crate) fn huffman_encoded_size(src: &[u8]) -> usize {
     let mut total_bits: u32 = 0;
 
     for &byte in src {
@@ -1154,7 +1154,7 @@ fn huffman_encoded_size(src: &[u8]) -> usize {
 /// (all-1s) in the final partial byte, as required by Section 5.2.
 ///
 /// This version writes directly to the destination buffer, avoiding intermediate allocation.
-fn encode_huffman_to_buffer(dst: &mut BytesMut, src: &[u8]) {
+pub(crate) fn encode_huffman_to_buffer(dst: &mut BytesMut, src: &[u8]) {
     // Reserve estimated space to reduce reallocations
     dst.reserve(src.len());
     let mut accumulator: u64 = 0;
@@ -1587,7 +1587,7 @@ static HUFFMAN_TABLE: [(u32, u8); 257] = [
 ///
 /// The table-driven decoder has uniform cost per byte regardless of
 /// code length: 2 array accesses + 2 conditionals.
-fn decode_huffman(src: &Bytes) -> Result<String, H2Error> {
+pub(crate) fn decode_huffman(src: &Bytes) -> Result<String, H2Error> {
     // Shortest HPACK code is 5 bits; preallocate to upper bound to avoid
     // growth reallocs on the common case where decoded > encoded length.
     let estimated_symbols = src.len().saturating_mul(8).saturating_add(4) / 5;

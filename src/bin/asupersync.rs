@@ -52,8 +52,8 @@ use asupersync::observability::{
 use asupersync::sync::{AcquireError, Semaphore};
 use asupersync::test_logging::derive_scenario_seed;
 use asupersync::trace::{
-    CompressionMode, IssueSeverity, ReplayEvent, TRACE_FILE_VERSION, TRACE_MAGIC, TraceFileError,
-    TraceReader, VerificationOptions, verify_trace,
+    CompressionMode, IssueSeverity, ReplayEvent, TRACE_FILE_VERSION, TRACE_MAGIC, TraceFileConfig,
+    TraceFileError, TraceReader, TraceWriter, VerificationOptions, verify_trace,
 };
 use asupersync::types::Budget;
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
@@ -158,6 +158,9 @@ enum TraceCommand {
 
     /// Diff two trace files
     Diff(TraceDiffArgs),
+
+    /// Rewrite a trace file with LZ4 compression
+    Compress(TraceCompressArgs),
 
     /// Export trace events to JSON
     Export(TraceExportArgs),
@@ -649,6 +652,19 @@ struct TraceExportArgs {
     format: ExportFormat,
 }
 
+#[derive(Args, Debug)]
+struct TraceCompressArgs {
+    /// Source trace file path
+    input: PathBuf,
+
+    /// Destination trace file path
+    output: PathBuf,
+
+    /// LZ4 compression level (-1..=16)
+    #[arg(long = "level", default_value_t = 1)]
+    level: i32,
+}
+
 #[derive(Debug, serde::Serialize)]
 struct TraceInfo {
     file: String,
@@ -831,6 +847,30 @@ impl Outputtable for TraceDiffOutput {
     }
 }
 
+#[derive(Debug, serde::Serialize)]
+struct TraceCompressOutput {
+    input: String,
+    output: String,
+    source_compression: String,
+    target_compression: String,
+    event_count: u64,
+    size_bytes: u64,
+}
+
+impl Outputtable for TraceCompressOutput {
+    fn human_format(&self) -> String {
+        [
+            format!("Input: {}", self.input),
+            format!("Output: {}", self.output),
+            format!("Source compression: {}", self.source_compression),
+            format!("Target compression: {}", self.target_compression),
+            format!("Events: {}", self.event_count),
+            format!("Size: {}", format_bytes(self.size_bytes)),
+        ]
+        .join("\n")
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
     let common = cli.common.to_common_args();
@@ -936,6 +976,13 @@ fn run_trace(args: TraceArgs, output: &mut Output) -> Result<(), CliError> {
                 return Err(CliError::new("trace_divergence", "Traces diverged")
                     .exit_code(ExitCode::TRACE_MISMATCH));
             }
+            Ok(())
+        }
+        TraceCommand::Compress(args) => {
+            let out = trace_compress(&args.input, &args.output, args.level)?;
+            output.write(&out).map_err(|e| {
+                CliError::new("output_error", "Failed to write output").detail(e.to_string())
+            })?;
             Ok(())
         }
         TraceCommand::Export(args) => {
@@ -6878,6 +6925,66 @@ fn compute_duration_nanos(reader: &mut TraceReader) -> Result<Option<u64>, Trace
     })
 }
 
+fn trace_compress(
+    input: &Path,
+    output: &Path,
+    level: i32,
+) -> Result<TraceCompressOutput, CliError> {
+    if !(-1..=16).contains(&level) {
+        return Err(CliError::new(
+            "invalid_argument",
+            "Trace compression level must be between -1 and 16",
+        ));
+    }
+    if input == output {
+        return Err(CliError::new(
+            "invalid_argument",
+            "Input and output trace paths must differ",
+        ));
+    }
+    if output.exists() {
+        return Err(CliError::new(
+            "output_exists",
+            "Refusing to overwrite existing trace output",
+        )
+        .detail(output.display().to_string()));
+    }
+
+    let mut reader = TraceReader::open(input).map_err(|err| trace_file_error(input, err))?;
+    let metadata = reader.metadata().clone();
+    let source_compression = compression_label(reader.compression());
+    let event_count = reader.event_count();
+    let mut writer = TraceWriter::create_with_config(
+        output,
+        TraceFileConfig::new().with_compression(CompressionMode::Lz4 { level }),
+    )
+    .map_err(|err| trace_file_error(output, err))?;
+    writer
+        .write_metadata(&metadata)
+        .map_err(|err| trace_file_error(output, err))?;
+
+    while let Some(event) = reader
+        .read_event()
+        .map_err(|err| trace_file_error(input, err))?
+    {
+        writer
+            .write_event(&event)
+            .map_err(|err| trace_file_error(output, err))?;
+    }
+    writer
+        .finish()
+        .map_err(|err| trace_file_error(output, err))?;
+
+    Ok(TraceCompressOutput {
+        input: input.display().to_string(),
+        output: output.display().to_string(),
+        source_compression,
+        target_compression: compression_label(CompressionMode::Lz4 { level }),
+        event_count,
+        size_bytes: file_size(output)?,
+    })
+}
+
 fn replay_event_time_nanos(event: &ReplayEvent) -> Option<u64> {
     match event {
         ReplayEvent::TimeAdvanced { to_nanos, .. } => Some(*to_nanos),
@@ -7290,6 +7397,34 @@ mod tests {
     }
 
     #[test]
+    fn trace_compress_rewrites_trace_as_lz4() {
+        let input = make_sample_trace();
+        let output_dir = tempfile::tempdir().expect("tempdir");
+        let output_path = output_dir.path().join("compressed.trace");
+
+        let summary = trace_compress(input.path(), &output_path, 1).expect("trace compress");
+        assert_eq!(summary.source_compression, "none");
+        assert_eq!(summary.target_compression, "lz4(level=1)");
+        assert_eq!(summary.event_count, 2);
+
+        let mut reader = TraceReader::open(&output_path).expect("open compressed reader");
+        assert!(reader.is_compressed());
+        assert_eq!(reader.compression(), CompressionMode::Lz4 { level: 1 });
+        let events = reader.load_all().expect("load compressed events");
+        assert_eq!(events.len(), 2);
+        assert!(matches!(events[0], ReplayEvent::RngSeed { seed: 42 }));
+    }
+
+    #[test]
+    fn trace_compress_rejects_existing_output() {
+        let input = make_sample_trace();
+        let output = NamedTempFile::new().expect("create temp output");
+
+        let err = trace_compress(input.path(), output.path(), 1).expect_err("existing output");
+        assert_eq!(err.error_type, "output_exists");
+    }
+
+    #[test]
     fn trace_export_json_array() {
         let file = make_sample_trace();
         let mut buf = Vec::new();
@@ -7350,6 +7485,31 @@ mod tests {
         assert_eq!(args.window_start, 8);
         assert_eq!(args.window_events, Some(12));
         assert!(args.json);
+    }
+
+    #[test]
+    fn trace_compress_args_parse_level_and_output() {
+        let cli = Cli::try_parse_from([
+            "asupersync",
+            "trace",
+            "compress",
+            "input.trace",
+            "output.trace",
+            "--level",
+            "4",
+        ])
+        .expect("parse trace compress args");
+
+        let Command::Trace(TraceArgs {
+            command: TraceCommand::Compress(args),
+        }) = cli.command
+        else {
+            panic!("expected trace compress command");
+        };
+
+        assert_eq!(args.input, PathBuf::from("input.trace"));
+        assert_eq!(args.output, PathBuf::from("output.trace"));
+        assert_eq!(args.level, 4);
     }
 
     #[test]

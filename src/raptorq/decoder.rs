@@ -20,9 +20,31 @@ use crate::raptorq::systematic::{ConstraintMatrix, SystematicError, SystematicPa
 use crate::raptorq::{decision_contract, decision_contract::GovernanceSnapshot};
 use crate::types::ObjectId;
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+
+// ============================================================================
+// Column state tracking
+// ============================================================================
+
+/// Dense column state for O(1) membership and transitions.
+/// Replaces BTreeSet<usize> lookups with direct array indexing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColumnState {
+    /// Column is active (unsolved, not inactivated).
+    Active,
+    /// Column has been solved during peeling phase.
+    Solved,
+    /// Column has been inactivated (deferred to Gaussian elimination).
+    Inactive,
+}
+
+impl Default for ColumnState {
+    fn default() -> Self {
+        Self::Active
+    }
+}
 
 // ============================================================================
 // Decoder types
@@ -286,10 +308,9 @@ struct DecoderState {
     rhs: Vec<Vec<u8>>,
     /// Solved intermediate symbols (None if not yet solved).
     solved: Vec<Option<Vec<u8>>>,
-    /// Set of active (unsolved, not inactivated) columns.
-    active_cols: BTreeSet<usize>,
-    /// Set of inactivated columns (will be solved via Gaussian elimination).
-    inactive_cols: BTreeSet<usize>,
+    /// Dense per-column state for O(1) membership tests and transitions.
+    /// Replaces BTreeSet<usize> active_cols and inactive_cols with direct indexing.
+    column_states: Vec<ColumnState>,
     /// Statistics.
     stats: DecodeStats,
 }
@@ -535,7 +556,7 @@ fn active_degree_one_col(state: &DecoderState, eq: &Equation) -> Option<usize> {
         return None;
     }
     let col = eq.terms[0].0;
-    if state.active_cols.contains(&col) && state.solved[col].is_none() {
+    if state.column_states[col] == ColumnState::Active && state.solved[col].is_none() {
         Some(col)
     } else {
         None
@@ -1563,11 +1584,11 @@ impl InactivationDecoder {
                 crate::raptorq::gf256::gf256_mul_slice(&mut solution, inv);
             }
 
-            state.active_cols.remove(&col);
+            state.column_states[col] = ColumnState::Solved;
             state.stats.peeled += 1;
 
             // Propagate to other equations.
-            let active_cols = &state.active_cols;
+            // Note: direct state.column_states[next_col] access replaces active_cols.contains()
             let solved = &state.solved;
             for (i, (eq, rhs)) in state
                 .equations
@@ -1589,7 +1610,7 @@ impl InactivationDecoder {
 
                 if !queued[i] && eq.degree() == 1 {
                     let next_col = eq.terms[0].0;
-                    if active_cols.contains(&next_col) && solved[next_col].is_none() {
+                    if state.column_states[next_col] == ColumnState::Active && solved[next_col].is_none() {
                         queue.push_back(i);
                         queued[i] = true;
                         state.stats.peel_queue_pushes += 1;
@@ -1715,15 +1736,12 @@ impl InactivationDecoder {
             rhs.push(vec![0u8; symbol_size]);
         }
 
-        let active_cols: BTreeSet<usize> = (0..l).collect();
-
         DecoderState {
             params: self.params.clone(),
             equations,
             rhs,
             solved: vec![None; l],
-            active_cols,
-            inactive_cols: BTreeSet::new(),
+            column_states: vec![ColumnState::Active; l],
             stats: DecodeStats::default(),
         }
     }
@@ -1889,12 +1907,12 @@ impl InactivationDecoder {
                 crate::raptorq::gf256::gf256_mul_slice(&mut solution, inv);
             }
 
-            state.active_cols.remove(&col);
+            state.column_states[col] = ColumnState::Solved;
             state.stats.peeled += 1;
             on_solved(col);
 
             // Propagate to other equations: subtract col's contribution
-            let active_cols = &state.active_cols;
+            // Note: direct state.column_states[next_col] access replaces active_cols.contains()
             let solved = &state.solved;
             for (i, eq) in state.equations.iter_mut().enumerate() {
                 if eq.used {
@@ -1914,7 +1932,7 @@ impl InactivationDecoder {
 
                 if !queued[i] && !eq.used && eq.degree() == 1 {
                     let next_col = eq.terms[0].0;
-                    if active_cols.contains(&next_col) && solved[next_col].is_none() {
+                    if state.column_states[next_col] == ColumnState::Active && solved[next_col].is_none() {
                         queue.push_back(i);
                         queued[i] = true;
                         state.stats.peel_queue_pushes += 1;
@@ -1936,9 +1954,16 @@ impl InactivationDecoder {
 
         // Collect remaining unsolved columns
         let unsolved: Vec<usize> = state
-            .active_cols
+            .column_states
             .iter()
-            .filter(|&&col| state.solved[col].is_none())
+            .enumerate()
+            .filter_map(|(col, &state_val)| {
+                if state_val == ColumnState::Active && state.solved[col].is_none() {
+                    Some(col)
+                } else {
+                    None
+                }
+            })
             .copied()
             .collect();
 
@@ -1960,8 +1985,7 @@ impl InactivationDecoder {
 
         // Mark all remaining unsolved columns as inactive
         for &col in &unsolved {
-            state.inactive_cols.insert(col);
-            state.active_cols.remove(&col);
+            state.column_states[col] = ColumnState::Inactive;
             state.stats.inactivated += 1;
         }
 
@@ -2213,9 +2237,16 @@ impl InactivationDecoder {
 
         // Collect remaining unsolved columns
         let unsolved: Vec<usize> = state
-            .active_cols
+            .column_states
             .iter()
-            .filter(|&&col| state.solved[col].is_none())
+            .enumerate()
+            .filter_map(|(col, &state_val)| {
+                if state_val == ColumnState::Active && state.solved[col].is_none() {
+                    Some(col)
+                } else {
+                    None
+                }
+            })
             .copied()
             .collect();
 
@@ -2248,8 +2279,7 @@ impl InactivationDecoder {
 
         // Mark all remaining unsolved columns as inactive
         for &col in &unsolved {
-            state.inactive_cols.insert(col);
-            state.active_cols.remove(&col);
+            state.column_states[col] = ColumnState::Inactive;
             state.stats.inactivated += 1;
         }
 
@@ -2650,8 +2680,7 @@ fn restore_dense_rows_into_state(
 
 fn reactivate_unsolved_columns(state: &mut DecoderState, unsolved: &[usize]) {
     for &col in unsolved {
-        state.inactive_cols.remove(&col);
-        state.active_cols.insert(col);
+        state.column_states[col] = ColumnState::Active;
     }
 }
 

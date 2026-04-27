@@ -330,30 +330,54 @@ impl Default for Scheduler {
 
 impl Scheduler {
     #[inline]
-    fn next_valid_cancel_entry(&self) -> Option<SchedulerEntry> {
-        self.cancel_lane
-            .iter()
-            .copied()
-            .filter(|entry| self.scheduled.contains(entry.task))
-            .max()
+    fn prune_cancel_head(&mut self) {
+        while self
+            .cancel_lane
+            .peek()
+            .is_some_and(|entry| !self.scheduled.contains(entry.task))
+        {
+            let _ = self.cancel_lane.pop();
+        }
     }
 
     #[inline]
-    fn next_valid_timed_entry(&self) -> Option<TimedEntry> {
-        self.timed_lane
-            .iter()
-            .copied()
-            .filter(|entry| self.scheduled.contains(entry.task))
-            .max()
+    fn next_valid_cancel_entry(&mut self) -> Option<SchedulerEntry> {
+        self.prune_cancel_head();
+        self.cancel_lane.peek().copied()
     }
 
     #[inline]
-    fn next_valid_ready_entry(&self) -> Option<SchedulerEntry> {
-        self.ready_lane
-            .iter()
-            .copied()
-            .filter(|entry| self.scheduled.contains(entry.task))
-            .max()
+    fn prune_timed_head(&mut self) {
+        while self
+            .timed_lane
+            .peek()
+            .is_some_and(|entry| !self.scheduled.contains(entry.task))
+        {
+            let _ = self.timed_lane.pop();
+        }
+    }
+
+    #[inline]
+    fn next_valid_timed_entry(&mut self) -> Option<TimedEntry> {
+        self.prune_timed_head();
+        self.timed_lane.peek().copied()
+    }
+
+    #[inline]
+    fn prune_ready_head(&mut self) {
+        while self
+            .ready_lane
+            .peek()
+            .is_some_and(|entry| !self.scheduled.contains(entry.task))
+        {
+            let _ = self.ready_lane.pop();
+        }
+    }
+
+    #[inline]
+    fn next_valid_ready_entry(&mut self) -> Option<SchedulerEntry> {
+        self.prune_ready_head();
+        self.ready_lane.peek().copied()
     }
 
     #[inline]
@@ -409,7 +433,7 @@ impl Scheduler {
     /// - Timed lane has a task with `deadline <= now`
     #[inline]
     #[must_use]
-    pub fn has_runnable_work(&self, now: Time) -> bool {
+    pub fn has_runnable_work(&mut self, now: Time) -> bool {
         if self.next_valid_cancel_entry().is_some() || self.next_valid_ready_entry().is_some() {
             return true;
         }
@@ -420,7 +444,7 @@ impl Scheduler {
     /// Returns the earliest deadline from the timed lane, if any.
     #[inline]
     #[must_use]
-    pub fn next_deadline(&self) -> Option<Time> {
+    pub fn next_deadline(&mut self) -> Option<Time> {
         self.next_valid_timed_entry().map(|entry| entry.deadline)
     }
 
@@ -584,8 +608,7 @@ impl Scheduler {
             }
 
             let timed_due = self
-                .timed_lane
-                .peek()
+                .next_valid_timed_entry()
                 .is_some_and(|entry| entry.deadline <= now);
             if timed_due {
                 if let Some(entry) = Self::pop_timed_with_rng(
@@ -672,8 +695,7 @@ impl Scheduler {
     ) -> Option<(TaskId, DispatchLane)> {
         loop {
             let timed_due = self
-                .timed_lane
-                .peek()
+                .next_valid_timed_entry()
                 .is_some_and(|entry| entry.deadline <= now);
             if timed_due {
                 if let Some(entry) = Self::pop_timed_with_rng(
@@ -904,7 +926,7 @@ impl Scheduler {
     #[must_use]
     pub fn pop_timed_only(&mut self, now: Time) -> Option<TaskId> {
         loop {
-            if let Some(entry) = self.timed_lane.peek() {
+            if let Some(entry) = self.next_valid_timed_entry() {
                 if entry.deadline <= now {
                     let entry = self.timed_lane.pop().expect("peeked entry should exist");
                     if self.scheduled.remove(entry.task) {
@@ -923,7 +945,7 @@ impl Scheduler {
     #[must_use]
     pub fn pop_timed_only_with_hint(&mut self, rng_hint: u64, now: Time) -> Option<TaskId> {
         loop {
-            let earliest = self.timed_lane.peek()?;
+            let earliest = self.next_valid_timed_entry()?;
             if earliest.deadline > now {
                 return None;
             }
@@ -986,7 +1008,7 @@ impl Scheduler {
             }
         }
         // Timed lane (EDF, only if deadline is due).
-        while let Some(earliest) = self.timed_lane.peek() {
+        while let Some(earliest) = self.next_valid_timed_entry() {
             if earliest.deadline <= now {
                 if let Some(entry) = Self::pop_timed_with_rng(
                     &mut self.timed_lane,
@@ -1077,28 +1099,28 @@ impl Scheduler {
     /// Returns true if the cancel lane has pending tasks.
     #[inline]
     #[must_use]
-    pub fn has_cancel_work(&self) -> bool {
+    pub fn has_cancel_work(&mut self) -> bool {
         self.next_valid_cancel_entry().is_some()
     }
 
     /// Returns true if the timed lane has pending tasks.
     #[inline]
     #[must_use]
-    pub fn has_timed_work(&self) -> bool {
+    pub fn has_timed_work(&mut self) -> bool {
         self.next_valid_timed_entry().is_some()
     }
 
     /// Returns true if the ready lane has pending tasks.
     #[inline]
     #[must_use]
-    pub fn has_ready_work(&self) -> bool {
+    pub fn has_ready_work(&mut self) -> bool {
         self.next_valid_ready_entry().is_some()
     }
 
     /// Returns the current ready-lane head without removing it.
     #[inline]
     #[must_use]
-    pub fn peek_ready_task(&self) -> Option<(TaskId, u8)> {
+    pub fn peek_ready_task(&mut self) -> Option<(TaskId, u8)> {
         self.next_valid_ready_entry()
             .map(|entry| (entry.task, entry.priority))
     }
@@ -1106,7 +1128,7 @@ impl Scheduler {
     /// Returns the highest ready-lane priority currently pending.
     #[inline]
     #[must_use]
-    pub fn peek_ready_priority(&self) -> Option<u8> {
+    pub fn peek_ready_priority(&mut self) -> Option<u8> {
         self.next_valid_ready_entry().map(|entry| entry.priority)
     }
 
@@ -3202,6 +3224,16 @@ mod tests {
             true,
             sched.peek_ready_priority().is_none()
         );
+        crate::assert_with_log!(
+            sched.cancel_lane.is_empty()
+                && sched.ready_lane.is_empty()
+                && sched.timed_lane.is_empty(),
+            "stale heads pruned from all lanes",
+            true,
+            sched.cancel_lane.is_empty()
+                && sched.ready_lane.is_empty()
+                && sched.timed_lane.is_empty()
+        );
         crate::test_complete!("observability_ignores_stale_lane_entries");
     }
 
@@ -3242,6 +3274,12 @@ mod tests {
             "ready work remains runnable despite stale head",
             true,
             sched.has_runnable_work(Time::ZERO)
+        );
+        crate::assert_with_log!(
+            sched.ready_lane.len() == 1,
+            "stale ready head pruned to live frontier",
+            1usize,
+            sched.ready_lane.len()
         );
         crate::test_complete!("ready_observability_skips_stale_head");
     }
@@ -3284,6 +3322,12 @@ mod tests {
             "live timed task becomes runnable at its own deadline",
             true,
             sched.has_runnable_work(live_deadline)
+        );
+        crate::assert_with_log!(
+            sched.timed_lane.len() == 1,
+            "stale timed head pruned to live frontier",
+            1usize,
+            sched.timed_lane.len()
         );
         crate::test_complete!("timed_observability_skips_stale_head");
     }

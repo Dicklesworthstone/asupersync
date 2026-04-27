@@ -6,10 +6,16 @@
 //! - control-stream ordering checks
 //! - pseudo-header validation helpers
 
+use crate::bytes::{Bytes, BytesMut};
 use crate::net::quic_core::{decode_varint, encode_varint};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::net::Ipv6Addr;
+
+use super::h2::hpack::{
+    decode_huffman as hpack_decode_huffman, encode_huffman_to_buffer as hpack_encode_huffman,
+    huffman_encoded_size as hpack_huffman_encoded_size,
+};
 
 const H3_FRAME_DATA: u64 = 0x0;
 const H3_FRAME_HEADERS: u64 = 0x1;
@@ -858,16 +864,30 @@ pub fn qpack_static_plan_for_response(head: &H3ResponseHead) -> Vec<QpackFieldPl
 }
 
 /// Encode a wire-level QPACK field section from a static/literal plan.
-///
-/// The current implementation emits a static-only field section prefix
-/// (`required_insert_count=0`, `base=0`) and supports:
-/// - Indexed field lines (static table)
-/// - Literal field lines with literal names (non-Huffman strings)
 pub fn qpack_encode_field_section(plan: &[QpackFieldPlan]) -> Result<Vec<u8>, H3NativeError> {
+    qpack_encode_field_section_with_context(plan, None)
+}
+
+/// Encode a wire-level QPACK field section with optional dynamic-table context.
+///
+/// Dynamic references require a `QpackContext` so the encoder can derive the
+/// correct Required Insert Count / Base and map absolute insertion IDs to the
+/// wire-level relative indices defined by RFC 9204.
+pub fn qpack_encode_field_section_with_context(
+    plan: &[QpackFieldPlan],
+    qpack_context: Option<&QpackContext>,
+) -> Result<Vec<u8>, H3NativeError> {
     let mut out = Vec::new();
-    // Field section prefix: Required Insert Count = 0, Delta Base = 0.
-    qpack_encode_prefixed_int(&mut out, 0, 8, 0)?;
+    let required_insert_count = qpack_plan_required_insert_count(plan, qpack_context)?;
+    let encoded_insert_count = qpack_encode_required_insert_count(
+        required_insert_count,
+        qpack_context.map_or(0, |context| context.max_table_capacity),
+    )?;
+    qpack_encode_prefixed_int(&mut out, 0, 8, encoded_insert_count)?;
+    // Emit Base = Required Insert Count (S=0, Delta Base=0) so all currently
+    // known dynamic references can be encoded as pre-base relative indices.
     qpack_encode_prefixed_int(&mut out, 0, 7, 0)?;
+    let base = required_insert_count;
 
     for field in plan {
         match field {
@@ -878,27 +898,38 @@ pub fn qpack_encode_field_section(plan: &[QpackFieldPlan]) -> Result<Vec<u8>, H3
                 // Indexed field line: 1 T Index(6+), T=1 for static table.
                 qpack_encode_prefixed_int(&mut out, 0b1100_0000, 6, *index)?;
             }
-            QpackFieldPlan::DynamicIndex(_index) => {
-                // Dynamic table indexed field - not supported in static-only encoder
-                return Err(H3NativeError::InvalidFrame(
-                    "dynamic table indexed fields not supported in static-only encoder",
-                ));
+            QpackFieldPlan::DynamicIndex(index) => {
+                let context = qpack_context.ok_or(H3NativeError::InvalidFrame(
+                    "dynamic table context required",
+                ))?;
+                if qpack_dynamic_entry(context.dynamic_table(), *index).is_none() {
+                    return Err(H3NativeError::InvalidFrame("unknown dynamic qpack index"));
+                }
+                let relative = qpack_absolute_to_relative(base, *index)?;
+                // Indexed field line: 1 T Index(6+), T=0 for dynamic table.
+                qpack_encode_prefixed_int(&mut out, 0b1000_0000, 6, relative)?;
             }
             QpackFieldPlan::Literal { name, value } => {
                 // Literal field line with literal name: 001 N H NameLen(3+)
-                // N=0, H=0 (non-Huffman)
+                // N=0, H set opportunistically when Huffman is smaller.
                 qpack_encode_string(&mut out, 0b0010_0000, 3, name)?;
                 // Value string literal: H=0 + ValueLen(7+)
                 qpack_encode_string(&mut out, 0, 7, value)?;
             }
-            QpackFieldPlan::DynamicNameLiteral {
-                name_index: _name_index,
-                value: _value,
-            } => {
-                // Dynamic table name reference - not supported in static-only encoder
-                return Err(H3NativeError::InvalidFrame(
-                    "dynamic table name references not supported in static-only encoder",
-                ));
+            QpackFieldPlan::DynamicNameLiteral { name_index, value } => {
+                let context = qpack_context.ok_or(H3NativeError::InvalidFrame(
+                    "dynamic table context required",
+                ))?;
+                if qpack_dynamic_name(context.dynamic_table(), *name_index).is_none() {
+                    return Err(H3NativeError::InvalidFrame(
+                        "unknown dynamic qpack name index",
+                    ));
+                }
+                let relative = qpack_absolute_to_relative(base, *name_index)?;
+                // Literal field line with name reference: 01 N T NameIndex(4+),
+                // T=0 for dynamic table references.
+                qpack_encode_prefixed_int(&mut out, 0b0100_0000, 4, relative)?;
+                qpack_encode_string(&mut out, 0, 7, value)?;
             }
         }
     }
@@ -989,6 +1020,49 @@ fn qpack_decode_base(
     }
 }
 
+fn qpack_encode_required_insert_count(
+    required_insert_count: u64,
+    max_table_capacity: usize,
+) -> Result<u64, H3NativeError> {
+    if required_insert_count == 0 {
+        return Ok(0);
+    }
+
+    let max_entries = (max_table_capacity / 32) as u64;
+    if max_entries == 0 {
+        return Err(H3NativeError::QpackPolicy(
+            "required insert count requires dynamic table capacity",
+        ));
+    }
+
+    let full_range = max_entries
+        .checked_mul(2)
+        .ok_or(H3NativeError::InvalidFrame(
+            "required insert count range overflow",
+        ))?;
+    Ok(((required_insert_count - 1) % full_range) + 1)
+}
+
+fn qpack_plan_required_insert_count(
+    plan: &[QpackFieldPlan],
+    qpack_context: Option<&QpackContext>,
+) -> Result<u64, H3NativeError> {
+    let needs_dynamic = plan.iter().any(|field| {
+        matches!(
+            field,
+            QpackFieldPlan::DynamicIndex(_) | QpackFieldPlan::DynamicNameLiteral { .. }
+        )
+    });
+    if !needs_dynamic {
+        return Ok(0);
+    }
+
+    let context = qpack_context.ok_or(H3NativeError::InvalidFrame(
+        "dynamic table context required",
+    ))?;
+    Ok(context.dynamic_table().insertion_counter())
+}
+
 /// br-asupersync-mbn0uo — Fuzz-target re-exporter for the H3
 /// status-code parser. `#[doc(hidden)]`; only exists for direct
 /// fuzz harness access.
@@ -1053,6 +1127,17 @@ fn qpack_relative_to_absolute(
                 "dynamic qpack relative index exceeds base (H3_QPACK_DECODER_STREAM_ERROR)",
             ))
     }
+}
+
+fn qpack_absolute_to_relative(base: u64, absolute_index: u64) -> Result<u64, H3NativeError> {
+    let next = absolute_index
+        .checked_add(1)
+        .ok_or(H3NativeError::InvalidFrame(
+            "dynamic qpack absolute index overflow",
+        ))?;
+    base.checked_sub(next).ok_or(H3NativeError::InvalidFrame(
+        "dynamic qpack absolute index exceeds base",
+    ))
 }
 
 fn qpack_decode_field_section_with_context(
@@ -1157,9 +1242,7 @@ fn qpack_decode_field_section_with_context(
                 let base = dynamic_base.ok_or(H3NativeError::InvalidFrame(
                     "dynamic table context required",
                 ))?;
-                // Dynamic table index - check post-base bit (bit 4)
-                let is_post_base = (b & 0x10) != 0;
-                let absolute_index = qpack_relative_to_absolute(base, index, is_post_base)?;
+                let absolute_index = qpack_relative_to_absolute(base, index, false)?;
                 out.push(QpackFieldPlan::DynamicIndex(absolute_index));
                 if out.len() > QPACK_MAX_DECODED_HEADERS {
                     return Err(H3NativeError::QpackPolicy(
@@ -1202,10 +1285,7 @@ fn qpack_decode_field_section_with_context(
                 let base = dynamic_base.ok_or(H3NativeError::InvalidFrame(
                     "dynamic table context required",
                 ))?;
-                // Dynamic table name reference - check post-base bit (bit 3)
-                let is_post_base_name = (b & 0x08) != 0;
-                let absolute_name_index =
-                    qpack_relative_to_absolute(base, name_index, is_post_base_name)?;
+                let absolute_name_index = qpack_relative_to_absolute(base, name_index, false)?;
                 out.push(QpackFieldPlan::DynamicNameLiteral {
                     name_index: absolute_name_index,
                     value,
@@ -1244,11 +1324,40 @@ fn qpack_decode_field_section_with_context(
                 "post-base/dynamic qpack line representations not allowed in static-only mode",
             ));
         }
-        // Post-base operations are for advanced QPACK features
-        // For minimum viable implementation, return a more specific error
-        return Err(H3NativeError::InvalidFrame(
-            "post-base dynamic table operations not yet supported",
-        ));
+
+        let base = dynamic_base.ok_or(H3NativeError::InvalidFrame(
+            "dynamic table context required",
+        ))?;
+        if (b & 0x10) != 0 {
+            // Indexed field line with post-base index: 0001 Index(4+)
+            let (index, extra) = qpack_decode_prefixed_int(b, 4, &input[pos + 1..])?;
+            pos += 1 + extra;
+            let absolute_index = qpack_relative_to_absolute(base, index, true)?;
+            out.push(QpackFieldPlan::DynamicIndex(absolute_index));
+            if out.len() > QPACK_MAX_DECODED_HEADERS {
+                return Err(H3NativeError::QpackPolicy(
+                    "decoded header count exceeds safety limit",
+                ));
+            }
+            continue;
+        }
+
+        // Literal field line with post-base name reference: 0000 N NameIndex(3+)
+        let (name_index, extra) = qpack_decode_prefixed_int(b, 3, &input[pos + 1..])?;
+        pos += 1 + extra;
+        let value_first = *input.get(pos).ok_or(H3NativeError::UnexpectedEof)?;
+        let (value, value_extra) = qpack_decode_string(value_first, 7, &input[pos + 1..])?;
+        pos += 1 + value_extra;
+        let absolute_name_index = qpack_relative_to_absolute(base, name_index, true)?;
+        out.push(QpackFieldPlan::DynamicNameLiteral {
+            name_index: absolute_name_index,
+            value,
+        });
+        if out.len() > QPACK_MAX_DECODED_HEADERS {
+            return Err(H3NativeError::QpackPolicy(
+                "decoded header count exceeds safety limit",
+            ));
+        }
     }
 
     Ok(out)
@@ -1835,8 +1944,21 @@ fn qpack_encode_string(
     value: &str,
 ) -> Result<(), H3NativeError> {
     let bytes = value.as_bytes();
-    qpack_encode_prefixed_int(out, prefix_bits, prefix_len, bytes.len() as u64)?;
-    out.extend_from_slice(bytes);
+    let huffman_len = hpack_huffman_encoded_size(bytes);
+    if huffman_len < bytes.len() {
+        qpack_encode_prefixed_int(
+            out,
+            prefix_bits | (1u8 << prefix_len),
+            prefix_len,
+            huffman_len as u64,
+        )?;
+        let mut encoded = BytesMut::with_capacity(huffman_len);
+        hpack_encode_huffman(&mut encoded, bytes);
+        out.extend_from_slice(&encoded);
+    } else {
+        qpack_encode_prefixed_int(out, prefix_bits, prefix_len, bytes.len() as u64)?;
+        out.extend_from_slice(bytes);
+    }
     Ok(())
 }
 
@@ -1851,11 +1973,6 @@ fn qpack_decode_string(
         ));
     }
     let huffman_bit = 1u8 << prefix_len;
-    if (first & huffman_bit) != 0 {
-        return Err(H3NativeError::InvalidFrame(
-            "qpack huffman strings are not supported in native static mode",
-        ));
-    }
     let (len, extra) = qpack_decode_prefixed_int(first, prefix_len, input)?;
     let len: usize = len.try_into().map_err(|_| {
         H3NativeError::InvalidFrame("qpack string length exceeds addressable range")
@@ -1864,9 +1981,15 @@ fn qpack_decode_string(
         return Err(H3NativeError::UnexpectedEof);
     }
     let bytes = &input[extra..extra + len];
-    let value = std::str::from_utf8(bytes)
-        .map_err(|_| H3NativeError::InvalidFrame("qpack string is not valid utf-8"))?
-        .to_string();
+    let value = if (first & huffman_bit) != 0 {
+        let encoded = Bytes::copy_from_slice(bytes);
+        hpack_decode_huffman(&encoded)
+            .map_err(|_| H3NativeError::InvalidFrame("invalid qpack huffman string"))?
+    } else {
+        std::str::from_utf8(bytes)
+            .map_err(|_| H3NativeError::InvalidFrame("qpack string is not valid utf-8"))?
+            .to_string()
+    };
     Ok((value, extra + len))
 }
 
@@ -4932,16 +5055,100 @@ mod tests {
     }
 
     #[test]
-    fn qpack_wire_rejects_huffman_strings_in_static_mode() {
-        // Field section prefix (RIC=0, base=0), then:
-        // literal-with-name-reference (static :authority index=0), value with H=1.
-        let wire = [0x00u8, 0x00, 0x50, 0x83, 0xaa, 0xbb, 0xcc];
-        let err = qpack_decode_field_section(&wire, H3QpackMode::StaticOnly).expect_err("reject");
+    fn qpack_wire_decodes_huffman_strings_in_static_mode() {
+        let mut encoded_value = BytesMut::new();
+        hpack_encode_huffman(&mut encoded_value, b"www.example.com");
+
+        let mut wire = vec![0x00u8, 0x00];
+        // Literal-with-name-reference, static :authority (index 0).
+        qpack_encode_prefixed_int(&mut wire, 0x50, 4, 0).expect("encode name ref");
+        qpack_encode_prefixed_int(&mut wire, 0x80, 7, encoded_value.len() as u64)
+            .expect("encode huffman string len");
+        wire.extend_from_slice(&encoded_value);
+
+        let plan = qpack_decode_field_section(&wire, H3QpackMode::StaticOnly).expect("decode");
         assert_eq!(
-            err,
-            H3NativeError::InvalidFrame(
-                "qpack huffman strings are not supported in native static mode",
-            )
+            plan,
+            vec![QpackFieldPlan::Literal {
+                name: ":authority".to_string(),
+                value: "www.example.com".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn qpack_dynamic_wire_encode_roundtrips_with_context() {
+        let mut context = QpackContext::new(4096);
+        context
+            .insert_dynamic_entry("x-old".to_string(), "old".to_string())
+            .expect("insert old entry");
+        context
+            .insert_dynamic_entry("x-middle".to_string(), "middle".to_string())
+            .expect("insert middle entry");
+        context
+            .insert_dynamic_entry("x-new".to_string(), "new".to_string())
+            .expect("insert new entry");
+
+        let plan = vec![
+            QpackFieldPlan::DynamicIndex(1),
+            QpackFieldPlan::DynamicNameLiteral {
+                name_index: 2,
+                value: "tail".to_string(),
+            },
+        ];
+
+        let wire =
+            qpack_encode_field_section_with_context(&plan, Some(&context)).expect("encode wire");
+        let decoded = qpack_decode_field_section_with_context(
+            &wire,
+            H3QpackMode::DynamicTableAllowed,
+            Some(&context),
+        )
+        .expect("decode wire");
+        assert_eq!(decoded, plan);
+
+        let headers = qpack_plan_to_header_fields(&decoded, Some(&context)).expect("resolve");
+        assert_eq!(
+            headers,
+            vec![
+                ("x-middle".to_string(), "middle".to_string()),
+                ("x-new".to_string(), "tail".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn qpack_dynamic_decode_resolves_post_base_lines() {
+        let mut context = QpackContext::new(4096);
+        context
+            .insert_dynamic_entry("x-old".to_string(), "old".to_string())
+            .expect("insert old entry");
+        context
+            .insert_dynamic_entry("x-middle".to_string(), "middle".to_string())
+            .expect("insert middle entry");
+        context
+            .insert_dynamic_entry("x-new".to_string(), "new".to_string())
+            .expect("insert new entry");
+
+        // EncRIC=4 => ReqInsertCount=3. S=1, DeltaBase=0 => Base=2.
+        // Indexed post-base index 0 => absolute index 2 ("x-new").
+        // Literal post-base name ref index 0 => absolute name index 2 ("x-new").
+        let wire = [0x04u8, 0x80, 0x10, 0x00, 0x04, b't', b'a', b'i', b'l'];
+        let plan = qpack_decode_field_section_with_context(
+            &wire,
+            H3QpackMode::DynamicTableAllowed,
+            Some(&context),
+        )
+        .expect("decode post-base wire");
+        assert_eq!(
+            plan,
+            vec![
+                QpackFieldPlan::DynamicIndex(2),
+                QpackFieldPlan::DynamicNameLiteral {
+                    name_index: 2,
+                    value: "tail".to_string(),
+                },
+            ]
         );
     }
 

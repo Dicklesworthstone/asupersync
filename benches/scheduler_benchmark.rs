@@ -320,6 +320,62 @@ fn bench_priority_scheduler(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_priority_observability(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scheduler/priority_observability");
+
+    for &count in &[256usize, 4096, 16_384] {
+        group.throughput(Throughput::Elements(count as u64));
+        group.bench_with_input(
+            BenchmarkId::new("has_runnable_work_ready", count),
+            &count,
+            |b, &count| {
+                b.iter_batched(
+                    || {
+                        let mut scheduler = Scheduler::with_capacity(count);
+                        for i in 0..count as u32 {
+                            scheduler.schedule(task(i), (i % 256) as u8);
+                        }
+                        scheduler
+                    },
+                    |mut scheduler| {
+                        let mut observed = false;
+                        for _ in 0..128 {
+                            observed ^= scheduler.has_runnable_work(Time::ZERO);
+                        }
+                        black_box(observed)
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+        group.bench_with_input(
+            BenchmarkId::new("next_deadline_timed", count),
+            &count,
+            |b, &count| {
+                b.iter_batched(
+                    || {
+                        let mut scheduler = Scheduler::with_capacity(count);
+                        for i in 0..count as u32 {
+                            scheduler.schedule_timed(task(i), Time::from_nanos(u64::from(i) + 1));
+                        }
+                        scheduler
+                    },
+                    |mut scheduler| {
+                        let mut observed = None;
+                        for _ in 0..128 {
+                            observed = scheduler.next_deadline();
+                        }
+                        black_box(observed)
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+    }
+
+    group.finish();
+}
+
 // =============================================================================
 // LANE PRIORITY ORDERING BENCHMARKS
 // =============================================================================
@@ -1131,6 +1187,7 @@ criterion_group!(
     bench_local_queue,
     bench_global_queue,
     bench_priority_scheduler,
+    bench_priority_observability,
     bench_lane_priority,
     bench_work_stealing,
     bench_scheduler_throughput,
