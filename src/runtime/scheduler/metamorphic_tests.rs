@@ -9,6 +9,7 @@ use crate::obligation::lyapunov::SchedulingSuggestion;
 use crate::runtime::RuntimeState;
 use crate::runtime::scheduler::ThreeLaneScheduler;
 use crate::sync::ContendedMutex;
+use crate::time::{TimerDriverHandle, VirtualClock};
 use crate::types::{RegionId, TaskId, Time};
 use crate::util::DetRng;
 use std::sync::Arc;
@@ -25,6 +26,27 @@ fn create_test_scheduler(worker_count: usize) -> ThreeLaneScheduler {
     let state = Arc::new(ContendedMutex::new(
         "metamorphic.runtime_state",
         RuntimeState::new(),
+    ));
+    ThreeLaneScheduler::new(worker_count, &state)
+}
+
+/// br-asupersync-k18nlg: create a test scheduler whose worker has a
+/// virtual clock pinned to `now`. Without this, `next_task()` defaults
+/// `now = Time::ZERO` (see three_lane.rs:3000-3003), and any timed
+/// task with a non-zero deadline is never considered "due" — so
+/// `pop_timed_if_due(now)` and `pop_timed_only_with_hint(rng, now)`
+/// always return None, and the EDF/timed-lane assertions become
+/// vacuous.
+fn create_test_scheduler_with_clock(
+    worker_count: usize,
+    now: Time,
+) -> ThreeLaneScheduler {
+    let clock = Arc::new(VirtualClock::starting_at(now));
+    let mut state = RuntimeState::new();
+    state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
+    let state = Arc::new(ContendedMutex::new(
+        "metamorphic.runtime_state",
+        state,
     ));
     ThreeLaneScheduler::new(worker_count, &state)
 }
@@ -575,23 +597,28 @@ fn mr_edf_timed_lane_ordering() {
         seed in any::<u64>(),
         deadline_spread_ms in 10u64..100,
     )| {
-        let _state = Arc::new(ContendedMutex::new(
-            "metamorphic.runtime_state",
-            RuntimeState::new()
-        ));
-        let mut scheduler = create_test_scheduler(1);
-        let mut workers = scheduler.take_workers();
-        let worker = &mut workers[0];
-
         // Generate tasks with different deadlines
         let task_ids = generate_task_ids(task_count, seed);
         let base_time = Time::from_nanos(1_000_000_000); // 1 second base
         let mut deadlines = Vec::new();
-
-        for (i, &task_id) in task_ids.iter().enumerate() {
+        for i in 0..task_count {
             let deadline = base_time + Duration::from_millis(deadline_spread_ms * (i as u64 + 1));
             deadlines.push(deadline);
-            scheduler.inject_timed(task_id, deadline);
+        }
+        // br-asupersync-k18nlg: pin the worker's virtual clock just
+        // past the latest deadline so every injected timed task is
+        // immediately "due" by `pop_timed_if_due`. Without this
+        // `now = Time::ZERO` (see three_lane.rs:3000-3003) and the
+        // dispatch_order would be empty.
+        let last_deadline = *deadlines.iter().max().expect("at least one deadline");
+        let clock_now = last_deadline + Duration::from_millis(1);
+
+        let mut scheduler = create_test_scheduler_with_clock(1, clock_now);
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
+
+        for (i, &task_id) in task_ids.iter().enumerate() {
+            scheduler.inject_timed(task_id, deadlines[i]);
         }
 
         // Expected order: earliest deadline first
@@ -609,36 +636,36 @@ fn mr_edf_timed_lane_ordering() {
             }
         }
 
-        // br-asupersync-5ad0mc: NOTE — the original assertions below
-        // skip on empty dispatch_order, which lets a silent timed-
-        // lane drop or an unadvanced time source pass the test
-        // vacuously. A stricter `dispatch_order.len() == task_count`
-        // anchor here currently surfaces a real but separate test-
-        // setup gap (the harness doesn't advance virtual time so
-        // deadlines never elapse). Filed separately so this commit
-        // stays green; this MR remains weakly anchored until the
-        // time-source-aware test harness lands.
+        // br-asupersync-5ad0mc + br-asupersync-k18nlg: now that the
+        // worker's clock is pinned past the deadlines, every injected
+        // timed task must dispatch. A regression that drops timed
+        // tasks (e.g. a broken pop_timed_if_due predicate) would
+        // produce a short dispatch_order and trip the anchor.
+        prop_assert_eq!(
+            dispatch_order.len(),
+            task_count,
+            "MR7 VIOLATION: timed-lane dispatched {} of {} injected tasks — \
+             EDF ordering check would be vacuous on the missing tasks",
+            dispatch_order.len(),
+            task_count,
+        );
 
         // METAMORPHIC ASSERTION: First dispatched should be earliest deadline
-        if !dispatch_order.is_empty() {
-            prop_assert_eq!(
-                dispatch_order[0], expected_earliest_index,
-                "MR7 VIOLATION: EDF ordering violated - dispatched task {} first, expected task {} (earliest deadline)",
-                dispatch_order[0], expected_earliest_index
-            );
-        }
+        prop_assert_eq!(
+            dispatch_order[0], expected_earliest_index,
+            "MR7 VIOLATION: EDF ordering violated - dispatched task {} first, expected task {} (earliest deadline)",
+            dispatch_order[0], expected_earliest_index
+        );
 
         // Verify all deadlines are in non-decreasing order when dispatched
-        if dispatch_order.len() > 1 {
-            for window in dispatch_order.windows(2) {
-                let first_deadline = deadlines[window[0]];
-                let second_deadline = deadlines[window[1]];
-                prop_assert!(
-                    first_deadline <= second_deadline,
-                    "MR7 VIOLATION: EDF ordering violated between consecutive dispatches - task {} deadline {:?} > task {} deadline {:?}",
-                    window[0], first_deadline, window[1], second_deadline
-                );
-            }
+        for window in dispatch_order.windows(2) {
+            let first_deadline = deadlines[window[0]];
+            let second_deadline = deadlines[window[1]];
+            prop_assert!(
+                first_deadline <= second_deadline,
+                "MR7 VIOLATION: EDF ordering violated between consecutive dispatches - task {} deadline {:?} > task {} deadline {:?}",
+                window[0], first_deadline, window[1], second_deadline
+            );
         }
     });
 }
@@ -714,8 +741,13 @@ fn mr_composite_cancel_drain_consistency() {
 /// then dispatch order must respect lane priority regardless of arrival order.
 #[test]
 fn mr_priority_lane_ordering() {
-    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
-    let mut scheduler = ThreeLaneScheduler::new(1, &state);
+    // br-asupersync-k18nlg: pin the worker's virtual clock past the
+    // timed-task deadline so the timed lane actually surfaces a task
+    // when next_task() is called. Without this, `now = Time::ZERO`
+    // and the timed task at deadline=1000 would never be considered
+    // "due" (causing the second assertion to fail).
+    let mut scheduler =
+        create_test_scheduler_with_clock(1, Time::from_nanos(2000));
     let mut workers = scheduler.take_workers();
     let worker = &mut workers[0];
 
@@ -863,16 +895,6 @@ mod validation_tests {
     /// Validate EDF timed lane ordering test infrastructure
     #[test]
     fn validate_edf_ordering_infrastructure() {
-        // Time imported at module level
-
-        let _state = Arc::new(ContendedMutex::new(
-            "test.runtime_state",
-            RuntimeState::new(),
-        ));
-        let mut scheduler = create_test_scheduler(1);
-        let mut workers = scheduler.take_workers();
-        let worker = &mut workers[0];
-
         // Create tasks with known deadline order
         let task_ids = generate_task_ids(3, 789);
         let base_time = Time::from_nanos(1_000_000_000);
@@ -880,6 +902,13 @@ mod validation_tests {
         let deadline1 = base_time + Duration::from_millis(30); // Latest
         let deadline2 = base_time + Duration::from_millis(10); // Earliest
         let deadline3 = base_time + Duration::from_millis(20); // Middle
+
+        // br-asupersync-k18nlg: pin the worker's clock past the
+        // latest deadline so all timed tasks are immediately due.
+        let clock_now = deadline1 + Duration::from_millis(1);
+        let mut scheduler = create_test_scheduler_with_clock(1, clock_now);
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
 
         scheduler.inject_timed(task_ids[0], deadline1);
         scheduler.inject_timed(task_ids[1], deadline2);
