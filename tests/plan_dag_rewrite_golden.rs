@@ -180,7 +180,9 @@ fn create_plan_snapshot(plan: &PlanDag) -> PlanDagSnapshot {
             let (node_type, details) = match node {
                 PlanNode::Leaf { label } => (
                     "leaf",
-                    PlanNodeDetails::Leaf { label: label.clone() },
+                    PlanNodeDetails::Leaf {
+                        label: label.clone(),
+                    },
                 ),
                 PlanNode::Join { children } => (
                     "join",
@@ -290,16 +292,12 @@ fn calculate_node_depth(plan: &PlanDag, node_id: PlanId, current_depth: usize) -
 
     match node {
         PlanNode::Leaf { .. } => current_depth,
-        PlanNode::Join { children } | PlanNode::Race { children } => {
-            children
-                .iter()
-                .map(|&child| calculate_node_depth(plan, child, current_depth + 1))
-                .max()
-                .unwrap_or(current_depth)
-        }
-        PlanNode::Timeout { child, .. } => {
-            calculate_node_depth(plan, *child, current_depth + 1)
-        }
+        PlanNode::Join { children } | PlanNode::Race { children } => children
+            .iter()
+            .map(|&child| calculate_node_depth(plan, child, current_depth + 1))
+            .max()
+            .unwrap_or(current_depth),
+        PlanNode::Timeout { child, .. } => calculate_node_depth(plan, *child, current_depth + 1),
     }
 }
 
@@ -342,7 +340,10 @@ fn get_applicable_rules(plan: &PlanDag, policy: RewritePolicy) -> Vec<&'static s
 }
 
 /// Mock transformation application (would use real rewriter in practice).
-fn apply_mock_transformations(plan: &PlanDag, policy: RewritePolicy) -> (PlanDag, Vec<TransformationStep>) {
+fn apply_mock_transformations(
+    plan: &PlanDag,
+    policy: RewritePolicy,
+) -> (PlanDag, Vec<TransformationStep>) {
     let mut output = plan.clone();
     let mut steps = Vec::new();
 
@@ -376,9 +377,10 @@ fn has_nested_joins(plan: &PlanDag) -> bool {
         let plan_id = PlanId::new(id);
         if let Some(node) = plan.node(plan_id) {
             if let PlanNode::Join { children } = node {
-                if children.iter().any(|&child_id| {
-                    matches!(plan.node(child_id), Some(PlanNode::Join { .. }))
-                }) {
+                if children
+                    .iter()
+                    .any(|&child_id| matches!(plan.node(child_id), Some(PlanNode::Join { .. })))
+                {
                     return true;
                 }
             }
@@ -392,9 +394,10 @@ fn has_nested_races(plan: &PlanDag) -> bool {
         let plan_id = PlanId::new(id);
         if let Some(node) = plan.node(plan_id) {
             if let PlanNode::Race { children } = node {
-                if children.iter().any(|&child_id| {
-                    matches!(plan.node(child_id), Some(PlanNode::Race { .. }))
-                }) {
+                if children
+                    .iter()
+                    .any(|&child_id| matches!(plan.node(child_id), Some(PlanNode::Race { .. })))
+                {
                     return true;
                 }
             }
@@ -447,9 +450,11 @@ fn has_race_of_joins_with_shared_child(plan: &PlanDag) -> bool {
         let plan_id = PlanId::new(id);
         if let Some(node) = plan.node(plan_id) {
             if let PlanNode::Race { children } = node {
-                if children.len() >= 2 && children.iter().all(|&child_id| {
-                    matches!(plan.node(child_id), Some(PlanNode::Join { .. }))
-                }) {
+                if children.len() >= 2
+                    && children
+                        .iter()
+                        .all(|&child_id| matches!(plan.node(child_id), Some(PlanNode::Join { .. })))
+                {
                     return true;
                 }
             }
@@ -645,7 +650,9 @@ fn golden_complex_mixed_policy() {
         "complex_mixed",
         "Complex plan with timeout, race, joins - multiple rewrite opportunities",
         &plan,
-        RewritePolicy::new().with_commutativity(true).with_timeout_simplification(true),
+        RewritePolicy::new()
+            .with_commutativity(true)
+            .with_timeout_simplification(true),
         "custom_selective",
     );
     assert_json_snapshot!("plan_rewrite_complex_mixed", golden);
