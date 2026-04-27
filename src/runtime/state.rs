@@ -812,6 +812,30 @@ impl RuntimeState {
         validator.validate_task_transition(task_id, event, context)
     }
 
+    fn validate_live_task_protocol_transition(
+        &self,
+        task_id: TaskId,
+        event: TaskEvent,
+        operation: &'static str,
+    ) {
+        let Some(task) = self.task(task_id) else {
+            return;
+        };
+        let context = TaskContext {
+            task_id,
+            region_id: task.owner,
+            spawned_at: task.created_at,
+            validation_level: CancelValidationLevel::Basic,
+        };
+        let validation_result = self.validate_task_protocol_transition(task_id, event, &context);
+        if matches!(
+            validation_result,
+            TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
+        ) {
+            log_cancel_protocol_violation(operation, &validation_result);
+        }
+    }
+
     /// Validates an obligation state transition using the cancel protocol validator.
     fn validate_obligation_protocol_transition(
         &self,
@@ -950,10 +974,19 @@ impl RuntimeState {
     /// O(1) — maintained incrementally for O(1) Lyapunov snapshots.
     pub fn cancel_task(&mut self, task_id: TaskId, reason: &CancelReason) -> bool {
         let budget = reason.cleanup_budget();
-        self.update_task(task_id, |record| {
+        let Some(newly_cancelled) = self.update_task(task_id, |record| {
             record.request_cancel_with_budget(reason.clone(), budget)
-        })
-        .unwrap_or(false)
+        }) else {
+            return false;
+        };
+        if newly_cancelled {
+            self.validate_live_task_protocol_transition(
+                task_id,
+                TaskEvent::RequestCancel,
+                "task cancellation",
+            );
+        }
+        newly_cancelled
     }
 
     /// Completes a task with the given outcome.
@@ -2240,6 +2273,11 @@ impl RuntimeState {
                 continue;
             }
             if newly_cancelled {
+                self.validate_live_task_protocol_transition(
+                    task_id,
+                    TaskEvent::RequestCancel,
+                    "sibling task cancellation",
+                );
                 self.record_task_trace_event(task_id, |seq| {
                     TraceEvent::cancel_request(seq, now, task_id, region, reason.clone())
                 });
@@ -2484,6 +2522,11 @@ impl RuntimeState {
                 });
 
                 if newly_cancelled {
+                    self.validate_live_task_protocol_transition(
+                        task_id,
+                        TaskEvent::RequestCancel,
+                        "region task cancellation",
+                    );
                     self.record_task_trace_event(task_id, |seq| {
                         TraceEvent::cancel_request(seq, now, task_id, rid, task_reason.clone())
                     });
@@ -2622,22 +2665,18 @@ impl RuntimeState {
                 return waiters;
             };
 
-            // Validate task completion protocol transition
-            let context = TaskContext {
-                task_id,
-                region_id: task.owner,
-                spawned_at: task.created_at,
-                validation_level: CancelValidationLevel::Basic,
+            let task_event = match &task.state {
+                crate::record::task::TaskState::Completed(Outcome::Cancelled(_)) => {
+                    TaskEvent::DrainComplete
+                }
+                crate::record::task::TaskState::Completed(Outcome::Panicked(payload)) => {
+                    TaskEvent::Panic {
+                        message: payload.message().to_string(),
+                    }
+                }
+                _ => TaskEvent::Complete,
             };
-            let validation_result =
-                self.validate_task_protocol_transition(task_id, TaskEvent::Complete, &context);
-            if matches!(
-                validation_result,
-                TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
-            ) {
-                log_cancel_protocol_violation("task completion", &validation_result);
-                // Continue with completion but log violation
-            }
+            self.validate_live_task_protocol_transition(task_id, task_event, "task completion");
             if let Some(inner) = task.cx_inner.as_ref() {
                 // br-asupersync-xgujaf — single write-lock; the previous
                 // read-then-write split had a TOCTOU window where a concurrent
@@ -7947,6 +7986,60 @@ mod tests {
             root_state_removed
         );
         crate::test_complete!("cancel_drain_finalize_nested_regions");
+    }
+
+    #[test]
+    fn lab_runtime_cancelled_task_updates_cancel_protocol_validator() {
+        init_test("lab_runtime_cancelled_task_updates_cancel_protocol_validator");
+        let config = crate::lab::config::LabConfig::new(42)
+            .max_steps(128)
+            .panic_on_leak(false);
+        let mut runtime = crate::lab::runtime::LabRuntime::new(config);
+        let root = runtime.state.create_root_region(Budget::INFINITE);
+
+        let (task_id, _) = runtime
+            .state
+            .create_task(root, Budget::INFINITE, async {
+                crate::runtime::yield_now::yield_now().await;
+            })
+            .expect("create task");
+        runtime.scheduler.lock().schedule(task_id, 0);
+        runtime.step();
+
+        let cancel_reason = CancelReason::user("validator regression");
+        let cancelled = runtime.state.cancel_task(task_id, &cancel_reason);
+        crate::assert_with_log!(
+            cancelled,
+            "task cancellation should be recorded",
+            true,
+            cancelled
+        );
+
+        runtime
+            .scheduler
+            .lock()
+            .schedule_cancel(task_id, cancel_reason.cleanup_budget().priority);
+        runtime.run_until_quiescent();
+
+        let validator = runtime.state.cancel_protocol_validator().lock();
+        let validator_cancelled = matches!(
+            validator.task_state(task_id),
+            Some(crate::cancel::protocol_state_machines::TaskState::Cancelled)
+        );
+        crate::assert_with_log!(
+            validator_cancelled,
+            "validator should observe RequestCancel -> DrainComplete",
+            true,
+            validator_cancelled
+        );
+        crate::assert_with_log!(
+            validator.violation_count() == 0,
+            "validator should not record protocol violations",
+            0u64,
+            validator.violation_count()
+        );
+
+        crate::test_complete!("lab_runtime_cancelled_task_updates_cancel_protocol_validator");
     }
 
     #[test]
