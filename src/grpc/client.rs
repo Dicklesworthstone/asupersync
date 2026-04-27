@@ -430,13 +430,38 @@ impl<C: Codec> GrpcClient<C> {
     }
 
     fn apply_channel_metadata_defaults(&self, metadata: &mut Metadata) {
-        let timeout_value = match metadata.get("grpc-timeout") {
+        /// br-asupersync-20occs: classification of an existing
+        /// `grpc-timeout` entry for the scrub-vs-replace decision.
+        enum ExistingTimeoutState {
+            Parseable(String),
+            Malformed,
+            Absent,
+        }
+
+        // br-asupersync-20occs: classify the existing entry into one of three
+        // states — present-and-parseable, present-but-malformed, or absent.
+        // If malformed, scrub it before deciding whether to insert the
+        // channel default; previously the malformed value rode through to the
+        // wire when channel.config.timeout was None.
+        let existing_state = match metadata.get("grpc-timeout") {
             Some(super::streaming::MetadataValue::Ascii(existing))
                 if super::server::parse_grpc_timeout(existing).is_some() =>
             {
-                Some(existing.clone())
+                ExistingTimeoutState::Parseable(existing.clone())
             }
-            _ => self.channel.config.timeout.map(encode_grpc_timeout),
+            Some(_) => ExistingTimeoutState::Malformed,
+            None => ExistingTimeoutState::Absent,
+        };
+        let timeout_value = match existing_state {
+            ExistingTimeoutState::Parseable(v) => Some(v),
+            ExistingTimeoutState::Malformed => {
+                // Scrub the malformed entry; fall back to the channel default
+                // (which may also be None, in which case no grpc-timeout is
+                // sent — equivalent to "no deadline").
+                metadata.remove("grpc-timeout");
+                self.channel.config.timeout.map(encode_grpc_timeout)
+            }
+            ExistingTimeoutState::Absent => self.channel.config.timeout.map(encode_grpc_timeout),
         };
         if let Some(timeout_value) = timeout_value {
             let _ = metadata.insert_or_replace("grpc-timeout", timeout_value);
@@ -1550,6 +1575,67 @@ mod tests {
             .filter(|(key, _)| key.eq_ignore_ascii_case("grpc-timeout"))
             .count();
         assert_eq!(timeout_count, 1);
+    }
+
+    /// br-asupersync-20occs: when channel.config.timeout is None AND the
+    /// request metadata carries a malformed grpc-timeout, the malformed
+    /// entry must be SCRUBBED before send. Previously the value rode
+    /// through to the wire because the existing-state classification only
+    /// distinguished parseable-or-fall-back-to-default, and with no
+    /// default to insert, the malformed entry was left untouched.
+    #[test]
+    fn occs20_malformed_grpc_timeout_scrubbed_when_channel_timeout_is_none() {
+        let channel = futures_lite::future::block_on(
+            // No .timeout(...) — channel.config.timeout is None.
+            Channel::builder("http://loopback:80").connect(),
+        )
+        .expect("channel");
+        let client = GrpcClient::new(channel);
+        let mut request = Request::new(Bytes::new());
+        request.metadata_mut().insert("grpc-timeout", "bogus");
+
+        let metadata = client
+            .build_outbound_metadata(&request, "/pkg.Service/Method")
+            .expect("metadata");
+
+        // Malformed entry MUST be scrubbed; with no channel default and no
+        // valid request value, no grpc-timeout entry should remain.
+        assert!(
+            metadata.get("grpc-timeout").is_none(),
+            "malformed grpc-timeout must be scrubbed when channel timeout is None, got: {:?}",
+            metadata.get("grpc-timeout")
+        );
+        let timeout_count = metadata
+            .iter()
+            .filter(|(key, _)| key.eq_ignore_ascii_case("grpc-timeout"))
+            .count();
+        assert_eq!(
+            timeout_count, 0,
+            "no grpc-timeout entries should remain after scrub"
+        );
+    }
+
+    /// br-asupersync-20occs: positive control — well-formed grpc-timeout
+    /// passes through unchanged regardless of channel default.
+    #[test]
+    fn occs20_well_formed_grpc_timeout_passes_through_with_no_channel_default() {
+        let channel =
+            futures_lite::future::block_on(Channel::builder("http://loopback:80").connect())
+                .expect("channel");
+        let client = GrpcClient::new(channel);
+        let mut request = Request::new(Bytes::new());
+        request.metadata_mut().insert("grpc-timeout", "100m");
+
+        let metadata = client
+            .build_outbound_metadata(&request, "/pkg.Service/Method")
+            .expect("metadata");
+
+        match metadata.get("grpc-timeout") {
+            Some(super::super::streaming::MetadataValue::Ascii(value)) => {
+                assert_eq!(value, "100m");
+            }
+            other => panic!("expected preserved grpc-timeout, got: {other:?}"),
+        }
     }
 
     #[test]
