@@ -73,32 +73,39 @@ impl Default for HappyEyeballsConfig {
 /// family appended at the end.
 #[must_use]
 pub fn sort_addresses(addrs: &[IpAddr]) -> Vec<IpAddr> {
-    let mut v6_iter = addrs.iter().copied().filter(IpAddr::is_ipv6);
-    let mut v4_iter = addrs.iter().copied().filter(IpAddr::is_ipv4);
-
+    let v6_iter = addrs.iter().copied().filter(IpAddr::is_ipv6);
+    let v4_iter = addrs.iter().copied().filter(IpAddr::is_ipv4);
     let mut result = Vec::with_capacity(addrs.len());
 
+    extend_interleaved(&mut result, v6_iter, v4_iter);
+
+    result
+}
+
+fn extend_interleaved<T>(
+    result: &mut Vec<T>,
+    mut lead_iter: impl Iterator<Item = T>,
+    mut follow_iter: impl Iterator<Item = T>,
+) {
     loop {
-        match (v6_iter.next(), v4_iter.next()) {
-            (Some(v6_addr), Some(v4_addr)) => {
-                result.push(v6_addr);
-                result.push(v4_addr);
+        match (lead_iter.next(), follow_iter.next()) {
+            (Some(lead), Some(follow)) => {
+                result.push(lead);
+                result.push(follow);
             }
-            (Some(v6_addr), None) => {
-                result.push(v6_addr);
-                result.extend(v6_iter);
+            (Some(lead), None) => {
+                result.push(lead);
+                result.extend(lead_iter);
                 break;
             }
-            (None, Some(v4_addr)) => {
-                result.push(v4_addr);
-                result.extend(v4_iter);
+            (None, Some(follow)) => {
+                result.push(follow);
+                result.extend(follow_iter);
                 break;
             }
             (None, None) => break,
         }
     }
-
-    result
 }
 
 /// Sorts socket addresses per RFC 8305 §4 while preserving per-address ports.
@@ -110,51 +117,14 @@ pub fn sort_addresses(addrs: &[IpAddr]) -> Vec<IpAddr> {
 #[must_use]
 fn sort_socket_addrs(addrs: &[SocketAddr]) -> Vec<SocketAddr> {
     let prefer_v6 = addrs.first().is_none_or(SocketAddr::is_ipv6);
-    let mut v6_iter = addrs.iter().copied().filter(SocketAddr::is_ipv6);
-    let mut v4_iter = addrs.iter().copied().filter(SocketAddr::is_ipv4);
-
+    let v6_iter = addrs.iter().copied().filter(SocketAddr::is_ipv6);
+    let v4_iter = addrs.iter().copied().filter(SocketAddr::is_ipv4);
     let mut result = Vec::with_capacity(addrs.len());
 
     if prefer_v6 {
-        loop {
-            match (v6_iter.next(), v4_iter.next()) {
-                (Some(v6_addr), Some(v4_addr)) => {
-                    result.push(v6_addr);
-                    result.push(v4_addr);
-                }
-                (Some(v6_addr), None) => {
-                    result.push(v6_addr);
-                    result.extend(v6_iter);
-                    break;
-                }
-                (None, Some(v4_addr)) => {
-                    result.push(v4_addr);
-                    result.extend(v4_iter);
-                    break;
-                }
-                (None, None) => break,
-            }
-        }
+        extend_interleaved(&mut result, v6_iter, v4_iter);
     } else {
-        loop {
-            match (v4_iter.next(), v6_iter.next()) {
-                (Some(v4_addr), Some(v6_addr)) => {
-                    result.push(v4_addr);
-                    result.push(v6_addr);
-                }
-                (Some(v4_addr), None) => {
-                    result.push(v4_addr);
-                    result.extend(v4_iter);
-                    break;
-                }
-                (None, Some(v6_addr)) => {
-                    result.push(v6_addr);
-                    result.extend(v6_iter);
-                    break;
-                }
-                (None, None) => break,
-            }
-        }
+        extend_interleaved(&mut result, v4_iter, v6_iter);
     }
 
     result
