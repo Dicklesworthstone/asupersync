@@ -93,11 +93,16 @@ pub async fn mpsc_stress_test(
             ..config.base.clone()
         };
 
-        println!(
-            "Round {}/{}: cancel_prob={:.2}",
-            round + 1,
-            config.stress_rounds,
-            cancel_prob
+        // br-asupersync-tjxgrg: route diagnostics through tracing so
+        // these pub-fn stress harnesses don't write to stdout/stderr
+        // when reused outside the test runner. AGENTS.md "Core code
+        // should not write to stdout/stderr" applies — these fns
+        // ship as part of the library API.
+        tracing::info!(
+            round = round + 1,
+            total_rounds = config.stress_rounds,
+            cancel_prob,
+            "stress_test: round starting"
         );
 
         let oracle = Arc::new(AtomicityOracle::new(round_config.clone()));
@@ -106,6 +111,12 @@ pub async fn mpsc_stress_test(
         let (sender, receiver) = mpsc::channel::<u64>(round_config.capacity);
         let expected_messages = round_config.num_producers * round_config.messages_per_producer;
 
+        // br-asupersync-tjxgrg: builds a FRESH per-round asupersync
+        // runtime independent of the outer block_on (which is a
+        // futures_lite::block_on driving this async fn). Nested in the
+        // sense that an outer executor is on the stack, but the inner
+        // runtime owns its own scheduler thread — there is no shared
+        // resource between them so the pattern does not deadlock.
         let runtime = RuntimeBuilder::current_thread().build()?;
         let handle = runtime.handle();
 
@@ -150,8 +161,8 @@ pub async fn mpsc_stress_test(
                 for (i, producer) in producers.into_iter().enumerate() {
                     match timeout(wall_now(), Duration::from_secs(5), producer).await {
                         Ok(Ok(())) => {}
-                        Ok(Err(e)) => eprintln!("Producer {} failed: {:?}", i, e),
-                        Err(_) => eprintln!("Producer {} timed out", i),
+                        Ok(Err(e)) => tracing::warn!(producer = i, error = ?e, "stress_test: producer failed"),
+                        Err(_) => tracing::warn!(producer = i, "stress_test: producer timed out"),
                     }
                 }
 
@@ -161,19 +172,19 @@ pub async fn mpsc_stress_test(
                 // Wait for consumer with timeout
                 match timeout(wall_now(), Duration::from_secs(5), consumer).await {
                     Ok(Ok(messages)) => {
-                        println!(
-                            "Round {} completed: received {} messages",
-                            round + 1,
-                            messages.len()
+                        tracing::info!(
+                            round = round + 1,
+                            received = messages.len(),
+                            "stress_test: round completed"
                         );
                         Some(messages.len())
                     }
                     Ok(Err(e)) => {
-                        eprintln!("Consumer error in round {}: {:?}", round + 1, e);
+                        tracing::warn!(round = round + 1, error = ?e, "stress_test: consumer error");
                         None
                     }
                     Err(_) => {
-                        eprintln!("Consumer timed out in round {}", round + 1);
+                        tracing::warn!(round = round + 1, "stress_test: consumer timed out");
                         None
                     }
                 }
@@ -189,10 +200,7 @@ pub async fn mpsc_stress_test(
                 let violations = stats.invariant_violations.load(Ordering::Acquire);
                 let consistency_ok = oracle.verify_final_consistency();
 
-                println!(
-                    "  Sent: {}, Received: {}, Violations: {}",
-                    sent, recv_count, violations
-                );
+                tracing::info!(sent, received = recv_count, violations, "stress_test: round stats");
 
                 total_violations += violations;
                 max_cancellation_rate = max_cancellation_rate.max(cancel_prob);
@@ -202,7 +210,7 @@ pub async fn mpsc_stress_test(
                     total_messages += sent;
                 } else {
                     total_violations += 1;
-                    eprintln!("CONSISTENCY FAILURE in round {}", round + 1);
+                    tracing::error!(round = round + 1, "stress_test: CONSISTENCY FAILURE");
                 }
             }
             // br-asupersync-xzqhw3: a round that fails to drive the
@@ -213,11 +221,11 @@ pub async fn mpsc_stress_test(
             // never returned. Count both incomplete-round shapes as
             // violations so the test surfaces them.
             Ok(None) => {
-                eprintln!("Round {} failed to complete properly", round + 1);
+                tracing::warn!(round = round + 1, "stress_test: round failed to complete properly");
                 total_violations += 1;
             }
             Err(_) => {
-                eprintln!("Round {} timed out", round + 1);
+                tracing::warn!(round = round + 1, "stress_test: round timed out");
                 total_violations += 1;
             }
         }
@@ -277,10 +285,7 @@ pub async fn oneshot_stress_test() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        println!(
-            "Oneshot stress test: {}/1000 operations successful",
-            successes
-        );
+        tracing::info!(successes, total = 1000, "oneshot_stress_test: completed");
         assert!(successes >= 995, "Too many oneshot failures"); // Allow some variance
     });
 
@@ -348,14 +353,11 @@ pub async fn broadcast_stress_test() -> Result<(), Box<dyn std::error::Error>> {
         let mut total_received = 0;
         for handle in subscribers {
             let (subscriber_id, count) = handle.await;
-            println!("Subscriber {}: received {} messages", subscriber_id, count);
+            tracing::debug!(subscriber_id, received = count, "broadcast_stress_test: subscriber result");
             total_received += count;
         }
 
-        println!(
-            "Broadcast stress test: sent {}, total received {}",
-            sent, total_received
-        );
+        tracing::info!(sent, total_received, "broadcast_stress_test: completed");
         assert!(
             total_received >= sent * num_subscribers / 2,
             "Too few messages received"
@@ -419,13 +421,24 @@ pub async fn watch_stress_test() -> Result<(), Box<dyn std::error::Error>> {
 
         // Send updates
         let sender_handle = handle.spawn(async move {
+            // br-asupersync-tjxgrg: was sender.send(...).unwrap(). If all
+            // watchers exit early via consecutive-timeouts or a select
+            // error, watch::Sender::send returns Err(SendError) — and
+            // unwrap() panicked the test harness instead of completing.
+            // Treat send-after-watchers-gone as a benign early-exit
+            // signal so the harness reports an honest "sent N up to
+            // exit" count.
+            let mut sent_count = 0usize;
             for i in 1..=num_updates {
-                sender.send(i as u32).unwrap();
+                if sender.send(i as u32).is_err() {
+                    break;
+                }
+                sent_count = i;
                 if i % 100 == 0 {
                     sleep(wall_now(), Duration::from_micros(10)).await;
                 }
             }
-            num_updates
+            sent_count
         });
 
         let sent = sender_handle.await;
