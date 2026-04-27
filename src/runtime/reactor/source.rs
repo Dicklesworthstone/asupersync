@@ -132,11 +132,10 @@ mod platform {
             }
         }
 
-        /// Creates a new source wrapper with a specific ID.
-        ///
-        /// This is useful when you need to control the ID assignment.
+        /// Test-only helper that bypasses automatic unique ID generation.
+        #[cfg(test)]
         #[must_use]
-        pub fn with_id(inner: T, id: u64) -> Self {
+        pub(crate) fn with_id(inner: T, id: u64) -> Self {
             Self { inner, id }
         }
 
@@ -226,9 +225,10 @@ mod platform {
             }
         }
 
-        /// Creates a new source wrapper with a specific ID.
+        /// Test-only helper that bypasses automatic unique ID generation.
+        #[cfg(test)]
         #[must_use]
-        pub fn with_id(inner: T, id: u64) -> Self {
+        pub(crate) fn with_id(inner: T, id: u64) -> Self {
             Self { inner, id }
         }
 
@@ -300,9 +300,10 @@ mod platform {
             }
         }
 
-        /// Creates a new source wrapper with a specific ID.
+        /// Test-only helper that bypasses automatic unique ID generation.
+        #[cfg(test)]
         #[must_use]
-        pub fn with_id(inner: T, id: u64) -> Self {
+        pub(crate) fn with_id(inner: T, id: u64) -> Self {
             Self { inner, id }
         }
 
