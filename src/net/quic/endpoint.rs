@@ -6,8 +6,11 @@ use super::config::{ClientAuth, QuicConfig};
 use super::connection::QuicConnection;
 use super::error::QuicError;
 use crate::cx::Cx;
+use std::future::{Future, poll_fn};
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Poll;
 
 /// A QUIC endpoint for creating client or server connections.
 ///
@@ -164,9 +167,7 @@ impl QuicEndpoint {
         cx.checkpoint()?;
 
         let connecting = self.inner.connect(addr, server_name)?;
-
-        // Wait for the connection to complete
-        let connection = connecting.await?;
+        let connection = wait_with_cx(cx, connecting).await??;
 
         Ok(QuicConnection::new(connection))
     }
@@ -182,7 +183,7 @@ impl QuicEndpoint {
         cx.checkpoint()?;
 
         let connecting = self.inner.connect_with(config, addr, server_name)?;
-        let connection = connecting.await?;
+        let connection = wait_with_cx(cx, connecting).await??;
 
         Ok(QuicConnection::new(connection))
     }
@@ -197,9 +198,14 @@ impl QuicEndpoint {
     pub async fn accept(&self, cx: &Cx) -> Result<QuicIncoming, QuicError> {
         cx.checkpoint()?;
 
-        let incoming = self.inner.accept().await.ok_or(QuicError::EndpointClosed)?;
+        let incoming = wait_with_cx(cx, self.inner.accept())
+            .await?
+            .ok_or(QuicError::EndpointClosed)?;
 
-        Ok(QuicIncoming { inner: incoming })
+        Ok(QuicIncoming {
+            inner: incoming,
+            cx: cx.clone(),
+        })
     }
 
     /// Get the local address this endpoint is bound to.
@@ -230,12 +236,13 @@ impl QuicEndpoint {
 #[derive(Debug)]
 pub struct QuicIncoming {
     inner: quinn::Connecting,
+    cx: Cx,
 }
 
 impl QuicIncoming {
     /// Wait for the TLS handshake to complete and establish the connection.
     pub async fn handshake(self) -> Result<QuicConnection, QuicError> {
-        let connection = self.inner.await?;
+        let connection = wait_with_cx(&self.cx, self.inner).await??;
         Ok(QuicConnection::new(connection))
     }
 
@@ -243,6 +250,20 @@ impl QuicIncoming {
     pub fn remote_address(&self) -> SocketAddr {
         self.inner.remote_address()
     }
+}
+
+async fn wait_with_cx<T, F>(cx: &Cx, future: F) -> Result<T, QuicError>
+where
+    F: Future<Output = T>,
+{
+    let mut future = std::pin::pin!(future);
+    poll_fn(|poll_cx| {
+        if let Err(err) = cx.checkpoint() {
+            return Poll::Ready(Err(QuicError::from(err)));
+        }
+        future.as_mut().poll(poll_cx).map(Ok)
+    })
+    .await
 }
 
 /// Skip server certificate verification (for testing).
@@ -294,5 +315,58 @@ impl rustls::client::danger::ServerCertVerifier for SkipServerVerification {
             rustls::SignatureScheme::RSA_PSS_SHA512,
             rustls::SignatureScheme::ED25519,
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
+
+    use super::*;
+    use std::task::Context;
+
+    fn noop_waker() -> std::task::Waker {
+        std::task::Waker::noop().clone()
+    }
+
+    struct PendingOnce {
+        polled: bool,
+    }
+
+    impl Future for PendingOnce {
+        type Output = ();
+
+        fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            if self.polled {
+                Poll::Ready(())
+            } else {
+                self.polled = true;
+                Poll::Pending
+            }
+        }
+    }
+
+    #[test]
+    fn wait_with_cx_returns_cancelled_when_context_is_cancelled_between_polls() {
+        let cx = Cx::for_testing();
+        let mut future = std::pin::pin!(wait_with_cx(&cx, PendingOnce { polled: false }));
+        let waker = noop_waker();
+        let mut poll_cx = Context::from_waker(&waker);
+
+        assert!(matches!(future.as_mut().poll(&mut poll_cx), Poll::Pending));
+
+        cx.set_cancel_requested(true);
+
+        match future.as_mut().poll(&mut poll_cx) {
+            Poll::Ready(Err(QuicError::Cancelled)) => {}
+            other => panic!("expected cancelled result, got {other:?}"),
+        }
     }
 }
