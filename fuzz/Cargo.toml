@@ -2241,3 +2241,10 @@ path = "fuzz_targets/transport_sink_collecting.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "raptorq_decoding_pipeline_feed"
+path = "fuzz_targets/raptorq_decoding_pipeline_feed.rs"
+test = false
+doc = false
+bench = false
