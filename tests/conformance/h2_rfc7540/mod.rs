@@ -12,6 +12,10 @@ pub mod connection_tests;
 pub mod error_tests;
 pub mod flow_control_tests;
 pub mod frame_format_tests;
+pub mod h2c_upgrade_tests;
+pub mod hpack_dynamic_table_update_tests;
+pub mod huffman_padding_tests;
+pub mod preface_byte_exact_tests;
 pub mod priority_tests;
 pub mod settings_tests;
 pub mod stream_tests;
@@ -56,6 +60,8 @@ pub enum TestCategory {
     Priority,
     /// Security considerations.
     Security,
+    /// Header compression (RFC 7541 HPACK).
+    HeaderCompression,
 }
 
 /// RFC 7540 requirement levels.
@@ -124,6 +130,12 @@ impl H2ConformanceHarness {
 
         // Priority tests (RFC 7540 Section 5.3)
         results.extend(priority_tests::run_priority_tests());
+
+        // New conformance tests
+        results.extend(preface_byte_exact_tests::run_preface_byte_exact_tests());
+        results.extend(hpack_dynamic_table_update_tests::run_hpack_dynamic_table_update_tests());
+        results.extend(h2c_upgrade_tests::run_h2c_upgrade_tests());
+        results.extend(huffman_padding_tests::run_huffman_padding_tests());
 
         results
     }
