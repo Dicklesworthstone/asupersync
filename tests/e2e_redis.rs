@@ -10,7 +10,7 @@ mod redis_e2e;
 
 use asupersync::cx::Cx;
 use asupersync::messaging::RedisClient;
-use asupersync::messaging::redis::RespValue;
+use asupersync::messaging::redis::{PubSubEvent, RespValue};
 use std::time::Duration;
 
 fn init_redis_test(name: &str) {
@@ -279,6 +279,107 @@ fn redis_e2e_cmd_bytes_binary_echo() {
             RespValue::BulkString(Some(payload.to_vec())),
             resp
         );
+    });
+
+    test_complete!(name);
+}
+
+#[test]
+fn redis_e2e_transaction_exec_roundtrip() {
+    let name = "redis_e2e_transaction_exec_roundtrip";
+    init_redis_test(name);
+    let Some(url) = redis_url_or_skip(name) else {
+        return;
+    };
+    let key = key_for(name, "tx");
+
+    futures_lite::future::block_on(async move {
+        let cx: Cx = Cx::for_testing();
+        let client = RedisClient::connect(&cx, &url).await.expect("connect");
+        let _ = client.del(&cx, &[&key]).await;
+
+        let mut tx = client.transaction(&cx).await.expect("MULTI");
+        tx.cmd(&cx, &["SET", &key, "queued"])
+            .await
+            .expect("queue SET");
+        tx.cmd(&cx, &["GET", &key]).await.expect("queue GET");
+        let responses = tx.exec(&cx).await.expect("EXEC");
+
+        assert_with_log!(responses.len() == 2, "transaction len", 2, responses.len());
+        assert_with_log!(
+            responses[0] == RespValue::SimpleString("OK".to_string()),
+            "transaction set reply",
+            RespValue::SimpleString("OK".to_string()),
+            responses[0].clone()
+        );
+        assert_with_log!(
+            responses[1] == RespValue::BulkString(Some(b"queued".to_vec())),
+            "transaction get reply",
+            RespValue::BulkString(Some(b"queued".to_vec())),
+            responses[1].clone()
+        );
+
+        let got = client.get(&cx, &key).await.expect("GET");
+        assert_with_log!(
+            got.as_deref() == Some(b"queued"),
+            "post-exec get",
+            Some(b"queued"),
+            got
+        );
+        let _ = client.del(&cx, &[&key]).await;
+    });
+
+    test_complete!(name);
+}
+
+#[test]
+fn redis_e2e_psubscribe_publish_delivers_pattern_message() {
+    let name = "redis_e2e_psubscribe_publish_delivers_pattern_message";
+    init_redis_test(name);
+    let Some(url) = redis_url_or_skip(name) else {
+        return;
+    };
+    let channel = key_for(name, "channel");
+    let pattern = format!("{channel}*");
+
+    futures_lite::future::block_on(async move {
+        let cx: Cx = Cx::for_testing();
+        let publisher = RedisClient::connect(&cx, &url)
+            .await
+            .expect("publisher connect");
+        let subscriber_client = RedisClient::connect(&cx, &url)
+            .await
+            .expect("subscriber connect");
+
+        let mut pubsub = subscriber_client.pubsub(&cx).await.expect("pubsub");
+        pubsub
+            .psubscribe(&cx, &[&pattern])
+            .await
+            .expect("PSUBSCRIBE");
+
+        let delivered = publisher
+            .publish(&cx, &channel, b"pattern-payload")
+            .await
+            .expect("PUBLISH");
+        assert_with_log!(delivered >= 1, "publish delivered", true, delivered >= 1);
+
+        let event = pubsub.next_event(&cx).await.expect("next_event");
+        assert_with_log!(
+            event
+                == PubSubEvent::Message(asupersync::messaging::redis::PubSubMessage {
+                    channel: channel.clone(),
+                    pattern: Some(pattern.clone()),
+                    payload: b"pattern-payload".to_vec(),
+                }),
+            "pattern pubsub event",
+            "pattern message",
+            format!("{event:?}")
+        );
+
+        pubsub
+            .punsubscribe(&cx, &[&pattern])
+            .await
+            .expect("PUNSUBSCRIBE");
     });
 
     test_complete!(name);
