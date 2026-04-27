@@ -89,45 +89,39 @@ impl Default for LengthDelimitedCodec {
     }
 }
 
+macro_rules! builder_setters {
+    ($(
+        $(#[$meta:meta])*
+        $name:ident: $ty:ty;
+    )*) => {
+        $(
+            $(#[$meta])*
+            #[inline]
+            #[must_use]
+            pub fn $name(mut self, val: $ty) -> Self {
+                self.$name = val;
+                self
+            }
+        )*
+    };
+}
+
 impl LengthDelimitedCodecBuilder {
-    /// Sets the length field offset.
-    #[inline]
-    #[must_use]
-    pub fn length_field_offset(mut self, val: usize) -> Self {
-        self.length_field_offset = val;
-        self
-    }
+    builder_setters! {
+        /// Sets the length field offset.
+        length_field_offset: usize;
 
-    /// Sets the length field length (1..=8 bytes).
-    #[inline]
-    #[must_use]
-    pub fn length_field_length(mut self, val: usize) -> Self {
-        self.length_field_length = val;
-        self
-    }
+        /// Sets the length field length (1..=8 bytes).
+        length_field_length: usize;
 
-    /// Adjusts the reported length by this amount.
-    #[inline]
-    #[must_use]
-    pub fn length_adjustment(mut self, val: isize) -> Self {
-        self.length_adjustment = val;
-        self
-    }
+        /// Adjusts the reported length by this amount.
+        length_adjustment: isize;
 
-    /// Number of bytes to skip before frame data.
-    #[inline]
-    #[must_use]
-    pub fn num_skip(mut self, val: usize) -> Self {
-        self.num_skip = val;
-        self
-    }
+        /// Number of bytes to skip before frame data.
+        num_skip: usize;
 
-    /// Sets the maximum frame length.
-    #[inline]
-    #[must_use]
-    pub fn max_frame_length(mut self, val: usize) -> Self {
-        self.max_frame_length = val;
-        self
+        /// Sets the maximum frame length.
+        max_frame_length: usize;
     }
 
     /// Configures the codec to read lengths in big-endian order.
@@ -966,7 +960,7 @@ mod tests {
         let mut codec = builder.new_codec();
         let mut dst = BytesMut::new();
         codec
-            .encode(BytesMut::from(&b"lock"[..]), &mut dst)
+            .encode(BytesMut::from(&b"Hello, Golden Frame!"[..]), &mut dst)
             .unwrap();
         dst
     }
@@ -1500,7 +1494,7 @@ mod tests {
     }
 
     #[test]
-    fn metamorphic_decoder_boundary_oversized_prefixes_reject_without_consuming_header() {
+    fn metamorphic_decoder_boundary_oversized_prefixes_consume_header_then_skip() {
         for (length_field_length, big_endian, max_frame_length) in [
             (1, true, 31usize),
             (1, false, 31usize),
@@ -1590,10 +1584,14 @@ mod tests {
                     "oversized prefix must raise InvalidData for {:?}",
                     config
                 );
-                assert_eq!(
-                    src.as_ref(),
-                    header.as_slice(),
-                    "oversized-prefix rejection must not consume header bytes for {:?}",
+                assert!(
+                    src.is_empty(),
+                    "oversized-prefix rejection must consume header bytes for {:?}",
+                    config
+                );
+                assert!(
+                    matches!(decoder.decode(&mut src), Ok(None)),
+                    "skip state should wait for offending body bytes for {:?}",
                     config
                 );
             }
