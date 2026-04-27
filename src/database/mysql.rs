@@ -2879,10 +2879,7 @@ impl MySqlConnection {
         // REPEATABLE READ or worse, breaking correctness assumptions
         // for read-modify-write workloads.
         let observed_level = match self
-            .query_unchecked(
-                cx,
-                "SELECT @@SESSION.transaction_isolation AS isolation",
-            )
+            .query_unchecked(cx, "SELECT @@SESSION.transaction_isolation AS isolation")
             .await
         {
             Outcome::Ok(rows) => match rows
@@ -4563,10 +4560,7 @@ mod tests {
         let msg = format!("{err}");
         assert!(msg.contains("SERIALIZABLE"), "missing requested in {msg}");
         assert!(msg.contains("REPEATABLE-READ"), "missing observed in {msg}");
-        assert!(
-            msg.contains("dvgvcu"),
-            "missing bead trace in {msg}"
-        );
+        assert!(msg.contains("dvgvcu"), "missing bead trace in {msg}");
     }
 
     #[test]

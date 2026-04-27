@@ -1217,10 +1217,8 @@ impl InactivationDecoder {
         symbol_size: usize,
         seed: u64,
     ) -> Result<Self, crate::raptorq::systematic::SystematicParamError> {
-        let params = crate::raptorq::systematic::SystematicParams::try_for_source_block(
-            k,
-            symbol_size,
-        )?;
+        let params =
+            crate::raptorq::systematic::SystematicParams::try_for_source_block(k, symbol_size)?;
         Ok(Self {
             params,
             seed,
@@ -5945,8 +5943,7 @@ mod tests {
     /// br-asupersync-cjv6x4: try_new succeeds for valid K.
     #[test]
     fn inactivation_decoder_try_new_accepts_valid_k() {
-        let decoder = InactivationDecoder::try_new(10, 64, 1)
-            .expect("try_new must accept K=10");
+        let decoder = InactivationDecoder::try_new(10, 64, 1).expect("try_new must accept K=10");
         // Smoke check: params populated.
         assert!(decoder.params().k >= 10);
     }

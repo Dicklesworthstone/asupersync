@@ -139,7 +139,9 @@ fn window_update_zero_increment_on_connection_must_reject() {
     let mut conn = Connection::server(Settings::default());
     handshake(&mut conn);
 
-    let zero = Frame::WindowUpdate(WindowUpdateFrame::new(/* stream */ 0, /* incr */ 0));
+    let zero = Frame::WindowUpdate(WindowUpdateFrame::new(
+        /* stream */ 0, /* incr */ 0,
+    ));
     let result = conn.process_frame(zero);
     assert!(
         result.is_err(),

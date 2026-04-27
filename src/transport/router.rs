@@ -633,8 +633,7 @@ impl LoadBalancer {
                         // is preserved; across routers the salt
                         // differs so cross-deployment pre-compute
                         // attacks fail.
-                        let mut ring =
-                            crate::distributed::HashRing::new(64, self.hash_ring_salt);
+                        let mut ring = crate::distributed::HashRing::new(64, self.hash_ring_salt);
                         for ep in &healthy {
                             ring.add_node(ep.id.0.to_string());
                         }

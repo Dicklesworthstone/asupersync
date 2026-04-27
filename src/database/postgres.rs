@@ -3522,10 +3522,7 @@ impl PgConnection {
         // error. Without this verify, a caller that requests
         // SERIALIZABLE could be silently transacting at READ
         // COMMITTED, breaking correctness for read-modify-write.
-        let observed_level = match self
-            .query_unchecked(cx, "SHOW transaction_isolation")
-            .await
-        {
+        let observed_level = match self.query_unchecked(cx, "SHOW transaction_isolation").await {
             Outcome::Ok(rows) => match rows
                 .first()
                 .and_then(|r| r.get_str("transaction_isolation").ok())

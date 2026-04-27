@@ -150,7 +150,10 @@ fn raptorq_proof_partial_loss_recovers_original_and_replays() {
         &[
             ("phase", "decode"),
             ("outcome", &format!("{outcome:?}")),
-            ("recovered_source_len", &success.result.source.len().to_string()),
+            (
+                "recovered_source_len",
+                &success.result.source.len().to_string(),
+            ),
             ("proof_version", &success.proof.version.to_string()),
         ],
     );
@@ -169,7 +172,10 @@ fn raptorq_proof_partial_loss_recovers_original_and_replays() {
         &[
             ("phase", "replay"),
             ("ok", if replay.is_ok() { "true" } else { "false" }),
-            ("content_hash_hex", &format!("{:016x}", proof.content_hash())),
+            (
+                "content_hash_hex",
+                &format!("{:016x}", proof.content_hash()),
+            ),
         ],
     );
     replay.expect("replay_and_verify must succeed on the originating symbol set");
@@ -252,10 +258,7 @@ fn raptorq_proof_insufficient_symbols_emits_well_formed_failure_proof() {
         "raptorq.proof.failure.replay",
         &[
             ("phase", "replay"),
-            (
-                "replay_ok",
-                if replay.is_ok() { "true" } else { "false" },
-            ),
+            ("replay_ok", if replay.is_ok() { "true" } else { "false" }),
         ],
     );
     // Either replay returns Ok (the actual decoder run also produced
@@ -348,8 +351,7 @@ fn raptorq_proof_recovery_is_invariant_under_received_symbol_permutation() {
     // The received multiset hash MUST match — it is intentionally
     // order-independent (proof.rs `ReceivedEsiMultisetHashState`).
     assert_eq!(
-        canonical.proof.received.esi_multiset_hash,
-        permuted.proof.received.esi_multiset_hash,
+        canonical.proof.received.esi_multiset_hash, permuted.proof.received.esi_multiset_hash,
         "esi_multiset_hash must be permutation-invariant"
     );
 

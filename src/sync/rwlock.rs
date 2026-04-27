@@ -2557,7 +2557,7 @@ mod tests {
             }
             if let Some(i) = popped {
                 writers_drained += 1;
-                let _ = writer_futs.remove(i);
+                drop(writer_futs.remove(i));
             } else {
                 // No writer ready means the forced reader-batch fired.
                 // Verify the reader is now ready.

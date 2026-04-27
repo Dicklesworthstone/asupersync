@@ -12,6 +12,7 @@ use crate::bytes::Bytes;
 
 use super::error::{ErrorCode, H2Error};
 use super::frame::PrioritySpec;
+#[cfg(test)]
 use super::hpack::Header;
 use super::settings::DEFAULT_INITIAL_WINDOW_SIZE;
 

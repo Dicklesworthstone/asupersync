@@ -172,10 +172,11 @@ use std::sync::atomic::AtomicU64;
 /// for the per-event log shape.
 static SILENT_SESSION_CONSUME_COUNT: AtomicU64 = AtomicU64::new(0);
 
-/// br-asupersync-wue53y: read the current value of the silent-
-/// consume counter. Lab tests use this to assert the audit-trail
-/// fires on each Err arm; production observability scrapes it via
-/// the metrics provider.
+/// Read the current silent-consume counter value.
+///
+/// br-asupersync-wue53y: lab tests use this to assert the audit
+/// trail fires on each Err arm, and production observability can
+/// scrape it via the metrics provider.
 #[must_use]
 pub fn silent_session_consume_count() -> u64 {
     SILENT_SESSION_CONSUME_COUNT.load(std::sync::atomic::Ordering::Relaxed)

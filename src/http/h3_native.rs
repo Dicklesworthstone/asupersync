@@ -3342,7 +3342,9 @@ mod tests {
             .expect_err("must fail");
         assert_eq!(
             err,
-            H3NativeError::ControlProtocol("only HEADERS/DATA/DATAGRAM are valid on request streams")
+            H3NativeError::ControlProtocol(
+                "only HEADERS/DATA/DATAGRAM are valid on request streams"
+            )
         );
     }
 
@@ -3420,7 +3422,8 @@ mod tests {
         .expect("datagram");
         // DATA after a DATAGRAM still works — DATAGRAM did not
         // advance to "trailers" state.
-        st.on_frame(&H3Frame::Data(vec![2])).expect("data after datagram");
+        st.on_frame(&H3Frame::Data(vec![2]))
+            .expect("data after datagram");
         // Trailers still allowed.
         st.on_frame(&H3Frame::Headers(vec![0x81]))
             .expect("trailers after data after datagram");
