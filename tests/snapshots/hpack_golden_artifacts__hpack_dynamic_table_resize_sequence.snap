@@ -1,0 +1,104 @@
+---
+source: tests/hpack_golden_artifacts.rs
+expression: golden
+---
+{
+  "description": "Stateful HPACK dynamic table size update sequence across header blocks",
+  "blocks": [
+    {
+      "label": "initial_insert_default_table_size",
+      "use_huffman": false,
+      "sensitive": false,
+      "headers": [
+        {
+          "name": "x-a",
+          "value": "1"
+        }
+      ],
+      "encoded_bytes": [
+        64,
+        3,
+        120,
+        45,
+        97,
+        1,
+        49
+      ],
+      "decoded_headers": [
+        {
+          "name": "x-a",
+          "value": "1"
+        }
+      ],
+      "encoder_dynamic_table_size": 36,
+      "encoder_dynamic_table_max_size": 4096,
+      "decoder_dynamic_table_size": 36,
+      "decoder_dynamic_table_max_size": 4096
+    },
+    {
+      "label": "shrink_then_grow_before_next_block",
+      "use_huffman": false,
+      "sensitive": false,
+      "headers": [
+        {
+          "name": "x-b",
+          "value": "2"
+        }
+      ],
+      "encoded_bytes": [
+        63,
+        1,
+        63,
+        33,
+        64,
+        3,
+        120,
+        45,
+        98,
+        1,
+        50
+      ],
+      "decoded_headers": [
+        {
+          "name": "x-b",
+          "value": "2"
+        }
+      ],
+      "encoder_dynamic_table_size": 36,
+      "encoder_dynamic_table_max_size": 64,
+      "decoder_dynamic_table_size": 36,
+      "decoder_dynamic_table_max_size": 64
+    },
+    {
+      "label": "clear_dynamic_table_before_next_block",
+      "use_huffman": false,
+      "sensitive": false,
+      "headers": [
+        {
+          "name": "x-c",
+          "value": "3"
+        }
+      ],
+      "encoded_bytes": [
+        32,
+        64,
+        3,
+        120,
+        45,
+        99,
+        1,
+        51
+      ],
+      "decoded_headers": [
+        {
+          "name": "x-c",
+          "value": "3"
+        }
+      ],
+      "encoder_dynamic_table_size": 0,
+      "encoder_dynamic_table_max_size": 0,
+      "decoder_dynamic_table_size": 0,
+      "decoder_dynamic_table_max_size": 0
+    }
+  ]
+}

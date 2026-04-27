@@ -1,0 +1,85 @@
+---
+source: tests/hpack_golden_artifacts.rs
+expression: goldens
+---
+{
+  "huffman": {
+    "description": "Sensitive authorization header huffman mode",
+    "use_huffman": true,
+    "encoded_bytes": [
+      31,
+      8,
+      144,
+      186,
+      81,
+      216,
+      91,
+      20,
+      65,
+      73,
+      97,
+      82,
+      178,
+      79,
+      212,
+      181,
+      44,
+      17,
+      51
+    ],
+    "decoded_headers": [
+      {
+        "name": "authorization",
+        "value": "Bearer secret-token-123"
+      }
+    ],
+    "round_trip_successful": true,
+    "first_byte": 31,
+    "uses_never_indexed_wire_form": true,
+    "encoder_dynamic_table_size": 0,
+    "decoder_dynamic_table_size": 0
+  },
+  "literal": {
+    "description": "Sensitive authorization header literal mode",
+    "use_huffman": false,
+    "encoded_bytes": [
+      31,
+      8,
+      23,
+      66,
+      101,
+      97,
+      114,
+      101,
+      114,
+      32,
+      115,
+      101,
+      99,
+      114,
+      101,
+      116,
+      45,
+      116,
+      111,
+      107,
+      101,
+      110,
+      45,
+      49,
+      50,
+      51
+    ],
+    "decoded_headers": [
+      {
+        "name": "authorization",
+        "value": "Bearer secret-token-123"
+      }
+    ],
+    "round_trip_successful": true,
+    "first_byte": 31,
+    "uses_never_indexed_wire_form": true,
+    "encoder_dynamic_table_size": 0,
+    "decoder_dynamic_table_size": 0
+  }
+}

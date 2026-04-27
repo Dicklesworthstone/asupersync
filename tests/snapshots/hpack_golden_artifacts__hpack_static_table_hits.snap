@@ -1,0 +1,47 @@
+---
+source: tests/hpack_golden_artifacts.rs
+expression: golden
+---
+{
+  "description": "Headers with exact static table matches",
+  "headers": [
+    {
+      "name": ":method",
+      "value": "GET"
+    },
+    {
+      "name": ":method",
+      "value": "POST"
+    },
+    {
+      "name": ":path",
+      "value": "/"
+    },
+    {
+      "name": ":scheme",
+      "value": "https"
+    },
+    {
+      "name": ":status",
+      "value": "200"
+    }
+  ],
+  "config": {
+    "use_huffman": false,
+    "max_table_size": 4096,
+    "max_header_list_size": null
+  },
+  "encoded_bytes": [
+    130,
+    131,
+    132,
+    135,
+    136
+  ],
+  "encoded_size": 5,
+  "dynamic_table_state": {
+    "current_size": 0,
+    "entry_count": 0,
+    "entries": []
+  }
+}

@@ -1,0 +1,20 @@
+---
+source: tests/hpack_golden_artifacts.rs
+expression: golden
+---
+{
+  "description": "Empty header list",
+  "headers": [],
+  "config": {
+    "use_huffman": false,
+    "max_table_size": 4096,
+    "max_header_list_size": null
+  },
+  "encoded_bytes": [],
+  "encoded_size": 0,
+  "dynamic_table_state": {
+    "current_size": 0,
+    "entry_count": 0,
+    "entries": []
+  }
+}

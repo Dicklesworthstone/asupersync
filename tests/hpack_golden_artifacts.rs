@@ -68,6 +68,63 @@ struct HpackRoundTripGolden {
     round_trip_successful: bool,
 }
 
+/// Golden artifact representation of a sensitive HPACK round-trip.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HpackSensitiveRoundTripGolden {
+    /// Description of this test case.
+    description: String,
+    /// Whether Huffman encoding was enabled.
+    use_huffman: bool,
+    /// Encoded bytes emitted by `encode_sensitive`.
+    encoded_bytes: Vec<u8>,
+    /// Decoded headers after round-trip.
+    decoded_headers: Vec<HpackHeaderGolden>,
+    /// Whether the decoded headers exactly match the original input.
+    round_trip_successful: bool,
+    /// First byte of the encoded wire representation.
+    first_byte: u8,
+    /// Whether the wire format starts with the RFC 7541 never-indexed prefix.
+    uses_never_indexed_wire_form: bool,
+    /// Encoder dynamic table size after encoding.
+    encoder_dynamic_table_size: usize,
+    /// Decoder dynamic table size after decoding.
+    decoder_dynamic_table_size: usize,
+}
+
+/// Golden artifact for a single HPACK header block in a stateful sequence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HpackBlockGolden {
+    /// Human-readable label for this block.
+    label: String,
+    /// Whether Huffman encoding was enabled for this block.
+    use_huffman: bool,
+    /// Whether the block used `encode_sensitive`.
+    sensitive: bool,
+    /// Source headers for this block.
+    headers: Vec<HpackHeaderGolden>,
+    /// Encoded bytes for the block.
+    encoded_bytes: Vec<u8>,
+    /// Decoded headers after feeding the block through the decoder.
+    decoded_headers: Vec<HpackHeaderGolden>,
+    /// Encoder dynamic table size after the block.
+    encoder_dynamic_table_size: usize,
+    /// Encoder dynamic table size limit after the block.
+    encoder_dynamic_table_max_size: usize,
+    /// Decoder dynamic table size after the block.
+    decoder_dynamic_table_size: usize,
+    /// Decoder dynamic table size limit after the block.
+    decoder_dynamic_table_max_size: usize,
+}
+
+/// Golden artifact for a sequence of HPACK blocks that share encoder/decoder state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HpackBlockSequenceGolden {
+    /// Description of this test case.
+    description: String,
+    /// Ordered sequence of encoded/decoded blocks.
+    blocks: Vec<HpackBlockGolden>,
+}
+
 /// Golden representation of an HPACK header.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 struct HpackHeaderGolden {
@@ -307,6 +364,89 @@ fn test_hpack_round_trip(
     }
 }
 
+/// Tests a sensitive HPACK round-trip using RFC 7541 never-indexed encoding.
+fn test_hpack_sensitive_round_trip(
+    headers: &[Header],
+    use_huffman: bool,
+    description: &str,
+) -> HpackSensitiveRoundTripGolden {
+    let mut encoder = Encoder::new();
+    encoder.set_use_huffman(use_huffman);
+    let mut dst = BytesMut::new();
+    encoder.encode_sensitive(headers, &mut dst);
+    let encoded_bytes = dst.to_vec();
+
+    let mut decoder = Decoder::new();
+    let mut src = Bytes::from(encoded_bytes.clone());
+    let decode_result = decoder.decode(&mut src);
+    let (decoded_headers, round_trip_successful) = match decode_result {
+        Ok(decoded) => {
+            let original_golden: Vec<HpackHeaderGolden> =
+                headers.iter().map(HpackHeaderGolden::from).collect();
+            let decoded_golden: Vec<HpackHeaderGolden> =
+                decoded.iter().map(HpackHeaderGolden::from).collect();
+            let successful = original_golden == decoded_golden;
+            (decoded_golden, successful)
+        }
+        Err(_) => (vec![], false),
+    };
+
+    let first_byte = encoded_bytes.first().copied().unwrap_or(0);
+    let uses_never_indexed_wire_form = (first_byte & 0xF0) == 0x10;
+
+    HpackSensitiveRoundTripGolden {
+        description: description.to_string(),
+        use_huffman,
+        encoded_bytes,
+        decoded_headers,
+        round_trip_successful,
+        first_byte,
+        uses_never_indexed_wire_form,
+        encoder_dynamic_table_size: encoder.dynamic_table_size(),
+        decoder_dynamic_table_size: decoder.dynamic_table_size(),
+    }
+}
+
+/// Encodes and decodes a stateful HPACK block, preserving encoder/decoder state.
+fn test_hpack_stateful_block(
+    encoder: &mut Encoder,
+    decoder: &mut Decoder,
+    headers: &[Header],
+    use_huffman: bool,
+    sensitive: bool,
+    label: &str,
+) -> HpackBlockGolden {
+    encoder.set_use_huffman(use_huffman);
+    let mut dst = BytesMut::new();
+    if sensitive {
+        encoder.encode_sensitive(headers, &mut dst);
+    } else {
+        encoder.encode(headers, &mut dst);
+    }
+    let encoded_bytes = dst.to_vec();
+
+    let mut src = Bytes::from(encoded_bytes.clone());
+    let decoded_headers = decoder
+        .decode(&mut src)
+        .expect("stateful HPACK golden block should decode successfully");
+
+    HpackBlockGolden {
+        label: label.to_string(),
+        use_huffman,
+        sensitive,
+        headers: headers.iter().map(HpackHeaderGolden::from).collect(),
+        encoded_bytes,
+        decoded_headers: decoded_headers
+            .iter()
+            .map(HpackHeaderGolden::from)
+            .collect(),
+        encoder_dynamic_table_size: encoder.dynamic_table_size(),
+        encoder_dynamic_table_max_size: encoder.dynamic_table_max_size(),
+        decoder_dynamic_table_size: decoder.dynamic_table_size(),
+        decoder_dynamic_table_max_size: decoder.dynamic_table_max_size(),
+    }
+}
+
 #[test]
 fn test_hpack_basic_encoding_no_huffman() {
     let headers = create_test_headers("basic_get");
@@ -501,4 +641,120 @@ fn test_hpack_deterministic_encoding() {
     );
 
     assert_json_snapshot!("hpack_deterministic_encoding", golden1);
+}
+
+#[test]
+fn test_hpack_sensitive_round_trip_modes() {
+    let headers = vec![Header {
+        name: "authorization".to_string(),
+        value: "Bearer secret-token-123".to_string(),
+    }];
+
+    let mut goldens = BTreeMap::new();
+    for (label, use_huffman) in [("literal", false), ("huffman", true)] {
+        let golden = test_hpack_sensitive_round_trip(
+            &headers,
+            use_huffman,
+            &format!("Sensitive authorization header {label} mode"),
+        );
+        assert!(
+            golden.round_trip_successful,
+            "Sensitive round-trip should be successful in {label} mode"
+        );
+        assert!(
+            golden.uses_never_indexed_wire_form,
+            "Sensitive headers must use RFC 7541 never-indexed encoding in {label} mode"
+        );
+        assert_eq!(
+            golden.encoder_dynamic_table_size, 0,
+            "Sensitive encoding must not populate the encoder dynamic table"
+        );
+        assert_eq!(
+            golden.decoder_dynamic_table_size, 0,
+            "Sensitive decoding must not populate the decoder dynamic table"
+        );
+        goldens.insert(label.to_string(), golden);
+    }
+
+    assert_json_snapshot!("hpack_sensitive_round_trip_modes", goldens);
+}
+
+#[test]
+fn test_hpack_dynamic_table_resize_sequence() {
+    let mut encoder = Encoder::new();
+    let mut decoder = Decoder::new();
+
+    let initial_headers = vec![Header {
+        name: "x-a".to_string(),
+        value: "1".to_string(),
+    }];
+    let initial_block = test_hpack_stateful_block(
+        &mut encoder,
+        &mut decoder,
+        &initial_headers,
+        false,
+        false,
+        "initial_insert_default_table_size",
+    );
+
+    encoder.set_max_table_size(32);
+    encoder.set_max_table_size(64);
+    let resized_headers = vec![Header {
+        name: "x-b".to_string(),
+        value: "2".to_string(),
+    }];
+    let resized_block = test_hpack_stateful_block(
+        &mut encoder,
+        &mut decoder,
+        &resized_headers,
+        false,
+        false,
+        "shrink_then_grow_before_next_block",
+    );
+
+    encoder.set_max_table_size(0);
+    let cleared_headers = vec![Header {
+        name: "x-c".to_string(),
+        value: "3".to_string(),
+    }];
+    let cleared_block = test_hpack_stateful_block(
+        &mut encoder,
+        &mut decoder,
+        &cleared_headers,
+        false,
+        false,
+        "clear_dynamic_table_before_next_block",
+    );
+
+    assert_eq!(
+        resized_block.encoder_dynamic_table_max_size, 64,
+        "Encoder should end the shrink/grow block at the final table size"
+    );
+    assert_eq!(
+        resized_block.decoder_dynamic_table_max_size, 64,
+        "Decoder should observe the final table size after the update sequence"
+    );
+    assert_eq!(
+        cleared_block.encoder_dynamic_table_max_size, 0,
+        "Encoder should clear the dynamic table when max size becomes zero"
+    );
+    assert_eq!(
+        cleared_block.decoder_dynamic_table_max_size, 0,
+        "Decoder should clear the dynamic table when max size becomes zero"
+    );
+    assert_eq!(
+        cleared_block.encoder_dynamic_table_size, 0,
+        "Zero-sized table should not retain encoder entries"
+    );
+    assert_eq!(
+        cleared_block.decoder_dynamic_table_size, 0,
+        "Zero-sized table should not retain decoder entries"
+    );
+
+    let golden = HpackBlockSequenceGolden {
+        description: "Stateful HPACK dynamic table size update sequence across header blocks"
+            .to_string(),
+        blocks: vec![initial_block, resized_block, cleared_block],
+    };
+    assert_json_snapshot!("hpack_dynamic_table_resize_sequence", golden);
 }

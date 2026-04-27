@@ -1,0 +1,108 @@
+---
+source: tests/hpack_golden_artifacts.rs
+expression: golden
+---
+{
+  "description": "Headers with empty values, special chars, unicode",
+  "headers": [
+    {
+      "name": "empty-value",
+      "value": ""
+    },
+    {
+      "name": "special-chars",
+      "value": "!@#$%^&*()"
+    },
+    {
+      "name": "unicode",
+      "value": "héllo wørld 🌍"
+    }
+  ],
+  "config": {
+    "use_huffman": true,
+    "max_table_size": 4096,
+    "max_header_list_size": null
+  },
+  "encoded_bytes": [
+    64,
+    136,
+    45,
+    53,
+    167,
+    210,
+    221,
+    199,
+    69,
+    165,
+    128,
+    64,
+    137,
+    69,
+    101,
+    33,
+    135,
+    66,
+    196,
+    156,
+    118,
+    35,
+    141,
+    254,
+    63,
+    245,
+    255,
+    95,
+    249,
+    87,
+    255,
+    207,
+    143,
+    159,
+    235,
+    251,
+    64,
+    133,
+    182,
+    163,
+    16,
+    242,
+    23,
+    158,
+    159,
+    255,
+    248,
+    255,
+    255,
+    187,
+    69,
+    7,
+    83,
+    199,
+    255,
+    241,
+    255,
+    254,
+    171,
+    40,
+    145,
+    79,
+    255,
+    255,
+    175,
+    255,
+    255,
+    191,
+    255,
+    254,
+    239,
+    255,
+    253,
+    239
+  ],
+  "encoded_size": 74,
+  "dynamic_table_state": {
+    "current_size": 0,
+    "entry_count": 0,
+    "entries": []
+  }
+}
