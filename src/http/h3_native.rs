@@ -193,7 +193,9 @@ pub enum H3UniStreamType {
 }
 
 impl H3UniStreamType {
-    fn decode(stream_type: u64) -> Self {
+    /// Decode a raw HTTP/3 unidirectional stream type.
+    #[must_use]
+    pub fn decode(stream_type: u64) -> Self {
         match stream_type {
             H3_STREAM_TYPE_CONTROL => Self::Control,
             H3_STREAM_TYPE_PUSH => Self::Push,
