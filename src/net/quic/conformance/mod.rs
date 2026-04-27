@@ -197,13 +197,8 @@ fn test_certificate_verification_requirement() -> ConformanceResult {
 }
 
 fn test_client_certificate_support() -> ConformanceResult {
-    let cx = test_cx();
-    let config = QuicConfig::default();
-
-    // Create a server that requires client certificates
-    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-
-    // This requires a full certificate setup which we don't have in unit tests
+    // br-asupersync-b56zt9: dropped unused cx/config/addr bindings — this
+    // arm currently returns Skipped pending a real cert harness.
     ConformanceResult::Skipped {
         reason: "Requires certificate infrastructure not available in unit tests".to_string(),
     }
@@ -256,8 +251,8 @@ fn test_initial_packet_handling() -> ConformanceResult {
 fn test_handshake_error_signaling() -> ConformanceResult {
     let cx = test_cx();
 
-    // Test invalid configuration scenarios
-    let mut config = QuicConfig::default();
+    // br-asupersync-b56zt9: was `let mut config` but never mutated.
+    let config = QuicConfig::default();
 
     // Test server without certificates
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
