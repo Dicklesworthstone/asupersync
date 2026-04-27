@@ -3613,47 +3613,28 @@ pub mod backpressure_metamorphic {
         let send_sequence = generate_send_sequence(producer_count, messages_per_producer, ordering, seed);
 
         // Execute the send sequence
-        let mut producer_handles = Vec::new();
-
-        match ordering {
-            ProducerOrdering::Sequential => {
-                // Each producer sends all its messages sequentially
-                for producer_id in 0..producer_count {
-                    let sender_clone = sender.clone();
-                    let producer_cx = cx.clone();
-                    let handle = std::thread::spawn(move || {
-                        futures_lite::future::block_on(async move {
-                            for msg_ordinal in 0..messages_per_producer {
-                                let encoded = encode_sender_message(producer_id, msg_ordinal);
-                                let _ = sender_clone.send(&producer_cx, encoded).await;
-                            }
-                        })
-                    });
-                    producer_handles.push(handle);
-                }
-            },
-            ProducerOrdering::Interleaved | ProducerOrdering::RoundRobin => {
-                // Create all producers and let them send according to sequence
-                for producer_id in 0..producer_count {
-                    let sender_clone = sender.clone();
-                    let producer_cx = cx.clone();
-                    let sequence_for_producer: Vec<_> = send_sequence.iter()
+        let producer_handles: Vec<_> = (0..producer_count).map(|producer_id| {
+            let sender_clone = sender.clone();
+            let producer_cx = cx.clone();
+            let message_sequence = match ordering {
+                ProducerOrdering::Sequential => (0..messages_per_producer).collect(),
+                ProducerOrdering::Interleaved | ProducerOrdering::RoundRobin => {
+                    send_sequence.iter()
                         .filter(|(pid, _)| *pid == producer_id)
                         .map(|(_, ordinal)| *ordinal)
-                        .collect();
-
-                    let handle = std::thread::spawn(move || {
-                        futures_lite::future::block_on(async move {
-                            for msg_ordinal in sequence_for_producer {
-                                let encoded = encode_sender_message(producer_id, msg_ordinal);
-                                let _ = sender_clone.send(&producer_cx, encoded).await;
-                            }
-                        })
-                    });
-                    producer_handles.push(handle);
+                        .collect()
                 }
-            }
-        }
+            };
+
+            std::thread::spawn(move || {
+                futures_lite::future::block_on(async move {
+                    for msg_ordinal in message_sequence {
+                        let encoded = encode_sender_message(producer_id, msg_ordinal);
+                        let _ = sender_clone.send(&producer_cx, encoded).await;
+                    }
+                })
+            })
+        }).collect();
 
         // Wait for all producers to complete
         for handle in producer_handles {
@@ -3689,22 +3670,15 @@ pub mod backpressure_metamorphic {
                 Vec::new()
             },
             ProducerOrdering::RoundRobin => {
-                let mut sequence = Vec::new();
-                for msg_round in 0..messages_per_producer {
-                    for producer_id in 0..producer_count {
-                        sequence.push((producer_id, msg_round));
-                    }
-                }
-                sequence
+                (0..messages_per_producer)
+                    .flat_map(|msg_round| (0..producer_count).map(move |producer_id| (producer_id, msg_round)))
+                    .collect()
             },
             ProducerOrdering::Interleaved => {
                 // Pseudo-random interleaving based on seed
-                let mut sequence = Vec::new();
-                for producer_id in 0..producer_count {
-                    for msg_ordinal in 0..messages_per_producer {
-                        sequence.push((producer_id, msg_ordinal));
-                    }
-                }
+                let mut sequence: Vec<_> = (0..producer_count)
+                    .flat_map(|producer_id| (0..messages_per_producer).map(move |msg_ordinal| (producer_id, msg_ordinal)))
+                    .collect();
                 // Simple deterministic shuffle based on seed
                 let mut rng_state = seed;
                 for i in (1..sequence.len()).rev() {
@@ -3718,11 +3692,10 @@ pub mod backpressure_metamorphic {
     }
 
     fn multiset_from_messages(messages: &[u32]) -> std::collections::BTreeMap<u32, usize> {
-        let mut multiset = std::collections::BTreeMap::new();
-        for &msg in messages {
-            *multiset.entry(msg).or_insert(0) += 1;
-        }
-        multiset
+        messages.iter().copied().fold(std::collections::BTreeMap::new(), |mut acc, msg| {
+            *acc.entry(msg).or_insert(0) += 1;
+            acc
+        })
     }
 
     fn verify_fifo_per_producer(messages: &[u32], producer_count: usize) {
