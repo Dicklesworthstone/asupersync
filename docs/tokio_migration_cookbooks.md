@@ -191,10 +191,10 @@ implementations, preserving RFC 9000/9114 compliance.
 | Recipe | From | To | Notes |
 |--------|------|-----|-------|
 | R4-01 | quinn::Endpoint | asupersync::net::quic::Endpoint | QUIC transport |
-| R4-02 | h3::client | asupersync::http::h3::client | H3 client |
-| R4-03 | h3::server | asupersync::http::h3::server | H3 server |
+| R4-02 | h3::client | asupersync::http::h3_native | H3 client primitives (Tokio-free) |
+| R4-03 | h3::server | asupersync::http::h3_native | H3 server primitives (Tokio-free) |
 | R4-04 | quinn::Connection | asupersync::net::quic::Connection | Stream mux |
-| R4-05 | QPACK encoder | asupersync::http::h3::qpack | Header compression |
+| R4-05 | QPACK encoder | asupersync::http::h3_native::{qpack_encode_field_section, qpack_decode_field_section} | Header compression |
 
 ### 5.3 Before/After
 
