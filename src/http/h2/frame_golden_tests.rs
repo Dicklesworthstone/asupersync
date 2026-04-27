@@ -42,7 +42,7 @@ impl FrameGoldenTester {
     /// Test frame serialization against a golden artifact.
     fn assert_frame_golden(&self, frame: &Frame, test_name: &str, expected_hex: &str) {
         let mut buf = BytesMut::new();
-        frame.encode(&mut buf);
+        frame.encode(&mut buf).expect("test frame fits");
         let actual_bytes = buf.freeze();
         let actual_hex = Self::to_hex(&actual_bytes);
 
@@ -371,7 +371,7 @@ fn test_basic_frame_sequence_golden() {
 
     let mut buf = BytesMut::new();
     for frame in &frames {
-        frame.encode(&mut buf);
+        frame.encode(&mut buf).expect("test frame fits");
     }
 
     let actual_hex = FrameGoldenTester::to_hex(&buf);
@@ -405,13 +405,13 @@ fn test_unknown_frame_golden() {
     // Golden: Unknown frame preserves payload exactly
     if tester.update_golden {
         let mut buf = BytesMut::new();
-        frame.encode(&mut buf);
+        frame.encode(&mut buf).expect("test frame fits");
         let actual_hex = FrameGoldenTester::to_hex(&buf);
         println!("UNKNOWN FRAME GOLDEN UPDATE: {actual_hex}");
     } else {
         // Simplified test - just verify it encodes without error
         let mut buf = BytesMut::new();
-        frame.encode(&mut buf);
+        frame.encode(&mut buf).expect("test frame fits");
         assert!(buf.len() > 9); // Header + payload
     }
 }
@@ -427,7 +427,7 @@ mod validation_tests {
         // Test that tester correctly encodes a simple frame
         let frame = Frame::Data(DataFrame::new(1, Bytes::from_static(b"test"), false));
         let mut buf = BytesMut::new();
-        frame.encode(&mut buf);
+        frame.encode(&mut buf).expect("test frame fits");
 
         assert_eq!(buf.len(), 9 + 4); // header + "test"
         assert_eq!(&buf[9..], b"test");

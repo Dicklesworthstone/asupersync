@@ -31,7 +31,7 @@ struct SettingsAckFrame {
 
 fn encode_frame(frame: &Frame) -> Vec<u8> {
     let mut buf = BytesMut::new();
-    frame.encode(&mut buf);
+    frame.encode(&mut buf).expect("encode");
     buf.to_vec()
 }
 

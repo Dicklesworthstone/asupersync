@@ -178,19 +178,41 @@ impl FrameHeader {
 
 /// Cast a payload length to the 24-bit H2 frame length field.
 ///
-/// # Panics
-///
-/// Panics if `len` exceeds `MAX_FRAME_SIZE`, preventing encoders from
-/// emitting a header length that disagrees with the bytes written.
+/// br-asupersync-pt23uf: returns Err(H2Error::frame_size) instead of
+/// panicking when `len` exceeds `MAX_FRAME_SIZE` (16 777 215 bytes per
+/// RFC 9113 §4.2). Previously this was an `assert!` that crashed the
+/// connection task on any caller bug or attacker-influenced echoed
+/// payload that exceeded the 24-bit length-field cap.
 #[inline]
-fn frame_length(len: usize) -> u32 {
-    assert!(
-        len <= MAX_FRAME_SIZE as usize,
-        "payload length {len} exceeds 24-bit max {MAX_FRAME_SIZE}"
-    );
+fn try_frame_length(len: usize) -> Result<u32, H2Error> {
+    if len > MAX_FRAME_SIZE as usize {
+        return Err(H2Error::frame_size(format!(
+            "payload length {len} exceeds 24-bit max {MAX_FRAME_SIZE} (br-asupersync-pt23uf)"
+        )));
+    }
     #[allow(clippy::cast_possible_truncation)]
     let len = len as u32;
-    len
+    Ok(len)
+}
+
+#[inline]
+fn checked_frame_length_sum(lhs: usize, rhs: usize) -> Result<u32, H2Error> {
+    let len = lhs.checked_add(rhs).ok_or_else(|| {
+        H2Error::frame_size(format!(
+            "payload length overflow while adding {lhs} and {rhs} (br-asupersync-pt23uf)"
+        ))
+    })?;
+    try_frame_length(len)
+}
+
+#[inline]
+fn checked_frame_length_product(lhs: usize, rhs: usize) -> Result<u32, H2Error> {
+    let len = lhs.checked_mul(rhs).ok_or_else(|| {
+        H2Error::frame_size(format!(
+            "payload length overflow while multiplying {lhs} by {rhs} (br-asupersync-pt23uf)"
+        ))
+    })?;
+    try_frame_length(len)
 }
 
 /// HTTP/2 frame.
@@ -246,7 +268,7 @@ impl Frame {
 
     /// Encode this frame to bytes.
     #[inline]
-    pub fn encode(&self, dst: &mut BytesMut) {
+    pub fn encode(&self, dst: &mut BytesMut) -> Result<(), H2Error> {
         match self {
             Self::Data(f) => f.encode(dst),
             Self::Headers(f) => f.encode(dst),
@@ -264,13 +286,14 @@ impl Frame {
                 payload,
             } => {
                 let header = FrameHeader {
-                    length: frame_length(payload.len()),
+                    length: try_frame_length(payload.len())?,
                     frame_type: *frame_type,
                     flags: 0,
                     stream_id: *stream_id,
                 };
                 header.write(dst);
                 dst.extend_from_slice(payload);
+                Ok(())
             }
         }
     }
@@ -332,20 +355,21 @@ impl DataFrame {
 
     /// Encode this frame.
     #[inline]
-    pub fn encode(&self, dst: &mut BytesMut) {
+    pub fn encode(&self, dst: &mut BytesMut) -> Result<(), H2Error> {
         let mut flags = 0u8;
         if self.end_stream {
             flags |= data_flags::END_STREAM;
         }
 
         let header = FrameHeader {
-            length: frame_length(self.data.len()),
+            length: try_frame_length(self.data.len())?,
             frame_type: FrameType::Data as u8,
             flags,
             stream_id: self.stream_id,
         };
         header.write(dst);
         dst.extend_from_slice(&self.data);
+        Ok(())
     }
 }
 
@@ -466,7 +490,7 @@ impl HeadersFrame {
 
     /// Encode this frame.
     #[inline]
-    pub fn encode(&self, dst: &mut BytesMut) {
+    pub fn encode(&self, dst: &mut BytesMut) -> Result<(), H2Error> {
         let mut flags = 0u8;
         if self.end_stream {
             flags |= headers_flags::END_STREAM;
@@ -475,14 +499,15 @@ impl HeadersFrame {
             flags |= headers_flags::END_HEADERS;
         }
 
-        let mut payload_len = self.header_block.len();
-        if self.priority.is_some() {
+        let length = if self.priority.is_some() {
             flags |= headers_flags::PRIORITY;
-            payload_len += 5;
-        }
+            checked_frame_length_sum(self.header_block.len(), 5)?
+        } else {
+            try_frame_length(self.header_block.len())?
+        };
 
         let header = FrameHeader {
-            length: frame_length(payload_len),
+            length,
             frame_type: FrameType::Headers as u8,
             flags,
             stream_id: self.stream_id,
@@ -499,6 +524,7 @@ impl HeadersFrame {
         }
 
         dst.extend_from_slice(&self.header_block);
+        Ok(())
     }
 }
 
@@ -565,7 +591,7 @@ impl PriorityFrame {
 
     /// Encode this frame.
     #[inline]
-    pub fn encode(&self, dst: &mut BytesMut) {
+    pub fn encode(&self, dst: &mut BytesMut) -> Result<(), H2Error> {
         let header = FrameHeader {
             length: 5,
             frame_type: FrameType::Priority as u8,
@@ -580,6 +606,7 @@ impl PriorityFrame {
         }
         dst.put_u32(dep);
         dst.put_u8(self.priority.weight);
+        Ok(())
     }
 }
 
@@ -626,7 +653,7 @@ impl RstStreamFrame {
 
     /// Encode this frame.
     #[inline]
-    pub fn encode(&self, dst: &mut BytesMut) {
+    pub fn encode(&self, dst: &mut BytesMut) -> Result<(), H2Error> {
         let header = FrameHeader {
             length: 4,
             frame_type: FrameType::RstStream as u8,
@@ -635,6 +662,7 @@ impl RstStreamFrame {
         };
         header.write(dst);
         dst.put_u32(self.error_code.into());
+        Ok(())
     }
 }
 
@@ -720,7 +748,7 @@ impl SettingsFrame {
 
     /// Encode this frame.
     #[inline]
-    pub fn encode(&self, dst: &mut BytesMut) {
+    pub fn encode(&self, dst: &mut BytesMut) -> Result<(), H2Error> {
         let mut flags = 0u8;
         if self.ack {
             flags |= settings_flags::ACK;
@@ -730,7 +758,7 @@ impl SettingsFrame {
         let encoded_settings: &[Setting] = if self.ack { &[] } else { &self.settings };
 
         let header = FrameHeader {
-            length: frame_length(encoded_settings.len().saturating_mul(6)),
+            length: checked_frame_length_product(encoded_settings.len(), 6)?,
             frame_type: FrameType::Settings as u8,
             flags,
             stream_id: 0,
@@ -741,6 +769,7 @@ impl SettingsFrame {
             dst.put_u16(setting.id());
             dst.put_u32(setting.value());
         }
+        Ok(())
     }
 }
 
@@ -873,14 +902,14 @@ impl PushPromiseFrame {
 
     /// Encode this frame.
     #[inline]
-    pub fn encode(&self, dst: &mut BytesMut) {
+    pub fn encode(&self, dst: &mut BytesMut) -> Result<(), H2Error> {
         let mut flags = 0u8;
         if self.end_headers {
             flags |= headers_flags::END_HEADERS;
         }
 
         let header = FrameHeader {
-            length: frame_length(4 + self.header_block.len()),
+            length: checked_frame_length_sum(self.header_block.len(), 4)?,
             frame_type: FrameType::PushPromise as u8,
             flags,
             stream_id: self.stream_id,
@@ -889,6 +918,7 @@ impl PushPromiseFrame {
 
         dst.put_u32(self.promised_stream_id & 0x7fff_ffff);
         dst.extend_from_slice(&self.header_block);
+        Ok(())
     }
 }
 
@@ -940,7 +970,7 @@ impl PingFrame {
 
     /// Encode this frame.
     #[inline]
-    pub fn encode(&self, dst: &mut BytesMut) {
+    pub fn encode(&self, dst: &mut BytesMut) -> Result<(), H2Error> {
         let mut flags = 0u8;
         if self.ack {
             flags |= ping_flags::ACK;
@@ -954,6 +984,7 @@ impl PingFrame {
         };
         header.write(dst);
         dst.extend_from_slice(&self.opaque_data);
+        Ok(())
     }
 }
 
@@ -1009,9 +1040,9 @@ impl GoAwayFrame {
 
     /// Encode this frame.
     #[inline]
-    pub fn encode(&self, dst: &mut BytesMut) {
+    pub fn encode(&self, dst: &mut BytesMut) -> Result<(), H2Error> {
         let header = FrameHeader {
-            length: frame_length(8 + self.debug_data.len()),
+            length: checked_frame_length_sum(self.debug_data.len(), 8)?,
             frame_type: FrameType::GoAway as u8,
             flags: 0,
             stream_id: 0,
@@ -1021,6 +1052,7 @@ impl GoAwayFrame {
         dst.put_u32(self.last_stream_id & 0x7fff_ffff);
         dst.put_u32(self.error_code.into());
         dst.extend_from_slice(&self.debug_data);
+        Ok(())
     }
 }
 
@@ -1076,7 +1108,7 @@ impl WindowUpdateFrame {
 
     /// Encode this frame.
     #[inline]
-    pub fn encode(&self, dst: &mut BytesMut) {
+    pub fn encode(&self, dst: &mut BytesMut) -> Result<(), H2Error> {
         let header = FrameHeader {
             length: 4,
             frame_type: FrameType::WindowUpdate as u8,
@@ -1085,6 +1117,7 @@ impl WindowUpdateFrame {
         };
         header.write(dst);
         dst.put_u32(self.increment & 0x7fff_ffff);
+        Ok(())
     }
 }
 
@@ -1115,20 +1148,21 @@ impl ContinuationFrame {
 
     /// Encode this frame.
     #[inline]
-    pub fn encode(&self, dst: &mut BytesMut) {
+    pub fn encode(&self, dst: &mut BytesMut) -> Result<(), H2Error> {
         let mut flags = 0u8;
         if self.end_headers {
             flags |= continuation_flags::END_HEADERS;
         }
 
         let header = FrameHeader {
-            length: frame_length(self.header_block.len()),
+            length: try_frame_length(self.header_block.len())?,
             frame_type: FrameType::Continuation as u8,
             flags,
             stream_id: self.stream_id,
         };
         header.write(dst);
         dst.extend_from_slice(&self.header_block);
+        Ok(())
     }
 }
 
@@ -1208,7 +1242,7 @@ mod tests {
         let original = DataFrame::new(1, Bytes::from_static(b"hello"), true);
 
         let mut buf = BytesMut::new();
-        original.encode(&mut buf);
+        original.encode(&mut buf).expect("encode");
 
         let header = FrameHeader::parse(&mut buf).unwrap();
         let payload = buf.split_to(header.length as usize).freeze();
@@ -1228,7 +1262,7 @@ mod tests {
         ]);
 
         let mut buf = BytesMut::new();
-        original.encode(&mut buf);
+        original.encode(&mut buf).expect("encode");
 
         let header = FrameHeader::parse(&mut buf).unwrap();
         let payload = buf.split_to(header.length as usize).freeze();
@@ -1243,7 +1277,7 @@ mod tests {
         let original = SettingsFrame::ack();
 
         let mut buf = BytesMut::new();
-        original.encode(&mut buf);
+        original.encode(&mut buf).expect("encode");
 
         let header = FrameHeader::parse(&mut buf).unwrap();
         assert_eq!(header.length, 0);
@@ -1257,7 +1291,8 @@ mod tests {
             settings: vec![Setting::HeaderTableSize(4096)],
             ack: true,
         }
-        .encode(&mut buf);
+        .encode(&mut buf)
+        .expect("encode");
 
         let header = FrameHeader::parse(&mut buf).unwrap();
         assert_eq!(header.length, 0, "SETTINGS ACK must be zero-length");
@@ -1273,7 +1308,7 @@ mod tests {
         let original = PingFrame::new([1, 2, 3, 4, 5, 6, 7, 8]);
 
         let mut buf = BytesMut::new();
-        original.encode(&mut buf);
+        original.encode(&mut buf).expect("encode");
 
         let header = FrameHeader::parse(&mut buf).unwrap();
         let payload = buf.split_to(header.length as usize).freeze();
@@ -1288,7 +1323,7 @@ mod tests {
         let original = GoAwayFrame::new(100, ErrorCode::NoError);
 
         let mut buf = BytesMut::new();
-        original.encode(&mut buf);
+        original.encode(&mut buf).expect("encode");
 
         let header = FrameHeader::parse(&mut buf).unwrap();
         let payload = buf.split_to(header.length as usize).freeze();
@@ -1303,7 +1338,7 @@ mod tests {
         let original = WindowUpdateFrame::new(1, 65535);
 
         let mut buf = BytesMut::new();
-        original.encode(&mut buf);
+        original.encode(&mut buf).expect("encode");
 
         let header = FrameHeader::parse(&mut buf).unwrap();
         let payload = buf.split_to(header.length as usize).freeze();
@@ -1322,7 +1357,7 @@ mod tests {
         let original = HeadersFrame::new(3, Bytes::from_static(b"header-block"), false, true);
 
         let mut buf = BytesMut::new();
-        original.encode(&mut buf);
+        original.encode(&mut buf).expect("encode");
 
         let header = FrameHeader::parse(&mut buf).unwrap();
         let payload = buf.split_to(header.length as usize).freeze();
@@ -1344,7 +1379,7 @@ mod tests {
         });
 
         let mut buf = BytesMut::new();
-        original.encode(&mut buf);
+        original.encode(&mut buf).expect("encode");
 
         let header = FrameHeader::parse(&mut buf).unwrap();
         let payload = buf.split_to(header.length as usize).freeze();
@@ -1371,7 +1406,7 @@ mod tests {
         };
 
         let mut buf = BytesMut::new();
-        original.encode(&mut buf);
+        original.encode(&mut buf).expect("encode");
 
         let header = FrameHeader::parse(&mut buf).unwrap();
         let payload = buf.split_to(header.length as usize).freeze();
@@ -1388,7 +1423,7 @@ mod tests {
         let original = RstStreamFrame::new(11, ErrorCode::Cancel);
 
         let mut buf = BytesMut::new();
-        original.encode(&mut buf);
+        original.encode(&mut buf).expect("encode");
 
         let header = FrameHeader::parse(&mut buf).unwrap();
         let payload = buf.split_to(header.length as usize).freeze();
@@ -1408,7 +1443,7 @@ mod tests {
         };
 
         let mut buf = BytesMut::new();
-        original.encode(&mut buf);
+        original.encode(&mut buf).expect("encode");
 
         let header = FrameHeader::parse(&mut buf).unwrap();
         let payload = buf.split_to(header.length as usize).freeze();
@@ -1429,7 +1464,7 @@ mod tests {
         };
 
         let mut buf = BytesMut::new();
-        original.encode(&mut buf);
+        original.encode(&mut buf).expect("encode");
 
         let header = FrameHeader::parse(&mut buf).unwrap();
         let payload = buf.split_to(header.length as usize).freeze();
@@ -1864,7 +1899,7 @@ mod tests {
         original.debug_data = Bytes::from_static(b"too many requests");
 
         let mut buf = BytesMut::new();
-        original.encode(&mut buf);
+        original.encode(&mut buf).expect("encode");
 
         let header = FrameHeader::parse(&mut buf).unwrap();
         let payload = buf.split_to(header.length as usize).freeze();
@@ -1994,9 +2029,24 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "payload length")]
-    fn test_frame_length_panics_above_max() {
-        let _ = frame_length(MAX_FRAME_SIZE as usize + 1);
+    fn test_try_frame_length_rejects_above_max() {
+        let err = try_frame_length(MAX_FRAME_SIZE as usize + 1).unwrap_err();
+        assert_eq!(err.code, ErrorCode::FrameSizeError);
+        assert!(err.to_string().contains("payload length"));
+    }
+
+    #[test]
+    fn test_data_frame_encode_rejects_payload_above_max() {
+        let original = DataFrame::new(
+            1,
+            Bytes::from(vec![0_u8; MAX_FRAME_SIZE as usize + 1]),
+            true,
+        );
+
+        let mut buf = BytesMut::new();
+        let err = original.encode(&mut buf).unwrap_err();
+        assert_eq!(err.code, ErrorCode::FrameSizeError);
+        assert!(buf.is_empty(), "oversized frame must not partially encode");
     }
 
     #[test]
@@ -2126,7 +2176,7 @@ mod tests {
         let original = WindowUpdateFrame::new(0, 0x7FFF_FFFF);
 
         let mut buf = BytesMut::new();
-        original.encode(&mut buf);
+        original.encode(&mut buf).expect("encode");
 
         let header = FrameHeader::parse(&mut buf).unwrap();
         let payload = buf.split_to(header.length as usize).freeze();

@@ -236,7 +236,7 @@ impl H2ConformanceHarness {
                 let original = RstStreamFrame::new(42, ErrorCode::RefusedStream);
 
                 let mut buf = BytesMut::new();
-                original.encode(&mut buf);
+                original.encode(&mut buf).map_err(h2error_to_string)?;
 
                 let header = FrameHeader::parse(&mut buf).map_err(h2error_to_string)?;
                 let payload = buf.split_to(header.length as usize).freeze();
@@ -417,7 +417,7 @@ impl H2ConformanceHarness {
                 let original = PingFrame::new([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11]);
 
                 let mut buf = BytesMut::new();
-                original.encode(&mut buf);
+                original.encode(&mut buf).map_err(h2error_to_string)?;
 
                 let header = FrameHeader::parse(&mut buf).map_err(h2error_to_string)?;
                 let payload = buf.split_to(header.length as usize).freeze();
@@ -474,7 +474,7 @@ impl H2ConformanceHarness {
                 let ping_ack = PingFrame::ack(opaque_data);
 
                 let mut buf = BytesMut::new();
-                ping_ack.encode(&mut buf);
+                ping_ack.encode(&mut buf).map_err(h2error_to_string)?;
 
                 let header = FrameHeader::parse(&mut buf).map_err(h2error_to_string)?;
                 // Verify ACK flag is set in header

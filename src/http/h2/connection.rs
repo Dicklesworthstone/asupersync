@@ -160,7 +160,10 @@ impl<T: AsRef<Frame>> Encoder<T> for FrameCodec {
     type Error = H2Error;
 
     fn encode(&mut self, item: T, dst: &mut BytesMut) -> Result<(), Self::Error> {
-        item.as_ref().encode(dst);
+        // br-asupersync-pt23uf: Frame::encode now returns Result; propagate
+        // FRAME_SIZE_ERROR to the connection codec layer instead of the
+        // previous panic on >16M payloads.
+        item.as_ref().encode(dst)?;
         Ok(())
     }
 }
@@ -1998,7 +2001,9 @@ mod tests {
         // Create a PING frame
         let frame = PingFrame::new([1, 2, 3, 4, 5, 6, 7, 8]);
         let mut buf = BytesMut::new();
-        Frame::Ping(frame).encode(&mut buf);
+        Frame::Ping(frame)
+            .encode(&mut buf)
+            .expect("Ping frame fits");
 
         // Decode it
         let decoded = codec.decode(&mut buf).unwrap().unwrap();
@@ -2027,7 +2032,7 @@ mod tests {
         buf.extend_from_slice(&[1, 2, 3]);
 
         let ping = PingFrame::new([9, 8, 7, 6, 5, 4, 3, 2]);
-        Frame::Ping(ping).encode(&mut buf);
+        Frame::Ping(ping).encode(&mut buf).expect("Ping frame fits");
 
         let decoded = codec.decode(&mut buf).unwrap().unwrap();
         match decoded {

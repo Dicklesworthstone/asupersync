@@ -339,7 +339,7 @@ impl H2PriorityConformanceHarness {
                 };
 
                 let mut buf = BytesMut::new();
-                original.encode(&mut buf);
+                original.encode(&mut buf).map_err(h2error_to_string)?;
 
                 let header = FrameHeader::parse(&mut buf).map_err(h2error_to_string)?;
                 let payload = buf.split_to(header.length as usize).freeze();
@@ -370,7 +370,7 @@ impl H2PriorityConformanceHarness {
                 };
 
                 let mut buf = BytesMut::new();
-                original.encode(&mut buf);
+                original.encode(&mut buf).map_err(h2error_to_string)?;
 
                 let header = FrameHeader::parse(&mut buf).map_err(h2error_to_string)?;
                 let payload = buf.split_to(header.length as usize).freeze();
@@ -573,7 +573,7 @@ impl H2PriorityConformanceHarness {
                     };
 
                     let mut buf = BytesMut::new();
-                    frame.encode(&mut buf);
+                    frame.encode(&mut buf).map_err(h2error_to_string)?;
 
                     let header = FrameHeader::parse(&mut buf).map_err(h2error_to_string)?;
                     let payload = buf.split_to(header.length as usize).freeze();
@@ -721,7 +721,9 @@ impl H2PriorityConformanceHarness {
                 };
 
                 let mut buf = BytesMut::new();
-                frame_exclusive.encode(&mut buf);
+                frame_exclusive
+                    .encode(&mut buf)
+                    .map_err(h2error_to_string)?;
 
                 // Check that E bit is set (0x80000000 | 42 = 0x8000002A)
                 assert_eq!(buf[9], 0x80); // First byte should have E bit set
@@ -741,7 +743,9 @@ impl H2PriorityConformanceHarness {
                     },
                 };
 
-                frame_non_exclusive.encode(&mut buf);
+                frame_non_exclusive
+                    .encode(&mut buf)
+                    .map_err(h2error_to_string)?;
 
                 // Check that E bit is clear
                 assert_eq!(buf[9], 0x00); // First byte should not have E bit set

@@ -235,7 +235,7 @@ proptest! {
 
         // Encode the frame
         let mut encoded = BytesMut::new();
-        frame.encode(&mut encoded);
+        frame.encode(&mut encoded).expect("encode");
 
         // Parse the encoded frame back
         let mut decode_buf = BytesMut::with_capacity(encoded.len());
@@ -580,13 +580,13 @@ proptest! {
 
         // Verify round-trip encoding preserves this relationship
         let mut buf1 = BytesMut::new();
-        update1.encode(&mut buf1);
+        update1.encode(&mut buf1).expect("encode");
 
         let mut buf2 = BytesMut::new();
-        update2.encode(&mut buf2);
+        update2.encode(&mut buf2).expect("encode");
 
         let mut buf_combined = BytesMut::new();
-        combined_update.encode(&mut buf_combined);
+        combined_update.encode(&mut buf_combined).expect("encode");
 
         // Parse back and verify
         let header1 = FrameHeader::parse(&mut buf1).unwrap();
@@ -631,13 +631,13 @@ proptest! {
 
         // All frames should encode/decode successfully
         let mut buf1 = BytesMut::new();
-        frame1.encode(&mut buf1);
+        frame1.encode(&mut buf1).expect("encode");
 
         let mut buf2 = BytesMut::new();
-        frame2.encode(&mut buf2);
+        frame2.encode(&mut buf2).expect("encode");
 
         let mut buf_combined = BytesMut::new();
-        combined_frame.encode(&mut buf_combined);
+        combined_frame.encode(&mut buf_combined).expect("encode");
 
         // Parse back and verify total setting count
         let header1 = FrameHeader::parse(&mut buf1).unwrap();
@@ -702,7 +702,7 @@ proptest! {
         // Verify each frame in subset encodes/decodes successfully
         for frame in &subset_frames {
             let mut buf = BytesMut::new();
-            frame.encode(&mut buf);
+            frame.encode(&mut buf).expect("encode");
 
             let header = FrameHeader::parse(&mut buf).unwrap();
             let payload = buf.split_to(header.length as usize).freeze();
@@ -823,11 +823,11 @@ proptest! {
 
         // Encode both frames and measure sizes
         let mut buf1 = BytesMut::new();
-        frame1.encode(&mut buf1);
+        frame1.encode(&mut buf1).expect("encode");
         let encoded_size1 = buf1.len();
 
         let mut buf2 = BytesMut::new();
-        frame2.encode(&mut buf2);
+        frame2.encode(&mut buf2).expect("encode");
         let encoded_size2 = buf2.len();
 
         // Calculate ratios

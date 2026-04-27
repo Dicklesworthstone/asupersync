@@ -401,7 +401,7 @@ fn continuation_frame_encoding_roundtrip() {
 
     for original in test_cases {
         let mut buf = BytesMut::new();
-        original.encode(&mut buf);
+        original.encode(&mut buf).expect("encode");
 
         // Parse frame header
         let mut header_bytes = buf.split_to(9);
