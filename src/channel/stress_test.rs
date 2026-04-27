@@ -275,6 +275,24 @@ pub async fn oneshot_stress_test() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+async fn send_broadcast_messages(sender: broadcast::Sender<u32>, num_messages: usize) -> usize {
+    let cx = Cx::for_testing();
+    let mut sent = 0;
+
+    for i in 0..num_messages {
+        if sender.send(&cx, i as u32).is_err() {
+            break;
+        }
+        sent += 1;
+
+        if i % 50 == 0 {
+            sleep(wall_now(), Duration::from_micros(1)).await;
+        }
+    }
+
+    sent
+}
+
 /// Stress test for broadcast channels with multiple subscribers.
 pub async fn broadcast_stress_test() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = RuntimeBuilder::current_thread().build()?;
@@ -310,18 +328,7 @@ pub async fn broadcast_stress_test() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Send messages concurrently with subscribers
-        let sender_handle = handle.spawn(async move {
-            let cx = Cx::for_testing();
-            for i in 0..num_messages {
-                if sender.send(&cx, i as u32).is_err() {
-                    break; // No more subscribers
-                }
-                if i % 50 == 0 {
-                    sleep(wall_now(), Duration::from_micros(1)).await;
-                }
-            }
-            num_messages
-        });
+        let sender_handle = handle.spawn(send_broadcast_messages(sender, num_messages));
 
         let sent = sender_handle.await;
 
@@ -480,6 +487,20 @@ mod tests {
     fn test_broadcast_stress_basic() {
         block_on(async move {
             broadcast_stress_test().await.unwrap();
+        });
+    }
+
+    #[test]
+    fn test_broadcast_sender_reports_successful_sends() {
+        block_on(async move {
+            let (sender, receiver) = broadcast::channel::<u32>(4);
+            drop(receiver);
+
+            let sent = send_broadcast_messages(sender, 16).await;
+            assert_eq!(
+                sent, 0,
+                "sender should report only messages accepted by live subscribers"
+            );
         });
     }
 
