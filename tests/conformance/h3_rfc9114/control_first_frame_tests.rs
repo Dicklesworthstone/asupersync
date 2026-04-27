@@ -385,10 +385,11 @@ fn create_control_stream_with_settings() -> Vec<u8> {
     let mut stream_data = Vec::new();
 
     // Stream type: Control (0x00)
-    stream_data.push(0x00);
+    encode_varint(0x00, &mut stream_data).expect("Control stream type varint");
 
     // SETTINGS frame (type=0x04, length=0, empty payload)
-    stream_data.extend_from_slice(&[0x04, 0x00]);
+    encode_varint(0x04, &mut stream_data).expect("SETTINGS frame type varint");
+    encode_varint(0x00, &mut stream_data).expect("SETTINGS frame length varint");
 
     stream_data
 }
@@ -397,10 +398,11 @@ fn create_control_stream_with_settings_and_goaway() -> Vec<u8> {
     let mut stream_data = Vec::new();
 
     // Stream type: Control (0x00)
-    stream_data.push(0x00);
+    encode_varint(0x00, &mut stream_data).expect("Control stream type varint");
 
     // SETTINGS frame (type=0x04, length=0)
-    stream_data.extend_from_slice(&[0x04, 0x00]);
+    encode_varint(0x04, &mut stream_data).expect("SETTINGS frame type varint");
+    encode_varint(0x00, &mut stream_data).expect("SETTINGS frame length varint");
 
     // GOAWAY frame (type=0x07, length=1, stream_id=0)
     stream_data.extend_from_slice(&[0x07, 0x01, 0x00]);
@@ -412,7 +414,7 @@ fn create_control_stream_with_frame_first(frame_type: H3FrameType) -> Vec<u8> {
     let mut stream_data = Vec::new();
 
     // Stream type: Control (0x00)
-    stream_data.push(0x00);
+    encode_varint(0x00, &mut stream_data).expect("Control stream type varint");
 
     // First frame (not SETTINGS)
     let frame = create_h3_frame(frame_type, &[]);
@@ -425,7 +427,7 @@ fn create_control_stream_with_frame_sequence(frame_types: &[H3FrameType]) -> Vec
     let mut stream_data = Vec::new();
 
     // Stream type: Control (0x00)
-    stream_data.push(0x00);
+    encode_varint(0x00, &mut stream_data).expect("Control stream type varint");
 
     // Add frames in sequence
     for &frame_type in frame_types {
@@ -440,7 +442,7 @@ fn create_control_stream_with_custom_settings(settings_data: &[u8]) -> Vec<u8> {
     let mut stream_data = Vec::new();
 
     // Stream type: Control (0x00)
-    stream_data.push(0x00);
+    encode_varint(0x00, &mut stream_data).expect("Control stream type varint");
 
     // Custom SETTINGS frame
     stream_data.extend_from_slice(settings_data);
@@ -452,17 +454,20 @@ fn create_settings_frame(parameters: &[(u64, u64)]) -> Vec<u8> {
     let mut frame_data = Vec::new();
 
     // Frame type: SETTINGS (0x04)
-    frame_data.push(0x04);
+    encode_varint(0x04, &mut frame_data).expect("SETTINGS frame type varint");
 
-    // Calculate payload length
-    let payload_len = parameters.len() * 2; // 2 varints per parameter
-    frame_data.push(payload_len as u8);
-
-    // Add parameters
+    // Build payload with proper varint encoding
+    let mut payload = Vec::new();
     for &(param_id, param_value) in parameters {
-        frame_data.push(param_id as u8); // Simplified for testing
-        frame_data.push(param_value as u8);
+        encode_varint(param_id, &mut payload).expect("SETTINGS parameter ID varint");
+        encode_varint(param_value, &mut payload).expect("SETTINGS parameter value varint");
     }
+
+    // Frame length (payload size)
+    encode_varint(payload.len() as u64, &mut frame_data).expect("SETTINGS frame length varint");
+
+    // Add payload
+    frame_data.extend_from_slice(&payload);
 
     frame_data
 }
@@ -525,16 +530,33 @@ fn parse_h3_frames(data: &[u8]) -> Vec<H3Frame> {
 
 fn validate_control_stream_creation(stream_data: &[u8]) -> bool {
     // Mock validation - checks for control stream type + SETTINGS first
-    if stream_data.is_empty() || stream_data[0] != 0x00 {
-        return false; // Not a control stream
+    if stream_data.is_empty() {
+        return false;
     }
 
-    if stream_data.len() < 3 {
-        return false; // Too short for stream type + frame
+    // Parse stream type varint
+    let Ok((stream_type, stream_type_len)) = decode_varint(stream_data) else {
+        return false;
+    };
+
+    // Check if it's a control stream (type 0x00)
+    if stream_type != 0x00 {
+        return false;
     }
+
+    // Ensure we have enough data for at least one frame header
+    if stream_data.len() < stream_type_len + 2 {
+        return false; // Too short for stream type + frame type + frame length
+    }
+
+    // Parse the first frame type varint
+    let frame_start = stream_type_len;
+    let Ok((frame_type, _frame_type_len)) = decode_varint(&stream_data[frame_start..]) else {
+        return false;
+    };
 
     // Check first frame is SETTINGS (0x04)
-    stream_data[1] == 0x04
+    frame_type == 0x04
 }
 
 fn validate_h3_frame(frame_data: &[u8]) -> bool {
