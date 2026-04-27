@@ -8,7 +8,7 @@
 //! | # | Invariant | Oracle |
 //! |---|-----------|--------|
 //! | 1 | Structured concurrency – every task is owned by exactly one region | [`TaskLeakOracle`] |
-//! | 2 | Region close = quiescence – no live children + all finalizers done | [`QuiescenceOracle`] |
+//! | 2 | Region close = quiescence – no live tasks/children, finalizers done, ledger empty | [`QuiescenceOracle`] |
 //! | 3 | Cancellation is a protocol – request → drain → finalize | [`CancellationProtocolOracle`] |
 //! | 4 | Losers are drained – races must cancel AND fully drain losers | [`LoserDrainOracle`] |
 //! | 5 | No obligation leaks – permits/acks/leases must be committed or aborted | [`ObligationLeakOracle`] |
@@ -377,11 +377,13 @@ impl OracleSuite {
 
         self.task_leak.reset();
         self.obligation_leak.snapshot_from_state(state, now);
-        self.quiescence.reset();
+        self.quiescence.snapshot_from_state(state, now);
         self.finalizer.reset();
         self.region_tree.reset();
         self.deadline_monotone.reset();
-        self.cancellation_protocol.snapshot_from_state(state, now);
+        if !self.cancellation_protocol.has_observed_events() {
+            self.cancellation_protocol.snapshot_from_state(state, now);
+        }
         self.cancel_correctness.reset();
         self.cancel_debt.reset();
         self.cancel_signal_ordering.reset();
@@ -453,8 +455,6 @@ impl OracleSuite {
             };
             self.region_tree
                 .on_region_create(snapshot.id, snapshot.parent, snapshot.created_at);
-            self.quiescence
-                .on_region_create(snapshot.id, snapshot.parent);
             self.deadline_monotone.on_region_create(
                 snapshot.id,
                 snapshot.parent,
@@ -471,10 +471,8 @@ impl OracleSuite {
 
         for (task_id, region_id, terminal) in tasks {
             self.task_leak.on_spawn(task_id, region_id, now);
-            self.quiescence.on_spawn(task_id, region_id);
             if terminal {
                 self.task_leak.on_complete(task_id, now);
-                self.quiescence.on_task_complete(task_id);
             }
         }
 
@@ -484,7 +482,6 @@ impl OracleSuite {
             };
             if snapshot.state.is_terminal() {
                 self.task_leak.on_region_close(region_id, now);
-                self.quiescence.on_region_close(region_id, now);
             }
         }
     }
@@ -1406,6 +1403,83 @@ mod tests {
             violation.unrun_finalizers
         );
         crate::test_complete!("hydrate_temporal_from_state_replays_finalizer_history");
+    }
+
+    #[test]
+    fn hydrate_temporal_from_state_preserves_live_cancellation_protocol_history() {
+        init_test("hydrate_temporal_from_state_preserves_live_cancellation_protocol_history");
+        let mut state = crate::runtime::RuntimeState::new();
+        let region = state.create_root_region(crate::types::Budget::INFINITE);
+
+        let task_slot = state.insert_task(crate::record::TaskRecord::new(
+            crate::types::TaskId::from_arena(crate::util::ArenaIndex::new(0, 0)),
+            region,
+            crate::types::Budget::INFINITE,
+        ));
+        let task = crate::types::TaskId::from_arena(task_slot);
+        state.task_mut(task).expect("task must exist").id = task;
+
+        let reason = crate::types::CancelReason::user("hydrate-preserve");
+        let from_state = crate::record::task::TaskState::Created;
+        let to_state = crate::record::task::TaskState::CancelRequested {
+            reason: reason.clone(),
+            cleanup_budget: crate::types::Budget::INFINITE,
+        };
+        state
+            .task_mut(task)
+            .expect("task must exist")
+            .request_cancel_with_budget(reason.clone(), crate::types::Budget::INFINITE);
+
+        let mut suite = OracleSuite::new();
+        suite.cancellation_protocol.on_region_create(region, None);
+        suite.cancellation_protocol.on_task_create(task, region);
+        suite
+            .cancellation_protocol
+            .on_cancel_request(task, reason, Time::from_nanos(10));
+        suite.cancellation_protocol.on_transition(
+            task,
+            &from_state,
+            &to_state,
+            Time::from_nanos(11),
+        );
+        for _ in 0..=crate::types::MAX_MASK_DEPTH + 1 {
+            suite.cancellation_protocol.on_task_poll(task);
+        }
+
+        let before = suite
+            .cancellation_protocol
+            .check()
+            .expect_err("live oracle should record overdue cancel acknowledgement");
+        let before_is_ack_violation = matches!(
+            before,
+            CancellationProtocolViolation::CancelNotAcknowledged { .. }
+        );
+        crate::assert_with_log!(
+            before_is_ack_violation,
+            "before violation kind",
+            true,
+            before_is_ack_violation
+        );
+
+        suite.hydrate_temporal_from_state(&state, Time::from_nanos(99));
+
+        let after = suite
+            .cancellation_protocol
+            .check()
+            .expect_err("hydration must preserve overdue cancel acknowledgement");
+        let after_is_ack_violation = matches!(
+            after,
+            CancellationProtocolViolation::CancelNotAcknowledged { .. }
+        );
+        crate::assert_with_log!(
+            after_is_ack_violation,
+            "after violation kind",
+            true,
+            after_is_ack_violation
+        );
+        crate::test_complete!(
+            "hydrate_temporal_from_state_preserves_live_cancellation_protocol_history"
+        );
     }
 
     #[test]

@@ -1250,6 +1250,21 @@ impl CancellationProtocolOracle {
         self.cancelled_regions.len()
     }
 
+    /// Returns whether the oracle has already observed live protocol events.
+    ///
+    /// This lets higher-level hydration paths avoid overwriting richer
+    /// request/drain/finalize evidence with a synthetic state-only snapshot.
+    #[must_use]
+    pub fn has_observed_events(&self) -> bool {
+        !self.tasks.is_empty()
+            || !self.region_parents.is_empty()
+            || !self.region_children.is_empty()
+            || !self.cancelled_regions.is_empty()
+            || !self.task_regions.is_empty()
+            || !self.violations.is_empty()
+            || !self.violation_records.is_empty()
+    }
+
     /// Returns the current mask depth of a task, if tracked.
     #[must_use]
     pub fn task_mask_depth(&self, task: TaskId) -> Option<u32> {
