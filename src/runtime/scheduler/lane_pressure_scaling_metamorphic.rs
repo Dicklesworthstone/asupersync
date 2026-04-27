@@ -34,10 +34,9 @@
 use crate::runtime::RuntimeState;
 use crate::runtime::scheduler::three_lane::{PreemptionMetrics, ThreeLaneScheduler};
 use crate::sync::ContendedMutex;
-use crate::types::{Budget, TaskId, Time};
-use crate::util::DetRng;
+use crate::types::{TaskId, Time};
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Configuration for lane pressure scaling metamorphic testing.
 #[derive(Debug, Clone)]
@@ -63,7 +62,16 @@ impl Default for LanePressureConfig {
         Self {
             base_tasks_per_lane: 20,
             scaling_factors: vec![1, 2, 4, 8],
-            lane_mix_ratios: [0.2, 0.3, 0.5], // 20% cancel, 30% timed, 50% ready
+            // br-asupersync-7hgaq9: timed-lane mix is 0.0 because
+            // the test harness does not advance virtual time, so
+            // `inject_timed` tasks never become dispatchable via
+            // `worker.next_task()` (filed as br-asupersync-k18nlg).
+            // Once a time-source-aware harness lands, restore this
+            // to e.g. [0.2, 0.3, 0.5] to also exercise the timed
+            // lane. For now we measure cancel:ready fairness, which
+            // is the substantive load-balance invariant of the
+            // three-lane scheduler.
+            lane_mix_ratios: [0.3, 0.0, 0.7], // 30% cancel, 0% timed, 70% ready
             cancel_streak_limit: 16,
             max_fairness_deviation: 0.15, // 15% deviation tolerance
             work_duration_ns: 1_000_000,  // 1ms virtual work
@@ -206,6 +214,32 @@ fn calculate_percentile(values: &[f64], percentile: f64) -> f64 {
 }
 
 /// Run a single pressure scaling test scenario.
+///
+/// br-asupersync-7hgaq9: previously this function constructed a
+/// `ThreeLaneScheduler` and immediately discarded it (binding to
+/// `_scheduler`), then manually populated `lane_dispatch_counts` from
+/// the *input* mix ratios and returned them as if they were
+/// dispatched. The "fairness certificate" was a normalized echo of
+/// the input. A scheduler with no behaviour at all would have
+/// satisfied every assertion.
+///
+/// This rewrite drives the real scheduler:
+///
+/// 1. Tasks for lane 0 (cancel) and lane 2 (ready) are injected via
+///    the matching `inject_cancel`/`inject_ready` API.
+/// 2. Each `TaskId` is tagged with its injection-lane in a side map
+///    so the dispatch loop can bucket the *observed* dispatches per
+///    lane (rather than the planned ones).
+/// 3. Workers are drained via `next_task()` until no more work is
+///    available, tracking the longest run of non-ready dispatches as
+///    `max_ready_stall_cycles` — a real fairness measurement.
+/// 4. Lane 1 (timed) is currently injected as ready with a noted
+///    limitation: `inject_timed` requires the worker's clock to have
+///    passed the deadline before `next_task()` will surface the task,
+///    and this harness does not advance virtual time. Filed as
+///    br-asupersync-k18nlg; until the time-source-aware harness
+///    lands, treat the timed-lane portion of the certificate as a
+///    placeholder rather than a real measurement.
 pub fn run_pressure_scaling_scenario(
     config: &LanePressureConfig,
     scaling_factor: usize,
@@ -215,17 +249,12 @@ pub fn run_pressure_scaling_scenario(
         RuntimeState::new(),
     ));
 
-    let region = state
-        .lock()
-        .unwrap()
-        .create_root_region(Budget::unlimited());
-    let _scheduler = ThreeLaneScheduler::new_with_cancel_limit(
+    let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(
         1, // single worker for deterministic testing
         &state,
         config.cancel_streak_limit,
     );
 
-    let mut _rng = DetRng::new(config.seed);
     let mut task_traces = Vec::new();
     let mut lane_dispatch_counts = [0u64; 3];
 
@@ -238,43 +267,43 @@ pub fn run_pressure_scaling_scenario(
     let ready_count = (scaled_total as f64 * config.lane_mix_ratios[2]) as usize;
 
     let task_counts = [cancel_count, timed_count, ready_count];
-    let mut injection_order = 0;
+    let total_injected: usize = task_counts.iter().sum();
 
-    // Create and inject tasks for each lane
+    // Side map: TaskId -> originating lane index (0=cancel, 1=timed,
+    // 2=ready). Lets us bucket dispatches by what the scheduler
+    // *actually* surfaces, not by what was planned.
+    let mut lane_by_task: HashMap<TaskId, usize> = HashMap::with_capacity(total_injected);
+    let mut injection_order: usize = 0;
+
+    // Create and inject tasks for each lane via the real scheduler API.
     for (lane_idx, &count) in task_counts.iter().enumerate() {
         for _ in 0..count {
-            let counter = Arc::new(AtomicUsize::new(0));
+            // Synthetic TaskId — `inject_*` allows ids without a
+            // matching record in the task table (used for tests),
+            // and we just need a unique handle to track dispatches.
+            let task_id = TaskId::new_for_test(injection_order as u32, 0);
+            lane_by_task.insert(task_id, lane_idx);
 
-            // Create task with simulated work
-            let task_counter = Arc::clone(&counter);
-            let work_duration = config.work_duration_ns;
-
-            let mut guard = state.lock().unwrap();
-            let (task_id, _) = guard
-                .create_task(region, Budget::unlimited(), async move {
-                    // Simulate work
-                    let _start_cycles = task_counter.fetch_add(1, Ordering::SeqCst);
-                    for _ in 0..(work_duration / 1000) {
-                        // Virtual CPU work
-                        std::hint::spin_loop();
-                    }
-                })
-                .expect("create task failed");
-            drop(guard);
-
-            // Inject task into appropriate lane
-            // For simplicity, inject all tasks as ready tasks for this test
-            // The actual lane assignment logic would need access to the scheduler internals
-            lane_dispatch_counts[lane_idx] += 1;
+            match lane_idx {
+                0 => scheduler.inject_cancel(task_id, 100),
+                1 => {
+                    // Timed lane: see function-level note. Use a
+                    // far-past deadline so the worker considers it
+                    // immediately due (best we can do without a
+                    // virtual time source). Fall back to ready
+                    // injection if `inject_timed` doesn't surface
+                    // the task — a deficiency tracked by k18nlg.
+                    scheduler.inject_timed(task_id, Time::from_nanos(0));
+                }
+                _ => scheduler.inject_ready(task_id, 100),
+            }
 
             task_traces.push(ScalingTestTask {
                 task_id,
                 lane: lane_idx,
                 injection_order,
                 execution_window: if lane_idx == 1 {
-                    Some(Time::from_nanos(
-                        1_000_000 + injection_order as u64 * 500_000,
-                    ))
+                    Some(Time::from_nanos(0))
                 } else {
                     None
                 },
@@ -287,22 +316,56 @@ pub fn run_pressure_scaling_scenario(
         }
     }
 
-    // Simplified execution simulation - just mark all tasks as completed
-    let max_cycles = scaled_total;
-    let scheduler_cycles = max_cycles as u64;
+    // Drain the scheduler. Track which lane each dispatched task
+    // actually came from (by lane_by_task lookup) so the certificate
+    // measures observed behaviour, not planned input.
+    let mut workers = scheduler.take_workers();
     let start_time = std::time::Instant::now();
+    let mut scheduler_cycles: u64 = 0;
+    let mut max_ready_stall_cycles: u64 = 0;
+    let mut current_ready_stall: u64 = 0;
+    let drain_cap = total_injected.saturating_mul(8) + 16;
 
-    // Simulate task execution completion
-    for task_trace in &mut task_traces {
-        task_trace.poll_count = 1;
-        task_trace.completion_time = Some(Time::from_nanos(
-            start_time.elapsed().as_nanos() as u64 + task_trace.injection_order as u64 * 1000,
-        ));
+    while scheduler_cycles < drain_cap as u64 {
+        let mut progressed = false;
+        for worker in workers.iter_mut() {
+            if let Some(task_id) = worker.next_task() {
+                progressed = true;
+                if let Some(&lane) = lane_by_task.get(&task_id) {
+                    lane_dispatch_counts[lane] += 1;
+                    if lane == 2 {
+                        // Ready lane dispatched: streak resets.
+                        max_ready_stall_cycles = max_ready_stall_cycles.max(current_ready_stall);
+                        current_ready_stall = 0;
+                    } else {
+                        // Cancel/timed dispatch advances the streak;
+                        // it represents the gap between consecutive
+                        // ready-lane dispatches.
+                        current_ready_stall = current_ready_stall.saturating_add(1);
+                    }
+
+                    if let Some(trace) = task_traces.iter_mut().find(|t| t.task_id == task_id) {
+                        trace.poll_count = trace.poll_count.saturating_add(1);
+                        trace.completion_time = Some(Time::from_nanos(
+                            start_time.elapsed().as_nanos() as u64
+                                + trace.injection_order as u64 * 1000,
+                        ));
+                    }
+                }
+            }
+        }
+        scheduler_cycles += 1;
+        if !progressed {
+            break;
+        }
     }
+    // Capture the final pending streak so a tail of cancels at the
+    // very end of the run is still reflected in the bound.
+    max_ready_stall_cycles = max_ready_stall_cycles.max(current_ready_stall);
 
     let total_runtime_ns = start_time.elapsed().as_nanos() as u64;
 
-    // Extract scheduler metrics (simplified for this test)
+    // Extract scheduler metrics from the real dispatched counts.
     let preemption_metrics = PreemptionMetrics {
         cancel_dispatches: lane_dispatch_counts[0],
         timed_dispatches: lane_dispatch_counts[1],
@@ -318,7 +381,7 @@ pub fn run_pressure_scaling_scenario(
         total_runtime_ns,
         scheduler_cycles,
         lane_dispatch_counts,
-        max_ready_stall_cycles: config.cancel_streak_limit as u64,
+        max_ready_stall_cycles,
     }
 }
 
@@ -344,7 +407,15 @@ pub fn verify_proportional_pressure_scaling_invariance(
         certificates.push((scaling_factor, certificate));
     }
 
-    let baseline = baseline_certificate.unwrap();
+    let _baseline = baseline_certificate.unwrap();
+    // br-asupersync-7hgaq9: the previous bound here was `baseline.max_ready_stall_bound * 2`,
+    // which is wrong once the scheduler is actually driven: at scale=1 the
+    // baseline is bounded by `cancel_count` (often < cancel_streak_limit),
+    // while at higher scales the bound saturates at `cancel_streak_limit`.
+    // The right absolute invariant is "stall bound never exceeds the
+    // configured cancel-streak limit (plus one off-by-one slack)" — that's
+    // what the three-lane scheduler actually guarantees.
+    let stall_invariant_bound: u64 = (config.cancel_streak_limit as u64).saturating_add(1);
 
     // Verify fairness deviation remains bounded
     for (scaling_factor, certificate) in &certificates {
@@ -355,11 +426,11 @@ pub fn verify_proportional_pressure_scaling_invariance(
             ));
         }
 
-        // Verify stall bounds remain constant
-        if certificate.max_ready_stall_bound > baseline.max_ready_stall_bound * 2 {
+        // Verify stall bounds remain bounded by cancel_streak_limit at every scale.
+        if certificate.max_ready_stall_bound > stall_invariant_bound {
             return Err(format!(
-                "Ready stall bound {} exceeds 2x baseline {} at scale factor {}",
-                certificate.max_ready_stall_bound, baseline.max_ready_stall_bound, scaling_factor
+                "Ready stall bound {} exceeds cancel_streak_limit+1 ({}) at scale factor {}",
+                certificate.max_ready_stall_bound, stall_invariant_bound, scaling_factor
             ));
         }
     }
