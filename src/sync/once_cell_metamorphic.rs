@@ -435,42 +435,47 @@ mod metamorphic_cancellation_restart {
         let cancellation_enabled = config.enable_cancellation;
 
         let summary = run_once_cell_test(&config, |global_state| async move {
-            let cell = Arc::new(OnceCell::new());
+            let cell = OnceCell::new();
 
-            // Test cancellation scenario by attempting initialization, then trying set
-            // This simulates the cancellation-restart pattern
             if cancellation_enabled {
-                global_state.record_cancellation();
-            }
+                let mut cancelled_init =
+                    Box::pin(cell.get_or_init(|| async { std::future::pending::<u32>().await }));
+                let waker = std::task::Waker::noop().clone();
+                let mut cx = Context::from_waker(&waker);
 
-            // First attempt: try to initialize but simulate failure by testing set() instead
-            match cell.set(50) {
-                Ok(()) => {
-                    global_state.successful_inits.fetch_add(1, Ordering::SeqCst);
-                    global_state.record_observed_value(50);
-                }
-                Err(_) => {
-                    global_state.failed_inits.fetch_add(1, Ordering::SeqCst);
-                }
-            }
-
-            // If set succeeded, verify we can't reinitialize
-            if cell.is_initialized() {
                 assert!(
-                    cell.set(60).is_err(),
-                    "Should not be able to set again after initialization"
+                    Future::poll(cancelled_init.as_mut(), &mut cx).is_pending(),
+                    "cancelled initializer should start and remain pending"
                 );
-                let final_value = cell.get().expect("Should have value after successful set");
-                assert_eq!(*final_value, 50, "Should retain original value");
-            } else {
-                // If first set failed (shouldn't happen in this test), try again
-                let result = cell.get_or_init(|| async { 60 }).await;
-                global_state.record_observed_value(*result);
-                assert_eq!(*result, 60, "Should initialize with second value");
+
+                drop(cancelled_init);
+                global_state.record_cancellation();
+
+                assert!(
+                    !cell.is_initialized(),
+                    "cancelled initializer must leave OnceCell uninitialized"
+                );
             }
+
+            let result = cell.get_or_init(|| async { 60 }).await;
+            global_state.successful_inits.fetch_add(1, Ordering::SeqCst);
+            global_state.record_observed_value(*result);
+
+            assert_eq!(*result, 60, "fresh restart should install second value");
+            assert_eq!(
+                cell.get(),
+                Some(&60),
+                "OnceCell should expose restarted value"
+            );
+            assert!(
+                cell.set(50).is_err(),
+                "OnceCell should reject a post-restart second initialization"
+            );
         });
 
         assert_eq!(summary.cancellations, 1);
+        assert_eq!(summary.successful_inits, 1);
+        assert_eq!(summary.failed_inits, 0);
         assert_eq!(summary.unique_values_observed, 1);
     }
 }
