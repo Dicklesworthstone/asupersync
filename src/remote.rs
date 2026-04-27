@@ -232,13 +232,16 @@ pub trait RemoteRuntime: Send + Sync + fmt::Debug {
 
     /// Clears any runtime-tracked lifecycle state after a terminal result has
     /// been consumed locally.
-    fn clear_task_state(&self, _task_id: RemoteTaskId) {}
+    ///
+    /// Implementations must remove the task from any state tracking maps to
+    /// prevent resource leaks.
+    fn clear_task_state(&self, task_id: RemoteTaskId);
 
     /// Unregisters a pending local task after spawn failure.
     ///
-    /// Implementations that keep a pending-results map should remove the
-    /// entry for `task_id`. The default implementation is a no-op.
-    fn unregister_task(&self, _task_id: RemoteTaskId) {}
+    /// Implementations that keep a pending-results map must remove the
+    /// entry for `task_id` to prevent resource leaks.
+    fn unregister_task(&self, task_id: RemoteTaskId);
 }
 
 // ---------------------------------------------------------------------------
@@ -2755,6 +2758,14 @@ mod tests {
         ) {
             // Intentionally dropped in this capture runtime.
         }
+
+        fn clear_task_state(&self, _task_id: RemoteTaskId) {
+            // No state to clear in capture runtime.
+        }
+
+        fn unregister_task(&self, _task_id: RemoteTaskId) {
+            // No registration state to clean up in capture runtime.
+        }
     }
 
     #[derive(Debug, Default)]
@@ -2778,6 +2789,10 @@ mod tests {
             _tx: oneshot::Sender<Result<RemoteOutcome, RemoteError>>,
         ) {
             self.registered.lock().push(task_id);
+        }
+
+        fn clear_task_state(&self, _task_id: RemoteTaskId) {
+            // No persistent state to clear in failing send runtime.
         }
 
         fn unregister_task(&self, task_id: RemoteTaskId) {
