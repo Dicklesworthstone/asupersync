@@ -255,6 +255,67 @@ impl SymbolCancelToken {
         }
     }
 
+    fn notify_retained_listeners_until_current(
+        state: &CancelTokenState,
+        target_reason: &CancelReason,
+        target_severity: u8,
+        force_target_notification: bool,
+    ) {
+        let notify_at_nanos = state.cancelled_at.load(Ordering::Acquire);
+        let notify_at = if notify_at_nanos == u64::MAX {
+            Time::ZERO
+        } else {
+            Time::from_nanos(notify_at_nanos)
+        };
+        let mut retained = {
+            let mut listeners = state.listeners.write();
+            std::mem::take(&mut *listeners)
+        };
+
+        for entry in &mut retained {
+            if force_target_notification || entry.notified_severity < target_severity {
+                Self::notify_listener_with_panic_logging(
+                    state,
+                    entry.listener.as_ref(),
+                    target_reason,
+                    notify_at,
+                );
+                entry.notified_severity = target_severity;
+            }
+        }
+
+        loop {
+            let reason_guard = state.reason.write();
+            let Some(current_reason) = reason_guard.clone() else {
+                let mut listeners = state.listeners.write();
+                listeners.extend(retained);
+                return;
+            };
+            let current_severity = current_reason.kind.severity();
+            if retained
+                .iter()
+                .all(|entry| entry.notified_severity >= current_severity)
+            {
+                let mut listeners = state.listeners.write();
+                listeners.extend(retained);
+                return;
+            }
+            drop(reason_guard);
+
+            for entry in &mut retained {
+                if entry.notified_severity < current_severity {
+                    Self::notify_listener_with_panic_logging(
+                        state,
+                        entry.listener.as_ref(),
+                        &current_reason,
+                        notify_at,
+                    );
+                    entry.notified_severity = current_severity;
+                }
+            }
+        }
+    }
+
     /// Returns the token ID.
     #[inline]
     #[must_use]
@@ -351,29 +412,15 @@ impl SymbolCancelToken {
             *reason_guard = Some(reason.clone());
 
             // Drop the reason lock before notifying to avoid reentrancy
-            // deadlocks. The listeners write lock is held across the
-            // notification (not drained) so add_listener that races
-            // with cancel observes a consistent state — a listener
-            // either lands here and is notified, or lands after the
-            // notification loop finishes and finds is_cancelled=true,
-            // at which point it self-notifies under the same lock.
+            // deadlocks. Retained listeners are moved out of the listener
+            // slab before callbacks run, then reinserted after catching up
+            // to any concurrently strengthened reason. This lets a listener
+            // re-enter `add_listener`: the late listener self-notifies via
+            // the post-cancel path and is not retained.
             drop(reason_guard);
 
             let new_severity = reason.kind.severity();
-            {
-                let mut listeners = self.state.listeners.write();
-                for entry in listeners.iter_mut() {
-                    // br-asupersync-mzamuo — log + count panics
-                    // instead of silently swallowing them.
-                    Self::notify_listener_with_panic_logging(
-                        &self.state,
-                        entry.listener.as_ref(),
-                        reason,
-                        now,
-                    );
-                    entry.notified_severity = new_severity;
-                }
-            }
+            Self::notify_retained_listeners_until_current(&self.state, reason, new_severity, true);
 
             // Drain children without holding the lock. Safe because
             // `cancelled` is already true (CAS above), so any concurrent
@@ -425,25 +472,12 @@ impl SymbolCancelToken {
             // reason are skipped to keep delivery monotone and
             // idempotent at each severity level.
             if new_severity > prior_severity {
-                let mut listeners = self.state.listeners.write();
-                for entry in listeners.iter_mut() {
-                    if entry.notified_severity < new_severity {
-                        // br-asupersync-mzamuo — strengthen-loop
-                        // panic surfaces via per-token counter +
-                        // tracing::warn! instead of silent swallow.
-                        // This is the specific code path the bead
-                        // targets: a listener whose Drop re-enters
-                        // the originating token's cancel path used
-                        // to be invisible.
-                        Self::notify_listener_with_panic_logging(
-                            &self.state,
-                            entry.listener.as_ref(),
-                            &strengthened_reason,
-                            now,
-                        );
-                        entry.notified_severity = new_severity;
-                    }
-                }
+                Self::notify_retained_listeners_until_current(
+                    &self.state,
+                    &strengthened_reason,
+                    new_severity,
+                    false,
+                );
             }
 
             false
@@ -549,11 +583,10 @@ impl SymbolCancelToken {
     /// observes `cancelled == false` and pushes the listener (cancel
     /// will pick it up under the same lock), or it observes
     /// `cancelled == true` AND finds the stored reason already
-    /// written. If the stored reason is somehow `None` despite
-    /// `cancelled == true` (e.g., a `from_bytes` round-trip without
-    /// `cancel()` ever being called locally), the function falls back
-    /// to the parent-cancel reason and asserts in debug builds — never
-    /// fabricates a `CancelKind::User`.
+    /// written. If the stored reason is `None` despite `cancelled == true`
+    /// (the valid `from_bytes` round-trip shape where `cancel()` was never
+    /// called locally), the function falls back to the parent-cancel reason —
+    /// never fabricates a `CancelKind::User`.
     pub fn add_listener(&self, listener: impl CancelListener + 'static) {
         // Take the reason lock first (mirrors cancel()'s ordering:
         // reason → listeners → drop reason → take listeners). Holding
@@ -571,14 +604,9 @@ impl SymbolCancelToken {
             // (parsed-from-wire token never had cancel() called
             // locally); in that case fall back to parent_cancelled
             // — never to the silent CancelKind::User fabrication.
-            let reason = reason_guard.clone().unwrap_or_else(|| {
-                debug_assert!(
-                    false,
-                    "add_listener observed cancelled=true with reason=None — \
-                     locking discipline violated (br-asupersync-2bm1a3)"
-                );
-                CancelReason::parent_cancelled()
-            });
+            let reason = reason_guard
+                .clone()
+                .unwrap_or_else(CancelReason::parent_cancelled);
             let at_nanos = self.state.cancelled_at.load(Ordering::Acquire);
             debug_assert!(
                 at_nanos != u64::MAX || reason_guard.is_none(),
@@ -1496,6 +1524,21 @@ mod tests {
     use serde_json::Value;
     use std::sync::Mutex as StdMutex;
     use std::sync::atomic::AtomicUsize;
+
+    struct CountingCleanupHandler;
+    impl CleanupHandler for CountingCleanupHandler {
+        fn cleanup(
+            &self,
+            _object_id: ObjectId,
+            symbols: Vec<Symbol>,
+        ) -> crate::error::Result<usize> {
+            Ok(symbols.len())
+        }
+
+        fn name(&self) -> &'static str {
+            "counting"
+        }
+    }
 
     struct NullSink;
 
@@ -2424,8 +2467,8 @@ mod tests {
             );
             assert_eq!(
                 remote_token.state.listeners.read().len(),
-                0,
-                "remote cancellation should drain listeners before returning"
+                1,
+                "remote cancellation should retain only the original listener before returning"
             );
 
             (
@@ -2515,6 +2558,8 @@ mod tests {
         let coordinator = CleanupCoordinator::new();
         let object_id = ObjectId::new_for_test(1);
         let now = Time::from_millis(100);
+
+        coordinator.register_handler(object_id, CountingCleanupHandler);
 
         // Register some symbols
         for i in 0..5 {
@@ -2981,20 +3026,30 @@ mod tests {
         );
         assert_eq!(
             token.state.listeners.read().len(),
-            0,
-            "late listener should not remain queued after cancellation drain"
+            1,
+            "the original retained listener remains, but the late listener must not be queued"
         );
 
         token.cancel(&CancelReason::shutdown(), Time::from_millis(200));
         assert_eq!(
             notification_count.load(Ordering::SeqCst),
-            1,
-            "drained late listener must not be re-notified by strengthened cancellations"
+            2,
+            "the retained original listener should run again on strengthen and self-notify one late listener"
+        );
+        assert_eq!(
+            *seen_kind.lock().unwrap(),
+            Some(CancelKind::Shutdown),
+            "late listener should observe the strengthened cancellation kind"
+        );
+        assert_eq!(
+            *seen_time.lock().unwrap(),
+            Some(now),
+            "late listener should observe the canonical first-cancel timestamp after strengthen"
         );
         assert_eq!(
             token.state.listeners.read().len(),
-            0,
-            "strengthened cancellations must not repopulate drained listeners"
+            1,
+            "strengthened cancellations retain only the original listener"
         );
     }
 
@@ -3065,8 +3120,8 @@ mod tests {
         );
         assert_eq!(
             token.state.listeners.read().len(),
-            0,
-            "drain must leave no late listeners queued"
+            1,
+            "drain must retain only the original listener, not the late listener"
         );
         assert_eq!(
             token.state.children.read().len(),
@@ -3165,6 +3220,8 @@ mod tests {
         let now = Time::from_millis(100);
         let obj1 = ObjectId::new_for_test(1);
         let obj2 = ObjectId::new_for_test(2);
+
+        coordinator.register_handler(obj1, CountingCleanupHandler);
 
         // Register symbols for two separate objects.
         for i in 0..3 {
@@ -3540,8 +3597,8 @@ mod tests {
     }
 
     /// META-CANCEL-005: Listener Multiplicativity Property
-    /// N listeners should all be notified exactly once per cancellation
-    /// Metamorphic relation: notifications_received = listeners_count × cancellations_count
+    /// Retained listeners are notified once per strictly stronger cancellation severity.
+    /// Metamorphic relation: notifications_received = listeners_count × severity_levels_seen
     #[test]
     fn meta_listener_multiplicativity() {
         use std::sync::atomic::{AtomicU32, Ordering};
@@ -3566,7 +3623,7 @@ mod tests {
         // Metamorphic relation: exactly N notifications for 1 cancellation
         assert_eq!(notification_count.load(Ordering::SeqCst), listener_count);
 
-        // Additional cancellation attempts should not trigger more notifications (listeners drained)
+        // A stronger cancellation re-notifies retained listeners once.
         let before_second = notification_count.load(Ordering::SeqCst);
         token.cancel(
             &CancelReason::new(CancelKind::Shutdown),
@@ -3574,7 +3631,15 @@ mod tests {
         );
         let after_second = notification_count.load(Ordering::SeqCst);
 
-        assert_eq!(before_second, after_second); // No additional notifications
+        assert_eq!(before_second, listener_count);
+        assert_eq!(after_second, listener_count * 2);
+
+        // Same-severity repeats must remain idempotent.
+        token.cancel(
+            &CancelReason::new(CancelKind::Shutdown),
+            Time::from_millis(6000),
+        );
+        assert_eq!(notification_count.load(Ordering::SeqCst), after_second);
     }
 
     /// META-CANCEL-006: Broadcast Deduplication Property
@@ -3733,6 +3798,8 @@ mod tests {
         let obj1 = ObjectId::new_for_test(70);
         let obj2 = ObjectId::new_for_test(71);
 
+        coordinator.register_handler(obj1, CountingCleanupHandler);
+
         // Register symbols for both objects
         for i in 0..3 {
             coordinator.register_pending(obj1, Symbol::new_for_test(70, 0, i, &[1, 2]), now);
@@ -3744,6 +3811,7 @@ mod tests {
         // Create separate coordinators for independent cleanup comparison
         let coord1 = CleanupCoordinator::new();
         let coord2 = CleanupCoordinator::new();
+        coord1.register_handler(obj1, CountingCleanupHandler);
 
         // Register same symbols in separate coordinators
         for i in 0..3 {
@@ -3827,12 +3895,12 @@ mod tests {
         use std::sync::Mutex as StdMutex;
         let mut rng = DetRng::new(0x_face_d00d);
         let token = SymbolCancelToken::new(ObjectId::new_for_test(7), &mut rng);
-        let observed: Arc<StdMutex<Vec<crate::types::CancelKind>>> =
+        let observed: Arc<StdMutex<Vec<(crate::types::CancelKind, Time)>>> =
             Arc::new(StdMutex::new(Vec::new()));
         {
             let observed = Arc::clone(&observed);
-            token.add_listener(move |reason: &CancelReason, _at: Time| {
-                observed.lock().unwrap().push(reason.kind);
+            token.add_listener(move |reason: &CancelReason, at: Time| {
+                observed.lock().unwrap().push((reason.kind, at));
             });
         }
 
@@ -3852,22 +3920,28 @@ mod tests {
             "listener must observe both the initial cancel and the strengthen, got {log:?}"
         );
         assert_eq!(
-            log.first().copied(),
+            log.first().map(|(kind, _)| *kind),
             Some(crate::types::CancelKind::User),
             "first notification must carry the initial weak reason, got {log:?}"
         );
         assert!(
-            log.contains(&crate::types::CancelKind::Shutdown),
+            log.iter()
+                .any(|(kind, at)| *kind == crate::types::CancelKind::Shutdown
+                    && *at == Time::from_nanos(100)),
             "listener must be re-notified with the strengthened reason, got {log:?}"
         );
         // No duplicate same-severity notifications.
         let user_count = log
             .iter()
-            .filter(|k| **k == crate::types::CancelKind::User)
+            .filter(|(kind, _)| *kind == crate::types::CancelKind::User)
             .count();
         assert_eq!(
             user_count, 1,
             "same-severity cancel must not re-fire listeners, got {log:?}"
+        );
+        assert!(
+            log.iter().all(|(_, at)| *at == Time::from_nanos(100)),
+            "all retained-listener notifications must use the canonical first-cancel timestamp, got {log:?}"
         );
     }
 
