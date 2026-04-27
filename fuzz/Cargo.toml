@@ -2278,3 +2278,13 @@ path = "fuzz_targets/tls_cert_chain_validation.rs"
 test = false
 doc = false
 bench = false
+
+# asupersync-b9m51x: HTTP/3 QPACK cross-component integration edge cases fuzzer.
+# Tests encoder<->decoder integration with random state changes, dynamic table size
+# negotiations, header block ordering, and static-only mode enforcement.
+[[bin]]
+name = "qpack_cross_component_integration"
+path = "fuzz_targets/qpack_cross_component_integration.rs"
+test = false
+doc = false
+bench = false
