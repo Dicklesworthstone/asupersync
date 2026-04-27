@@ -2268,3 +2268,13 @@ path = "fuzz_targets/hpack_dynamic_table_sequences.rs"
 test = false
 doc = false
 bench = false
+
+# asupersync-eq1j92: TLS certificate chain validation pathological cases fuzzer.
+# Tests random valid+malformed cert sequences, expired/not-yet-valid certificates,
+# signature-algorithm mismatches, missing intermediates, and chain ordering issues.
+[[bin]]
+name = "tls_cert_chain_validation"
+path = "fuzz_targets/tls_cert_chain_validation.rs"
+test = false
+doc = false
+bench = false
