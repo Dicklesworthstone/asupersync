@@ -163,7 +163,7 @@ fn http2_grpc_unary_call_with_real_transport() {
         // Note: Since we don't have a full HTTP/2 implementation yet,
         // this will still use the loopback behavior, but the URI validation
         // now allows localhost which is the first step
-        let response_result = client.unary("/test.Service/TestMethod", request).await;
+        let response_result = client.unary::<String, String>("/test.Service/TestMethod", request).await;
 
         match response_result {
             Ok(response) => {
@@ -212,7 +212,7 @@ fn http2_grpc_server_streaming_localhost() {
 
         test_section!("initiate_server_streaming");
         let request = Request::new("stream_request".to_string());
-        let response_result = client.server_streaming("/test.Service/StreamMethod", request).await;
+        let response_result = client.server_streaming::<String, String>("/test.Service/StreamMethod", request).await;
 
         match response_result {
             Ok(response) => {
@@ -251,7 +251,6 @@ fn http2_grpc_connection_timeout_and_deadline() {
         let channel = Channel::builder(uri)
             .connect_timeout(Duration::from_millis(100))  // Very short timeout
             .timeout(Duration::from_millis(500))         // Request timeout
-            .build()
             .connect()
             .await;
 
@@ -268,7 +267,7 @@ fn http2_grpc_connection_timeout_and_deadline() {
                 // This should still work since we're not actually connecting yet
                 // but the timeout configuration is validated
                 let request = Request::new("timeout_test".to_string());
-                let _response = client.unary("/test.Service/TimeoutMethod", request).await;
+                let _response = client.unary::<String, String>("/test.Service/TimeoutMethod", request).await;
 
                 test_complete!("http2_grpc_connection_timeout_and_deadline");
             }
@@ -348,11 +347,11 @@ fn http2_grpc_metadata_and_trailers() {
         let mut request = Request::new("metadata_test".to_string());
         request.metadata_mut().insert(
             "x-test-header",
-            MetadataValue::from_static("test_value")
+            MetadataValue::Ascii("test_value".to_string())
         );
         request.metadata_mut().insert(
             "x-client-id",
-            MetadataValue::from_static("grpc_http2_e2e_test")
+            MetadataValue::Ascii("grpc_http2_e2e_test".to_string())
         );
 
         log_test_event("request_metadata_added", json!({
@@ -363,7 +362,7 @@ fn http2_grpc_metadata_and_trailers() {
         }));
 
         test_section!("execute_call_with_metadata");
-        let response_result = client.unary("/test.Service/MetadataMethod", request).await;
+        let response_result = client.unary::<String, String>("/test.Service/MetadataMethod", request).await;
 
         match response_result {
             Ok(response) => {
