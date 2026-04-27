@@ -189,26 +189,33 @@ impl ObligationTable {
     /// `Reserved` state (commit / abort / leak / removal-while-pending).
     #[inline]
     fn note_pending_removed(&mut self, kind: ObligationKind, reserved_at: Time) {
-        debug_assert!(
-            self.cached_pending > 0,
-            "pending counter underflow removing {kind:?} obligation reserved at {reserved_at:?}"
-        );
         let kind_slot = kind_index(kind);
-        debug_assert!(
-            self.pending_by_kind[kind_slot] > 0,
-            "per-kind pending counter underflow removing {kind:?} obligation reserved at {reserved_at:?}"
-        );
-        debug_assert!(
-            self.pending_reserved_at_sum_ns >= u128::from(reserved_at.as_nanos()),
-            "pending reserved-at sum underflow removing {kind:?} obligation reserved at {reserved_at:?}"
-        );
+        let reserved_at_ns = u128::from(reserved_at.as_nanos());
 
-        self.cached_pending = self.cached_pending.saturating_sub(1);
-        let slot = &mut self.pending_by_kind[kind_slot];
-        *slot = slot.saturating_sub(1);
-        self.pending_reserved_at_sum_ns = self
+        let cached_pending = self.cached_pending.checked_sub(1).unwrap_or_else(|| {
+            panic!(
+                "pending counter underflow removing {kind:?} obligation reserved at {reserved_at:?}"
+            )
+        });
+        let pending_for_kind = self.pending_by_kind[kind_slot]
+            .checked_sub(1)
+            .unwrap_or_else(|| {
+                panic!(
+                    "per-kind pending counter underflow removing {kind:?} obligation reserved at {reserved_at:?}"
+                )
+            });
+        let pending_reserved_at_sum_ns = self
             .pending_reserved_at_sum_ns
-            .saturating_sub(u128::from(reserved_at.as_nanos()));
+            .checked_sub(reserved_at_ns)
+            .unwrap_or_else(|| {
+                panic!(
+                    "pending reserved-at sum underflow removing {kind:?} obligation reserved at {reserved_at:?}"
+                )
+            });
+
+        self.cached_pending = cached_pending;
+        self.pending_by_kind[kind_slot] = pending_for_kind;
+        self.pending_reserved_at_sum_ns = pending_reserved_at_sum_ns;
     }
 
     #[cfg(debug_assertions)]
@@ -1313,7 +1320,7 @@ mod tests {
         );
         assert_eq!(table.pending_reserved_at_sum_ns(), 0);
 
-        // Per-kind counters must bottom out at zero on saturating_sub paths.
+        // Per-kind counters must bottom out at zero on normal lifecycle paths.
         for kind in [
             ObligationKind::SendPermit,
             ObligationKind::Ack,
@@ -1325,12 +1332,31 @@ mod tests {
         }
     }
 
-    #[cfg(debug_assertions)]
     #[test]
     #[should_panic(expected = "pending counter underflow")]
-    fn pending_counter_underflow_is_not_silent_in_debug() {
+    fn pending_counter_underflow_is_not_silent() {
         let mut table = ObligationTable::new();
         table.note_pending_removed(ObligationKind::Ack, Time::ZERO);
+    }
+
+    #[test]
+    #[should_panic(expected = "per-kind pending counter underflow")]
+    fn pending_counter_per_kind_underflow_is_not_silent() {
+        let mut table = ObligationTable::new();
+        table.cached_pending = 1;
+        table.pending_by_kind[kind_index(ObligationKind::Lease)] = 1;
+
+        table.note_pending_removed(ObligationKind::Ack, Time::ZERO);
+    }
+
+    #[test]
+    #[should_panic(expected = "pending reserved-at sum underflow")]
+    fn pending_reserved_at_sum_underflow_is_not_silent() {
+        let mut table = ObligationTable::new();
+        table.cached_pending = 1;
+        table.pending_by_kind[kind_index(ObligationKind::Ack)] = 1;
+
+        table.note_pending_removed(ObligationKind::Ack, Time::from_nanos(1));
     }
 
     #[cfg(debug_assertions)]
