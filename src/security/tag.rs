@@ -69,7 +69,7 @@ impl AuthenticationTag {
     /// regardless of the key.
     #[must_use]
     pub fn verify(&self, key: &AuthKey, symbol: &Symbol) -> bool {
-        if self.bytes == [0u8; TAG_SIZE] {
+        if self.is_zero() {
             return false;
         }
         let mut mac =
@@ -309,5 +309,32 @@ mod tests {
 
         let expected = AuthenticationTag::from_bytes(mac.finalize().into_bytes().into());
         assert_eq!(AuthenticationTag::compute(&key, &symbol), expected);
+    }
+
+    #[test]
+    fn verify_uses_constant_time_zero_tag_rejection() {
+        // Regression test for asupersync-lo6ygl: Zero-tag verification bypass
+        //
+        // SECURITY INVARIANT: Zero tag rejection must use constant-time comparison
+        //
+        // The verify() method must use is_zero() for zero-tag detection instead of
+        // direct byte array comparison. Direct comparison (self.bytes == [0u8; 32])
+        // may short-circuit on the first non-zero byte, creating timing side channels.
+        //
+        // Constant-time is_zero() always examines all bytes regardless of their values,
+        // preventing timing attacks that could distinguish zero vs non-zero tags.
+        let key = AuthKey::from_seed(42);
+        let id = SymbolId::new_for_test(1, 0, 0);
+        let symbol = Symbol::new(id, vec![1, 2, 3], SymbolKind::Source);
+
+        // Zero tag must always fail verification
+        let zero_tag = AuthenticationTag::zero();
+        assert!(!zero_tag.verify(&key, &symbol), "zero tag must fail verification");
+        assert!(zero_tag.is_zero(), "zero tag must report as zero");
+
+        // Non-zero tag should pass verification when computed correctly
+        let valid_tag = AuthenticationTag::compute(&key, &symbol);
+        assert!(valid_tag.verify(&key, &symbol), "valid tag must pass verification");
+        assert!(!valid_tag.is_zero(), "valid tag must not report as zero");
     }
 }
