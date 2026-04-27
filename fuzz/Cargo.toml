@@ -2248,3 +2248,23 @@ path = "fuzz_targets/raptorq_decoding_pipeline_feed.rs"
 test = false
 doc = false
 bench = false
+
+# br-asupersync-seqfhv: WebSocket fragmentation sequence state machine fuzzer.
+# Tests RFC 6455 §5.4 violations and complex frame sequences that can trigger
+# state machine edge cases in WebSocket frame processing.
+[[bin]]
+name = "websocket_fragmentation_state_machine"
+path = "fuzz_targets/websocket_fragmentation_state_machine.rs"
+test = false
+doc = false
+bench = false
+
+# asupersync-x5ordu: HPACK dynamic table state machine adversarial sequences fuzzer.
+# Tests sequences of insert/dynamic-table-resize/eviction across encoder+decoder,
+# asserting indices stay consistent throughout the operation sequence.
+[[bin]]
+name = "hpack_dynamic_table_sequences"
+path = "fuzz_targets/hpack_dynamic_table_sequences.rs"
+test = false
+doc = false
+bench = false
