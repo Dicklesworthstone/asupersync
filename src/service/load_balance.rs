@@ -1077,6 +1077,10 @@ mod tests {
         crate::test_phase!(name);
     }
 
+    fn backend_names<const N: usize>(names: [&str; N]) -> Vec<String> {
+        names.into_iter().map(str::to_owned).collect()
+    }
+
     fn push_waker_if_new(wakers: &mut Vec<Waker>, waker: &Waker) {
         if wakers.iter().all(|existing| !existing.will_wake(waker)) {
             wakers.push(waker.clone());
@@ -2486,7 +2490,7 @@ mod tests {
         assert_eq!(lb.len(), 2);
         assert_eq!(
             discover.endpoints(),
-            vec!["backend-a".to_string(), "backend-b".to_string()]
+            backend_names(["backend-a", "backend-b"])
         );
 
         lb.update_from_discover(&discover)
@@ -2494,7 +2498,7 @@ mod tests {
         assert_eq!(lb.len(), 2);
         assert_eq!(
             discover.endpoints(),
-            vec!["backend-b".to_string(), "backend-c".to_string()]
+            backend_names(["backend-b", "backend-c"])
         );
 
         lb.update_from_discover(&discover)
@@ -2506,10 +2510,7 @@ mod tests {
             lb.remove(0).expect("backend-c should remain"),
         ];
         remaining.sort();
-        assert_eq!(
-            remaining,
-            vec!["backend-b".to_string(), "backend-c".to_string()]
-        );
+        assert_eq!(remaining, backend_names(["backend-b", "backend-c"]));
         crate::test_complete!("lb_update_from_discover_applies_insert_remove_and_dedupes");
     }
 
@@ -2528,7 +2529,7 @@ mod tests {
             .expect("first balancer should consume discovery inserts");
         assert_eq!(
             discover.endpoints(),
-            vec!["backend-a".to_string(), "backend-b".to_string()]
+            backend_names(["backend-a", "backend-b"])
         );
 
         late.update_from_discover(&discover)
@@ -2540,10 +2541,7 @@ mod tests {
             late.remove(0).expect("backend-b should be present"),
         ];
         remaining.sort();
-        assert_eq!(
-            remaining,
-            vec!["backend-a".to_string(), "backend-b".to_string()]
-        );
+        assert_eq!(remaining, backend_names(["backend-a", "backend-b"]));
         crate::test_complete!("lb_update_from_discover_reconciles_late_joiner_against_snapshot");
     }
 
@@ -2662,11 +2660,11 @@ mod tests {
     #[test]
     fn lb_update_from_static_discovery_is_idempotent() {
         init_test("lb_update_from_static_discovery_is_idempotent");
-        let discover = super::super::discover::StaticList::new(vec![
-            "backend-a".to_string(),
-            "backend-b".to_string(),
-            "backend-a".to_string(),
-        ]);
+        let discover = super::super::discover::StaticList::new(backend_names([
+            "backend-a",
+            "backend-b",
+            "backend-a",
+        ]));
         let lb = LoadBalancer::empty(RoundRobin::new());
 
         lb.update_from_discover(&discover)
@@ -2682,11 +2680,9 @@ mod tests {
     #[test]
     fn lb_weighted_discovery_insert_syncs_strategy_state() {
         init_test("lb_weighted_discovery_insert_syncs_strategy_state");
-        let discover = super::super::discover::StaticList::new(vec![
-            "backend-a".to_string(),
-            "backend-b".to_string(),
-        ]);
-        let lb = LoadBalancer::new(Weighted::new(vec![3]), vec!["backend-a".to_string()]);
+        let discover =
+            super::super::discover::StaticList::new(backend_names(["backend-a", "backend-b"]));
+        let lb = LoadBalancer::new(Weighted::new(vec![3]), backend_names(["backend-a"]));
 
         lb.update_from_discover(&discover)
             .expect("discovery insert should keep weighted strategy aligned");
@@ -2707,7 +2703,7 @@ mod tests {
     #[test]
     fn lb_weighted_push_syncs_strategy_state() {
         init_test("lb_weighted_push_syncs_strategy_state");
-        let lb = LoadBalancer::new(Weighted::new(vec![3]), vec!["backend-a".to_string()]);
+        let lb = LoadBalancer::new(Weighted::new(vec![3]), backend_names(["backend-a"]));
 
         lb.push("backend-b".to_string());
         assert_eq!(lb.len(), 2);
@@ -2729,7 +2725,7 @@ mod tests {
         init_test("lb_new_syncs_weighted_strategy_state_for_initial_backends");
         let lb = LoadBalancer::new(
             Weighted::new(vec![1]),
-            vec!["backend-a".to_string(), "backend-b".to_string()],
+            backend_names(["backend-a", "backend-b"]),
         );
 
         let loads = lb.loads();
@@ -2747,7 +2743,7 @@ mod tests {
     #[test]
     fn lb_new_preserves_deferred_weight_for_later_backend_insert() {
         init_test("lb_new_preserves_deferred_weight_for_later_backend_insert");
-        let lb = LoadBalancer::new(Weighted::new(vec![9, 4]), vec!["backend-a".to_string()]);
+        let lb = LoadBalancer::new(Weighted::new(vec![9, 4]), backend_names(["backend-a"]));
 
         let state = lb.strategy().state.lock();
         assert_eq!(
@@ -2785,11 +2781,7 @@ mod tests {
         init_test("lb_weighted_remove_reindexes_strategy_weights");
         let lb = LoadBalancer::new(
             Weighted::new(vec![10, 1, 1]),
-            vec![
-                "backend-a".to_string(),
-                "backend-b".to_string(),
-                "backend-c".to_string(),
-            ],
+            backend_names(["backend-a", "backend-b", "backend-c"]),
         );
 
         let removed = lb.remove(0).expect("first backend should be removable");
