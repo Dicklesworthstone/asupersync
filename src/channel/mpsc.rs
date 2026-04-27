@@ -8,13 +8,13 @@
 //!
 //! Asupersync (cancel-safe):
 //!   let permit = tx.reserve(cx).await?;  // Phase 1: reserve slot
-//!   permit.send(message);                 // Phase 2: commit (cannot fail)
+//!   permit.send(message)?;               // Phase 2: commit (surfaces disconnection)
 //! ```
 //!
 //! # Obligation Tracking
 //!
 //! Each `SendPermit` represents an obligation that must be resolved:
-//! - `permit.send(value)`: Commits the obligation
+//! - `permit.send(value)`: Commits the obligation (surfaces disconnection as Outcome)
 //! - `permit.abort()`: Aborts the obligation
 //! - `drop(permit)`: Equivalent to abort (RAII cleanup)
 //!
@@ -1608,6 +1608,38 @@ mod tests {
         crate::test_complete!("permit_send_after_receiver_drop_surfaces_disconnected");
     }
 
+    /// Regression test for br-asupersync-l7t66t: channel failure lens.
+    ///
+    /// Verifies that SendPermit::send surfaces disconnection failures as Outcomes
+    /// instead of silently dropping the value, preserving the two-phase reserve/send
+    /// invariant that no values should be silently dropped.
+    #[test]
+    fn send_permit_surfaces_disconnected_as_outcome() {
+        init_test("send_permit_surfaces_disconnected_as_outcome");
+        let cx = test_cx();
+        let (tx, rx) = channel::<String>(1);
+
+        // Phase 1: Reserve a slot
+        let permit = block_on(tx.reserve(&cx)).expect("reserve should succeed");
+
+        // Drop receiver to create disconnection condition
+        drop(rx);
+
+        // Phase 2: Commit should surface disconnection, not silently drop
+        let message = "important_data".to_string();
+        let outcome = permit.send(message.clone());
+
+        // Verify that the disconnection is surfaced as an Outcome::Err, preserving the value
+        crate::assert_with_log!(
+            matches!(outcome, Outcome::Err(SendError::Disconnected(ref value)) if value == &message),
+            "disconnected send preserves value in outcome",
+            format!("Err(Disconnected({:?}))", message),
+            format!("{:?}", outcome)
+        );
+
+        crate::test_complete!("send_permit_surfaces_disconnected_as_outcome");
+    }
+
     #[test]
     fn weak_sender_upgrade_fails_after_drop() {
         init_test("weak_sender_upgrade_fails_after_drop");
@@ -3118,7 +3150,13 @@ pub mod backpressure_metamorphic {
                                                         cancelled_clone.fetch_add(1, Ordering::SeqCst);
                                                     }
                                                     Ok(permit) => {
-                                                        permit.send(i as u32);
+                                                        let outcome = permit.send(i as u32);
+                                                        crate::assert_with_log!(
+                                                            matches!(outcome, Outcome::Ok(())),
+                                                            "send outcome in stress test",
+                                                            "Ok(())",
+                                                            format!("{:?}", outcome)
+                                                        );
                                                     }
                                                     Err(other) => {
                                                         panic!(
