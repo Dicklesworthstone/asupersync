@@ -1331,6 +1331,7 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Instant;
 
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();

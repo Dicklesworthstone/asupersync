@@ -1332,6 +1332,17 @@ impl<'a> MessageReader<'a> {
         self.pos += 1; // skip null terminator
         Ok(s)
     }
+
+    fn ensure_consumed(&self, context: &str) -> Result<(), PgError> {
+        let remaining = self.remaining();
+        if remaining == 0 {
+            Ok(())
+        } else {
+            Err(PgError::Protocol(format!(
+                "{context} message has {remaining} trailing byte(s)"
+            )))
+        }
+    }
 }
 
 // ============================================================================
@@ -2009,7 +2020,7 @@ impl PgStream {
                 if let Some(std_stream) = s.try_as_std() {
                     let _ = std_stream.set_nonblocking(true);
                     use std::io::Write;
-                    let mut writer: &std::net::TcpStream = &std_stream;
+                    let mut writer = std_stream;
                     let _ = writer.write_all(&TERMINATE_FRAME);
                 }
             }
@@ -2136,18 +2147,18 @@ const DEFAULT_MAX_RESULT_ROWS: usize = 1_000_000;
 pub const DEFAULT_MAX_PREPARED_STATEMENTS: usize = 256;
 
 /// br-asupersync-7v80ju: hard cap on the size of the per-connection
-/// deallocate-retry queue. If a server is rejecting CLOSE messages
-/// faster than we can drain them, we mark the connection unhealthy
-/// well before the queue itself grows large enough to leak memory
-/// on the client side.
+/// deallocate-retry queue.
+///
+/// If a server is rejecting CLOSE messages faster than we can drain them, we
+/// mark the connection unhealthy well before the queue itself grows large
+/// enough to leak memory on the client side.
 pub const DEALLOCATE_RETRY_QUEUE_CAP: usize = 64;
 
-/// br-asupersync-7v80ju: number of consecutive CLOSE failures after
-/// which the connection is marked unhealthy and signalled to the
-/// pool for eviction. Three consecutive failures is a deliberate
-/// trade-off — one transient packet loss is forgiven, but a
-/// systematically-misbehaving server (or a desynchronised wire) is
-/// caught quickly.
+/// br-asupersync-7v80ju: consecutive CLOSE failures before eviction.
+///
+/// Three consecutive failures is a deliberate trade-off — one transient packet
+/// loss is forgiven, but a systematically-misbehaving server (or a
+/// desynchronised wire) is caught quickly.
 pub const DEALLOCATE_FAILURE_UNHEALTHY_THRESHOLD: u32 = 3;
 
 /// Bounded LRU cache for server-side prepared statements.
@@ -2355,6 +2366,15 @@ impl Drop for PgConnectionInner {
     }
 }
 
+#[cfg(any(test, feature = "test-internals"))]
+fn test_cancel_target() -> CancelTarget {
+    CancelTarget {
+        host: "127.0.0.1".to_string(),
+        port: 5432,
+        connect_timeout: std::time::Duration::from_millis(500),
+    }
+}
+
 /// An async PostgreSQL connection.
 ///
 /// All operations integrate with [`Cx`] for cancellation and checkpointing.
@@ -2400,6 +2420,22 @@ fn row_returning_execute_error(api: &str, query_api: &str) -> PgError {
 #[inline]
 fn cancelled_error(cx: &Cx) -> PgError {
     PgError::Cancelled(cancelled_reason(cx))
+}
+
+const MAX_BACKEND_MESSAGE_LEN: i32 = 64 * 1024 * 1024;
+
+fn backend_message_body_len(len_i32: i32) -> Result<usize, PgError> {
+    // Practical PostgreSQL message limit. The protocol allows up to 2 GiB
+    // but legitimate messages rarely exceed a few tens of MiB even for large
+    // COPY batches. Capping at 64 MiB prevents a malicious peer (or MitM on
+    // an unencrypted connection) from forcing a multi-GiB allocation with a
+    // single 5-byte header.
+    if !(4..=MAX_BACKEND_MESSAGE_LEN).contains(&len_i32) {
+        return Err(PgError::Protocol(format!(
+            "invalid message length: {len_i32}"
+        )));
+    }
+    Ok(len_i32 as usize - 4)
 }
 
 #[inline]
@@ -4418,21 +4454,9 @@ impl PgConnection {
         self.read_exact(cx, &mut len_buf).await?;
         let len_i32 = i32::from_be_bytes(len_buf);
 
-        // Practical PostgreSQL message limit. The protocol allows up to 2 GiB
-        // but legitimate messages rarely exceed a few tens of MiB even for large
-        // COPY batches. Capping at 64 MiB prevents a malicious peer (or MitM on
-        // an unencrypted connection) from forcing a multi-GiB allocation with a
-        // single 5-byte header (DoS mitigation — issue #8).
-        const MAX_MESSAGE_LEN: i32 = 64 * 1024 * 1024;
-        if !(4..=MAX_MESSAGE_LEN).contains(&len_i32) {
-            return Err(PgError::Protocol(format!(
-                "invalid message length: {len_i32}"
-            )));
-        }
-        let len = len_i32 as usize;
+        let body_len = backend_message_body_len(len_i32)?;
 
         // Read message body
-        let body_len = len - 4;
         let mut body = vec![0u8; body_len];
         if body_len > 0 {
             self.read_exact(cx, &mut body).await?;
@@ -4479,6 +4503,7 @@ impl PgConnection {
             });
         }
 
+        reader.ensure_consumed("RowDescription")?;
         Ok((columns, indices))
     }
 
@@ -4540,6 +4565,7 @@ impl PgConnection {
             }
         }
 
+        reader.ensure_consumed("DataRow")?;
         Ok(values)
     }
 
@@ -4681,6 +4707,7 @@ impl PgConnection {
             }
         }
 
+        reader.ensure_consumed("ErrorResponse")?;
         Ok(PgError::Server {
             code,
             message,
@@ -4725,6 +4752,7 @@ impl PgConnection {
         for _ in 0..num {
             oids.push(reader.read_i32()? as u32);
         }
+        reader.ensure_consumed("ParameterDescription")?;
         Ok(oids)
     }
 
@@ -5231,11 +5259,11 @@ mod hex {
     }
 }
 
-/// Reference [`AsyncConnectionManager`] implementation for
-/// [`PgConnection`]. Wraps a [`PgConnectOptions`] used to mint new
-/// connections; the pool calls [`Self::connect`] to add a connection
-/// and [`Self::release_check`] on every return-to-pool to decide
-/// whether the connection is safe to reuse.
+/// Reference [`AsyncConnectionManager`] implementation for [`PgConnection`].
+///
+/// Wraps a [`PgConnectOptions`] used to mint new connections; the pool calls
+/// [`Self::connect`] to add a connection and [`Self::release_check`] on every
+/// return-to-pool to decide whether the connection is safe to reuse.
 ///
 /// br-asupersync-a1x452 + br-asupersync-t4wfzb: pre-fix, no
 /// PgConnection-specific manager existed. Pool consumers either rolled
@@ -5382,6 +5410,7 @@ fn fuzz_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
                 stream: PgStream::Plain(stream),
                 process_id: 0,
                 secret_key: 0,
+                cancel_target: test_cancel_target(),
                 parameters: BTreeMap::new(),
                 transaction_status: b'I',
                 closed: false,
@@ -5400,17 +5429,40 @@ fn fuzz_test_connection_with_peer() -> (PgConnection, std::net::TcpStream) {
 }
 
 /// br-asupersync-eoixvy — fuzz-target re-exporter for PostgreSQL backend
-/// message framing. Uses the real `read_message()` path behind a
-/// `test-internals` seam so libFuzzer can exercise length validation and
-/// truncation handling against production code.
+/// message framing. Uses the same length-validation helper as the production
+/// `read_message()` path, but parses from memory so libFuzzer cannot block on
+/// a synchronous socket write before the async reader is polled.
 #[cfg(feature = "test-internals")]
 #[doc(hidden)]
 pub async fn fuzz_read_backend_message(cx: &Cx, frame: &[u8]) -> Result<(u8, Vec<u8>), PgError> {
-    let (mut conn, mut peer) = fuzz_test_connection_with_peer();
-    std::io::Write::write_all(&mut peer, frame).map_err(PgError::Io)?;
-    peer.shutdown(std::net::Shutdown::Write)
-        .map_err(PgError::Io)?;
-    conn.read_message(cx).await
+    if cx.checkpoint().is_err() {
+        return Err(cancelled_error(cx));
+    }
+    if frame.len() < 5 {
+        return Err(PgError::Io(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "unexpected end of stream",
+        )));
+    }
+
+    let msg_type = frame[0];
+    let len_i32 = i32::from_be_bytes([frame[1], frame[2], frame[3], frame[4]]);
+    let body_len = backend_message_body_len(len_i32)?;
+    let body_start = 5usize;
+    let body_end = body_start
+        .checked_add(body_len)
+        .ok_or_else(|| PgError::Protocol("message length overflow".into()))?;
+    if frame.len() < body_end {
+        return Err(PgError::Io(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "unexpected end of stream",
+        )));
+    }
+    if cx.checkpoint().is_err() {
+        return Err(cancelled_error(cx));
+    }
+
+    Ok((msg_type, frame[body_start..body_end].to_vec()))
 }
 
 /// br-asupersync-eoixvy — fuzz-target re-exporter for the RowDescription
@@ -5724,7 +5776,7 @@ mod tests {
     #[test]
     fn test_scram_pbkdf2_matches_rfc8018_sha256_vector() {
         let cx = Cx::for_testing();
-        let auth = ScramAuth::new(&cx, "user", "password");
+        let auth = ScramAuth::new(&cx, "user", "password", ScramChannelBinding::None);
         let derived = auth.pbkdf2_sha256("password", b"salt", 1);
         let expected =
             hex::decode("120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b")
@@ -5749,6 +5801,7 @@ mod tests {
                 stream: PgStream::Plain(stream),
                 process_id: 0,
                 secret_key: 0,
+                cancel_target: test_cancel_target(),
                 parameters: BTreeMap::new(),
                 transaction_status: b'I',
                 closed: false,
@@ -5778,6 +5831,7 @@ mod tests {
                     stream: PgStream::Plain(stream),
                     process_id: 0,
                     secret_key: 0,
+                    cancel_target: test_cancel_target(),
                     parameters: BTreeMap::new(),
                     transaction_status: b'I',
                     closed: false,
@@ -5861,6 +5915,8 @@ mod tests {
             let tx = PgTransaction {
                 conn: &mut conn,
                 finished: false,
+                isolation_level: None,
+                read_only: false,
             };
             tx.commit(&cx).await
         });
@@ -5878,6 +5934,8 @@ mod tests {
             let tx = PgTransaction {
                 conn: &mut conn,
                 finished: false,
+                isolation_level: None,
+                read_only: false,
             };
             tx.rollback(&cx).await
         });
@@ -6485,6 +6543,80 @@ mod tests {
         let (columns, indices) = conn.parse_row_description(&data).unwrap();
         assert!(columns.is_empty());
         assert!(indices.is_empty());
+    }
+
+    #[test]
+    fn postgres_wire_subparsers_reject_trailing_bytes() {
+        let conn = make_test_connection();
+
+        let row_description = [0, 0, 0xAA];
+        let row_err = conn.parse_row_description(&row_description).unwrap_err();
+        assert!(
+            row_err
+                .to_string()
+                .contains("RowDescription message has 1 trailing byte"),
+            "unexpected RowDescription error: {row_err}"
+        );
+
+        let data_row = [0, 0, 0xBB];
+        let data_err = conn.parse_data_row(&data_row, &[]).unwrap_err();
+        assert!(
+            data_err
+                .to_string()
+                .contains("DataRow message has 1 trailing byte"),
+            "unexpected DataRow error: {data_err}"
+        );
+
+        let error_response = [0, 0xCC];
+        let error_err = conn.parse_error_response(&error_response).unwrap_err();
+        assert!(
+            error_err
+                .to_string()
+                .contains("ErrorResponse message has 1 trailing byte"),
+            "unexpected ErrorResponse error: {error_err}"
+        );
+
+        let parameter_description = [0, 0, 0xDD];
+        let param_err =
+            PgConnection::parse_parameter_description(&parameter_description).unwrap_err();
+        assert!(
+            param_err
+                .to_string()
+                .contains("ParameterDescription message has 1 trailing byte"),
+            "unexpected ParameterDescription error: {param_err}"
+        );
+    }
+
+    #[cfg(feature = "test-internals")]
+    #[test]
+    fn fuzz_read_backend_message_parses_in_memory_without_socket_io() {
+        let cx = Cx::for_testing();
+
+        let mut frame = vec![b'D'];
+        frame.extend_from_slice(&8i32.to_be_bytes());
+        frame.extend_from_slice(&[1, 2, 3, 4]);
+        // A real stream may already have the next frame buffered. The seam
+        // must match read_message() and return only the first message body.
+        frame.extend_from_slice(&[b'Z', 0, 0, 0, 5, b'I']);
+        let (msg_type, body) = run(fuzz_read_backend_message(&cx, &frame)).unwrap();
+        assert_eq!(msg_type, b'D');
+        assert_eq!(body, vec![1, 2, 3, 4]);
+
+        let mut too_large = vec![b'D'];
+        too_large.extend_from_slice(&(MAX_BACKEND_MESSAGE_LEN + 1).to_be_bytes());
+        let too_large_err = run(fuzz_read_backend_message(&cx, &too_large)).unwrap_err();
+        assert!(
+            too_large_err.to_string().contains("invalid message length"),
+            "unexpected too-large error: {too_large_err}"
+        );
+
+        let mut truncated = vec![b'D'];
+        truncated.extend_from_slice(&8i32.to_be_bytes());
+        truncated.push(1);
+        match run(fuzz_read_backend_message(&cx, &truncated)).unwrap_err() {
+            PgError::Io(err) => assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof),
+            other => panic!("expected UnexpectedEof, got: {other}"),
+        }
     }
 
     // ================================================================
@@ -8806,7 +8938,9 @@ mod tests {
     #[test]
     fn a1x452_release_check_rejects_needs_discard() {
         use crate::database::pool::AsyncConnectionManager;
-        let mgr = PgConnectionManager::new(PgConnectOptions::new());
+        let mgr = PgConnectionManager::new(
+            PgConnectOptions::parse("postgres://localhost/testdb").unwrap(),
+        );
         let mut conn = make_test_connection();
 
         // Healthy out of the gate.
@@ -8823,7 +8957,9 @@ mod tests {
     #[test]
     fn t4wfzb_release_check_rejects_unhealthy() {
         use crate::database::pool::AsyncConnectionManager;
-        let mgr = PgConnectionManager::new(PgConnectOptions::new());
+        let mgr = PgConnectionManager::new(
+            PgConnectOptions::parse("postgres://localhost/testdb").unwrap(),
+        );
         let mut conn = make_test_connection();
 
         assert!(mgr.release_check(&mut conn));
@@ -8838,7 +8974,9 @@ mod tests {
     #[test]
     fn release_check_rejects_in_transaction() {
         use crate::database::pool::AsyncConnectionManager;
-        let mgr = PgConnectionManager::new(PgConnectOptions::new());
+        let mgr = PgConnectionManager::new(
+            PgConnectOptions::parse("postgres://localhost/testdb").unwrap(),
+        );
         let mut conn = make_test_connection();
 
         assert!(mgr.release_check(&mut conn));
@@ -8854,7 +8992,9 @@ mod tests {
     #[test]
     fn release_check_rejects_closed_connection() {
         use crate::database::pool::AsyncConnectionManager;
-        let mgr = PgConnectionManager::new(PgConnectOptions::new());
+        let mgr = PgConnectionManager::new(
+            PgConnectOptions::parse("postgres://localhost/testdb").unwrap(),
+        );
         let mut conn = make_test_connection();
         conn.inner.closed = true;
         assert!(
