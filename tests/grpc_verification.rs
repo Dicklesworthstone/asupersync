@@ -310,7 +310,7 @@ fn grpc_verify_006_error_conversions() {
     // io::Error -> GrpcError
     let io_err = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused");
     let grpc_err: GrpcError = io_err.into();
-    assert!(matches!(grpc_err, GrpcError::Transport(_)));
+    assert!(matches!(grpc_err, GrpcError::Transport(_, _)));
 
     // Status -> GrpcError
     let status = Status::not_found("missing");
