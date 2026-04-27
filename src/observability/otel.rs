@@ -1958,6 +1958,61 @@ mod exporter_tests {
         let dbg = format!("{exporter:?}");
         assert!(dbg.contains("InMemoryExporter"));
     }
+
+    /// br-asupersync-coxhdt: escape_label_value must handle the
+    /// Prometheus-spec-required escape trio (\\\\, \\n, \\") plus \\r as
+    /// defense-in-depth. Otherwise an attacker-controlled label value
+    /// containing a literal '"' would close the value-string early
+    /// and inject spurious labels.
+    #[test]
+    fn escape_label_value_handles_spec_required_trio_plus_cr() {
+        // Plain values pass through unchanged.
+        assert_eq!(escape_label_value("plain"), "plain");
+        // Backslash → \\
+        assert_eq!(escape_label_value(r"a\b"), r"a\\b");
+        // Newline → \n
+        assert_eq!(escape_label_value("a\nb"), r"a\nb");
+        // Double-quote → \"
+        assert_eq!(escape_label_value(r#"a"b"#), r#"a\"b"#);
+        // Carriage return → \r
+        assert_eq!(escape_label_value("a\rb"), r"a\rb");
+        // All four together.
+        assert_eq!(escape_label_value("a\\b\nc\"d\re"), r#"a\\b\nc\"d\re"#);
+    }
+
+    /// br-asupersync-coxhdt: format_labels MUST route every label
+    /// value through escape_label_value. An attacker who controls
+    /// a label value containing a literal '"' must NOT be able to
+    /// close the value string early and inject `,attacker_label="x"`
+    /// into the resulting Prometheus output.
+    #[test]
+    fn format_labels_escapes_quote_to_prevent_label_injection() {
+        let labels = vec![(
+            "path".to_string(),
+            r#"/api","attacker_label"="injected"#.to_string(),
+        )];
+        let rendered = StdoutExporter::format_labels(&labels);
+        // The literal '"' in the value MUST appear as \" in the output.
+        assert!(
+            rendered.contains(r#"\""#),
+            "format_labels failed to escape attacker quote: {rendered}"
+        );
+        // The fragment that would inject if escaping failed must NOT
+        // appear as a parseable second label.
+        assert!(
+            !rendered.contains(r#"","attacker_label"="injected"}"#),
+            "format_labels permitted label injection: {rendered}"
+        );
+    }
+
+    /// br-asupersync-coxhdt: a backslash in a label value is doubled,
+    /// not consumed.
+    #[test]
+    fn format_labels_escapes_backslash_to_prevent_value_corruption() {
+        let labels = vec![("k".to_string(), r"a\b".to_string())];
+        let rendered = StdoutExporter::format_labels(&labels);
+        assert!(rendered.contains(r"a\\b"));
+    }
 }
 
 // =============================================================================
