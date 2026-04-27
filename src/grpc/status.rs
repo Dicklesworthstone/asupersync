@@ -168,6 +168,21 @@ fn cap_status_details(details: Bytes) -> Bytes {
     details.slice(..MAX_STATUS_DETAILS_LEN)
 }
 
+macro_rules! status_constructors {
+    ($(
+        $(#[$meta:meta])*
+        $name:ident => $code:ident;
+    )*) => {
+        $(
+            $(#[$meta])*
+            #[must_use]
+            pub fn $name(message: impl Into<String>) -> Self {
+                Self::new(Code::$code, message)
+            }
+        )*
+    };
+}
+
 impl Status {
     /// Create a new status with the given code and message.
     ///
@@ -202,100 +217,39 @@ impl Status {
         Self::new(Code::Ok, "")
     }
 
-    /// Create a cancelled status.
-    #[must_use]
-    pub fn cancelled(message: impl Into<String>) -> Self {
-        Self::new(Code::Cancelled, message)
-    }
-
-    /// Create an unknown error status.
-    #[must_use]
-    pub fn unknown(message: impl Into<String>) -> Self {
-        Self::new(Code::Unknown, message)
-    }
-
-    /// Create an invalid argument status.
-    #[must_use]
-    pub fn invalid_argument(message: impl Into<String>) -> Self {
-        Self::new(Code::InvalidArgument, message)
-    }
-
-    /// Create a deadline exceeded status.
-    #[must_use]
-    pub fn deadline_exceeded(message: impl Into<String>) -> Self {
-        Self::new(Code::DeadlineExceeded, message)
-    }
-
-    /// Create a not found status.
-    #[must_use]
-    pub fn not_found(message: impl Into<String>) -> Self {
-        Self::new(Code::NotFound, message)
-    }
-
-    /// Create an already exists status.
-    #[must_use]
-    pub fn already_exists(message: impl Into<String>) -> Self {
-        Self::new(Code::AlreadyExists, message)
-    }
-
-    /// Create a permission denied status.
-    #[must_use]
-    pub fn permission_denied(message: impl Into<String>) -> Self {
-        Self::new(Code::PermissionDenied, message)
-    }
-
-    /// Create a resource exhausted status.
-    #[must_use]
-    pub fn resource_exhausted(message: impl Into<String>) -> Self {
-        Self::new(Code::ResourceExhausted, message)
-    }
-
-    /// Create a failed precondition status.
-    #[must_use]
-    pub fn failed_precondition(message: impl Into<String>) -> Self {
-        Self::new(Code::FailedPrecondition, message)
-    }
-
-    /// Create an aborted status.
-    #[must_use]
-    pub fn aborted(message: impl Into<String>) -> Self {
-        Self::new(Code::Aborted, message)
-    }
-
-    /// Create an out of range status.
-    #[must_use]
-    pub fn out_of_range(message: impl Into<String>) -> Self {
-        Self::new(Code::OutOfRange, message)
-    }
-
-    /// Create an unimplemented status.
-    #[must_use]
-    pub fn unimplemented(message: impl Into<String>) -> Self {
-        Self::new(Code::Unimplemented, message)
-    }
-
-    /// Create an internal error status.
-    #[must_use]
-    pub fn internal(message: impl Into<String>) -> Self {
-        Self::new(Code::Internal, message)
-    }
-
-    /// Create an unavailable status.
-    #[must_use]
-    pub fn unavailable(message: impl Into<String>) -> Self {
-        Self::new(Code::Unavailable, message)
-    }
-
-    /// Create a data loss status.
-    #[must_use]
-    pub fn data_loss(message: impl Into<String>) -> Self {
-        Self::new(Code::DataLoss, message)
-    }
-
-    /// Create an unauthenticated status.
-    #[must_use]
-    pub fn unauthenticated(message: impl Into<String>) -> Self {
-        Self::new(Code::Unauthenticated, message)
+    status_constructors! {
+        /// Create a cancelled status.
+        cancelled => Cancelled;
+        /// Create an unknown error status.
+        unknown => Unknown;
+        /// Create an invalid argument status.
+        invalid_argument => InvalidArgument;
+        /// Create a deadline exceeded status.
+        deadline_exceeded => DeadlineExceeded;
+        /// Create a not found status.
+        not_found => NotFound;
+        /// Create an already exists status.
+        already_exists => AlreadyExists;
+        /// Create a permission denied status.
+        permission_denied => PermissionDenied;
+        /// Create a resource exhausted status.
+        resource_exhausted => ResourceExhausted;
+        /// Create a failed precondition status.
+        failed_precondition => FailedPrecondition;
+        /// Create an aborted status.
+        aborted => Aborted;
+        /// Create an out of range status.
+        out_of_range => OutOfRange;
+        /// Create an unimplemented status.
+        unimplemented => Unimplemented;
+        /// Create an internal error status.
+        internal => Internal;
+        /// Create an unavailable status.
+        unavailable => Unavailable;
+        /// Create a data loss status.
+        data_loss => DataLoss;
+        /// Create an unauthenticated status.
+        unauthenticated => Unauthenticated;
     }
 
     /// Get the status code.
