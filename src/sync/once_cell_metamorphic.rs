@@ -102,6 +102,11 @@ impl GlobalOnceCellState {
         }
     }
 
+    /// Record a simulated cancellation event in cancellation-focused tests.
+    pub fn record_cancellation(&self) {
+        self.cancellations.fetch_add(1, Ordering::SeqCst);
+    }
+
     /// Record a value observed by a reader.
     pub fn record_observed_value(&self, value: u32) {
         let mut values = self.observed_values.lock();
@@ -427,12 +432,16 @@ mod metamorphic_cancellation_restart {
     #[test]
     fn test_cancelled_init_allows_restart() {
         let config = OnceCellTestConfig::basic(2, vec![50, 60], 33333).with_cancellation();
+        let cancellation_enabled = config.enable_cancellation;
 
         let summary = run_once_cell_test(&config, |global_state| async move {
             let cell = Arc::new(OnceCell::new());
 
             // Test cancellation scenario by attempting initialization, then trying set
             // This simulates the cancellation-restart pattern
+            if cancellation_enabled {
+                global_state.record_cancellation();
+            }
 
             // First attempt: try to initialize but simulate failure by testing set() instead
             match cell.set(50) {
