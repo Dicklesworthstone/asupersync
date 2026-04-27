@@ -378,6 +378,18 @@ impl Metadata {
         true
     }
 
+    /// Remove all entries with the given key (case-insensitive match).
+    ///
+    /// br-asupersync-20occs: returns the number of entries removed. Used by
+    /// the gRPC client to scrub a malformed `grpc-timeout` from outgoing
+    /// metadata before send when the channel default timeout is unset.
+    pub fn remove(&mut self, key: &str) -> usize {
+        let before = self.entries.len();
+        self.entries
+            .retain(|(existing_key, _)| !existing_key.eq_ignore_ascii_case(key));
+        before - self.entries.len()
+    }
+
     /// Insert a binary value.
     ///
     /// Returns `false` when the metadata key is invalid and the entry is
