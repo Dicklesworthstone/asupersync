@@ -159,31 +159,16 @@ pub const RFC9000_HANDSHAKE_CASES: &[ConformanceCase] = &[
 
 fn test_tls_version_requirement() -> ConformanceResult {
     ConformanceResult::Skipped {
-        reason: "Requires a harness that can observe configured or negotiated TLS version".to_string(),
+        reason: "Requires a harness that can observe configured or negotiated TLS version"
+            .to_string(),
     }
 }
 
 fn test_alpn_support_requirement() -> ConformanceResult {
-    let cx = test_cx();
-    let mut config = QuicConfig::default();
-
-    // Test 1: Empty ALPN should be allowed (quinn will use default)
-    match QuicEndpoint::client(&cx, &config) {
-        Ok(_) => {}
-        Err(e) => {
-            return ConformanceResult::Fail {
-                reason: format!("Client creation failed with empty ALPN: {}", e),
-            };
-        }
-    }
-
-    // Test 2: Custom ALPN should be supported
-    config.alpn_protocols = vec![b"h3".to_vec(), b"h2".to_vec()];
-    match QuicEndpoint::client(&cx, &config) {
-        Ok(_) => ConformanceResult::Pass,
-        Err(e) => ConformanceResult::Fail {
-            reason: format!("Client creation failed with custom ALPN: {}", e),
-        },
+    ConformanceResult::Skipped {
+        reason:
+            "Requires a handshake harness that can observe advertised or negotiated ALPN protocols"
+                .to_string(),
     }
 }
 

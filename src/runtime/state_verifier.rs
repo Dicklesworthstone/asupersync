@@ -165,6 +165,9 @@ impl StateTransitionVerifier {
         to: TaskPhase,
         context: &str,
     ) -> Result<(), StateViolation> {
+        if !self.config.enable_validation {
+            return Ok(());
+        }
         let valid = from.is_valid_transition(to);
         self.stats.record_transition(StateEntityType::Task, valid);
 
@@ -198,6 +201,9 @@ impl StateTransitionVerifier {
         to: RegionState,
         context: &str,
     ) -> Result<(), StateViolation> {
+        if !self.config.enable_validation {
+            return Ok(());
+        }
         let valid = from.is_valid_transition(to);
         self.stats.record_transition(StateEntityType::Region, valid);
 
@@ -231,6 +237,9 @@ impl StateTransitionVerifier {
         to: ObligationState,
         context: &str,
     ) -> Result<(), StateViolation> {
+        if !self.config.enable_validation {
+            return Ok(());
+        }
         let valid = from.is_valid_transition(to);
         self.stats
             .record_transition(StateEntityType::Obligation, valid);
@@ -547,6 +556,30 @@ mod tests {
         let stats = verifier.stats();
         assert_eq!(stats.obligation_transitions, 2);
         assert_eq!(stats.obligation_violations, 1);
+    }
+
+    #[test]
+    fn test_validation_can_be_disabled() {
+        let verifier = StateTransitionVerifier::new(StateVerifierConfig {
+            enable_validation: false,
+            panic_on_violation: true,
+            enable_diagnostics: true,
+            ..Default::default()
+        });
+
+        use crate::record::task::TaskPhase::*;
+        let task_id = TaskId::new_for_test(2, 0);
+
+        assert!(
+            verifier
+                .validate_task_transition(task_id, Created, Finalizing, "disabled")
+                .is_ok()
+        );
+
+        let stats = verifier.stats();
+        assert_eq!(stats.total_transitions, 0);
+        assert_eq!(stats.violations_detected, 0);
+        assert!(verifier.violations().is_empty());
     }
 
     #[test]
