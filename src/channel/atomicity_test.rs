@@ -105,11 +105,16 @@ impl ChannelSnapshot {
     pub fn verify_capacity_invariant(&self) -> bool {
         self.used_slots <= self.capacity
     }
-
-    /// Verifies that used_slots = queue_length + reserved_count.
-    pub fn verify_accounting_invariant(&self) -> bool {
-        self.used_slots == self.queue_length + self.reserved_count
-    }
+    // br-asupersync-7yr9du: `verify_accounting_invariant` was deleted
+    // because it was tautological. Every snapshot produced by
+    // `TestableChannel::take_snapshot` populates `used_slots` as
+    // `queue_length + reserved_count`, so checking that equality
+    // afterwards is an identity test, not an invariant test. The
+    // mpsc Sender does not expose a separately-tracked used-slots
+    // counter, so there is no independent value to cross-check
+    // against. If a future channel implementation grows a redundant
+    // accounting field, restore this check by sourcing `used_slots`
+    // from that field directly.
 }
 
 /// Atomicity verification oracle that tracks channel state consistency.
@@ -179,14 +184,11 @@ impl AtomicityOracle {
 
     /// Takes a snapshot of channel state for invariant checking.
     pub fn take_snapshot(&self, snapshot: ChannelSnapshot) {
-        // Verify invariants immediately
-        if self.config.check_invariants {
-            if !snapshot.verify_capacity_invariant() {
-                self.record_violation();
-            }
-            if !snapshot.verify_accounting_invariant() {
-                self.record_violation();
-            }
+        // Verify invariants immediately. (Only the capacity invariant
+        // is checked; the prior `verify_accounting_invariant` call was
+        // tautological — see br-asupersync-7yr9du.)
+        if self.config.check_invariants && !snapshot.verify_capacity_invariant() {
+            self.record_violation();
         }
 
         // Update max observed values
@@ -420,7 +422,6 @@ mod tests {
         };
 
         assert!(snapshot.verify_capacity_invariant());
-        assert!(snapshot.verify_accounting_invariant());
 
         // Test violation cases
         let bad_snapshot = ChannelSnapshot {
