@@ -1,7 +1,8 @@
 //! Real Kafka broker integration tests - no mocks.
 //!
 //! These tests require a real Kafka broker running with specific configuration.
-//! Run with: REAL_KAFKA_TESTS=true cargo test kafka_real_broker
+//! Run with:
+//! `REAL_KAFKA_TESTS=true cargo test --features kafka --test kafka_real_broker -- --nocapture`
 
 #![cfg(test)]
 
@@ -178,18 +179,16 @@ impl KafkaMessageFactory {
     }
 }
 
-fn check_real_broker_available() -> RealBrokerConfig {
-    RealBrokerConfig::new()
-}
-
-fn skip_if_no_real_broker(config: &RealBrokerConfig) {
+fn require_real_broker() -> Option<RealBrokerConfig> {
+    let config = RealBrokerConfig::new();
     if !config.enabled {
         let reason = config.reason.as_ref()
             .map(|r| r.as_str())
             .unwrap_or("Real Kafka broker not available");
         eprintln!("SKIPPING: {}", reason);
-        panic!("Test requires real Kafka broker");
+        return None;
     }
+    Some(config)
 }
 
 /// Generate unique topic names to avoid cross-test contamination
@@ -202,10 +201,11 @@ fn unique_topic(base: &str) -> String {
     format!("{}-{}-{}", base, timestamp, random)
 }
 
-#[tokio::test]
-async fn test_real_broker_producer_send_and_metadata() {
-    let config = check_real_broker_available();
-    skip_if_no_real_broker(&config);
+#[test]
+fn test_real_broker_producer_send_and_metadata() {
+    let Some(config) = require_real_broker() else {
+        return;
+    };
 
     let log = KafkaTestLogger::new("real_broker_producer_send");
 
@@ -260,13 +260,14 @@ async fn test_real_broker_producer_send_and_metadata() {
         producer.close(&cx, Duration::from_secs(5)).await.unwrap();
 
         log.test_end("pass");
-    }).await;
+    });
 }
 
-#[tokio::test]
-async fn test_real_broker_consumer_producer_round_trip() {
-    let config = check_real_broker_available();
-    skip_if_no_real_broker(&config);
+#[test]
+fn test_real_broker_consumer_producer_round_trip() {
+    let Some(config) = require_real_broker() else {
+        return;
+    };
 
     let log = KafkaTestLogger::new("real_broker_round_trip");
 
@@ -368,13 +369,14 @@ async fn test_real_broker_consumer_producer_round_trip() {
         producer.close(&cx, Duration::from_secs(5)).await.unwrap();
 
         log.test_end("pass");
-    }).await;
+    });
 }
 
-#[tokio::test]
-async fn test_real_broker_transaction_exactly_once() {
-    let config = check_real_broker_available();
-    skip_if_no_real_broker(&config);
+#[test]
+fn test_real_broker_transaction_exactly_once() {
+    let Some(config) = require_real_broker() else {
+        return;
+    };
 
     let log = KafkaTestLogger::new("real_broker_transactions");
 
@@ -455,13 +457,14 @@ async fn test_real_broker_transaction_exactly_once() {
         consumer.close(&cx).await.unwrap();
 
         log.test_end("pass");
-    }).await;
+    });
 }
 
-#[tokio::test]
-async fn test_real_broker_consumer_group_rebalancing() {
-    let config = check_real_broker_available();
-    skip_if_no_real_broker(&config);
+#[test]
+fn test_real_broker_consumer_group_rebalancing() {
+    let Some(config) = require_real_broker() else {
+        return;
+    };
 
     let log = KafkaTestLogger::new("real_broker_rebalancing");
 
@@ -491,7 +494,7 @@ async fn test_real_broker_consumer_group_rebalancing() {
         let initial_gen = consumer1.rebalance_generation();
 
         // Wait for initial assignment to stabilize
-        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        std::thread::sleep(std::time::Duration::from_secs(5));
 
         log.phase("second_consumer_join");
 
@@ -499,7 +502,7 @@ async fn test_real_broker_consumer_group_rebalancing() {
         consumer2.subscribe(&cx, &[&topic]).await.unwrap();
 
         // Wait for rebalance to complete
-        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+        std::thread::sleep(std::time::Duration::from_secs(10));
 
         log.phase("verify_rebalance");
 
@@ -535,13 +538,14 @@ async fn test_real_broker_consumer_group_rebalancing() {
         consumer2.close(&cx).await.unwrap();
 
         log.test_end("pass");
-    }).await;
+    });
 }
 
-#[tokio::test]
-async fn test_real_broker_network_failure_recovery() {
-    let config = check_real_broker_available();
-    skip_if_no_real_broker(&config);
+#[test]
+fn test_real_broker_network_failure_recovery() {
+    let Some(config) = require_real_broker() else {
+        return;
+    };
 
     let log = KafkaTestLogger::new("real_broker_network_failure");
 
@@ -586,7 +590,7 @@ async fn test_real_broker_network_failure_recovery() {
 
             // Small delay to avoid overwhelming broker
             if i % 10 == 0 {
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                std::thread::sleep(std::time::Duration::from_millis(100));
             }
         }
 
@@ -615,7 +619,7 @@ async fn test_real_broker_network_failure_recovery() {
         producer.close(&cx, Duration::from_secs(10)).await.unwrap();
 
         log.test_end("pass");
-    }).await;
+    });
 }
 
 // Helper to setup test dependencies

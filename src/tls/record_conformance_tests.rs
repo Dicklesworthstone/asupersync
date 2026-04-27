@@ -155,6 +155,30 @@ mod tests {
         }
     }
 
+    fn make_tls_inner_plaintext(content: &[u8], content_type: u8, padding_len: usize) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(content.len() + 1 + padding_len);
+        payload.extend_from_slice(content);
+        payload.push(content_type);
+        payload.extend(std::iter::repeat_n(0x00, padding_len));
+        payload
+    }
+
+    fn parse_tls_inner_plaintext(payload: &[u8]) -> Result<(&[u8], u8, usize), &'static str> {
+        let content_type_pos = payload
+            .iter()
+            .rposition(|byte| *byte != 0)
+            .ok_or("TLSInnerPlaintext missing content type")?;
+        let content_type = payload[content_type_pos];
+        match content_type {
+            CONTENT_TYPE_ALERT | CONTENT_TYPE_HANDSHAKE | CONTENT_TYPE_APPLICATION_DATA => Ok((
+                &payload[..content_type_pos],
+                content_type,
+                payload.len() - content_type_pos - 1,
+            )),
+            _ => Err("TLSInnerPlaintext ends with invalid content type"),
+        }
+    }
+
     /// Test helper for TLS connections with raw record injection
     struct TlsTestHarness {
         client: ClientConnection,
@@ -334,6 +358,49 @@ mod tests {
 
     // ---- Test 2: Record padding edge cases ----
 
+    /// RFC 8446 §5.4 - TLSInnerPlaintext is content || type || zeros.
+    #[test]
+    fn test_tls_inner_plaintext_places_content_type_before_padding() {
+        init_test_logging();
+        crate::test_phase!("test_tls_inner_plaintext_places_content_type_before_padding");
+
+        let payload = make_tls_inner_plaintext(b"hello", CONTENT_TYPE_APPLICATION_DATA, 4);
+        let (content, content_type, padding_len) =
+            parse_tls_inner_plaintext(&payload).expect("payload must decode");
+
+        crate::assert_with_log!(
+            content == b"hello"
+                && content_type == CONTENT_TYPE_APPLICATION_DATA
+                && padding_len == 4,
+            "tls_inner_plaintext_layout",
+            "content || type || zeros",
+            format!(
+                "decoded content={content:?} type=0x{content_type:02x} padding_len={padding_len}"
+            )
+        );
+
+        crate::test_complete!("test_tls_inner_plaintext_places_content_type_before_padding");
+    }
+
+    /// RFC 8446 §5.4 - all-zero payloads are missing the mandatory content type.
+    #[test]
+    fn test_tls_inner_plaintext_rejects_padding_only_payload() {
+        init_test_logging();
+        crate::test_phase!("test_tls_inner_plaintext_rejects_padding_only_payload");
+
+        let err = parse_tls_inner_plaintext(&[0x00, 0x00, 0x00]).expect_err(
+            "padding-only payload must fail because TLSInnerPlaintext requires a content type",
+        );
+        crate::assert_with_log!(
+            err.contains("missing content type"),
+            "padding_only_payload_rejected",
+            "missing content type",
+            err
+        );
+
+        crate::test_complete!("test_tls_inner_plaintext_rejects_padding_only_payload");
+    }
+
     /// RFC 8446 §5.4 - Test record padding validation (zero padding)
     #[test]
     fn test_record_padding_zero_padding() {
@@ -346,10 +413,9 @@ mod tests {
             harness.complete_handshake().expect("Handshake failed");
 
             // Test zero padding (no padding bytes)
-            // In TLS 1.3, padding is implicit - just content followed by content type
-            let plaintext_content = b"Hello, World!";
-            let mut payload = plaintext_content.to_vec();
-            payload.push(CONTENT_TYPE_APPLICATION_DATA); // Content type byte, no padding
+            // In TLS 1.3, TLSInnerPlaintext is content || type || zeros.
+            let payload =
+                make_tls_inner_plaintext(b"Hello, World!", CONTENT_TYPE_APPLICATION_DATA, 0);
 
             let record = TlsRecord::application_data(payload);
             let result = harness.inject_server_record(&record);
@@ -386,13 +452,15 @@ mod tests {
             harness.complete_handshake().expect("Handshake failed");
 
             // Test maximum padding
-            // RFC 8446 allows arbitrary padding up to record size limits
+            // RFC 8446 allows arbitrary padding up to record size limits;
+            // the content type still precedes the padding bytes.
             let plaintext_content = b"Hi";
             let max_padding_len = MAX_RECORD_LENGTH as usize - plaintext_content.len() - 1; // -1 for content type
-
-            let mut payload = plaintext_content.to_vec();
-            payload.extend(vec![0x00; max_padding_len]); // Zero padding bytes
-            payload.push(CONTENT_TYPE_APPLICATION_DATA); // Content type at end
+            let payload = make_tls_inner_plaintext(
+                plaintext_content,
+                CONTENT_TYPE_APPLICATION_DATA,
+                max_padding_len,
+            );
 
             let record = TlsRecord::application_data(payload);
             let result = harness.inject_server_record(&record);
@@ -886,16 +954,15 @@ mod tests {
             let test_sequence = [
                 ("minimal", vec![CONTENT_TYPE_APPLICATION_DATA]),
                 ("padded", {
-                    let mut payload = b"Hello".to_vec();
-                    payload.extend(vec![0x00; 100]); // 100 bytes padding
-                    payload.push(CONTENT_TYPE_APPLICATION_DATA);
-                    payload
+                    make_tls_inner_plaintext(b"Hello", CONTENT_TYPE_APPLICATION_DATA, 100)
                 }),
                 ("maximum", {
                     let max_content_size = MAX_RECORD_LENGTH as usize - 1; // -1 for content type
-                    let mut payload = vec![0x42; max_content_size];
-                    payload.push(CONTENT_TYPE_APPLICATION_DATA);
-                    payload
+                    make_tls_inner_plaintext(
+                        &vec![0x42; max_content_size],
+                        CONTENT_TYPE_APPLICATION_DATA,
+                        0,
+                    )
                 }),
             ];
 

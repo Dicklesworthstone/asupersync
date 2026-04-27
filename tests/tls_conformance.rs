@@ -763,6 +763,39 @@ W7n9v0wIyo4e/O0DO2fczXZD
     }
 
     #[test]
+    fn acceptor_build_rejects_empty_certificate_chain() {
+        let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+        let err = TlsAcceptorBuilder::new(CertificateChain::new(), key)
+            .build()
+            .expect_err("empty certificate chain must fail before handshake");
+
+        match err {
+            TlsError::Configuration(msg) => {
+                assert!(msg.contains("empty certificate chain"), "{msg}");
+            }
+            other => panic!("expected empty-chain configuration error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn require_full_chain_rejects_single_leaf_chain() {
+        let chain = CertificateChain::from_pem(TEST_CERT_PEM).unwrap();
+        let key = PrivateKey::from_pem(TEST_KEY_PEM).unwrap();
+        let err = TlsAcceptorBuilder::new(chain, key)
+            .require_full_chain()
+            .build()
+            .expect_err("single-cert chain must fail when require_full_chain is set");
+
+        match err {
+            TlsError::Configuration(msg) => {
+                assert!(msg.contains("require_full_chain"), "{msg}");
+                assert!(msg.contains("only 1 cert"), "{msg}");
+            }
+            other => panic!("expected full-chain configuration error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn handshake_rejects_wrong_hostname() {
         init_test_logging();
         test_phase!("tls_wrong_hostname_rejected");

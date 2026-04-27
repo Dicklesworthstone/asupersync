@@ -300,6 +300,11 @@ insta = { version = "1.40", features = ["json"] }
 # Lightweight deterministic RNG for randomized test harnesses
 fastrand = "2.3"
 
+[[test]]
+name = "kafka_real_broker"
+path = "tests/integration/kafka_real_broker.rs"
+required-features = ["kafka"]
+
 [[bench]]
 name = "phase0_baseline"
 harness = false

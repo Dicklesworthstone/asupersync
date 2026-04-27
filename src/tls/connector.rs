@@ -544,18 +544,16 @@ impl TlsConnectorBuilder {
                     for entry in entries.filter_map(Result::ok) {
                         let path = entry.path();
                         if path.is_file() {
-                            if let Some(ext) = path.extension() {
-                                if ext == "pem" || ext == "crt" || ext == "cer" {
-                                    #[cfg(feature = "tracing-integration")]
-                                    {
-                                        let (loaded, rejected) = self.load_pem_file(&path);
-                                        loaded_total += loaded;
-                                        rejected_total += rejected;
-                                    }
-                                    #[cfg(not(feature = "tracing-integration"))]
-                                    {
-                                        let _ = self.load_pem_file(&path);
-                                    }
+                            if is_env_cert_bundle_path(&path) {
+                                #[cfg(feature = "tracing-integration")]
+                                {
+                                    let (loaded, rejected) = self.load_pem_file(&path);
+                                    loaded_total += loaded;
+                                    rejected_total += rejected;
+                                }
+                                #[cfg(not(feature = "tracing-integration"))]
+                                {
+                                    let _ = self.load_pem_file(&path);
                                 }
                             }
                         } else if path.is_dir() {
@@ -1157,6 +1155,16 @@ impl TlsConnectorBuilder {
     }
 }
 
+fn is_env_cert_bundle_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|ext| {
+            ext.eq_ignore_ascii_case("pem")
+                || ext.eq_ignore_ascii_case("crt")
+                || ext.eq_ignore_ascii_case("cer")
+        })
+}
+
 /// Return `true` iff the DER-encoded certificate bears
 /// `BasicConstraints CA:TRUE` and is therefore eligible to act as a
 /// trust anchor (br-asupersync-0owoem).
@@ -1324,6 +1332,28 @@ mod tests {
             builder.enable_env_certs,
             "enable_env_cert_loading must flip the opt-in flag"
         );
+    }
+
+    #[test]
+    fn test_ssl_cert_dir_bundle_extension_match_is_case_insensitive() {
+        assert!(super::is_env_cert_bundle_path(std::path::Path::new(
+            "/tmp/corp-root.pem"
+        )));
+        assert!(super::is_env_cert_bundle_path(std::path::Path::new(
+            "/tmp/corp-root.PEM"
+        )));
+        assert!(super::is_env_cert_bundle_path(std::path::Path::new(
+            "/tmp/corp-root.CrT"
+        )));
+        assert!(super::is_env_cert_bundle_path(std::path::Path::new(
+            "/tmp/corp-root.cEr"
+        )));
+        assert!(!super::is_env_cert_bundle_path(std::path::Path::new(
+            "/tmp/corp-root.pem.bak"
+        )));
+        assert!(!super::is_env_cert_bundle_path(std::path::Path::new(
+            "/tmp/corp-root"
+        )));
     }
 
     // --- br-asupersync-0owoem: BasicConstraints CA:TRUE gate -------
