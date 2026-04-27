@@ -1627,10 +1627,14 @@ mod tests {
 
         match enforce_metadata_size_limit(&metadata, 8 * 1024) {
             Err(status) => {
-                // gRPC equivalent of HTTP 431 — RESOURCE_EXHAUSTED.
+                // br-asupersync-3crhd7: assert against the gRPC Code, not
+                // an HTTP status code. The gRPC equivalent of HTTP 431
+                // payload-too-large is Code::ResourceExhausted (which is
+                // i32 value 8, not u16 429). Previously this assertion
+                // compared 8 == 429 and could never pass.
                 assert_eq!(
-                    status.code() as u32,
-                    crate::web::StatusCode::TOO_MANY_REQUESTS.as_u16() as u32,
+                    status.code(),
+                    super::super::status::Code::ResourceExhausted,
                     "must reject with RESOURCE_EXHAUSTED, got {:?}",
                     status.code()
                 );
