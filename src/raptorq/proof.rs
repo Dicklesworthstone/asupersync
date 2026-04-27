@@ -822,7 +822,25 @@ impl DecodeProofBuilder {
     }
 
     /// Mark decode as successful.
+    ///
+    /// br-asupersync-gvxrxv: panics if the outcome was already set. Callers
+    /// must drive a builder through exactly one terminal transition (success
+    /// XOR failure) — silently overwriting an earlier outcome would let an
+    /// internal-ordering bug bind source_payload_hash to garbage from a
+    /// failed decode and attest success for a failed run, bypassing the
+    /// s2jxu0 hash-binding protection entirely.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the proof outcome was already set by a prior call to
+    /// `set_success` or `set_failure`.
     pub fn set_success(&mut self, recovered_source: &[Vec<u8>]) {
+        assert!(
+            self.outcome.is_none(),
+            "ProofBuilder::set_success called after outcome already set \
+             (br-asupersync-gvxrxv): existing outcome = {:?}",
+            self.outcome
+        );
         self.outcome = Some(ProofOutcome::Success {
             symbols_recovered: recovered_source.len(),
             source_payload_hash: recovered_source_hash(recovered_source),
@@ -830,7 +848,21 @@ impl DecodeProofBuilder {
     }
 
     /// Mark decode as failed.
+    ///
+    /// br-asupersync-gvxrxv: panics if the outcome was already set. See
+    /// [`set_success`](Self::set_success) for the rationale.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the proof outcome was already set by a prior call to
+    /// `set_success` or `set_failure`.
     pub fn set_failure(&mut self, reason: FailureReason) {
+        assert!(
+            self.outcome.is_none(),
+            "ProofBuilder::set_failure called after outcome already set \
+             (br-asupersync-gvxrxv): existing outcome = {:?}",
+            self.outcome
+        );
         self.outcome = Some(ProofOutcome::Failure { reason });
     }
 
@@ -1746,6 +1778,59 @@ mod tests {
     fn decode_proof_builder_debug() {
         let builder = DecodeProof::builder(make_test_config());
         assert!(format!("{builder:?}").contains("DecodeProofBuilder"));
+    }
+
+    /// br-asupersync-gvxrxv: ProofBuilder must reject double-set of
+    /// outcome. Internal call-ordering bugs that re-call set_success or
+    /// set_failure after an earlier outcome was already recorded must
+    /// panic, NOT silently overwrite — silent overwrite would let a
+    /// failed-then-succeeded path bind source_payload_hash to garbage and
+    /// attest success for a failed decode (bypasses s2jxu0 hash binding).
+    #[test]
+    #[should_panic(expected = "set_success called after outcome already set")]
+    fn gvxrxv_set_success_after_set_success_panics() {
+        let mut builder = DecodeProof::builder(make_test_config());
+        let recovered: Vec<Vec<u8>> = vec![vec![1, 2, 3]; 4];
+        builder.set_success(&recovered);
+        builder.set_success(&recovered); // must panic
+    }
+
+    #[test]
+    #[should_panic(expected = "set_failure called after outcome already set")]
+    fn gvxrxv_set_failure_after_set_failure_panics() {
+        let mut builder = DecodeProof::builder(make_test_config());
+        builder.set_failure(FailureReason::SingularMatrix {
+            row: 0,
+            attempted_cols: vec![0, 1],
+        });
+        builder.set_failure(FailureReason::SingularMatrix {
+            row: 0,
+            attempted_cols: vec![0, 1],
+        }); // must panic
+    }
+
+    #[test]
+    #[should_panic(expected = "set_failure called after outcome already set")]
+    fn gvxrxv_set_failure_after_set_success_panics() {
+        let mut builder = DecodeProof::builder(make_test_config());
+        let recovered: Vec<Vec<u8>> = vec![vec![1, 2, 3]; 4];
+        builder.set_success(&recovered);
+        builder.set_failure(FailureReason::SingularMatrix {
+            row: 0,
+            attempted_cols: vec![0, 1],
+        }); // must panic — would otherwise corrupt the certified outcome
+    }
+
+    #[test]
+    #[should_panic(expected = "set_success called after outcome already set")]
+    fn gvxrxv_set_success_after_set_failure_panics() {
+        let mut builder = DecodeProof::builder(make_test_config());
+        builder.set_failure(FailureReason::SingularMatrix {
+            row: 0,
+            attempted_cols: vec![0, 1],
+        });
+        let recovered: Vec<Vec<u8>> = vec![vec![1, 2, 3]; 4];
+        builder.set_success(&recovered); // must panic — most dangerous case (bypasses s2jxu0 hash binding)
     }
 
     #[test]
