@@ -225,6 +225,22 @@ pub struct SettingsBuilder {
     settings: Settings,
 }
 
+macro_rules! settings_builder_setters {
+    ($(
+        $(#[$meta:meta])*
+        $method:ident($arg:ident: $ty:ty) => $field:ident = $value:expr;
+    )*) => {
+        $(
+            $(#[$meta])*
+            #[must_use]
+            pub fn $method(mut self, $arg: $ty) -> Self {
+                self.settings.$field = $value;
+                self
+            }
+        )*
+    };
+}
+
 impl SettingsBuilder {
     /// Create a new settings builder with default values.
     #[must_use]
@@ -248,56 +264,30 @@ impl SettingsBuilder {
         }
     }
 
-    /// Set the header table size.
-    #[must_use]
-    pub fn header_table_size(mut self, size: u32) -> Self {
-        self.settings.header_table_size = size;
-        self
-    }
+    settings_builder_setters! {
+        /// Set the header table size.
+        header_table_size(size: u32) => header_table_size = size;
 
-    /// Enable or disable server push.
-    #[must_use]
-    pub fn enable_push(mut self, enable: bool) -> Self {
-        self.settings.enable_push = enable;
-        self
-    }
+        /// Enable or disable server push.
+        enable_push(enable: bool) => enable_push = enable;
 
-    /// Set the maximum concurrent streams.
-    #[must_use]
-    pub fn max_concurrent_streams(mut self, max: u32) -> Self {
-        self.settings.max_concurrent_streams = max;
-        self
-    }
+        /// Set the maximum concurrent streams.
+        max_concurrent_streams(max: u32) => max_concurrent_streams = max;
 
-    /// Set the initial window size.
-    #[must_use]
-    pub fn initial_window_size(mut self, size: u32) -> Self {
-        self.settings.initial_window_size = size.min(MAX_INITIAL_WINDOW_SIZE);
-        self
-    }
+        /// Set the initial window size.
+        initial_window_size(size: u32) => initial_window_size = size.min(MAX_INITIAL_WINDOW_SIZE);
 
-    /// Set the maximum frame size.
-    #[must_use]
-    pub fn max_frame_size(mut self, size: u32) -> Self {
-        self.settings.max_frame_size = size.clamp(MIN_MAX_FRAME_SIZE, MAX_MAX_FRAME_SIZE);
-        self
-    }
+        /// Set the maximum frame size.
+        max_frame_size(size: u32) => max_frame_size = size.clamp(MIN_MAX_FRAME_SIZE, MAX_MAX_FRAME_SIZE);
 
-    /// Set the maximum header list size.
-    #[must_use]
-    pub fn max_header_list_size(mut self, size: u32) -> Self {
-        self.settings.max_header_list_size = size;
-        self
-    }
+        /// Set the maximum header list size.
+        max_header_list_size(size: u32) => max_header_list_size = size;
 
-    /// Set the continuation sequence timeout in milliseconds.
-    ///
-    /// This controls how long a HEADERS/PUSH_PROMISE CONTINUATION sequence
-    /// can remain incomplete before the connection times out.
-    #[must_use]
-    pub fn continuation_timeout_ms(mut self, timeout_ms: u64) -> Self {
-        self.settings.continuation_timeout_ms = timeout_ms;
-        self
+        /// Set the continuation sequence timeout in milliseconds.
+        ///
+        /// This controls how long a HEADERS/PUSH_PROMISE CONTINUATION sequence
+        /// can remain incomplete before the connection times out.
+        continuation_timeout_ms(timeout_ms: u64) => continuation_timeout_ms = timeout_ms;
     }
 
     /// Build the settings.
