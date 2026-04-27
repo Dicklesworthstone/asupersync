@@ -1,0 +1,20 @@
+---
+source: src/types/wasm_abi.rs
+assertion_line: 7404
+expression: event
+---
+{
+  "abi_version": {
+    "major": 1,
+    "minor": 2
+  },
+  "symbol": "task_spawn",
+  "payload_shape": "spawn_request_v1",
+  "state_from": "bound",
+  "state_to": "active",
+  "compatibility": {
+    "decision": "backward_compatible",
+    "producer_minor": 1,
+    "consumer_minor": 2
+  }
+}

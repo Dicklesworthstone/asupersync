@@ -7215,4 +7215,208 @@ mod tests {
             assert_eq!(ap, decoded);
         }
     }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // br-asupersync-3iuhhg — WASM ABI serialization stability goldens.
+    //
+    // The wasm_abi.rs surface is the wire contract between the Rust
+    // runtime and the JS package. Any layout change (field add/rename,
+    // tag scheme, snake_case discipline) silently breaks compiled wasm
+    // artifacts that depend on the prior shape. The fingerprint at
+    // signature_fingerprint_matches_expected_v1 catches symbol/payload
+    // tuple drift, but it does NOT catch:
+    //   * new fields added to a struct (e.g. WasmAbiCancellation),
+    //   * a serde tag/rename change (e.g. dropping rename_all="snake_case"),
+    //   * an envelope variant tag rename (e.g. "ok" -> "Ok"),
+    //   * a value-arm encoding change (e.g. WasmAbiValue::Bytes layout).
+    //
+    // The insta goldens below freeze the JSON shape of every public ABI
+    // type. Any drift requires an explicit `cargo insta review` and a
+    // deliberate version bump in WASM_ABI_MAJOR/MINOR — the same hard
+    // gate the fingerprint already provides for symbol tuples.
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn wasm_abi_v1_signature_set_serde_snapshot() {
+        // Freezes the eight-symbol v1 contract: any reorder, payload
+        // shape change, or symbol rename must reviewer-approve here.
+        insta::assert_json_snapshot!("wasm_abi_v1_signature_set", WASM_ABI_SIGNATURES_V1.to_vec());
+    }
+
+    #[test]
+    fn wasm_abi_compatibility_decision_variants_snapshot() {
+        // All four decision variants — Exact, BackwardCompatible,
+        // MajorMismatch, ConsumerTooOld — encoded with the
+        // tag = "decision" / snake_case discipline.
+        let variants = vec![
+            WasmAbiCompatibilityDecision::Exact,
+            WasmAbiCompatibilityDecision::BackwardCompatible {
+                producer_minor: 2,
+                consumer_minor: 5,
+            },
+            WasmAbiCompatibilityDecision::MajorMismatch {
+                producer_major: 1,
+                consumer_major: 2,
+            },
+            WasmAbiCompatibilityDecision::ConsumerTooOld {
+                producer_minor: 7,
+                consumer_minor: 3,
+            },
+        ];
+        insta::assert_json_snapshot!("wasm_abi_compatibility_decision_variants", variants);
+    }
+
+    #[test]
+    fn wasm_abi_atomic_enums_snapshot() {
+        // Single snapshot covering every snake_case-discipline enum that
+        // has no payload. A rename or reorder of any variant breaks
+        // a wire contract; this golden is the gate.
+        let payload = serde_json::json!({
+            "symbol": [
+                WasmAbiSymbol::RuntimeCreate,
+                WasmAbiSymbol::RuntimeClose,
+                WasmAbiSymbol::ScopeEnter,
+                WasmAbiSymbol::ScopeClose,
+                WasmAbiSymbol::TaskSpawn,
+                WasmAbiSymbol::TaskJoin,
+                WasmAbiSymbol::TaskCancel,
+                WasmAbiSymbol::FetchRequest,
+            ],
+            "payload_shape": [
+                WasmAbiPayloadShape::Empty,
+                WasmAbiPayloadShape::HandleRefV1,
+                WasmAbiPayloadShape::ScopeEnterRequestV1,
+                WasmAbiPayloadShape::SpawnRequestV1,
+                WasmAbiPayloadShape::CancelRequestV1,
+                WasmAbiPayloadShape::FetchRequestV1,
+                WasmAbiPayloadShape::OutcomeEnvelopeV1,
+            ],
+            "handle_kind": [
+                WasmHandleKind::Runtime,
+                WasmHandleKind::Region,
+                WasmHandleKind::Task,
+                WasmHandleKind::CancelToken,
+                WasmHandleKind::FetchRequest,
+            ],
+            "boundary_state": [
+                WasmBoundaryState::Unbound,
+                WasmBoundaryState::Bound,
+                WasmBoundaryState::Active,
+                WasmBoundaryState::Cancelling,
+                WasmBoundaryState::Draining,
+                WasmBoundaryState::Closed,
+            ],
+            "error_code": [
+                WasmAbiErrorCode::CapabilityDenied,
+                WasmAbiErrorCode::InvalidHandle,
+                WasmAbiErrorCode::DecodeFailure,
+                WasmAbiErrorCode::CompatibilityRejected,
+                WasmAbiErrorCode::InternalFailure,
+            ],
+            "recoverability": [
+                WasmAbiRecoverability::Transient,
+                WasmAbiRecoverability::Permanent,
+                WasmAbiRecoverability::Unknown,
+            ],
+            "change_class": [
+                WasmAbiChangeClass::AdditiveField,
+                WasmAbiChangeClass::AdditiveSymbol,
+                WasmAbiChangeClass::BehavioralTightening,
+                WasmAbiChangeClass::BehavioralRelaxation,
+                WasmAbiChangeClass::SymbolRemoval,
+                WasmAbiChangeClass::ValueEncodingChange,
+                WasmAbiChangeClass::OutcomeSemanticChange,
+                WasmAbiChangeClass::CancellationSemanticChange,
+            ],
+        });
+        insta::assert_json_snapshot!("wasm_abi_atomic_enums", payload);
+    }
+
+    #[test]
+    fn wasm_abi_value_variants_snapshot() {
+        // tag="kind", content="value" envelope — every WasmAbiValue arm.
+        // Bytes is fixed so the snapshot is byte-stable across runs.
+        let variants = vec![
+            WasmAbiValue::Unit,
+            WasmAbiValue::Bool(true),
+            WasmAbiValue::I64(-42),
+            WasmAbiValue::U64(7),
+            WasmAbiValue::String("hello".to_string()),
+            WasmAbiValue::Bytes(vec![0x00, 0x01, 0x02, 0xff]),
+            WasmAbiValue::Handle(WasmHandleRef {
+                kind: WasmHandleKind::Region,
+                slot: 11,
+                generation: 3,
+                owner_token: 0xDEAD_BEEF_FEED_FACE,
+            }),
+        ];
+        insta::assert_json_snapshot!("wasm_abi_value_variants", variants);
+    }
+
+    #[test]
+    fn wasm_abi_outcome_envelope_variants_snapshot() {
+        // tag="outcome" envelope — Ok / Err / Cancelled / Panicked
+        // shapes, including nested WasmAbiFailure and WasmAbiCancellation.
+        let envelopes = vec![
+            WasmAbiOutcomeEnvelope::Ok {
+                value: WasmAbiValue::U64(7),
+            },
+            WasmAbiOutcomeEnvelope::Err {
+                failure: WasmAbiFailure {
+                    code: WasmAbiErrorCode::CapabilityDenied,
+                    recoverability: WasmAbiRecoverability::Permanent,
+                    message: "scope closed".to_string(),
+                },
+            },
+            WasmAbiOutcomeEnvelope::Cancelled {
+                cancellation: WasmAbiCancellation {
+                    kind: "user".to_string(),
+                    phase: "completed".to_string(),
+                    origin_region: "R(3,7)".to_string(),
+                    origin_task: Some("T(4,1)".to_string()),
+                    timestamp_nanos: 42,
+                    message: Some("deadline exceeded".to_string()),
+                    truncated: false,
+                },
+            },
+            WasmAbiOutcomeEnvelope::Panicked {
+                message: "boom".to_string(),
+            },
+        ];
+        insta::assert_json_snapshot!("wasm_abi_outcome_envelope_variants", envelopes);
+    }
+
+    #[test]
+    fn wasm_abi_boundary_event_snapshot() {
+        // Full WasmAbiBoundaryEvent — the structured-log shape consumed
+        // by JS observability. Every field is part of the wire contract.
+        let event = WasmAbiBoundaryEvent {
+            abi_version: WasmAbiVersion { major: 1, minor: 2 },
+            symbol: WasmAbiSymbol::TaskSpawn,
+            payload_shape: WasmAbiPayloadShape::SpawnRequestV1,
+            state_from: WasmBoundaryState::Bound,
+            state_to: WasmBoundaryState::Active,
+            compatibility: WasmAbiCompatibilityDecision::BackwardCompatible {
+                producer_minor: 1,
+                consumer_minor: 2,
+            },
+        };
+        insta::assert_json_snapshot!("wasm_abi_boundary_event", event);
+    }
+
+    #[test]
+    fn wasm_abi_handle_ref_snapshot() {
+        // Handle reference: kind/slot/generation/owner_token. The
+        // owner_token field was added by br-asupersync-axbme3 and is
+        // serde(default)'d for backward read compatibility — this
+        // snapshot freezes the post-token JSON layout so removing it
+        // would require explicit reviewer approval.
+        let handle = WasmHandleRef {
+            kind: WasmHandleKind::Task,
+            slot: 5,
+            generation: 1,
+            owner_token: 0x1234_5678_9ABC_DEF0,
+        };
+        insta::assert_json_snapshot!("wasm_abi_handle_ref", handle);
+    }
 }
