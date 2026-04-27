@@ -193,6 +193,12 @@ impl WorkStealingChecker {
                         return None;
                     }
                 }
+            } else {
+                self.record_violation(ViolationType::LostWork {
+                    task_id,
+                    last_owner: from_worker,
+                });
+                return None;
             }
         }
 
@@ -237,6 +243,12 @@ impl WorkStealingChecker {
                         return;
                     }
                 }
+            } else {
+                self.record_violation(ViolationType::LostWork {
+                    task_id,
+                    last_owner: from_worker,
+                });
+                return;
             }
         }
 
@@ -282,6 +294,12 @@ impl WorkStealingChecker {
                         return;
                     }
                 }
+            } else {
+                self.record_violation(ViolationType::LostWork {
+                    task_id,
+                    last_owner: from_worker,
+                });
+                return;
             }
         }
 
@@ -331,19 +349,43 @@ impl WorkStealingChecker {
                         // Completed or cancelled - this is fine
                     }
                 }
+            } else {
+                self.record_violation(ViolationType::LostWork {
+                    task_id,
+                    last_owner: worker_id,
+                });
             }
         }
     }
 
     /// Records that a task has completed execution.
-    pub fn track_task_execution_complete(&self, task_id: TaskId, _worker_id: WorkerId) {
+    pub fn track_task_execution_complete(&self, task_id: TaskId, worker_id: WorkerId) {
         if !self.enabled {
             return;
         }
 
-        {
+        let completion_violation = {
             let mut executing = self.executing_tasks.write();
-            executing.remove(&task_id);
+            match executing.get(&task_id).copied() {
+                Some(active_worker) if active_worker == worker_id => {
+                    executing.remove(&task_id);
+                    None
+                }
+                Some(active_worker) => Some(ViolationType::DoubleExecution {
+                    task_id,
+                    first_worker: active_worker,
+                    second_worker: worker_id,
+                }),
+                None => Some(ViolationType::LostWork {
+                    task_id,
+                    last_owner: worker_id,
+                }),
+            }
+        };
+
+        if let Some(violation) = completion_violation {
+            self.record_violation(violation);
+            return;
         }
 
         {
@@ -581,7 +623,10 @@ mod tests {
         assert!(checker.has_violations());
         let violations = checker.violations();
         assert_eq!(violations.len(), 1);
-        matches!(violations[0], ViolationType::DoubleExecution { .. });
+        assert!(matches!(
+            violations[0],
+            ViolationType::DoubleExecution { .. }
+        ));
     }
 
     #[test]
@@ -599,5 +644,111 @@ mod tests {
         assert!(tracker.is_none()); // Should fail to create tracker
 
         assert!(checker.has_violations());
+    }
+
+    #[test]
+    fn test_steal_start_rejects_unknown_task() {
+        let checker = WorkStealingChecker::new();
+        let worker1 = 1;
+        let worker2 = 2;
+        let task = TaskId::new_for_test(103, 0);
+
+        let tracker = checker.track_steal_start(task, worker1, worker2);
+        assert!(tracker.is_none());
+
+        let stats = checker.stats();
+        assert_eq!(stats.steal_attempts, 0);
+        assert_eq!(stats.successful_steals, 0);
+        assert_eq!(stats.failed_steals, 0);
+        assert_eq!(stats.lost_work_violations, 1);
+
+        let violations = checker.violations();
+        assert_eq!(violations.len(), 1);
+        assert!(matches!(
+            violations[0],
+            ViolationType::LostWork {
+                task_id,
+                last_owner
+            } if task_id == task && last_owner == worker1
+        ));
+    }
+
+    #[test]
+    fn test_steal_success_without_tracked_owner_is_not_counted() {
+        let checker = WorkStealingChecker::new();
+        let task = TaskId::new_for_test(104, 0);
+
+        checker.track_steal_success(task, 1, 2, Duration::ZERO);
+
+        let stats = checker.stats();
+        assert_eq!(stats.successful_steals, 0);
+        assert_eq!(stats.lost_work_violations, 1);
+    }
+
+    #[test]
+    fn test_execution_of_unknown_task_detects_lost_work() {
+        let checker = WorkStealingChecker::new();
+        let task = TaskId::new_for_test(105, 0);
+
+        checker.track_task_execution_start(task, 7);
+
+        let stats = checker.stats();
+        assert_eq!(stats.double_execution_violations, 0);
+        assert_eq!(stats.lost_work_violations, 1);
+
+        let violations = checker.violations();
+        assert_eq!(violations.len(), 1);
+        assert!(matches!(
+            violations[0],
+            ViolationType::LostWork {
+                task_id,
+                last_owner
+            } if task_id == task && last_owner == 7
+        ));
+    }
+
+    #[test]
+    fn test_completion_from_wrong_worker_preserves_active_execution() {
+        let checker = WorkStealingChecker::new();
+        let worker1 = 1;
+        let worker2 = 2;
+        let task = TaskId::new_for_test(106, 0);
+
+        checker.track_task_queued(task, worker1);
+        checker.track_task_execution_start(task, worker1);
+        checker.track_task_execution_complete(task, worker2);
+
+        let stats = checker.stats();
+        assert_eq!(stats.double_execution_violations, 1);
+        assert_eq!(stats.lost_work_violations, 0);
+        assert_eq!(checker.executing_tasks.read().get(&task), Some(&worker1));
+        assert_eq!(
+            checker.task_owners.read().get(&task),
+            Some(&OwnershipState::Owned(worker1))
+        );
+
+        checker.track_task_execution_complete(task, worker1);
+        assert_eq!(
+            checker.task_owners.read().get(&task),
+            Some(&OwnershipState::Completed)
+        );
+    }
+
+    #[test]
+    fn test_completion_without_execution_start_detects_lost_work() {
+        let checker = WorkStealingChecker::new();
+        let worker1 = 1;
+        let task = TaskId::new_for_test(107, 0);
+
+        checker.track_task_queued(task, worker1);
+        checker.track_task_execution_complete(task, worker1);
+
+        let stats = checker.stats();
+        assert_eq!(stats.lost_work_violations, 1);
+        assert_eq!(stats.double_execution_violations, 0);
+        assert_eq!(
+            checker.task_owners.read().get(&task),
+            Some(&OwnershipState::Owned(worker1))
+        );
     }
 }
