@@ -7,7 +7,6 @@ use super::error::TlsError;
 use super::stream::TlsStream;
 use super::types::{Certificate, CertificateChain, CertificatePinSet, PrivateKey, RootCertStore};
 use crate::io::{AsyncRead, AsyncWrite};
-use base64::Engine as _;
 
 #[cfg(feature = "tls")]
 use rustls::ClientConfig;
@@ -474,7 +473,7 @@ impl TlsConnectorBuilder {
     /// restriction of 0-RTT to safe HTTP methods).
     ///
     /// `build()` rejects the combination of `enable_early_data(true)`
-    /// + non-disabled session resumption when this acknowledgement
+    /// plus non-disabled session resumption when this acknowledgement
     /// has not been made — preventing a misconfiguration from
     /// shipping silently. Call this only after wiring up the
     /// application-level idempotency layer.
@@ -531,9 +530,15 @@ impl TlsConnectorBuilder {
         if let Ok(cert_dir) = std::env::var("SSL_CERT_DIR") {
             let dir = std::path::Path::new(&cert_dir);
             if dir.is_dir() {
-                #[allow(unused_mut, unused_variables, unused_assignments)]
+                // br-asupersync-s0nwli: only accumulate per-file
+                // counters when the tracing-integration feature is on
+                // — they are exclusively read by the tracing::warn!
+                // block below. Without the feature, the totals were
+                // dead-write which trips clippy's unused_assignments
+                // lint at -D warnings.
+                #[cfg(feature = "tracing-integration")]
                 let mut loaded_total = 0usize;
-                #[allow(unused_mut, unused_variables, unused_assignments)]
+                #[cfg(feature = "tracing-integration")]
                 let mut rejected_total = 0usize;
                 if let Ok(entries) = std::fs::read_dir(dir) {
                     for entry in entries.filter_map(Result::ok) {
@@ -541,9 +546,16 @@ impl TlsConnectorBuilder {
                         if path.is_file() {
                             if let Some(ext) = path.extension() {
                                 if ext == "pem" || ext == "crt" || ext == "cer" {
-                                    let (loaded, rejected) = self.load_pem_file(&path);
-                                    loaded_total += loaded;
-                                    rejected_total += rejected;
+                                    #[cfg(feature = "tracing-integration")]
+                                    {
+                                        let (loaded, rejected) = self.load_pem_file(&path);
+                                        loaded_total += loaded;
+                                        rejected_total += rejected;
+                                    }
+                                    #[cfg(not(feature = "tracing-integration"))]
+                                    {
+                                        let _ = self.load_pem_file(&path);
+                                    }
                                 }
                             }
                         } else if path.is_dir() {
@@ -1058,7 +1070,6 @@ impl TlsConnectorBuilder {
         let builder = if self.crl_pems.is_empty() {
             builder.with_root_certificates(roots)
         } else {
-            use rustls::server::WebPkiClientVerifier as _; // ensure rustls in scope
             let mut crl_ders: Vec<rustls::pki_types::CertificateRevocationListDer<'static>> =
                 Vec::new();
             for pem in &self.crl_pems {
