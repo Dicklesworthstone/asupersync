@@ -401,14 +401,14 @@ mod edge_case_fuzz {
                 offset = end;
             }
 
-            // Decode should get all data
+            // Decode should get exactly the bytes that were encoded.
             let decoded = codec.decode(&mut buffer).unwrap();
 
             if data.is_empty() {
                 prop_assert!(decoded.is_none(), "expected None for empty fragmented data");
             } else {
                 let decoded_data = decoded.unwrap();
-                prop_assert_eq!(&decoded_data[..], &data[..]);
+                prop_assert_eq!(&decoded_data[..], &data[..offset]);
             }
         }
 
