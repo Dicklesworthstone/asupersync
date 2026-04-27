@@ -11,8 +11,9 @@
 //!   mutex for ALL future acquirers
 //! - **MR2 (Cancel Non-Poisoning)**: cancel inside lock guard does NOT poison
 //!   (cleanup is semantically normal)
-//! - **MR3 (Poison Recovery)**: poisoned mutex can be recovered via `into_inner`
-//!   on error path
+//! - **MR3 (Poison State Stability)**: once poisoned, every subsequent query
+//!   (`is_poisoned`, `try_lock`, async `lock`) reports the poisoned state
+//!   consistently across repeated calls and across the sync/async API surface
 //! - **MR4 (Concurrent Poison Consistency)**: concurrent waiters on poisoned
 //!   mutex all see consistent Err rather than partial state
 //!
@@ -21,7 +22,7 @@
 //! These MRs ensure that:
 //! - Panic-based poisoning is consistently detected across all access patterns
 //! - Cancellation does not interfere with poison semantics
-//! - Recovery mechanisms work reliably
+//! - The poisoned bit is monotonic and observable through every public query
 //! - Race conditions don't lead to inconsistent poison state
 
 use crate::lab::LabConfig;
@@ -249,49 +250,35 @@ fn mr2_cancel_non_poisoning() {
     });
 }
 
-/// **MR3: Poison Recovery**
+/// **MR3: Poison State Stability**
 ///
-/// A poisoned mutex can be recovered by converting ownership errors into
-/// a recovered state. The recovery should preserve the last consistent state
-/// before poisoning.
+/// Once a mutex has been poisoned, the poisoned bit is monotonic — every
+/// subsequent observation through every public query reports the same
+/// poisoned state. This is the recovery-adjacent property the asupersync
+/// `Mutex` actually exposes: `into_inner` and `get_mut` both panic on a
+/// poisoned mutex (recovery is intentionally not supported), so the
+/// metamorphic relation worth verifying is that observers cannot disagree
+/// about whether poisoning has happened.
 ///
-/// **Property**: recover(poisoned(mutex, panic_state)) extracts last_good_state
+/// **Property**:
+///   ∀k ∈ ℕ. is_poisoned(mutex) ∧
+///   try_lock(mutex)ₖ = Err(Poisoned) ∧
+///   lock(mutex)ₖ.await = Err(Poisoned)
+///   after poison(mutex)
 #[test]
-fn mr3_poison_recovery() {
+fn mr3_poison_state_stability() {
     proptest!(|(
         initial_value in 0u32..1000,
         operations_before_panic in 0usize..5,
-        final_operation_value in 0u32..100
+        final_operation_value in 0u32..100,
+        repeat_query_count in 2usize..8,
     )| {
         let mutex = Arc::new(Mutex::new(TestData {
             value: initial_value,
             counter: 0,
         }));
 
-        // Phase 1: Capture state before panic
-        let _expected_state = {
-            let cx = create_test_context(1, 1);
-            let _lab = LabRuntime::new(LabConfig::default());
-
-            futures_lite::future::block_on(async {
-                let mut guard = mutex.lock(&cx).await.expect("initial lock should succeed");
-
-                // Apply operations
-                for i in 0..operations_before_panic {
-                    guard.counter += 1;
-                    guard.value = guard.value.wrapping_add(i as u32);
-                }
-                guard.value = guard.value.wrapping_add(final_operation_value);
-
-                // Capture state before panic
-                TestData {
-                    value: guard.value,
-                    counter: guard.counter,
-                }
-            })
-        };
-
-        // Phase 2: Poison the mutex
+        // Phase 1: Poison the mutex by panicking while holding the guard.
         let mutex_clone = Arc::clone(&mutex);
         let handle = std::thread::spawn(move || {
             let cx = create_test_context(2, 1);
@@ -300,42 +287,48 @@ fn mr3_poison_recovery() {
             futures_lite::future::block_on(async {
                 let mut guard = mutex_clone.lock(&cx).await.expect("lock for poison should succeed");
 
-                // Perform same operations
                 for i in 0..operations_before_panic {
                     guard.counter += 1;
                     guard.value = guard.value.wrapping_add(i as u32);
                 }
                 guard.value = guard.value.wrapping_add(final_operation_value);
 
-                // Now panic to poison
-                panic!("deliberate panic for poison recovery test");
+                panic!("deliberate panic to poison mutex");
             });
         });
 
-        let _ = handle.join().expect_err("should panic");
+        let _ = handle.join().expect_err("poisoning thread should panic");
 
-        // Phase 3: Verify poison state
-        prop_assert!(mutex.is_poisoned(), "mutex should be poisoned");
+        // MR3.1: is_poisoned reports true and never spuriously transitions back.
+        for k in 0..repeat_query_count {
+            prop_assert!(mutex.is_poisoned(),
+                "is_poisoned must remain true on query {} after poisoning", k);
+        }
 
-        // Phase 4: Recovery via into_inner (after ensuring we have sole ownership)
-        // Note: The actual mutex data should still be valid even though poisoned
-        // We test this indirectly by verifying the mutex behavior
+        // MR3.2: try_lock consistently returns Poisoned across repeated calls.
+        for k in 0..repeat_query_count {
+            let result = mutex.try_lock();
+            prop_assert!(matches!(result, Err(TryLockError::Poisoned)),
+                "try_lock query {} should return Poisoned, got {:?}", k, result);
+        }
 
-        // MR3.1: Verify that we can still detect the poisoned state consistently
-        let poison_check_1 = mutex.try_lock();
-        prop_assert!(matches!(poison_check_1, Err(TryLockError::Poisoned)),
-            "poison check 1 should return Poisoned");
+        // MR3.3: The async lock surface agrees with try_lock — every awaited
+        // lock attempt resolves immediately to Err(Poisoned). This is the
+        // sync/async parity half of the stability relation.
+        let _lab = LabRuntime::new(LabConfig::default());
+        for k in 0..repeat_query_count {
+            let cx = create_test_context(3 + k as u32, 1);
+            let result = futures_lite::future::block_on(async {
+                mutex.lock(&cx).await.map(|_| ())
+            });
+            prop_assert!(matches!(result, Err(LockError::Poisoned)),
+                "async lock query {} should return Poisoned, got {:?}", k, result);
+        }
 
-        let poison_check_2 = mutex.try_lock();
-        prop_assert!(matches!(poison_check_2, Err(TryLockError::Poisoned)),
-            "poison check 2 should return Poisoned (consistency)");
-
-        // MR3.2: Verify that the poison state is stable
-        prop_assert!(mutex.is_poisoned(), "poison state should remain stable");
-
-        // Note: Full recovery testing via into_inner() requires ownership transfer,
-        // which is complex in a property test. The key MR is that poisoned state
-        // is consistently detected and reported.
+        // MR3.4: Stability is preserved after observing the poison through
+        // both APIs — the final query still reports poisoned.
+        prop_assert!(mutex.is_poisoned(),
+            "poison state must remain stable after mixed sync/async observations");
     });
 }
 

@@ -249,7 +249,9 @@ fn comprehensive_metamorphic_integration() {
     assert!(!mutex2.is_poisoned());
     assert!(mutex2.try_lock().is_ok());
 
-    // Test MR3: Recovery path verification (indirect via poison checking)
+    // Test MR3: Poison state stability — repeated try_lock observations of a
+    // poisoned mutex must agree (the asupersync Mutex does not expose a
+    // recovery path; into_inner/get_mut both panic on poisoned).
     let poison_result1 = mutex1.try_lock();
     let poison_result2 = mutex1.try_lock();
     assert_eq!(
