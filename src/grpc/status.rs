@@ -481,10 +481,9 @@ impl From<std::io::Error> for GrpcError {
         use std::io::ErrorKind as Ek;
         let kind = match err.kind() {
             Ek::TimedOut => TransportErrorKind::Timeout,
-            Ek::ConnectionRefused
-            | Ek::NotFound
-            | Ek::AddrNotAvailable
-            | Ek::AddrInUse => TransportErrorKind::ConnectFailed,
+            Ek::ConnectionRefused | Ek::NotFound | Ek::AddrNotAvailable | Ek::AddrInUse => {
+                TransportErrorKind::ConnectFailed
+            }
             Ek::ConnectionReset
             | Ek::ConnectionAborted
             | Ek::BrokenPipe
@@ -658,15 +657,8 @@ mod tests {
     #[test]
     fn uk2vsg_status_details_cap_preserves_short_input() {
         let payload = b"small payload";
-        let status = Status::with_details(
-            Code::Internal,
-            "err",
-            Bytes::from_static(payload),
-        );
-        assert_eq!(
-            status.details().expect("details set").as_ref(),
-            payload
-        );
+        let status = Status::with_details(Code::Internal, "err", Bytes::from_static(payload));
+        assert_eq!(status.details().expect("details set").as_ref(), payload);
     }
 
     /// br-asupersync-9gg21l: Status mapping is now driven by the typed
@@ -682,9 +674,7 @@ mod tests {
             (TransportErrorKind::Other, Code::Unavailable),
         ];
         for (kind, expected) in table {
-            let s =
-                GrpcError::transport_kind(kind, "msg with substring 'timeout'")
-                    .into_status();
+            let s = GrpcError::transport_kind(kind, "msg with substring 'timeout'").into_status();
             assert_eq!(
                 s.code(),
                 expected,
@@ -1384,10 +1374,7 @@ mod tests {
         let error_cases = vec![
             (GrpcError::MessageTooLarge, Code::ResourceExhausted),
             (
-                GrpcError::transport_kind(
-                    TransportErrorKind::ConnectFailed,
-                    "Connection failed",
-                ),
+                GrpcError::transport_kind(TransportErrorKind::ConnectFailed, "Connection failed"),
                 Code::Unavailable,
             ),
             (

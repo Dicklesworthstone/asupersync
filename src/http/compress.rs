@@ -1414,7 +1414,10 @@ mod tests {
         let mut output = Vec::new();
         // First call must error out (cap exceeded).
         let first = decompressor.decompress(&compressed, &mut output);
-        assert!(first.is_err(), "first call must reject by cap, got {first:?}");
+        assert!(
+            first.is_err(),
+            "first call must reject by cap, got {first:?}"
+        );
 
         // Second call MUST be rejected with the poisoned-error message and
         // MUST NOT push any further bytes into output.
@@ -1436,8 +1439,7 @@ mod tests {
         // finish() must also reject after poisoning.
         let after = decompressor.finish(&mut output);
         assert!(
-            after.is_err()
-                && after.as_ref().unwrap_err().to_string().contains("poisoned"),
+            after.is_err() && after.as_ref().unwrap_err().to_string().contains("poisoned"),
             "finish() after poisoned must surface poisoned-error, got: {after:?}"
         );
     }
