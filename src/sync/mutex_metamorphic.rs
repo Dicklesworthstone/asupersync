@@ -32,8 +32,11 @@ use crate::types::Budget;
 use crate::util::ArenaIndex;
 use crate::{Cx, RegionId, TaskId};
 use proptest::prelude::*;
+use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 /// Test data structure for mutex operations
@@ -64,6 +67,15 @@ fn create_test_context(region_id: u32, task_id: u32) -> Cx {
         TaskId::from_arena(ArenaIndex::new(task_id, 0)),
         Budget::INFINITE,
     )
+}
+
+fn poll_pinned_once<T, F: Future<Output = T>>(mut future: Pin<&mut F>) -> Option<T> {
+    let waker = Waker::noop();
+    let mut cx = Context::from_waker(waker);
+    match future.as_mut().poll(&mut cx) {
+        Poll::Ready(value) => Some(value),
+        Poll::Pending => None,
+    }
 }
 
 /// **MR1: Panic Poisoning Consistency**
@@ -181,18 +193,23 @@ fn mr2_cancel_non_poisoning() {
                 let cx2 = create_test_context(1, 2);
 
                 // Hold the lock on first context
-                let _guard1 = mutex.lock(&cx1).await.expect("first lock should succeed");
+                let guard1 = mutex.lock(&cx1).await.expect("first lock should succeed");
 
-                // Try to lock with second context, then cancel
-                let lock_future = mutex_clone.lock(&cx2);
+                // Poll once so the second lock future is actually queued behind `guard1`
+                // before cancellation is requested.
+                let mut lock_future = std::pin::pin!(mutex_clone.lock(&cx2));
+                let pending = poll_pinned_once(lock_future.as_mut()).is_none();
+                prop_assert!(pending, "second waiter should pend behind the held guard");
+
                 cx2.set_cancel_requested(true);
 
-                let result = lock_future.await;
+                let result = poll_pinned_once(lock_future.as_mut())
+                    .expect("cancelled waiter should resolve on the next poll");
                 prop_assert!(matches!(result, Err(LockError::Cancelled)),
                     "cancelled wait should return Cancelled, got {:?}", result);
 
                 // Release first lock
-                drop(_guard1);
+                drop(guard1);
                 Ok::<(), TestCaseError>(())
             })?;
         } else {
