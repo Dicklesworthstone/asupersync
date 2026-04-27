@@ -70,15 +70,15 @@ fn test_stream_type_first_varint() -> H3ConformanceResult {
         let invalid_cases = vec![
             (b"\x01\x02\x00".to_vec(), "data before stream type"),
             (b"HTTP/3\x00".to_vec(), "text before stream type"),
-            (b"\xff\xff\xff\xff\x00".to_vec(), "large data before stream type"),
+            (
+                b"\xff\xff\xff\xff\x00".to_vec(),
+                "large data before stream type",
+            ),
         ];
 
         for (invalid_data, description) in invalid_cases {
             if validate_stream_type_declaration(&invalid_data) {
-                return Err(format!(
-                    "Invalid case '{}' was accepted",
-                    description
-                ));
+                return Err(format!("Invalid case '{}' was accepted", description));
             }
         }
 
@@ -90,7 +90,11 @@ fn test_stream_type_first_varint() -> H3ConformanceResult {
         description: "Stream type must be first varint on unidirectional streams".to_string(),
         category: TestCategory::StreamTypes,
         requirement_level: RequirementLevel::Must,
-        verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+        verdict: if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        },
         elapsed_ms,
         notes: result.err(),
     }
@@ -113,10 +117,7 @@ fn test_invalid_stream_type_rejection() -> H3ConformanceResult {
             let stream_data = create_stream_with_raw_type(invalid_type);
 
             if validate_stream_type_declaration(&stream_data) {
-                return Err(format!(
-                    "Invalid stream type {} was accepted",
-                    description
-                ));
+                return Err(format!("Invalid stream type {} was accepted", description));
             }
 
             // Should result in H3_STREAM_CREATION_ERROR
@@ -137,7 +138,11 @@ fn test_invalid_stream_type_rejection() -> H3ConformanceResult {
         description: "Invalid stream types must be rejected".to_string(),
         category: TestCategory::StreamTypes,
         requirement_level: RequirementLevel::Must,
-        verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+        verdict: if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        },
         elapsed_ms,
         notes: result.err(),
     }
@@ -161,10 +166,7 @@ fn test_duplicate_stream_type_rejection() -> H3ConformanceResult {
             let first_stream = create_stream_with_type_first(*stream_type);
 
             if !validate_stream_type_declaration(&first_stream) {
-                return Err(format!(
-                    "First {:?} stream was rejected",
-                    stream_type
-                ));
+                return Err(format!("First {:?} stream was rejected", stream_type));
             }
         }
 
@@ -203,7 +205,11 @@ fn test_duplicate_stream_type_rejection() -> H3ConformanceResult {
         description: "Duplicate stream types must be rejected".to_string(),
         category: TestCategory::StreamTypes,
         requirement_level: RequirementLevel::Must,
-        verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+        verdict: if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        },
         elapsed_ms,
         notes: result.err(),
     }
@@ -226,10 +232,7 @@ fn test_stream_type_ordering() -> H3ConformanceResult {
             if i == 0 {
                 // First stream (control) should always be accepted
                 if !validate_stream_type_declaration(&stream_data) {
-                    return Err(format!(
-                        "Control stream creation failed: {}",
-                        description
-                    ));
+                    return Err(format!("Control stream creation failed: {}", description));
                 }
             } else {
                 // Subsequent streams should be accepted after control stream
@@ -258,7 +261,11 @@ fn test_stream_type_ordering() -> H3ConformanceResult {
         description: "Stream type creation ordering validation".to_string(),
         category: TestCategory::StreamTypes,
         requirement_level: RequirementLevel::Must,
-        verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+        verdict: if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        },
         elapsed_ms,
         notes: result.err(),
     }
@@ -320,7 +327,11 @@ fn test_reserved_stream_types() -> H3ConformanceResult {
         description: "Reserved stream types handling validation".to_string(),
         category: TestCategory::StreamTypes,
         requirement_level: RequirementLevel::Should,
-        verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+        verdict: if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        },
         elapsed_ms,
         notes: result.err(),
     }
@@ -384,10 +395,10 @@ fn validate_stream_type_declaration(stream_data: &[u8]) -> bool {
 
     // Extract stream type from varint
     match get_stream_type_from_data(stream_data) {
-        Some(H3StreamType::Control) |
-        Some(H3StreamType::Push) |
-        Some(H3StreamType::QpackEncoder) |
-        Some(H3StreamType::QpackDecoder) => true,
+        Some(H3StreamType::Control)
+        | Some(H3StreamType::Push)
+        | Some(H3StreamType::QpackEncoder)
+        | Some(H3StreamType::QpackDecoder) => true,
         _ => false,
     }
 }

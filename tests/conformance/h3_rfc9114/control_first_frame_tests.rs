@@ -7,8 +7,9 @@
 //! - Non-SETTINGS first frame must close connection with H3_MISSING_SETTINGS
 
 use super::*;
+use asupersync::http::h3_native::{H3ConnectionConfig, H3ControlState, H3Frame, H3NativeError};
 use asupersync::net::quic_core::{decode_varint, encode_varint};
-use asupersync::http::h3_native::{H3Frame, H3NativeError, H3ConnectionConfig, H3ControlState};
+use std::sync::{Mutex, OnceLock};
 
 /// HTTP/3 frame types from RFC 9114.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -400,18 +401,17 @@ impl TestConnectionState {
     fn reset(&mut self) {
         *self = Self::new();
     }
+
+    fn record_error(&mut self, error: H3NativeError) {
+        self.last_error = Some(error);
+        self.is_closed = true;
+    }
 }
 
-/// Global test connection state (in real implementation this would be per-connection)
-static mut TEST_CONNECTION: Option<TestConnectionState> = None;
+static TEST_CONNECTION: OnceLock<Mutex<TestConnectionState>> = OnceLock::new();
 
-fn get_test_connection() -> &'static mut TestConnectionState {
-    unsafe {
-        if TEST_CONNECTION.is_none() {
-            TEST_CONNECTION = Some(TestConnectionState::new());
-        }
-        TEST_CONNECTION.as_mut().unwrap()
-    }
+fn get_test_connection() -> &'static Mutex<TestConnectionState> {
+    TEST_CONNECTION.get_or_init(|| Mutex::new(TestConnectionState::new()))
 }
 
 #[derive(Debug)]
@@ -514,6 +514,22 @@ fn create_settings_frame(parameters: &[(u64, u64)]) -> Vec<u8> {
 
 fn create_h3_frame(frame_type: H3FrameType, payload: &[u8]) -> Vec<u8> {
     let mut frame_data = Vec::new();
+    let mut synthesized_payload = Vec::new();
+    let payload = if payload.is_empty() {
+        match frame_type {
+            H3FrameType::Data | H3FrameType::Headers | H3FrameType::Settings => payload,
+            H3FrameType::PushPromise
+            | H3FrameType::Goaway
+            | H3FrameType::MaxPushId
+            | H3FrameType::Reserved
+            | H3FrameType::Reserved2 => {
+                encode_varint(0, &mut synthesized_payload).expect("default frame payload varint");
+                synthesized_payload.as_slice()
+            }
+        }
+    } else {
+        payload
+    };
 
     // RFC 9114 §7.1: frame type and frame length are QUIC varints.
     encode_varint(frame_type as u64, &mut frame_data).expect("HTTP/3 frame type varint");
@@ -569,7 +585,8 @@ fn parse_h3_frames(data: &[u8]) -> Vec<ParsedH3Frame> {
 }
 
 fn validate_control_stream_creation(stream_data: &[u8]) -> bool {
-    // Mock validation - checks for control stream type + SETTINGS first
+    reset_connection_state();
+
     if stream_data.is_empty() {
         return false;
     }
@@ -584,41 +601,50 @@ fn validate_control_stream_creation(stream_data: &[u8]) -> bool {
         return false;
     }
 
-    // Ensure we have enough data for at least one frame header
-    if stream_data.len() < stream_type_len + 2 {
-        return false; // Too short for stream type + frame type + frame length
+    let config = H3ConnectionConfig::default();
+    let mut offset = stream_type_len;
+    let mut saw_frame = false;
+
+    while offset < stream_data.len() {
+        let frame_data = &stream_data[offset..];
+        let (_frame, consumed) = match H3Frame::decode(frame_data, &config) {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                get_test_connection().lock().unwrap().record_error(error);
+                return false;
+            }
+        };
+
+        if consumed == 0 {
+            get_test_connection()
+                .lock()
+                .unwrap()
+                .record_error(H3NativeError::InvalidFrame("zero-length frame decode"));
+            return false;
+        }
+
+        if simulate_control_stream_frame_processing(frame_data).is_err() {
+            return false;
+        }
+
+        saw_frame = true;
+        offset += consumed;
     }
 
-    // Parse the first frame type varint
-    let frame_start = stream_type_len;
-    let Ok((frame_type, _frame_type_len)) = decode_varint(&stream_data[frame_start..]) else {
-        return false;
-    };
-
-    // Check first frame is SETTINGS (0x04)
-    frame_type == 0x04
+    saw_frame
 }
 
 fn validate_h3_frame(frame_data: &[u8]) -> bool {
-    // Basic frame validation
-    let Ok((_frame_type, type_len)) = decode_varint(frame_data) else {
-        return false;
-    };
-    let Ok((length, len_len)) = decode_varint(&frame_data[type_len..]) else {
-        return false;
-    };
-
-    frame_data.len() >= type_len + len_len + length as usize
+    let config = H3ConnectionConfig::default();
+    matches!(H3Frame::decode(frame_data, &config), Ok((_frame, consumed)) if consumed == frame_data.len())
 }
 
 fn get_last_h3_connection_error() -> Option<H3NativeError> {
-    // Use real H3 error tracking from connection state
-    get_test_connection().last_error().cloned()
+    get_test_connection().lock().unwrap().last_error().cloned()
 }
 
 fn get_connection_closed() -> bool {
-    // Use real connection state tracking
-    get_test_connection().is_closed()
+    get_test_connection().lock().unwrap().is_closed()
 }
 
 fn process_frame_after_error(frame_data: &[u8]) -> bool {
@@ -628,11 +654,12 @@ fn process_frame_after_error(frame_data: &[u8]) -> bool {
     match H3Frame::decode(frame_data, &config) {
         Ok((frame, _)) => {
             // Try to process the frame - should fail if connection is in error state
-            if get_test_connection().is_closed() {
+            let mut connection = get_test_connection().lock().unwrap();
+            if connection.is_closed() {
                 false // Reject frames after connection error
             } else {
                 // Try to handle the frame with real H3 validation
-                get_test_connection().handle_frame(&frame).is_ok()
+                connection.handle_frame(&frame).is_ok()
             }
         }
         Err(_) => false, // Invalid frame data
@@ -640,8 +667,7 @@ fn process_frame_after_error(frame_data: &[u8]) -> bool {
 }
 
 fn reset_connection_state() {
-    // Reset using real connection state management
-    get_test_connection().reset();
+    get_test_connection().lock().unwrap().reset();
 }
 
 fn simulate_control_stream_frame_processing(frame_data: &[u8]) -> Result<(), H3NativeError> {
@@ -649,7 +675,7 @@ fn simulate_control_stream_frame_processing(frame_data: &[u8]) -> Result<(), H3N
     let config = H3ConnectionConfig::default();
 
     let (frame, _) = H3Frame::decode(frame_data, &config)?;
-    get_test_connection().handle_frame(&frame)
+    get_test_connection().lock().unwrap().handle_frame(&frame)
 }
 
 #[test]

@@ -43,28 +43,28 @@ fn test_datagram_frame_format() -> H3ConformanceResult {
                     flow_id: 0,
                     payload: b"hello".to_vec(),
                 },
-                "DATAGRAM with flow ID 0"
+                "DATAGRAM with flow ID 0",
             ),
             (
                 H3DatagramFrame {
                     flow_id: 1,
                     payload: b"world".to_vec(),
                 },
-                "DATAGRAM with flow ID 1"
+                "DATAGRAM with flow ID 1",
             ),
             (
                 H3DatagramFrame {
                     flow_id: 255,
                     payload: vec![],
                 },
-                "DATAGRAM with empty payload"
+                "DATAGRAM with empty payload",
             ),
             (
                 H3DatagramFrame {
                     flow_id: 16383,
                     payload: vec![0; 1200],
                 },
-                "DATAGRAM with large payload"
+                "DATAGRAM with large payload",
             ),
         ];
 
@@ -90,7 +90,9 @@ fn test_datagram_frame_format() -> H3ConformanceResult {
             if decoded.payload != datagram_frame.payload {
                 return Err(format!(
                     "Payload mismatch for {}: lengths {} vs {}",
-                    description, datagram_frame.payload.len(), decoded.payload.len()
+                    description,
+                    datagram_frame.payload.len(),
+                    decoded.payload.len()
                 ));
             }
         }
@@ -103,7 +105,11 @@ fn test_datagram_frame_format() -> H3ConformanceResult {
         description: "H3 DATAGRAM frame format validation".to_string(),
         category: TestCategory::DatagramFormat,
         requirement_level: RequirementLevel::Must,
-        verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+        verdict: if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        },
         elapsed_ms,
         notes: result.err(),
     }
@@ -137,7 +143,8 @@ fn test_flow_id_encoding() -> H3ConformanceResult {
             if encoded.len() < expected_varint_len + 4 {
                 return Err(format!(
                     "Encoded frame too short for {}: expected at least {} bytes",
-                    description, expected_varint_len + 4
+                    description,
+                    expected_varint_len + 4
                 ));
             }
 
@@ -167,7 +174,11 @@ fn test_flow_id_encoding() -> H3ConformanceResult {
         description: "Flow ID varint encoding validation".to_string(),
         category: TestCategory::DatagramFormat,
         requirement_level: RequirementLevel::Must,
-        verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+        verdict: if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        },
         elapsed_ms,
         notes: result.err(),
     }
@@ -260,7 +271,11 @@ fn test_datagram_ordering_semantics() -> H3ConformanceResult {
         description: "DATAGRAM frame ordering and flow isolation".to_string(),
         category: TestCategory::DatagramFormat,
         requirement_level: RequirementLevel::Must,
-        verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+        verdict: if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        },
         elapsed_ms,
         notes: result.err(),
     }
@@ -330,7 +345,11 @@ fn test_datagram_capability_negotiation() -> H3ConformanceResult {
         description: "DATAGRAM capability negotiation via SETTINGS".to_string(),
         category: TestCategory::Settings,
         requirement_level: RequirementLevel::Must,
-        verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+        verdict: if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        },
         elapsed_ms,
         notes: result.err(),
     }
@@ -384,8 +403,7 @@ fn test_datagram_error_handling() -> H3ConformanceResult {
         if !result {
             let error = get_last_datagram_error();
             match error {
-                Some(DatagramError::FrameTooLarge) |
-                Some(DatagramError::ResourceExhausted) => {
+                Some(DatagramError::FrameTooLarge) | Some(DatagramError::ResourceExhausted) => {
                     // Expected error types for oversized frames
                 }
                 Some(other_error) => {
@@ -408,7 +426,11 @@ fn test_datagram_error_handling() -> H3ConformanceResult {
         description: "DATAGRAM frame error handling validation".to_string(),
         category: TestCategory::DatagramFormat,
         requirement_level: RequirementLevel::Must,
-        verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+        verdict: if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        },
         elapsed_ms,
         notes: result.err(),
     }
@@ -446,8 +468,7 @@ fn decode_datagram_frame(data: &[u8]) -> Result<H3DatagramFrame, String> {
         return Err("Empty DATAGRAM frame".to_string());
     }
 
-    let (flow_id, varint_len) = decode_varint(data)
-        .ok_or("Invalid flow ID varint")?;
+    let (flow_id, varint_len) = decode_varint(data).ok_or("Invalid flow ID varint")?;
 
     if varint_len > data.len() {
         return Err("Truncated DATAGRAM frame".to_string());
@@ -518,10 +539,15 @@ fn decode_varint(data: &[u8]) -> Option<(u64, usize)> {
 }
 
 fn calculate_varint_length(value: u64) -> usize {
-    if value < 64 { 1 }
-    else if value < 16384 { 2 }
-    else if value < 1073741824 { 4 }
-    else { 8 }
+    if value < 64 {
+        1
+    } else if value < 16384 {
+        2
+    } else if value < 1073741824 {
+        4
+    } else {
+        8
+    }
 }
 
 fn validate_datagram_frame_format(data: &[u8]) -> bool {

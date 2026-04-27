@@ -42,10 +42,26 @@ fn test_protocol_pseudo_header_validation() -> H3ConformanceResult {
     let (result, elapsed_ms) = timed_test(|| -> Result<(), String> {
         // Test valid :protocol pseudo-header values
         let valid_protocols = vec![
-            ("connect-udp", ExtendedConnectProtocol::ConnectUdp, "CONNECT-UDP protocol"),
-            ("connect-ip", ExtendedConnectProtocol::ConnectIp, "CONNECT-IP protocol"),
-            ("webtransport", ExtendedConnectProtocol::WebTransport, "WebTransport protocol"),
-            ("custom-protocol", ExtendedConnectProtocol::Custom("custom-protocol".to_string()), "custom protocol"),
+            (
+                "connect-udp",
+                ExtendedConnectProtocol::ConnectUdp,
+                "CONNECT-UDP protocol",
+            ),
+            (
+                "connect-ip",
+                ExtendedConnectProtocol::ConnectIp,
+                "CONNECT-IP protocol",
+            ),
+            (
+                "webtransport",
+                ExtendedConnectProtocol::WebTransport,
+                "WebTransport protocol",
+            ),
+            (
+                "custom-protocol",
+                ExtendedConnectProtocol::Custom("custom-protocol".to_string()),
+                "custom protocol",
+            ),
         ];
 
         for (protocol_value, expected_protocol, description) in valid_protocols {
@@ -71,7 +87,10 @@ fn test_protocol_pseudo_header_validation() -> H3ConformanceResult {
         let invalid_cases = vec![
             (None, "missing :protocol pseudo-header"),
             (Some(""), "empty :protocol value"),
-            (Some("CONNECT-UDP"), "uppercase protocol (should be lowercase)"),
+            (
+                Some("CONNECT-UDP"),
+                "uppercase protocol (should be lowercase)",
+            ),
             (Some("connect udp"), "protocol with spaces"),
             (Some("connect/udp"), "protocol with invalid characters"),
         ];
@@ -98,7 +117,11 @@ fn test_protocol_pseudo_header_validation() -> H3ConformanceResult {
         description: ":protocol pseudo-header validation".to_string(),
         category: TestCategory::ExtendedConnect,
         requirement_level: RequirementLevel::Must,
-        verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+        verdict: if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        },
         elapsed_ms,
         notes: result.err(),
     }
@@ -109,11 +132,8 @@ fn test_protocol_pseudo_header_validation() -> H3ConformanceResult {
 fn test_connect_udp_negotiation() -> H3ConformanceResult {
     let (result, elapsed_ms) = timed_test(|| -> Result<(), String> {
         // Test CONNECT-UDP request format
-        let connect_udp_headers = create_extended_connect_headers(
-            "connect-udp",
-            "target.example.com",
-            1234
-        );
+        let connect_udp_headers =
+            create_extended_connect_headers("connect-udp", "target.example.com", 1234);
 
         if !validate_extended_connect_headers(&connect_udp_headers) {
             return Err("Valid CONNECT-UDP headers were rejected".to_string());
@@ -175,7 +195,11 @@ fn test_connect_udp_negotiation() -> H3ConformanceResult {
         description: "CONNECT-UDP negotiation validation".to_string(),
         category: TestCategory::ExtendedConnect,
         requirement_level: RequirementLevel::Must,
-        verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+        verdict: if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        },
         elapsed_ms,
         notes: result.err(),
     }
@@ -189,7 +213,7 @@ fn test_connect_ip_negotiation() -> H3ConformanceResult {
         let connect_ip_headers = create_extended_connect_headers(
             "connect-ip",
             "192.0.2.1",
-            0 // Port not meaningful for CONNECT-IP
+            0, // Port not meaningful for CONNECT-IP
         );
 
         if !validate_extended_connect_headers(&connect_ip_headers) {
@@ -256,7 +280,11 @@ fn test_connect_ip_negotiation() -> H3ConformanceResult {
         description: "CONNECT-IP negotiation validation".to_string(),
         category: TestCategory::ExtendedConnect,
         requirement_level: RequirementLevel::Must,
-        verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+        verdict: if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        },
         elapsed_ms,
         notes: result.err(),
     }
@@ -268,35 +296,26 @@ fn test_capsule_format_validation() -> H3ConformanceResult {
     let (result, elapsed_ms) = timed_test(|| -> Result<(), String> {
         // Test valid capsule formats
         let valid_capsules = vec![
-            (
-                create_datagram_capsule(b"UDP payload"),
-                "DATAGRAM capsule"
-            ),
+            (create_datagram_capsule(b"UDP payload"), "DATAGRAM capsule"),
             (
                 create_close_webtransport_session_capsule(0x1234, "Normal closure"),
-                "CLOSE_WEBTRANSPORT_SESSION capsule"
+                "CLOSE_WEBTRANSPORT_SESSION capsule",
             ),
             (
                 create_drain_webtransport_session_capsule(0x5678),
-                "DRAIN_WEBTRANSPORT_SESSION capsule"
+                "DRAIN_WEBTRANSPORT_SESSION capsule",
             ),
         ];
 
         for (capsule_data, description) in valid_capsules {
             if !validate_capsule_format(&capsule_data) {
-                return Err(format!(
-                    "Valid capsule rejected: {}",
-                    description
-                ));
+                return Err(format!("Valid capsule rejected: {}", description));
             }
 
             // Test round-trip parsing
             let parsed = parse_capsule(&capsule_data)?;
             if parsed.capsule_type == CapsuleType::Unknown {
-                return Err(format!(
-                    "Capsule type not recognized for {}",
-                    description
-                ));
+                return Err(format!("Capsule type not recognized for {}", description));
             }
         }
 
@@ -310,10 +329,7 @@ fn test_capsule_format_validation() -> H3ConformanceResult {
 
         for (malformed_data, description) in malformed_capsules {
             if validate_capsule_format(&malformed_data) {
-                return Err(format!(
-                    "Malformed capsule accepted: {}",
-                    description
-                ));
+                return Err(format!("Malformed capsule accepted: {}", description));
             }
         }
 
@@ -325,7 +341,11 @@ fn test_capsule_format_validation() -> H3ConformanceResult {
         description: "Capsule format validation for Extended CONNECT".to_string(),
         category: TestCategory::ExtendedConnect,
         requirement_level: RequirementLevel::Must,
-        verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+        verdict: if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        },
         elapsed_ms,
         notes: result.err(),
     }
@@ -336,11 +356,8 @@ fn test_capsule_format_validation() -> H3ConformanceResult {
 fn test_extended_connect_error_handling() -> H3ConformanceResult {
     let (result, elapsed_ms) = timed_test(|| -> Result<(), String> {
         // Test unsupported protocol handling
-        let unsupported_protocol = create_extended_connect_headers(
-            "unsupported-protocol",
-            "example.com",
-            8080
-        );
+        let unsupported_protocol =
+            create_extended_connect_headers("unsupported-protocol", "example.com", 8080);
 
         if validate_extended_connect_headers(&unsupported_protocol) {
             let response = process_connect_request(&unsupported_protocol);
@@ -351,17 +368,20 @@ fn test_extended_connect_error_handling() -> H3ConformanceResult {
 
         // Test malformed pseudo-headers
         let malformed_cases = vec![
-            (create_headers_with_duplicate_protocol(), "duplicate :protocol header"),
-            (create_headers_with_mixed_case_protocol(), "mixed case pseudo-header"),
+            (
+                create_headers_with_duplicate_protocol(),
+                "duplicate :protocol header",
+            ),
+            (
+                create_headers_with_mixed_case_protocol(),
+                "mixed case pseudo-header",
+            ),
             (create_headers_missing_authority(), "missing :authority"),
         ];
 
         for (malformed_headers, description) in malformed_cases {
             if validate_extended_connect_headers(&malformed_headers) {
-                return Err(format!(
-                    "Malformed headers accepted: {}",
-                    description
-                ));
+                return Err(format!("Malformed headers accepted: {}", description));
             }
 
             let error_code = get_last_protocol_error();
@@ -389,7 +409,11 @@ fn test_extended_connect_error_handling() -> H3ConformanceResult {
         description: "Extended CONNECT error handling validation".to_string(),
         category: TestCategory::ExtendedConnect,
         requirement_level: RequirementLevel::Must,
-        verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+        verdict: if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        },
         elapsed_ms,
         notes: result.err(),
     }
@@ -444,11 +468,26 @@ fn create_extended_connect_headers(protocol: &str, authority: &str, port: u16) -
     };
 
     vec![
-        HttpHeader { name: ":method".to_string(), value: "CONNECT".to_string() },
-        HttpHeader { name: ":protocol".to_string(), value: protocol.to_string() },
-        HttpHeader { name: ":scheme".to_string(), value: "https".to_string() },
-        HttpHeader { name: ":path".to_string(), value: "/".to_string() },
-        HttpHeader { name: ":authority".to_string(), value: authority_with_port },
+        HttpHeader {
+            name: ":method".to_string(),
+            value: "CONNECT".to_string(),
+        },
+        HttpHeader {
+            name: ":protocol".to_string(),
+            value: protocol.to_string(),
+        },
+        HttpHeader {
+            name: ":scheme".to_string(),
+            value: "https".to_string(),
+        },
+        HttpHeader {
+            name: ":path".to_string(),
+            value: "/".to_string(),
+        },
+        HttpHeader {
+            name: ":authority".to_string(),
+            value: authority_with_port,
+        },
     ]
 }
 
@@ -460,41 +499,86 @@ fn create_connect_headers_without_protocol(authority: &str, port: u16) -> Vec<Ht
     };
 
     vec![
-        HttpHeader { name: ":method".to_string(), value: "CONNECT".to_string() },
-        HttpHeader { name: ":scheme".to_string(), value: "https".to_string() },
-        HttpHeader { name: ":path".to_string(), value: "/".to_string() },
-        HttpHeader { name: ":authority".to_string(), value: authority_with_port },
+        HttpHeader {
+            name: ":method".to_string(),
+            value: "CONNECT".to_string(),
+        },
+        HttpHeader {
+            name: ":scheme".to_string(),
+            value: "https".to_string(),
+        },
+        HttpHeader {
+            name: ":path".to_string(),
+            value: "/".to_string(),
+        },
+        HttpHeader {
+            name: ":authority".to_string(),
+            value: authority_with_port,
+        },
     ]
 }
 
 fn create_headers_with_duplicate_protocol() -> Vec<HttpHeader> {
     vec![
-        HttpHeader { name: ":method".to_string(), value: "CONNECT".to_string() },
-        HttpHeader { name: ":protocol".to_string(), value: "connect-udp".to_string() },
-        HttpHeader { name: ":protocol".to_string(), value: "connect-ip".to_string() },
-        HttpHeader { name: ":authority".to_string(), value: "example.com".to_string() },
+        HttpHeader {
+            name: ":method".to_string(),
+            value: "CONNECT".to_string(),
+        },
+        HttpHeader {
+            name: ":protocol".to_string(),
+            value: "connect-udp".to_string(),
+        },
+        HttpHeader {
+            name: ":protocol".to_string(),
+            value: "connect-ip".to_string(),
+        },
+        HttpHeader {
+            name: ":authority".to_string(),
+            value: "example.com".to_string(),
+        },
     ]
 }
 
 fn create_headers_with_mixed_case_protocol() -> Vec<HttpHeader> {
     vec![
-        HttpHeader { name: ":method".to_string(), value: "CONNECT".to_string() },
-        HttpHeader { name: ":Protocol".to_string(), value: "connect-udp".to_string() },
-        HttpHeader { name: ":authority".to_string(), value: "example.com".to_string() },
+        HttpHeader {
+            name: ":method".to_string(),
+            value: "CONNECT".to_string(),
+        },
+        HttpHeader {
+            name: ":Protocol".to_string(),
+            value: "connect-udp".to_string(),
+        },
+        HttpHeader {
+            name: ":authority".to_string(),
+            value: "example.com".to_string(),
+        },
     ]
 }
 
 fn create_headers_missing_authority() -> Vec<HttpHeader> {
     vec![
-        HttpHeader { name: ":method".to_string(), value: "CONNECT".to_string() },
-        HttpHeader { name: ":protocol".to_string(), value: "connect-udp".to_string() },
+        HttpHeader {
+            name: ":method".to_string(),
+            value: "CONNECT".to_string(),
+        },
+        HttpHeader {
+            name: ":protocol".to_string(),
+            value: "connect-udp".to_string(),
+        },
     ]
 }
 
 fn create_connect_response(status: u16, reason: &str) -> Vec<HttpHeader> {
     vec![
-        HttpHeader { name: ":status".to_string(), value: status.to_string() },
-        HttpHeader { name: "reason".to_string(), value: reason.to_string() },
+        HttpHeader {
+            name: ":status".to_string(),
+            value: status.to_string(),
+        },
+        HttpHeader {
+            name: "reason".to_string(),
+            value: reason.to_string(),
+        },
     ]
 }
 
@@ -586,12 +670,15 @@ fn parse_capsule(data: &[u8]) -> Result<Capsule, String> {
 }
 
 fn headers_to_map(headers: &[HttpHeader]) -> std::collections::HashMap<String, String> {
-    headers.iter()
+    headers
+        .iter()
         .map(|h| (h.name.clone(), h.value.clone()))
         .collect()
 }
 
-fn extract_protocol_from_headers(headers: &[HttpHeader]) -> Result<ExtendedConnectProtocol, String> {
+fn extract_protocol_from_headers(
+    headers: &[HttpHeader],
+) -> Result<ExtendedConnectProtocol, String> {
     let header_map = headers_to_map(headers);
 
     match header_map.get(":protocol") {
@@ -613,16 +700,15 @@ fn is_valid_ip_address(target: &str) -> bool {
     if cleaned.chars().all(|c| c.is_ascii_digit() || c == '.') {
         let parts: Vec<&str> = cleaned.split('.').collect();
         if parts.len() == 4 {
-            return parts.iter().all(|part| {
-                part.parse::<u8>().is_ok() && !part.is_empty()
-            });
+            return parts
+                .iter()
+                .all(|part| part.parse::<u8>().is_ok() && !part.is_empty());
         }
     }
 
     // IPv6 check (simplified)
     if cleaned.contains(':') {
-        return cleaned.chars().all(|c| c.is_ascii_hexdigit() || c == ':') &&
-               cleaned.len() >= 2;
+        return cleaned.chars().all(|c| c.is_ascii_hexdigit() || c == ':') && cleaned.len() >= 2;
     }
 
     false
@@ -635,7 +721,8 @@ fn process_connect_request(_headers: &[HttpHeader]) -> Vec<HttpHeader> {
 
 fn get_response_status(response: &[HttpHeader]) -> u16 {
     let header_map = headers_to_map(response);
-    header_map.get(":status")
+    header_map
+        .get(":status")
         .and_then(|s| s.parse().ok())
         .unwrap_or(500)
 }

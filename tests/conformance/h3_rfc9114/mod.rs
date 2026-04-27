@@ -6,16 +6,19 @@
 //! spec-derived tests. Each test case maps to specific MUST/SHOULD clauses.
 
 use serde::Serialize;
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 pub mod connection_preface_tests;
 
 // New conformance test modules
-pub mod stream_types_tests;
 pub mod control_first_frame_tests;
 pub mod datagram_format_tests;
 pub mod extended_connect_tests;
 pub mod goaway_tests;
+pub mod stream_types_tests;
+
+const EXPECTED_H3_CONFORMANCE_TESTS: usize = 29;
 
 /// Conformance test result for HTTP/3 RFC 9114.
 #[derive(Debug, Clone, Serialize)]
@@ -226,8 +229,11 @@ mod integration_tests {
         let harness = H3ConformanceHarness::new();
         let results = harness.run_all_tests();
 
-        // Verify we have all expected tests
-        assert_eq!(results.len(), 4, "Should have 4 connection preface tests");
+        assert_eq!(
+            results.len(),
+            EXPECTED_H3_CONFORMANCE_TESTS,
+            "H3 harness should run every RFC 9114/9297/9298 conformance sub-suite"
+        );
 
         // Verify all tests have proper structure
         for result in &results {
@@ -239,13 +245,17 @@ mod integration_tests {
 
         // Verify test IDs are unique
         let mut test_ids: Vec<&str> = results.iter().map(|r| r.test_id.as_str()).collect();
-        test_ids.sort();
+        test_ids.sort_unstable();
         test_ids.dedup();
-        assert_eq!(test_ids.len(), 4, "All test IDs should be unique");
+        assert_eq!(
+            test_ids.len(),
+            EXPECTED_H3_CONFORMANCE_TESTS,
+            "All H3 conformance test IDs should be unique"
+        );
 
         // Verify coverage report
         let coverage = harness.coverage_report();
-        assert_eq!(coverage.total_tests, 4);
+        assert_eq!(coverage.total_tests, EXPECTED_H3_CONFORMANCE_TESTS);
         assert!(coverage.must_coverage >= 0.0);
     }
 
@@ -256,8 +266,7 @@ mod integration_tests {
         let results = harness.run_all_tests();
 
         // Verify we have tests for all major categories
-        let categories: std::collections::HashSet<TestCategory> =
-            results.iter().map(|r| r.category).collect();
+        let categories: HashSet<TestCategory> = results.iter().map(|r| r.category).collect();
 
         assert!(categories.contains(&TestCategory::ConnectionPreface));
         assert!(categories.contains(&TestCategory::Settings));

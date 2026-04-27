@@ -62,10 +62,7 @@ fn test_goaway_last_stream_id_validity() -> H3ConformanceResult {
             let encoded_goaway = encode_goaway_frame(&goaway);
 
             if !validate_goaway_frame(&encoded_goaway) {
-                return Err(format!(
-                    "Valid GOAWAY frame rejected: {}",
-                    description
-                ));
+                return Err(format!("Valid GOAWAY frame rejected: {}", description));
             }
 
             if !process_goaway_frame(&encoded_goaway) {
@@ -79,7 +76,8 @@ fn test_goaway_last_stream_id_validity() -> H3ConformanceResult {
             let stream_states = get_stream_states();
             for stream_id in &[1, 5, 9, 13] {
                 let should_be_processed = *stream_id <= last_stream_id;
-                let is_processed = stream_states.get(stream_id)
+                let is_processed = stream_states
+                    .get(stream_id)
                     .map_or(false, |state| *state == StreamState::WillProcess);
 
                 if should_be_processed != is_processed {
@@ -131,7 +129,11 @@ fn test_goaway_last_stream_id_validity() -> H3ConformanceResult {
         description: "GOAWAY last-stream-ID validity validation".to_string(),
         category: TestCategory::ConnectionManagement,
         requirement_level: RequirementLevel::Must,
-        verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+        verdict: if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        },
         elapsed_ms,
         notes: result.err(),
     }
@@ -201,7 +203,11 @@ fn test_goaway_graceful_shutdown() -> H3ConformanceResult {
         description: "GOAWAY graceful shutdown semantics".to_string(),
         category: TestCategory::ConnectionManagement,
         requirement_level: RequirementLevel::Must,
-        verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+        verdict: if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        },
         elapsed_ms,
         notes: result.err(),
     }
@@ -239,7 +245,10 @@ fn test_goaway_immediate_shutdown() -> H3ConformanceResult {
 
         // Connection should close immediately
         let connection_state = get_connection_state();
-        if !matches!(connection_state, ConnectionState::Closed | ConnectionState::Closing) {
+        if !matches!(
+            connection_state,
+            ConnectionState::Closed | ConnectionState::Closing
+        ) {
             return Err("Connection should close immediately with last_stream_id=0".to_string());
         }
 
@@ -256,7 +265,11 @@ fn test_goaway_immediate_shutdown() -> H3ConformanceResult {
         description: "GOAWAY immediate shutdown semantics".to_string(),
         category: TestCategory::ConnectionManagement,
         requirement_level: RequirementLevel::Must,
-        verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+        verdict: if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        },
         elapsed_ms,
         notes: result.err(),
     }
@@ -323,7 +336,11 @@ fn test_goaway_bidirectional_behavior() -> H3ConformanceResult {
         description: "GOAWAY bidirectional behavior validation".to_string(),
         category: TestCategory::ConnectionManagement,
         requirement_level: RequirementLevel::Must,
-        verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+        verdict: if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        },
         elapsed_ms,
         notes: result.err(),
     }
@@ -344,10 +361,7 @@ fn test_goaway_error_handling() -> H3ConformanceResult {
             reset_connection_state();
 
             if validate_goaway_frame(&malformed_data) {
-                return Err(format!(
-                    "Malformed GOAWAY frame accepted: {}",
-                    description
-                ));
+                return Err(format!("Malformed GOAWAY frame accepted: {}", description));
             }
 
             if process_goaway_frame(&malformed_data) {
@@ -376,7 +390,9 @@ fn test_goaway_error_handling() -> H3ConformanceResult {
         // Verify the smaller last_stream_id takes effect
         let stream_states = get_stream_states();
         if stream_states.get(&9) != Some(&StreamState::Rejected) {
-            return Err("Stream 9 should be rejected after second GOAWAY with smaller ID".to_string());
+            return Err(
+                "Stream 9 should be rejected after second GOAWAY with smaller ID".to_string(),
+            );
         }
 
         // Test GOAWAY with future stream ID
@@ -406,7 +422,11 @@ fn test_goaway_error_handling() -> H3ConformanceResult {
         description: "GOAWAY error handling and edge cases".to_string(),
         category: TestCategory::ConnectionManagement,
         requirement_level: RequirementLevel::Must,
-        verdict: if result.is_ok() { TestVerdict::Pass } else { TestVerdict::Fail },
+        verdict: if result.is_ok() {
+            TestVerdict::Pass
+        } else {
+            TestVerdict::Fail
+        },
         elapsed_ms,
         notes: result.err(),
     }
