@@ -339,7 +339,12 @@ impl TransportErrorKind {
         use std::io::ErrorKind as Ek;
         match kind {
             Ek::TimedOut => Self::Timeout,
-            Ek::ConnectionRefused | Ek::NotFound | Ek::AddrNotAvailable => Self::ConnectFailed,
+            Ek::ConnectionRefused
+            | Ek::NotFound
+            | Ek::AddrNotAvailable
+            | Ek::NetworkDown
+            | Ek::NetworkUnreachable
+            | Ek::HostUnreachable => Self::ConnectFailed,
             // AddrInUse is a local bind/config failure, not peer reachability.
             Ek::AddrInUse => Self::ProtocolViolation,
             Ek::ConnectionReset
@@ -687,6 +692,9 @@ mod tests {
             (Ek::TimedOut, TransportErrorKind::Timeout),
             (Ek::ConnectionRefused, TransportErrorKind::ConnectFailed),
             (Ek::AddrNotAvailable, TransportErrorKind::ConnectFailed),
+            (Ek::NetworkDown, TransportErrorKind::ConnectFailed),
+            (Ek::NetworkUnreachable, TransportErrorKind::ConnectFailed),
+            (Ek::HostUnreachable, TransportErrorKind::ConnectFailed),
             (Ek::ConnectionReset, TransportErrorKind::ResetByPeer),
             (Ek::ConnectionAborted, TransportErrorKind::ResetByPeer),
             (Ek::BrokenPipe, TransportErrorKind::ResetByPeer),
@@ -702,13 +710,22 @@ mod tests {
         for (io_kind, expected) in mappings {
             let io_err = std::io::Error::new(*io_kind, "test");
             let grpc: GrpcError = io_err.into();
-            match grpc {
-                GrpcError::Transport(actual, _) => assert_eq!(
-                    actual, *expected,
-                    "io::ErrorKind::{io_kind:?} must map to TransportErrorKind::{expected:?}, got {actual:?}"
-                ),
-                other => panic!("io::Error must convert to Transport variant, got {other:?}"),
-            }
+            let actual = match grpc {
+                GrpcError::Transport(actual, _) => actual,
+                other => {
+                    crate::assert_with_log!(
+                        false,
+                        "io::Error converts to transport variant",
+                        "Transport",
+                        format!("{other:?}")
+                    );
+                    TransportErrorKind::Other
+                }
+            };
+            assert_eq!(
+                actual, *expected,
+                "io::ErrorKind::{io_kind:?} must map to TransportErrorKind::{expected:?}, got {actual:?}"
+            );
         }
     }
 
@@ -719,6 +736,9 @@ mod tests {
             Ek::TimedOut,
             Ek::ConnectionRefused,
             Ek::AddrNotAvailable,
+            Ek::NetworkDown,
+            Ek::NetworkUnreachable,
+            Ek::HostUnreachable,
             Ek::AddrInUse,
             Ek::ConnectionReset,
             Ek::ConnectionAborted,
@@ -730,13 +750,22 @@ mod tests {
         ] {
             let expected = TransportErrorKind::from_io_error_kind(kind);
             let grpc: GrpcError = std::io::Error::new(kind, "io failure").into();
-            match grpc {
-                GrpcError::Transport(actual, _) => assert_eq!(
-                    actual, expected,
-                    "helper and GrpcError::from must classify {kind:?} identically"
-                ),
-                other => panic!("io::Error must convert to Transport variant, got {other:?}"),
-            }
+            let actual = match grpc {
+                GrpcError::Transport(actual, _) => actual,
+                other => {
+                    crate::assert_with_log!(
+                        false,
+                        "io::Error converts to transport variant",
+                        "Transport",
+                        format!("{other:?}")
+                    );
+                    TransportErrorKind::Other
+                }
+            };
+            assert_eq!(
+                actual, expected,
+                "helper and GrpcError::from must classify {kind:?} identically"
+            );
         }
     }
 
