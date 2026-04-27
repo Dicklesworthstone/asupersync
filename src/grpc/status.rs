@@ -305,7 +305,11 @@ impl From<std::io::Error> for Status {
 /// via [`GrpcError::transport_kind`]; the bare [`GrpcError::transport`]
 /// constructor defaults to [`TransportErrorKind::Other`] which maps to
 /// `Unavailable` (safe retryable default).
+// br-asupersync-co6rye: #[non_exhaustive] so future taxonomy growth
+// (e.g. TlsHandshakeFailed, LocalConfigError) is non-breaking for
+// downstream callers that match on this enum.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum TransportErrorKind {
     /// Operation timed out (deadline elapsed). Maps to DeadlineExceeded.
     Timeout,
@@ -435,9 +439,17 @@ impl From<std::io::Error> for GrpcError {
         use std::io::ErrorKind as Ek;
         let kind = match err.kind() {
             Ek::TimedOut => TransportErrorKind::Timeout,
-            Ek::ConnectionRefused | Ek::NotFound | Ek::AddrNotAvailable | Ek::AddrInUse => {
+            Ek::ConnectionRefused | Ek::NotFound | Ek::AddrNotAvailable => {
                 TransportErrorKind::ConnectFailed
             }
+            // br-asupersync-co6rye: AddrInUse is a LOCAL bind failure
+            // (the local port is taken), not a peer-reachability issue.
+            // Mapping to ConnectFailed → Unavailable (retryable) misleads
+            // clients into retry loops that can't recover without
+            // operator action. ProtocolViolation → Status::internal is
+            // non-retryable and accurately describes a local config
+            // error that the peer cannot resolve.
+            Ek::AddrInUse => TransportErrorKind::ProtocolViolation,
             Ek::ConnectionReset
             | Ek::ConnectionAborted
             | Ek::BrokenPipe
@@ -676,6 +688,10 @@ mod tests {
             (Ek::NotConnected, TransportErrorKind::ResetByPeer),
             (Ek::UnexpectedEof, TransportErrorKind::ResetByPeer),
             (Ek::InvalidData, TransportErrorKind::ProtocolViolation),
+            // br-asupersync-co6rye: AddrInUse is a local bind failure
+            // (not a peer problem), so it maps to ProtocolViolation
+            // (→ Status::internal, non-retryable) NOT ConnectFailed.
+            (Ek::AddrInUse, TransportErrorKind::ProtocolViolation),
             (Ek::Other, TransportErrorKind::Other),
         ];
         for (io_kind, expected) in mappings {
