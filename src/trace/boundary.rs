@@ -66,11 +66,14 @@ impl SquareComplex {
     ///
     /// `num_vertices` is the number of 0-cells.
     /// `edges` is a list of directed edges `(i, j)` with `i < j`.
+    /// Malformed edges with out-of-range or non-forward endpoints are discarded.
     ///
     /// Squares are detected as commuting diamonds: four vertices `a < b, c < d`
     /// with edges `a→b`, `a→c`, `b→d`, `c→d` and canonical order `b < c`.
     #[must_use]
     pub fn from_edges(num_vertices: usize, mut edges: Vec<(usize, usize)>) -> Self {
+        edges.retain(|&(s, t)| s < num_vertices && t < num_vertices && s < t);
+
         // Sort edges for determinism and binary search.
         edges.sort_unstable();
         edges.dedup();
@@ -434,6 +437,13 @@ mod tests {
     fn vertices_only() {
         let cx = SquareComplex::from_edges(5, vec![]);
         assert_eq!(cx.edges.len(), 0);
+        assert_eq!(cx.squares.len(), 0);
+    }
+
+    #[test]
+    fn malformed_edges_are_discarded() {
+        let cx = SquareComplex::from_edges(3, vec![(0, 1), (3, 1), (1, 1), (2, 0), (1, 2)]);
+        assert_eq!(cx.edges, vec![(0, 1), (1, 2)]);
         assert_eq!(cx.squares.len(), 0);
     }
 
