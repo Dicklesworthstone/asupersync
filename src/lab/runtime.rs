@@ -1625,16 +1625,17 @@ impl LabRuntime {
             .and_then(|record| record.cx.clone());
         let _cx_guard = crate::cx::Cx::set_current(current_cx);
 
-        let started_running = if let Some(record) = self.state.task_mut(task_id) {
-            let old_state = record.state.clone();
-            if record.start_running() {
-                Some((old_state, record.state.clone()))
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        let started_running = self
+            .state
+            .update_task(task_id, |record| {
+                let old_state = record.state.clone();
+                if record.start_running() {
+                    Some((old_state, record.state.clone()))
+                } else {
+                    None
+                }
+            })
+            .flatten();
 
         if let Some((from_state, to_state)) = started_running.as_ref() {
             if self.config.has_cancellation_oracle() {
@@ -1664,9 +1665,9 @@ impl LabRuntime {
         };
 
         // Record the poll so futurelock detection uses the correct idle step count.
-        if let Some(record) = self.state.task_mut(task_id) {
+        let _ = self.state.update_task(task_id, |record| {
             record.mark_polled(self.steps);
-        }
+        });
 
         let cancel_ack = self.consume_cancel_ack(task_id);
 
@@ -1685,7 +1686,7 @@ impl LabRuntime {
                 // Update state to Completed if not already terminal
                 let mut oracle_transitions = Vec::new(); // Collect transitions for later oracle notification
 
-                if let Some(record) = self.state.task_mut(task_id) {
+                let _ = self.state.update_task(task_id, |record| {
                     if !record.state.is_terminal() {
                         let old_state = record.state.clone();
                         let record_outcome = match outcome {
@@ -1741,7 +1742,7 @@ impl LabRuntime {
                             oracle_transitions.push((old_state, record.state.clone()));
                         }
                     }
-                }
+                });
 
                 // Notify oracle of all state transitions after all mutations are complete
                 if self.config.has_cancellation_oracle() {
@@ -2017,25 +2018,26 @@ impl LabRuntime {
     }
 
     fn consume_cancel_ack(&mut self, task_id: TaskId) -> bool {
-        let Some(record) = self.state.task_mut(task_id) else {
-            return false;
-        };
-        let Some(inner) = record.cx_inner.as_ref() else {
-            return false;
-        };
-        let mut acknowledged = false;
-        {
-            let mut guard = inner.write();
-            if guard.cancel_acknowledged {
-                guard.cancel_acknowledged = false;
-                drop(guard);
-                acknowledged = true;
-            }
-        }
-        if acknowledged {
-            let _ = record.acknowledge_cancel();
-        }
-        acknowledged
+        self.state
+            .update_task(task_id, |record| {
+                let Some(inner) = record.cx_inner.as_ref() else {
+                    return false;
+                };
+                let mut acknowledged = false;
+                {
+                    let mut guard = inner.write();
+                    if guard.cancel_acknowledged {
+                        guard.cancel_acknowledged = false;
+                        drop(guard);
+                        acknowledged = true;
+                    }
+                }
+                if acknowledged {
+                    let _ = record.acknowledge_cancel();
+                }
+                acknowledged
+            })
+            .unwrap_or(false)
     }
 
     /// Injects a cancellation for a task.
@@ -2055,22 +2057,29 @@ impl LabRuntime {
             );
         }
 
-        // Mark the task as cancel-requested with chaos reason
-        if let Some(record) = self.state.task_mut(task_id) {
-            if !record.state.is_terminal() {
-                let old_state = record.state.clone();
-                record.request_cancel_with_budget(reason, Budget::ZERO);
-
-                // Record the state transition in the oracle after mutation is complete
-                if self.config.has_cancellation_oracle() {
-                    let new_state = record.state.clone();
-                    self.oracles.cancellation_protocol.on_transition(
-                        task_id,
-                        &old_state,
-                        &new_state,
-                        self.virtual_time,
-                    );
+        // Mark the task as cancel-requested with chaos reason.
+        let transition = self
+            .state
+            .update_task(task_id, |record| {
+                if !record.state.is_terminal() {
+                    let old_state = record.state.clone();
+                    record.request_cancel_with_budget(reason, Budget::ZERO);
+                    Some((old_state, record.state.clone()))
+                } else {
+                    None
                 }
+            })
+            .flatten();
+
+        // Record the state transition in the oracle after mutation is complete.
+        if let Some((old_state, new_state)) = transition {
+            if self.config.has_cancellation_oracle() {
+                self.oracles.cancellation_protocol.on_transition(
+                    task_id,
+                    &old_state,
+                    &new_state,
+                    self.virtual_time,
+                );
             }
         }
 
@@ -3827,9 +3836,8 @@ mod tests {
 
         runtime
             .state
-            .task_mut(task_id)
-            .unwrap()
-            .complete(Outcome::Ok(()));
+            .update_task(task_id, |record| record.complete(Outcome::Ok(())))
+            .unwrap();
 
         let violations = runtime.check_invariants();
         let mut found = false;
@@ -3884,9 +3892,8 @@ mod tests {
 
         runtime
             .state
-            .task_mut(task_id)
-            .unwrap()
-            .complete(Outcome::Ok(()));
+            .update_task(task_id, |record| record.complete(Outcome::Ok(())))
+            .unwrap();
 
         let violations = runtime.check_invariants();
         let has_leak = violations
@@ -4441,9 +4448,8 @@ mod tests {
         runtime.advance_time_to(Time::from_nanos(140));
         runtime
             .state
-            .task_mut(task_id)
-            .unwrap()
-            .complete(Outcome::Ok(()));
+            .update_task(task_id, |record| record.complete(Outcome::Ok(())))
+            .unwrap();
 
         let violations = runtime.check_invariants();
         let has_leak = violations
@@ -5324,18 +5330,21 @@ mod tests {
         runtime.step();
 
         // Put the task through cancel protocol: CancelRequested → Cancelling
-        if let Some(record) = runtime.state.task_mut(task_id) {
-            record.request_cancel(crate::types::CancelReason::user("test-cancel"));
-            let _ = record.acknowledge_cancel();
-            // Task is now in Cancelling state
-            assert!(
-                matches!(
-                    record.state,
-                    crate::record::task::TaskState::Cancelling { .. }
-                ),
-                "task should be in Cancelling state"
-            );
-        }
+        runtime
+            .state
+            .update_task(task_id, |record| {
+                record.request_cancel(crate::types::CancelReason::user("test-cancel"));
+                let _ = record.acknowledge_cancel();
+                // Task is now in Cancelling state
+                assert!(
+                    matches!(
+                        record.state,
+                        crate::record::task::TaskState::Cancelling { .. }
+                    ),
+                    "task should be in Cancelling state"
+                );
+            })
+            .unwrap();
 
         // Reschedule and run to completion: the cancel protocol will
         // complete it as Cancelled when the wrapped future returns Ok.
