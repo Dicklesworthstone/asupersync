@@ -904,7 +904,15 @@ impl Connection {
         // responses.
         let is_subsequent_headers = stream.initial_headers_decoded();
         let is_request = !self.is_client;
-        let is_trailers = is_subsequent_headers && (is_request || end_stream);
+        // br-asupersync-k4jj9p: a client may receive 1xx informational
+        // HEADERS (e.g. 100 Continue, 103 Early Hints) followed by the
+        // final 2xx/3xx/4xx/5xx HEADERS even when the final response is
+        // bodyless. Per RFC 9113 §8.1 + §8.3.2, only the FINAL response
+        // promotes the stream to "initial headers decoded"; subsequent
+        // HEADERS before a final response are still informational, NOT
+        // trailers. Compute a tentative is_trailers and refine it after
+        // header decoding using the just-observed :status pseudo-header.
+        let tentative_is_trailers = is_subsequent_headers && (is_request || end_stream);
 
         let fragments = stream.take_header_fragments();
 
@@ -928,6 +936,28 @@ impl Connection {
         let mut src = combined.freeze();
         let headers = self.hpack_decoder.decode(&mut src)?;
 
+        // br-asupersync-k4jj9p: refine is_trailers using the just-observed
+        // :status pseudo-header. CLIENT side: a subsequent HEADERS is
+        // trailers ONLY if there is NO :status pseudo-header (since 1xx
+        // informational AND final responses both carry :status). SERVER
+        // side keeps the original semantics — any subsequent HEADERS is
+        // trailers (1xx informational is impossible request-side).
+        let observed_status = headers
+            .iter()
+            .find(|h| h.name.as_bytes() == b":status")
+            .and_then(|h| std::str::from_utf8(h.value.as_bytes()).ok())
+            .and_then(|s| s.parse::<u16>().ok());
+        let is_informational_response =
+            !is_request && observed_status.is_some_and(|s| (100..200).contains(&s));
+        let is_trailers = if is_request {
+            tentative_is_trailers
+        } else {
+            // Client side: trailers iff subsequent-headers AND no :status.
+            // end_stream alone is NOT sufficient — a bodyless final
+            // response after 1xx has end_stream=true but is NOT trailers.
+            is_subsequent_headers && observed_status.is_none() && end_stream
+        };
+
         // br-asupersync-vqpx88 + br-asupersync-0eyf7t: RFC 9113
         // §8.3.1/§8.3.2 pseudo-header structural validation, plus
         // the §8.1 trailers-have-no-pseudo-headers rule. The
@@ -939,11 +969,13 @@ impl Connection {
             return Err(H2Error::stream(stream_id, ErrorCode::ProtocolError, why));
         }
 
-        // br-asupersync-0eyf7t — mark the initial-headers gate so a
-        // future HEADERS for the same stream is correctly classified
-        // as trailers. Skip the mark on the trailers path itself
-        // (the gate is monotone: once set, stays set).
-        if !is_trailers {
+        // br-asupersync-0eyf7t + br-asupersync-k4jj9p — mark the
+        // initial-headers gate ONLY when we've observed the FINAL
+        // response (not a 1xx informational). Marking on 1xx would
+        // mis-classify the subsequent final-response HEADERS as
+        // trailers, rejecting its valid :status pseudo-header.
+        let should_mark_initial = !is_trailers && !is_informational_response;
+        if should_mark_initial {
             if let Some(stream) = self.streams.get_mut(stream_id) {
                 stream.mark_initial_headers_decoded();
             }
