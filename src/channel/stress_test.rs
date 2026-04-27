@@ -187,6 +187,7 @@ pub async fn mpsc_stress_test(
                 let sent = stats.messages_sent.load(Ordering::Acquire);
                 let recv_count = stats.messages_received.load(Ordering::Acquire);
                 let violations = stats.invariant_violations.load(Ordering::Acquire);
+                let consistency_ok = oracle.verify_final_consistency();
 
                 println!(
                     "  Sent: {}, Received: {}, Violations: {}",
@@ -198,7 +199,8 @@ pub async fn mpsc_stress_test(
                 max_cancellation_rate = max_cancellation_rate.max(cancel_prob);
                 rounds_completed += 1;
 
-                if !oracle.verify_final_consistency() {
+                if !consistency_ok {
+                    total_violations += 1;
                     eprintln!("CONSISTENCY FAILURE in round {}", round + 1);
                 }
             }
