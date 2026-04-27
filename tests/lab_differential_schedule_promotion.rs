@@ -201,8 +201,9 @@ fn promoted_schedule_divergence_builds_retained_bundle_with_lineage() {
 
     let default_bundle_root = entry.default_bundle_root();
     assert!(
-        default_bundle_root.starts_with("artifacts/differential/scheduler_surface/"),
-        "default bundle root should normalize the surface id: {default_bundle_root}"
+        default_bundle_root
+            .starts_with("artifacts/differential/z-11-7363686564756c65722e73757266616365/"),
+        "default bundle root should encode the raw surface id without collisions: {default_bundle_root}"
     );
 
     let bundle = DifferentialBundleArtifacts::from_dual_run_result(&entry, &result);

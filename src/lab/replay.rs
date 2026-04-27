@@ -2250,8 +2250,8 @@ mod tests {
             colon_entry_id, underscore_entry_id,
             "distinct raw IDs must not collapse to the same registry entry id"
         );
-        assert!(colon_entry_id.starts_with("z-3-3a3a3a."));
-        assert!(underscore_entry_id.starts_with("___."));
+        assert!(colon_entry_id.starts_with("surface.z-3-3a3a3a."));
+        assert!(underscore_entry_id.starts_with("surface.___."));
 
         let slash_entry_id = DivergenceCorpusEntry::entry_id_for(
             "surface",
