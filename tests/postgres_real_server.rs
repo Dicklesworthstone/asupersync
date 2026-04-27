@@ -25,7 +25,7 @@
 #![cfg(all(test, feature = "postgres"))]
 #![allow(clippy::pedantic, clippy::nursery, clippy::print_stderr)]
 
-use asupersync::database::postgres::{PgConnection, PgError};
+use asupersync::database::postgres::{PgConnectOptions, PgConnection, PgError};
 use asupersync::test_utils::run_test_with_cx;
 use asupersync::types::Outcome;
 
@@ -49,10 +49,7 @@ impl RealPgConfig {
         let toggle = std::env::var("REAL_POSTGRES_TESTS").unwrap_or_default() == "true";
         let node_env = std::env::var("NODE_ENV").unwrap_or_default();
 
-        let host_looks_local = url.contains("@localhost")
-            || url.contains("@127.0.0.1")
-            || url.contains("@[::1]")
-            || url.contains("@/");
+        let host_looks_local = postgres_url_host_is_local(&url);
         let url_lc = url.to_ascii_lowercase();
         let looks_prod = url_lc.contains("prod") || url_lc.contains("production");
 
@@ -77,6 +74,16 @@ impl RealPgConfig {
             enabled: toggle && reason.is_none(),
             reason,
         }
+    }
+}
+
+fn postgres_url_host_is_local(url: &str) -> bool {
+    match PgConnectOptions::parse(url) {
+        Ok(opts) => {
+            opts.host.eq_ignore_ascii_case("localhost")
+                || matches!(opts.host.as_str(), "127.0.0.1" | "::1")
+        }
+        Err(_) => false,
     }
 }
 
@@ -166,6 +173,33 @@ fn skip_if_disabled(cfg: &RealPgConfig, test_name: &str) -> bool {
         return true;
     }
     false
+}
+
+#[test]
+fn postgres_real_config_localhost_gate_rejects_prefix_spoofing() {
+    assert!(postgres_url_host_is_local(
+        "postgres://postgres:postgres@localhost:5432/postgres"
+    ));
+    assert!(postgres_url_host_is_local(
+        "postgres://postgres:postgres@LOCALHOST:5432/postgres"
+    ));
+    assert!(postgres_url_host_is_local(
+        "postgres://postgres:postgres@127.0.0.1:5432/postgres"
+    ));
+    assert!(postgres_url_host_is_local(
+        "postgres://postgres:postgres@[::1]:5432/postgres"
+    ));
+    assert!(postgres_url_host_is_local("postgres://localhost/postgres"));
+    assert!(!postgres_url_host_is_local(
+        "postgres://postgres:postgres@localhost.evil.example:5432/postgres"
+    ));
+    assert!(!postgres_url_host_is_local(
+        "postgres://postgres:postgres@127.0.0.1.evil.example:5432/postgres"
+    ));
+    assert!(!postgres_url_host_is_local(
+        "postgres://postgres:postgres@10.0.0.5:5432/postgres"
+    ));
+    assert!(!postgres_url_host_is_local("not-a-postgres-url"));
 }
 
 fn unwrap_pg<T>(out: Outcome<T, PgError>, log: &PgTestLogger, op: &str) -> T {

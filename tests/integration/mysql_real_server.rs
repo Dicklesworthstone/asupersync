@@ -15,7 +15,9 @@
 #![cfg(all(test, feature = "mysql"))]
 #![allow(clippy::pedantic, clippy::nursery, clippy::print_stderr)]
 
-use asupersync::database::mysql::{IsolationLevel, MySqlConnection, MySqlError};
+use asupersync::database::mysql::{
+    IsolationLevel, MySqlConnectOptions, MySqlConnection, MySqlError,
+};
 use asupersync::test_utils::run_test_with_cx;
 use asupersync::types::Outcome;
 
@@ -36,10 +38,8 @@ impl RealMySqlConfig {
         let allow_remote = std::env::var("ALLOW_NON_LOCALHOST_MYSQL").unwrap_or_default() == "true";
         let node_env = std::env::var("NODE_ENV").unwrap_or_default();
 
+        let host_looks_local = mysql_url_host_is_local(&url);
         let url_lc = url.to_ascii_lowercase();
-        let host_looks_local = url_lc.contains("@localhost")
-            || url_lc.contains("@127.0.0.1")
-            || url_lc.contains("@[::1]");
         let looks_prod = url_lc.contains("prod") || url_lc.contains("production");
 
         let reason = if !toggle {
@@ -61,6 +61,16 @@ impl RealMySqlConfig {
             enabled: toggle && reason.is_none(),
             reason,
         }
+    }
+}
+
+fn mysql_url_host_is_local(url: &str) -> bool {
+    match MySqlConnectOptions::parse(url) {
+        Ok(opts) => {
+            opts.host.eq_ignore_ascii_case("localhost")
+                || matches!(opts.host.as_str(), "127.0.0.1" | "::1")
+        }
+        Err(_) => false,
     }
 }
 
@@ -136,6 +146,33 @@ fn skip_if_disabled(cfg: &RealMySqlConfig, test_name: &str) -> bool {
         return true;
     }
     false
+}
+
+#[test]
+fn mysql_real_config_localhost_gate_rejects_prefix_spoofing() {
+    assert!(mysql_url_host_is_local(
+        "mysql://root:password@localhost:3306/mysql"
+    ));
+    assert!(mysql_url_host_is_local(
+        "mysql://root:password@LOCALHOST:3306/mysql"
+    ));
+    assert!(mysql_url_host_is_local(
+        "mysql://root:password@127.0.0.1:3306/mysql"
+    ));
+    assert!(mysql_url_host_is_local(
+        "mysql://root:password@[::1]:3306/mysql"
+    ));
+    assert!(mysql_url_host_is_local("mysql://localhost/mysql"));
+    assert!(!mysql_url_host_is_local(
+        "mysql://root:password@localhost.evil.example:3306/mysql"
+    ));
+    assert!(!mysql_url_host_is_local(
+        "mysql://root:password@127.0.0.1.evil.example:3306/mysql"
+    ));
+    assert!(!mysql_url_host_is_local(
+        "mysql://root:password@10.0.0.5:3306/mysql"
+    ));
+    assert!(!mysql_url_host_is_local("not-a-mysql-url"));
 }
 
 fn unwrap_mysql<T>(outcome: Outcome<T, MySqlError>, op: &str, log: &MySqlTestLogger) -> T {

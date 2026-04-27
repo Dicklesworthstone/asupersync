@@ -1124,10 +1124,17 @@ impl MySqlConnectOptions {
             // IPv6 literal: [addr]:port or [addr]
             if let Some((bracketed, rest)) = host_port.split_once(']') {
                 let addr = &bracketed[1..]; // strip leading '['
-                let port = rest
-                    .strip_prefix(':')
-                    .and_then(|p| p.parse().ok())
-                    .unwrap_or(3306);
+                let port = if rest.is_empty() {
+                    3306
+                } else if let Some(port_str) = rest.strip_prefix(':') {
+                    port_str
+                        .parse()
+                        .map_err(|_| MySqlError::InvalidUrl(format!("invalid port: {port_str}")))?
+                } else {
+                    return Err(MySqlError::InvalidUrl(format!(
+                        "invalid host/port segment: {host_port}"
+                    )));
+                };
                 (addr, port)
             } else {
                 return Err(MySqlError::InvalidUrl(
@@ -1137,10 +1144,18 @@ impl MySqlConnectOptions {
         } else if host_port.matches(':').count() > 1 {
             (host_port, 3306)
         } else {
-            host_port
-                .rsplit_once(':')
-                .map_or((host_port, 3306), |(h, p)| (h, p.parse().unwrap_or(3306)))
+            match host_port.rsplit_once(':') {
+                Some((h, p)) => (
+                    h,
+                    p.parse()
+                        .map_err(|_| MySqlError::InvalidUrl(format!("invalid port: {p}")))?,
+                ),
+                None => (host_port, 3306),
+            }
         };
+        if host.is_empty() {
+            return Err(MySqlError::InvalidUrl("missing host".to_string()));
+        }
 
         let mut connect_timeout = None;
         let mut ssl_mode = SslMode::Disabled;
@@ -1381,7 +1396,7 @@ impl Drop for MySqlConnection {
                         // for the spawn to complete; if the killer
                         // hangs we leak the daemon thread but that's
                         // acceptable on a runtime shutdown path.
-                        let _ = runtime.block_on(join);
+                        runtime.block_on(join);
                     })
                     .ok();
             }
@@ -1706,11 +1721,12 @@ impl MySqlConnection {
                 // caching_sha2_password-configured client into this
                 // mode. Default-deny closes that door.
                 if !options.insecure_legacy_mysql_native_password {
-                    return Err(MySqlError::UnsupportedAuthPlugin(format!(
+                    return Err(MySqlError::UnsupportedAuthPlugin(
                         "mysql_native_password rejected by default — set \
                          MySqlConnectOptions::insecure_legacy_mysql_native_password = true \
                          to opt in (and prefer ssl_mode: Required to neutralise the offline-crack surface)"
-                    )));
+                            .to_string(),
+                    ));
                 }
                 mysql_native_auth(password, &handshake.auth_plugin_data)
             }
@@ -4413,6 +4429,7 @@ mod tests {
                     server_version: String::new(),
                     needs_rollback: false,
                     max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                    query_in_flight: std::sync::atomic::AtomicBool::new(false),
                 },
                 options: None,
             };
@@ -4432,6 +4449,8 @@ mod tests {
             let tx = MySqlTransaction {
                 conn: &mut conn,
                 finished: false,
+                isolation_level: None,
+                read_only: false,
             };
             tx.commit(&cx).await
         });
@@ -4449,6 +4468,8 @@ mod tests {
             let tx = MySqlTransaction {
                 conn: &mut conn,
                 finished: false,
+                isolation_level: None,
+                read_only: false,
             };
             tx.rollback(&cx).await
         });
@@ -6182,6 +6203,33 @@ mod tests {
         let err = MySqlConnectOptions::parse("mysql://user@[::1:3306/db").unwrap_err();
         match err {
             MySqlError::InvalidUrl(msg) => assert!(msg.contains("bracket"), "{msg}"),
+            other => panic!("expected InvalidUrl, got {other:?}"), // ubs:ignore - test logic
+        }
+    }
+
+    #[test]
+    fn test_connect_options_rejects_invalid_port() {
+        let err = MySqlConnectOptions::parse("mysql://user@localhost:not-a-port/db").unwrap_err();
+        match err {
+            MySqlError::InvalidUrl(msg) => assert!(msg.contains("invalid port"), "{msg}"),
+            other => panic!("expected InvalidUrl, got {other:?}"), // ubs:ignore - test logic
+        }
+    }
+
+    #[test]
+    fn test_connect_options_rejects_invalid_ipv6_port() {
+        let err = MySqlConnectOptions::parse("mysql://user@[::1]:not-a-port/db").unwrap_err();
+        match err {
+            MySqlError::InvalidUrl(msg) => assert!(msg.contains("invalid port"), "{msg}"),
+            other => panic!("expected InvalidUrl, got {other:?}"), // ubs:ignore - test logic
+        }
+    }
+
+    #[test]
+    fn test_connect_options_rejects_empty_host() {
+        let err = MySqlConnectOptions::parse("mysql://user@:3306/db").unwrap_err();
+        match err {
+            MySqlError::InvalidUrl(msg) => assert!(msg.contains("host"), "{msg}"),
             other => panic!("expected InvalidUrl, got {other:?}"), // ubs:ignore - test logic
         }
     }

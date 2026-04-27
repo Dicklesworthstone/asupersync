@@ -649,7 +649,7 @@ mod mysql {
                 )));
             }
             let sql = format!("SAVEPOINT {name}");
-            match tx.execute(cx, &sql).await {
+            match tx.execute_unchecked(cx, &sql).await {
                 Outcome::Ok(_) => Outcome::Ok(MySqlSavepoint {
                     tx,
                     name: name.to_owned(),
@@ -668,7 +668,7 @@ mod mysql {
             }
             self.released = true;
             let sql = format!("RELEASE SAVEPOINT {}", self.name);
-            match self.tx.execute(cx, &sql).await {
+            match self.tx.execute_unchecked(cx, &sql).await {
                 Outcome::Ok(_) => Outcome::Ok(()),
                 Outcome::Err(e) => Outcome::Err(e),
                 Outcome::Cancelled(r) => Outcome::Cancelled(r),
@@ -683,7 +683,7 @@ mod mysql {
             }
             self.released = true;
             let sql = format!("ROLLBACK TO SAVEPOINT {}", self.name);
-            match self.tx.execute(cx, &sql).await {
+            match self.tx.execute_unchecked(cx, &sql).await {
                 Outcome::Ok(_) => Outcome::Ok(()),
                 Outcome::Err(e) => Outcome::Err(e),
                 Outcome::Cancelled(r) => Outcome::Cancelled(r),
