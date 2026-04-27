@@ -398,6 +398,25 @@ impl HeadersFrame {
             }
             pad_length = payload[0] as usize;
             payload = payload.slice(1..);
+
+            // br-asupersync-ujytci: validate pad_length BEFORE entering the
+            // priority block so the connection-level PROTOCOL_ERROR for
+            // padding-exceeds-payload (RFC 9113 §6.2) takes precedence over
+            // the stream-level PROTOCOL_ERROR for self-dependency. If both
+            // defects are present in one attacker-crafted frame, the prior
+            // ordering returned the stream error first and the malformed
+            // peer survived the connection. The check here accounts for
+            // the 5 priority bytes that will be consumed next, so the
+            // residual payload must hold both the priority block and the
+            // padding tail simultaneously.
+            let priority_bytes = if has_priority { 5usize } else { 0 };
+            // saturating_add is defense-in-depth — pad_length is u8-sourced
+            // so it cannot exceed 255 + 5 < usize::MAX.
+            if pad_length.saturating_add(priority_bytes) > payload.len() {
+                return Err(H2Error::protocol(
+                    "HEADERS frame padding exceeds data length",
+                ));
+            }
         }
 
         // Parse priority if present
@@ -430,13 +449,9 @@ impl HeadersFrame {
             None
         };
 
-        // Remove padding
+        // Strip padding tail. The pad_length-vs-payload-length check above
+        // already validated this fits, so the slice is safe.
         if padded {
-            if pad_length > payload.len() {
-                return Err(H2Error::protocol(
-                    "HEADERS frame padding exceeds data length",
-                ));
-            }
             payload = payload.slice(..payload.len() - pad_length);
         }
 
@@ -1501,6 +1516,74 @@ mod tests {
 
         let err = HeadersFrame::parse(&header, payload).unwrap_err();
         assert_eq!(err.code, ErrorCode::ProtocolError);
+    }
+
+    #[test]
+    /// br-asupersync-ujytci: HEADERS PADDED+PRIORITY with BOTH a self-
+    /// dependency AND a padding-overflow must surface the connection-level
+    /// PROTOCOL_ERROR (padding) and NOT the stream-level error
+    /// (self-dependency). RFC 9113 §6.2: padding-exceeds-payload is a
+    /// malformed-frame connection error and §5.4.1 says malformed frames
+    /// MUST be treated as connection errors. Previously the parse-order
+    /// returned the stream-error first and the malformed peer survived.
+    #[test]
+    fn ujytci_headers_padded_priority_overflow_returns_connection_error() {
+        let header = FrameHeader {
+            length: 7,
+            frame_type: FrameType::Headers as u8,
+            flags: headers_flags::PADDED | headers_flags::PRIORITY | headers_flags::END_HEADERS,
+            stream_id: 1,
+        };
+        // Payload layout: [pad_len=10][priority 5 bytes][header-block ... 1 byte]
+        // Total post-pad-len-byte: 6 bytes. Priority consumes 5, leaving 1 byte.
+        // pad_length=10 cannot fit in the 1 remaining byte — MUST be rejected
+        // with connection-level PROTOCOL_ERROR even though the priority block
+        // also encodes self-dependency (stream_id=1, dependency=1).
+        let payload = Bytes::from_static(&[
+            10, // pad_length = 10 (overflows)
+            0, 0, 0, 1,  // dependency = 1 (self-dep — would be stream error if reached)
+            16, // weight
+            0, // 1 byte of "header block" — far less than pad_length=10
+        ]);
+        let err = HeadersFrame::parse(&header, payload).expect_err("must reject");
+        assert_eq!(err.code, ErrorCode::ProtocolError);
+        assert!(
+            err.stream_id.is_none(),
+            "padding-overflow MUST be connection-level (stream_id=None), got {:?}",
+            err.stream_id
+        );
+        assert!(
+            err.message.contains("padding exceeds"),
+            "expected padding-overflow message, got: {}",
+            err.message
+        );
+    }
+
+    /// br-asupersync-ujytci: positive control — when PADDED+PRIORITY is
+    /// well-formed (priority block + pad_length both fit in residual
+    /// payload AND dependency != stream_id), parse must succeed.
+    #[test]
+    fn ujytci_headers_padded_priority_valid_parses_successfully() {
+        let header = FrameHeader {
+            length: 9,
+            frame_type: FrameType::Headers as u8,
+            flags: headers_flags::PADDED | headers_flags::PRIORITY | headers_flags::END_HEADERS,
+            stream_id: 1,
+        };
+        // [pad_len=2][priority 5 bytes][header-block 1 byte][padding 2 bytes]
+        // Post-pad-len-byte: 8 bytes. Priority consumes 5, leaving 3 bytes
+        // (1 header block + 2 padding). pad_length=2 fits.
+        let payload = Bytes::from_static(&[
+            2,    // pad_length = 2
+            0, 0, 0, 5, // dependency = 5 (≠ stream_id = 1)
+            8,    // weight
+            0xFE, // 1 byte "header block"
+            0, 0, // padding (2 bytes, all zero)
+        ]);
+        let parsed = HeadersFrame::parse(&header, payload).expect("must parse");
+        assert_eq!(parsed.priority.expect("priority present").dependency, 5);
+        assert_eq!(parsed.header_block.len(), 1);
+        assert_eq!(parsed.header_block[0], 0xFE);
     }
 
     #[test]
