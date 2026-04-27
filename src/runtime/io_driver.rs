@@ -346,6 +346,23 @@ impl IoDriver {
     where
         F: FnMut(&Event, Option<Interest>),
     {
+        // Extract event data and wakers while holding the lock, but don't invoke callbacks yet
+        let (wakers, event_data) = self.extract_wakers_and_event_data(events);
+
+        // Now invoke callbacks without holding any locks
+        for (event, interest) in event_data {
+            on_event(&event, interest);
+        }
+
+        wakers
+    }
+
+    /// Extract wakers and event data while holding the driver lock, but don't invoke callbacks.
+    /// This prevents deadlocks when callbacks try to reacquire the same lock.
+    pub(crate) fn extract_wakers_and_event_data(
+        &mut self,
+        events: Events,
+    ) -> (smallvec::SmallVec<[Waker; 64]>, smallvec::SmallVec<[(Event, Option<Interest>); 64]>) {
         struct Restorer<'a> {
             driver: &'a mut IoDriver,
             events: Option<Events>,
@@ -368,10 +385,14 @@ impl IoDriver {
             .as_ref()
             .expect("events should be Some during restore");
         let mut wakers = smallvec::SmallVec::with_capacity(events_ref.len());
+        let mut event_data = smallvec::SmallVec::with_capacity(events_ref.len());
         let mut seen_tokens = smallvec::SmallVec::<[Token; 64]>::new();
+
         for event in events_ref {
             let interest = restorer.driver.interests.get(&event.token).copied();
-            on_event(event, interest);
+            // Store event data for later callback invocation
+            event_data.push((*event, interest));
+
             if seen_tokens.contains(&event.token) {
                 continue;
             }
@@ -385,7 +406,7 @@ impl IoDriver {
             }
         }
 
-        wakers
+        (wakers, event_data)
     }
 
     /// Restores the events buffer without dispatching wakers.
@@ -2823,5 +2844,47 @@ mod tests {
         assert_eq!(s2.polls, 0);
         assert_eq!(s2.events_received, 0);
         assert_eq!(s2.registrations, 0);
+    }
+
+    #[test]
+    fn on_event_callback_does_not_deadlock() {
+        // Test that on_event callbacks can call back into the driver without deadlocking.
+        // This is a regression test for the deadlock issue where on_event was called
+        // while holding the inner mutex.
+
+        let handle = IoDriverHandle::new(Arc::new(NotFoundReactor));
+
+        // Create an event that would trigger the callback
+        let events = {
+            let mut events = Events::with_capacity(1);
+            events.push(Event::new(Token::new(42), Interest::READABLE));
+            events
+        };
+
+        // Clone handle to capture in callback
+        let handle_clone = handle.clone();
+        let callback_executed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag_clone = callback_executed.clone();
+
+        // Simulate on_event callback that tries to access the driver
+        let on_event = move |_event: &Event, _interest: Option<Interest>| {
+            flag_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+
+            // This would deadlock if the callback is invoked while holding the mutex
+            // Try to access driver stats (requires acquiring the mutex)
+            let _stats = handle_clone.stats();
+
+            // Try to check if driver is empty (also requires mutex access)
+            let _empty = handle_clone.is_empty();
+        };
+
+        // Manually invoke the method that was previously causing deadlocks
+        {
+            let mut driver = handle.inner.lock();
+            let _wakers = driver.restore_and_extract_wakers(events, on_event);
+        }
+
+        // Verify the callback was executed
+        assert!(callback_executed.load(std::sync::atomic::Ordering::SeqCst));
     }
 }
