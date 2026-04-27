@@ -482,15 +482,18 @@ fn apply_join_associativity(plan: &mut PlanDag) -> Option<TransformationStep> {
 
 fn apply_join_commutativity(plan: &mut PlanDag) -> Option<TransformationStep> {
     // Mock: reorder first multi-child join
-    for (idx, node) in plan.nodes.iter().enumerate() {
-        if let PlanNode::Join { children } = node {
-            if children.len() > 1 {
-                return Some(TransformationStep {
-                    rule: "JoinCommute",
-                    target_nodes: vec![idx],
-                    before: format!("Join[{:?}]", children),
-                    after: format!("Join[{:?}] (reordered)", children),
-                });
+    for idx in 0..plan.node_count() {
+        let plan_id = PlanId::new(idx);
+        if let Some(node) = plan.node(plan_id) {
+            if let PlanNode::Join { children } = node {
+                if children.len() > 1 {
+                    return Some(TransformationStep {
+                        rule: "JoinCommute",
+                        target_nodes: vec![idx],
+                        before: format!("Join[{:?}]", children),
+                        after: format!("Join[{:?}] (reordered)", children),
+                    });
+                }
             }
         }
     }
@@ -499,15 +502,18 @@ fn apply_join_commutativity(plan: &mut PlanDag) -> Option<TransformationStep> {
 
 fn apply_timeout_simplification(plan: &mut PlanDag) -> Option<TransformationStep> {
     // Mock: flatten first nested timeout found
-    for (parent_idx, parent_node) in plan.nodes.iter().enumerate() {
-        if let PlanNode::Timeout { child, duration } = parent_node {
-            if matches!(plan.node(*child), Some(PlanNode::Timeout { .. })) {
-                return Some(TransformationStep {
-                    rule: "TimeoutMin",
-                    target_nodes: vec![parent_idx, child.index()],
-                    before: format!("Timeout({}ms, Timeout(...))", duration.as_millis()),
-                    after: format!("Timeout(min, ...)"),
-                });
+    for parent_idx in 0..plan.node_count() {
+        let plan_id = PlanId::new(parent_idx);
+        if let Some(parent_node) = plan.node(plan_id) {
+            if let PlanNode::Timeout { child, duration } = parent_node {
+                if matches!(plan.node(*child), Some(PlanNode::Timeout { .. })) {
+                    return Some(TransformationStep {
+                        rule: "TimeoutMin",
+                        target_nodes: vec![parent_idx, child.index()],
+                        before: format!("Timeout({}ms, Timeout(...))", duration.as_millis()),
+                        after: format!("Timeout(min, ...)"),
+                    });
+                }
             }
         }
     }
