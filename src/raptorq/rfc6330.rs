@@ -787,7 +787,14 @@ mod tests {
     /// makes the test self-describing of the conformance contract.
     #[test]
     fn rand_worked_examples_match_rfc_5_3_5_1_canonical_formula() {
+        // Original 7 representative triples (br-asupersync-zqk51i)
+        // plus br-asupersync-68c5e3 edge-case extension covering m
+        // boundaries (1, 2, u32::MAX), y boundaries (0, 255, 256,
+        // u32::MAX), i boundaries (0, u8::MAX), and triples chosen
+        // to exercise wrap-around in `y.wrapping_add(u32::from(i))`
+        // inside each of the four byte-index lookups.
         let test_cases: &[(u32, u8, u32)] = &[
+            // -- zqk51i baseline --
             (0, 0, 256),
             (0, 1, 1024),
             (1, 0, 65536),
@@ -795,6 +802,50 @@ mod tests {
             (0xDEAD_BEEF, 3, 4096),
             (1_048_576, 30, 256),
             (u32::MAX, u8::MAX, 1024),
+            // -- 68c5e3: m boundaries --
+            // m = 1 must always return 0 regardless of xor.
+            (0, 0, 1),
+            (0xDEAD_BEEF, 17, 1),
+            (u32::MAX, u8::MAX, 1),
+            // m = 2 (smallest "interesting" m; result is the LSB of
+            // the xor).
+            (0, 0, 2),
+            (0xCAFE_BABE, 11, 2),
+            // m = u32::MAX: reduction is by the largest possible
+            // modulus shy of overflow; output equals xor for any
+            // xor < u32::MAX, exercises the % m without truncating
+            // most bits.
+            (0, 0, u32::MAX),
+            (0xDEAD_BEEF, 0, u32::MAX),
+            (u32::MAX, u8::MAX, u32::MAX),
+            // -- 68c5e3: y boundaries --
+            // y = 255 / y = 256: probes the boundary in x0
+            // ((y + i) & 0xFF) when the low byte rolls from 0xFF
+            // into a higher byte of x1.
+            (255, 0, 256),
+            (255, 1, 256),
+            (256, 0, 256),
+            (256, 1, 256),
+            // y = 0xFF00 / y = 0x10000: x1-byte boundary.
+            (0xFF00, 0, 4096),
+            (0x1_0000, 0, 4096),
+            // y = u32::MAX with i = 0: every x_k = 0xFF (no
+            // wrap-around — this is the natural max-byte index).
+            (u32::MAX, 0, 4096),
+            // y = u32::MAX with i = 1: every byte addition wraps
+            // 0xFF + 1 → 0x00 in each of the four x_k slots, so all
+            // four V-table indices land on row 0. This is the only
+            // input that simultaneously triggers wrap-around in all
+            // four byte-index lookups.
+            (u32::MAX, 1, 4096),
+            // -- 68c5e3: i boundaries --
+            // i = u8::MAX with y = 0: x0 = 0xFF, x1 = 0xFF, etc. —
+            // boundary on the high end of the V-table indices.
+            (0, u8::MAX, 4096),
+            // i = u8::MAX with y = 1: probes the carry between x0
+            // and x1 (low-byte adds wraps within x0 but the y >> 8
+            // term stays at 0).
+            (1, u8::MAX, 4096),
         ];
         for &(y, i, m) in test_cases {
             // Canonical RFC 6330 §5.3.5.1 formula recomputed inline.
