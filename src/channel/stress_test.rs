@@ -200,7 +200,12 @@ pub async fn mpsc_stress_test(
                 let violations = stats.invariant_violations.load(Ordering::Acquire);
                 let consistency_ok = oracle.verify_final_consistency();
 
-                tracing::info!(sent, received = recv_count, violations, "stress_test: round stats");
+                tracing::info!(
+                    sent,
+                    received = recv_count,
+                    violations,
+                    "stress_test: round stats"
+                );
 
                 total_violations += violations;
                 max_cancellation_rate = max_cancellation_rate.max(cancel_prob);
@@ -221,7 +226,10 @@ pub async fn mpsc_stress_test(
             // never returned. Count both incomplete-round shapes as
             // violations so the test surfaces them.
             Ok(None) => {
-                tracing::warn!(round = round + 1, "stress_test: round failed to complete properly");
+                tracing::warn!(
+                    round = round + 1,
+                    "stress_test: round failed to complete properly"
+                );
                 total_violations += 1;
             }
             Err(_) => {
@@ -353,7 +361,11 @@ pub async fn broadcast_stress_test() -> Result<(), Box<dyn std::error::Error>> {
         let mut total_received = 0;
         for handle in subscribers {
             let (subscriber_id, count) = handle.await;
-            tracing::debug!(subscriber_id, received = count, "broadcast_stress_test: subscriber result");
+            tracing::debug!(
+                subscriber_id,
+                received = count,
+                "broadcast_stress_test: subscriber result"
+            );
             total_received += count;
         }
 
