@@ -186,10 +186,8 @@ fuzz_target!(|input: BytesChainFuzz| {
                                 amount
                             );
                         } else {
-                            // Oversized advance - should panic
                             let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-                                let mut temp_chain = first_data.chain(second_data);
-                                temp_chain.advance(amount);
+                                chain.advance(amount);
                             }));
                             assert!(
                                 result.is_err(),
@@ -197,6 +195,9 @@ fuzz_target!(|input: BytesChainFuzz| {
                                 amount,
                                 initial_remaining
                             );
+                            // Stop after the expected panic path rather than
+                            // assuming the live chain remains reusable.
+                            break;
                         }
                     }
 
@@ -227,10 +228,8 @@ fuzz_target!(|input: BytesChainFuzz| {
                                 "Remaining mismatch after copy"
                             );
                         } else {
-                            // Should panic on underflow
                             let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-                                let mut temp_chain = first_data.chain(second_data);
-                                temp_chain.copy_to_slice(&mut actual_dst);
+                                chain.copy_to_slice(&mut actual_dst);
                             }));
                             assert!(
                                 result.is_err(),
@@ -238,6 +237,7 @@ fuzz_target!(|input: BytesChainFuzz| {
                                 dst_len,
                                 chain.remaining()
                             );
+                            break;
                         }
                     }
 
@@ -254,16 +254,14 @@ fuzz_target!(|input: BytesChainFuzz| {
                                 "Remaining mismatch after get_u8"
                             );
                         } else {
-                            // Should panic on underflow
-                            let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-                                let mut temp_chain = first_data.chain(second_data);
-                                temp_chain.get_u8()
-                            }));
+                            let result =
+                                panic::catch_unwind(panic::AssertUnwindSafe(|| chain.get_u8()));
                             assert!(
                                 result.is_err(),
                                 "GetU8 with {} remaining should panic",
                                 chain.remaining()
                             );
+                            break;
                         }
                     }
 
@@ -280,16 +278,14 @@ fuzz_target!(|input: BytesChainFuzz| {
                                 "Remaining mismatch after get_u16"
                             );
                         } else {
-                            // Should panic on underflow
-                            let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-                                let mut temp_chain = first_data.chain(second_data);
-                                temp_chain.get_u16()
-                            }));
+                            let result =
+                                panic::catch_unwind(panic::AssertUnwindSafe(|| chain.get_u16()));
                             assert!(
                                 result.is_err(),
                                 "GetU16 with {} remaining should panic",
                                 chain.remaining()
                             );
+                            break;
                         }
                     }
 
@@ -325,12 +321,11 @@ fuzz_target!(|input: BytesChainFuzz| {
                     ChainOperation::OversizedAdvance { amount } => {
                         let amount = (*amount as usize).max(chain.remaining() + 1);
 
-                        // Should always panic
                         let result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-                            let mut temp_chain = first_data.chain(second_data);
-                            temp_chain.advance(amount);
+                            chain.advance(amount);
                         }));
                         assert!(result.is_err(), "Oversized advance {} should panic", amount);
+                        break;
                     }
                 }
 
