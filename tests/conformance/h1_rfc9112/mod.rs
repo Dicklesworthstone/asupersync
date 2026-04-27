@@ -21,6 +21,7 @@
 //! of edge cases and RFC compliance corner cases.
 
 mod chunked_encoding_tests;
+mod framing_precedence_tests;
 mod golden_test_vectors;
 mod harness;
 
