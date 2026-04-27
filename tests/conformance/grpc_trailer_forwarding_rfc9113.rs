@@ -126,6 +126,7 @@ mod grpc_trailer_conformance_tests {
     #[derive(Debug, Clone)]
     #[allow(dead_code)]
     pub struct MockGrpcResponse {
+        pub http_status: u16,
         pub initial_headers: Metadata,
         pub data_frames: Vec<Bytes>,
         pub trailers: Metadata,
@@ -141,10 +142,10 @@ mod grpc_trailer_conformance_tests {
         #[allow(dead_code)]
         pub fn new() -> Self {
             let mut initial_headers = Metadata::new();
-            initial_headers.insert(":status", "200");
             initial_headers.insert("content-type", "application/grpc");
 
             Self {
+                http_status: 200,
                 initial_headers,
                 data_frames: Vec::new(),
                 trailers: Metadata::new(),
@@ -519,10 +520,7 @@ mod grpc_trailer_conformance_tests {
                 .map(|v| matches!(v, MetadataValue::Ascii(s) if s.contains("application/grpc")))
                 .unwrap_or(false);
 
-            let has_status_200 = response
-                .initial_headers
-                .get(":status")
-                .is_some_and(|v| matches!(v, MetadataValue::Ascii(s) if s == "200"));
+            let has_status_200 = response.http_status == 200;
 
             let verdict = if has_content_type && has_status_200 && response.is_trailer_only() {
                 TestVerdict::Pass
@@ -627,8 +625,8 @@ mod grpc_trailer_conformance_tests {
                 ("500m", Some(Duration::from_millis(500))),    // Milliseconds
                 ("1000u", Some(Duration::from_micros(1000))),  // Microseconds
                 ("2000n", Some(Duration::from_nanos(2000))),   // Nanoseconds
-                ("99H", Some(Duration::from_secs(99 * 3600))), // Maximum value
-                ("1H", Some(Duration::from_secs(3600))),       // Minimum value
+                ("100H", Some(Duration::from_secs(100 * 3600))), // 3-digit value is valid
+                ("1H", Some(Duration::from_secs(3600))),       // Minimum non-zero value
                 ("0S", Some(Duration::from_secs(0))),          // Zero (edge case)
                 ("invalid", None),                             // Invalid format
                 ("100X", None),                                // Invalid unit
@@ -662,7 +660,7 @@ mod grpc_trailer_conformance_tests {
 
             GrpcTrailerConformanceResult {
                 test_id: "grpc_timeout_header_parsing_all_units".to_string(),
-                description: "grpc-timeout header parsing H[1-99]<unit> units U=H,M,S,m,u,n"
+                description: "grpc-timeout header parsing with 1-8 digits and H/M/S/m/u/n units"
                     .to_string(),
                 category: TestCategory::TimeoutHeaderParsing,
                 requirement_level: RequirementLevel::Must,
@@ -728,14 +726,13 @@ mod grpc_trailer_conformance_tests {
             let start = Instant::now();
 
             let invalid_cases = vec![
-                "100H", // Value too large (>99)
-                "0H",   // Value too small (<1) for this unit
-                "1.5S", // Decimal not allowed
-                "1SS",  // Double unit
-                "S1",   // Unit before value
-                "-1S",  // Negative value
-                "1h",   // Wrong case (should be 'H')
-                " 1S ", // Whitespace
+                "100000000H", // Value exceeds the 8-digit ceiling
+                "1.5S",       // Decimal not allowed
+                "1SS",        // Double unit
+                "S1",         // Unit before value
+                "-1S",        // Negative value
+                "1h",         // Wrong case (should be 'H')
+                " 1S ",       // Whitespace
             ];
 
             let mut all_rejected = true;
