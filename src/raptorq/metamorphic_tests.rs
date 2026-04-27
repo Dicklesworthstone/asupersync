@@ -1316,12 +1316,21 @@ fn mr_decode_completion_idempotence() {
                     prop_assert_eq!(block2, data.clone(),
                         "MR14 VIOLATION: extended decode failed identity");
                 }
-                Err(_) => {
-                    // Returning Err on the extended set is acceptable per
-                    // the property's (a) OR (b) clause — but unlikely in
-                    // practice since more symbols should never make decode
-                    // FAIL after fewer symbols succeeded. We allow it but
-                    // don't require it.
+                Err(err) => {
+                    // br-asupersync-48c0nb: previously this arm was a
+                    // permissive no-op — "more symbols should never make
+                    // decode FAIL after fewer symbols succeeded. We allow
+                    // it but don't require it." That made MR14 a
+                    // monotonicity check pretending to be idempotence and
+                    // would silently pass if a future regression flipped
+                    // Ok→Err on the extended symbol set. Tighten to FAIL.
+                    prop_assert!(
+                        false,
+                        "MR14 VIOLATION (br-asupersync-48c0nb): extended symbol set \
+                         flipped decode from Ok→Err. min_symbols={}, extended_count={}, \
+                         extra_count={}, k={}, error={:?}",
+                        min_symbols, extended_count, extra_count, k, err
+                    );
                 }
             }
         }
