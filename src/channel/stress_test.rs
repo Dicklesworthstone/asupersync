@@ -358,6 +358,8 @@ pub async fn watch_stress_test() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = RuntimeBuilder::current_thread().build()?;
     let handle = runtime.handle();
     runtime.block_on(async move {
+        let idle_timeout = Duration::from_millis(1);
+        let max_consecutive_timeouts = 8;
         let (sender, _) = watch::channel::<u32>(0);
         let num_watchers = 5;
         let num_updates = 1000;
@@ -370,15 +372,17 @@ pub async fn watch_stress_test() -> Result<(), Box<dyn std::error::Error>> {
                 let cx = Cx::for_testing();
                 let mut updates_seen = 0;
                 let mut last_value = 0;
+                let mut consecutive_timeouts = 0;
 
                 for _ in 0..num_updates * 2 {
                     // Allow extra iterations for watchers
-                    let timeout_fut = sleep(wall_now(), Duration::from_micros(1));
+                    let timeout_fut = sleep(wall_now(), idle_timeout);
                     let changed_fut = receiver.changed(&cx);
 
                     match Select::new(changed_fut, timeout_fut).await {
                         Ok(Either::Left(result)) => match result {
                             Ok(()) => {
+                                consecutive_timeouts = 0;
                                 let value = *receiver.borrow();
                                 if value > last_value {
                                     updates_seen += 1;
@@ -388,8 +392,10 @@ pub async fn watch_stress_test() -> Result<(), Box<dyn std::error::Error>> {
                             Err(_) => break,
                         },
                         Ok(Either::Right(_)) => {
-                            // Timeout - prevent infinite waiting
-                            break;
+                            consecutive_timeouts += 1;
+                            if consecutive_timeouts >= max_consecutive_timeouts {
+                                break;
+                            }
                         }
                         Err(_) => break,
                     }
