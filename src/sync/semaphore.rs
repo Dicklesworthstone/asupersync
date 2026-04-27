@@ -25,7 +25,7 @@
 //! ```
 
 use parking_lot::Mutex as ParkingMutex;
-use std::collections::VecDeque;
+use slab::Slab;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -93,12 +93,14 @@ struct SemaphoreState {
     permits: usize,
     /// Whether the semaphore is closed.
     closed: bool,
-    /// Queue of waiters.
-    waiters: VecDeque<Waiter>,
+    /// Queue of waiters stored in a slab for O(1) targeted removal.
+    waiters: Slab<Waiter>,
+    /// Head of the FIFO waiter queue.
+    waiter_head: Option<usize>,
+    /// Tail of the FIFO waiter queue.
+    waiter_tail: Option<usize>,
     /// Next waiter id for de-duplication.
     next_waiter_id: u64,
-    /// Whether waiter IDs have wrapped and now require collision checks.
-    waiter_ids_wrapped: bool,
 }
 
 #[derive(Debug)]
@@ -106,54 +108,115 @@ struct Waiter {
     id: u64,
     count: usize,
     waker: Waker,
+    prev: Option<usize>,
+    next: Option<usize>,
 }
 
 #[inline]
-fn waiter_waker_if_runnable(state: &SemaphoreState, index: usize) -> Option<Waker> {
-    let waiter = state.waiters.get(index)?;
+fn waiter_waker_if_runnable(state: &SemaphoreState, slot: usize) -> Option<Waker> {
+    let waiter = state.waiters.get(slot)?;
     (state.permits >= waiter.count).then(|| waiter.waker.clone())
 }
 
 #[inline]
 fn front_waiter_waker_if_runnable(state: &SemaphoreState) -> Option<Waker> {
-    waiter_waker_if_runnable(state, 0)
+    state
+        .waiter_head
+        .and_then(|slot| waiter_waker_if_runnable(state, slot))
 }
 
 #[inline]
 fn allocate_waiter_id(state: &mut SemaphoreState) -> u64 {
-    loop {
-        let id = state.next_waiter_id;
-        state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
-        if state.next_waiter_id == 0 {
-            state.waiter_ids_wrapped = true;
-        }
-
-        if !state.waiter_ids_wrapped || !state.waiters.iter().any(|waiter| waiter.id == id) {
-            return id;
-        }
-    }
+    let id = state.next_waiter_id;
+    state.next_waiter_id = state.next_waiter_id.wrapping_add(1);
+    id
 }
 
 #[inline]
-fn remove_waiter_and_take_next_waker(state: &mut SemaphoreState, waiter_id: u64) -> Option<Waker> {
-    if state
-        .waiters
-        .front()
-        .is_some_and(|waiter| waiter.id == waiter_id)
-    {
-        // Exception safety: Clone the next waker before popping ourselves so that
-        // if clone() panics, our waiter remains in the queue for Drop cleanup.
-        let next_waker = waiter_waker_if_runnable(state, 1);
-        state.waiters.pop_front();
+fn waiter_by_handle(state: &SemaphoreState, handle: WaiterHandle) -> Option<&Waiter> {
+    let waiter = state.waiters.get(handle.slot)?;
+    (waiter.id == handle.id).then_some(waiter)
+}
+
+#[inline]
+fn waiter_by_handle_mut(state: &mut SemaphoreState, handle: WaiterHandle) -> Option<&mut Waiter> {
+    let waiter = state.waiters.get_mut(handle.slot)?;
+    (waiter.id == handle.id).then_some(waiter)
+}
+
+#[inline]
+fn is_front_waiter(state: &SemaphoreState, handle: WaiterHandle) -> bool {
+    state.waiter_head == Some(handle.slot) && waiter_by_handle(state, handle).is_some()
+}
+
+#[inline]
+fn enqueue_waiter(state: &mut SemaphoreState, count: usize, waker: Waker) -> WaiterHandle {
+    let id = allocate_waiter_id(state);
+    let prev = state.waiter_tail;
+    let slot = state.waiters.insert(Waiter {
+        id,
+        count,
+        waker,
+        prev,
+        next: None,
+    });
+    if let Some(prev_slot) = prev {
+        state.waiters[prev_slot].next = Some(slot);
+    } else {
+        state.waiter_head = Some(slot);
+    }
+    state.waiter_tail = Some(slot);
+    WaiterHandle { slot, id }
+}
+
+#[inline]
+fn unlink_waiter(state: &mut SemaphoreState, handle: WaiterHandle) -> Option<Waiter> {
+    let waiter = waiter_by_handle(state, handle)?;
+    let prev = waiter.prev;
+    let next = waiter.next;
+    if let Some(prev_slot) = prev {
+        state.waiters[prev_slot].next = next;
+    } else {
+        state.waiter_head = next;
+    }
+    if let Some(next_slot) = next {
+        state.waiters[next_slot].prev = prev;
+    } else {
+        state.waiter_tail = prev;
+    }
+    Some(state.waiters.remove(handle.slot))
+}
+
+#[inline]
+fn pop_front_waiter(state: &mut SemaphoreState) -> Option<Waiter> {
+    let slot = state.waiter_head?;
+    let id = state.waiters.get(slot)?.id;
+    unlink_waiter(state, WaiterHandle { slot, id })
+}
+
+#[inline]
+fn remove_waiter_and_take_next_waker(
+    state: &mut SemaphoreState,
+    handle: WaiterHandle,
+) -> Option<Waker> {
+    if is_front_waiter(state, handle) {
+        // Exception safety: clone the next waker before unlinking ourselves so
+        // Drop/cancel cleanup can retry if waker.clone() panics.
+        let next_waker = waiter_by_handle(state, handle)
+            .and_then(|waiter| waiter.next)
+            .and_then(|slot| waiter_waker_if_runnable(state, slot));
+        unlink_waiter(state, handle);
         next_waker
     } else {
-        // Non-front waiter: targeted removal stops at first match instead of
-        // scanning the entire deque like retain() would.
-        if let Some(pos) = state.waiters.iter().position(|w| w.id == waiter_id) {
-            state.waiters.remove(pos);
-        }
+        unlink_waiter(state, handle);
         None
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WaiterHandle {
+    slot: usize,
+    id: u64,
 }
 
 impl Semaphore {
@@ -165,9 +228,10 @@ impl Semaphore {
             state: ParkingMutex::new(SemaphoreState {
                 permits,
                 closed: false,
-                waiters: VecDeque::with_capacity(4),
+                waiters: Slab::with_capacity(4),
+                waiter_head: None,
+                waiter_tail: None,
                 next_waiter_id: 0,
-                waiter_ids_wrapped: false,
             }),
             permits_shadow: AtomicUsize::new(permits),
             closed_shadow: AtomicBool::new(false),
@@ -208,9 +272,11 @@ impl Semaphore {
             state.permits = 0;
             self.closed_shadow.store(true, Ordering::Release);
             self.permits_shadow.store(0, Ordering::Relaxed);
+            state.waiter_head = None;
+            state.waiter_tail = None;
             std::mem::take(&mut state.waiters)
         };
-        for waiter in taken {
+        for (_, waiter) in taken {
             waiter.waker.wake();
         }
     }
@@ -223,7 +289,7 @@ impl Semaphore {
             semaphore: self,
             cx,
             count,
-            waiter_id: None,
+            waiter: None,
             completed: false,
         }
     }
@@ -236,7 +302,7 @@ impl Semaphore {
         let mut state = self.state.lock();
         let result = if state.closed {
             Err(TryAcquireError)
-        } else if !state.waiters.is_empty() {
+        } else if state.waiter_head.is_some() {
             // Strict FIFO
             Err(TryAcquireError)
         } else if state.permits >= count {
@@ -294,18 +360,18 @@ pub struct AcquireFuture<'a, 'b> {
     semaphore: &'a Semaphore,
     cx: &'b Cx,
     count: usize,
-    waiter_id: Option<u64>,
+    waiter: Option<WaiterHandle>,
     completed: bool,
 }
 
 impl Drop for AcquireFuture<'_, '_> {
     fn drop(&mut self) {
-        if let Some(waiter_id) = self.waiter_id {
+        if let Some(waiter) = self.waiter {
             let next_waker = {
                 let mut state = self.semaphore.state.lock();
                 // If we are at the front, we need to wake the next waiter when we leave,
                 // otherwise the signal (permits available) might be lost.
-                remove_waiter_and_take_next_waker(&mut state, waiter_id)
+                remove_waiter_and_take_next_waker(&mut state, waiter)
             };
             if let Some(next) = next_waker {
                 next.wake();
@@ -324,15 +390,15 @@ impl<'a> Future for AcquireFuture<'a, '_> {
         }
 
         if self.cx.checkpoint().is_err() {
-            if let Some(waiter_id) = self.waiter_id {
+            if let Some(waiter) = self.waiter {
                 let next_waker = {
                     let mut state = self.semaphore.state.lock();
                     // If we are at the front, we need to wake the next waiter when we leave,
                     // otherwise the signal (permits available) might be lost.
-                    remove_waiter_and_take_next_waker(&mut state, waiter_id)
+                    remove_waiter_and_take_next_waker(&mut state, waiter)
                 };
-                // Clear waiter_id so Drop doesn't try to remove it again
-                self.waiter_id = None;
+                // Clear waiter so Drop doesn't try to remove it again
+                self.waiter = None;
                 if let Some(next) = next_waker {
                     next.wake();
                 }
@@ -341,25 +407,14 @@ impl<'a> Future for AcquireFuture<'a, '_> {
             return Poll::Ready(Err(AcquireError::Cancelled));
         }
 
-        // Single lock acquisition: allocate waiter_id inside the same
-        // critical section if this is our first wait, avoiding the previous
-        // double-lock (lock to get id, drop, re-lock to check state).
         let mut state = self.semaphore.state.lock();
 
-        let waiter_id = if let Some(id) = self.waiter_id {
-            id
-        } else {
-            let id = allocate_waiter_id(&mut state);
-            self.waiter_id = Some(id);
-            id
-        };
-
         if state.closed {
-            if let Some(pos) = state.waiters.iter().position(|w| w.id == waiter_id) {
-                state.waiters.remove(pos);
+            if let Some(waiter) = self.waiter {
+                unlink_waiter(&mut state, waiter);
             }
             drop(state);
-            self.waiter_id = None;
+            self.waiter = None;
             self.completed = true;
             return Poll::Ready(Err(AcquireError::Closed));
         }
@@ -367,7 +422,9 @@ impl<'a> Future for AcquireFuture<'a, '_> {
         // FIFO fairness: only acquire if queue is empty or we are at the front.
         // This prevents queue jumping where a new arrival grabs permits before
         // earlier-waiting tasks get their turn.
-        let is_next_in_line = state.waiters.front().is_none_or(|w| w.id == waiter_id);
+        let is_next_in_line = self.waiter.map_or(state.waiter_head.is_none(), |waiter| {
+            is_front_waiter(&state, waiter)
+        });
 
         if is_next_in_line && state.permits >= self.count {
             state.permits -= self.count;
@@ -378,12 +435,10 @@ impl<'a> Future for AcquireFuture<'a, '_> {
             // Optimization: Since we verified we are next in line, we are either
             // at the front of the queue or the queue is empty. We can just pop
             // the front instead of scanning the whole deque with retain (O(N)).
-            if !state.waiters.is_empty() {
-                debug_assert_eq!(
-                    state.waiters.front().map(|waiter| waiter.id),
-                    Some(waiter_id)
-                );
-                state.waiters.pop_front();
+            if let Some(waiter) = self.waiter {
+                debug_assert!(is_front_waiter(&state, waiter));
+                let removed = pop_front_waiter(&mut state);
+                debug_assert!(removed.is_some());
             }
 
             // Wake next waiter if there are still permits available.
@@ -391,8 +446,8 @@ impl<'a> Future for AcquireFuture<'a, '_> {
             // would only wake the first, leaving others sleeping indefinitely.
             let next_waker = front_waiter_waker_if_runnable(&state);
             drop(state);
-            // Clear waiter_id after releasing state guard to avoid borrow conflicts.
-            self.waiter_id = None;
+            // Clear the waiter handle after releasing state guard to avoid borrow conflicts.
+            self.waiter = None;
             self.completed = true;
             if let Some(next) = next_waker {
                 next.wake();
@@ -407,21 +462,25 @@ impl<'a> Future for AcquireFuture<'a, '_> {
             }));
         }
 
-        if let Some(existing) = state
-            .waiters
-            .iter_mut()
-            .find(|waiter| waiter.id == waiter_id)
-        {
-            debug_assert_eq!(existing.count, self.count);
-            if !existing.waker.will_wake(context.waker()) {
-                existing.waker.clone_from(context.waker());
+        if let Some(waiter) = self.waiter {
+            if let Some(existing) = waiter_by_handle_mut(&mut state, waiter) {
+                debug_assert_eq!(existing.count, self.count);
+                if !existing.waker.will_wake(context.waker()) {
+                    existing.waker.clone_from(context.waker());
+                }
+            } else {
+                self.waiter = Some(enqueue_waiter(
+                    &mut state,
+                    self.count,
+                    context.waker().clone(),
+                ));
             }
         } else {
-            state.waiters.push_back(Waiter {
-                id: waiter_id,
-                count: self.count,
-                waker: context.waker().clone(),
-            });
+            self.waiter = Some(enqueue_waiter(
+                &mut state,
+                self.count,
+                context.waker().clone(),
+            ));
         }
         Poll::Pending
     }
@@ -516,7 +575,7 @@ impl OwnedSemaphorePermit {
             semaphore,
             cx: Some(cx.clone()),
             count,
-            waiter_id: None,
+            waiter: None,
             completed: false,
         }
         .await
@@ -604,7 +663,7 @@ pub struct OwnedAcquireFuture {
     semaphore: Arc<Semaphore>,
     cx: Option<Cx>,
     count: usize,
-    waiter_id: Option<u64>,
+    waiter: Option<WaiterHandle>,
     completed: bool,
 }
 
@@ -619,7 +678,7 @@ impl OwnedAcquireFuture {
             semaphore,
             cx: Some(cx),
             count,
-            waiter_id: None,
+            waiter: None,
             completed: false,
         }
     }
@@ -635,7 +694,7 @@ impl OwnedAcquireFuture {
             semaphore,
             cx: None,
             count,
-            waiter_id: None,
+            waiter: None,
             completed: false,
         }
     }
@@ -643,12 +702,12 @@ impl OwnedAcquireFuture {
 
 impl Drop for OwnedAcquireFuture {
     fn drop(&mut self) {
-        if let Some(waiter_id) = self.waiter_id {
+        if let Some(waiter) = self.waiter {
             let next_waker = {
                 let mut state = self.semaphore.state.lock();
                 // If we are at the front, we need to wake the next waiter when we leave,
                 // otherwise the signal (permits available) might be lost.
-                remove_waiter_and_take_next_waker(&mut state, waiter_id)
+                remove_waiter_and_take_next_waker(&mut state, waiter)
             };
             if let Some(next) = next_waker {
                 next.wake();
@@ -668,14 +727,14 @@ impl Future for OwnedAcquireFuture {
         }
 
         if this.cx.as_ref().is_some_and(|cx| cx.checkpoint().is_err()) {
-            if let Some(waiter_id) = this.waiter_id {
+            if let Some(waiter) = this.waiter {
                 let next_waker = {
                     let mut state = this.semaphore.state.lock();
                     // If we are at the front, we need to wake the next waiter when we leave,
                     // otherwise the signal (permits available) might be lost.
-                    remove_waiter_and_take_next_waker(&mut state, waiter_id)
+                    remove_waiter_and_take_next_waker(&mut state, waiter)
                 };
-                this.waiter_id = None;
+                this.waiter = None;
                 if let Some(next) = next_waker {
                     next.wake();
                 }
@@ -686,26 +745,20 @@ impl Future for OwnedAcquireFuture {
 
         let mut state = this.semaphore.state.lock();
 
-        let waiter_id = if let Some(id) = this.waiter_id {
-            id
-        } else {
-            let id = allocate_waiter_id(&mut state);
-            this.waiter_id = Some(id);
-            id
-        };
-
         if state.closed {
-            if let Some(pos) = state.waiters.iter().position(|w| w.id == waiter_id) {
-                state.waiters.remove(pos);
+            if let Some(waiter) = this.waiter {
+                unlink_waiter(&mut state, waiter);
             }
             drop(state);
-            this.waiter_id = None;
+            this.waiter = None;
             this.completed = true;
             return Poll::Ready(Err(AcquireError::Closed));
         }
 
         // FIFO fairness: only acquire if queue is empty or we are at the front.
-        let is_next_in_line = state.waiters.front().is_none_or(|w| w.id == waiter_id);
+        let is_next_in_line = this.waiter.map_or(state.waiter_head.is_none(), |waiter| {
+            is_front_waiter(&state, waiter)
+        });
 
         if is_next_in_line && state.permits >= this.count {
             state.permits -= this.count;
@@ -714,12 +767,10 @@ impl Future for OwnedAcquireFuture {
                 .store(state.permits, Ordering::Relaxed);
 
             // Optimization: O(1) removal instead of O(N) retain
-            if !state.waiters.is_empty() {
-                debug_assert_eq!(
-                    state.waiters.front().map(|waiter| waiter.id),
-                    Some(waiter_id)
-                );
-                state.waiters.pop_front();
+            if let Some(waiter) = this.waiter {
+                debug_assert!(is_front_waiter(&state, waiter));
+                let removed = pop_front_waiter(&mut state);
+                debug_assert!(removed.is_some());
             }
 
             // Wake next waiter if there are still permits available.
@@ -728,7 +779,7 @@ impl Future for OwnedAcquireFuture {
             let next_waker = front_waiter_waker_if_runnable(&state);
             drop(state);
             // Prevent redundant Drop cleanup after releasing state guard.
-            this.waiter_id = None;
+            this.waiter = None;
             this.completed = true;
             if let Some(next) = next_waker {
                 next.wake();
@@ -743,21 +794,25 @@ impl Future for OwnedAcquireFuture {
             }));
         }
 
-        if let Some(existing) = state
-            .waiters
-            .iter_mut()
-            .find(|waiter| waiter.id == waiter_id)
-        {
-            debug_assert_eq!(existing.count, this.count);
-            if !existing.waker.will_wake(context.waker()) {
-                existing.waker.clone_from(context.waker());
+        if let Some(waiter) = this.waiter {
+            if let Some(existing) = waiter_by_handle_mut(&mut state, waiter) {
+                debug_assert_eq!(existing.count, this.count);
+                if !existing.waker.will_wake(context.waker()) {
+                    existing.waker.clone_from(context.waker());
+                }
+            } else {
+                this.waiter = Some(enqueue_waiter(
+                    &mut state,
+                    this.count,
+                    context.waker().clone(),
+                ));
             }
         } else {
-            state.waiters.push_back(Waiter {
-                id: waiter_id,
-                count: this.count,
-                waker: context.waker().clone(),
-            });
+            this.waiter = Some(enqueue_waiter(
+                &mut state,
+                this.count,
+                context.waker().clone(),
+            ));
         }
         Poll::Pending
     }
@@ -790,6 +845,20 @@ mod tests {
             TaskId::from_arena(ArenaIndex::new(0, 0)),
             Budget::INFINITE,
         )
+    }
+
+    fn queued_waiter_ids(state: &SemaphoreState) -> Vec<u64> {
+        let mut ids = Vec::with_capacity(state.waiters.len());
+        let mut cursor = state.waiter_head;
+        while let Some(slot) = cursor {
+            let waiter = state
+                .waiters
+                .get(slot)
+                .expect("waiter queue must point to a live slot");
+            ids.push(waiter.id);
+            cursor = waiter.next;
+        }
+        ids
     }
 
     fn poll_once<T, F>(future: &mut F) -> Option<T>
@@ -1885,7 +1954,7 @@ mod tests {
 
         {
             let state = sem.state.lock();
-            let ids: Vec<u64> = state.waiters.iter().map(|waiter| waiter.id).collect();
+            let ids = queued_waiter_ids(&state);
             crate::assert_with_log!(ids.len() == 2, "two waiters queued", 2usize, ids.len());
             crate::assert_with_log!(
                 ids[0] == u64::MAX,
@@ -1898,12 +1967,6 @@ mod tests {
                 "waiter ids unique",
                 true,
                 ids[1] != ids[0]
-            );
-            crate::assert_with_log!(
-                state.waiter_ids_wrapped,
-                "waiter ids marked wrapped",
-                true,
-                state.waiter_ids_wrapped
             );
         }
 

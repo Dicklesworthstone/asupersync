@@ -379,6 +379,10 @@ name = "load_balancer_benchmark"
 harness = false
 
 [[bench]]
+name = "semaphore_benchmark"
+harness = false
+
+[[bench]]
 name = "fabric_bench"
 harness = false
 required-features = ["messaging-fabric", "test-internals"]
