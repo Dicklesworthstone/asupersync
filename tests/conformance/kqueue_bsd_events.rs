@@ -25,5 +25,10 @@ fn kqueue_conformance_requires_bsd_platform() {
     assert!(true, "Placeholder test for non-BSD platforms");
 }
 
-#[cfg(any(target_os = "macos", target_os = "freebsd"))]
-pub use super::super::conformance_kqueue_bsd_events::*;
+// The actual BSD kqueue conformance tests live in the standalone integration
+// test crate `tests/conformance_kqueue_bsd_events.rs` and run via:
+//     cargo test --test conformance_kqueue_bsd_events
+// They CANNOT be re-exported here — each top-level `tests/*.rs` is its own
+// crate root in cargo's integration-test model, so `super::super::<sibling>`
+// does not resolve. Previous attempt at `pub use super::super::
+// conformance_kqueue_bsd_events::*;` was removed for that reason.
