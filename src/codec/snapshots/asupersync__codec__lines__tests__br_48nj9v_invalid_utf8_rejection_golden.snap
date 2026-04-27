@@ -1,0 +1,16 @@
+---
+source: src/codec/lines.rs
+expression: report
+---
+lone_continuation: input=800a (2B)
+  Err(InvalidUtf8)
+  residual_len=0, next_index=0, is_discarding=false
+incomplete_2byte: input=c3280a (3B)
+  Err(InvalidUtf8)
+  residual_len=0, next_index=0, is_discarding=false
+truncated_4byte: input=f09f0a (3B)
+  Err(InvalidUtf8)
+  residual_len=0, next_index=0, is_discarding=false
+valid_then_garbage: input=6869ff0a (4B)
+  Err(InvalidUtf8)
+  residual_len=0, next_index=0, is_discarding=false

@@ -1,0 +1,54 @@
+---
+source: src/codec/lines.rs
+expression: report
+---
+eof_no_trailing_newline: input=7461696c2d776974686f75742d6e65776c696e65 (20B)
+  decode_eof: Ok(Some("tail-without-newline"))
+  decode_eof_again: Ok(None)
+  residual_len=0
+eof_trailing_lf_only: input=6c696e650a (5B)
+  decode: Ok(Some("line"))
+  decode_eof: Ok(None)
+  decode_eof_again: Ok(None)
+  residual_len=0
+eof_trailing_crlf: input=6c696e650d0a (6B)
+  decode: Ok(Some("line"))
+  decode_eof: Ok(None)
+  decode_eof_again: Ok(None)
+  residual_len=0
+eof_bare_cr_at_end: input=6c696e650d (5B)
+  decode_eof: Ok(Some("line"))
+  decode_eof_again: Ok(None)
+  residual_len=0
+eof_empty: input= (0B)
+  decode_eof: Ok(None)
+  decode_eof_again: Ok(None)
+  residual_len=0
+eof_only_lf: input=0a (1B)
+  decode: Ok(Some(""))
+  decode_eof: Ok(None)
+  decode_eof_again: Ok(None)
+  residual_len=0
+eof_only_crlf: input=0d0a (2B)
+  decode: Ok(Some(""))
+  decode_eof: Ok(None)
+  decode_eof_again: Ok(None)
+  residual_len=0
+eof_only_cr: input=0d (1B)
+  decode_eof: Ok(Some(""))
+  decode_eof_again: Ok(None)
+  residual_len=0
+eof_two_lines_partial_tail: input=66697273740a7365636f6e64 (12B)
+  decode: Ok(Some("first"))
+  decode_eof: Ok(Some("second"))
+  decode_eof_again: Ok(None)
+  residual_len=0
+eof_crlf_then_partial: input=66697273740d0a7365636f6e64 (13B)
+  decode: Ok(Some("first"))
+  decode_eof: Ok(Some("second"))
+  decode_eof_again: Ok(None)
+  residual_len=0
+eof_bare_cr_midline_then_partial: input=6c696e650d6d6f7265 (9B)
+  decode_eof: Ok(Some("line\rmore"))
+  decode_eof_again: Ok(None)
+  residual_len=0
