@@ -715,12 +715,17 @@ impl TlsConnectorBuilder {
     /// gate and insert the cert into the trust store unconditionally.
     /// Reserved for the rare cases where a non-CA cert is
     /// intentionally trusted as a root (e.g., pinning a self-signed
-    /// test cert in a sandbox). Logs a warning so the deviation is
-    /// visible in production logs.
+    /// test cert in a sandbox).
+    ///
+    /// **SECURITY**: This method is restricted to test builds only to prevent
+    /// production deployments from accidentally bypassing certificate validation
+    /// and enabling MITM attacks. Use `add_root_certificate()` with
+    /// `with_strict_ca_validation()` in production instead.
+    #[cfg(test)]
     pub fn insecure_add_root_certificate(mut self, cert: &Certificate) -> Self {
         #[cfg(feature = "tracing-integration")]
-        tracing::warn!(
-            "TLS: insecure_add_root_certificate called — \
+        tracing::debug!(
+            "TLS: insecure_add_root_certificate called in test build — \
              BasicConstraints CA:TRUE gate bypassed (br-asupersync-sx6j9y)"
         );
         if let Err(e) = self.root_certs.add(cert) {
@@ -1814,5 +1819,61 @@ mod tests {
             builder.validate_ca_constraints,
             "enable_env_cert_loading must set validate_ca_constraints=true"
         );
+    }
+
+    /// Regression test for asupersync-2o602p: Verify that production builds
+    /// properly reject leaf certificates when strict validation is enabled,
+    /// preventing MITM attacks via misconfigured trust stores.
+    #[cfg(feature = "tls")]
+    #[test]
+    fn production_cert_validation_rejects_leaf_certificates() {
+        let leaf_certs = Certificate::from_pem(TEST_CERT_PEM).unwrap();
+        let leaf = leaf_certs.into_iter().next().unwrap();
+
+        // Production mode with strict validation: must reject leaf certificates
+        let builder = TlsConnectorBuilder::new()
+            .with_strict_ca_validation()
+            .add_root_certificate(&leaf);
+
+        assert!(
+            builder.root_certs.is_empty(),
+            "Production builds with strict validation must reject leaf certificates"
+        );
+
+        // Verify that we cannot build a connector with invalid root certificates
+        let result = TlsConnectorBuilder::new()
+            .with_strict_ca_validation()
+            .add_root_certificate(&leaf)
+            .build();
+
+        // Should succeed to build even with empty root store (will use system roots)
+        // The key is that the leaf cert was properly rejected
+        assert!(result.is_ok(), "Builder should succeed with system roots");
+        assert!(
+            result.unwrap().config().root_store.is_empty(),
+            "Custom root store should be empty after rejecting leaf cert"
+        );
+    }
+
+    /// Regression test for asupersync-2o602p: Verify that the insecure bypass
+    /// method is only available in test builds, not production.
+    #[test]
+    fn insecure_add_root_certificate_restricted_to_tests() {
+        // This test verifies the method exists in test builds (where this test runs)
+        let leaf_certs = Certificate::from_pem(TEST_CERT_PEM).unwrap();
+        let leaf = leaf_certs.into_iter().next().unwrap();
+
+        let builder = TlsConnectorBuilder::new()
+            .insecure_add_root_certificate(&leaf);
+
+        assert_eq!(
+            builder.root_certs.len(), 1,
+            "insecure_add_root_certificate should work in test builds"
+        );
+
+        // In production builds, this method should not be available
+        // This is enforced at compile time by #[cfg(test)]
+        // If someone tries to use it in production, they'll get a compile error:
+        // "cannot find method `insecure_add_root_certificate`"
     }
 }
