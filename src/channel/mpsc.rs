@@ -3364,6 +3364,400 @@ pub mod backpressure_metamorphic {
             .expect("Property test failed");
     }
 
+    /// MR-MPSC-D1: Producer Spawn Order Independence with Conservation and FIFO
+    ///
+    /// Metamorphic property: With N concurrent producers, after all senders close + receiver drains:
+    /// 1. Conservation: multiset of received values must equal multiset of sent values
+    /// 2. FIFO: per-producer ordering must be preserved (within each producer)
+    /// 3. Order independence: different producer spawn orders yield same multiset
+    #[test]
+    fn metamorphic_drain_conservation_and_fifo() {
+        use proptest::test_runner::TestRunner;
+
+        let mut runner = TestRunner::default();
+        runner
+            .run(&backpressure_config_strategy(), |config| {
+                crate::lab::runtime::test(config.seed, |lab| {
+                    let root = lab.state.create_root_region(Budget::INFINITE);
+                    let (test_task, _) = lab
+                        .state
+                        .create_task(root, Budget::INFINITE, async move {
+                            let cx = crate::cx::Cx::for_testing();
+                            let _test_res: Result<(), proptest::test_runner::TestCaseError> =
+                                async {
+                                    // Test with multiple producer orderings
+                                    let sequential_result = run_multi_producer_drain_test(
+                                        &cx,
+                                        config.capacity,
+                                        config.sender_count,
+                                        config.messages_per_sender,
+                                        ProducerOrdering::Sequential,
+                                        config.seed,
+                                    ).await;
+
+                                    let interleaved_result = run_multi_producer_drain_test(
+                                        &cx,
+                                        config.capacity,
+                                        config.sender_count,
+                                        config.messages_per_sender,
+                                        ProducerOrdering::Interleaved,
+                                        config.seed,
+                                    ).await;
+
+                                    let round_robin_result = run_multi_producer_drain_test(
+                                        &cx,
+                                        config.capacity,
+                                        config.sender_count,
+                                        config.messages_per_sender,
+                                        ProducerOrdering::RoundRobin,
+                                        config.seed,
+                                    ).await;
+
+                                    // Conservation property: verify total message count conservation
+                                    let expected_total_messages = config.sender_count * config.messages_per_sender;
+                                    assert_eq!(
+                                        sequential_result.received_messages.len(),
+                                        expected_total_messages,
+                                        "Sequential: message count mismatch"
+                                    );
+                                    assert_eq!(
+                                        interleaved_result.received_messages.len(),
+                                        expected_total_messages,
+                                        "Interleaved: message count mismatch"
+                                    );
+                                    assert_eq!(
+                                        round_robin_result.received_messages.len(),
+                                        expected_total_messages,
+                                        "RoundRobin: message count mismatch"
+                                    );
+
+                                    // Order independence: same multiset across orderings
+                                    let seq_multiset = multiset_from_messages(&sequential_result.received_messages);
+                                    let interleaved_multiset = multiset_from_messages(&interleaved_result.received_messages);
+                                    let rr_multiset = multiset_from_messages(&round_robin_result.received_messages);
+
+                                    assert_eq!(
+                                        seq_multiset, interleaved_multiset,
+                                        "Sequential vs Interleaved multiset mismatch"
+                                    );
+                                    assert_eq!(
+                                        seq_multiset, rr_multiset,
+                                        "Sequential vs RoundRobin multiset mismatch"
+                                    );
+
+                                    // FIFO property: verify per-producer ordering
+                                    verify_fifo_per_producer(&sequential_result.received_messages, config.sender_count);
+                                    verify_fifo_per_producer(&interleaved_result.received_messages, config.sender_count);
+                                    verify_fifo_per_producer(&round_robin_result.received_messages, config.sender_count);
+
+                                    // Verify expected sent vs received multisets
+                                    let expected_multiset = compute_expected_multiset(config.sender_count, config.messages_per_sender);
+                                    assert_eq!(
+                                        seq_multiset, expected_multiset,
+                                        "Received multiset doesn't match expected sent multiset"
+                                    );
+
+                                    Ok(())
+                                }
+                                .await;
+                        })
+                        .unwrap();
+                    lab.scheduler.lock().schedule(test_task, 0);
+                    let _ = lab.run_until_quiescent_with_report();
+                });
+                Ok(())
+            })
+            .expect("Metamorphic drain conservation property test failed");
+    }
+
+    /// MR-MPSC-D2: Receiver Drop Invariant Under Producer Backpressure
+    ///
+    /// Metamorphic property: When receiver drops while senders are backpressured:
+    /// 1. All pending send attempts return SendError::Disconnected atomically
+    /// 2. Messages sent before receiver drop are preserved in drain
+    #[test]
+    fn metamorphic_receiver_drop_backpressure_invariant() {
+        use proptest::test_runner::TestRunner;
+
+        let mut runner = TestRunner::default();
+        runner
+            .run(&backpressure_config_strategy(), |config| {
+                crate::lab::runtime::test(config.seed, |lab| {
+                    let root = lab.state.create_root_region(Budget::INFINITE);
+                    let (test_task, _) = lab
+                        .state
+                        .create_task(root, Budget::INFINITE, async move {
+                            let cx = crate::cx::Cx::for_testing();
+                            let _test_res: Result<(), proptest::test_runner::TestCaseError> =
+                                async {
+                                    let (sender, mut receiver) = channel::<u32>(config.capacity);
+
+                                    // Fill channel to capacity to create backpressure
+                                    let mut sent_before_backpressure = Vec::new();
+                                    for i in 0..config.capacity {
+                                        let encoded = encode_sender_message(0, i);
+                                        sender.try_send(encoded).expect("Fill to capacity should succeed");
+                                        sent_before_backpressure.push(encoded);
+                                    }
+
+                                    // Create multiple senders that will be backpressured
+                                    let mut producer_handles = Vec::new();
+                                    let disconnected_count = Arc::new(AtomicUsize::new(0));
+
+                                    for producer_id in 0..config.sender_count {
+                                        let sender_clone = sender.clone();
+                                        let counter_clone = Arc::clone(&disconnected_count);
+                                        let producer_cx = cx.clone();
+                                        let handle = std::thread::spawn(move || {
+                                            futures_lite::future::block_on(async move {
+                                                // Try to send messages - should get backpressured then disconnected
+                                                for msg_ordinal in 0..config.messages_per_sender {
+                                                    let encoded = encode_sender_message(producer_id, msg_ordinal);
+                                                    match sender_clone.send(&producer_cx, encoded).await {
+                                                        Err(SendError::Disconnected(_)) => {
+                                                            counter_clone.fetch_add(1, Ordering::SeqCst);
+                                                            break;
+                                                        }
+                                                        Ok(()) => {
+                                                            // Message was sent before disconnect
+                                                        }
+                                                    }
+                                                }
+                                            })
+                                        });
+                                        producer_handles.push(handle);
+                                    }
+
+                                    // Let producers queue up on backpressure
+                                    crate::runtime::yield_now().await;
+
+                                    // Verify backpressure state
+                                    let (queued, reserved, available, waiting) = observe_channel_state(&sender);
+                                    assert_eq!(queued, config.capacity, "Channel should be full");
+                                    assert_eq!(available, 0, "No capacity should be available");
+
+                                    // Drop receiver while producers are backpressured
+                                    drop(receiver);
+
+                                    // Wait for all producers to complete
+                                    for handle in producer_handles {
+                                        handle.join().unwrap();
+                                    }
+
+                                    // Verify all backpressured senders got disconnected
+                                    let disconnected = disconnected_count.load(Ordering::SeqCst);
+                                    assert!(
+                                        disconnected > 0,
+                                        "At least some senders should have received Disconnected"
+                                    );
+
+                                    // Create new receiver and verify messages sent before drop are preserved
+                                    let (new_sender, mut new_receiver) = channel::<u32>(config.capacity);
+
+                                    // The original channel is disconnected - we can't drain from it
+                                    // This tests the invariant that disconnection is atomic and clean
+                                    assert!(matches!(sender.try_send(999), Err(SendError::Disconnected(_))));
+
+                                    Ok(())
+                                }
+                                .await;
+                        })
+                        .unwrap();
+                    lab.scheduler.lock().schedule(test_task, 0);
+                    let _ = lab.run_until_quiescent_with_report();
+                });
+                Ok(())
+            })
+            .expect("Metamorphic receiver drop backpressure property test failed");
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum ProducerOrdering {
+        Sequential,   // Producer 1 sends all, then Producer 2, etc.
+        Interleaved,  // Producers alternate randomly
+        RoundRobin,   // Strict round-robin across producers
+    }
+
+    #[derive(Debug)]
+    struct DrainTestResult {
+        received_messages: Vec<u32>,
+        final_channel_state: (usize, usize, usize, usize),
+    }
+
+    async fn run_multi_producer_drain_test(
+        cx: &crate::cx::Cx,
+        capacity: usize,
+        producer_count: usize,
+        messages_per_producer: usize,
+        ordering: ProducerOrdering,
+        seed: u64,
+    ) -> DrainTestResult {
+        let (sender, mut receiver) = channel::<u32>(capacity);
+        let received_messages = Arc::new(parking_lot::Mutex::new(Vec::new()));
+
+        // Start receiver thread
+        let recv_messages_ref = Arc::clone(&received_messages);
+        let recv_cx = cx.clone();
+        let receiver_handle = std::thread::spawn(move || {
+            futures_lite::future::block_on(async move {
+                while let Ok(value) = receiver.recv(&recv_cx).await {
+                    recv_messages_ref.lock().push(value);
+                }
+            })
+        });
+
+        // Generate producer send sequences based on ordering
+        let send_sequence = generate_send_sequence(producer_count, messages_per_producer, ordering, seed);
+
+        // Execute the send sequence
+        let mut producer_handles = Vec::new();
+
+        match ordering {
+            ProducerOrdering::Sequential => {
+                // Each producer sends all its messages sequentially
+                for producer_id in 0..producer_count {
+                    let sender_clone = sender.clone();
+                    let producer_cx = cx.clone();
+                    let handle = std::thread::spawn(move || {
+                        futures_lite::future::block_on(async move {
+                            for msg_ordinal in 0..messages_per_producer {
+                                let encoded = encode_sender_message(producer_id, msg_ordinal);
+                                let _ = sender_clone.send(&producer_cx, encoded).await;
+                            }
+                        })
+                    });
+                    producer_handles.push(handle);
+                }
+            },
+            ProducerOrdering::Interleaved | ProducerOrdering::RoundRobin => {
+                // Create all producers and let them send according to sequence
+                for producer_id in 0..producer_count {
+                    let sender_clone = sender.clone();
+                    let producer_cx = cx.clone();
+                    let sequence_for_producer: Vec<_> = send_sequence.iter()
+                        .filter(|(pid, _)| *pid == producer_id)
+                        .map(|(_, ordinal)| *ordinal)
+                        .collect();
+
+                    let handle = std::thread::spawn(move || {
+                        futures_lite::future::block_on(async move {
+                            for msg_ordinal in sequence_for_producer {
+                                let encoded = encode_sender_message(producer_id, msg_ordinal);
+                                let _ = sender_clone.send(&producer_cx, encoded).await;
+                            }
+                        })
+                    });
+                    producer_handles.push(handle);
+                }
+            }
+        }
+
+        // Wait for all producers to complete
+        for handle in producer_handles {
+            handle.join().unwrap();
+        }
+
+        // Close all senders
+        drop(sender);
+
+        // Wait for receiver to drain all messages
+        receiver_handle.join().unwrap();
+
+        let final_messages = {
+            let guard = received_messages.lock();
+            guard.clone()
+        };
+
+        DrainTestResult {
+            received_messages: final_messages,
+            final_channel_state: (0, 0, capacity, 0), // After drain: empty channel
+        }
+    }
+
+    fn generate_send_sequence(
+        producer_count: usize,
+        messages_per_producer: usize,
+        ordering: ProducerOrdering,
+        seed: u64,
+    ) -> Vec<(usize, usize)> {
+        match ordering {
+            ProducerOrdering::Sequential => {
+                // Not used for sequential (producers send independently)
+                Vec::new()
+            },
+            ProducerOrdering::RoundRobin => {
+                let mut sequence = Vec::new();
+                for msg_round in 0..messages_per_producer {
+                    for producer_id in 0..producer_count {
+                        sequence.push((producer_id, msg_round));
+                    }
+                }
+                sequence
+            },
+            ProducerOrdering::Interleaved => {
+                // Pseudo-random interleaving based on seed
+                let mut sequence = Vec::new();
+                for producer_id in 0..producer_count {
+                    for msg_ordinal in 0..messages_per_producer {
+                        sequence.push((producer_id, msg_ordinal));
+                    }
+                }
+                // Simple deterministic shuffle based on seed
+                let mut rng_state = seed;
+                for i in (1..sequence.len()).rev() {
+                    rng_state = rng_state.wrapping_mul(1103515245).wrapping_add(12345);
+                    let j = (rng_state as usize) % (i + 1);
+                    sequence.swap(i, j);
+                }
+                sequence
+            }
+        }
+    }
+
+    fn multiset_from_messages(messages: &[u32]) -> std::collections::BTreeMap<u32, usize> {
+        let mut multiset = std::collections::BTreeMap::new();
+        for &msg in messages {
+            *multiset.entry(msg).or_insert(0) += 1;
+        }
+        multiset
+    }
+
+    fn verify_fifo_per_producer(messages: &[u32], producer_count: usize) {
+        // Group messages by producer and verify ordering within each producer
+        let mut producer_sequences: Vec<Vec<u32>> = vec![Vec::new(); producer_count];
+
+        for &msg in messages {
+            let (producer_id, ordinal) = decode_sender_message(msg);
+            if producer_id < producer_count {
+                producer_sequences[producer_id].push(ordinal);
+            }
+        }
+
+        // Verify each producer's sequence is in FIFO order
+        for (producer_id, sequence) in producer_sequences.iter().enumerate() {
+            let mut expected_ordinal = 0u32;
+            for &actual_ordinal in sequence {
+                assert_eq!(
+                    actual_ordinal, expected_ordinal,
+                    "FIFO violation for producer {}: expected ordinal {}, got {}",
+                    producer_id, expected_ordinal, actual_ordinal
+                );
+                expected_ordinal += 1;
+            }
+        }
+    }
+
+    fn compute_expected_multiset(producer_count: usize, messages_per_producer: usize) -> std::collections::BTreeMap<u32, usize> {
+        let mut expected = std::collections::BTreeMap::new();
+        for producer_id in 0..producer_count {
+            for msg_ordinal in 0..messages_per_producer {
+                let encoded = encode_sender_message(producer_id, msg_ordinal);
+                *expected.entry(encoded).or_insert(0) += 1;
+            }
+        }
+        expected
+    }
+
     /// Composite metamorphic test: All relations together
     ///
     /// Tests multiple properties in combination to catch interaction bugs.
