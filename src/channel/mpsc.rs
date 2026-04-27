@@ -82,6 +82,8 @@ use std::sync::{Arc, Weak};
 use std::task::{Context, Poll, Waker};
 
 use crate::cx::Cx;
+use crate::runtime::reactor::token::{SlabToken, TokenSlab};
+use crate::types::outcome::Outcome;
 
 /// Error returned when sending fails.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,17 +133,6 @@ impl std::fmt::Display for RecvError {
 
 impl std::error::Error for RecvError {}
 
-/// A queued waiter for channel capacity.
-///
-/// Waker is stored inline (no inner `Mutex`) because all access occurs while
-/// the outer `ChannelInner` lock is held, making a per-waiter mutex pure overhead.
-/// Identity is a monotonic `u64` instead of `Arc::ptr_eq`, eliminating one `Arc`
-/// allocation per waiter.
-#[derive(Debug)]
-struct SendWaiter {
-    id: u64,
-    waker: Waker,
-}
 
 /// Internal channel state shared between senders and receivers.
 #[derive(Debug)]
@@ -150,12 +141,12 @@ struct ChannelInner<T> {
     queue: VecDeque<T>,
     /// Number of reserved slots (permits outstanding).
     reserved: usize,
-    /// Wakers for senders waiting for capacity.
-    send_wakers: VecDeque<SendWaiter>,
+    /// Wakers for senders waiting for capacity (O(1) access by token).
+    send_wakers: TokenSlab,
+    /// FIFO queue of waiter tokens to maintain fair ordering.
+    waiter_queue: VecDeque<SlabToken>,
     /// Waker for the receiver waiting for messages.
     recv_waker: Option<Waker>,
-    /// Monotonic counter for waiter identity (replaces Arc::ptr_eq).
-    next_waiter_id: u64,
 }
 
 /// Shared state wrapper.
@@ -188,9 +179,9 @@ impl<T> ChannelInner<T> {
         Self {
             queue: VecDeque::with_capacity(capacity),
             reserved: 0,
-            send_wakers: VecDeque::with_capacity(4),
+            send_wakers: TokenSlab::with_capacity(4),
+            waiter_queue: VecDeque::with_capacity(4),
             recv_waker: None,
-            next_waiter_id: 0,
         }
     }
 
@@ -214,7 +205,9 @@ impl<T> ChannelInner<T> {
     /// for removing itself upon successfully acquiring a permit.
     #[inline]
     fn take_next_sender_waker(&self) -> Option<Waker> {
-        self.send_wakers.front().map(|waiter| waiter.waker.clone())
+        self.waiter_queue.front()
+            .and_then(|&token| self.send_wakers.get(token))
+            .cloned()
     }
 }
 
@@ -256,7 +249,7 @@ impl<T> Sender<T> {
         Reserve {
             sender: self,
             cx,
-            waiter_id: None,
+            waiter_token: None,
         }
     }
 
@@ -379,10 +372,10 @@ impl<T> Sender<T> {
                 return;
             }
             self.shared.receiver_dropped.store(true, Ordering::Release);
-            let send_wakers: SmallVec<[Waker; 4]> = inner
-                .send_wakers
-                .drain(..)
-                .map(|waiter| waiter.waker)
+            let tokens: SmallVec<[SlabToken; 4]> = inner.waiter_queue.drain(..).collect();
+            let send_wakers: SmallVec<[Waker; 4]> = tokens
+                .into_iter()
+                .filter_map(|token| inner.send_wakers.remove(token))
                 .collect();
             let recv_waker = inner.recv_waker.take();
             drop(inner);
@@ -501,12 +494,12 @@ impl<T> Sender<T> {
 pub struct Reserve<'a, T> {
     sender: &'a Sender<T>,
     cx: &'a Cx,
-    waiter_id: Option<u64>,
+    waiter_token: Option<SlabToken>,
 }
 
 impl<T> Reserve<'_, T> {
     fn cleanup_waiter(&mut self) {
-        if let Some(id) = self.waiter_id.take() {
+        if let Some(token) = self.waiter_token.take() {
             let next_waker = {
                 let mut inner = self.sender.shared.inner.lock();
 
@@ -515,9 +508,12 @@ impl<T> Reserve<'_, T> {
                     // or pre-granted (reservation leaked, but channel is dead anyway).
                     // Safest to just do nothing.
                     None
-                } else if let Some(pos) = inner.send_wakers.iter().position(|w| w.id == id) {
-                    // We are in the queue. We haven't been granted a reservation.
-                    inner.send_wakers.remove(pos);
+                } else if inner.send_wakers.remove(token).is_some() {
+                    // We are in the slab. We haven't been granted a reservation.
+                    // Remove from FIFO queue as well.
+                    if let Some(pos) = inner.waiter_queue.iter().position(|&t| t == token) {
+                        inner.waiter_queue.remove(pos);
+                    }
                     // CASCADE: A receiver may have freed capacity and woken us,
                     // but we never polled. Pass the baton to the next waiter.
                     if inner.has_capacity(self.sender.shared.capacity) {
@@ -526,7 +522,7 @@ impl<T> Reserve<'_, T> {
                         None
                     }
                 } else {
-                    // Stale waiter: not in queue, channel alive.
+                    // Stale waiter: not in slab, channel alive.
                     // Another agent or cleanup already removed us. We have no
                     // resource ownership to transfer, so do nothing.
                     None
@@ -553,26 +549,28 @@ impl<'a, T> Future for Reserve<'a, T> {
         let mut inner = self.sender.shared.inner.lock();
 
         if self.sender.shared.receiver_dropped.load(Ordering::Relaxed) {
-            self.waiter_id = None; // Waiter is already cleared by Receiver::drop
+            self.waiter_token = None; // Waiter is already cleared by Receiver::drop
             return Poll::Ready(Err(SendError::<()>::Disconnected(())));
         }
 
-        let is_first = self.waiter_id.map_or_else(
-            || inner.send_wakers.is_empty(),
-            |id| inner.send_wakers.front().is_some_and(|w| w.id == id),
+        let is_first = self.waiter_token.map_or_else(
+            || inner.waiter_queue.is_empty(),
+            |token| inner.waiter_queue.front().copied() == Some(token),
         );
 
         if is_first && inner.has_capacity(self.sender.shared.capacity) {
             inner.reserved += 1;
             // Remove self from queue
-            if let Some(id) = self.waiter_id {
-                let is_head = inner.send_wakers.front().is_some_and(|w| w.id == id);
-
-                if is_head {
-                    inner.send_wakers.pop_front();
-                } else if let Some(pos) = inner.send_wakers.iter().position(|w| w.id == id) {
-                    inner.send_wakers.remove(pos);
+            if let Some(token) = self.waiter_token {
+                // Remove from FIFO queue (should be at front)
+                if inner.waiter_queue.front().copied() == Some(token) {
+                    inner.waiter_queue.pop_front();
+                } else if let Some(pos) = inner.waiter_queue.iter().position(|&t| t == token) {
+                    inner.waiter_queue.remove(pos);
                 }
+
+                // Remove from slab
+                inner.send_wakers.remove(token);
 
                 // CASCADE: If there is still capacity, wake the *next* waiter.
                 // Extract waker now; wake after releasing the lock.
@@ -586,8 +584,8 @@ impl<'a, T> Future for Reserve<'a, T> {
                     w.wake();
                 }
 
-                // Clear waiter_id so Drop doesn't uselessly lock and search the queue
-                self.waiter_id = None;
+                // Clear waiter_token so Drop doesn't uselessly lock and search the queue
+                self.waiter_token = None;
             } else {
                 drop(inner);
             }
@@ -599,22 +597,18 @@ impl<'a, T> Future for Reserve<'a, T> {
         }
 
         // Register/update waiter (all access under outer lock — no inner Mutex needed)
-        if let Some(id) = self.waiter_id {
+        if let Some(token) = self.waiter_token {
             // Already queued. Update waker inline.
-            if let Some(entry) = inner.send_wakers.iter_mut().find(|w| w.id == id) {
-                if !entry.waker.will_wake(ctx.waker()) {
-                    entry.waker.clone_from(ctx.waker());
+            if let Some(waker) = inner.send_wakers.get_mut(token) {
+                if !waker.will_wake(ctx.waker()) {
+                    waker.clone_from(ctx.waker());
                 }
             }
         } else {
-            // New waiter — assign monotonic id, store waker inline.
-            let id = inner.next_waiter_id;
-            inner.next_waiter_id = inner.next_waiter_id.wrapping_add(1);
-            inner.send_wakers.push_back(SendWaiter {
-                id,
-                waker: ctx.waker().clone(),
-            });
-            self.waiter_id = Some(id);
+            // New waiter — insert into slab and add to FIFO queue.
+            let token = inner.send_wakers.insert(ctx.waker().clone());
+            inner.waiter_queue.push_back(token);
+            self.waiter_token = Some(token);
         }
 
         drop(inner);
@@ -723,9 +717,16 @@ pub struct SendPermit<'a, T> {
 
 impl<T> SendPermit<'_, T> {
     /// Commits the reserved slot, enqueuing the value.
+    ///
+    /// Returns an Outcome indicating success or failure. When the receiver has been
+    /// dropped, returns Err(SendError::Disconnected(value)) to surface the disconnection
+    /// rather than silently dropping the value.
     #[inline]
-    pub fn send(self, value: T) {
-        let _ = self.try_send(value);
+    pub fn send(self, value: T) -> Outcome<(), SendError<T>> {
+        match self.try_send(value) {
+            Ok(()) => Outcome::Ok(()),
+            Err(error) => Outcome::Err(error),
+        }
     }
 
     /// Commits the reserved slot, returning an error if the receiver was dropped.
@@ -827,10 +828,10 @@ impl<T> Receiver<T> {
                 return;
             }
             self.shared.receiver_dropped.store(true, Ordering::Release);
-            let wakers: SmallVec<[Waker; 4]> = inner
-                .send_wakers
-                .drain(..)
-                .map(|waiter| waiter.waker)
+            let tokens: SmallVec<[SlabToken; 4]> = inner.waiter_queue.drain(..).collect();
+            let wakers: SmallVec<[Waker; 4]> = tokens
+                .into_iter()
+                .filter_map(|token| inner.send_wakers.remove(token))
                 .collect();
             drop(inner);
             wakers
@@ -997,10 +998,10 @@ impl<T> Drop for Receiver<T> {
             // We extract them using std::mem::take to drop them outside the lock,
             // preventing deadlocks if T::drop requires the same channel lock.
             let items = std::mem::take(&mut inner.queue);
-            let wakers: SmallVec<[Waker; 4]> = inner
-                .send_wakers
-                .drain(..)
-                .map(|waiter| waiter.waker)
+            let tokens: SmallVec<[SlabToken; 4]> = inner.waiter_queue.drain(..).collect();
+            let wakers: SmallVec<[Waker; 4]> = tokens
+                .into_iter()
+                .filter_map(|token| inner.send_wakers.remove(token))
                 .collect();
             drop(inner);
             (wakers, items)
@@ -1164,7 +1165,13 @@ mod tests {
         let permit = block_on(tx.reserve(&cx)).expect("reserve failed");
 
         // Phase 2: commit
-        permit.send(42);
+        let outcome = permit.send(42);
+        crate::assert_with_log!(
+            matches!(outcome, Outcome::Ok(())),
+            "send outcome",
+            "Ok(())",
+            format!("{:?}", outcome)
+        );
 
         let value = block_on(rx.recv(&cx)).expect("recv failed");
         crate::assert_with_log!(value == 42, "recv value", 42, value);
@@ -1446,7 +1453,13 @@ mod tests {
         drop(permit);
 
         let permit2 = tx.try_reserve().expect("try_reserve after drop");
-        permit2.send(5);
+        let outcome = permit2.send(5);
+        crate::assert_with_log!(
+            matches!(outcome, Outcome::Ok(())),
+            "send outcome",
+            "Ok(())",
+            format!("{:?}", outcome)
+        );
 
         let value = block_on(rx.recv(&cx)).expect("recv");
         crate::assert_with_log!(value == 5, "recv value", 5, value);
@@ -1566,14 +1579,22 @@ mod tests {
     }
 
     #[test]
-    fn permit_send_after_receiver_drop_does_not_enqueue() {
-        init_test("permit_send_after_receiver_drop_does_not_enqueue");
+    fn permit_send_after_receiver_drop_surfaces_disconnected() {
+        init_test("permit_send_after_receiver_drop_surfaces_disconnected");
         let (tx, rx) = channel::<i32>(1);
         let cx = test_cx();
 
         let permit = block_on(tx.reserve(&cx)).expect("reserve failed");
         drop(rx);
-        permit.send(5);
+        let outcome = permit.send(5);
+
+        // Verify that disconnection is surfaced as an Outcome::Err, not silently dropped
+        crate::assert_with_log!(
+            matches!(outcome, Outcome::Err(SendError::Disconnected(5))),
+            "disconnected send surfaces error",
+            "Err(Disconnected(5))",
+            format!("{:?}", outcome)
+        );
 
         let (queue_empty, reserved) = {
             let inner = tx.shared.inner.lock();
@@ -1584,7 +1605,7 @@ mod tests {
         };
         crate::assert_with_log!(queue_empty, "queue empty", true, queue_empty);
         crate::assert_with_log!(reserved == 0, "reserved cleared", 0, reserved);
-        crate::test_complete!("permit_send_after_receiver_drop_does_not_enqueue");
+        crate::test_complete!("permit_send_after_receiver_drop_surfaces_disconnected");
     }
 
     #[test]
@@ -1835,7 +1856,13 @@ mod tests {
         crate::assert_with_log!(used == 2, "used after 2 reserves", 2, used);
 
         // Commit one, abort one.
-        p1.send(10);
+        let outcome = p1.send(10);
+        crate::assert_with_log!(
+            matches!(outcome, Outcome::Ok(())),
+            "send outcome",
+            "Ok(())",
+            format!("{:?}", outcome)
+        );
         p2.abort();
 
         // Check: reserved=0, queue=1, used=1
@@ -2108,7 +2135,13 @@ mod tests {
 
         // Fill capacity.
         let permit = tx.try_reserve().unwrap();
-        permit.send(1);
+        let outcome = permit.send(1);
+        crate::assert_with_log!(
+            matches!(outcome, Outcome::Ok(())),
+            "send outcome",
+            "Ok(())",
+            format!("{:?}", outcome)
+        );
 
         // Queue A.
         let mut reserve_a = Box::pin(tx.reserve(&cx));
@@ -2142,7 +2175,13 @@ mod tests {
         let (tx, _rx) = channel::<i32>(1);
 
         let permit = tx.try_reserve().expect("fill capacity");
-        permit.send(1);
+        let outcome = permit.send(1);
+        crate::assert_with_log!(
+            matches!(outcome, Outcome::Ok(())),
+            "send outcome",
+            "Ok(())",
+            format!("{:?}", outcome)
+        );
 
         let mut reserve_a = Box::pin(tx.reserve(&cx));
         let waker_a = noop_waker();
@@ -2157,13 +2196,13 @@ mod tests {
 
         {
             let mut inner = tx.shared.inner.lock();
-            let waiter_id_a = reserve_a.waiter_id.expect("waiter id for A");
-            let waiter_pos_a = inner
-                .send_wakers
-                .iter()
-                .position(|w| w.id == waiter_id_a)
-                .expect("A queued");
-            inner.send_wakers.remove(waiter_pos_a);
+            let waiter_token_a = reserve_a.waiter_token.expect("waiter token for A");
+            // Remove from slab
+            inner.send_wakers.remove(waiter_token_a).expect("A queued in slab");
+            // Remove from FIFO queue
+            if let Some(pos) = inner.waiter_queue.iter().position(|&t| t == waiter_token_a) {
+                inner.waiter_queue.remove(pos);
+            }
             inner.queue.clear();
         }
 
@@ -2877,7 +2916,13 @@ pub mod backpressure_metamorphic {
                         // Send via reserve/send
                         for i in 0..std::cmp::min(config.messages_per_sender, config.capacity) {
                             if let Ok(permit) = sender1.try_reserve() {
-                                permit.send(i as u32);
+                                let outcome = permit.send(i as u32);
+                                crate::assert_with_log!(
+                                    matches!(outcome, Outcome::Ok(())),
+                                    "send outcome in loop",
+                                    "Ok(())",
+                                    format!("{:?}", outcome)
+                                );
                             }
                         }
                         drop(sender1);
