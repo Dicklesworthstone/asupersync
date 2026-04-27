@@ -1572,6 +1572,91 @@ mod tests {
         }
     }
 
+    /// br-asupersync-keo94q: K' ladder MID-TABLE boundary jump
+    /// coverage. The lower-edge boundary test (br-asupersync-0frehk)
+    /// pins K=1..=10, and `params_lookup_uses_smallest_k_prime_ge_k`
+    /// pins one mid-jump (K=11 → K'=12). But the bulk of
+    /// SYSTEMATIC_INDEX_TABLE has many adjacent jumps — K=12 → K'=12
+    /// (boundary), K=13..18 → K'=18, K=19..20 → K'=20, K=21..26 →
+    /// K'=26, etc. — that the existing tests do not exercise.
+    ///
+    /// A regression that flipped partition_point's predicate (e.g.,
+    /// `row.0 < k as u32` → `row.0 <= k as u32 - 1` with a bad
+    /// underflow guard) at any boundary would silently skip a row
+    /// for K values straddling that boundary, but the K=11 / K=100
+    /// tests would not catch it. Pin every (K=boundary,
+    /// K=boundary+1) pair across the first 30 K' rows so any
+    /// off-by-one in the search regresses immediately and pinpoints
+    /// the affected row.
+    ///
+    /// Additionally pins K=K'_max (last table row) — the upper-edge
+    /// boundary that gaussian_systematic_index_table_rejects_out_of_range_k
+    /// only tests by REJECTING K_max+1; this confirms the boundary
+    /// row IS accepted and routes to itself.
+    #[test]
+    fn rfc6330_systematic_index_table_mid_table_boundary_jumps() {
+        // Each entry is (boundary_k, expected_k_prime_for_boundary,
+        // expected_k_prime_for_boundary_plus_one). The third field
+        // is the K' that K = boundary+1 should round up to (i.e.,
+        // the *next* table row's K').
+        const BOUNDARIES: &[(usize, usize, usize)] = &[
+            // K=12 lands exactly on the second row; K=13 jumps to K'=18.
+            (12, 12, 18),
+            (18, 18, 20),
+            (20, 20, 26),
+            (26, 26, 30),
+            (30, 30, 32),
+            (32, 32, 36),
+            (36, 36, 42),
+            (42, 42, 46),
+            (46, 46, 48),
+            (48, 48, 49),
+            (49, 49, 55),
+            (55, 55, 60),
+            (60, 60, 62),
+            (62, 62, 69),
+            (69, 69, 75),
+            (75, 75, 84),
+            (84, 84, 88),
+            (88, 88, 91),
+            (91, 91, 95),
+            (95, 95, 97),
+        ];
+
+        const SYMBOL_SIZE: usize = 4;
+
+        for &(k_boundary, k_prime_at_boundary, k_prime_above) in BOUNDARIES {
+            let p_at = SystematicParams::for_source_block(k_boundary, SYMBOL_SIZE);
+            assert_eq!(
+                p_at.k, k_boundary,
+                "boundary K={k_boundary}: k field must echo input"
+            );
+            assert_eq!(
+                p_at.k_prime, k_prime_at_boundary,
+                "boundary K={k_boundary}: must land EXACTLY on K'={k_prime_at_boundary}"
+            );
+
+            let p_above = SystematicParams::for_source_block(k_boundary + 1, SYMBOL_SIZE);
+            assert_eq!(
+                p_above.k_prime,
+                k_prime_above,
+                "boundary K={k_boundary}+1={}: must round up to next row's K'={k_prime_above}, got K'={}",
+                k_boundary + 1,
+                p_above.k_prime
+            );
+        }
+
+        // Upper-edge: the LAST entry in SYSTEMATIC_INDEX_TABLE has
+        // K'=56403. K=56403 must accept and route to itself; K_max+1
+        // is already rejected by rfc6330_systematic_index_table_rejects_out_of_range_k.
+        let p_max = SystematicParams::try_for_source_block(56_403, SYMBOL_SIZE)
+            .expect("K=K'_max=56403 must be accepted");
+        assert_eq!(
+            p_max.k_prime, 56_403,
+            "K=56403 must land exactly on the last table row K'=56403"
+        );
+    }
+
     /// br-asupersync-eri4b3: K-boundary fail-cleanly conformance.
     /// K=0 is invalid; K=56404 (one past the last K' table row) MUST
     /// return UnsupportedSourceBlockSize cleanly without panic.
