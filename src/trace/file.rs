@@ -204,6 +204,7 @@ impl CompressionMode {
     }
 
     /// Creates a compression mode from the header byte.
+    #[allow(dead_code)]
     fn from_byte(byte: u8) -> Option<Self> {
         match byte {
             0 => Some(Self::None),
@@ -910,6 +911,9 @@ impl TraceReader {
             reader.read_exact(&mut comp_byte)?;
             match CompressionMode::from_byte(comp_byte[0]) {
                 Some(mode) => mode,
+                None if comp_byte[0] == 1 && is_compressed => {
+                    return Err(TraceFileError::CompressionNotAvailable);
+                }
                 None if is_compressed => {
                     return Err(TraceFileError::UnsupportedCompression(comp_byte[0]));
                 }
@@ -1372,17 +1376,34 @@ impl ExactSizeIterator for TraceEventIterator {}
 /// # Errors
 ///
 /// Returns an error if file creation or writing fails.
-pub fn write_trace(
+pub fn write_trace_with_config(
     path: impl AsRef<Path>,
     metadata: &TraceMetadata,
     events: &[ReplayEvent],
+    config: TraceFileConfig,
 ) -> TraceFileResult<()> {
-    let mut writer = TraceWriter::create(path)?;
+    let mut writer = TraceWriter::create_with_config(path, config)?;
     writer.write_metadata(metadata)?;
     for event in events {
         writer.write_event(event)?;
     }
     writer.finish()
+}
+
+/// Writes a complete trace to a file with the default configuration.
+///
+/// This is a convenience function for writing small traces.
+/// For large traces, use [`TraceWriter`] for streaming writes.
+///
+/// # Errors
+///
+/// Returns an error if file creation or writing fails.
+pub fn write_trace(
+    path: impl AsRef<Path>,
+    metadata: &TraceMetadata,
+    events: &[ReplayEvent],
+) -> TraceFileResult<()> {
+    write_trace_with_config(path, metadata, events, TraceFileConfig::default())
 }
 
 /// Reads a complete trace from a file.
@@ -1447,24 +1468,32 @@ mod tests {
         ]
     }
 
-    fn write_header_with_metadata(file: &mut std::fs::File, compression: CompressionMode) {
+    fn write_header_with_raw_compression(
+        file: &mut std::fs::File,
+        flags: u16,
+        compression_byte: u8,
+    ) {
         let metadata = TraceMetadata::new(42);
         let meta_bytes = rmp_serde::to_vec(&metadata).expect("serialize metadata");
-        let flags = if compression.is_compressed() {
-            FLAG_COMPRESSED
-        } else {
-            0
-        };
 
         file.write_all(TRACE_MAGIC).expect("write magic");
         file.write_all(&TRACE_FILE_VERSION.to_le_bytes())
             .expect("write version");
         file.write_all(&flags.to_le_bytes()).expect("write flags");
-        file.write_all(&[compression.to_byte()])
+        file.write_all(&[compression_byte])
             .expect("write compression");
         file.write_all(&(meta_bytes.len() as u32).to_le_bytes())
             .expect("write metadata length");
         file.write_all(&meta_bytes).expect("write metadata");
+    }
+
+    fn write_header_with_metadata(file: &mut std::fs::File, compression: CompressionMode) {
+        let flags = if compression.is_compressed() {
+            FLAG_COMPRESSED
+        } else {
+            0
+        };
+        write_header_with_raw_compression(file, flags, compression.to_byte());
     }
 
     fn trace_file_layout_summary(path: &std::path::Path) -> serde_json::Value {
@@ -1600,6 +1629,25 @@ mod tests {
         for (orig, read) in events.iter().zip(read_events.iter()) {
             assert_eq!(orig, read);
         }
+    }
+
+    #[cfg(not(feature = "trace-compression"))]
+    #[test]
+    fn compressed_header_without_feature_reports_compression_not_available() {
+        let temp = NamedTempFile::new().expect("create temp file");
+        let path = temp.path();
+        let mut file = std::fs::File::create(path).expect("create file");
+        write_header_with_raw_compression(&mut file, FLAG_COMPRESSED, 1);
+        file.write_all(&0u64.to_le_bytes())
+            .expect("write event count");
+        file.flush().expect("flush");
+        drop(file);
+
+        let err = TraceReader::open(path).expect_err("compressed trace must require feature");
+        assert!(
+            matches!(err, TraceFileError::CompressionNotAvailable),
+            "got: {err:?}"
+        );
     }
 
     #[test]
@@ -1963,6 +2011,23 @@ mod tests {
     #[cfg(feature = "trace-compression")]
     mod compression_tests {
         use super::*;
+
+        #[test]
+        fn write_trace_with_config_writes_compressed_trace() {
+            let temp = NamedTempFile::new().expect("create temp file");
+            let path = temp.path();
+
+            let metadata = TraceMetadata::new(42).with_description("compressed helper trace");
+            let events = sample_events();
+            let config = TraceFileConfig::new().with_compression(CompressionMode::Lz4 { level: 1 });
+
+            write_trace_with_config(path, &metadata, &events, config).expect("write trace");
+
+            let reader = TraceReader::open(path).expect("open reader");
+            assert!(reader.is_compressed());
+            assert_eq!(reader.compression(), CompressionMode::Lz4 { level: 1 });
+            assert_eq!(reader.load_all().expect("load all"), events);
+        }
 
         #[test]
         fn compressed_write_and_read_roundtrip() {

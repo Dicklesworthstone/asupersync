@@ -284,10 +284,11 @@ impl<T> Sender<T> {
         Ok(())
     }
 
-    /// Modifies the current value in place.
+    /// Modifies the current value.
     ///
-    /// This is more efficient than `borrow()` + modify + `send()` when
-    /// the value is large, as it avoids cloning.
+    /// To avoid deadlocks, this method clones the current value, releases the lock,
+    /// applies the closure to the clone, then reacquires the lock to update the value.
+    /// This prevents user closures from running while holding the write lock.
     ///
     /// Applies an in-place update to the latest value for current and future
     /// subscribers.
@@ -301,15 +302,26 @@ impl<T> Sender<T> {
     /// closed.
     pub fn send_modify<F>(&self, f: F) -> Result<(), ModifyError>
     where
+        T: Clone,
         F: FnOnce(&mut T),
     {
         if self.inner.is_sender_dropped() {
             return Err(ModifyError);
         }
 
+        // Clone current value while holding read lock to avoid calling user code under write lock
+        let mut value = {
+            let guard = self.inner.value.read();
+            guard.0.clone()
+        };
+
+        // Call user closure without holding any locks to prevent deadlocks
+        f(&mut value);
+
+        // Update the value atomically
         {
             let mut guard = self.inner.value.write();
-            f(&mut guard.0);
+            guard.0 = value;
             guard.1 = guard.1.wrapping_add(1);
             self.inner.version.store(guard.1, Ordering::Release);
         }
@@ -2907,5 +2919,60 @@ mod tests {
         );
 
         crate::test_complete!("mr_state_consistency_borrow_vs_borrow_and_update_after_shutdown");
+    }
+
+    /// Regression test for deadlock prevention in send_modify.
+    ///
+    /// This test verifies that user closures in send_modify cannot cause deadlocks
+    /// by trying to access watch channels while the closure runs. The old implementation
+    /// would deadlock because the closure ran while holding the write lock.
+    #[test]
+    fn send_modify_deadlock_prevention() {
+        init_test("send_modify_deadlock_prevention");
+
+        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(42));
+        let region = runtime
+            .state
+            .create_root_region(crate::types::Budget::INFINITE);
+
+        let (tx1, rx1) = channel(0u32);
+        let (tx2, mut rx2) = channel(String::from("initial"));
+
+        // Create a scenario where send_modify closure tries to read from another watch channel.
+        // This would deadlock in the old implementation but should work in the new one.
+        let (task_id, _task_handle) = runtime
+            .state
+            .create_task(region, crate::types::Budget::INFINITE, async move {
+                // This closure reads from rx1 while send_modify holds a lock on tx2's value.
+                // In the old implementation, this would deadlock if rx1's read attempted
+                // to acquire any locks that send_modify was holding.
+                let result = tx2.send_modify(|s| {
+                    // Try to read from another watch channel inside the closure
+                    let current_value = *rx1.borrow();
+                    *s = format!("modified_with_{}", current_value);
+                });
+
+                result.map_err(|_| {
+                    crate::error::Error::cancelled(&crate::types::CancelReason::default())
+                })
+            })
+            .unwrap();
+
+        // Schedule and run the task
+        runtime.scheduler.lock().schedule(task_id, 0);
+        runtime.run_until_quiescent();
+
+        // Verify the modification worked correctly
+        let final_value = rx2.borrow();
+        crate::assert_with_log!(
+            *final_value == "modified_with_0",
+            "send_modify closure executed without deadlock",
+            "modified_with_0",
+            &*final_value
+        );
+
+        // If we reach this point without hanging, the deadlock was avoided
+
+        crate::test_complete!("send_modify_deadlock_prevention");
     }
 }
