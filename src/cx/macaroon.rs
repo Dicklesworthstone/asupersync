@@ -118,8 +118,119 @@ pub enum CaveatPredicate {
     Custom(String, String),
 }
 
+/// br-asupersync-5i331u — error returned by [`CaveatPredicate::validate`]
+/// when a string-bearing variant carries a payload too large to encode
+/// in the caveat wire format (which uses a `u16` length prefix). Without
+/// this gate, calling `to_bytes()` on such a caveat would panic at
+/// `u16::try_from(...).expect(...)` — a process-level DoS reachable from
+/// any code path that constructs a `Custom` or `ResourceScope` caveat
+/// from attacker-influenced input.
+///
+/// Callers that handle externally-supplied caveat content MUST call
+/// `validate()` before passing the predicate to `Macaroon` issuance /
+/// verification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CaveatEncodeError {
+    /// `CaveatPredicate::ResourceScope`'s pattern exceeds `u16::MAX`
+    /// (65535) bytes — the wire-format length prefix cannot encode it.
+    PatternTooLarge {
+        /// The actual byte length the caveat carries.
+        actual: usize,
+        /// The maximum supported length (`u16::MAX as usize`).
+        max: usize,
+    },
+    /// `CaveatPredicate::Custom`'s key exceeds `u16::MAX` (65535) bytes.
+    CustomKeyTooLarge {
+        /// The actual byte length the key carries.
+        actual: usize,
+        /// The maximum supported length.
+        max: usize,
+    },
+    /// `CaveatPredicate::Custom`'s value exceeds `u16::MAX` (65535) bytes.
+    CustomValueTooLarge {
+        /// The actual byte length the value carries.
+        actual: usize,
+        /// The maximum supported length.
+        max: usize,
+    },
+}
+
+impl std::fmt::Display for CaveatEncodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PatternTooLarge { actual, max } => write!(
+                f,
+                "ResourceScope pattern is {actual} bytes; wire format max is {max} (br-asupersync-5i331u)"
+            ),
+            Self::CustomKeyTooLarge { actual, max } => write!(
+                f,
+                "Custom caveat key is {actual} bytes; wire format max is {max} (br-asupersync-5i331u)"
+            ),
+            Self::CustomValueTooLarge { actual, max } => write!(
+                f,
+                "Custom caveat value is {actual} bytes; wire format max is {max} (br-asupersync-5i331u)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CaveatEncodeError {}
+
 impl CaveatPredicate {
+    /// br-asupersync-5i331u — validate that this caveat can be encoded
+    /// without panic. Callers that handle externally-supplied caveat
+    /// content (e.g., a capability-issuance API that takes a request-
+    /// supplied resource pattern) MUST call this before passing the
+    /// predicate to `Macaroon::issue`. Any string-bearing variant
+    /// carrying a payload above `u16::MAX` (65535) bytes is rejected.
+    ///
+    /// Returns `Ok(())` if the predicate fits the wire format,
+    /// `Err(CaveatEncodeError::*)` otherwise. Variants that don't
+    /// carry user-controlled bytes (`TimeBefore`, `MaxUses`, etc.)
+    /// always validate.
+    pub fn validate(&self) -> Result<(), CaveatEncodeError> {
+        const MAX: usize = u16::MAX as usize;
+        match self {
+            Self::ResourceScope(pattern) => {
+                if pattern.len() > MAX {
+                    return Err(CaveatEncodeError::PatternTooLarge {
+                        actual: pattern.len(),
+                        max: MAX,
+                    });
+                }
+            }
+            Self::Custom(key, value) => {
+                if key.len() > MAX {
+                    return Err(CaveatEncodeError::CustomKeyTooLarge {
+                        actual: key.len(),
+                        max: MAX,
+                    });
+                }
+                if value.len() > MAX {
+                    return Err(CaveatEncodeError::CustomValueTooLarge {
+                        actual: value.len(),
+                        max: MAX,
+                    });
+                }
+            }
+            // Other variants carry no user-controlled bytes.
+            Self::TimeBefore(_)
+            | Self::TimeAfter(_)
+            | Self::RegionScope(_)
+            | Self::TaskScope(_)
+            | Self::MaxUses(_)
+            | Self::RateLimit { .. } => {}
+        }
+        Ok(())
+    }
+
     /// Encode the predicate to bytes for HMAC chaining.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a string-bearing variant exceeds `u16::MAX` bytes —
+    /// callers handling untrusted input MUST call [`Self::validate`]
+    /// first to catch this case (br-asupersync-5i331u).
     #[must_use]
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
@@ -3270,5 +3381,112 @@ mod tests {
             !recovered.is_bound(),
             "deserialized tokens are treated as unbound — see br-asupersync-00ze7h"
         );
+    }
+
+    // ================================================================
+    // br-asupersync-5i331u — wire-format length-prefix validation
+    // ================================================================
+
+    /// Caveats with content under the u16::MAX wire-format cap MUST
+    /// pass validate() and round-trip cleanly through to_bytes().
+    #[test]
+    fn b_5i331u_validate_accepts_normal_caveats() {
+        let small_pattern = "/api/users/*".to_string();
+        let cav = CaveatPredicate::ResourceScope(small_pattern);
+        assert!(cav.validate().is_ok());
+        let _ = cav.to_bytes(); // does not panic
+
+        let custom_small = CaveatPredicate::Custom("k".to_string(), "v".to_string());
+        assert!(custom_small.validate().is_ok());
+        let _ = custom_small.to_bytes();
+
+        // Variants with no user-controlled bytes always validate.
+        assert!(CaveatPredicate::TimeBefore(0).validate().is_ok());
+        assert!(CaveatPredicate::MaxUses(10).validate().is_ok());
+        assert!(
+            CaveatPredicate::RateLimit {
+                max_count: 1,
+                window_secs: 1
+            }
+            .validate()
+            .is_ok()
+        );
+    }
+
+    /// br-asupersync-5i331u: a ResourceScope pattern at exactly the cap
+    /// boundary MUST validate (u16::MAX = 65535 bytes is the maximum
+    /// representable length).
+    #[test]
+    fn b_5i331u_validate_accepts_pattern_at_u16_boundary() {
+        const MAX: usize = u16::MAX as usize;
+        let pattern = "x".repeat(MAX);
+        let cav = CaveatPredicate::ResourceScope(pattern);
+        assert!(
+            cav.validate().is_ok(),
+            "pattern at exactly u16::MAX bytes must validate"
+        );
+    }
+
+    /// br-asupersync-5i331u: a ResourceScope pattern ONE BYTE over the
+    /// cap MUST be rejected by validate() with PatternTooLarge —
+    /// catching the panic precondition BEFORE to_bytes() is invoked.
+    #[test]
+    fn b_5i331u_validate_rejects_oversized_pattern() {
+        const MAX: usize = u16::MAX as usize;
+        let pattern = "x".repeat(MAX + 1);
+        let cav = CaveatPredicate::ResourceScope(pattern);
+        match cav.validate() {
+            Err(CaveatEncodeError::PatternTooLarge { actual, max }) => {
+                assert_eq!(actual, MAX + 1);
+                assert_eq!(max, MAX);
+            }
+            other => panic!("expected PatternTooLarge, got {other:?}"),
+        }
+    }
+
+    /// br-asupersync-5i331u: Custom caveat key over the cap rejected.
+    #[test]
+    fn b_5i331u_validate_rejects_oversized_custom_key() {
+        const MAX: usize = u16::MAX as usize;
+        let key = "k".repeat(MAX + 1);
+        let cav = CaveatPredicate::Custom(key, "v".to_string());
+        match cav.validate() {
+            Err(CaveatEncodeError::CustomKeyTooLarge { actual, max }) => {
+                assert_eq!(actual, MAX + 1);
+                assert_eq!(max, MAX);
+            }
+            other => panic!("expected CustomKeyTooLarge, got {other:?}"),
+        }
+    }
+
+    /// br-asupersync-5i331u: Custom caveat value over the cap rejected.
+    /// Use a small key + oversized value so the key check passes first
+    /// and the value check fires.
+    #[test]
+    fn b_5i331u_validate_rejects_oversized_custom_value() {
+        const MAX: usize = u16::MAX as usize;
+        let value = "v".repeat(MAX + 1);
+        let cav = CaveatPredicate::Custom("k".to_string(), value);
+        match cav.validate() {
+            Err(CaveatEncodeError::CustomValueTooLarge { actual, max }) => {
+                assert_eq!(actual, MAX + 1);
+                assert_eq!(max, MAX);
+            }
+            other => panic!("expected CustomValueTooLarge, got {other:?}"),
+        }
+    }
+
+    /// br-asupersync-5i331u: Display impl renders the variant + actual
+    /// + max + bead-id, useful for log diagnostics.
+    #[test]
+    fn b_5i331u_display_includes_diagnostics() {
+        let err = CaveatEncodeError::PatternTooLarge {
+            actual: 100_000,
+            max: 65_535,
+        };
+        let s = format!("{err}");
+        assert!(s.contains("100000"), "Display must include actual: {s}");
+        assert!(s.contains("65535"), "Display must include max: {s}");
+        assert!(s.contains("5i331u"), "Display must reference bead: {s}");
     }
 }
