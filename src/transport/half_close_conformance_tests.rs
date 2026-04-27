@@ -82,7 +82,7 @@ impl HalfCloseGoldenTester {
 
         // Client should not receive any data after shutdown(Read)
         let mut buf = [0u8; 64];
-        let _client_reads_data = match client.read(&mut buf) {
+        let client_reads_data = match client.read(&mut buf) {
             Ok(0) => false,                                       // EOF is expected behavior
             Ok(_) => true,                                        // Should NOT receive data
             Err(e) if e.kind() == ErrorKind::WouldBlock => false, // No data (good)
@@ -95,9 +95,15 @@ impl HalfCloseGoldenTester {
         Ok(HalfCloseResult {
             operation: "shutdown_read".to_string(),
             peer_observes_eof: false, // Server shouldn't see EOF yet
-            local_can_read: false,    // Should not read after shutdown(Read)
+            // Plumb the actual probe result so a regression that lets bytes
+            // through after shutdown(Read) flips the golden string. The
+            // expected golden pins `read:false`; if a future change made
+            // the kernel-level shutdown a no-op the assertion would now
+            // fail instead of silently passing.
+            local_can_read: client_reads_data,
             local_can_write: client_can_write,
-            error: None,
+            error: client_reads_data
+                .then_some("shutdown(Read) still allowed local reads".to_string()),
         })
     }
 
