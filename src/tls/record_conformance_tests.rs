@@ -512,14 +512,30 @@ mod tests {
 
             let result = harness.inject_server_record(&modified_record);
 
-            // The record should be processed successfully because the header is not
-            // integrity-protected. However, rustls might still validate the version.
-            // The key point is that header modification doesn't cause crypto failures.
+            // br-asupersync-zt2i8r: previously this assertion pinned the
+            // literal `true`, which made it a no-op. The invariant we
+            // actually want to lock is "the outer header is parsed
+            // identically regardless of crypto; i.e. modifying the
+            // legacy_record_version does NOT cause a parse-level
+            // success/failure flip vs an unmodified record." Compare
+            // against a baseline run with the original record so any
+            // future change to rustls' parser surfacing version checks
+            // would flip the parity and trip the test.
+            let mut harness_baseline =
+                TlsTestHarness::new().expect("Failed to create baseline harness");
+            harness_baseline
+                .complete_handshake()
+                .expect("Baseline handshake failed");
+            let baseline = harness_baseline.inject_server_record(&original_record);
             crate::assert_with_log!(
-                true, // We're testing the behavior exists, exact result depends on rustls
-                "header modification behavior",
+                result.is_ok() == baseline.is_ok(),
+                "header_version_modification_parity",
                 true,
-                "TLS record header should not be integrity-protected"
+                format!(
+                    "TLS record header is not integrity-protected: legacy_record_version mutation must produce same parse outcome as baseline. baseline_ok={}, modified_ok={}",
+                    baseline.is_ok(),
+                    result.is_ok()
+                )
             );
 
             // Test: Modify the content type in header (outer record type, not inner)
@@ -533,13 +549,21 @@ mod tests {
                 payload: encrypted_payload,
             };
 
-            // This tests that the outer record type is not cryptographically bound
+            // br-asupersync-zt2i8r: same — assert the OUTER content type
+            // mutation is parsed (not silently dropped at the wire). In
+            // TLS 1.3 the outer type is always 0x17 in production; rustls
+            // will typically reject 0x16 post-handshake with a decrypt
+            // error. Pin "rustls returns Err for outer-type-mutated
+            // application_data records once the handshake is complete"
+            // — drift either way is a regression worth flagging.
             let result_2 = harness.inject_server_record(&modified_record_2);
             crate::assert_with_log!(
+                result_2.is_err(),
+                "outer_content_type_mutation_rejected",
                 true,
-                "outer content type modification",
-                true,
-                "Outer record content type should not be cryptographically protected"
+                format!(
+                    "Mutating outer record ContentType from 0x17 to 0x16 must produce a parse/decrypt error post-handshake, got Ok"
+                )
             );
         });
 
@@ -570,14 +594,21 @@ mod tests {
 
             let early_data_record = TlsRecord::application_data(early_payload);
 
-            // Inject early data record in post-handshake state (invalid)
+            // br-asupersync-zt2i8r: previously this asserted the
+            // tautology `result.is_ok() || result.is_err()` which is
+            // always true. The actual invariant: an unsolicited
+            // application_data record injected into a freshly-handshaken
+            // ServerConnection that doesn't have valid ciphertext under
+            // the negotiated keys MUST fail decryption (rustls returns
+            // an Err). Pin that rather than the tautology.
             let result = harness.inject_server_record(&early_data_record);
-
             crate::assert_with_log!(
-                result.is_ok() || result.is_err(), // Both outcomes are valid, testing exists
-                "early data handling",
+                result.is_err(),
+                "post_handshake_unencrypted_app_data_rejected",
                 true,
-                "Early data records should have defined behavior"
+                format!(
+                    "Post-handshake injection of plaintext application_data record without valid AEAD must fail decryption, got Ok"
+                )
             );
 
             // Test that early data records have proper length limits
@@ -589,11 +620,18 @@ mod tests {
             let max_early_record = TlsRecord::application_data(max_early_payload);
             let result_max = harness.inject_server_record(&max_early_record);
 
+            // br-asupersync-zt2i8r: same tautology fix. A 16383-byte
+            // payload (= MAX_RECORD_LENGTH - 1) is BELOW the wire limit
+            // of MAX_ENCRYPTED_RECORD_LENGTH (16384+256=16640), so the
+            // record-length check allows it. Without valid ciphertext
+            // it still fails decryption — pin Err.
             crate::assert_with_log!(
-                result_max.is_ok() || result_max.is_err(),
-                "early data length limits",
+                result_max.is_err(),
+                "max_record_length_unencrypted_rejected",
                 true,
-                "Early data records should respect same length limits as normal records"
+                format!(
+                    "Length-valid but cryptographically-invalid record must fail decryption post-handshake, got Ok"
+                )
             );
 
             // Test oversized early data (should be rejected)
