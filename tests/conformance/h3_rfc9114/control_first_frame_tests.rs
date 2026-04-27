@@ -330,7 +330,6 @@ fn test_missing_settings_error_handling() -> H3ConformanceResult {
         }
 
         // Verify connection is properly closed
-        let connection_state = get_connection_state();
         if !get_connection_closed() {
             return Err("Connection should be closed after H3_MISSING_SETTINGS".to_string());
         }
