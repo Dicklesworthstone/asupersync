@@ -801,6 +801,31 @@ impl RuntimeState {
         validator.validate_region_transition(region_id, event, context)
     }
 
+    fn validate_live_region_protocol_transition(
+        &self,
+        region_id: RegionId,
+        event: RegionEvent,
+        operation: &'static str,
+    ) {
+        let Some(region) = self.regions.get(region_id.arena_index()) else {
+            return;
+        };
+        let context = RegionContext {
+            region_id,
+            parent_region: region.parent,
+            created_at: region.created_at,
+            validation_level: CancelValidationLevel::Basic,
+        };
+        let validation_result =
+            self.validate_region_protocol_transition(region_id, event, &context);
+        if matches!(
+            validation_result,
+            TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
+        ) {
+            log_cancel_protocol_violation(operation, &validation_result);
+        }
+    }
+
     /// Validates a task state transition using the cancel protocol validator.
     fn validate_task_protocol_transition(
         &self,
@@ -2881,6 +2906,11 @@ impl RuntimeState {
             region_id,
             previous
         );
+        self.validate_live_region_protocol_transition(
+            region_id,
+            RegionEvent::FinalizerStarted,
+            "async finalizer start",
+        );
         Ok((task_id, budget.priority))
     }
 
@@ -2995,6 +3025,11 @@ impl RuntimeState {
 
     fn record_finalizer_registration(&mut self, id: u64, region: RegionId) {
         let now = self.current_runtime_time();
+        self.validate_live_region_protocol_transition(
+            region,
+            RegionEvent::FinalizerRegistered,
+            "finalizer registration",
+        );
         self.pending_finalizer_ids
             .entry(region)
             .or_default()
@@ -3087,6 +3122,11 @@ impl RuntimeState {
 
             match finalizer {
                 Finalizer::Sync(f) => {
+                    self.validate_live_region_protocol_transition(
+                        region_id,
+                        RegionEvent::FinalizerStarted,
+                        "sync finalizer start",
+                    );
                     // Run synchronously, catching panics to ensure remaining
                     // finalizers still execute and the region is not permanently
                     // stuck in Finalizing state.
@@ -6977,6 +7017,140 @@ mod tests {
             format!("{:?}", state.finalizer_history)
         );
         crate::test_complete!("task_completed_records_async_finalizer_run_history");
+    }
+
+    #[test]
+    fn lab_runtime_validator_tracks_async_finalizer_registration_start_and_completion() {
+        use crate::cancel::protocol_state_machines::RegionState as ValidatorRegionState;
+
+        init_test("lab_runtime_validator_tracks_async_finalizer_registration_start_and_completion");
+        let mut runtime = crate::lab::runtime::LabRuntime::with_seed(17);
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let region_record = runtime.state.region(region).expect("region missing");
+        let context = RegionContext {
+            region_id: region,
+            parent_region: region_record.parent,
+            created_at: region_record.created_at,
+            validation_level: CancelValidationLevel::Basic,
+        };
+
+        {
+            let mut validator = runtime.state.cancel_protocol_validator().lock();
+            let activate =
+                validator.validate_region_transition(region, RegionEvent::Activate, &context);
+            crate::assert_with_log!(
+                matches!(activate, TransitionResult::Valid),
+                "activate",
+                "valid",
+                format!("{activate:?}")
+            );
+        }
+
+        runtime.state.now = Time::from_nanos(10);
+        let registered = runtime.state.register_async_finalizer(region, async {});
+        crate::assert_with_log!(registered, "registered", true, registered);
+
+        {
+            let validator = runtime.state.cancel_protocol_validator().lock();
+            crate::assert_with_log!(
+                validator.region_state(region).cloned()
+                    == Some(ValidatorRegionState::Active {
+                        active_tasks: 0,
+                        pending_finalizers: 1,
+                    }),
+                "validator saw registration",
+                "Active{pending_finalizers:1}",
+                format!("{:?}", validator.region_state(region))
+            );
+            crate::assert_with_log!(
+                validator.violation_count() == 0,
+                "no registration violations",
+                0u64,
+                validator.violation_count()
+            );
+        }
+
+        let region_record = runtime.state.region(region).expect("region missing");
+        let began_close = region_record.begin_close(None);
+        crate::assert_with_log!(began_close, "begin close", true, began_close);
+        let began_finalize = region_record.begin_finalize();
+        crate::assert_with_log!(began_finalize, "begin finalize", true, began_finalize);
+        runtime.state.finalizing_regions.push(region);
+
+        {
+            let mut validator = runtime.state.cancel_protocol_validator().lock();
+            let cancel = validator.validate_region_transition(
+                region,
+                RegionEvent::Cancel {
+                    reason: "test close".to_string(),
+                },
+                &context,
+            );
+            crate::assert_with_log!(
+                matches!(cancel, TransitionResult::Valid),
+                "cancel",
+                "valid",
+                format!("{cancel:?}")
+            );
+        }
+
+        runtime.state.now = Time::from_nanos(20);
+        let scheduled = runtime.state.drain_ready_async_finalizers();
+        crate::assert_with_log!(
+            scheduled.len() == 1,
+            "scheduled len",
+            1usize,
+            scheduled.len()
+        );
+
+        {
+            let validator = runtime.state.cancel_protocol_validator().lock();
+            crate::assert_with_log!(
+                validator.region_state(region).cloned()
+                    == Some(ValidatorRegionState::Finalizing {
+                        running_finalizers: 1,
+                    }),
+                "validator saw finalizer start",
+                "Finalizing{running_finalizers:1}",
+                format!("{:?}", validator.region_state(region))
+            );
+            crate::assert_with_log!(
+                validator.violation_count() == 0,
+                "no start violations",
+                0u64,
+                validator.violation_count()
+            );
+        }
+
+        let task_id = scheduled[0].0;
+        runtime
+            .state
+            .task_mut(task_id)
+            .expect("async finalizer task missing")
+            .complete(Outcome::Ok(()));
+
+        runtime.state.now = Time::from_nanos(30);
+        let _ = runtime.state.task_completed(task_id);
+
+        {
+            let validator = runtime.state.cancel_protocol_validator().lock();
+            crate::assert_with_log!(
+                validator.region_state(region).cloned() == Some(ValidatorRegionState::Finalized),
+                "validator saw finalizer completion",
+                "Finalized",
+                format!("{:?}", validator.region_state(region))
+            );
+            crate::assert_with_log!(
+                validator.violation_count() == 0,
+                "no completion violations",
+                0u64,
+                validator.violation_count()
+            );
+        }
+
+        crate::test_complete!(
+            "lab_runtime_validator_tracks_async_finalizer_registration_start_and_completion"
+        );
     }
 
     #[test]

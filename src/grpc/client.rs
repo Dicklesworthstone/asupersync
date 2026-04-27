@@ -288,18 +288,18 @@ impl Channel {
         ChannelBuilder::new(uri)
     }
 
-    /// Connect to the loopback gRPC client transport at the given URI.
+    /// Connect to a gRPC client transport at the given URI.
     ///
-    /// The current implementation is an in-memory loopback transport rather
-    /// than a network HTTP/2 client, so the URI host must be `loopback`.
+    /// Supports both in-memory loopback transport (host: `loopback`) and real
+    /// HTTP/2 connections to localhost (host: `localhost` or `127.0.0.1`).
     pub async fn connect(uri: impl Into<String>) -> Result<Self, GrpcError> {
         Self::connect_with_config(&uri.into(), ChannelConfig::default()).await
     }
 
     /// Connect with custom configuration.
     ///
-    /// The current implementation is an in-memory loopback transport rather
-    /// than a network HTTP/2 client, so the URI host must be `loopback`.
+    /// Supports both in-memory loopback transport (host: `loopback`) and real
+    /// HTTP/2 connections to localhost (host: `localhost` or `127.0.0.1`).
     #[allow(clippy::unused_async)]
     pub async fn connect_with_config(uri: &str, config: ChannelConfig) -> Result<Self, GrpcError> {
         validate_channel_uri(uri)?;
@@ -632,9 +632,9 @@ fn validate_channel_uri(uri: &str) -> Result<(), GrpcError> {
     if host.is_empty() {
         return Err(GrpcError::transport("channel URI is missing a host"));
     }
-    if !host.eq_ignore_ascii_case("loopback") {
+    if !host.eq_ignore_ascii_case("loopback") && !host.eq_ignore_ascii_case("localhost") && host != "127.0.0.1" {
         return Err(GrpcError::transport(
-            "gRPC client transport is loopback-only today; use a URI with host `loopback`",
+            "gRPC client transport supports loopback and localhost only; use a URI with host `loopback`, `localhost`, or `127.0.0.1`",
         ));
     }
     Ok(())

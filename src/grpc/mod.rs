@@ -1,15 +1,16 @@
 //! gRPC protocol implementation.
 //!
-//! This module provides gRPC protocol building blocks plus the current
-//! loopback-only client/server surface for unary, server streaming, client
-//! streaming, and bidirectional streaming flows.
+//! This module provides gRPC protocol building blocks plus client/server
+//! surface for unary, server streaming, client streaming, and bidirectional
+//! streaming flows.
 //!
 //! # Overview
 //!
 //! gRPC is a high-performance RPC framework that uses Protocol Buffers for
 //! serialization and typically runs over HTTP/2 transport. This implementation
-//! currently provides deterministic in-memory loopback client behavior plus the
-//! surrounding framing, status, service, and interceptor surfaces:
+//! provides both deterministic in-memory loopback client behavior and real
+//! HTTP/2 connections to localhost, plus the surrounding framing, status,
+//! service, and interceptor surfaces:
 //!
 //! - Message framing codec for gRPC over HTTP/2
 //! - All streaming patterns
@@ -22,8 +23,11 @@
 //! ```ignore
 //! use asupersync::grpc::{Channel, Request, Response, Status};
 //!
-//! // Connect to the current loopback transport
+//! // Connect to loopback transport for deterministic testing
 //! let channel = Channel::connect("http://loopback:50051").await?;
+//!
+//! // Or connect to real HTTP/2 service on localhost
+//! let channel = Channel::connect("http://localhost:8080").await?;
 //!
 //! // Create a client and make a call
 //! let mut client = GrpcClient::new(channel);

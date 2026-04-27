@@ -263,6 +263,7 @@ impl CancelStateMachine for RegionStateMachine {
     }
 
     fn transition(&mut self, event: Self::Event, context: &Self::Context) -> TransitionResult {
+        let old_state = self.state.clone();
         let new_state = match (&self.state, &event) {
             // Created -> Active
             (RegionState::Created, RegionEvent::Activate) => RegionState::Active {
@@ -624,7 +625,7 @@ impl CancelStateMachine for TaskStateMachine {
     }
 
     fn transition(&mut self, event: Self::Event, _context: &Self::Context) -> TransitionResult {
-        let old_state = self.state.clone();
+        let _old_state = self.state.clone();
         let new_state = match (&self.state, &event) {
             // Spawned -> Running
             (TaskState::Spawned, TaskEvent::Start) => TaskState::Running,
