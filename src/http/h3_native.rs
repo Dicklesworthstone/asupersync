@@ -2116,8 +2116,12 @@ impl H3RequestStreamState {
                 }
                 Ok(())
             }
-            _ => Err(H3NativeError::ControlProtocol(
-                "only HEADERS/DATA/DATAGRAM are valid on request streams",
+            H3Frame::PushPromise { .. } | H3Frame::Unknown { .. } => Ok(()),
+            H3Frame::Settings(_)
+            | H3Frame::CancelPush(_)
+            | H3Frame::Goaway(_)
+            | H3Frame::MaxPushId(_) => Err(H3NativeError::ControlProtocol(
+                "control frames are not valid on request streams",
             )),
         }
     }
@@ -2272,9 +2276,12 @@ impl H3ConnectionState {
         // peer-negotiated QUIC bidi-stream cap. Previously-seen streams
         // (still live, or already finished) pass through unchanged so that
         // in-flight frames and trailers can complete normally.
+        let request_stream_exists = self.request_streams.contains_key(&stream_id);
+        if matches!(frame, H3Frame::Unknown { .. }) && !request_stream_exists {
+            return Ok(());
+        }
         if let Some(limit) = self.config.max_concurrent_request_streams
-            && !self.request_streams.contains_key(&stream_id)
-            && !self.is_request_stream_finished(stream_id)
+            && !request_stream_exists
             && self.request_streams.len() as u64 >= limit
         {
             return Err(H3NativeError::ConcurrentStreamLimitExceeded {
@@ -2282,8 +2289,13 @@ impl H3ConnectionState {
                 limit,
             });
         }
-        let state = self.request_streams.entry(stream_id).or_default();
-        state.on_frame(frame)
+        if let Some(state) = self.request_streams.get_mut(&stream_id) {
+            return state.on_frame(frame);
+        }
+        let mut state = H3RequestStreamState::new();
+        state.on_frame(frame)?;
+        self.request_streams.insert(stream_id, state);
+        Ok(())
     }
 
     /// Number of currently live (non-finished) request streams. Use this with
@@ -3342,9 +3354,7 @@ mod tests {
             .expect_err("must fail");
         assert_eq!(
             err,
-            H3NativeError::ControlProtocol(
-                "only HEADERS/DATA/DATAGRAM are valid on request streams"
-            )
+            H3NativeError::ControlProtocol("control frames are not valid on request streams")
         );
     }
 
@@ -3430,6 +3440,58 @@ mod tests {
     }
 
     #[test]
+    fn request_stream_ignores_unknown_frames_without_advancing_state_machine() {
+        let mut st = H3RequestStreamState::new();
+        st.on_frame(&H3Frame::Unknown {
+            frame_type: 0xDEAD_BEEF,
+            payload: vec![1, 2, 3],
+        })
+        .expect("unknown frames must be ignored before headers");
+        let err = st
+            .on_frame(&H3Frame::Data(vec![1]))
+            .expect_err("unknown frame must not count as initial headers");
+        assert_eq!(
+            err,
+            H3NativeError::ControlProtocol("DATA before initial HEADERS on request stream")
+        );
+
+        st.on_frame(&H3Frame::Headers(vec![0x80])).expect("headers");
+        st.on_frame(&H3Frame::Unknown {
+            frame_type: 0x40,
+            payload: vec![4, 5],
+        })
+        .expect("unknown frames must be ignored after headers");
+        st.on_frame(&H3Frame::Data(vec![2]))
+            .expect("DATA after ignored unknown frame");
+    }
+
+    #[test]
+    fn request_stream_accepts_push_promise_without_advancing_state_machine() {
+        let mut st = H3RequestStreamState::new();
+        st.on_frame(&H3Frame::PushPromise {
+            push_id: 1,
+            field_block: vec![0x80],
+        })
+        .expect("PUSH_PROMISE is a request-stream sidecar");
+        let err = st
+            .on_frame(&H3Frame::Data(vec![1]))
+            .expect_err("PUSH_PROMISE must not count as initial headers");
+        assert_eq!(
+            err,
+            H3NativeError::ControlProtocol("DATA before initial HEADERS on request stream")
+        );
+
+        st.on_frame(&H3Frame::Headers(vec![0x80])).expect("headers");
+        st.on_frame(&H3Frame::PushPromise {
+            push_id: 2,
+            field_block: vec![0x81],
+        })
+        .expect("PUSH_PROMISE after headers");
+        st.on_frame(&H3Frame::Data(vec![2]))
+            .expect("DATA after push promise");
+    }
+
+    #[test]
     fn control_stream_rejects_data_after_settings() {
         let mut state = H3ControlState::new();
         state
@@ -3503,6 +3565,43 @@ mod tests {
                 "request stream id must be client-initiated bidirectional"
             )
         );
+    }
+
+    #[test]
+    fn connection_ignores_unknown_request_frame_without_opening_stream() {
+        let mut c = H3ConnectionState::new();
+        c.on_control_frame(&H3Frame::Settings(H3Settings::default()))
+            .expect("settings");
+        c.on_request_stream_frame(
+            0,
+            &H3Frame::Unknown {
+                frame_type: 0x21,
+                payload: vec![0xAA],
+            },
+        )
+        .expect("unknown frame on new request stream must be ignored");
+        assert_eq!(c.active_request_stream_count(), 0);
+        c.on_request_stream_frame(0, &H3Frame::Headers(vec![0x80]))
+            .expect("headers still open the stream after ignored unknown");
+        assert_eq!(c.active_request_stream_count(), 1);
+    }
+
+    #[test]
+    fn connection_does_not_open_request_stream_after_invalid_first_frame() {
+        let mut c = H3ConnectionState::new();
+        c.on_control_frame(&H3Frame::Settings(H3Settings::default()))
+            .expect("settings");
+        let err = c
+            .on_request_stream_frame(0, &H3Frame::Data(vec![0xAA]))
+            .expect_err("DATA before HEADERS must be rejected");
+        assert_eq!(
+            err,
+            H3NativeError::ControlProtocol("DATA before initial HEADERS on request stream")
+        );
+        assert_eq!(c.active_request_stream_count(), 0);
+        c.on_request_stream_frame(0, &H3Frame::Headers(vec![0x80]))
+            .expect("valid first HEADERS should still open the stream");
+        assert_eq!(c.active_request_stream_count(), 1);
     }
 
     #[test]

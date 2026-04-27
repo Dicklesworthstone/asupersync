@@ -818,7 +818,7 @@ fn cancel_push_frame_handling() {
         .expect_err("cancel_push not allowed on request stream");
     assert_eq!(
         err,
-        H3NativeError::ControlProtocol("only HEADERS/DATA are valid on request streams")
+        H3NativeError::ControlProtocol("control frames are not valid on request streams")
     );
 
     // CANCEL_PUSH before SETTINGS on control stream is rejected.
@@ -868,7 +868,7 @@ fn max_push_id_frame_handling() {
         .expect_err("max_push_id not allowed on request stream");
     assert_eq!(
         err,
-        H3NativeError::ControlProtocol("only HEADERS/DATA are valid on request streams")
+        H3NativeError::ControlProtocol("control frames are not valid on request streams")
     );
 
     // MAX_PUSH_ID before SETTINGS on control stream is rejected.
@@ -942,7 +942,7 @@ fn h3_error_handling_invalid_frames() {
         .expect_err("settings on request stream");
     assert_eq!(
         err,
-        H3NativeError::ControlProtocol("only HEADERS/DATA are valid on request streams")
+        H3NativeError::ControlProtocol("control frames are not valid on request streams")
     );
 
     // GOAWAY on request stream is rejected.
@@ -952,21 +952,16 @@ fn h3_error_handling_invalid_frames() {
         .expect_err("goaway on request stream");
     assert_eq!(
         err,
-        H3NativeError::ControlProtocol("only HEADERS/DATA are valid on request streams")
+        H3NativeError::ControlProtocol("control frames are not valid on request streams")
     );
 
-    // Unknown frame on request stream is rejected.
+    // Unknown frames on request streams are ignored for GREASE / forward compatibility.
     let mut req3 = H3RequestStreamState::new();
-    let err = req3
-        .on_frame(&H3Frame::Unknown {
-            frame_type: 0xFF,
-            payload: vec![],
-        })
-        .expect_err("unknown frame on request stream");
-    assert_eq!(
-        err,
-        H3NativeError::ControlProtocol("only HEADERS/DATA are valid on request streams")
-    );
+    req3.on_frame(&H3Frame::Unknown {
+        frame_type: 0xFF,
+        payload: vec![],
+    })
+    .expect("unknown frame on request stream is ignored");
 
     // -- Unexpected frame type: unidirectional stream ID for request stream --
     let mut conn = H3ConnectionState::new();
@@ -978,7 +973,7 @@ fn h3_error_handling_invalid_frames() {
         .expect_err("uni stream id for request");
     assert_eq!(
         err,
-        H3NativeError::StreamProtocol("request stream id must be bidirectional")
+        H3NativeError::StreamProtocol("request stream id must be client-initiated bidirectional")
     );
 }
 
@@ -1269,8 +1264,9 @@ fn qpack_static_table_plan_coverage() {
         );
     }
 
-    // Non-indexed status produces Literal.
-    let non_indexed_statuses: Vec<u16> = vec![101, 201, 202, 301, 307, 401, 405, 502];
+    // Non-indexed valid status produces Literal. HTTP/3 explicitly rejects
+    // 101 Switching Protocols, so it is covered separately below.
+    let non_indexed_statuses: Vec<u16> = vec![201, 202, 301, 307, 401, 405, 502];
     for status in &non_indexed_statuses {
         let resp = H3ResponseHead::new(*status, vec![]).expect("valid response");
         let resp_plan = qpack_static_plan_for_response(&resp);
@@ -1283,6 +1279,12 @@ fn qpack_static_table_plan_coverage() {
             "status {status} should produce Literal"
         );
     }
+    assert_eq!(
+        H3ResponseHead::new(101, vec![]).expect_err("HTTP/3 rejects 101"),
+        H3NativeError::InvalidResponsePseudoHeader(
+            "HTTP/3 does not support 101 Switching Protocols"
+        )
+    );
 
     // Response with custom headers.
     let resp_with_headers = H3ResponseHead::new(
@@ -1785,9 +1787,9 @@ fn h3_fault_schedule_duplicate_and_drop_injection_are_deterministic() {
     }
     match &dropped_headers_results[2].1 {
         Err(H3NativeError::ControlProtocol(msg)) => {
-            assert_eq!(*msg, "request stream ended before initial HEADERS");
+            assert_eq!(*msg, "unknown request stream on finish");
         }
-        other => panic!("expected finish-before-HEADERS error, got {other:?}"),
+        other => panic!("expected unknown-stream finish error, got {other:?}"),
     }
 }
 
