@@ -327,6 +327,38 @@ pub enum TransportErrorKind {
     Other,
 }
 
+impl TransportErrorKind {
+    /// Classify an [`std::io::ErrorKind`] into the gRPC transport taxonomy.
+    ///
+    /// Callers that need to preserve context around an `io::Error` should use
+    /// this helper plus [`GrpcError::transport_kind`] rather than stringifying
+    /// the error through [`GrpcError::transport`], which intentionally defaults
+    /// to [`Self::Other`].
+    #[must_use]
+    pub fn from_io_error_kind(kind: std::io::ErrorKind) -> Self {
+        use std::io::ErrorKind as Ek;
+        match kind {
+            Ek::TimedOut => Self::Timeout,
+            Ek::ConnectionRefused | Ek::NotFound | Ek::AddrNotAvailable => Self::ConnectFailed,
+            // AddrInUse is a local bind/config failure, not peer reachability.
+            Ek::AddrInUse => Self::ProtocolViolation,
+            Ek::ConnectionReset
+            | Ek::ConnectionAborted
+            | Ek::BrokenPipe
+            | Ek::NotConnected
+            | Ek::UnexpectedEof => Self::ResetByPeer,
+            Ek::InvalidData => Self::ProtocolViolation,
+            _ => Self::Other,
+        }
+    }
+}
+
+impl From<std::io::ErrorKind> for TransportErrorKind {
+    fn from(kind: std::io::ErrorKind) -> Self {
+        Self::from_io_error_kind(kind)
+    }
+}
+
 /// gRPC error type.
 #[derive(Debug)]
 pub enum GrpcError {
@@ -430,34 +462,7 @@ impl From<Status> for GrpcError {
 
 impl From<std::io::Error> for GrpcError {
     fn from(err: std::io::Error) -> Self {
-        // br-asupersync-9gg21l: classify io::Error by ErrorKind. TimedOut
-        // → Timeout (DeadlineExceeded). ConnectionRefused / NotFound /
-        // HostUnreachable / NetworkUnreachable / AddrNotAvailable
-        // → ConnectFailed. ConnectionReset / ConnectionAborted /
-        // BrokenPipe / NotConnected → ResetByPeer. InvalidData →
-        // ProtocolViolation (Internal). Everything else → Other.
-        use std::io::ErrorKind as Ek;
-        let kind = match err.kind() {
-            Ek::TimedOut => TransportErrorKind::Timeout,
-            Ek::ConnectionRefused | Ek::NotFound | Ek::AddrNotAvailable => {
-                TransportErrorKind::ConnectFailed
-            }
-            // br-asupersync-co6rye: AddrInUse is a LOCAL bind failure
-            // (the local port is taken), not a peer-reachability issue.
-            // Mapping to ConnectFailed → Unavailable (retryable) misleads
-            // clients into retry loops that can't recover without
-            // operator action. ProtocolViolation → Status::internal is
-            // non-retryable and accurately describes a local config
-            // error that the peer cannot resolve.
-            Ek::AddrInUse => TransportErrorKind::ProtocolViolation,
-            Ek::ConnectionReset
-            | Ek::ConnectionAborted
-            | Ek::BrokenPipe
-            | Ek::NotConnected
-            | Ek::UnexpectedEof => TransportErrorKind::ResetByPeer,
-            Ek::InvalidData => TransportErrorKind::ProtocolViolation,
-            _ => TransportErrorKind::Other,
-        };
+        let kind = TransportErrorKind::from_io_error_kind(err.kind());
         Self::Transport(kind, err.to_string())
     }
 }
@@ -701,6 +706,34 @@ mod tests {
                 GrpcError::Transport(actual, _) => assert_eq!(
                     actual, *expected,
                     "io::ErrorKind::{io_kind:?} must map to TransportErrorKind::{expected:?}, got {actual:?}"
+                ),
+                other => panic!("io::Error must convert to Transport variant, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn io_error_kind_helper_matches_grpc_error_conversion() {
+        use std::io::ErrorKind as Ek;
+        for kind in [
+            Ek::TimedOut,
+            Ek::ConnectionRefused,
+            Ek::AddrNotAvailable,
+            Ek::AddrInUse,
+            Ek::ConnectionReset,
+            Ek::ConnectionAborted,
+            Ek::BrokenPipe,
+            Ek::NotConnected,
+            Ek::UnexpectedEof,
+            Ek::InvalidData,
+            Ek::Other,
+        ] {
+            let expected = TransportErrorKind::from_io_error_kind(kind);
+            let grpc: GrpcError = std::io::Error::new(kind, "io failure").into();
+            match grpc {
+                GrpcError::Transport(actual, _) => assert_eq!(
+                    actual, expected,
+                    "helper and GrpcError::from must classify {kind:?} identically"
                 ),
                 other => panic!("io::Error must convert to Transport variant, got {other:?}"),
             }

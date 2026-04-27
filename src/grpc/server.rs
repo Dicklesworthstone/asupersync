@@ -14,7 +14,7 @@ use crate::cx::{Cx, cap};
 use super::client::CompressionEncoding;
 use super::reflection::ReflectionService;
 use super::service::{NamedService, ServiceHandler};
-use super::status::{GrpcError, Status};
+use super::status::{GrpcError, Status, TransportErrorKind};
 use super::streaming::{Metadata, Request, Response};
 
 fn wall_clock_instant_now() -> Instant {
@@ -519,11 +519,18 @@ impl Server {
             ));
         }
         // Accept both numeric socket addresses and hostname forms like localhost:50051.
-        let listener = std::net::TcpListener::bind(addr)
-            .map_err(|error| GrpcError::transport(format!("bind failed: {error}")))?;
-        listener
-            .set_nonblocking(true)
-            .map_err(|error| GrpcError::transport(format!("nonblocking setup failed: {error}")))?;
+        let listener = std::net::TcpListener::bind(addr).map_err(|error| {
+            GrpcError::transport_kind(
+                TransportErrorKind::from_io_error_kind(error.kind()),
+                format!("bind failed: {error}"),
+            )
+        })?;
+        listener.set_nonblocking(true).map_err(|error| {
+            GrpcError::transport_kind(
+                TransportErrorKind::from_io_error_kind(error.kind()),
+                format!("nonblocking setup failed: {error}"),
+            )
+        })?;
         Ok(())
     }
 }
@@ -1178,6 +1185,47 @@ mod tests {
         let result = futures_lite::future::block_on(server.serve("127.0.0.1:0"));
         crate::assert_with_log!(result.is_ok(), "bind probe succeeds", true, result.is_ok());
         crate::test_complete!("test_server_serve_bind_probe");
+    }
+
+    #[test]
+    fn test_server_serve_addr_in_use_preserves_non_retryable_kind() {
+        init_test("test_server_serve_addr_in_use_preserves_non_retryable_kind");
+        let held_listener = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("test should reserve an ephemeral TCP port");
+        let addr = held_listener
+            .local_addr()
+            .expect("reserved listener should expose local addr");
+
+        let server = Server::builder().add_service(TestService).build();
+        let result = futures_lite::future::block_on(server.serve(&addr.to_string()));
+        let err = result.expect_err("binding an already-held port should fail");
+
+        match &err {
+            GrpcError::Transport(kind, message) => {
+                crate::assert_with_log!(
+                    *kind == TransportErrorKind::ProtocolViolation,
+                    "addr-in-use transport kind",
+                    TransportErrorKind::ProtocolViolation,
+                    *kind
+                );
+                crate::assert_with_log!(
+                    message.contains("bind failed"),
+                    "message contains bind context",
+                    true,
+                    message.contains("bind failed")
+                );
+            }
+            other => panic!("expected typed transport error for AddrInUse, got {other:?}"),
+        }
+
+        let status = err.into_status();
+        crate::assert_with_log!(
+            status.code() == crate::grpc::status::Code::Internal,
+            "addr-in-use status code",
+            crate::grpc::status::Code::Internal,
+            status.code()
+        );
+        crate::test_complete!("test_server_serve_addr_in_use_preserves_non_retryable_kind");
     }
 
     #[test]
