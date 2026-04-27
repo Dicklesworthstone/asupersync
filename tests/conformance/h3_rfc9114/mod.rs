@@ -10,6 +10,13 @@ use std::time::{Duration, Instant};
 
 pub mod connection_preface_tests;
 
+// New conformance test modules
+pub mod stream_types_tests;
+pub mod control_first_frame_tests;
+pub mod datagram_format_tests;
+pub mod extended_connect_tests;
+pub mod goaway_tests;
+
 /// Conformance test result for HTTP/3 RFC 9114.
 #[derive(Debug, Clone, Serialize)]
 #[allow(dead_code)]
@@ -122,6 +129,13 @@ impl H3ConformanceHarness {
 
         // Connection preface tests (RFC 9114 Section 6.1)
         results.extend(connection_preface_tests::run_connection_preface_tests());
+
+        // New conformance tests
+        results.extend(stream_types_tests::run_stream_type_tests());
+        results.extend(control_first_frame_tests::run_control_first_frame_tests());
+        results.extend(datagram_format_tests::run_datagram_format_tests());
+        results.extend(extended_connect_tests::run_extended_connect_tests());
+        results.extend(goaway_tests::run_goaway_tests());
 
         results
     }
