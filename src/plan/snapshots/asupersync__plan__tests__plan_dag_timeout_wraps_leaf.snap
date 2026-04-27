@@ -1,0 +1,22 @@
+---
+source: src/plan/mod.rs
+expression: dag
+---
+PlanDag {
+    nodes: [
+        Leaf {
+            label: "slow-op",
+        },
+        Timeout {
+            child: PlanId(
+                0,
+            ),
+            duration: 250ms,
+        },
+    ],
+    root: Some(
+        PlanId(
+            1,
+        ),
+    ),
+}

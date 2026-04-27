@@ -1,0 +1,145 @@
+---
+source: src/trace/distributed/id.rs
+expression: "serde_json::json!({\n    \"trace_ids\": trace_ids, \"span_ids\": span_ids, \"w3c_reject_cases\":\n    w3c_rejects,\n})"
+---
+{
+  "span_ids": [
+    {
+      "as_u64": "0x0000000000000000",
+      "debug": "SymbolSpanId(0000000000000000)",
+      "display": "00000000",
+      "label": "nil"
+    },
+    {
+      "as_u64": "0xffffffffffffffff",
+      "debug": "SymbolSpanId(ffffffffffffffff)",
+      "display": "ffffffff",
+      "label": "max"
+    },
+    {
+      "as_u64": "0xdeadbeefcafebabe",
+      "debug": "SymbolSpanId(deadbeefcafebabe)",
+      "display": "cafebabe",
+      "label": "dead_beef"
+    },
+    {
+      "as_u64": "0x123456789abcdef0",
+      "debug": "SymbolSpanId(123456789abcdef0)",
+      "display": "9abcdef0",
+      "label": "classic_pattern"
+    },
+    {
+      "as_u64": "0x000000000000002a",
+      "debug": "SymbolSpanId(000000000000002a)",
+      "display": "0000002a",
+      "label": "new_for_test_42"
+    },
+    {
+      "as_u64": "0xffffffff00000000",
+      "debug": "SymbolSpanId(ffffffff00000000)",
+      "display": "00000000",
+      "label": "high_only"
+    }
+  ],
+  "trace_ids": [
+    {
+      "as_u128": "0x00000000000000000000000000000000",
+      "debug": "DistTraceId(00000000000000000000000000000000)",
+      "display": "0000000000000000",
+      "high": "0x0000000000000000",
+      "is_nil": true,
+      "label": "nil",
+      "low": "0x0000000000000000",
+      "to_w3c": "00000000000000000000000000000000",
+      "w3c_roundtrip_ok": true
+    },
+    {
+      "as_u128": "0xffffffffffffffffffffffffffffffff",
+      "debug": "DistTraceId(ffffffffffffffffffffffffffffffff)",
+      "display": "ffffffffffffffff",
+      "high": "0xffffffffffffffff",
+      "is_nil": false,
+      "label": "max",
+      "low": "0xffffffffffffffff",
+      "to_w3c": "ffffffffffffffffffffffffffffffff",
+      "w3c_roundtrip_ok": true
+    },
+    {
+      "as_u128": "0x123456789abcdef0fedcba9876543210",
+      "debug": "DistTraceId(123456789abcdef0fedcba9876543210)",
+      "display": "123456789abcdef0",
+      "high": "0x123456789abcdef0",
+      "is_nil": false,
+      "label": "asymmetric_pattern",
+      "low": "0xfedcba9876543210",
+      "to_w3c": "123456789abcdef0fedcba9876543210",
+      "w3c_roundtrip_ok": true
+    },
+    {
+      "as_u128": "0xaaaaaaaaaaaaaaaa0000000000000000",
+      "debug": "DistTraceId(aaaaaaaaaaaaaaaa0000000000000000)",
+      "display": "aaaaaaaaaaaaaaaa",
+      "high": "0xaaaaaaaaaaaaaaaa",
+      "is_nil": false,
+      "label": "high_only",
+      "low": "0x0000000000000000",
+      "to_w3c": "aaaaaaaaaaaaaaaa0000000000000000",
+      "w3c_roundtrip_ok": true
+    },
+    {
+      "as_u128": "0x0000000000000000bbbbbbbbbbbbbbbb",
+      "debug": "DistTraceId(0000000000000000bbbbbbbbbbbbbbbb)",
+      "display": "0000000000000000",
+      "high": "0x0000000000000000",
+      "is_nil": false,
+      "label": "low_only",
+      "low": "0xbbbbbbbbbbbbbbbb",
+      "to_w3c": "0000000000000000bbbbbbbbbbbbbbbb",
+      "w3c_roundtrip_ok": true
+    },
+    {
+      "as_u128": "0x0000000000000000000000000000002a",
+      "debug": "DistTraceId(0000000000000000000000000000002a)",
+      "display": "0000000000000000",
+      "high": "0x0000000000000000",
+      "is_nil": false,
+      "label": "new_for_test_42",
+      "low": "0x000000000000002a",
+      "to_w3c": "0000000000000000000000000000002a",
+      "w3c_roundtrip_ok": true
+    },
+    {
+      "as_u128": "0x00010002000300040005000600070008",
+      "debug": "DistTraceId(00010002000300040005000600070008)",
+      "display": "0001000200030004",
+      "high": "0x0001000200030004",
+      "is_nil": false,
+      "label": "u128_constant",
+      "low": "0x0005000600070008",
+      "to_w3c": "00010002000300040005000600070008",
+      "w3c_roundtrip_ok": true
+    }
+  ],
+  "w3c_reject_cases": [
+    {
+      "input_label": "empty",
+      "input_len": 0,
+      "rejected": true
+    },
+    {
+      "input_label": "len_16",
+      "input_len": 16,
+      "rejected": true
+    },
+    {
+      "input_label": "len_33",
+      "input_len": 33,
+      "rejected": true
+    },
+    {
+      "input_label": "non_hex_len_32",
+      "input_len": 32,
+      "rejected": true
+    }
+  ]
+}
