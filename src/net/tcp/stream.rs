@@ -1688,8 +1688,12 @@ mod tests {
         // Close the server side to create a broken pipe condition
         drop(server);
 
-        // Ensure client socket has proper flags to avoid SIGPIPE
-        let _client_fd = client.as_raw_fd();
+        // Ensure client socket has proper flags to avoid SIGPIPE.
+        // Used by the BSD/macOS branches below (`client_fd` references on
+        // SO_NOSIGPIPE setsockopt/getsockopt). On Linux the variable is
+        // unused — gate the warning so cargo doesn't complain.
+        #[cfg_attr(target_os = "linux", allow(unused_variables))]
+        let client_fd = client.as_raw_fd();
 
         #[cfg(target_os = "linux")]
         {
