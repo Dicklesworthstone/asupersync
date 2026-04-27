@@ -162,6 +162,25 @@ fn mr_scheduler_work_conservation() {
             processed_a, work_after_a, total_a,
             harness_b.stats.tasks_processed, work_after_b, total_b
         );
+
+        // br-asupersync-5ad0mc: ABSOLUTE-CORRECTNESS ANCHOR. Without
+        // this, a regression that makes BOTH branches drop the same
+        // number of tasks would still satisfy `total_a == total_b`.
+        // Pin both totals to the originally-spawned task_count.
+        prop_assert_eq!(
+            total_a,
+            task_count,
+            "MR1 VIOLATION: scenario A lost tasks — spawned={} but processed+remaining={}",
+            task_count,
+            total_a,
+        );
+        prop_assert_eq!(
+            total_b,
+            task_count,
+            "MR1 VIOLATION: scenario B lost tasks — spawned={} but processed+remaining={}",
+            task_count,
+            total_b,
+        );
     });
 }
 
@@ -192,6 +211,26 @@ fn mr_scheduler_spawn_wake_equivalence() {
             work_after_spawn, work_after_wake,
             "MR2 VIOLATION: spawn vs wake produced different ready work counts - spawn: {}, wake: {}",
             work_after_spawn, work_after_wake
+        );
+
+        // br-asupersync-5ad0mc: NON-EMPTY ANCHOR. The relative check
+        // above passes if BOTH spawn and wake silently drop every
+        // task (both 0). `total_work_in_system` is a sum-over-workers
+        // and can legitimately exceed `task_count` (e.g. the global
+        // injector mirrors work into per-worker views), so we cannot
+        // anchor it == task_count without coupling to that
+        // implementation choice. The weakest anchor that still
+        // catches the silent-drop class of regression is "non-zero
+        // when task_count > 0".
+        prop_assert!(
+            work_after_spawn > 0,
+            "MR2 VIOLATION: spawn dropped EVERY task — {} tasks injected, 0 ready system-wide",
+            task_count,
+        );
+        prop_assert!(
+            work_after_wake > 0,
+            "MR2 VIOLATION: wake dropped EVERY task — {} tasks injected, 0 ready system-wide",
+            task_count,
         );
     });
 }
@@ -325,8 +364,8 @@ fn mr_cancel_lane_starvation_bound() {
             scheduler.inject_cancel(task_id, 100);
         }
 
-        let mut _cancel_dispatches = 0;
-        let mut ready_dispatches = 0;
+        let mut cancel_dispatches = 0_usize;
+        let mut ready_dispatches = 0_usize;
         let mut max_consecutive_cancel = 0;
         let mut current_cancel_streak = 0;
 
@@ -335,7 +374,7 @@ fn mr_cancel_lane_starvation_bound() {
             if let Some(task_id) = worker.next_task() {
                 // Check if this task is from cancel or ready lane
                 if cancel_task_ids.contains(&task_id) {
-                    _cancel_dispatches += 1;
+                    cancel_dispatches += 1;
                     current_cancel_streak += 1;
                     max_consecutive_cancel = max_consecutive_cancel.max(current_cancel_streak);
                 } else if ready_task_ids.contains(&task_id) {
@@ -354,13 +393,25 @@ fn mr_cancel_lane_starvation_bound() {
             max_consecutive_cancel, cancel_streak_limit
         );
 
-        // If both ready and cancel work were available, ready should have been dispatched
-        if ready_tasks > 0 && cancel_tasks > 0 && ready_dispatches > 0 {
-            prop_assert!(
-                max_consecutive_cancel <= cancel_streak_limit,
-                "MR4 VIOLATION: ready work starved beyond fairness bound"
-            );
-        }
+        // br-asupersync-5ad0mc: ABSOLUTE-CORRECTNESS ANCHORS. Without
+        // these, a scheduler that silently drops every cancel task
+        // would yield `max_consecutive_cancel == 0 <=
+        // cancel_streak_limit` and the test would pass without
+        // exercising the streak-bound logic at all. Pin both lanes to
+        // a positive dispatch count so the streak invariant is
+        // checked under real pressure.
+        prop_assert!(
+            cancel_dispatches >= 1,
+            "MR4 VIOLATION: zero cancel dispatches across {} injected cancel tasks — \
+             streak-bound assertion would be vacuous",
+            cancel_tasks,
+        );
+        prop_assert!(
+            ready_dispatches >= 1,
+            "MR4 VIOLATION: zero ready dispatches across {} injected ready tasks — \
+             ready-lane fairness wouldn't be exercised",
+            ready_tasks,
+        );
     });
 }
 
@@ -402,11 +453,13 @@ fn mr_drain_widened_bound() {
 
         let mut max_consecutive_cancel = 0;
         let mut current_cancel_streak = 0;
+        let mut cancel_dispatches = 0_usize;
 
         // Process work and track cancel streaks under drain mode
         for _ in 0..(ready_tasks + cancel_tasks) {
             if let Some(task_id) = worker.next_task() {
                 if cancel_task_ids.contains(&task_id) {
+                    cancel_dispatches += 1;
                     current_cancel_streak += 1;
                     max_consecutive_cancel = max_consecutive_cancel.max(current_cancel_streak);
                 } else if ready_task_ids.contains(&task_id) {
@@ -423,6 +476,15 @@ fn mr_drain_widened_bound() {
             max_consecutive_cancel <= drain_limit,
             "MR5 VIOLATION: cancel streak in drain mode exceeded 2*L bound - max: {}, limit: {}",
             max_consecutive_cancel, drain_limit
+        );
+
+        // br-asupersync-5ad0mc: ABSOLUTE-CORRECTNESS ANCHOR. Same as
+        // MR4: zero cancel dispatches makes the bound check vacuous.
+        prop_assert!(
+            cancel_dispatches >= 1,
+            "MR5 VIOLATION: zero cancel dispatches under DrainObligations across \
+             {} injected cancel tasks — 2*L bound assertion would be vacuous",
+            cancel_tasks,
         );
     });
 }
@@ -546,6 +608,16 @@ fn mr_edf_timed_lane_ordering() {
                 }
             }
         }
+
+        // br-asupersync-5ad0mc: NOTE — the original assertions below
+        // skip on empty dispatch_order, which lets a silent timed-
+        // lane drop or an unadvanced time source pass the test
+        // vacuously. A stricter `dispatch_order.len() == task_count`
+        // anchor here currently surfaces a real but separate test-
+        // setup gap (the harness doesn't advance virtual time so
+        // deadlines never elapse). Filed separately so this commit
+        // stays green; this MR remains weakly anchored until the
+        // time-source-aware test harness lands.
 
         // METAMORPHIC ASSERTION: First dispatched should be earliest deadline
         if !dispatch_order.is_empty() {
