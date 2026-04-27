@@ -1911,6 +1911,46 @@ mod tests {
         solver.set_rhs(2, DenseRow::new(vec![1]));
     }
 
+    /// br-asupersync-yjjgz1: a 3x3 matrix where ONE column is fully
+    /// zero while the other columns carry valid data. Distinct from
+    /// gaussian_all_zeros_matrix_returns_singular (whole matrix
+    /// zero) because here pivot selection must specifically reject
+    /// the zero column for ITS column index while still finding
+    /// pivots in the populated columns. A regression in find_pivot's
+    /// bounds checks or column-iteration loop could miscount the
+    /// rank, miscount free variables, or panic on the missing
+    /// pivot.
+    ///
+    ///   Coefficients (col 1 is all zeros):     RHS:
+    ///     [1 0 1]                                [2]
+    ///     [0 0 1]                                [1]
+    ///     [1 0 0]                                [1]
+    ///
+    /// The system is rank-deficient (rank 2, 3 unknowns) so the
+    /// solver MUST return Singular (or Inconsistent if the RHS path
+    /// flags the contradiction first) — never Solved. The exact
+    /// classification depends on the solver's pivot-selection order;
+    /// either non-Solved outcome is acceptable as the conformance
+    /// signal.
+    #[test]
+    fn gaussian_single_zero_column_returns_singular() {
+        let mut solver = GaussianSolver::new(3, 3);
+        solver.set_row(0, &[1, 0, 1], DenseRow::new(vec![2]));
+        solver.set_row(1, &[0, 0, 1], DenseRow::new(vec![1]));
+        solver.set_row(2, &[1, 0, 0], DenseRow::new(vec![1]));
+
+        match solver.solve() {
+            GaussianResult::Singular { .. } => {}
+            GaussianResult::Inconsistent { .. } => {
+                // Acceptable too — both signal "no unique solution".
+            }
+            GaussianResult::Solved(_) => panic!(
+                "br-asupersync-yjjgz1: a matrix with a fully-zero \
+                 column is rank-deficient and MUST NOT solve"
+            ),
+        }
+    }
+
     #[test]
     fn gaussian_zero_row_contradiction_before_first_pivot_reports_inconsistent() {
         let mut basic = GaussianSolver::new(2, 2);
