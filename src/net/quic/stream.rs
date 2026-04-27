@@ -4,8 +4,11 @@
 
 use super::error::QuicError;
 use crate::cx::Cx;
+use std::future::{Future, poll_fn};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::Poll;
 
 /// Tracks active streams for cleanup on cancellation.
 #[derive(Debug, Default)]
@@ -76,7 +79,7 @@ impl SendStream {
             return Err(QuicError::StreamClosed);
         }
 
-        self.inner.write(data).await.map_err(QuicError::from)
+        wait_result_with_cx(cx, self.inner.write(data)).await
     }
 
     /// Write all data to the stream.
@@ -87,7 +90,7 @@ impl SendStream {
             return Err(QuicError::StreamClosed);
         }
 
-        self.inner.write_all(data).await.map_err(QuicError::from)
+        wait_result_with_cx(cx, self.inner.write_all(data)).await
     }
 
     /// Finish sending on this stream (half-close).
@@ -167,11 +170,7 @@ impl RecvStream {
             return Err(QuicError::StreamClosed);
         }
 
-        match self.inner.read(buf).await {
-            Ok(Some(n)) => Ok(Some(n)),
-            Ok(None) => Ok(None),
-            Err(e) => Err(QuicError::from(e)),
-        }
+        wait_result_with_cx(cx, self.inner.read(buf)).await
     }
 
     /// Read exactly the requested number of bytes.
@@ -182,7 +181,7 @@ impl RecvStream {
             return Err(QuicError::StreamClosed);
         }
 
-        self.inner.read_exact(buf).await.map_err(QuicError::from)
+        wait_result_with_cx(cx, self.inner.read_exact(buf)).await
     }
 
     /// Read all remaining data up to a limit.
@@ -193,7 +192,7 @@ impl RecvStream {
             return Err(QuicError::StreamClosed);
         }
 
-        self.inner.read_to_end(limit).await.map_err(QuicError::from)
+        wait_result_with_cx(cx, self.inner.read_to_end(limit)).await
     }
 
     /// Stop reading from this stream with an error code.
@@ -224,10 +223,57 @@ impl Drop for RecvStream {
     }
 }
 
+async fn wait_result_with_cx<T, E, F>(cx: &Cx, future: F) -> Result<T, QuicError>
+where
+    E: Into<QuicError>,
+    F: Future<Output = Result<T, E>>,
+{
+    let mut future = std::pin::pin!(future);
+    poll_fn(|poll_cx| {
+        if let Err(err) = cx.checkpoint() {
+            return Poll::Ready(Err(QuicError::from(err)));
+        }
+        future
+            .as_mut()
+            .poll(poll_cx)
+            .map(|result| result.map_err(Into::into))
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::pedantic, clippy::nursery, clippy::expect_fun_call, clippy::map_unwrap_or, clippy::cast_possible_wrap, clippy::future_not_send)]
+    #![allow(
+        clippy::pedantic,
+        clippy::nursery,
+        clippy::expect_fun_call,
+        clippy::map_unwrap_or,
+        clippy::cast_possible_wrap,
+        clippy::future_not_send
+    )]
     use super::*;
+    use std::task::Context;
+
+    fn noop_waker() -> std::task::Waker {
+        std::task::Waker::noop().clone()
+    }
+
+    struct PendingOnce {
+        polled: bool,
+    }
+
+    impl Future for PendingOnce {
+        type Output = Result<(), QuicError>;
+
+        fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+            if self.polled {
+                Poll::Ready(Ok(()))
+            } else {
+                self.polled = true;
+                Poll::Pending
+            }
+        }
+    }
 
     #[test]
     fn tracker_initially_not_closing() {
@@ -271,5 +317,26 @@ mod tests {
         let tracker = StreamTracker::new();
         let debug = format!("{tracker:?}");
         assert!(debug.contains("StreamTracker"));
+    }
+
+    #[test]
+    fn wait_result_with_cx_returns_cancelled_when_context_is_cancelled_between_polls() {
+        let cx = Cx::for_testing();
+        let mut future = std::pin::pin!(wait_result_with_cx(&cx, PendingOnce { polled: false }));
+        let waker = noop_waker();
+        let mut poll_cx = Context::from_waker(&waker);
+
+        assert!(matches!(future.as_mut().poll(&mut poll_cx), Poll::Pending));
+
+        cx.set_cancel_requested(true);
+
+        let cancelled = matches!(
+            future.as_mut().poll(&mut poll_cx),
+            Poll::Ready(Err(QuicError::Cancelled))
+        );
+        assert!(
+            cancelled,
+            "future should return cancelled after Cx cancellation"
+        );
     }
 }
