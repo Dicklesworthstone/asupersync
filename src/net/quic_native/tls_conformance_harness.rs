@@ -394,10 +394,22 @@ mod property_conformance {
     use super::*;
 
     prop_compose! {
+        // br-asupersync-0pfh9h: do not emit `CryptoLevel::Initial` here. The
+        // reference machine `RefCryptoLevelMachine::advance_level` rejects
+        // any backward transition (`target < current_level`), so a sequence
+        // like `[OneRtt, Initial]` returns Err on the second step. The
+        // implementation under test, by contrast, has no `on_initial_*`
+        // entry point and the property runner maps `CryptoLevel::Initial`
+        // to `Ok(())` (no-op). That asymmetry causes ref_levels=[OneRtt]
+        // vs impl_levels=[OneRtt, Initial] on shrunk inputs and breaks the
+        // invariant we are trying to assert. Only Handshake and OneRtt
+        // model real forward transitions, so restrict the strategy to
+        // those — the original Initial draws were unreachable in any
+        // production path anyway (Initial is the start state, not a
+        // commanded transition).
         fn arb_crypto_sequence()(
             levels in prop::collection::vec(
                 prop_oneof![
-                    Just(CryptoLevel::Initial),
                     Just(CryptoLevel::Handshake),
                     Just(CryptoLevel::OneRtt)
                 ],
