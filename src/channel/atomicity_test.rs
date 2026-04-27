@@ -57,6 +57,8 @@ pub struct AtomicityStats {
     pub reservations_made: AtomicU64,
     /// Total reservations aborted.
     pub reservations_aborted: AtomicU64,
+    /// Total operations skipped by synthetic cancellation injection before reserve.
+    pub injected_skips: AtomicU64,
     /// Total cancellations during reserve phase.
     pub reserve_cancellations: AtomicU64,
     /// Total cancellations during commit phase.
@@ -154,6 +156,11 @@ impl AtomicityOracle {
         self.stats
             .reserve_cancellations
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records a synthetic skip before entering the reserve phase.
+    pub fn record_injected_skip(&self) {
+        self.stats.injected_skips.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Records a cancellation during commit phase.
@@ -312,7 +319,7 @@ where
 
         // Check for cancellation injection during reserve
         if injector.should_cancel() {
-            oracle.record_reserve_cancellation();
+            oracle.record_injected_skip();
             continue;
         }
 
