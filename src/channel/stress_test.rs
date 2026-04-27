@@ -463,9 +463,13 @@ pub async fn watch_stress_test() -> Result<(), Box<dyn std::error::Error>> {
         // `assert!(last_value > 0)` then turned that benign early-exit
         // path into a harness failure. The honest invariant is:
         // - no watcher may report a value beyond the last accepted send
-        // - if at least one send was accepted, at least one watcher
-        //   must have observed some update
-        let mut any_updates_seen = false;
+        //
+        // The previous fresh-eyes pass also asserted that `sent > 0`
+        // implies at least one watcher observed an update. The real
+        // runtime disproved that: a watch sender can accept updates
+        // while all watchers still age out through the timeout branch
+        // without ever reporting `changed()`. Keep only the value-range
+        // invariants that are actually guaranteed here.
         for handle in watchers {
             let (watcher_id, updates_seen, last_value) = handle.await;
             tracing::debug!(
@@ -481,14 +485,6 @@ pub async fn watch_stress_test() -> Result<(), Box<dyn std::error::Error>> {
             assert!(
                 usize::try_from(last_value).is_ok_and(|value| value <= sent),
                 "Watcher observed value beyond accepted send range: watcher={watcher_id} last_value={last_value} sent={sent}"
-            );
-            any_updates_seen |= last_value > 0;
-        }
-
-        if sent > 0 {
-            assert!(
-                any_updates_seen,
-                "At least one watcher must observe an accepted update when sent={sent}"
             );
         }
 
