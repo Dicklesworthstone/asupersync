@@ -1828,7 +1828,17 @@ impl MySqlConnection {
             .map(SecretString::as_str)
             .unwrap_or_default();
         let auth_response = match plugin_name {
-            "mysql_native_password" => mysql_native_auth(password, auth_data),
+            "mysql_native_password" => {
+                if !options.insecure_legacy_mysql_native_password {
+                    return Err(MySqlError::UnsupportedAuthPlugin(
+                        "mysql_native_password rejected by default — set \
+                         MySqlConnectOptions::insecure_legacy_mysql_native_password = true \
+                         to opt in (and prefer ssl_mode: Required to neutralise the offline-crack surface)"
+                            .to_string(),
+                    ));
+                }
+                mysql_native_auth(password, auth_data)
+            }
             "caching_sha2_password" => caching_sha2_auth(password, auth_data),
             plugin => {
                 return Err(MySqlError::UnsupportedAuthPlugin(plugin.to_string()));
