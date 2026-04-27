@@ -22,5 +22,5 @@ expression: scrub_browser_trace_fields(&fields)
   "trace_id": "[trace_id]",
   "validation_failure_category": "none",
   "validation_status": "valid",
-  "worker_id": "worker-browser-snapshot"
+  "worker_id": "<redacted>"
 }
