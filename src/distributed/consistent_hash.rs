@@ -385,6 +385,7 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use serde_json::json;
 
     fn build_ring(node_count: usize, vnodes_per_node: usize) -> HashRing {
         // br-asupersync-rnybb1: tests use a fixed seed (0) for
@@ -395,6 +396,49 @@ mod tests {
             ring.add_node(format!("node-{i}"));
         }
         ring
+    }
+
+    fn canonical_fixed_seed_key_node_mapping_snapshot() -> serde_json::Value {
+        let mut ring = HashRing::new(32, 0x5eed_cafe);
+        for node in ["node-a", "node-b", "node-c", "node-d"] {
+            assert!(ring.add_node(node), "fixture node should be unique");
+        }
+
+        let representative_keys = [
+            "blob:deadbeef",
+            "blob:cafebabe",
+            "order:000001",
+            "order:000128",
+            "region:us-east-1",
+            "region:eu-west-1",
+            "route:/v1/health",
+            "route:/v1/orders/42",
+            "session:0001",
+            "session:1042",
+            "tenant:acme/invoices",
+            "tenant:acme/orders/99",
+            "tenant:globex/alerts",
+            "user:alice",
+            "user:bob",
+            "user:zoe",
+        ];
+
+        json!({
+            "seed": ring.seed(),
+            "vnodes_per_node": 32,
+            "nodes": ring.nodes().collect::<Vec<_>>(),
+            "assignments": representative_keys
+                .iter()
+                .map(|key| {
+                    json!({
+                        "key": key,
+                        "node": ring
+                            .node_for_key(key)
+                            .expect("fixture ring should assign representative key"),
+                    })
+                })
+                .collect::<Vec<_>>(),
+        })
     }
 
     #[test]
@@ -610,6 +654,11 @@ mod tests {
                 "key {key} assigned differently across builds"
             );
         }
+    }
+
+    #[test]
+    fn canonical_fixed_seed_key_node_mapping() {
+        insta::assert_json_snapshot!(canonical_fixed_seed_key_node_mapping_snapshot());
     }
 
     /// Metamorphic relation: permuting node insertion order must not change
@@ -839,7 +888,11 @@ mod tests {
         // Record initial key-to-node assignments
         let initial_assignments: Vec<String> = keys
             .iter()
-            .map(|key| ring.node_for_key(key).expect("ring should assign key").to_owned())
+            .map(|key| {
+                ring.node_for_key(key)
+                    .expect("ring should assign key")
+                    .to_owned()
+            })
             .collect();
 
         // Add a new node
@@ -848,7 +901,11 @@ mod tests {
         // Record assignments after adding the new node
         let final_assignments: Vec<String> = keys
             .iter()
-            .map(|key| ring.node_for_key(key).expect("ring should assign key").to_owned())
+            .map(|key| {
+                ring.node_for_key(key)
+                    .expect("ring should assign key")
+                    .to_owned()
+            })
             .collect();
 
         // Count how many keys were reassigned
