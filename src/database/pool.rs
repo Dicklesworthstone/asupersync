@@ -405,6 +405,22 @@ impl<M: ConnectionManager> DbPool<M> {
         }
     }
 
+    fn sleep_retry_backoff(&self, mut duration: Duration) -> bool {
+        const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+        while !duration.is_zero() {
+            if self.is_closed() {
+                return false;
+            }
+
+            let chunk = duration.min(SHUTDOWN_POLL_INTERVAL);
+            std::thread::sleep(chunk);
+            duration = duration.saturating_sub(chunk);
+        }
+
+        !self.is_closed()
+    }
+
     /// Acquire a connection from the pool.
     ///
     /// Returns a `PooledConnection` that automatically returns the connection
@@ -568,9 +584,14 @@ impl<M: ConnectionManager> DbPool<M> {
 
                     // Calculate backoff delay (no jitter in synchronous context).
                     let delay = calculate_delay(policy, attempt, None);
-                    std::thread::sleep(delay.min(remaining));
+                    if !self.sleep_retry_backoff(delay.min(remaining)) {
+                        return Err(DbPoolError::Closed);
+                    }
 
                     // Re-check deadline after sleep.
+                    if self.is_closed() {
+                        return Err(DbPoolError::Closed);
+                    }
                     if crate::time::wall_now() >= deadline {
                         self.stats.total_timeouts.fetch_add(1, Ordering::Relaxed);
                         return Err(DbPoolError::Timeout);
@@ -950,10 +971,13 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
         }
     }
 
-    async fn sleep_retry_backoff(cx: &Cx, mut duration: Duration) -> bool {
+    async fn sleep_retry_backoff(&self, cx: &Cx, mut duration: Duration) -> bool {
         const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
         while !duration.is_zero() {
+            if self.is_closed() {
+                return false;
+            }
             if cx.checkpoint().is_err() {
                 return false;
             }
@@ -963,7 +987,7 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
             duration = duration.saturating_sub(chunk);
         }
 
-        cx.checkpoint().is_ok()
+        !self.is_closed() && cx.checkpoint().is_ok()
     }
 
     /// Acquire a connection from the pool.
@@ -1112,11 +1136,17 @@ impl<M: AsyncConnectionManager> AsyncDbPool<M> {
                     }
 
                     let delay = calculate_delay(policy, attempt, None);
-                    if !Self::sleep_retry_backoff(cx, delay.min(remaining)).await {
+                    if !self.sleep_retry_backoff(cx, delay.min(remaining)).await {
+                        if self.is_closed() {
+                            return Err(DbPoolError::Closed);
+                        }
                         self.stats.total_timeouts.fetch_add(1, Ordering::Relaxed);
                         return Err(DbPoolError::Timeout);
                     }
 
+                    if self.is_closed() {
+                        return Err(DbPoolError::Closed);
+                    }
                     if crate::time::wall_now() >= deadline || cx.checkpoint().is_err() {
                         self.stats.total_timeouts.fetch_add(1, Ordering::Relaxed);
                         return Err(DbPoolError::Timeout);
@@ -1600,6 +1630,91 @@ mod tests {
         assert_eq!(stats.max_size, 10);
         assert!(!pool.is_closed());
         crate::test_complete!("pool_new");
+    }
+
+    #[test]
+    fn get_with_retry_observes_close_during_backoff() {
+        init_test("get_with_retry_observes_close_during_backoff");
+        let pool = Arc::new(DbPool::new(
+            TestManager::new(),
+            DbPoolConfig::with_max_size(1)
+                .validate_on_checkout(false)
+                .connection_timeout(Duration::from_secs(1)),
+        ));
+        let held = pool.get().expect("holder acquires the only slot");
+        let policy = RetryPolicy::fixed_delay(Duration::from_millis(250), 3);
+        let close_pool = Arc::clone(&pool);
+        let closer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            close_pool.close();
+        });
+
+        let started = Instant::now();
+        let result = pool.get_with_retry(&policy);
+        let elapsed = started.elapsed();
+
+        closer.join().expect("close thread should finish cleanly");
+
+        assert!(matches!(result, Err(DbPoolError::Closed)));
+        assert!(
+            elapsed < Duration::from_millis(200),
+            "close during retry backoff should stop promptly, observed {elapsed:?}"
+        );
+
+        drop(held);
+
+        let stats = pool.stats();
+        assert_eq!(stats.total, 0, "closed pool should not retain capacity");
+        assert_eq!(
+            stats.active, 0,
+            "closed pool should not retain active leases"
+        );
+        assert_eq!(
+            stats.total_discards, 1,
+            "return after close should discard the held connection"
+        );
+        assert_eq!(pool.manager.disconnects(), 1);
+        crate::test_complete!("get_with_retry_observes_close_during_backoff");
+    }
+
+    #[test]
+    fn async_get_with_retry_observes_close_during_backoff() {
+        init_test("async_get_with_retry_observes_close_during_backoff");
+        let pool = Arc::new(AsyncDbPool::new(
+            AsyncTestManager::always_failing(),
+            DbPoolConfig::with_max_size(1)
+                .validate_on_checkout(false)
+                .connection_timeout(Duration::from_secs(1)),
+        ));
+        let policy = RetryPolicy::fixed_delay(Duration::from_millis(250), 3);
+        let cx = Cx::for_testing();
+        let close_pool = Arc::clone(&pool);
+        let closer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            close_pool.close();
+        });
+
+        let started = Instant::now();
+        let result = block_on(pool.get_with_retry(&cx, &policy));
+        let elapsed = started.elapsed();
+
+        closer.join().expect("close thread should finish cleanly");
+
+        assert!(matches!(result, Err(DbPoolError::Closed)));
+        assert!(
+            elapsed < Duration::from_millis(200),
+            "close during retry backoff should stop promptly, observed {elapsed:?}"
+        );
+        let stats = pool.stats();
+        assert_eq!(
+            stats.total, 0,
+            "closed async pool should not retain capacity"
+        );
+        assert_eq!(
+            stats.active, 0,
+            "closed async pool should not retain active leases"
+        );
+        crate::test_complete!("async_get_with_retry_observes_close_during_backoff");
     }
 
     #[test]
