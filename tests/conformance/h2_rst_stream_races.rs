@@ -6,12 +6,10 @@
 //! runtime behavior.
 
 use asupersync::bytes::Bytes;
+use asupersync::http::h2::Header;
 use asupersync::http::h2::connection::{Connection, ReceivedFrame};
 use asupersync::http::h2::error::ErrorCode;
-use asupersync::http::h2::frame::{
-    DataFrame, Frame, RstStreamFrame, Setting, SettingsFrame,
-};
-use asupersync::http::h2::Header;
+use asupersync::http::h2::frame::{DataFrame, Frame, RstStreamFrame, Setting, SettingsFrame};
 use asupersync::http::h2::settings::Settings;
 
 fn open_client_connection() -> Connection {

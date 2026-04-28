@@ -7,21 +7,24 @@ failures with high-signal traces and minimal manual digging.
 ## Quick Commands
 
 ```bash
-# Unit + integration tests
-rch exec -- cargo test
+# Build hygiene check (always run first)
+rch exec -- cargo check --lib -p asupersync --features test-internals
+
+# Unit + integration tests (library only)
+rch exec -- env CARGO_INCREMENTAL=0 cargo test --lib --features test-internals
 
 # Stream logs
-rch exec -- cargo test -- --nocapture
+rch exec -- env CARGO_INCREMENTAL=0 cargo test --lib --features test-internals -- --nocapture
 
 # Run a specific test file
-rch exec -- cargo test --test http_verification
+rch exec -- env CARGO_INCREMENTAL=0 cargo test --test http_verification --features test-internals
 
 # Run a specific test by name (substring match)
-rch exec -- cargo test cancellation_conformance
+rch exec -- env CARGO_INCREMENTAL=0 cargo test cancellation_conformance --features test-internals
 
 # Phase 2 differential policy contract checks
-rch exec -- cargo test --test lab_live_time_normalization_policy_contract -- --nocapture
-rch exec -- cargo test --test lab_live_virtualized_surface_matrix_contract -- --nocapture
+rch exec -- env CARGO_INCREMENTAL=0 cargo test --test lab_live_time_normalization_policy_contract --features test-internals -- --nocapture
+rch exec -- env CARGO_INCREMENTAL=0 cargo test --test lab_live_virtualized_surface_matrix_contract --features test-internals -- --nocapture
 ```
 
 ## Shared Validation Contract (asupersync-ay6qvw)
@@ -1063,7 +1066,7 @@ CI should run at minimum:
 
 - `cargo fmt --check`
 - `cargo clippy --all-targets -- -D warnings`
-- `cargo test`
+- `rch exec -- env CARGO_INCREMENTAL=0 cargo test --lib --features test-internals`
 
 CI also includes scheduled fuzzing via `.github/workflows/fuzz.yml`,
 property tests via `.github/workflows/property-tests.yml`, and
