@@ -6,7 +6,7 @@
 
 > **North Star:** inside Asupersync’s capability boundary, every concurrent program has (1) a well‑founded ownership tree, (2) explicit cancellation driven to quiescence, (3) deterministic resource cleanup, and (4) compositional building blocks whose semantics are *lawful* and testable under a deterministic lab runtime.
 
-This is a **blank‑slate** design: Asupersync owns the scheduler, cancellation protocol, region model, and (optionally) the I/O reactor. It is built only on Rust’s stable `async/await` and `core::future::Future` + `std::task::{Waker, RawWaker}`.
+This is a **blank‑slate** design: Asupersync owns the scheduler, cancellation protocol, region model, and (optionally) the I/O reactor. It is built on Rust’s `async/await` plus `core::future::Future` and `std::task::{Waker, RawWaker}`; the current repository pins a nightly Edition 2024 toolchain even though the semantic model itself does not require language changes.
 
 ---
 
@@ -45,7 +45,7 @@ If you use Asupersync primitives, you get **cancel correctness**, **no orphan ta
 * Not a full web framework.
 * Not “exactly once” distributed execution (we provide *idempotency + leases*; exactly once is a system property).
 * Not magical cancellation for arbitrary user futures: non‑cooperative futures can still stall. We define escalation boundaries explicitly.
-* Not a compiler feature: we do not require language changes (but we can optionally integrate nightly features).
+* Not a compiler feature: we do not require language changes, even though this repository currently pins a nightly toolchain and may optionally integrate nightly-only features.
 
 ### 1.3 The soundness frontier (explicit tiers)
 
