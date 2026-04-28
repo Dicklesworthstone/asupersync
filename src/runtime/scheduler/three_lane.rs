@@ -2832,10 +2832,7 @@ impl ThreeLaneWorker {
             return IoPhaseOutcome::NoProgress;
         };
 
-        let now = self
-            .timer_driver
-            .as_ref()
-            .map_or(Time::ZERO, TimerDriverHandle::now);
+        let now = self.current_scheduler_time();
         let local_deadline = self.local.lock().next_deadline();
         let timer_deadline = self
             .timer_driver
@@ -2937,10 +2934,7 @@ impl ThreeLaneWorker {
                 }
 
                 // Get current time for runnable checks
-                let now = self
-                    .timer_driver
-                    .as_ref()
-                    .map_or(Time::ZERO, TimerDriverHandle::now);
+                let now = self.current_scheduler_time();
 
                 // Lock-free check: global injector and fast queue (no mutex needed).
                 if self.global.has_runnable_work(now) || !self.fast_queue.is_empty() {
@@ -2989,10 +2983,7 @@ impl ThreeLaneWorker {
 
                     if let Some(next_deadline) = next_deadline {
                         // Re-fetch now to ensure we don't sleep if deadline passed during logic
-                        let now = self
-                            .timer_driver
-                            .as_ref()
-                            .map_or(Time::ZERO, TimerDriverHandle::now);
+                        let now = self.current_scheduler_time();
                         match classify_backoff_timeout_decision(io_phase, next_deadline, now) {
                             BackoffTimeoutDecision::ParkTimeout { nanos } => {
                                 record_backoff_timeout_park(
@@ -3132,10 +3123,7 @@ impl ThreeLaneWorker {
         }
 
         // Current time for EDF (computed once, reused for global + local).
-        let now = self
-            .timer_driver
-            .as_ref()
-            .map_or(Time::ZERO, TimerDriverHandle::now);
+        let now = self.current_scheduler_time();
 
         // ── PHASE 1: Highest Priority Global Queue ───────────────────────
         if suggestion == SchedulingSuggestion::MeetDeadlines {
@@ -3709,6 +3697,21 @@ impl ThreeLaneWorker {
         suggestion
     }
 
+    /// Returns the scheduler's current notion of time.
+    ///
+    /// When no timer driver is installed, use the runtime state's cached clock
+    /// so timed-lane dispatch stays consistent with the Lyapunov snapshot.
+    fn current_scheduler_time(&self) -> Time {
+        if let Some(timer_driver) = self.timer_driver.as_ref() {
+            return TimerDriverHandle::now(timer_driver);
+        }
+
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .now
+    }
+
     /// Runs a single scheduling step.
     ///
     /// Returns `true` if a task was executed.
@@ -3744,11 +3747,7 @@ impl ThreeLaneWorker {
     /// whose deadline has passed.
     #[allow(dead_code)] // Scheduler dispatch integration path
     pub(crate) fn try_timed_work(&mut self) -> Option<TaskId> {
-        // Get current time from timer driver or use Time::ZERO (always ready)
-        let now = self
-            .timer_driver
-            .as_ref()
-            .map_or(Time::ZERO, TimerDriverHandle::now);
+        let now = self.current_scheduler_time();
 
         // Global timed - EDF ordering, only pop if deadline is due
         if let Some(tt) = self.global.pop_timed_if_due(now) {
@@ -7179,6 +7178,38 @@ mod tests {
             Some(cancel_task),
             "cancel follows timed under MeetDeadlines"
         );
+    }
+
+    #[test]
+    fn test_governor_meet_deadlines_without_timer_driver_uses_state_time() {
+        let mut state = RuntimeState::new();
+        state.now = Time::from_nanos(999_000_000);
+        let root = state.create_root_region(Budget::unlimited());
+        let (_task_id, _handle) = state
+            .create_task(root, Budget::with_deadline_ns(1_000_000_000), async {})
+            .expect("create deadline task");
+        let state = Arc::new(ContendedMutex::new("runtime_state", state));
+
+        let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 16, true, 1);
+        let cancel_task = TaskId::new_for_test(1, 12);
+        let timed_task = TaskId::new_for_test(1, 13);
+        scheduler.inject_cancel(cancel_task, 100);
+        scheduler.inject_timed(timed_task, Time::from_nanos(500_000_000));
+
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
+
+        assert_eq!(
+            worker.governor_suggest(),
+            SchedulingSuggestion::MeetDeadlines,
+            "state.now should still drive Lyapunov deadline pressure without a timer driver"
+        );
+        assert_eq!(
+            worker.next_task(),
+            Some(timed_task),
+            "timed work due before state.now must dispatch ahead of cancel work"
+        );
+        assert_eq!(worker.next_task(), Some(cancel_task));
     }
 
     #[test]
