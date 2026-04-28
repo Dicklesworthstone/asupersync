@@ -971,7 +971,7 @@ error messages. See `docs/macro-dsl.md` for the full pattern catalog.
 Current reality: the Cargo-compiled conformance registry for this repository is
 the integration-test entrypoint at `tests/conformance.rs`, which includes the
 live module list from `tests/conformance/mod.rs`. That registry currently wires
-59 `pub mod` suites, with some entries or result lanes gated by `mysql`,
+61 `pub mod` suites, with some entries or result lanes gated by `mysql`,
 `quic`, `tls`, or platform-specific cfgs.
 
 The active registry covers:
@@ -984,7 +984,7 @@ The active registry covers:
 
 Important limitation: the repository also preserves many conformance files on
 disk that are **not** part of the live registry today. `tests/conformance/mod.rs`
-currently leaves 28 `pub mod` entries commented out as known bit-rot or
+currently leaves 21 `pub mod` entries commented out as known bit-rot or
 unresolved-dependency follow-ups, including older `h1_*` siblings,
 `sqlite_prepared_statements`, the full `websocket_rfc6455` suite,
 `grpc_deadline`, `grpc_health`, `grpc_status`, `h3_settings`, `quic_initial`,
