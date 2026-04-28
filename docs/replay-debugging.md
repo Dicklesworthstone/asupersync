@@ -379,17 +379,27 @@ failure without guesswork.
 Enable replay recording when creating the Lab runtime:
 
 ```rust
-use asupersync::lab::{LabConfig, LabRuntime};
+use asupersync::{Cx, LabConfig, LabRuntime, Outcome, Scope};
 use asupersync::trace::{RecorderConfig, TraceRecorder};
+use asupersync::types::{policy::FailFast, Budget};
 
 // Enable recording with default config
 let config = LabConfig::new(42)
     .with_default_replay_recording();
 
 let mut runtime = LabRuntime::new(config);
+let root = runtime.state.create_root_region(Budget::INFINITE);
+let cx = Cx::for_testing();
+let scope = Scope::<FailFast>::new(root, Budget::INFINITE);
 
-// Run your test
-runtime.spawn_root(my_async_task);
+// Spawn the root task explicitly, then enqueue it.
+let handle = scope
+    .spawn_registered(&mut runtime.state, &cx, |_task_cx| async move {
+        // Exercise the code under test here.
+        Outcome::ok(())
+    })
+    .expect("spawn root task");
+runtime.scheduler.lock().schedule(handle.task_id(), 0);
 runtime.run_until_quiescent();
 ```
 
@@ -711,24 +721,42 @@ fn analyze_race() {
 **Problem**: A task doesn't clean up properly when cancelled.
 
 ```rust
+use asupersync::{CancelReason, Cx, LabConfig, LabRuntime, Outcome, Scope};
+use asupersync::time::{sleep, wall_now};
+use asupersync::types::{policy::FailFast, Budget};
+use std::time::Duration;
+
 #[test]
 fn test_cancellation_cleanup() {
     let config = LabConfig::new(42)
         .with_default_replay_recording();
     let mut runtime = LabRuntime::new(config);
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+    let cx = Cx::for_testing();
+    let scope = Scope::<FailFast>::new(root, Budget::INFINITE);
 
     // Spawn a task and cancel it mid-operation
-    let handle = runtime.spawn_root(async |cx| {
-        let _permit = resource.acquire(cx).await?;
-        // Long operation that gets cancelled
-        cx.sleep(Duration::from_secs(10)).await;
-        // Cleanup code that should run
-        permit.release();
-        Outcome::ok(())
-    });
+    let handle = scope
+        .spawn_registered(&mut runtime.state, &cx, |task_cx| async move {
+            let permit = resource.acquire(&task_cx).await.expect("acquire permit");
+            let now = task_cx.timer_driver().map_or_else(wall_now, |driver| driver.now());
+            // Long operation that gets cancelled
+            sleep(now, Duration::from_secs(10)).await;
+            // Cleanup code that should run
+            permit.release();
+            Outcome::ok(())
+        })
+        .expect("spawn cancellable task");
 
+    runtime.scheduler.lock().schedule(handle.task_id(), 0);
     runtime.step_n(100);
-    runtime.cancel(handle);
+    let cancel_reason = CancelReason::user("debug cancellation");
+    let cancelled = runtime.state.cancel_task(handle.task_id(), &cancel_reason);
+    assert!(cancelled, "task should accept cancellation");
+    runtime.scheduler.lock().schedule_cancel(
+        handle.task_id(),
+        cancel_reason.cleanup_budget().priority,
+    );
     runtime.run_until_quiescent();
 
     // Bug: permit wasn't released!
@@ -778,30 +806,42 @@ fn analyze_cancellation() {
 **Problem**: Timers fire in unexpected order.
 
 ```rust
+use asupersync::{join, Cx, LabConfig, LabRuntime, Outcome, Scope};
+use asupersync::time::{sleep, wall_now};
+use asupersync::types::{policy::FailFast, Budget};
+use std::time::Duration;
+
 #[test]
 fn test_timer_ordering() {
     let config = LabConfig::new(42)
         .with_default_replay_recording();
     let mut runtime = LabRuntime::new(config);
+    let root = runtime.state.create_root_region(Budget::INFINITE);
+    let cx = Cx::for_testing();
+    let scope = Scope::<FailFast>::new(root, Budget::INFINITE);
 
-    runtime.spawn_root(async |cx| {
-        // These should complete in order
-        let t1 = cx.sleep(Duration::from_millis(100));
-        let t2 = cx.sleep(Duration::from_millis(200));
-        let t3 = cx.sleep(Duration::from_millis(300));
+    let handle = scope
+        .spawn_registered(&mut runtime.state, &cx, |task_cx| async move {
+            let now = task_cx.timer_driver().map_or_else(wall_now, |driver| driver.now());
+            // These should complete in order
+            let t1 = sleep(now, Duration::from_millis(100));
+            let t2 = sleep(now, Duration::from_millis(200));
+            let t3 = sleep(now, Duration::from_millis(300));
 
-        let mut order = vec![];
+            let mut order = vec![];
 
-        join!(
-            async { t1.await; order.push(1); },
-            async { t2.await; order.push(2); },
-            async { t3.await; order.push(3); },
-        );
+            join!(
+                async { t1.await; order.push(1); },
+                async { t2.await; order.push(2); },
+                async { t3.await; order.push(3); },
+            );
 
-        assert_eq!(order, vec![1, 2, 3], "Timers fired out of order!");
-        Outcome::ok(())
-    });
+            assert_eq!(order, vec![1, 2, 3], "Timers fired out of order!");
+            Outcome::ok(())
+        })
+        .expect("spawn timer task");
 
+    runtime.scheduler.lock().schedule(handle.task_id(), 0);
     runtime.run_until_quiescent();
 }
 ```
