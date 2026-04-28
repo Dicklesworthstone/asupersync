@@ -866,6 +866,7 @@ mod tests {
     )]
     use super::*;
     use crate::grpc::Code;
+    use crate::http::h2::error::ErrorCode;
     use std::task::Waker;
 
     fn noop_waker() -> Waker {
@@ -875,6 +876,16 @@ mod tests {
     fn init_test(name: &str) {
         crate::test_utils::init_test_logging();
         crate::test_phase!(name);
+    }
+
+    fn grpc_go_rst_stream_status(code: ErrorCode) -> Status {
+        match code {
+            ErrorCode::Cancel => Status::cancelled(format!("Received RST_STREAM with code {code}")),
+            ErrorCode::RefusedStream => {
+                Status::unavailable(format!("Received RST_STREAM with code {code}"))
+            }
+            _ => Status::internal(format!("Received RST_STREAM with code {code}")),
+        }
     }
 
     #[test]
@@ -2221,11 +2232,19 @@ mod tests {
         let mut server_response_stream = ResponseStream::<String>::open();
 
         // Phase 1: Normal bidirectional message exchange
-        client_request_stream.push("client_msg_1".to_string()).expect("client sends");
-        server_response_stream.push(Ok("server_resp_1".to_string())).expect("server responds");
+        client_request_stream
+            .push("client_msg_1".to_string())
+            .expect("client sends");
+        server_response_stream
+            .push(Ok("server_resp_1".to_string()))
+            .expect("server responds");
 
-        client_request_stream.push("client_msg_2".to_string()).expect("client sends");
-        server_response_stream.push(Ok("server_resp_2".to_string())).expect("server responds");
+        client_request_stream
+            .push("client_msg_2".to_string())
+            .expect("client sends");
+        server_response_stream
+            .push(Ok("server_resp_2".to_string()))
+            .expect("server responds");
 
         // Phase 2: Client-side cancellation during active streaming
         // Per gRPC spec: client cancellation must propagate cancellation reason
@@ -2258,13 +2277,19 @@ mod tests {
         // After draining, cancellation status must be returned (fail-closed)
         match pinned_client.as_mut().poll_next(&mut cx) {
             Poll::Ready(Some(Err(status))) => {
-                assert_eq!(status.code(), Code::Cancelled, "grpc-go: cancellation code preserved");
+                assert_eq!(
+                    status.code(),
+                    Code::Cancelled,
+                    "grpc-go: cancellation code preserved"
+                );
                 assert!(
                     status.message().contains("client cancelled"),
                     "grpc-go: cancellation reason preserved"
                 );
             }
-            other => panic!("grpc-go semantics violated: expected cancellation status, got {other:?}"),
+            other => {
+                panic!("grpc-go semantics violated: expected cancellation status, got {other:?}")
+            }
         }
 
         // Phase 4: Simulate server-side cancellation response
@@ -2292,13 +2317,19 @@ mod tests {
         // Server cancellation status returned after drain
         match pinned_server.as_mut().poll_next(&mut cx) {
             Poll::Ready(Some(Err(status))) => {
-                assert_eq!(status.code(), Code::Cancelled, "grpc-go: server cancellation code");
+                assert_eq!(
+                    status.code(),
+                    Code::Cancelled,
+                    "grpc-go: server cancellation code"
+                );
                 assert!(
                     status.message().contains("server detected"),
                     "grpc-go: server cancellation message preserved"
                 );
             }
-            other => panic!("grpc-go server semantics violated: expected cancellation status, got {other:?}"),
+            other => panic!(
+                "grpc-go server semantics violated: expected cancellation status, got {other:?}"
+            ),
         }
 
         // Phase 5: Verify bidirectional cancellation state consistency
@@ -2319,18 +2350,140 @@ mod tests {
         // Subsequent polls should consistently return the same cancellation status
         match pinned_client.as_mut().poll_next(&mut cx) {
             Poll::Ready(Some(Err(status))) => {
-                assert_eq!(status.code(), Code::Cancelled, "grpc-go: cancellation status idempotent");
+                assert_eq!(
+                    status.code(),
+                    Code::Cancelled,
+                    "grpc-go: cancellation status idempotent"
+                );
             }
             other => panic!("grpc-go idempotent cancellation violated: {other:?}"),
         }
 
         match pinned_server.as_mut().poll_next(&mut cx) {
             Poll::Ready(Some(Err(status))) => {
-                assert_eq!(status.code(), Code::Cancelled, "grpc-go: server cancellation idempotent");
+                assert_eq!(
+                    status.code(),
+                    Code::Cancelled,
+                    "grpc-go: server cancellation idempotent"
+                );
             }
             other => panic!("grpc-go server idempotent cancellation violated: {other:?}"),
         }
 
         crate::test_complete!("differential_bidirectional_cancellation_semantics_vs_grpc_go");
+    }
+
+    /// GRPC-DIFF-RST: RST_STREAM error codes must propagate with grpc-go-style
+    /// status classes after any already-buffered items are drained.
+    #[test]
+    fn differential_rst_stream_error_code_propagation_vs_grpc_go() {
+        init_test("differential_rst_stream_error_code_propagation_vs_grpc_go");
+
+        let cases = [
+            (ErrorCode::Cancel, Code::Cancelled, "CANCEL"),
+            (
+                ErrorCode::RefusedStream,
+                Code::Unavailable,
+                "REFUSED_STREAM",
+            ),
+            (ErrorCode::ProtocolError, Code::Internal, "PROTOCOL_ERROR"),
+        ];
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        for (index, (rst_code, expected_code, expected_token)) in cases.iter().copied().enumerate()
+        {
+            let request_buffered = format!("request-buffered-{index}");
+            let response_buffered = format!("response-buffered-{index}");
+            let mut request_stream = StreamingRequest::<String>::open();
+            request_stream
+                .push(request_buffered.clone())
+                .expect("buffer request item");
+            request_stream.cancel_with_error(grpc_go_rst_stream_status(rst_code));
+
+            let mut response_stream = ResponseStream::<String>::open();
+            response_stream
+                .push(Ok(response_buffered.clone()))
+                .expect("buffer response item");
+            response_stream.cancel_with_error(grpc_go_rst_stream_status(rst_code));
+
+            let mut pinned_request = Pin::new(&mut request_stream);
+            let mut pinned_response = Pin::new(&mut response_stream);
+
+            assert!(
+                matches!(
+                    pinned_request.as_mut().poll_next(&mut cx),
+                    Poll::Ready(Some(Ok(ref msg))) if msg == &request_buffered
+                ),
+                "grpc-go: buffered request items must drain before RST_STREAM status for {rst_code}"
+            );
+            match pinned_request.as_mut().poll_next(&mut cx) {
+                Poll::Ready(Some(Err(status))) => {
+                    assert_eq!(
+                        status.code(),
+                        expected_code,
+                        "grpc-go: request-side RST_STREAM code class drifted for {rst_code}"
+                    );
+                    assert!(
+                        status.message().contains(expected_token),
+                        "grpc-go: request-side RST_STREAM details should mention {expected_token}"
+                    );
+                }
+                other => {
+                    panic!("expected request-side RST_STREAM status for {rst_code}, got {other:?}")
+                }
+            }
+            match pinned_request.as_mut().poll_next(&mut cx) {
+                Poll::Ready(Some(Err(status))) => {
+                    assert_eq!(
+                        status.code(),
+                        expected_code,
+                        "grpc-go: request-side RST_STREAM status should stay idempotent for {rst_code}"
+                    );
+                }
+                other => panic!(
+                    "expected idempotent request-side RST_STREAM status for {rst_code}, got {other:?}"
+                ),
+            }
+
+            assert!(
+                matches!(
+                    pinned_response.as_mut().poll_next(&mut cx),
+                    Poll::Ready(Some(Ok(ref msg))) if msg == &response_buffered
+                ),
+                "grpc-go: buffered response items must drain before RST_STREAM status for {rst_code}"
+            );
+            match pinned_response.as_mut().poll_next(&mut cx) {
+                Poll::Ready(Some(Err(status))) => {
+                    assert_eq!(
+                        status.code(),
+                        expected_code,
+                        "grpc-go: response-side RST_STREAM code class drifted for {rst_code}"
+                    );
+                    assert!(
+                        status.message().contains(expected_token),
+                        "grpc-go: response-side RST_STREAM details should mention {expected_token}"
+                    );
+                }
+                other => {
+                    panic!("expected response-side RST_STREAM status for {rst_code}, got {other:?}")
+                }
+            }
+            match pinned_response.as_mut().poll_next(&mut cx) {
+                Poll::Ready(Some(Err(status))) => {
+                    assert_eq!(
+                        status.code(),
+                        expected_code,
+                        "grpc-go: response-side RST_STREAM status should stay idempotent for {rst_code}"
+                    );
+                }
+                other => panic!(
+                    "expected idempotent response-side RST_STREAM status for {rst_code}, got {other:?}"
+                ),
+            }
+        }
+
+        crate::test_complete!("differential_rst_stream_error_code_propagation_vs_grpc_go");
     }
 }
