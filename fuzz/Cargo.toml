@@ -2479,6 +2479,17 @@ test = false
 doc = false
 bench = false
 
+# PostgreSQL ParameterDescription/ParameterStatus message family fuzzer.
+# Tests src/database/postgres.rs parameter message parsing with structure-aware
+# input generation covering OID types, parameter names/values, encoding corruption,
+# and message format edge cases (negative counts, embedded nulls, oversized data).
+[[bin]]
+name = "postgres_parameter_messages"
+path = "fuzz_targets/postgres_parameter_messages.rs"
+test = false
+doc = false
+bench = false
+
 # br-asupersync-qs0zoz: RESP protocol adapter lifecycle and decode fuzzer.
 # Tests src/messaging/protocol/mod.rs handshake/health/transport state changes,
 # cancellation handling, RESP frame prefix consumption, and round-trip decode.
