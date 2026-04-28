@@ -338,6 +338,15 @@ mod tests {
         crate::test_phase!(name);
     }
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct LabBarrierGenerationSummary {
+        leader_party: usize,
+        released_parties: Vec<usize>,
+        generation: u64,
+        arrived: usize,
+        waiter_count: usize,
+    }
+
     // Helper to block on futures for testing (since we don't have the full runtime here)
     fn block_on<F: Future>(f: F) -> F::Output {
         let mut f = std::pin::pin!(f);
@@ -349,6 +358,111 @@ mod tests {
                 Poll::Pending => std::thread::yield_now(),
             }
         }
+    }
+
+    fn run_barrier_generations_under_lab_runtime(
+        staggered_generations: &[Vec<usize>],
+    ) -> Vec<LabBarrierGenerationSummary> {
+        assert!(
+            !staggered_generations.is_empty(),
+            "metamorphic barrier run requires at least one generation"
+        );
+        let parties = staggered_generations[0].len();
+        assert!(parties > 0, "metamorphic barrier run requires at least one party");
+        for generation in staggered_generations {
+            assert_eq!(
+                generation.len(),
+                parties,
+                "every metamorphic generation must keep the same party count"
+            );
+        }
+
+        let config = TestConfig::new()
+            .with_seed(0xBA22_1E42)
+            .with_tracing(true)
+            .with_max_steps(20_000);
+        let mut runtime = LabRuntimeTarget::create_runtime(config);
+        let barrier = Arc::new(Barrier::new(parties));
+
+        let summaries = LabRuntimeTarget::block_on(&mut runtime, async move {
+            let cx = Cx::current().expect("lab runtime should install a current Cx");
+            let mut summaries = Vec::new();
+
+            for staggers in staggered_generations {
+                let releases = Arc::new(StdMutex::new(Vec::<(usize, bool)>::new()));
+                let mut tasks = Vec::new();
+
+                for (party, delay) in staggers.iter().copied().enumerate() {
+                    let spawn_cx = cx.clone();
+                    let task_cx = spawn_cx.clone();
+                    let barrier = Arc::clone(&barrier);
+                    let releases = Arc::clone(&releases);
+                    tasks.push(LabRuntimeTarget::spawn(
+                        &spawn_cx,
+                        Budget::INFINITE,
+                        async move {
+                            for _ in 0..delay {
+                                yield_now().await;
+                            }
+
+                            let wait_result = barrier
+                                .wait(&task_cx)
+                                .await
+                                .expect("barrier wait should succeed");
+                            releases
+                                .lock()
+                                .unwrap()
+                                .push((party, wait_result.is_leader()));
+                        },
+                    ));
+                }
+
+                for task in tasks {
+                    let outcome = task.await;
+                    crate::assert_with_log!(
+                        matches!(outcome, crate::types::Outcome::Ok(())),
+                        "barrier generation task completes successfully",
+                        true,
+                        matches!(outcome, crate::types::Outcome::Ok(()))
+                    );
+                }
+
+                let release_log = releases.lock().unwrap().clone();
+                let mut leaders = release_log
+                    .iter()
+                    .filter_map(|(party, is_leader)| is_leader.then_some(*party));
+                let leader_party = leaders
+                    .next()
+                    .expect("exactly one leader should be recorded per generation");
+                assert!(
+                    leaders.next().is_none(),
+                    "exactly one leader should be recorded per generation"
+                );
+
+                let mut released_parties =
+                    release_log.iter().map(|(party, _)| *party).collect::<Vec<_>>();
+                released_parties.sort_unstable();
+
+                let state = barrier.state.lock();
+                summaries.push(LabBarrierGenerationSummary {
+                    leader_party,
+                    released_parties,
+                    generation: state.generation,
+                    arrived: state.arrived,
+                    waiter_count: state.waiters.len(),
+                });
+            }
+
+            summaries
+        });
+
+        let violations = runtime.oracles.check_all(runtime.now());
+        assert!(
+            violations.is_empty(),
+            "metamorphic barrier generations should leave runtime invariants clean: {violations:?}"
+        );
+
+        summaries
     }
 
     #[test]
@@ -483,6 +597,51 @@ mod tests {
         }
 
         crate::test_complete!("barrier_multiple_generations");
+    }
+
+    #[test]
+    fn metamorphic_completed_generation_preserves_next_generation_rendezvous() {
+        init_test("metamorphic_completed_generation_preserves_next_generation_rendezvous");
+
+        let baseline =
+            run_barrier_generations_under_lab_runtime(&[vec![0, 1, 2]]);
+        let transformed =
+            run_barrier_generations_under_lab_runtime(&[vec![2, 0, 1], vec![0, 1, 2]]);
+
+        let baseline_target = &baseline[0];
+        let transformed_target = &transformed[1];
+
+        assert_eq!(
+            baseline_target.leader_party,
+            transformed_target.leader_party,
+            "replaying the same target rendezvous after a completed prior generation must preserve leader identity"
+        );
+        assert_eq!(
+            baseline_target.released_parties,
+            transformed_target.released_parties,
+            "completed prior generations must not change which parties release in the target rendezvous"
+        );
+        assert_eq!(
+            baseline_target.arrived, 0,
+            "baseline rendezvous must drain the arrival count"
+        );
+        assert_eq!(
+            transformed_target.arrived, 0,
+            "transformed rendezvous must drain the arrival count"
+        );
+        assert_eq!(
+            baseline_target.waiter_count, 0,
+            "baseline rendezvous must drain waiter registrations"
+        );
+        assert_eq!(
+            transformed_target.waiter_count, 0,
+            "transformed rendezvous must drain waiter registrations"
+        );
+        assert_eq!(
+            transformed_target.generation,
+            baseline_target.generation + 1,
+            "inserting one completed sacrificial generation should only offset the target generation count by one"
+        );
     }
 
     #[test]
