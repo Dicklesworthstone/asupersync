@@ -1949,5 +1949,4 @@ mod tests {
         out.extend(decoder.finish().unwrap());
         assert_eq!(out, payload);
     }
-
 }

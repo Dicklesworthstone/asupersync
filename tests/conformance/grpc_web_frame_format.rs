@@ -144,6 +144,31 @@ fn grpc_web_rejects_reserved_flag_bits() {
     }
 }
 
+#[test]
+fn grpc_web_rejects_compressed_trailer_frames_until_supported() {
+    let codec = WebFrameCodec::new();
+    let mut wire = BytesMut::new();
+    wire.put_u8(0x81);
+    wire.put_u32(0);
+
+    let err = codec.decode(&mut wire).expect_err(
+        "compressed trailer frames must fail closed until decompression is implemented",
+    );
+    match err {
+        asupersync::grpc::GrpcError::Compression(message) => {
+            assert!(
+                message.contains("compressed gRPC-Web trailer frames are unsupported"),
+                "unexpected compression error: {message}"
+            );
+        }
+        other => panic!("expected compression error, got {other:?}"),
+    }
+    assert!(
+        codec.is_poisoned(),
+        "unsupported compressed trailer frames must poison the codec"
+    );
+}
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // gRPC-Web Specification Conformance Tests
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
