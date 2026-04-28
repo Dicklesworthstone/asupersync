@@ -1,1 +1,7 @@
-
+seed=0x13579bdf2468ace0 object_id=000000000000000013579bdf2468ace0 payload_len=24 payload_hex=b97270a09558cc97d22143fb4a7a00684c4cda17d1fcc326
+symbol idx=00 sbn=000 esi=0000 kind=Source len=8 data_hex=b97270a09558cc97
+symbol idx=01 sbn=000 esi=0001 kind=Source len=8 data_hex=d22143fb4a7a0068
+symbol idx=02 sbn=000 esi=0002 kind=Source len=8 data_hex=4c4cda17d1fcc326
+symbol idx=03 sbn=000 esi=0003 kind=Repair len=8 data_hex=10b02729f777f521
+symbol idx=04 sbn=000 esi=0004 kind=Repair len=8 data_hex=5d5b9ca9fe745ad9
+stats bytes_in=24 blocks=1 source_symbols=3 repair_symbols=2
