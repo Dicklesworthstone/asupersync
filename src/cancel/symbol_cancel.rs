@@ -588,22 +588,25 @@ impl SymbolCancelToken {
         // children, so if we observe !cancelled (Acquire) under the write lock
         // the subsequent cancel() will see our child when it reads the list.
         //
-        // br-asupersync-n1a1br — atomic enough snapshot under the
-        // `children` lock. The previous shape could observe
-        // `cancelled == true` while `cancelled_at` was still the
-        // sentinel `u64::MAX`, then incorrectly stamp the child with
-        // `Time::ZERO`. The helper below waits out the in-flight
-        // local-cancel window without taking the `reason` lock in the
-        // blocking direction (that would invert cancel()'s
-        // reason→children ordering and deadlock).
-        let mut children = self.state.children.write();
-        let snapshot = self.cancelled_at_snapshot_for_child();
+        // br-asupersync-53nvge: if `cancelled == true`, drop the children lock
+        // BEFORE waiting for `cancelled_at` publication. The timestamp race is
+        // synchronised by `reason`/`cancelled_at`, not by the child list lock;
+        // holding `children.write()` across the wait point needlessly
+        // serializes late child creation and can stall other threads in the
+        // reason→children handoff window.
+        {
+            let mut children = self.state.children.write();
+            if !self.state.cancelled.load(Ordering::Acquire) {
+                children.push(child.clone());
+                return child;
+            }
+        }
 
-        if let Some(at) = snapshot {
-            drop(children);
+        if let Some(at) = self.cancelled_at_snapshot_for_child() {
             let parent_reason = CancelReason::parent_cancelled();
             child.cancel(&parent_reason, at);
         } else {
+            let mut children = self.state.children.write();
             children.push(child.clone());
         }
 
@@ -2210,7 +2213,10 @@ mod tests {
             ("cancelled_token", {
                 let obj = ObjectId::new(0xaaaa_bbbb_cccc_dddd, 0xeeee_ffff_0000_1111);
                 let token = SymbolCancelToken::new(obj, &mut rng);
-                token.cancel(&CancelReason::timeout(), crate::types::Time::from_millis(1000));
+                token.cancel(
+                    &CancelReason::timeout(),
+                    crate::types::Time::from_millis(1000),
+                );
                 token
             }),
             ("test_token_minimal", {
@@ -2219,9 +2225,12 @@ mod tests {
             ("test_token_max_values", {
                 let token = SymbolCancelToken::new_for_test(
                     0xffff_ffff_ffff_ffff,
-                    ObjectId::new(0xdead_beef_cafe_babe, 0x1337_1337_1337_1337)
+                    ObjectId::new(0xdead_beef_cafe_babe, 0x1337_1337_1337_1337),
                 );
-                token.cancel(&CancelReason::user("test"), crate::types::Time::from_millis(9999));
+                token.cancel(
+                    &CancelReason::user("test"),
+                    crate::types::Time::from_millis(9999),
+                );
                 token
             }),
         ];
@@ -2243,14 +2252,18 @@ mod tests {
                 token.object_id().high(),
                 token.object_id().low(),
                 token.is_cancelled(),
-                bytes.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(", "),
-                bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+                bytes
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                bytes
+                    .iter()
+                    .map(|b| format!("{:02x}", b))
+                    .collect::<String>()
             );
 
-            insta::assert_snapshot!(
-                format!("cancel_token_serialization_{}", name),
-                hex_output
-            );
+            insta::assert_snapshot!(format!("cancel_token_serialization_{}", name), hex_output);
         }
     }
 
@@ -4595,6 +4608,64 @@ mod tests {
             "Test thread failed to start within timeout"
         );
 
+        parent
+            .state
+            .cancelled_at
+            .store(cancel_time.as_nanos(), Ordering::Release);
+        drop(reason_guard);
+
+        let child_cancelled_at = join.join().expect("child thread must complete");
+        assert_eq!(child_cancelled_at, Some(cancel_time.as_nanos()));
+    }
+
+    /// br-asupersync-53nvge — a late `child()` call may need to wait for
+    /// `cancelled_at` publication, but that wait must not monopolize the
+    /// `children` lock. Other threads still need that lock for drain/metrics
+    /// work in the same handoff window.
+    #[test]
+    fn child_wait_for_cancelled_at_does_not_hold_children_lock() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        let mut rng = DetRng::new(0x53A9_0001);
+        let parent = SymbolCancelToken::new(ObjectId::new(4, 4), &mut rng);
+        let started = Arc::new(AtomicBool::new(false));
+
+        let mut reason_guard = parent.state.reason.write();
+        *reason_guard = Some(CancelReason::new(CancelKind::User));
+        parent.state.cancelled.store(true, Ordering::Release);
+        parent.state.cancelled_at.store(u64::MAX, Ordering::Release);
+
+        let parent_for_child = parent.clone();
+        let started_for_child = Arc::clone(&started);
+        let join = std::thread::spawn(move || {
+            started_for_child.store(true, Ordering::Release);
+            let mut child_rng = DetRng::new(0x53A9_0002);
+            let child = parent_for_child.child(&mut child_rng);
+            child.cancelled_at().map(Time::as_nanos)
+        });
+
+        const MAX_WAIT_RETRIES: u32 = 10_000;
+        for _attempt in 0..MAX_WAIT_RETRIES {
+            if started.load(Ordering::Acquire) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_nanos(100));
+        }
+        assert!(
+            started.load(Ordering::Acquire),
+            "child thread failed to start within timeout"
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        assert!(
+            parent.state.children.try_write().is_some(),
+            "late child creation must not hold children.write() while waiting for cancelled_at"
+        );
+
+        let cancel_time = Time::from_nanos(991);
         parent
             .state
             .cancelled_at
