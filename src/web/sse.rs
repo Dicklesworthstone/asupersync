@@ -220,7 +220,6 @@ pub const DEFAULT_SSE_MAX_EVENTS: usize = 100_000;
 pub struct Sse {
     events: Vec<SseEvent>,
     keep_alive: bool,
-    last_event_id: Option<String>,
     max_events: usize,
     max_total_bytes: usize,
 }
@@ -232,7 +231,6 @@ impl Sse {
         Self {
             events,
             keep_alive: false,
-            last_event_id: None,
             max_events: DEFAULT_SSE_MAX_EVENTS,
             max_total_bytes: DEFAULT_SSE_MAX_TOTAL_BYTES,
         }
@@ -254,19 +252,6 @@ impl Sse {
     #[must_use]
     pub fn keep_alive(mut self) -> Self {
         self.keep_alive = true;
-        self
-    }
-
-    /// Set the `Last-Event-ID` value for reconnection support.
-    ///
-    /// When set, the response includes the ID on the last event,
-    /// allowing clients to resume from where they left off.
-    #[must_use]
-    pub fn last_event_id(mut self, id: impl Into<String>) -> Self {
-        let id = id.into();
-        if !id.contains('\0') {
-            self.last_event_id = Some(id);
-        }
         self
     }
 
@@ -300,17 +285,8 @@ impl Sse {
         }
 
         // Serialize each event.
-        for (i, event) in self.events.iter().enumerate() {
-            // If this is the last event and we have a last_event_id, inject it.
-            if i == self.events.len() - 1 && self.last_event_id.is_some() {
-                let mut event_with_id = event.clone();
-                if event_with_id.id.is_none() {
-                    event_with_id.id.clone_from(&self.last_event_id);
-                }
-                event_with_id.write_to(&mut body);
-            } else {
-                event.write_to(&mut body);
-            }
+        for event in &self.events {
+            event.write_to(&mut body);
         }
 
         body
@@ -528,39 +504,23 @@ mod tests {
     }
 
     #[test]
-    fn sse_last_event_id() {
+    fn sse_explicit_event_ids_drive_reconnection() {
         let sse = Sse::new(vec![
             SseEvent::default().data("first"),
-            SseEvent::default().data("last"),
-        ])
-        .last_event_id("99");
+            SseEvent::default().data("last").id("99"),
+        ]);
         let body = sse.to_body();
         // First event should not have an ID.
         assert!(body.starts_with("data:first\n\n"));
-        // Last event should have the injected ID.
+        // The server-authored last event ID should be present.
         assert!(body.contains("id:99"));
     }
 
     #[test]
-    fn sse_last_event_id_does_not_overwrite_existing() {
-        let sse = Sse::new(vec![SseEvent::default().data("event").id("existing")])
-            .last_event_id("injected");
+    fn sse_explicit_event_id_is_preserved() {
+        let sse = Sse::new(vec![SseEvent::default().data("event").id("existing")]);
         let body = sse.to_body();
-        // Existing ID should be preserved.
         assert!(body.contains("id:existing"));
-        assert!(!body.contains("id:injected"));
-    }
-
-    #[test]
-    fn sse_last_event_id_rejects_null_bytes() {
-        let sse = Sse::new(vec![SseEvent::default().data("event")]).last_event_id("bad\0id");
-        let body = sse.to_body();
-        // Null-byte ID should be silently rejected, matching SseEvent::id() behavior.
-        assert!(
-            !body.contains("id:"),
-            "null-byte ID should not appear in output"
-        );
-        assert_eq!(body, "data:event\n\n");
     }
 
     // ================================================================

@@ -1059,18 +1059,20 @@ fn integration_sse_handler() {
 }
 
 #[test]
-fn integration_sse_keep_alive_and_last_event_id() {
+fn integration_sse_keep_alive_and_explicit_event_id() {
     fn sse_handler() -> Sse {
         Sse::new(vec![
             SseEvent::default().event("update").data("{\"n\":1}"),
-            SseEvent::default().event("update").data("{\"n\":2}"),
+            SseEvent::default()
+                .event("update")
+                .data("{\"n\":2}")
+                .id("42"),
         ])
         .keep_alive()
-        .last_event_id("42")
     }
 
     common::init_test_logging();
-    test_phase!("SSE Keep-Alive and Last-Event-ID");
+    test_phase!("SSE Keep-Alive and Explicit Event ID");
 
     let router = Router::new().route("/stream", get(FnHandler::new(sse_handler)));
 
@@ -1079,10 +1081,10 @@ fn integration_sse_keep_alive_and_last_event_id() {
 
     // Keep-alive comment at the start
     assert!(body.starts_with(":keep-alive\n\n"));
-    // Last event ID injected on the final event
+    // The server-authored event ID appears on the final event.
     assert!(body.contains("id:42"));
 
-    test_complete!("sse_keep_alive_and_last_event_id");
+    test_complete!("sse_keep_alive_and_explicit_event_id");
 }
 
 #[test]
