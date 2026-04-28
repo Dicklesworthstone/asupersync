@@ -2249,6 +2249,36 @@ mod tests {
     }
 
     #[test]
+    fn test_rfc7541_c4_1_first_request_exact_wire_with_huffman() {
+        // RFC 7541 Appendix C.4.1 exact wire image.
+        let headers = vec![
+            Header::new(":method", "GET"),
+            Header::new(":scheme", "http"),
+            Header::new(":path", "/"),
+            Header::new(":authority", "www.example.com"),
+        ];
+        let expected_wire: &[u8] = &[
+            0x82, 0x86, 0x84, 0x41, 0x8c, 0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab,
+            0x90, 0xf4, 0xff,
+        ];
+
+        let mut decoder = Decoder::new();
+        let mut src = Bytes::copy_from_slice(expected_wire);
+        let decoded = decoder.decode(&mut src).expect("RFC 7541 C.4.1 decode");
+        assert_eq!(decoded, headers);
+
+        let mut encoder = Encoder::new();
+        encoder.set_use_huffman(true);
+        let mut encoded = BytesMut::new();
+        encoder.encode(&headers, &mut encoded);
+        assert_eq!(
+            encoded.as_ref(),
+            expected_wire,
+            "RFC 7541 C.4.1 wire image must match the specification exactly"
+        );
+    }
+
+    #[test]
     fn test_rfc7541_c5_response_without_huffman() {
         // Test response headers encoding/decoding
         let mut enc = Encoder::new();
