@@ -726,6 +726,7 @@ mod tests {
                 crate::time::sleep(crate::time::wall_now(), Duration::from_millis(10)).await;
             }
 
+            let _ = rejected_client.shutdown(std::net::Shutdown::Both).await;
             drop(rejected_client);
 
             let stats = stats_handle.snapshot();
@@ -746,6 +747,7 @@ mod tests {
                 .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
                 .await
                 .expect("write healthy request");
+            let _ = healthy_client.shutdown(std::net::Shutdown::Both).await;
             drop(healthy_client);
 
             for _ in 0..64 {
@@ -982,6 +984,7 @@ mod tests {
 
             shutdown.wait_for_phase(ShutdownPhase::ForceClosing).await;
 
+            let _ = client.shutdown(std::net::Shutdown::Both).await;
             finished.notify_one();
             let stats = run_handle.await.expect("run");
             assert!(stats.force_closed > 0, "expected force close path");
@@ -1053,6 +1056,7 @@ mod tests {
             // so it exits promptly without waiting for `finished`.
             set_http1_listener_test_time(Time::from_millis(25));
 
+            let _ = client.shutdown(std::net::Shutdown::Both).await;
             let stats = run_handle.await.expect("run");
             assert_eq!(stats.force_closed, 1);
             // Duration check is intentionally non-exact: the shared
