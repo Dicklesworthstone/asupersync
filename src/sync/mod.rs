@@ -34,6 +34,8 @@ mod mutex;
 mod notify;
 #[cfg(test)]
 mod notify_bug_test;
+#[cfg(test)]
+mod notify_metamorphic;
 
 mod once_cell;
 #[cfg(test)]
