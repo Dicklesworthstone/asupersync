@@ -24,8 +24,6 @@ fn wall_clock_instant_now() -> Instant {
 /// Tracks the state of a single stream for idle timeout enforcement.
 #[derive(Debug, Clone)]
 struct StreamState {
-    /// Stream ID (for logging/debugging).
-    id: u32,
     /// Last activity timestamp (when the stream last sent data).
     last_activity: Instant,
 }
@@ -36,8 +34,6 @@ struct StreamState {
 pub struct ConnectionState {
     /// Active streams on this connection, keyed by stream ID.
     active_streams: HashMap<u32, StreamState>,
-    /// Connection creation time.
-    created_at: Instant,
 }
 
 impl ConnectionState {
@@ -45,7 +41,6 @@ impl ConnectionState {
     pub fn new() -> Self {
         Self {
             active_streams: HashMap::new(),
-            created_at: wall_clock_instant_now(),
         }
     }
 
@@ -61,10 +56,12 @@ impl ConnectionState {
             ));
         }
 
-        self.active_streams.insert(stream_id, StreamState {
-            id: stream_id,
-            last_activity: wall_clock_instant_now(),
-        });
+        self.active_streams.insert(
+            stream_id,
+            StreamState {
+                last_activity: wall_clock_instant_now(),
+            },
+        );
         Ok(())
     }
 

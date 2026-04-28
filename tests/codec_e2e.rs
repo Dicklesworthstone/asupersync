@@ -812,15 +812,11 @@ fn e2e_codec_050_lines_encode_multi() {
     let mut buf = BytesMut::new();
 
     test_section!("encode");
-    codec
-        .encode("line1".to_string(), &mut buf)
-        .expect("encode 1");
-    codec
-        .encode("line2".to_string(), &mut buf)
-        .expect("encode 2");
-    codec
-        .encode("line3".to_string(), &mut buf)
-        .expect("encode 3");
+    for (index, line) in ["line1", "line2", "line3"].into_iter().enumerate() {
+        codec
+            .encode(line.to_string(), &mut buf)
+            .unwrap_or_else(|err| panic!("encode {}: {err:?}", index + 1));
+    }
 
     test_section!("verify");
     assert_with_log!(
