@@ -3,7 +3,7 @@
 //! Exercises `SseEvent`/`Sse` wire rendering against a small reference parser
 //! and malformed raw streams to cover:
 //! 1. Comment/data/ID/event sanitization and CR normalization
-//! 2. Last-Event-ID injection on the terminal event only
+//! 2. Last-Event-ID restoration across event boundaries
 //! 3. Retry field numeric parsing
 //! 4. Malformed UTF-8 / retry handling without panics
 //! 5. Maximum event-size rejection on oversized raw streams
@@ -29,7 +29,6 @@ enum FuzzInput {
 #[derive(Debug, Clone, Arbitrary)]
 struct StructuredStream {
     keep_alive: bool,
-    last_event_id: Option<String>,
     events: Vec<EventSpec>,
 }
 
@@ -88,9 +87,6 @@ fn fuzz_web_sse(input: FuzzInput) {
 }
 
 fn exercise_structured_stream(mut stream: StructuredStream) {
-    stream.last_event_id = stream
-        .last_event_id
-        .map(|value| truncate_text(&value, MAX_FIELD_CHARS));
     stream.events.truncate(MAX_EVENTS);
 
     let sse = build_sse(&stream);
@@ -141,9 +137,6 @@ fn build_sse(stream: &StructuredStream) -> Sse {
     if stream.keep_alive {
         sse = sse.keep_alive();
     }
-    if let Some(last_event_id) = stream.last_event_id.as_deref() {
-        sse = sse.last_event_id(last_event_id);
-    }
     sse
 }
 
@@ -175,30 +168,20 @@ fn build_event(spec: &EventSpec) -> SseEvent {
 fn expected_events(stream: &StructuredStream) -> Vec<ParsedEvent> {
     let mut specs = stream.events.clone();
     specs.truncate(MAX_EVENTS);
-
-    match (
-        stream
-            .last_event_id
-            .as_ref()
-            .filter(|last_event_id| !last_event_id.contains('\0')),
-        specs.last_mut(),
-    ) {
-        (Some(last_event_id), Some(last)) => {
-            let built_id = sanitize_id(last.id.as_deref().unwrap_or_default());
-            if built_id.is_none() {
-                last.id = Some(last_event_id.clone());
-            }
+    let mut restored_last_event_id = None;
+    let mut parsed = Vec::with_capacity(specs.len());
+    for spec in &specs {
+        if let Some(event) = expected_event_from_spec(spec, &mut restored_last_event_id) {
+            parsed.push(event);
         }
-        _ => {}
     }
-
-    specs
-        .iter()
-        .filter_map(expected_event_from_spec)
-        .collect::<Vec<_>>()
+    parsed
 }
 
-fn expected_event_from_spec(spec: &EventSpec) -> Option<ParsedEvent> {
+fn expected_event_from_spec(
+    spec: &EventSpec,
+    restored_last_event_id: &mut Option<String>,
+) -> Option<ParsedEvent> {
     let event = spec
         .event
         .as_deref()
@@ -209,10 +192,14 @@ fn expected_event_from_spec(spec: &EventSpec) -> Option<ParsedEvent> {
         .as_deref()
         .map(|value| normalize_lines(&truncate_text(value, MAX_FIELD_CHARS)).join("\n"));
 
-    let id = spec
+    let explicit_id = spec
         .id
         .as_deref()
         .and_then(|value| sanitize_id(&truncate_text(value, MAX_FIELD_CHARS)));
+    if let Some(id) = explicit_id.clone() {
+        *restored_last_event_id = Some(id);
+    }
+    let effective_id = explicit_id.or_else(|| restored_last_event_id.clone());
 
     let retry = match spec.retry {
         RetrySpec::None => None,
@@ -220,11 +207,11 @@ fn expected_event_from_spec(spec: &EventSpec) -> Option<ParsedEvent> {
         RetrySpec::DurationMillis(millis) => Some(u64::from(millis)),
     };
 
-    let has_fields = event.is_some() || data.is_some() || id.is_some() || retry.is_some();
+    let has_fields = event.is_some() || data.is_some() || spec.id.is_some() || retry.is_some();
     has_fields.then_some(ParsedEvent {
         event,
         data,
-        id,
+        id: effective_id,
         retry,
     })
 }
@@ -235,6 +222,7 @@ fn parse_sse_stream(bytes: &[u8], max_event_size: usize) -> Result<Vec<ParsedEve
 
     let mut parsed = Vec::new();
     let mut current = PartialEvent::default();
+    let mut restored_last_event_id = None;
     let mut event_size = 0usize;
     let mut saw_field = false;
 
@@ -246,7 +234,7 @@ fn parse_sse_stream(bytes: &[u8], max_event_size: usize) -> Result<Vec<ParsedEve
 
         if line.is_empty() {
             if saw_field {
-                parsed.push(finish_event(&mut current));
+                parsed.push(finish_event(&mut current, &mut restored_last_event_id));
                 saw_field = false;
             }
             event_size = 0;
@@ -285,18 +273,25 @@ fn parse_sse_stream(bytes: &[u8], max_event_size: usize) -> Result<Vec<ParsedEve
     }
 
     if saw_field {
-        parsed.push(finish_event(&mut current));
+        parsed.push(finish_event(&mut current, &mut restored_last_event_id));
     }
 
     Ok(parsed)
 }
 
-fn finish_event(current: &mut PartialEvent) -> ParsedEvent {
+fn finish_event(
+    current: &mut PartialEvent,
+    restored_last_event_id: &mut Option<String>,
+) -> ParsedEvent {
     let data = (!current.data_lines.is_empty()).then(|| current.data_lines.join("\n"));
+    let explicit_id = current.id.take();
+    if let Some(id) = explicit_id.clone() {
+        *restored_last_event_id = Some(id);
+    }
     let parsed = ParsedEvent {
         event: current.event.take(),
         data,
-        id: current.id.take(),
+        id: explicit_id.or_else(|| restored_last_event_id.clone()),
         retry: current.retry.take(),
     };
     current.data_lines.clear();
