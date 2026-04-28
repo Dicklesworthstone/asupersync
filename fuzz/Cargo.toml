@@ -2568,3 +2568,15 @@ path = "fuzz_targets/jetstream_consumer_stream_info_decoder.rs"
 test = false
 doc = false
 bench = false
+
+# Structure-aware JetStream PullSubscribeOpts wire format fuzzer.
+# Tests src/messaging/jetstream.rs pull subscription request encoding with intelligent input
+# generation for batch/expires JSON format: {"batch":N,"expires":NANOS}.
+# Exercises JSON structure validation, numeric boundary testing, timeout computation edge
+# cases, type confusion handling, and wire format manipulation strategies.
+[[bin]]
+name = "jetstream_pull_subscribe_opts_wire_format"
+path = "fuzz_targets/jetstream_pull_subscribe_opts_wire_format.rs"
+test = false
+doc = false
+bench = false
