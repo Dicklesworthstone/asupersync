@@ -3,13 +3,11 @@
 //! Comprehensive golden artifact testing for OTEL span serialization formats.
 //! Uses the existing span infrastructure with insta snapshots.
 
+use crate::observability::otel::span_semantics::tests::test_span_snapshot;
 use crate::observability::otel::span_semantics::*;
 use opentelemetry::trace::{SpanKind, Status};
 use serde_json::json;
 use std::collections::HashMap;
-
-// Use the existing test_span_snapshot function from the parent module
-use super::test_span_snapshot;
 
 /// Comprehensive golden artifact tests for OpenTelemetry span serialization.
 /// Tests ensure span serialization remains stable and catches format regressions.
@@ -152,8 +150,12 @@ mod tests {
         ]);
 
         let parent_context = opentelemetry::trace::SpanContext::new(
-            opentelemetry::trace::TraceId::from_u128(0x1234567890abcdef),
-            opentelemetry::trace::SpanId::from_u64(0x9876543210fedcba),
+            opentelemetry::trace::TraceId::from_bytes([
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x12, 0x34, 0x56, 0x78,
+            ]),
+            opentelemetry::trace::SpanId::from_bytes([
+                0x98, 0x76, 0x54, 0x32, 0x10, 0xfe, 0xdc, 0xba,
+            ]),
             opentelemetry::trace::TraceFlags::SAMPLED,
             true, // is_remote
             opentelemetry::trace::TraceState::default(),

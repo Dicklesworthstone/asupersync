@@ -25,6 +25,8 @@ pub mod priority;
 #[cfg(test)]
 pub mod priority_inversion_metamorphic;
 pub mod priority_inversion_oracle;
+#[cfg(test)]
+pub mod ready_dispatch_invariance_metamorphic;
 pub mod stealing;
 pub mod three_lane;
 pub mod work_stealing_checker;

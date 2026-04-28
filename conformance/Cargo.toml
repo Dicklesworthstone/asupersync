@@ -44,3 +44,5 @@ tokio = { version = "1.0", features = ["time"] }
 
 [dev-dependencies]
 # Runtimes can be added here for testing
+opentelemetry-proto = "0.31"
+prost = "0.14"

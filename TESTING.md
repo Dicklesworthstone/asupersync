@@ -872,7 +872,7 @@ The conformance suite lives in the `conformance/` crate and is designed to be
 runtime-agnostic. To run it:
 
 ```bash
-cargo test -p asupersync-conformance
+rch exec -- env CARGO_INCREMENTAL=0 cargo test -p asupersync-conformance --features test-internals
 ```
 
 The `asupersync` crate also exposes conformance tooling in the CLI when the
@@ -1032,12 +1032,12 @@ unit tests: units validate local invariants, E2E validates the full pipeline.
 ./scripts/run_phase6_e2e.sh
 
 # Or via cargo directly:
-cargo test --test e2e_geodesic_normalization \
+rch exec -- env CARGO_INCREMENTAL=0 cargo test --test e2e_geodesic_normalization \
            --test topology_benchmark \
            --test e2e_governor_vs_baseline \
            --test raptorq_conformance \
            --test golden_outputs \
-           --all-features -- --nocapture
+           --features test-internals -- --nocapture
 
 # Run a single suite:
 ./scripts/run_phase6_e2e.sh --suite geo
@@ -1074,7 +1074,7 @@ Phase 6 E2E suites via the `phase6-e2e` job in `.github/workflows/ci.yml`.
 
 ## Debugging Tips
 
-- Use `cargo test -- --nocapture` to stream logs.
+- Use `rch exec -- env CARGO_INCREMENTAL=0 cargo test --lib --features test-internals -- --nocapture` to stream logs.
 - Prefer `test_lab_with_tracing()` when you need larger trace buffers.
 - When a test fails, scan for the last `test_phase!` and `assert_with_log!`
   markers to pinpoint the failure point.

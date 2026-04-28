@@ -2198,10 +2198,7 @@ mod tests {
 
         let serialized =
             OtelMetricsExporter::serialize_request(&request).expect("serialize_request failed");
-        assert_eq!(
-            serialized,
-            "{\"resource\":{\"attributes\":{\"service.name\":\"asupersync\",\"service.version\":\"0.3.1-test\"}},\"metrics\":[{\"descriptor\":{\"name\":\"requests_total\",\"description\":\"Counter: requests_total\",\"unit\":\"1\"},\"data_points\":[{\"timestamp_nanos\":123,\"value\":{\"Counter\":7},\"attributes\":{}}]}]}"
-        );
+        insta::assert_snapshot!("metrics_export_otel_serialized_request", serialized);
     }
 
     #[test]
