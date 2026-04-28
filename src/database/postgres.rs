@@ -1418,6 +1418,21 @@ fn tls_server_end_point_cbind(cert_der: &[u8]) -> Vec<u8> {
     h.finalize().to_vec()
 }
 
+/// Constant-time equality for a secret expected byte string against an
+/// attacker-controlled actual value.
+///
+/// SCRAM server signatures are fixed-size SHA-256 MACs, so length mismatches
+/// are public. We still walk the full expected length to avoid turning
+/// truncated attacker inputs into a variable-time prefix oracle.
+#[inline]
+fn scram_constant_time_eq_expected_len(expected: &[u8], actual: &[u8]) -> bool {
+    let mut diff = u8::from(expected.len() != actual.len());
+    for (idx, &expected_byte) in expected.iter().enumerate() {
+        diff |= expected_byte ^ actual.get(idx).copied().unwrap_or(0);
+    }
+    std::hint::black_box(diff) == 0
+}
+
 /// SCRAM-SHA-256 authentication state machine.
 ///
 /// br-asupersync-r2l1ze: `password` is held in a [`SecretString`] so the
@@ -1593,17 +1608,7 @@ impl ScramAuth {
         })?;
         let expected_sig = Self::hmac_sha256(&server_key, auth_message.as_bytes());
 
-        // Constant-time comparison to prevent timing side-channel attacks
-        // against SCRAM mutual authentication. The length check must not
-        // short-circuit the content comparison.
-        let len_ok = server_sig.len() == expected_sig.len();
-        let content_ok = server_sig
-            .iter()
-            .zip(expected_sig.iter())
-            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-            == 0;
-        let sig_matches = len_ok & content_ok;
-        if !sig_matches {
+        if !scram_constant_time_eq_expected_len(&expected_sig, &server_sig) {
             return Err(PgError::AuthenticationFailed(
                 "server signature mismatch".to_string(),
             ));
@@ -2924,17 +2929,21 @@ impl PgConnection {
                                 &mechanisms,
                                 #[cfg(feature = "tls")]
                                 {
-                                    self.inner
-                                        .stream
-                                        .is_tls()
-                                        .then(|| self.inner.stream.peer_leaf_certificate_der())
-                                        .flatten()
+                                    self.inner.stream.is_tls()
+                                },
+                                #[cfg(not(feature = "tls"))]
+                                {
+                                    false
+                                },
+                                #[cfg(feature = "tls")]
+                                {
+                                    self.inner.stream.peer_leaf_certificate_der()
                                 },
                                 #[cfg(not(feature = "tls"))]
                                 {
                                     None::<Vec<u8>>
                                 },
-                            );
+                            )?;
                             let chosen = cb.mechanism();
                             if mechanisms.iter().any(|m| m == chosen) {
                                 let password = options.password.as_ref().ok_or_else(|| {
@@ -2975,34 +2984,39 @@ impl PgConnection {
         }
     }
 
-    /// Choose a `ScramChannelBinding` based on advertised mechanisms and the
-    /// presence of a TLS leaf certificate. See the call site in the SASL
-    /// handler for the policy tree. (br-asupersync-7n2xsi)
+    /// Choose a `ScramChannelBinding` based on advertised mechanisms, whether
+    /// the connection is already TLS, and the presence of a TLS leaf
+    /// certificate. See the call site in the SASL handler for the policy tree.
+    /// (br-asupersync-7n2xsi)
     fn pick_scram_channel_binding(
         mechanisms: &[String],
+        tls_active: bool,
         tls_leaf_cert: Option<Vec<u8>>,
-    ) -> ScramChannelBinding {
+    ) -> Result<ScramChannelBinding, PgError> {
         let server_offers_plus = mechanisms.iter().any(|m| m == "SCRAM-SHA-256-PLUS");
-        match (tls_leaf_cert, server_offers_plus) {
+        #[cfg(feature = "tls")]
+        if tls_active && tls_leaf_cert.is_none() {
+            return Err(PgError::AuthenticationFailed(
+                "TLS peer certificate required for PostgreSQL SCRAM authentication".to_string(),
+            ));
+        }
+        #[cfg(feature = "tls")]
+        return Ok(match (tls_leaf_cert, server_offers_plus) {
             #[cfg(feature = "tls")]
             (Some(cert), true) => ScramChannelBinding::TlsServerEndPoint {
                 cbind_data: tls_server_end_point_cbind(&cert),
             },
-            // TLS is in use but server didn't advertise -PLUS, OR we have TLS
-            // but no leaf cert. The `y` GS2 signal still defends against the
-            // downgrade attack.
+            // TLS is in use but server didn't advertise -PLUS. The `y` GS2
+            // signal still defends against the downgrade attack.
             #[cfg(feature = "tls")]
-            (Some(_), false) | (None, true) => {
-                // (None, true) shouldn't happen in practice (server can only
-                // offer -PLUS if the connection is TLS), but if it does, we
-                // can't compute cbind_data without a cert — fall back to the
-                // safe non-CB path with the supported-not-used signal.
-                ScramChannelBinding::SupportedNotUsed
-            }
-            #[cfg(not(feature = "tls"))]
-            (_, _) => ScramChannelBinding::None,
+            (Some(_), false) => ScramChannelBinding::SupportedNotUsed,
             #[cfg(feature = "tls")]
-            (None, false) => ScramChannelBinding::None,
+            (None, _) => ScramChannelBinding::None,
+        });
+        #[cfg(not(feature = "tls"))]
+        {
+            let _ = (mechanisms, tls_active, tls_leaf_cert);
+            Ok(ScramChannelBinding::None)
         }
     }
 
@@ -6008,6 +6022,18 @@ mod tests {
     }
 
     #[test]
+    fn test_scram_constant_time_eq_expected_len_correctness() {
+        let expected = [1u8, 2, 3, 4];
+        assert!(scram_constant_time_eq_expected_len(&expected, &[1, 2, 3, 4]));
+        assert!(!scram_constant_time_eq_expected_len(&expected, &[1, 2, 3]));
+        assert!(!scram_constant_time_eq_expected_len(&expected, &[1, 2, 3, 5]));
+        assert!(!scram_constant_time_eq_expected_len(
+            &expected,
+            &[1, 2, 3, 4, 5]
+        ));
+    }
+
+    #[test]
     fn test_scram_sha256_rfc7677_section3_conformance() {
         // RFC 7677 Section 3 test vectors - SCRAM-SHA-256 authentication exchange
         // when client doesn't support channel bindings
@@ -6055,6 +6081,51 @@ mod tests {
         let server_final = "v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=";
         auth.verify_server_final(server_final)
             .expect("Should verify RFC 7677 §3 server signature");
+    }
+
+    #[test]
+    fn test_scram_sha256_rejects_truncated_server_signature() {
+        let cx = Cx::for_testing();
+        let mut auth = ScramAuth::new(&cx, "user", "pencil", ScramChannelBinding::None);
+        auth.client_nonce = "rOprNGfwEbeRWgbNEkqO".to_string();
+        auth.client_first_bare = "n=user,r=rOprNGfwEbeRWgbNEkqO".to_string();
+
+        let server_first = "r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096";
+        auth.process_server_first(server_first)
+            .expect("Should process RFC server first message");
+
+        let full_sig = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            "6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=",
+        )
+        .expect("valid base64");
+        let truncated_sig = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            &full_sig[..full_sig.len() - 1],
+        );
+
+        match auth.verify_server_final(&format!("v={truncated_sig}")) {
+            Err(PgError::AuthenticationFailed(msg)) => {
+                assert!(msg.contains("server signature mismatch"), "got: {msg}");
+            }
+            other => panic!("expected AuthenticationFailed, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn pick_scram_channel_binding_rejects_tls_without_peer_certificate() {
+        let mechanisms = vec![
+            "SCRAM-SHA-256".to_string(),
+            "SCRAM-SHA-256-PLUS".to_string(),
+        ];
+
+        match PgConnection::pick_scram_channel_binding(&mechanisms, true, None) {
+            Err(PgError::AuthenticationFailed(msg)) => {
+                assert!(msg.contains("peer certificate"), "got: {msg}");
+            }
+            other => panic!("expected AuthenticationFailed, got {other:?}"),
+        }
     }
 
     /// Create a PgConnection backed by a dummy socket pair for unit-testing
@@ -9287,6 +9358,137 @@ mod tests {
         assert!(cache.entries.contains_key("sql_c"));
         assert!(cache.entries.contains_key("sql_d"));
         assert!(!cache.entries.contains_key("sql_a"));
+    }
+
+    /// Mock-free version of prepared_cache_returns_evicted_name_at_cap.
+    ///
+    /// This test replaces the fake_pg_statement mock with real prepared statements
+    /// created through the actual prepare() method, testing cache eviction behavior
+    /// with realistic PostgreSQL protocol responses.
+    #[test]
+    fn prepared_cache_eviction_with_real_statements() {
+        use std::io::Write;
+        use std::collections::VecDeque;
+
+        run(async {
+            let (mut conn, mut peer) = make_test_connection_with_peer();
+            let cx = Cx::for_testing();
+
+            // Set cache capacity to 3 for testing eviction
+            conn.inner.prepared_cache = PreparedStatementCache::new(3);
+
+            // Helper to simulate PostgreSQL prepare response
+            let simulate_prepare_response = |peer: &mut std::net::TcpStream, stmt_name: &str| {
+                std::thread::spawn({
+                    let stmt_name = stmt_name.to_string();
+                    let mut peer_clone = peer.try_clone().expect("clone peer");
+                    move || {
+                        // Read Parse message
+                        let _parse_msg = read_until_contains(&mut peer_clone, stmt_name.as_bytes());
+
+                        // Send realistic PostgreSQL response sequence:
+                        // ParseComplete(1) + ParameterDescription(t) + RowDescription(T) + ReadyForQuery(Z)
+                        let mut response = Vec::new();
+
+                        // ParseComplete: 1 + length(4 bytes) = '1' + 0x00000004
+                        response.extend_from_slice(&[b'1', 0x00, 0x00, 0x00, 0x04]);
+
+                        // ParameterDescription: 't' + length + param_count(i16) + oid1(i32)
+                        // For "SELECT $1" - one parameter of type TEXT(25)
+                        response.extend_from_slice(&[b't', 0x00, 0x00, 0x00, 0x0A]); // length: 10
+                        response.extend_from_slice(&[0x00, 0x01]); // 1 parameter
+                        response.extend_from_slice(&[0x00, 0x00, 0x00, 0x19]); // OID 25 (TEXT)
+
+                        // RowDescription: 'T' + length + field_count(i16) + field1
+                        // For "SELECT $1" - one result column
+                        response.extend_from_slice(&[b'T', 0x00, 0x00, 0x00, 0x21]); // length: 33
+                        response.extend_from_slice(&[0x00, 0x01]); // 1 column
+                        response.extend_from_slice(b"?column?\x00"); // column name + null terminator
+                        response.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // table_oid
+                        response.extend_from_slice(&[0x00, 0x00]); // column_attr_number
+                        response.extend_from_slice(&[0x00, 0x00, 0x00, 0x19]); // type_oid (TEXT)
+                        response.extend_from_slice(&[0xFF, 0xFF]); // type_size (-1 for variable)
+                        response.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]); // type_modifier
+                        response.extend_from_slice(&[0x00, 0x00]); // format_code (text)
+
+                        // ReadyForQuery: 'Z' + length + status
+                        response.extend_from_slice(&[b'Z', 0x00, 0x00, 0x00, 0x05, b'I']); // Idle
+
+                        peer_clone.write_all(&response).expect("write response");
+                    }
+                })
+            };
+
+            // Prepare first statement - should not evict anything
+            let responder1 = simulate_prepare_response(&mut peer, "__asupersync_s0");
+            let stmt1 = conn.prepare(&cx, "SELECT $1").await;
+            responder1.join().expect("responder1");
+            assert!(matches!(stmt1, Outcome::Ok(_)));
+            assert_eq!(conn.inner.prepared_cache.len(), 1);
+
+            // Prepare second statement
+            let responder2 = simulate_prepare_response(&mut peer, "__asupersync_s1");
+            let stmt2 = conn.prepare(&cx, "SELECT $1, $2").await;
+            responder2.join().expect("responder2");
+            assert!(matches!(stmt2, Outcome::Ok(_)));
+            assert_eq!(conn.inner.prepared_cache.len(), 2);
+
+            // Prepare third statement - fills to capacity
+            let responder3 = simulate_prepare_response(&mut peer, "__asupersync_s2");
+            let stmt3 = conn.prepare(&cx, "SELECT COUNT(*)").await;
+            responder3.join().expect("responder3");
+            assert!(matches!(stmt3, Outcome::Ok(_)));
+            assert_eq!(conn.inner.prepared_cache.len(), 3);
+
+            // Prepare fourth statement - should evict the LRU (first) statement
+            // and trigger DEALLOCATE for the evicted statement
+            let responder4 = std::thread::spawn({
+                let mut peer_clone = peer.try_clone().expect("clone peer");
+                move || {
+                    // Expect DEALLOCATE for evicted statement first
+                    let deallocate_msg = read_until_contains(&mut peer_clone, b"__asupersync_s0");
+                    assert!(deallocate_msg.windows(b"__asupersync_s0".len()).any(|w| w == b"__asupersync_s0"),
+                            "should send DEALLOCATE for evicted statement");
+
+                    // Send DEALLOCATE response: CloseComplete + ReadyForQuery
+                    let mut dealloc_response = Vec::new();
+                    dealloc_response.extend_from_slice(&[b'3', 0x00, 0x00, 0x00, 0x04]); // CloseComplete
+                    dealloc_response.extend_from_slice(&[b'Z', 0x00, 0x00, 0x00, 0x05, b'I']); // ReadyForQuery
+                    peer_clone.write_all(&dealloc_response).expect("write dealloc response");
+
+                    // Then expect new PARSE for fourth statement
+                    let _parse_msg = read_until_contains(&mut peer_clone, b"__asupersync_s3");
+
+                    // Send prepare response for fourth statement
+                    let mut response = Vec::new();
+                    response.extend_from_slice(&[b'1', 0x00, 0x00, 0x00, 0x04]); // ParseComplete
+                    response.extend_from_slice(&[b't', 0x00, 0x00, 0x00, 0x06, 0x00, 0x00]); // ParameterDescription (no params)
+                    response.extend_from_slice(&[b'T', 0x00, 0x00, 0x00, 0x21]); // RowDescription
+                    response.extend_from_slice(&[0x00, 0x01]); // 1 column
+                    response.extend_from_slice(b"result\x00"); // column name
+                    response.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x17, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00]);
+                    response.extend_from_slice(&[b'Z', 0x00, 0x00, 0x00, 0x05, b'I']); // ReadyForQuery
+                    peer_clone.write_all(&response).expect("write response");
+                }
+            });
+
+            let stmt4 = conn.prepare(&cx, "SELECT 'result'").await;
+            responder4.join().expect("responder4");
+            assert!(matches!(stmt4, Outcome::Ok(_)));
+
+            // Verify cache state after eviction
+            assert_eq!(conn.inner.prepared_cache.len(), 3, "cache should maintain capacity of 3");
+
+            // Verify that the first statement was evicted and subsequent statements remain
+            assert!(conn.inner.prepared_cache.get_and_touch("SELECT $1").is_none(),
+                    "first statement should have been evicted");
+            assert!(conn.inner.prepared_cache.get_and_touch("SELECT $1, $2").is_some(),
+                    "second statement should still be cached");
+            assert!(conn.inner.prepared_cache.get_and_touch("SELECT COUNT(*)").is_some(),
+                    "third statement should still be cached");
+            assert!(conn.inner.prepared_cache.get_and_touch("SELECT 'result'").is_some(),
+                    "fourth statement should be cached");
+        });
     }
 
     #[test]
