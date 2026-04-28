@@ -199,7 +199,7 @@ Hypothetical: If code could call sleep() without Cx:
 
   // In RT, this is prevented:
   async fn correct_task(cx: &Cx<cap::Timer>) {
-    cx.sleep(Duration::from_secs(1)).await; // requires Timer capability
+    crate::time::sleep(cx.now(), Duration::from_secs(1)).await; // requires Timer capability
   }
 ```
 

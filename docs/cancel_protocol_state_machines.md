@@ -292,6 +292,6 @@ match result {
 ## References
 
 1. [Structured Concurrency Specification](./asupersync_v4_formal_semantics.md)
-2. [Cancellation Protocol Design](./cancellation_protocol.md)  
-3. [TLA+ Model Specifications](../formal/cancel_protocol.tla)
-4. [Performance Benchmarks](../benchmarks/state_machine_overhead.md)
+2. [Cancellation Testing Guide](./cancellation-testing.md)  
+3. [TLA+ Model Specifications](../formal/tla/Asupersync.tla)
+4. [Benchmark Harnesses](../benches/)

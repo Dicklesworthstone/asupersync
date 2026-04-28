@@ -39,10 +39,12 @@ This document covers hardening for three process parity gaps identified in T3.1:
 |-----------|---------------|--------------------|-|
 | `Child::wait()` | Returns `impl Future<Output=ExitStatus>` | Sync blocking `waitpid(2)` | **Divergent** — sync blocks runtime thread |
 | `Child::wait_async()` | N/A (Tokio's `wait()` is already async) | Poll loop with `yield_now()` | **Functional parity** — non-blocking |
-| `Child::output()` | Sync convenience (not in Tokio async) | Sync with pipe drain | N/A |
-| `Child::output_async()` | Returns `impl Future<Output=Output>` | Async poll loop with pipe drain | **Functional parity** |
-| `Child::status()` | Sync | Sync | N/A |
-| `Child::status_async()` | Returns `impl Future<Output=ExitStatus>` | Async poll loop | **Functional parity** |
+| `Child::wait_with_output()` | `child.wait_with_output().await` | Sync with pipe drain | **Divergent** — sync blocks runtime thread |
+| `Child::wait_with_output_async()` | N/A (Tokio's `wait_with_output()` is already async) | Async poll loop with pipe drain | **Functional parity** |
+| `Command::output()` | `Command::output().await` | Sync convenience with pipe drain | **Divergent** — sync blocks runtime thread |
+| `Command::output_async()` | N/A (Tokio's `output()` is already async) | Async convenience with pipe drain | **Functional parity** |
+| `Command::status()` | `Command::status().await` | Sync convenience | **Divergent** — sync blocks runtime thread |
+| `Command::status_async()` | N/A (Tokio's `status()` is already async) | Async convenience | **Functional parity** |
 | `Child::try_wait()` | Returns `Option<ExitStatus>` | Returns `Option<ExitStatus>` | **Full parity** |
 | `Child::kill()` | Sends SIGKILL | Sends SIGKILL | **Full parity** |
 | `Child::start_kill()` | Same as kill() | Same as kill() | **Full parity** |
@@ -53,8 +55,8 @@ This document covers hardening for three process parity gaps identified in T3.1:
 | Test ID | Assertion | Pass Criteria |
 |---------|-----------|---------------|
 | PL-G1-01 | `wait_async()` does not block calling thread | Future resolves after child exits; yields between polls |
-| PL-G1-02 | `output_async()` captures stdout/stderr without blocking | All pipe data collected; status is correct |
-| PL-G1-03 | `status_async()` returns correct exit code | Non-zero exit codes propagated correctly |
+| PL-G1-02 | `wait_with_output_async()` and `Command::output_async()` capture stdout/stderr without blocking | All pipe data collected; status is correct |
+| PL-G1-03 | `Command::status_async()` returns correct exit code | Non-zero exit codes propagated correctly |
 | PL-G1-04 | `try_wait()` returns None before exit | Polling before child terminates yields None |
 | PL-G1-05 | `try_wait()` returns Some after exit | Polling after child terminates yields exit status |
 
@@ -169,7 +171,7 @@ No PTY/terminal session API exists. Tokio does not provide PTY support either (i
 5. **try_wait determinism**: Returns None before exit, Some(status) after
 6. **kill_on_drop determinism**: Drop always attempts kill + reap if enabled
 7. **Error determinism**: Same failure condition always produces same ProcessError variant
-8. **Async parity**: `wait_async()` and `output_async()` produce same results as sync equivalents
+8. **Async parity**: `wait_async()`, `wait_with_output_async()`, `Command::output_async()`, and `Command::status_async()` produce same results as their sync equivalents
 
 ---
 
