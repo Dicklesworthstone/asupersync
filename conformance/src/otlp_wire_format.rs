@@ -30,8 +30,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 struct OtlpTestVector {
     /// Test case name.
     name: String,
-    /// Raw protobuf bytes (hex-encoded for readability).
-    protobuf_hex: String,
     /// Expected decoded metric data.
     expected_metric: TestMetric,
     /// Whether this should pass or fail validation.
@@ -57,7 +55,6 @@ enum TestMetricType {
     Counter,
     Gauge,
     Histogram,
-    Summary,
 }
 
 /// Test data point structure.
@@ -72,7 +69,6 @@ struct TestDataPoint {
 #[derive(Debug, Clone, PartialEq)]
 enum TestMetricValue {
     Int64(i64),
-    Double(f64),
     Histogram {
         count: u64,
         sum: f64,
@@ -97,7 +93,6 @@ fn otlp_test_vectors() -> Vec<OtlpTestVector> {
         // Basic counter metric
         OtlpTestVector {
             name: "basic_counter".to_string(),
-            protobuf_hex: "0a4a0a120a0c726573...".to_string(), // Simplified for demo
             expected_metric: TestMetric {
                 name: "requests_total".to_string(),
                 description: "Total number of HTTP requests".to_string(),
@@ -111,17 +106,16 @@ fn otlp_test_vectors() -> Vec<OtlpTestVector> {
                 resource_attributes: [
                     ("service.name".to_string(), "test-service".to_string()),
                     ("service.version".to_string(), "1.0.0".to_string()),
-                ].into(),
+                ]
+                .into(),
                 scope_name: "asupersync".to_string(),
                 scope_version: "0.3.1".to_string(),
             },
             should_pass: true,
         },
-
         // Histogram metric
         OtlpTestVector {
             name: "basic_histogram".to_string(),
-            protobuf_hex: "0a6d0a120a0c726573...".to_string(), // Simplified for demo
             expected_metric: TestMetric {
                 name: "request_duration_seconds".to_string(),
                 description: "HTTP request duration histogram".to_string(),
@@ -134,26 +128,35 @@ fn otlp_test_vectors() -> Vec<OtlpTestVector> {
                         count: 100,
                         sum: 42.5,
                         buckets: vec![
-                            TestHistogramBucket { upper_bound: 0.1, count: 10 },
-                            TestHistogramBucket { upper_bound: 0.5, count: 50 },
-                            TestHistogramBucket { upper_bound: 1.0, count: 85 },
-                            TestHistogramBucket { upper_bound: f64::INFINITY, count: 100 },
+                            TestHistogramBucket {
+                                upper_bound: 0.1,
+                                count: 10,
+                            },
+                            TestHistogramBucket {
+                                upper_bound: 0.5,
+                                count: 50,
+                            },
+                            TestHistogramBucket {
+                                upper_bound: 1.0,
+                                count: 85,
+                            },
+                            TestHistogramBucket {
+                                upper_bound: f64::INFINITY,
+                                count: 100,
+                            },
                         ],
                     },
                 }],
-                resource_attributes: [
-                    ("service.name".to_string(), "web-server".to_string()),
-                ].into(),
+                resource_attributes: [("service.name".to_string(), "web-server".to_string())]
+                    .into(),
                 scope_name: "asupersync::http".to_string(),
                 scope_version: "0.3.1".to_string(),
             },
             should_pass: true,
         },
-
         // Invalid metric (missing required fields)
         OtlpTestVector {
             name: "invalid_missing_name".to_string(),
-            protobuf_hex: "0a210a120a0c726573...".to_string(), // Simplified for demo
             expected_metric: TestMetric {
                 name: "".to_string(), // Missing name should fail validation
                 description: "Invalid metric".to_string(),
@@ -300,7 +303,7 @@ pub fn otlp_003_temporality<RT: RuntimeInterface>() -> ConformanceTest<RT> {
                 }));
 
                 // Mock temporality validation
-                let actual_temporality = get_metric_temporality(&metric_type);
+                let actual_temporality = get_metric_temporality(metric_type);
 
                 if actual_temporality != *expected_temporality {
                     return TestResult::failed(format!(
@@ -448,10 +451,8 @@ pub fn otlp_005_compatibility<RT: RuntimeInterface>() -> ConformanceTest<RT> {
 /// Mock OTLP message validation.
 fn validate_otlp_message(vector: &OtlpTestVector) -> bool {
     // In real implementation:
-    // 1. Parse protobuf_hex to bytes
-    // 2. Use protobuf decoder for OTLP metrics messages
-    // 3. Validate structure and required fields
-    // 4. Return validation result
+    // 1. Decode OTLP protobuf metrics bytes
+    // 2. Validate structure and required fields
 
     // For mock: pass if name is non-empty, fail otherwise
     !vector.expected_metric.name.is_empty()
@@ -467,9 +468,8 @@ fn encode_resource_attribute(key: &str, value: &str) -> Vec<u8> {
 fn decode_resource_attribute(encoded: &[u8]) -> (String, String) {
     // Real implementation would decode OTLP protobuf
     let decoded = String::from_utf8_lossy(encoded);
-    let parts: Vec<&str> = decoded.split('=').collect();
-    if parts.len() == 2 {
-        (parts[0].to_string(), parts[1].to_string())
+    if let Some((key, value)) = decoded.split_once('=') {
+        (key.to_string(), value.to_string())
     } else {
         ("".to_string(), "".to_string())
     }
@@ -480,7 +480,6 @@ fn get_metric_temporality(metric_type: &TestMetricType) -> &'static str {
     match metric_type {
         TestMetricType::Counter | TestMetricType::Histogram => "cumulative",
         TestMetricType::Gauge => "unspecified",
-        TestMetricType::Summary => "delta",
     }
 }
 
@@ -540,10 +539,18 @@ mod tests {
 
     #[test]
     fn test_metric_temporality() {
-        assert_eq!(get_metric_temporality(&TestMetricType::Counter), "cumulative");
-        assert_eq!(get_metric_temporality(&TestMetricType::Gauge), "unspecified");
-        assert_eq!(get_metric_temporality(&TestMetricType::Histogram), "cumulative");
-        assert_eq!(get_metric_temporality(&TestMetricType::Summary), "delta");
+        assert_eq!(
+            get_metric_temporality(&TestMetricType::Counter),
+            "cumulative"
+        );
+        assert_eq!(
+            get_metric_temporality(&TestMetricType::Gauge),
+            "unspecified"
+        );
+        assert_eq!(
+            get_metric_temporality(&TestMetricType::Histogram),
+            "cumulative"
+        );
     }
 
     #[test]
