@@ -659,11 +659,47 @@ fn parse_part_headers(data: &[u8]) -> HashMap<String, String> {
     headers
 }
 
+/// Sanitize a filename to prevent path traversal attacks.
+///
+/// Removes path separators, control characters, and normalizes the filename
+/// to prevent directory traversal via Content-Disposition filename parameters.
+///
+/// SECURITY: This function prevents attacks like `../../../etc/passwd` by:
+/// 1. Splitting on path separators and taking only the base name
+/// 2. Filtering out control characters
+/// 3. Trimming leading/trailing dots and spaces (Windows/macOS issues)
+/// 4. Providing fallback for empty results
+fn sanitize_filename(filename: &str) -> String {
+    // Split on common path separators and take the last component (base name)
+    let base_name = filename
+        .split(['/', '\\', ':', '?', '*', '"', '<', '>', '|'])
+        .last()
+        .unwrap_or("file");
+
+    // Filter out control characters and normalize
+    let sanitized = base_name
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect::<String>();
+
+    // Trim problematic leading/trailing characters
+    let trimmed = sanitized.trim_matches(['.', ' ']).to_string();
+
+    // Fallback to "file" if empty after sanitization
+    if trimmed.is_empty() {
+        "file".to_string()
+    } else {
+        trimmed
+    }
+}
+
 /// Parse a parameter from a Content-Disposition header value.
 ///
 /// Handles both quoted and unquoted values:
 /// - `form-data; name="field1"`
 /// - `form-data; name=field1`
+///
+/// SECURITY: For filename parameters, applies sanitization to prevent path traversal.
 fn parse_disposition_param(disposition: &str, param: &str) -> Option<String> {
     if let Some(value) = parse_disposition_ext_param(disposition, param) {
         return Some(value);
@@ -686,7 +722,7 @@ fn parse_disposition_param(disposition: &str, param: &str) -> Option<String> {
     };
     let after = &disposition[idx + search.len()..];
 
-    after.strip_prefix('"').map_or_else(
+    let raw_value = after.strip_prefix('"').map_or_else(
         || {
             let end = after.find([';', ' ', '\t']).unwrap_or(after.len());
             let val = after[..end].trim();
@@ -713,7 +749,14 @@ fn parse_disposition_param(disposition: &str, param: &str) -> Option<String> {
             }
             Some(result)
         },
-    )
+    )?;
+
+    // SECURITY: Apply filename sanitization to prevent path traversal
+    if param == "filename" {
+        Some(sanitize_filename(&raw_value))
+    } else {
+        Some(raw_value)
+    }
 }
 
 fn parse_disposition_ext_param(disposition: &str, param: &str) -> Option<String> {
@@ -733,7 +776,14 @@ fn parse_disposition_ext_param(disposition: &str, param: &str) -> Option<String>
 
     let after = &disposition[idx + search.len()..];
     let end = after.find([';', ' ', '\t']).unwrap_or(after.len());
-    decode_rfc8187_ext_value(after[..end].trim())
+    let decoded = decode_rfc8187_ext_value(after[..end].trim())?;
+
+    // SECURITY: Apply filename sanitization to RFC 8187 extended filenames
+    if param == "filename" {
+        Some(sanitize_filename(&decoded))
+    } else {
+        Some(decoded)
+    }
 }
 
 fn decode_rfc8187_ext_value(value: &str) -> Option<String> {
