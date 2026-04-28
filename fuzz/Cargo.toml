@@ -1566,6 +1566,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "multipart_filename_extraction"
+path = "fuzz_targets/multipart_filename_extraction.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "raptorq_roundtrip"
 path = "fuzz_targets/raptorq_roundtrip.rs"
 test = false
@@ -1617,6 +1624,16 @@ bench = false
 [[bin]]
 name = "grpc_streaming"
 path = "fuzz_targets/grpc_streaming.rs"
+test = false
+doc = false
+bench = false
+
+# Structure-aware gRPC streaming cancel storm fuzzer targeting stream state
+# transitions under concurrent cancellation pressure. Tests race conditions,
+# state consistency, and fail-closed semantics during cancel storms.
+[[bin]]
+name = "grpc_streaming_cancel_storm"
+path = "fuzz_targets/grpc_streaming_cancel_storm.rs"
 test = false
 doc = false
 bench = false
@@ -2500,6 +2517,18 @@ bench = false
 [[bin]]
 name = "jetstream_pub_ack_duplicate_detection"
 path = "fuzz_targets/jetstream_pub_ack_duplicate_detection.rs"
+test = false
+doc = false
+bench = false
+
+# RFC 6330 RaptorQ encoder K_max + N_max boundary limits fuzzer.
+# Structure-aware fuzzing targeting SystematicParams validation and encoding
+# with K values around the RFC 6330 limit (~56,403) and various N combinations.
+# Tests encoder behavior at parameter boundaries, overflow conditions, and
+# validates that encoding fails gracefully at unsupported limits.
+[[bin]]
+name = "raptorq_encoder_rfc6330_limits"
+path = "fuzz_targets/raptorq_encoder_rfc6330_limits.rs"
 test = false
 doc = false
 bench = false
