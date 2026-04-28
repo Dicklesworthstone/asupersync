@@ -4628,23 +4628,40 @@ mod tests {
         // RFC 9113 Section 6.8 conformance test - GOAWAY frame ordering and semantics
         // Tests the MUST/SHOULD clauses for connection termination
 
+        fn encode_headers(headers: Vec<Header>) -> Bytes {
+            let mut encoder = hpack::Encoder::new();
+            let mut encoded = BytesMut::new();
+            encoder.encode(&headers, &mut encoded);
+            encoded.freeze()
+        }
+
         let mut conn = Connection::server(Settings::default());
 
         // Test Requirement 1: GOAWAY should include last successfully processed stream ID
         // Open multiple streams to establish last_stream_id baseline
 
         // Process stream 1 (successfully)
-        let headers1 = HeadersFrame::new(1, vec![
-            Header::new(b":method", b"GET"),
-            Header::new(b":path", b"/"),
-        ]);
+        let headers1 = HeadersFrame::new(
+            1,
+            encode_headers(vec![
+                Header::new(":method", "GET"),
+                Header::new(":path", "/"),
+            ]),
+            false,
+            true,
+        );
         conn.process_frame(Frame::Headers(headers1)).unwrap();
 
         // Process stream 3 (successfully)
-        let headers3 = HeadersFrame::new(3, vec![
-            Header::new(b":method", b"POST"),
-            Header::new(b":path", b"/api"),
-        ]);
+        let headers3 = HeadersFrame::new(
+            3,
+            encode_headers(vec![
+                Header::new(":method", "POST"),
+                Header::new(":path", "/api"),
+            ]),
+            false,
+            true,
+        );
         conn.process_frame(Frame::Headers(headers3)).unwrap();
 
         // RFC 9113 §6.8: "the stream identifier of the last stream that it successfully received"
@@ -4659,7 +4676,7 @@ mod tests {
                 );
                 assert_eq!(goaway.error_code, ErrorCode::NoError);
                 assert_eq!(goaway.debug_data, Bytes::from("graceful shutdown"));
-            },
+            }
             _ => panic!("Expected GOAWAY frame, got {:?}", frame),
         }
 
@@ -4678,7 +4695,7 @@ mod tests {
         match result1 {
             ReceivedFrame::GoAway { last_stream_id, .. } => {
                 assert_eq!(last_stream_id, 5);
-            },
+            }
             _ => panic!("Expected GoAway received frame"),
         }
 
@@ -4691,7 +4708,7 @@ mod tests {
                     last_stream_id, 1,
                     "RFC 9113 §6.8: Multiple GOAWAY frames should narrow last_stream_id"
                 );
-            },
+            }
             _ => panic!("Expected GoAway received frame"),
         }
 
@@ -4707,14 +4724,20 @@ mod tests {
 
         assert!(frame1.is_some());
         assert!(matches!(frame1.unwrap(), Frame::GoAway(_)));
-        assert!(frame2.is_none(), "Second GOAWAY call should not generate additional frame");
+        assert!(
+            frame2.is_none(),
+            "Second GOAWAY call should not generate additional frame"
+        );
 
         // Test Requirement 5: Frame ordering preservation in pending operations
         // GOAWAY should be processed in order relative to other pending frames
         let mut conn4 = Connection::server(Settings::default());
+        conn4.state = ConnectionState::Open;
 
-        // Queue a PING frame first
-        conn4.send_ping(b"testping");
+        // Queue a PING ACK first by processing an inbound ping.
+        conn4
+            .process_frame(Frame::Ping(PingFrame::new(*b"testping")))
+            .expect("inbound ping should queue an ACK response");
         // Then queue GOAWAY
         conn4.goaway(ErrorCode::NoError, Bytes::new());
 
@@ -4722,7 +4745,13 @@ mod tests {
         let frame1 = conn4.next_frame().expect("PING frame expected first");
         let frame2 = conn4.next_frame().expect("GOAWAY frame expected second");
 
-        assert!(matches!(frame1, Frame::Ping(_)), "PING should come before GOAWAY");
-        assert!(matches!(frame2, Frame::GoAway(_)), "GOAWAY should preserve ordering");
+        assert!(
+            matches!(frame1, Frame::Ping(_)),
+            "PING should come before GOAWAY"
+        );
+        assert!(
+            matches!(frame2, Frame::GoAway(_)),
+            "GOAWAY should preserve ordering"
+        );
     }
 }
