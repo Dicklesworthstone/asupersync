@@ -1,5 +1,5 @@
-#![allow(warnings)]
-#![allow(clippy::all)]
+#![deny(warnings)]
+#![deny(clippy::all)]
 //! HTTP/2 CONTINUATION ordering conformance tests (RFC 9113 §6.10).
 //!
 //! These vectors exercise the connection's real frame-sequencing state:
