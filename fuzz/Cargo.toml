@@ -214,6 +214,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "mysql_row_decoder"
+path = "fuzz_targets/mysql_row_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_postgres_wire_protocol"
 path = "fuzz_targets/postgres_wire_protocol.rs"
 test = false

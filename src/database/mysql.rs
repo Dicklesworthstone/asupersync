@@ -4152,6 +4152,25 @@ pub fn fuzz_parse_error_packet(data: &[u8]) -> MySqlError {
     MySqlConnection::parse_error(data)
 }
 
+#[doc(hidden)]
+pub fn fuzz_parse_text_row(data: &[u8], columns: &[MySqlColumn]) -> Result<Vec<MySqlValue>, MySqlError> {
+    MySqlConnection::parse_text_row(data, columns)
+}
+
+#[doc(hidden)]
+pub fn fuzz_parse_binary_row(data: &[u8], columns: &[MySqlColumn]) -> Result<Vec<MySqlValue>, MySqlError> {
+    MySqlConnection::parse_binary_row(data, columns)
+}
+
+#[doc(hidden)]
+pub fn fuzz_parse_data_row_or_terminator(
+    data: &[u8],
+    columns: &[MySqlColumn],
+    deprecate_eof: bool
+) -> Result<Option<Vec<MySqlValue>>, MySqlError> {
+    MySqlConnection::parse_data_row_or_terminator(data, columns, deprecate_eof)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
