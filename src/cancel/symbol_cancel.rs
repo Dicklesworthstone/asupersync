@@ -1055,6 +1055,11 @@ pub struct CancelBroadcaster<S: CancelSink> {
     sink: S,
     /// Local sequence counter.
     next_sequence: AtomicU64,
+    /// Failed broadcast messages pending retry.
+    /// br-asupersync-dm6ci4: Preserve failed forward broadcasts for retry
+    /// instead of dropping them on broadcast errors. The retry queue maintains
+    /// failed messages in order for deterministic re-attempt behavior.
+    pending_retries: RwLock<VecDeque<CancelMessage>>,
     /// br-asupersync-ml5ba5 — Per-broadcaster random tag mixed into
     /// the synthetic token_id `prepare_cancel` mints when no local
     /// `SymbolCancelToken` exists for an object. Without this,
@@ -1128,6 +1133,7 @@ impl<S: CancelSink> CancelBroadcaster<S> {
             sink,
             next_sequence: AtomicU64::new(0),
             sender_tag,
+            pending_retries: RwLock::new(VecDeque::new()),
             initiated: AtomicU64::new(0),
             received: AtomicU64::new(0),
             forwarded: AtomicU64::new(0),
@@ -1239,15 +1245,74 @@ impl<S: CancelSink> CancelBroadcaster<S> {
         now: Time,
     ) -> crate::error::Result<usize> {
         let msg = self.prepare_cancel(object_id, reason, now);
-        self.sink.broadcast(&msg).await
+        match self.sink.broadcast(&msg).await {
+            Ok(count) => Ok(count),
+            Err(err) => {
+                // br-asupersync-dm6ci4: On broadcast failure, preserve the message
+                // for retry instead of dropping it. This ensures failed forward
+                // broadcasts can be re-attempted later via retry_failed_broadcasts().
+                self.pending_retries.write().push_back(msg);
+                Err(err)
+            }
+        }
     }
 
     /// Handles a received cancellation message and forwards if appropriate.
     pub async fn handle_message(&self, msg: CancelMessage, now: Time) -> crate::error::Result<()> {
         if let Some(forwarded) = self.receive_message(&msg, now) {
-            self.sink.broadcast(&forwarded).await?;
+            match self.sink.broadcast(&forwarded).await {
+                Ok(_) => Ok(()),
+                Err(err) => {
+                    // br-asupersync-dm6ci4: On forward broadcast failure, preserve
+                    // the forwarded message for retry instead of dropping it.
+                    self.pending_retries.write().push_back(forwarded);
+                    Err(err)
+                }
+            }
+        } else {
+            Ok(())
         }
-        Ok(())
+    }
+
+    /// Retries failed broadcast messages.
+    ///
+    /// br-asupersync-dm6ci4: Re-attempts broadcasting of messages that previously
+    /// failed due to network or sink errors. Messages are retried in FIFO order
+    /// to preserve temporal causality. Successfully broadcast messages are removed
+    /// from the retry queue; failed messages remain queued for subsequent retries.
+    ///
+    /// Returns the number of messages successfully retried and any error from the
+    /// last failed retry attempt.
+    pub async fn retry_failed_broadcasts(&self) -> (usize, Option<crate::error::Error>) {
+        let mut retried_count = 0;
+        let mut last_error = None;
+
+        // Process retry queue until empty or we hit a failure
+        loop {
+            let msg = {
+                let mut retries = self.pending_retries.write();
+                retries.pop_front()
+            };
+
+            let Some(msg) = msg else {
+                break; // No more messages to retry
+            };
+
+            match self.sink.broadcast(&msg).await {
+                Ok(_) => {
+                    retried_count += 1;
+                    // Successfully retried, continue with next message
+                }
+                Err(err) => {
+                    // Failed again, put message back at the front for next retry
+                    self.pending_retries.write().push_front(msg);
+                    last_error = Some(err);
+                    break; // Stop retrying on first failure to preserve order
+                }
+            }
+        }
+
+        (retried_count, last_error)
     }
 
     /// Returns a snapshot of current metrics.
@@ -1363,6 +1428,8 @@ pub struct CleanupCoordinator {
     handlers: RwLock<HashMap<ObjectId, Box<dyn CleanupHandler>>>,
     /// Completed object IDs that no longer accept pending symbols.
     completed: RwLock<HashSet<ObjectId>>,
+    /// Symbols buffered during cleanup attempts (to prevent drops during retry).
+    cleanup_buffer: RwLock<HashMap<ObjectId, Vec<Symbol>>>,
     /// Default cleanup budget.
     default_budget: Budget,
 }
@@ -1375,6 +1442,7 @@ impl CleanupCoordinator {
             pending: RwLock::new(HashMap::new()),
             handlers: RwLock::new(HashMap::new()),
             completed: RwLock::new(HashSet::new()),
+            cleanup_buffer: RwLock::new(HashMap::new()),
             default_budget: Budget::new().with_poll_quota(1000),
         }
     }
@@ -1396,6 +1464,15 @@ impl CleanupCoordinator {
             return;
         }
 
+        // Check if object is in cleanup buffer (mid-retry); if so, buffer the symbol
+        // rather than dropping it, so it can be replayed when retry completes.
+        let mut cleanup_buffer = self.cleanup_buffer.write();
+        if cleanup_buffer.contains_key(&object_id) {
+            cleanup_buffer.entry(object_id).or_default().push(symbol);
+            return;
+        }
+        drop(cleanup_buffer); // Release buffer lock before modifying pending
+
         let set = pending
             .entry(object_id)
             .or_insert_with(|| PendingSymbolSet {
@@ -1413,9 +1490,20 @@ impl CleanupCoordinator {
         &self,
         object_id: ObjectId,
         handler: Box<dyn CleanupHandler>,
-        pending_set: PendingSymbolSet,
+        mut pending_set: PendingSymbolSet,
     ) {
         self.handlers.write().insert(object_id, handler);
+
+        // Replay any symbols that were buffered during cleanup attempt
+        let mut cleanup_buffer = self.cleanup_buffer.write();
+        if let Some(buffered_symbols) = cleanup_buffer.remove(&object_id) {
+            for symbol in buffered_symbols {
+                pending_set.total_bytes = pending_set.total_bytes.saturating_add(symbol.len());
+                pending_set.symbols.push(symbol);
+            }
+        }
+        drop(cleanup_buffer); // Release buffer lock before other locks
+
         // Keep `pending` held while clearing `completed` so reopening retry
         // state is atomic with respect to register_pending() and cannot drop
         // symbols in the reopen window.
@@ -1431,6 +1519,9 @@ impl CleanupCoordinator {
 
     /// Clears pending symbols for an object (e.g., after successful decode).
     pub fn clear_pending(&self, object_id: &ObjectId) -> Option<usize> {
+        // A successfully decoded object no longer needs its cleanup handler;
+        // retaining it would leak per-object handler state indefinitely.
+        self.handlers.write().remove(object_id);
         let mut pending = self.pending.write();
         self.completed.write().insert(*object_id);
         pending.remove(object_id).map(|set| set.symbols.len())
@@ -1449,13 +1540,14 @@ impl CleanupCoordinator {
             handler_errors: Vec::new(),
         };
 
-        // Atomically extract the handler and pending symbols while marking as completed.
-        // The lock hierarchy (handlers -> pending -> completed) prevents deadlocks,
-        // and holding them all prevents concurrent cleanup calls from interleaving and
-        // losing symbols by finding a pending set without its handler.
+        // Atomically extract the handler and pending symbols. Create a cleanup buffer
+        // entry to catch symbols arriving during cleanup attempts, preventing drops
+        // during the retry window. Don't mark as completed until handler succeeds.
         let handler = { self.handlers.write().remove(&object_id) };
         let pending_set = { self.pending.write().remove(&object_id) };
-        self.completed.write().insert(object_id);
+
+        // Create cleanup buffer entry to catch symbols during cleanup
+        self.cleanup_buffer.write().insert(object_id, Vec::new());
 
         if let Some(set) = pending_set {
             let symbol_count = set.symbols.len();
@@ -1476,12 +1568,16 @@ impl CleanupCoordinator {
                     result.handlers_run.push(handler_name.clone());
                     match handler.cleanup(object_id, set.symbols) {
                         Ok(_) => {
+                            // Handler succeeded - mark as completed and clean up buffer
+                            self.completed.write().insert(object_id);
+                            self.cleanup_buffer.write().remove(&object_id);
                             result.symbols_cleaned = symbol_count;
                             result.bytes_freed = total_bytes;
                         }
                         Err(err) => {
                             // The cleanup attempt failed; retain the pending set and
                             // handler so the caller can retry deterministically.
+                            // The cleanup buffer is preserved by restore_retry_state.
                             self.restore_retry_state(object_id, handler, retry_set);
                             result.completed = false;
                             result.handler_errors.push(format!("{handler_name}: {err}"));
@@ -1514,9 +1610,41 @@ impl CleanupCoordinator {
                      {symbol_count} symbol(s) / {total_bytes} byte(s) deferred \
                      (br-asupersync-batcyw)"
                 ));
-                // Restore pending; un-mark completed.
-                self.pending.write().insert(object_id, set);
-                self.completed.write().remove(&object_id);
+
+                // Merge any buffered symbols back into the pending set
+                let mut cleanup_buffer = self.cleanup_buffer.write();
+                let mut restored_set = set;
+                if let Some(buffered_symbols) = cleanup_buffer.remove(&object_id) {
+                    for symbol in buffered_symbols {
+                        restored_set.total_bytes = restored_set.total_bytes.saturating_add(symbol.len());
+                        restored_set.symbols.push(symbol);
+                    }
+                }
+                drop(cleanup_buffer);
+
+                // Restore pending; don't mark completed (no handler to retry with).
+                self.pending.write().insert(object_id, restored_set);
+            }
+        } else {
+            // No pending symbols, but check cleanup buffer for symbols that arrived
+            // during a previous cleanup attempt
+            let mut cleanup_buffer = self.cleanup_buffer.write();
+            if let Some(buffered_symbols) = cleanup_buffer.remove(&object_id) {
+                if !buffered_symbols.is_empty() {
+                    // Create a new pending set from buffered symbols
+                    let now = Time::now(); // Use current time since we don't have original
+                    let mut new_set = PendingSymbolSet {
+                        symbols: Vec::new(),
+                        total_bytes: 0,
+                        _created_at: now,
+                    };
+                    for symbol in buffered_symbols {
+                        new_set.total_bytes = new_set.total_bytes.saturating_add(symbol.len());
+                        new_set.symbols.push(symbol);
+                    }
+                    self.pending.write().insert(object_id, new_set);
+                    result.completed = false; // Can't complete without symbols to clean
+                }
             }
         }
 
@@ -2689,6 +2817,53 @@ mod tests {
         assert_eq!(result.handlers_run, vec!["test"]);
         assert!(result.completed);
         assert!(result.handler_errors.is_empty());
+    }
+
+    #[test]
+    fn test_clear_pending_drops_registered_handler() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct DropCountingHandler {
+            drops: Arc<AtomicUsize>,
+        }
+
+        impl Drop for DropCountingHandler {
+            fn drop(&mut self) {
+                self.drops.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        impl CleanupHandler for DropCountingHandler {
+            fn cleanup(
+                &self,
+                _object_id: ObjectId,
+                _symbols: Vec<Symbol>,
+            ) -> crate::error::Result<usize> {
+                Ok(0)
+            }
+
+            fn name(&self) -> &'static str {
+                "drop-counting"
+            }
+        }
+
+        let coordinator = CleanupCoordinator::new();
+        let object_id = ObjectId::new_for_test(6);
+        let now = Time::from_millis(100);
+        let drops = Arc::new(AtomicUsize::new(0));
+
+        coordinator.register_handler(
+            object_id,
+            DropCountingHandler {
+                drops: Arc::clone(&drops),
+            },
+        );
+        coordinator.register_pending(object_id, Symbol::new_for_test(6, 0, 0, &[1, 2, 3]), now);
+
+        assert_eq!(coordinator.handlers.read().len(), 1);
+        assert_eq!(coordinator.clear_pending(&object_id), Some(1));
+        assert_eq!(coordinator.handlers.read().len(), 0);
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -4309,9 +4484,9 @@ mod tests {
 
         // Add several listeners that track notification count
         let notification_count = Arc::new(AtomicU32::new(0));
-        for i in 0..5 {
+        for _i in 0..5 {
             let count = Arc::clone(&notification_count);
-            token.add_listener(move |reason: &CancelReason, _time: Time| {
+            token.add_listener(move |_reason: &CancelReason, _time: Time| {
                 count.fetch_add(1, Ordering::Relaxed);
                 // Simulate listener work to make race condition more likely
                 std::hint::spin_loop();
@@ -4510,5 +4685,133 @@ mod tests {
             Some(crate::types::Time::from_millis(12345)),
             "child created during in-flight cancel must inherit the canonical parent timestamp"
         );
+    }
+
+    // --- br-asupersync-9a0x8n: CleanupCoordinator symbol drop fix ---
+
+    #[test]
+    fn cleanup_coordinator_buffers_symbols_during_retry() {
+        // br-asupersync-9a0x8n: symbols arriving during cleanup retry
+        // attempts should be buffered and replayed when retry state
+        // is restored, not dropped.
+
+        use std::sync::Arc;
+        use std::sync::Mutex;
+
+        let coordinator = CleanupCoordinator::new();
+        let object_id = ObjectId::new_for_test(42);
+        let now = Time::from_nanos(1000);
+
+        // Register initial symbols
+        coordinator.register_pending(object_id, Symbol::from_slice(b"initial1"), now);
+        coordinator.register_pending(object_id, Symbol::from_slice(b"initial2"), now);
+
+        // Create a failing handler
+        #[derive(Debug)]
+        struct FailingHandler {
+            attempts: Arc<Mutex<u32>>,
+        }
+
+        impl CleanupHandler for FailingHandler {
+            fn name(&self) -> &str { "failing_test_handler" }
+
+            fn cleanup(&self, _object_id: ObjectId, symbols: Vec<Symbol>) -> Result<(), CleanupError> {
+                let mut attempts = self.attempts.lock().unwrap();
+                *attempts += 1;
+
+                if *attempts == 1 {
+                    // First attempt fails, triggering retry logic
+                    Err(CleanupError::new("simulated failure"))
+                } else {
+                    // Second attempt succeeds
+                    assert_eq!(symbols.len(), 4, "Should have initial + buffered symbols");
+                    let data: Vec<&[u8]> = symbols.iter().map(|s| s.as_ref()).collect();
+                    // Should contain initial symbols plus symbols added during first cleanup
+                    assert!(data.contains(&b"initial1"[..]));
+                    assert!(data.contains(&b"initial2"[..]));
+                    assert!(data.contains(&b"during_cleanup1"[..]));
+                    assert!(data.contains(&b"during_cleanup2"[..]));
+                    Ok(())
+                }
+            }
+        }
+
+        let attempts = Arc::new(Mutex::new(0u32));
+        let handler = FailingHandler { attempts: Arc::clone(&attempts) };
+        coordinator.register_handler(object_id, handler);
+
+        // Start first cleanup (will fail)
+        let result1 = coordinator.cleanup(object_id, None);
+        assert!(!result1.completed, "First cleanup should fail and not complete");
+        assert!(!result1.handler_errors.is_empty(), "Should have handler error");
+
+        // Add symbols during retry state (these used to be dropped)
+        coordinator.register_pending(object_id, Symbol::from_slice(b"during_cleanup1"), now);
+        coordinator.register_pending(object_id, Symbol::from_slice(b"during_cleanup2"), now);
+
+        // Verify symbols are in cleanup buffer, not dropped
+        let stats = coordinator.stats();
+        assert_eq!(stats.pending_objects, 1, "Should have pending object after failure");
+
+        // Retry cleanup (will succeed and include buffered symbols)
+        let result2 = coordinator.cleanup(object_id, None);
+        assert!(result2.completed, "Second cleanup should succeed");
+        assert!(result2.handler_errors.is_empty(), "Should have no handler errors");
+        assert_eq!(result2.symbols_cleaned, 4, "Should clean initial + buffered symbols");
+
+        // Verify no pending symbols remain
+        let final_stats = coordinator.stats();
+        assert_eq!(final_stats.pending_objects, 0, "Should have no pending objects");
+        assert_eq!(final_stats.pending_symbols, 0, "Should have no pending symbols");
+
+        // Verify handler was called twice (fail, then success)
+        assert_eq!(*attempts.lock().unwrap(), 2, "Handler should be called twice");
+    }
+
+    #[test]
+    fn cleanup_coordinator_no_symbols_lost_during_concurrent_registration() {
+        // Regression test for the specific race: symbols registered
+        // during the window between cleanup start and retry restoration
+        // should not be lost.
+
+        let coordinator = CleanupCoordinator::new();
+        let object_id = ObjectId::new_for_test(99);
+        let now = Time::from_nanos(2000);
+
+        // Register initial symbol
+        coordinator.register_pending(object_id, Symbol::from_slice(b"original"), now);
+
+        // Create handler that always fails (forces retry)
+        #[derive(Debug)]
+        struct AlwaysFailHandler;
+
+        impl CleanupHandler for AlwaysFailHandler {
+            fn name(&self) -> &str { "always_fail" }
+            fn cleanup(&self, _: ObjectId, _: Vec<Symbol>) -> Result<(), CleanupError> {
+                Err(CleanupError::new("always fails"))
+            }
+        }
+
+        coordinator.register_handler(object_id, AlwaysFailHandler);
+
+        // Start cleanup (will fail and create cleanup buffer)
+        let result = coordinator.cleanup(object_id, None);
+        assert!(!result.completed);
+
+        // Register more symbols during retry state
+        coordinator.register_pending(object_id, Symbol::from_slice(b"during_retry1"), now);
+        coordinator.register_pending(object_id, Symbol::from_slice(b"during_retry2"), now);
+
+        // Verify all symbols are preserved (not dropped)
+        let stats = coordinator.stats();
+        assert_eq!(stats.pending_objects, 1);
+        // Original symbol + two added during retry should all be preserved
+        assert!(stats.pending_symbols >= 3, "All symbols should be preserved, got {}", stats.pending_symbols);
+
+        // Additional symbols after restoration should also work
+        coordinator.register_pending(object_id, Symbol::from_slice(b"after_retry"), now);
+
+        let final_stats = coordinator.stats();
+        assert!(final_stats.pending_symbols >= 4, "All symbols including post-retry should be preserved");
     }
 }
