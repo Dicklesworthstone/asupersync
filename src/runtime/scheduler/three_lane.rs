@@ -1331,6 +1331,7 @@ impl ThreeLaneScheduler {
                 }
             } else {
                 worker.adaptive_cancel_policy = None;
+                worker.preemption_metrics.adaptive_epochs = 0;
                 worker.preemption_metrics.adaptive_current_limit = worker.cancel_streak_limit;
                 worker.preemption_metrics.adaptive_reward_ema = 0.0;
                 worker.preemption_metrics.adaptive_e_value = 1.0;
@@ -11154,6 +11155,31 @@ mod tests {
             adaptive_next_rng, baseline_next_rng,
             "deterministic UCB epoch updates must not consume extra RNG state"
         );
+    }
+
+    #[test]
+    fn disabling_adaptive_cancel_streak_resets_exposed_epoch_metrics() {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 4);
+        scheduler.set_adaptive_cancel_streak(true, 1);
+        scheduler.inject_ready(TaskId::new_for_test(9200, 1), 50);
+
+        {
+            let worker = scheduler.workers.first_mut().expect("worker");
+            assert_eq!(worker.next_task(), Some(TaskId::new_for_test(9200, 1)));
+            assert!(
+                worker.preemption_metrics().adaptive_epochs > 0,
+                "dispatch should complete at least one adaptive epoch before disable"
+            );
+        }
+
+        scheduler.set_adaptive_cancel_streak(false, 1);
+        let worker = scheduler.workers.first().expect("worker");
+        let metrics = worker.preemption_metrics();
+        assert_eq!(metrics.adaptive_epochs, 0);
+        assert_eq!(metrics.adaptive_current_limit, worker.cancel_streak_limit);
+        assert_eq!(metrics.adaptive_reward_ema, 0.0);
+        assert_eq!(metrics.adaptive_e_value, 1.0);
     }
 
     #[test]
