@@ -717,6 +717,40 @@ mod tests {
     }
 
     #[test]
+    fn tla_behavior_module_snapshot() {
+        let events = [
+            TraceEvent::region_created(1, Time::from_nanos(10), rid(1), None),
+            TraceEvent::spawn(2, Time::from_nanos(20), tid(1), rid(1)),
+            TraceEvent::schedule(3, Time::from_nanos(30), tid(1), rid(1)),
+            TraceEvent::poll(4, Time::from_nanos(40), tid(1), rid(1)),
+            TraceEvent::yield_task(5, Time::from_nanos(50), tid(1), rid(1)),
+            TraceEvent::obligation_reserve(
+                6,
+                Time::from_nanos(60),
+                oid(1),
+                tid(1),
+                rid(1),
+                ObligationKind::SendPermit,
+            ),
+            TraceEvent::obligation_commit(
+                7,
+                Time::from_nanos(70),
+                oid(1),
+                tid(1),
+                rid(1),
+                ObligationKind::SendPermit,
+                10,
+            ),
+            TraceEvent::complete(8, Time::from_nanos(80), tid(1), rid(1)),
+        ];
+
+        let exporter = TlaExporter::from_trace(&events);
+        let module = exporter.export_behavior("GoldenBehavior");
+
+        insta::assert_snapshot!(module.source);
+    }
+
+    #[test]
     fn format_tla_task_map_empty() {
         let map = BTreeMap::new();
         assert_eq!(format_tla_task_map(&map), "<<>>");
