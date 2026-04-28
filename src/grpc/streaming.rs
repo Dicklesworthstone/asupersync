@@ -475,6 +475,8 @@ pub struct StreamingRequest<T> {
     items: VecDeque<Result<T, Status>>,
     /// Whether no further items will arrive.
     closed: bool,
+    /// Terminal status for cancelled/errored streams (fail-closed).
+    terminal_status: Option<Status>,
     /// Last waker waiting for a new item.
     waiter: Option<Waker>,
 }
@@ -486,6 +488,7 @@ impl<T> StreamingRequest<T> {
         Self {
             items: VecDeque::new(),
             closed: true,
+            terminal_status: None,
             waiter: None,
         }
     }
@@ -496,6 +499,7 @@ impl<T> StreamingRequest<T> {
         Self {
             items: VecDeque::new(),
             closed: false,
+            terminal_status: None,
             waiter: None,
         }
     }
@@ -532,6 +536,14 @@ impl<T> StreamingRequest<T> {
         self.closed = true;
         wake_waiter(&mut self.waiter);
     }
+
+    /// Cancels the stream with an error status (fail-closed).
+    /// Future polls will return the error instead of None.
+    pub fn cancel_with_error(&mut self, status: Status) {
+        self.closed = true;
+        self.terminal_status = Some(status);
+        wake_waiter(&mut self.waiter);
+    }
 }
 
 impl<T> Default for StreamingRequest<T> {
@@ -552,6 +564,10 @@ impl<T: Send + std::marker::Unpin> Streaming for StreamingRequest<T> {
             return Poll::Ready(Some(next));
         }
         if this.closed {
+            // SECURITY: Fail-closed stream cancellation - distinguish error vs graceful completion
+            if let Some(terminal_status) = &this.terminal_status {
+                return Poll::Ready(Some(Err(terminal_status.clone())));
+            }
             return Poll::Ready(None);
         }
         this.waiter = Some(cx.waker().clone());
@@ -672,6 +688,8 @@ pub struct ResponseStream<T> {
     items: VecDeque<Result<T, Status>>,
     /// Whether the stream is terminal.
     closed: bool,
+    /// Terminal status for cancelled/errored streams (fail-closed).
+    terminal_status: Option<Status>,
     /// Last pending poll waker.
     waiter: Option<Waker>,
 }
@@ -684,6 +702,7 @@ impl<T> ResponseStream<T> {
             items: VecDeque::new(),
             closed: true,
             waiter: None,
+            terminal_status: None,
         }
     }
 
@@ -694,6 +713,7 @@ impl<T> ResponseStream<T> {
             items: VecDeque::new(),
             closed: false,
             waiter: None,
+            terminal_status: None,
         }
     }
 
@@ -720,6 +740,16 @@ impl<T> ResponseStream<T> {
         self.closed = true;
         wake_waiter(&mut self.waiter);
     }
+
+    /// Cancel the stream with a specific error status.
+    ///
+    /// Used for fail-closed cancellation where the stream should propagate
+    /// the cancellation reason rather than appearing normally completed.
+    pub fn cancel_with_error(&mut self, status: Status) {
+        self.terminal_status = Some(status);
+        self.closed = true;
+        wake_waiter(&mut self.waiter);
+    }
 }
 
 impl<T> Default for ResponseStream<T> {
@@ -740,6 +770,10 @@ impl<T: Send + std::marker::Unpin> Streaming for ResponseStream<T> {
             return Poll::Ready(Some(next));
         }
         if this.closed {
+            // SECURITY: Fail-closed stream cancellation - distinguish error vs graceful completion
+            if let Some(terminal_status) = &this.terminal_status {
+                return Poll::Ready(Some(Err(terminal_status.clone())));
+            }
             return Poll::Ready(None);
         }
         this.waiter = Some(cx.waker().clone());
