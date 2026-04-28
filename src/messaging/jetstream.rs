@@ -870,7 +870,7 @@ impl JetStreamContext {
             .ok_or_else(|| JsError::ParseError("missing stream in PubAck".to_string()))?;
         let seq = extract_json_u64(&json, "seq")
             .ok_or_else(|| JsError::ParseError("missing seq in PubAck".to_string()))?;
-        let duplicate = json.contains("\"duplicate\":true");
+        let duplicate = extract_json_bool(&json, "duplicate").unwrap_or(false);
 
         Ok(PubAck {
             stream,
@@ -1328,6 +1328,19 @@ fn extract_json_u64(json: &str, key: &str) -> Option<u64> {
         .find(|c: char| !c.is_ascii_digit())
         .unwrap_or(rest.len());
     rest[..end].parse().ok()
+}
+
+fn extract_json_bool(json: &str, key: &str) -> Option<bool> {
+    let pattern = format!("\"{key}\":");
+    let start = json.find(&pattern)? + pattern.len();
+    let rest = json[start..].trim_start();
+    if rest.starts_with("true") {
+        Some(true)
+    } else if rest.starts_with("false") {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -1802,6 +1815,20 @@ mod tests {
         let cloned = ack;
         assert_eq!(cloned.seq, 42);
         assert!(!cloned.duplicate);
+    }
+
+    #[test]
+    fn parse_pub_ack_accepts_whitespace_around_duplicate_bool() {
+        let payload = br#"{
+            "stream":"ORDERS",
+            "seq":42,
+            "duplicate": true
+        }"#;
+
+        let ack = JetStreamContext::parse_pub_ack(payload).expect("valid PubAck");
+        assert_eq!(ack.stream, "ORDERS");
+        assert_eq!(ack.seq, 42);
+        assert!(ack.duplicate);
     }
 
     #[test]
