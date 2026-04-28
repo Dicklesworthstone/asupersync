@@ -587,16 +587,21 @@ coverage is missing or relies on mocks.
 | Lab runtime + testing infra | Deterministic scheduling, replay, oracles | `src/lab/runtime.rs::empty_runtime_is_quiescent`, `src/lab/oracle/*` unit tests | `tests/lab_determinism.rs::test_lab_deterministic_scheduling_same_seed`, `tests/property_region_ops.rs::property_invariant_coverage`, `tests/algebraic_laws.rs::algebraic_law_coverage` | `tests/runtime_e2e.rs::e2e_task_spawn_and_quiescence` | Determinism oracles must log seed and schedule | Some tests still use mocks for pool/transport (see gap list) |
 | Config + CLI + observability | Config validation, CLI tooling, metrics | `src/config.rs::default_config_valid`, `src/observability/metrics.rs::test_counter_increment` | `tests/builder_verification.rs::builder_verify_001_default_build`, `tests/otel_metrics.rs::test_provider_receives_task_events`, `tests/tracing_integration.rs::trace_with_fields_emits_structured_entry` | `tests/e2e_console.rs::console_plain_text_never_mode_no_ansi` | CLI outputs should be deterministic | gRPC CLI paths still have stubbed behavior |
 
-### Quantitative Summary (rough estimates, measured 2026-02-03)
+### Quantitative Summary (rough estimates, partially refreshed 2026-04-28; baseline 2026-02-03)
 
 These counts are rough and were derived from grep-based tallies; they are not a substitute
 for a per-module audit. Treat them as directional signals until we re-run a scripted count.
 
+The Cancellation and Obligations rows were re-counted against current `src/` on 2026-04-28
+(`grep -c '#\[test\]' src/cancel/*.rs` and `src/obligation/leak_check.rs`); the rest of the
+table remains on the 2026-02-03 baseline and is therefore directionally stale, especially in
+the high-churn modules (Net, HTTP, Trace).
+
 | Subsystem | Unit tests (src/) | Integration tests (tests/) | Files w/ inline tests | Key gap |
 | --- | --- | --- | --- | --- |
 | Runtime + scheduler | 486 | ~65 (6 files) | 35 | Lane fairness invariant coverage |
-| Cancellation (cancel/) | 15 | ~51 (5 files) | 1 | **Critical: only 1 file** |
-| Obligations | 210 | covered by cancel/conformance | 10 | Leak oracle has only 3 unit tests |
+| Cancellation (cancel/) | 185 | ~51 (5 files) | 4 | Spread across 4 files (progress_certificate, symbol_cancel, protocol_state_machines, protocol_validator_test_suite); fairness/ordering invariants still need explicit coverage |
+| Obligations | 210 | covered by cancel/conformance | 10 | Leak oracle (`obligation/leak_check.rs`) now has 42 unit tests; remaining gap is multi-region leak attribution |
 | Channels | 66 | ~41 (4 files) | 4 | Cancel-safety explicit tests |
 | Sync primitives | 79 | ~25 (3 files) | 7 | Barrier has only 2 tests |
 | IO + reactor + time | 76 | ~78 (6 files) | 12 | io_uring paths hard to test in CI |
@@ -608,7 +613,7 @@ for a per-module audit. Treat them as directional signals until we re-run a scri
 | Security | 26 | ~68 (5 files) | 5 | Low unit test count |
 | Lab + testing infra | 350 | ~64 (4 files) | 30 | Good coverage |
 | Combinators | 433 | ~11 (1 file) | 15 | Good unit coverage |
-| **Totals** | **~3100+** | **~1297** | **381** | |
+| **Totals** | **~3290+** | **~1297** | **384** | |
 
 ### Coverage Measurement + CI Gating (bd-28bx)
 
