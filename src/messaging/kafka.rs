@@ -814,7 +814,7 @@ fn bootstrap_server_host(endpoint: &str) -> &str {
     endpoint.rsplit_once(':').map_or(endpoint, |(host, _)| host)
 }
 
-fn is_loopback_bootstrap_server(endpoint: &str) -> bool {
+pub(crate) fn is_loopback_bootstrap_server(endpoint: &str) -> bool {
     let host = bootstrap_server_host(endpoint).trim();
     host.eq_ignore_ascii_case("localhost")
         || host

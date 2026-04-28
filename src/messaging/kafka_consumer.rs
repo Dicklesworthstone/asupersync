@@ -18,7 +18,7 @@
 #![allow(clippy::unused_async)]
 
 use crate::cx::Cx;
-use crate::messaging::kafka::KafkaError;
+use crate::messaging::kafka::{KafkaError, is_loopback_bootstrap_server};
 #[cfg(not(feature = "kafka"))]
 use crate::messaging::kafka::{stub_broker_end_offset, stub_broker_fetch, stub_broker_notify};
 use crate::sync::Notify;
@@ -117,6 +117,14 @@ pub struct ConsumerConfig {
     /// When true, always use rdkafka broker connection.
     /// When false (default), use StubBroker in test mode for deterministic testing.
     pub force_real_kafka: bool,
+    /// Scary opt-in for PLAINTEXT / unauthenticated remote brokers.
+    ///
+    /// `src/messaging/kafka_consumer.rs` does not yet expose TLS or SASL
+    /// knobs, so the secure default is fail-closed for non-loopback bootstrap
+    /// servers. Set this only for local labs that intentionally exercise an
+    /// insecure broker. Production callers should wait for real TLS/SASL
+    /// support.
+    pub allow_insecure_transport_for_testing: bool,
 }
 
 impl Default for ConsumerConfig {
@@ -142,6 +150,7 @@ impl Default for ConsumerConfig {
             fetch_max_wait: Duration::from_millis(500),
             isolation_level: IsolationLevel::ReadUncommitted,
             force_real_kafka: false,
+            allow_insecure_transport_for_testing: false,
         }
     }
 }
@@ -241,6 +250,13 @@ impl ConsumerConfig {
         self
     }
 
+    /// Scary opt-in for remote PLAINTEXT / unauthenticated brokers.
+    #[must_use]
+    pub const fn allow_insecure_transport_for_testing(mut self, allow: bool) -> Self {
+        self.allow_insecure_transport_for_testing = allow;
+        self
+    }
+
     /// Validate the configuration.
     pub fn validate(&self) -> Result<(), KafkaError> {
         if self.bootstrap_servers.is_empty() {
@@ -260,6 +276,17 @@ impl ConsumerConfig {
             return Err(KafkaError::Config(
                 "fetch_min_bytes must be <= fetch_max_bytes".to_string(),
             ));
+        }
+        if !self.allow_insecure_transport_for_testing {
+            for server in &self.bootstrap_servers {
+                if !is_loopback_bootstrap_server(server) {
+                    return Err(KafkaError::Config(format!(
+                        "remote Kafka bootstrap server '{server}' is rejected by default: \
+                         src/messaging/kafka_consumer.rs has no TLS/SASL knobs yet, so only loopback \
+                         brokers are allowed unless allow_insecure_transport_for_testing(true) is set"
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -1534,6 +1561,7 @@ mod tests {
         assert_eq!(config.fetch_min_bytes, 4);
         assert_eq!(config.fetch_max_bytes, 1024);
         assert_eq!(config.isolation_level, IsolationLevel::ReadCommitted);
+        assert!(!config.allow_insecure_transport_for_testing);
     }
 
     #[test]
@@ -1551,6 +1579,20 @@ mod tests {
             .fetch_min_bytes(10)
             .fetch_max_bytes(1);
         assert!(bad_fetch.validate().is_err());
+
+        let remote_plaintext =
+            ConsumerConfig::new(vec!["broker.example.com:9092".to_string()], "group");
+        let err = remote_plaintext.validate().expect_err(
+            "remote non-loopback bootstrap servers must fail closed until TLS/SASL support lands",
+        );
+        assert!(
+            matches!(err, KafkaError::Config(msg) if msg.contains("allow_insecure_transport_for_testing"))
+        );
+
+        let explicit_insecure =
+            ConsumerConfig::new(vec!["broker.example.com:9092".to_string()], "group")
+                .allow_insecure_transport_for_testing(true);
+        assert!(explicit_insecure.validate().is_ok());
     }
 
     #[test]
@@ -1677,6 +1719,15 @@ mod tests {
     fn consumer_config_validate_ok() {
         let cfg = ConsumerConfig::default();
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn consumer_config_allows_loopback_ipv4_and_ipv6_without_insecure_opt_in() {
+        let ipv4 = ConsumerConfig::new(vec!["127.0.0.1:9092".into()], "group");
+        assert!(ipv4.validate().is_ok());
+
+        let ipv6 = ConsumerConfig::new(vec!["[::1]:9092".into()], "group");
+        assert!(ipv6.validate().is_ok());
     }
 
     #[test]
