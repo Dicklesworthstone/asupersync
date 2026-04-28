@@ -501,6 +501,16 @@ impl HealthService {
         &self,
         request: &Request<HealthCheckRequest>,
     ) -> Pin<Box<dyn Future<Output = Result<Response<HealthWatchStream>, Status>> + Send>> {
+        // Security fix (br-asupersync-n7w3l1): Health watch streaming must require authentication.
+        // This completes the auth hardening by applying the same check to server-streaming
+        // endpoints that was previously only applied to unary check_async().
+        if request.metadata().get("authorization").is_none() {
+            let error = Status::unauthenticated(
+                "health check endpoint requires authentication"
+            );
+            return Box::pin(async move { Err(error) });
+        }
+
         let stream = HealthWatchStream::new(self.clone(), request.get_ref().service.clone());
         Box::pin(async move { Ok(Response::new(stream)) })
     }
