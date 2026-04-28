@@ -633,6 +633,50 @@ fn e2e_codec_024_length_field_offset() {
     test_complete!("e2e_codec_024_length_field_offset");
 }
 
+/// E2E-CODEC-025: LengthDelimited encode ignores decode-only offset knobs
+///
+/// Tokio `LengthDelimitedCodec` treats `length_field_offset` and `num_skip`
+/// as decode-only. Encoding with those knobs set must therefore produce the
+/// same wire bytes as the default encoder.
+#[test]
+fn e2e_codec_025_length_delimited_encode_ignores_decode_only_offset_and_num_skip() {
+    init_test("e2e_codec_025_length_delimited_encode_ignores_decode_only_offset_and_num_skip");
+    test_section!("setup");
+
+    let payload = BytesMut::from(&b"hello"[..]);
+    let mut default_codec = LengthDelimitedCodec::new();
+    let mut offset_codec = LengthDelimitedCodec::builder()
+        .length_field_offset(2)
+        .num_skip(6)
+        .new_codec();
+    let mut default_wire = BytesMut::new();
+    let mut offset_wire = BytesMut::new();
+
+    test_section!("encode");
+    default_codec
+        .encode(payload.clone(), &mut default_wire)
+        .expect("default encode");
+    offset_codec
+        .encode(payload, &mut offset_wire)
+        .expect("offset encode");
+
+    test_section!("verify");
+    assert_with_log!(
+        default_wire == offset_wire,
+        "wire parity",
+        &default_wire[..],
+        &offset_wire[..]
+    );
+    assert_with_log!(
+        &offset_wire[..] == b"\x00\x00\x00\x05hello",
+        "tokio wire bytes",
+        b"\x00\x00\x00\x05hello",
+        &offset_wire[..]
+    );
+
+    test_complete!("e2e_codec_025_length_delimited_encode_ignores_decode_only_offset_and_num_skip");
+}
+
 // ============================================================================
 // STRESS TESTS
 // ============================================================================

@@ -108,7 +108,7 @@ macro_rules! builder_setters {
 
 impl LengthDelimitedCodecBuilder {
     builder_setters! {
-        /// Sets the length field offset.
+        /// Sets the length field offset for decoding.
         length_field_offset: usize;
 
         /// Sets the length field length (1..=8 bytes).
@@ -117,7 +117,7 @@ impl LengthDelimitedCodecBuilder {
         /// Adjusts the reported length by this amount.
         length_adjustment: isize;
 
-        /// Number of bytes to skip before frame data.
+        /// Number of bytes to skip before frame data when decoding.
         num_skip: usize;
 
         /// Sets the maximum frame length.
@@ -391,40 +391,25 @@ impl Encoder<BytesMut> for LengthDelimitedCodec {
             ));
         }
 
-        // br-asupersync-ooqkxe — checked arithmetic on the reserve budget.
-        // The previous shape was `header_len + frame_len` after `header_len`
-        // was computed via saturating_add — so an attacker-controlled
-        // `length_field_offset` near `usize::MAX` could saturate and then
-        // the unchecked `+ frame_len` would wrap, calling reserve() with a
-        // tiny value and silently leaving the buffer too small for the
-        // bytes we are about to put_u8/put_slice. checked_add(frame_len)
-        // returns None on overflow; we surface that as InvalidData so
-        // callers see an explicit error rather than a panic or buffer
-        // corruption.
-        let header_len = self
+        // br-asupersync-zqnmjc — Tokio wire-compat:
+        // `length_field_offset` and `num_skip` are decode-only knobs and
+        // MUST NOT change the bytes emitted by the encoder. The wire prefix
+        // is therefore just the encoded length field itself. Keep the reserve
+        // arithmetic checked so large payloads still surface InvalidData
+        // instead of wrapping the buffer budget.
+        let total_len = self
             .builder
-            .length_field_offset
-            .checked_add(self.builder.length_field_length)
+            .length_field_length
+            .checked_add(frame_len)
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
-                    "header length (offset + length_field_length) overflows usize",
+                    "frame buffer reservation overflows usize",
                 )
             })?;
-        let total_len = header_len.checked_add(frame_len).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "frame buffer reservation overflows usize",
-            )
-        })?;
 
         // Reserve space for the entire frame
         dst.reserve(total_len);
-
-        // Write length field offset padding (zeros)
-        for _ in 0..self.builder.length_field_offset {
-            dst.put_u8(0);
-        }
 
         // Write the length field in the configured byte order
         if self.builder.big_endian {
@@ -1199,34 +1184,33 @@ mod tests {
         );
     }
 
-    /// (d) length_field_offset != 0: encoder writes `offset` zero pad
-    /// bytes, then the length field, then payload. Past audit batches
-    /// fixed two arithmetic bugs in this exact codepath (br-asupersync-
-    /// ooqkxe and qj99nz); freezing the wire format prevents either
-    /// regression from sneaking back in.
+    /// Tokio wire-compat: `length_field_offset` and `num_skip` are
+    /// decode-only knobs. Encoding with them set must produce the same bytes
+    /// as the default encoder instead of injecting zero padding.
     #[test]
-    fn ld_goldens_length_field_offset_two() {
-        let mut codec = LengthDelimitedCodec::builder()
+    fn ld_encode_ignores_decode_only_offset_and_num_skip() {
+        let payload = BytesMut::from(&b"test"[..]);
+        let mut default_codec = LengthDelimitedCodec::new();
+        let mut expected = BytesMut::new();
+        default_codec
+            .encode(payload.clone(), &mut expected)
+            .unwrap();
+
+        let mut offset_codec = LengthDelimitedCodec::builder()
             .length_field_offset(2)
             .length_field_length(4)
             .num_skip(6)
             .new_codec();
         let mut dst = BytesMut::new();
-        codec
-            .encode(BytesMut::from(&b"test"[..]), &mut dst)
-            .unwrap();
+        offset_codec.encode(payload, &mut dst).unwrap();
 
-        let expected: &[u8] = include_bytes!("../../tests/goldens/length_delim/offset2_u32_be.bin");
-        assert_eq!(dst.as_ref(), expected, "offset=2 wire format drift");
-        assert_eq!(dst.len(), 10, "offset(2) + header(4) + payload(4)");
+        assert_eq!(
+            dst, expected,
+            "br-asupersync-zqnmjc: decode-only offset/skip must not leak into encoded wire bytes"
+        );
+        assert_eq!(dst.len(), 8, "u32 header + 4-byte payload only");
 
-        // Round-trip: a freshly-built decoder with the same shape must
-        // recover the original payload.
-        let mut decoder = LengthDelimitedCodec::builder()
-            .length_field_offset(2)
-            .length_field_length(4)
-            .num_skip(6)
-            .new_codec();
+        let mut decoder = LengthDelimitedCodec::new();
         let mut src = dst;
         let frame = decoder
             .decode(&mut src)
