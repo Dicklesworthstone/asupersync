@@ -196,6 +196,103 @@ impl KafkaMessageFactory {
             })
             .collect()
     }
+
+    /// Create payment settlement message (critical financial data).
+    fn create_payment_settle_message(&self, user_id: &str, amount_cents: u64) -> (Vec<u8>, Vec<u8>) {
+        let msg_id = self.message_counter.fetch_add(1, Ordering::SeqCst);
+        let key = format!("payment-{}", user_id).into_bytes();
+        let payload = json!({
+            "type": "payment.settle",
+            "user_id": user_id,
+            "amount_cents": amount_cents,
+            "transaction_id": format!("txn_settle_{}", msg_id),
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "payment_method": "credit_card",
+            "currency": "USD",
+            "version": "1.0"
+        })
+        .to_string()
+        .into_bytes();
+
+        (key, payload)
+    }
+
+    /// Create payment charge message.
+    fn create_payment_charge_message(&self, user_id: &str, amount_cents: u64) -> (Vec<u8>, Vec<u8>) {
+        let msg_id = self.message_counter.fetch_add(1, Ordering::SeqCst);
+        let key = format!("payment-{}", user_id).into_bytes();
+        let payload = json!({
+            "type": "payment.charge",
+            "user_id": user_id,
+            "amount_cents": amount_cents,
+            "transaction_id": format!("txn_charge_{}", msg_id),
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "payment_method": "debit_card",
+            "currency": "USD",
+            "version": "1.0"
+        })
+        .to_string()
+        .into_bytes();
+
+        (key, payload)
+    }
+
+    /// Create payment refund message.
+    fn create_payment_refund_message(&self, user_id: &str, amount_cents: u64) -> (Vec<u8>, Vec<u8>) {
+        let msg_id = self.message_counter.fetch_add(1, Ordering::SeqCst);
+        let key = format!("payment-{}", user_id).into_bytes();
+        let payload = json!({
+            "type": "payment.refund",
+            "user_id": user_id,
+            "amount_cents": amount_cents,
+            "transaction_id": format!("txn_refund_{}", msg_id),
+            "original_transaction_id": format!("txn_charge_{}", msg_id - 1),
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "reason": "customer_request",
+            "currency": "USD",
+            "version": "1.0"
+        })
+        .to_string()
+        .into_bytes();
+
+        (key, payload)
+    }
+
+    /// Create transaction message for abort/replay testing.
+    fn create_transaction_message(&self, transaction_id: &str, transaction_type: &str, amount: u64) -> (Vec<u8>, Vec<u8>) {
+        let key = format!("{}", transaction_id).into_bytes();
+        let payload = json!({
+            "transaction_id": transaction_id,
+            "type": transaction_type,
+            "amount": amount,
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "account_id": "acc_test_12345",
+            "version": "1.0"
+        })
+        .to_string()
+        .into_bytes();
+
+        (key, payload)
+    }
+
+    /// Create payment message with sequence for ordering tests.
+    fn create_payment_message_with_sequence(&self, user_id: &str, payment_type: &str, amount_cents: u64, sequence: u64) -> (Vec<u8>, Vec<u8>) {
+        let key = format!("payment-{}", user_id).into_bytes();
+        let payload = json!({
+            "type": format!("payment.{}", payment_type),
+            "user_id": user_id,
+            "amount_cents": amount_cents,
+            "sequence": sequence,
+            "transaction_id": format!("txn_{}_{}", payment_type, sequence),
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "currency": "USD",
+            "version": "1.0"
+        })
+        .to_string()
+        .into_bytes();
+
+        (key, payload)
+    }
 }
 
 fn require_real_broker() -> Option<RealBrokerConfig> {
@@ -709,6 +806,139 @@ fn test_real_broker_network_failure_recovery() {
         log.phase("cleanup");
         producer.flush(&cx, Duration::from_secs(30)).await.unwrap();
         producer.close(&cx, Duration::from_secs(10)).await.unwrap();
+
+        log.test_end("pass");
+    });
+}
+
+/// Test payment message delivery with real broker (no StubBroker allowed).
+/// This test ensures critical financial messages are never lost due to mock semantics.
+#[test]
+fn test_real_broker_payment_message_delivery() {
+    let Some(config) = require_real_broker() else {
+        return;
+    };
+
+    let log = KafkaTestLogger::new("real_broker_payment_delivery");
+
+    run_test_with_cx(|cx| async move {
+        let payment_topic = unique_topic("fabric.payment.settle");
+        let factory = KafkaMessageFactory::new();
+
+        log.phase("setup");
+
+        // Producer with maximum safety settings for payment messages
+        let producer_config = ProducerConfig::new(config.bootstrap_servers.clone())
+            .client_id("payment-producer")
+            .acks(Acks::All) // Wait for full replication
+            .retries(10)
+            .enable_idempotence(true)
+            .batch_size(1) // Send immediately, no batching for payments
+            .linger_ms(0)
+            .compression(Compression::None); // No compression for payment audit trail
+
+        let producer = KafkaProducer::new(producer_config).unwrap();
+
+        // Consumer with strict ordering requirements
+        let consumer_config = ConsumerConfig::new(config.bootstrap_servers.clone())
+            .group_id("payment-consumer-group")
+            .auto_offset_reset(AutoOffsetReset::Earliest)
+            .enable_auto_commit(false) // Manual commit for payment processing
+            .max_poll_records(1); // One payment at a time
+
+        let consumer = KafkaConsumer::new(consumer_config).unwrap();
+        consumer.subscribe(&[&payment_topic]).unwrap();
+
+        log.phase("send_payment_messages");
+
+        // Send critical payment messages
+        let payment_messages = vec![
+            factory.create_payment_settle_message("user123", 10000), // $100.00
+            factory.create_payment_charge_message("user456", 5000),   // $50.00
+            factory.create_payment_refund_message("user789", 2500),   // $25.00
+        ];
+
+        let mut sent_metadata = Vec::new();
+        for (i, (key, payload)) in payment_messages.iter().enumerate() {
+            let result = producer.send(&cx, &payment_topic, Some(key), payload, None).await;
+
+            match result {
+                Ok(metadata) => {
+                    log.kafka_operation(&format!("payment_send_{}", i), Some(&metadata), None);
+                    sent_metadata.push(metadata);
+                }
+                Err(error) => {
+                    log.kafka_operation(&format!("payment_send_{}", i), None, Some(&error));
+                    panic!("Payment message send failed: {}", error);
+                }
+            }
+        }
+
+        log.phase("consume_payments");
+
+        // Consume and verify all payment messages are delivered in order
+        let mut received_messages = Vec::new();
+        let timeout = Duration::from_secs(30);
+        let poll_start = std::time::Instant::now();
+
+        while received_messages.len() < payment_messages.len() && poll_start.elapsed() < timeout {
+            if let Some(records) = consumer.poll(&cx, Duration::from_millis(1000)).await.unwrap() {
+                for record in records {
+                    // Payment processing simulation: verify message integrity
+                    let key = String::from_utf8(record.key.unwrap_or_default()).unwrap();
+                    let payload = String::from_utf8(record.value).unwrap();
+                    let payment: serde_json::Value = serde_json::from_str(&payload).unwrap();
+
+                    // Verify payment message structure
+                    assert!(payment["user_id"].is_string(), "Payment must have user_id");
+                    assert!(payment["amount_cents"].is_u64(), "Payment must have amount in cents");
+                    assert!(payment["transaction_id"].is_string(), "Payment must have transaction_id");
+                    assert!(payment["timestamp"].is_string(), "Payment must have timestamp");
+
+                    received_messages.push((key, payload));
+
+                    // Manual commit after processing (like real payment system)
+                    let offset = TopicPartitionOffset {
+                        topic: record.topic.clone(),
+                        partition: record.partition,
+                        offset: record.offset + 1, // Next offset to read
+                    };
+                    consumer.commit_offset(&cx, &[offset]).await.unwrap();
+
+                    log.kafka_operation(
+                        "payment_processed",
+                        None,
+                        Some(&format!("user={}, amount={}",
+                            payment["user_id"],
+                            payment["amount_cents"]
+                        ))
+                    );
+                }
+            }
+        }
+
+        log.phase("verify_payment_delivery");
+
+        // ALL payment messages must be delivered - no tolerance for loss
+        assert_eq!(
+            received_messages.len(),
+            payment_messages.len(),
+            "All payment messages must be delivered: sent={}, received={}",
+            payment_messages.len(),
+            received_messages.len()
+        );
+
+        // Verify no payment data corruption
+        for (i, (sent_key, sent_payload)) in payment_messages.iter().enumerate() {
+            let (received_key, received_payload) = &received_messages[i];
+            assert_eq!(sent_key, received_key, "Payment key must match exactly");
+            assert_eq!(sent_payload, received_payload, "Payment payload must match exactly");
+        }
+
+        log.phase("cleanup");
+        producer.flush(&cx, Duration::from_secs(10)).await.unwrap();
+        producer.close(&cx, Duration::from_secs(5)).await.unwrap();
+        consumer.close(&cx).await.unwrap();
 
         log.test_end("pass");
     });

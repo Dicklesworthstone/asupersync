@@ -593,6 +593,19 @@ static STUB_BROKER_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[cfg(not(feature = "kafka"))]
 fn stub_broker() -> &'static StubBroker {
+    // PRODUCTION SAFETY: Block StubBroker in production builds
+    // The StubBroker is a dangerous mock that can silently hide message delivery bugs.
+    // It should only run in test/development environments.
+    #[cfg(not(any(test, debug_assertions)))]
+    {
+        panic!(
+            "CRITICAL: StubBroker attempted to run in production build. \
+             This is a dangerous mock that lacks real Kafka semantics and can \
+             cause message loss in payment/transaction paths. \
+             Enable the 'kafka' feature for production use or ensure debug_assertions are enabled."
+        );
+    }
+
     STUB_BROKER.get_or_init(StubBroker::default)
 }
 
@@ -636,6 +649,27 @@ pub(crate) fn stub_broker_fetch(
 #[cfg(not(feature = "kafka"))]
 #[allow(dead_code)]
 pub(crate) fn stub_broker_publish(record: StubBrokerRecord) -> RecordMetadata {
+    // PRODUCTION SAFETY: Additional guard for critical payment/transaction topics
+    if is_critical_production_topic(&record.topic) {
+        #[cfg(not(any(test, debug_assertions)))]
+        {
+            panic!(
+                "CRITICAL: Attempted to publish to production topic '{}' using StubBroker mock. \
+                 This can cause message loss in payment/transaction systems. \
+                 Use real Kafka broker with the 'kafka' feature enabled.",
+                record.topic
+            );
+        }
+
+        // In test builds, log the dangerous operation
+        #[cfg(any(test, debug_assertions))]
+        eprintln!(
+            "WARNING: Publishing to critical topic '{}' using StubBroker mock. \
+             This is safe only in test environments.",
+            record.topic
+        );
+    }
+
     stub_broker_publish_batch(vec![record])
         .into_iter()
         .next()
@@ -712,6 +746,24 @@ fn validate_topic(topic: &str) -> Result<(), KafkaError> {
         return Err(KafkaError::InvalidTopic(topic.to_string()));
     }
     Ok(())
+}
+
+#[cfg(not(feature = "kafka"))]
+/// Check if a topic contains critical production data that should never use StubBroker.
+fn is_critical_production_topic(topic: &str) -> bool {
+    // Payment and transaction topics are critical - message loss = financial loss
+    topic.contains("payment") ||
+    topic.contains("transaction") ||
+    topic.contains("billing") ||
+    topic.contains("charge") ||
+    topic.contains("refund") ||
+    topic.contains("settle") ||
+    topic.contains("wallet") ||
+    topic.contains("invoice") ||
+    topic.contains("subscription") ||
+    topic.starts_with("fabric.payment.") ||
+    topic.starts_with("fabric.billing.") ||
+    topic.starts_with("fabric.transaction.")
 }
 
 /// Compression algorithm for Kafka messages.
