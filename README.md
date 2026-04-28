@@ -434,7 +434,7 @@ It maps common Tokio ecosystem crates to the corresponding Asupersync modules.
 | TCP/UDP/Unix sockets | `tokio::net` | `src/net/tcp/`, `src/net/udp.rs`, `src/net/unix/` | Built-in | Active | Mixed | Medium |
 | DNS resolution | `trust-dns`, `hickory`, custom stacks | `src/net/dns/` | Built-in | Active | Mixed | Medium |
 | TLS | `tokio-rustls`, `native-tls` | `src/tls/` (`tls`, `tls-native-roots`, `tls-webpki-roots`) | Feature-gated | Active | Mixed | Medium |
-| WebSocket | `tokio-tungstenite` | `src/net/websocket/` | Built-in | Active | Mixed | Medium |
+| WebSocket | `tokio-tungstenite` | `src/net/websocket/` | Built-in | Active (live RFC6455 coverage still partial) | Mixed | Medium |
 | HTTP stack (HTTP/1.1 + HTTP/2) | `hyper`, `h2`, `http-body`, `hyper-util` | `src/http/h1/`, `src/http/h2/`, `src/http/body.rs`, `src/http/pool.rs` | Built-in | Active | Mixed | Medium |
 | QUIC + HTTP/3 (static-only QPACK) | `quinn`, `h3`, `h3-quinn` | `src/net/quic_core/`, `src/net/quic_native/`, `src/http/h3_native.rs` (native core feature surfaces exposed via `quic`/`http3`; historical wrapper sources in `src/net/quic/` and `src/http/h3/` remain parked outside the core feature graph) | Feature-gated | Active | Mixed | Medium |
 | Web framework | `axum`, `warp`, `tower-http` | `src/web/`, `src/service/`, `src/server/` | In progress | Active | Mixed | Medium |
@@ -715,7 +715,13 @@ Both layers integrate with connection pooling (`src/http/pool.rs`) and optional 
 
 ### WebSocket
 
-`src/net/websocket/` implements RFC 6455: handshake, binary/text frames, ping/pong, and close frames with status codes. The split reader/writer model allows concurrent send and receive within the same region.
+`src/net/websocket/` ships handshake, binary/text frames, ping/pong, and close
+frames with status codes. The split reader/writer model allows concurrent send
+and receive within the same region. Current `tests/conformance` wiring only
+keeps the extension-negotiation suite live; the broader RFC 6455 framing,
+masking, control-frame, close, and fragmentation suites are still present on
+disk but not compiled in the active registry until the dormant
+`websocket_rfc6455` lane is re-wired.
 
 ### TLS
 
@@ -1479,7 +1485,8 @@ and known limitations.
 | Single-thread deterministic kernel | ✅ Complete |
 | Parallel scheduler + work-stealing | ✅ Implemented (three-lane scheduler) |
 | I/O reactor (Linux epoll + optional io_uring primary path; BSD/Windows reactors have narrower interest support) | ✅ Implemented |
-| TCP, HTTP/1.1, HTTP/2, WebSocket, TLS | ✅ Implemented |
+| TCP, HTTP/1.1, HTTP/2, TLS | ✅ Implemented |
+| WebSocket | ⚠️ Runtime surface shipped, but live RFC6455 conformance coverage is partial (extension negotiation is wired; broader framing/control/close/masking suites remain dormant) |
 | HTTP/3 (QPACK static-only mode) | ⚠️ Partial implementation (dynamic table, Huffman encoding not supported) |
 | Database clients (SQLite, PostgreSQL, MySQL) | ✅ Implemented |
 | Actor supervision (GenServer, links, monitors) | ✅ Implemented |
@@ -1571,7 +1578,7 @@ Asupersync has its own runtime with explicit capabilities. For code that needs t
 
 ### Is this production-ready?
 
-Asupersync is active development software with a fully implemented core runtime surface (deterministic kernel, parallel scheduler, TCP/HTTP/TLS/WebSocket, database clients, distributed runtime primitives, actor/supervision model, and deterministic verification harnesses). Phase 6 hardening is still active for release gates and external-boundary/browser adapter maturity, so shipped support is lane-specific rather than blanket-GA across every adapter surface; use [`docs/integration.md`](./docs/integration.md) and [`docs/WASM.md`](./docs/WASM.md) as the live source of truth for support class and rollout posture. It is a strong fit for internal systems where correctness guarantees and deterministic debugging are primary requirements.
+Asupersync is active development software with a fully implemented core runtime surface (deterministic kernel, parallel scheduler, TCP/HTTP/TLS, database clients, distributed runtime primitives, actor/supervision model, and deterministic verification harnesses), plus a shipped WebSocket runtime lane whose live RFC6455 conformance coverage is still partial. Phase 6 hardening is still active for release gates and external-boundary/browser adapter maturity, so shipped support is lane-specific rather than blanket-GA across every adapter surface; use [`docs/integration.md`](./docs/integration.md) and [`docs/WASM.md`](./docs/WASM.md) as the live source of truth for support class and rollout posture. It is a strong fit for internal systems where correctness guarantees and deterministic debugging are primary requirements.
 
 ### How do I report bugs?
 
