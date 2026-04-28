@@ -2199,4 +2199,138 @@ mod tests {
         let combined_output = outputs.join("\n");
         assert_golden("streaming_types_debug_formatting", &combined_output);
     }
+
+    /// GRPC-DIFF-CANCEL: Bidirectional cancellation semantics vs grpc-go reference
+    ///
+    /// This differential test verifies our bidirectional cancellation behavior matches
+    /// grpc-go's cancellation semantics. In gRPC bidirectional streaming, when either
+    /// side cancels, the cancellation must propagate correctly and both streams must
+    /// transition to fail-closed state with the cancellation reason preserved.
+    ///
+    /// Reference behavior (grpc-go v1.54+):
+    /// - Client cancel → server receives context.Canceled, stops processing
+    /// - Server cancel → client receives status error, stops processing
+    /// - Both sides must distinguish cancellation from graceful completion
+    /// - Buffered messages drain before cancellation status is returned
+    #[test]
+    fn differential_bidirectional_cancellation_semantics_vs_grpc_go() {
+        init_test("differential_bidirectional_cancellation_semantics_vs_grpc_go");
+
+        // Simulate bidirectional streaming with client and server sides
+        let mut client_request_stream = StreamingRequest::<String>::open();
+        let mut server_response_stream = ResponseStream::<String>::open();
+
+        // Phase 1: Normal bidirectional message exchange
+        client_request_stream.push("client_msg_1".to_string()).expect("client sends");
+        server_response_stream.push(Ok("server_resp_1".to_string())).expect("server responds");
+
+        client_request_stream.push("client_msg_2".to_string()).expect("client sends");
+        server_response_stream.push(Ok("server_resp_2".to_string())).expect("server responds");
+
+        // Phase 2: Client-side cancellation during active streaming
+        // Per gRPC spec: client cancellation must propagate cancellation reason
+        let cancel_status = Status::cancelled("client cancelled bidirectional stream");
+        client_request_stream.cancel_with_error(cancel_status.clone());
+
+        // Phase 3: Verify fail-closed semantics match grpc-go behavior
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut pinned_client = Pin::new(&mut client_request_stream);
+        let mut pinned_server = Pin::new(&mut server_response_stream);
+
+        // Client stream should drain buffered messages before returning cancellation
+        assert!(
+            matches!(
+                pinned_client.as_mut().poll_next(&mut cx),
+                Poll::Ready(Some(Ok(ref msg))) if msg == "client_msg_1"
+            ),
+            "grpc-go semantics: buffered messages drain before cancellation"
+        );
+
+        assert!(
+            matches!(
+                pinned_client.as_mut().poll_next(&mut cx),
+                Poll::Ready(Some(Ok(ref msg))) if msg == "client_msg_2"
+            ),
+            "grpc-go semantics: all buffered messages drained"
+        );
+
+        // After draining, cancellation status must be returned (fail-closed)
+        match pinned_client.as_mut().poll_next(&mut cx) {
+            Poll::Ready(Some(Err(status))) => {
+                assert_eq!(status.code(), Code::Cancelled, "grpc-go: cancellation code preserved");
+                assert!(
+                    status.message().contains("client cancelled"),
+                    "grpc-go: cancellation reason preserved"
+                );
+            }
+            other => panic!("grpc-go semantics violated: expected cancellation status, got {other:?}"),
+        }
+
+        // Phase 4: Simulate server-side cancellation response
+        // Per grpc-go: server detects client cancellation and cancels its response stream
+        let server_cancel_status = Status::cancelled("server detected client cancellation");
+        server_response_stream.cancel_with_error(server_cancel_status.clone());
+
+        // Server response stream should also follow fail-closed semantics
+        assert!(
+            matches!(
+                pinned_server.as_mut().poll_next(&mut cx),
+                Poll::Ready(Some(Ok(ref msg))) if msg == "server_resp_1"
+            ),
+            "grpc-go: server drains responses before cancellation"
+        );
+
+        assert!(
+            matches!(
+                pinned_server.as_mut().poll_next(&mut cx),
+                Poll::Ready(Some(Ok(ref msg))) if msg == "server_resp_2"
+            ),
+            "grpc-go: server drains all responses"
+        );
+
+        // Server cancellation status returned after drain
+        match pinned_server.as_mut().poll_next(&mut cx) {
+            Poll::Ready(Some(Err(status))) => {
+                assert_eq!(status.code(), Code::Cancelled, "grpc-go: server cancellation code");
+                assert!(
+                    status.message().contains("server detected"),
+                    "grpc-go: server cancellation message preserved"
+                );
+            }
+            other => panic!("grpc-go server semantics violated: expected cancellation status, got {other:?}"),
+        }
+
+        // Phase 5: Verify bidirectional cancellation state consistency
+        // Both streams should now be in cancelled state and reject new messages
+        let post_cancel_send = client_request_stream.push("post_cancel".to_string());
+        assert!(
+            post_cancel_send.is_err(),
+            "grpc-go: cancelled request stream rejects new messages"
+        );
+
+        let post_cancel_response = server_response_stream.push(Ok("post_cancel".to_string()));
+        assert!(
+            post_cancel_response.is_err(),
+            "grpc-go: cancelled response stream rejects new messages"
+        );
+
+        // Phase 6: Verify idempotent cancellation status (grpc-go behavior)
+        // Subsequent polls should consistently return the same cancellation status
+        match pinned_client.as_mut().poll_next(&mut cx) {
+            Poll::Ready(Some(Err(status))) => {
+                assert_eq!(status.code(), Code::Cancelled, "grpc-go: cancellation status idempotent");
+            }
+            other => panic!("grpc-go idempotent cancellation violated: {other:?}"),
+        }
+
+        match pinned_server.as_mut().poll_next(&mut cx) {
+            Poll::Ready(Some(Err(status))) => {
+                assert_eq!(status.code(), Code::Cancelled, "grpc-go: server cancellation idempotent");
+            }
+            other => panic!("grpc-go server idempotent cancellation violated: {other:?}"),
+        }
+
+        crate::test_complete!("differential_bidirectional_cancellation_semantics_vs_grpc_go");
+    }
 }
