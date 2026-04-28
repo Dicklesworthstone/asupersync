@@ -508,6 +508,30 @@ impl Equation {
         let idx = self.terms.binary_search_by_key(&col, |(c, _)| *c).ok()?;
         Some(self.terms.remove(idx).1)
     }
+
+    #[inline]
+    fn extract_solved_terms(
+        &mut self,
+        solved: &[Option<Vec<u8>>],
+        removed: &mut Vec<(usize, Gf256)>,
+    ) {
+        removed.clear();
+
+        let mut write = 0usize;
+        for read in 0..self.terms.len() {
+            let term = self.terms[read];
+            if !term.1.is_zero() && solved[term.0].is_some() {
+                removed.push(term);
+            } else {
+                if write != read {
+                    self.terms[write] = term;
+                }
+                write += 1;
+            }
+        }
+
+        self.terms.truncate(write);
+    }
 }
 
 #[inline]
@@ -1476,6 +1500,7 @@ impl InactivationDecoder {
         state.stats.peel_frontier_peak = state.stats.peel_frontier_peak.max(queue.len());
         Self::peel_from_queue(&mut state, &mut queue, &mut queued);
 
+        let mut solved_terms = Vec::new();
         for chunk in symbols.chunks(effective_batch) {
             let base_eq_idx = state.equations.len();
             // Assembly: add this batch of symbols as equations.
@@ -1489,24 +1514,12 @@ impl InactivationDecoder {
             // Catch-up: apply already-peeled solutions to newly assembled equations.
             // This ensures new equations see the same reduced state they would in
             // the sequential path where all equations are present before peeling.
+            let solved = &state.solved;
             for idx in base_eq_idx..state.equations.len() {
-                let eq = &state.equations[idx];
-                // Collect columns that have been solved and appear in this equation.
-                let solved_terms: Vec<(usize, Gf256)> = eq
-                    .terms
-                    .iter()
-                    .filter(|(col, coef)| !coef.is_zero() && state.solved[*col].is_some())
-                    .copied()
-                    .collect();
-                for (col, eq_coef) in &solved_terms {
-                    let solution = state.solved[*col].as_ref().expect("solution must exist");
-                    gf256_addmul_slice(&mut state.rhs[idx], solution, *eq_coef);
-                    if let Ok(pos) = state.equations[idx]
-                        .terms
-                        .binary_search_by_key(col, |(c, _)| *c)
-                    {
-                        state.equations[idx].terms.remove(pos);
-                    }
+                state.equations[idx].extract_solved_terms(solved, &mut solved_terms);
+                for &(col, eq_coef) in &solved_terms {
+                    let solution = solved[col].as_ref().expect("solution must exist");
+                    gf256_addmul_slice(&mut state.rhs[idx], solution, eq_coef);
                 }
             }
 
