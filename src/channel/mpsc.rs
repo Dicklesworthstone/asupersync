@@ -2616,6 +2616,58 @@ pub mod backpressure_metamorphic {
         (transcript, post_step_states, abort_count, final_state)
     }
 
+    async fn run_single_sender_drain_boundary_case(
+        cx: &crate::cx::Cx,
+        messages: &[u32],
+        split_index: usize,
+        drain_midstream: bool,
+    ) -> Vec<u32> {
+        let (sender, mut receiver) = channel::<u32>(messages.len().max(1));
+        let split = split_index.min(messages.len());
+        let mut transcript = Vec::with_capacity(messages.len());
+
+        for &value in &messages[..split] {
+            sender
+                .send(cx, value)
+                .await
+                .expect("prefix send should succeed");
+        }
+
+        if drain_midstream {
+            for _ in 0..split {
+                transcript.push(
+                    receiver
+                        .try_recv()
+                        .expect("midstream drain should observe the queued prefix"),
+                );
+            }
+            assert!(
+                matches!(receiver.try_recv(), Err(RecvError::Empty)),
+                "draining the queued prefix should leave no buffered tail before suffix sends"
+            );
+        }
+
+        for &value in &messages[split..] {
+            sender
+                .send(cx, value)
+                .await
+                .expect("suffix send should succeed");
+        }
+
+        drop(sender);
+
+        while let Ok(value) = receiver.try_recv() {
+            transcript.push(value);
+        }
+
+        assert!(
+            matches!(receiver.try_recv(), Err(RecvError::Disconnected)),
+            "sender drop should disconnect the drained receiver"
+        );
+
+        transcript
+    }
+
     /// MR1: Capacity Conservation
     ///
     /// Invariant: total_capacity = queued + reserved + available
@@ -2931,6 +2983,70 @@ pub mod backpressure_metamorphic {
                                 .await;
                         })
                         .unwrap();
+                    lab.scheduler.lock().schedule(test_task, 0);
+                    let report = lab.run_until_quiescent_with_report();
+                    assert_lab_report_success(report);
+                });
+                Ok(())
+            })
+            .expect("Property test failed");
+    }
+
+    /// MR2c: inserting a midstream drain boundary preserves the single-sender receive trace.
+    ///
+    /// Property: batching all sends before draining and draining a queued prefix midway through
+    /// the same single-producer trace must yield the same final receive transcript.
+    #[test]
+    fn metamorphic_midstream_drain_boundary_preserves_single_sender_trace() {
+        use proptest::test_runner::TestRunner;
+
+        let mut runner = TestRunner::default();
+        let strategy = proptest::collection::vec(any::<u16>(), 1..=24).prop_flat_map(|messages| {
+            let len = messages.len();
+            (Just(messages), 0usize..=len, any::<u64>())
+        });
+
+        runner
+            .run(&strategy, |(messages, split_index, seed)| {
+                crate::lab::runtime::test(seed, |lab| {
+                    let root = lab.state.create_root_region(Budget::INFINITE);
+                    let (test_task, _) = lab.state.create_task(root, Budget::INFINITE, async move {
+                        let cx = crate::cx::Cx::for_testing();
+                        let _test_res: Result<(), proptest::test_runner::TestCaseError> = async {
+                            let messages: Vec<u32> = messages.into_iter().map(u32::from).collect();
+
+                            let batched = run_single_sender_drain_boundary_case(
+                                &cx,
+                                &messages,
+                                split_index,
+                                false,
+                            )
+                            .await;
+                            let transformed = run_single_sender_drain_boundary_case(
+                                &cx,
+                                &messages,
+                                split_index,
+                                true,
+                            )
+                            .await;
+
+                            assert_eq!(
+                                batched, messages,
+                                "batched single-sender transcript drifted"
+                            );
+                            assert_eq!(
+                                transformed, messages,
+                                "midstream drain boundary changed the receive transcript at split {split_index}"
+                            );
+                            assert_eq!(
+                                batched, transformed,
+                                "single-sender receive trace changed after inserting a midstream drain boundary"
+                            );
+
+                            Ok(())
+                        }
+                        .await;
+                    }).unwrap();
                     lab.scheduler.lock().schedule(test_task, 0);
                     let report = lab.run_until_quiescent_with_report();
                     assert_lab_report_success(report);
