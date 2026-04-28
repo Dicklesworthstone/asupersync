@@ -1737,6 +1737,25 @@ mod tests {
         crate::test_complete!("recv_future_drop_clears_stale_waker");
     }
 
+    fn value_ready_recv_signature(cancel_before_recv: bool) -> (&'static str, Option<i32>, bool) {
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<i32>();
+
+        let permit = tx.reserve(&cx).expect("cx not cancelled in test");
+        permit.send(77).expect("send should succeed");
+        if cancel_before_recv {
+            cx.set_cancel_requested(true);
+        }
+
+        let (state, value) = match block_on(rx.recv(&cx)) {
+            Ok(value) => ("value", Some(value)),
+            Err(RecvError::Closed) => ("closed", None),
+            Err(RecvError::Cancelled) => ("cancelled", None),
+            Err(RecvError::PolledAfterCompletion) => ("repoll", None),
+        };
+        (state, value, rx.is_closed())
+    }
+
     // --- Audit tests (SapphireHill, 2026-02-15) ---
 
     #[test]
@@ -1754,6 +1773,31 @@ mod tests {
         let ok = matches!(result, Ok(77));
         crate::assert_with_log!(ok, "value over cancel", true, ok);
         crate::test_complete!("recv_returns_value_even_when_cancelled");
+    }
+
+    #[test]
+    fn metamorphic_value_ready_recv_ignores_post_send_receiver_cancellation() {
+        init_test("metamorphic_value_ready_recv_ignores_post_send_receiver_cancellation");
+
+        let baseline = value_ready_recv_signature(false);
+        let cancelled = value_ready_recv_signature(true);
+
+        crate::assert_with_log!(
+            cancelled == baseline,
+            "once the value is committed, cancelling the receiver cx before recv does not change the observable result",
+            format!("{baseline:?}"),
+            format!("{cancelled:?}")
+        );
+        crate::assert_with_log!(
+            baseline == ("value", Some(77), true),
+            "value-ready receive still wins over cancellation and leaves the channel closed",
+            ("value", Some(77), true),
+            baseline
+        );
+
+        crate::test_complete!(
+            "metamorphic_value_ready_recv_ignores_post_send_receiver_cancellation"
+        );
     }
 
     #[test]
@@ -1998,5 +2042,65 @@ mod tests {
             second_waiter_id
         );
         crate::test_complete!("recv_repoll_same_waker_keeps_waiter_identity");
+    }
+
+    /// Metamorphic property: once a value is committed to the oneshot channel,
+    /// receiving that value is invariant under post-send receiver cancellation.
+    ///
+    /// This tests that the receive operation will still succeed with the correct
+    /// value even if the receiver's Cx becomes cancelled after the value was sent
+    /// but before the receive call is made.
+    #[test]
+    fn metamorphic_value_ready_receive_invariant_under_post_send_receiver_cancellation() {
+        init_test("metamorphic_value_ready_receive_invariant_under_post_send_receiver_cancellation");
+
+        let test_value = 42i32;
+        let sender_cx = Cx::for_testing();
+        let receiver_cx = Cx::for_testing();
+
+        // Create channel and send value (commit it)
+        let (tx, mut rx) = channel::<i32>();
+        tx.send(&sender_cx, test_value)
+            .expect("send should succeed");
+
+        // Verify value is ready before cancellation
+        assert!(rx.try_recv().is_ok(), "value should be ready after send");
+
+        // Now cancel the receiver context AFTER the value was committed
+        receiver_cx.set_cancel_requested(true);
+        assert!(receiver_cx.is_cancel_requested(), "receiver cx should be cancelled");
+
+        // Create a new channel with same scenario for comparison
+        let (tx2, mut rx2) = channel::<i32>();
+        tx2.send(&sender_cx, test_value)
+            .expect("send should succeed on control channel");
+
+        // Metamorphic property: recv on cancelled cx should produce same result
+        // as recv on non-cancelled cx when value is already ready
+        let result_cancelled = block_on(rx.recv(&receiver_cx));
+        let result_normal = block_on(rx2.recv(&sender_cx)); // non-cancelled cx
+
+        // Both should succeed with the same value
+        match (result_cancelled, result_normal) {
+            (Ok(val1), Ok(val2)) => {
+                assert_eq!(val1, val2, "value should be same regardless of post-send cancellation");
+                assert_eq!(val1, test_value, "received value should match sent value");
+            }
+            (result1, result2) => {
+                panic!(
+                    "Metamorphic property violated: cancelled={:?}, normal={:?}. \
+                    When value is ready, recv should succeed regardless of receiver cancellation",
+                    result1, result2
+                );
+            }
+        }
+
+        // Verify both channels are in terminal closed state
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Closed)),
+                "channel should be closed after recv");
+        assert!(matches!(rx2.try_recv(), Err(TryRecvError::Closed)),
+                "control channel should be closed after recv");
+
+        crate::test_complete!("metamorphic_value_ready_receive_invariant_under_post_send_receiver_cancellation");
     }
 }
