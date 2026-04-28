@@ -698,6 +698,7 @@ impl ObligationLedger {
             "cannot reset obligation ledger with leaked obligations"
         );
         self.obligations.clear();
+        self.finalized_regions.clear();
         self.stats = LedgerStats::default();
         self.next_index = 0;
         self.generation = self
@@ -1192,6 +1193,46 @@ mod tests {
 
         ledger.commit(fresh, Time::from_nanos(3));
         crate::test_complete!("reset_reuses_index_with_bumped_generation");
+    }
+
+    #[test]
+    fn reset_clears_finalized_region_fence() {
+        init_test("reset_clears_finalized_region_fence");
+        let mut ledger = ObligationLedger::new();
+        let task = make_task();
+        let region = make_region();
+
+        let token = ledger.acquire(ObligationKind::SendPermit, task, region, Time::ZERO);
+        ledger.commit(token, Time::from_nanos(1));
+        ledger.mark_region_finalized(region);
+        crate::assert_with_log!(
+            ledger.is_region_finalized(region),
+            "region finalized before reset",
+            true,
+            ledger.is_region_finalized(region)
+        );
+
+        ledger.reset();
+
+        crate::assert_with_log!(
+            !ledger.is_region_finalized(region),
+            "reset clears finalized region fence",
+            false,
+            ledger.is_region_finalized(region)
+        );
+
+        let fresh = ledger
+            .try_acquire(ObligationKind::Ack, task, region, Time::from_nanos(2))
+            .expect("reset must allow fresh acquire for the same region id");
+        crate::assert_with_log!(
+            ledger.pending_count() == 1,
+            "fresh acquire allowed after reset",
+            1,
+            ledger.pending_count()
+        );
+        ledger.commit(fresh, Time::from_nanos(3));
+
+        crate::test_complete!("reset_clears_finalized_region_fence");
     }
 
     #[test]
