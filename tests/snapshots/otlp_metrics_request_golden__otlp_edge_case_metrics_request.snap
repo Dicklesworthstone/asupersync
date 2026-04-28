@@ -1,0 +1,82 @@
+---
+source: tests/otlp_metrics_request_golden.rs
+expression: scrubbed
+---
+{
+  "otlp_version": "1.0.0",
+  "content_type": "application/x-protobuf",
+  "scrubbed_fields": [
+    "time_unix_nano",
+    "process.pid",
+    "host.name"
+  ],
+  "export_request": {
+    "resource_attributes": {
+      "custom.label": "测试 with 🚀 emoji",
+      "empty.value": "",
+      "service.name": "edge-test",
+      "service.version": "unknown"
+    },
+    "scope_metrics": [
+      {
+        "scope": {
+          "name": "edge-test",
+          "version": ""
+        },
+        "metrics": [
+          {
+            "name": "zero.counter",
+            "description": "",
+            "unit": "",
+            "type": "counter",
+            "data_points": [
+              {
+                "attributes": {},
+                "time_unix_nano": "[TIMESTAMP]",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "name": "temperature.celsius",
+            "description": "Temperature reading",
+            "unit": "°C",
+            "type": "gauge",
+            "data_points": [
+              {
+                "attributes": {
+                  "sensor": "outdoor"
+                },
+                "time_unix_nano": "[TIMESTAMP]",
+                "value": -15.5
+              }
+            ]
+          },
+          {
+            "name": "empty.histogram",
+            "description": "Histogram with no observations",
+            "unit": "ms",
+            "type": "histogram",
+            "data_points": [
+              {
+                "attributes": {},
+                "time_unix_nano": "[TIMESTAMP]",
+                "count": 0,
+                "sum": 0.0,
+                "bucket_counts": [
+                  0,
+                  0,
+                  0
+                ],
+                "explicit_bounds": [
+                  1.0,
+                  10.0
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

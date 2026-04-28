@@ -1,0 +1,99 @@
+---
+source: tests/otlp_metrics_request_golden.rs
+expression: scrubbed
+---
+{
+  "otlp_version": "1.0.0",
+  "content_type": "application/x-protobuf",
+  "scrubbed_fields": [
+    "time_unix_nano",
+    "process.pid",
+    "host.name"
+  ],
+  "export_request": {
+    "resource_attributes": {
+      "deployment.environment": "test",
+      "host.name": "[HOSTNAME]",
+      "process.pid": "[PID]",
+      "service.name": "asupersync",
+      "service.version": "0.3.1"
+    },
+    "scope_metrics": [
+      {
+        "scope": {
+          "name": "asupersync",
+          "version": "0.3.1"
+        },
+        "metrics": [
+          {
+            "name": "asupersync.tasks.spawned",
+            "description": "Total number of tasks spawned",
+            "unit": "1",
+            "type": "counter",
+            "data_points": [
+              {
+                "attributes": {
+                  "region_type": "root"
+                },
+                "time_unix_nano": "[TIMESTAMP]",
+                "value": 42
+              },
+              {
+                "attributes": {
+                  "region_type": "child"
+                },
+                "time_unix_nano": "[TIMESTAMP]",
+                "value": 18
+              }
+            ]
+          },
+          {
+            "name": "asupersync.connections.active",
+            "description": "Current number of active connections",
+            "unit": "1",
+            "type": "gauge",
+            "data_points": [
+              {
+                "attributes": {
+                  "protocol": "http1",
+                  "status": "healthy"
+                },
+                "time_unix_nano": "[TIMESTAMP]",
+                "value": 8
+              }
+            ]
+          },
+          {
+            "name": "asupersync.tasks.duration",
+            "description": "Task execution duration in seconds",
+            "unit": "s",
+            "type": "histogram",
+            "data_points": [
+              {
+                "attributes": {
+                  "outcome": "ok"
+                },
+                "time_unix_nano": "[TIMESTAMP]",
+                "count": 100,
+                "sum": 42.5,
+                "bucket_counts": [
+                  10,
+                  50,
+                  35,
+                  5,
+                  0
+                ],
+                "explicit_bounds": [
+                  0.1,
+                  0.5,
+                  1.0,
+                  5.0
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}
