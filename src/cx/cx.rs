@@ -3082,11 +3082,10 @@ impl Cx<cap::All> {
     /// # Visibility (br-asupersync-2x6hbi)
     ///
     /// Gated behind `#[cfg(any(test, feature = "test-internals"))]` so that
-    /// production consumers of the asupersync crate (with default
-    /// `test-internals` feature OFF) cannot construct a `Cx<cap::All>` out
-    /// of band, bypassing runtime cap-mask enforcement. `test-internals` is
-    /// in the default feature set, so existing tests and dev-time consumers
-    /// keep working without any change.
+    /// production consumers of the asupersync crate cannot construct a
+    /// `Cx<cap::All>` out of band, bypassing runtime cap-mask enforcement.
+    /// Tests still see the constructor through `cfg(test)`, and explicit
+    /// dev-time consumers can opt in with `--features test-internals`.
     #[cfg(any(test, feature = "test-internals"))]
     #[must_use]
     pub fn for_testing() -> Self {
@@ -3196,12 +3195,11 @@ impl Cx<cap::All> {
     /// which inherits the runtime's drivers and cap-mask via
     /// `build_request_cx_from_inner` and is therefore non-escalating.
     ///
-    /// Default-feature builds enable `test-internals`, so this
-    /// constructor remains visible in development. Production builds
-    /// disable `test-internals` (or fall through to `default-features
-    /// = false`) and lose access to the constructor entirely — the
-    /// only way to mint a Cx in production is through the runtime
-    /// boundary, which IS capability-controlled.
+    /// Default builds exclude `test-internals`, so production
+    /// consumers lose access to this constructor entirely unless they
+    /// opt in explicitly. The only ambient-free way to mint a Cx in
+    /// production is through the runtime boundary, which is
+    /// capability-controlled.
     #[cfg(any(test, feature = "test-internals"))]
     #[must_use]
     pub fn for_request_with_budget(budget: Budget) -> Self {

@@ -527,6 +527,7 @@ fn validate_nats_token(value: &str, field: &str) -> Result<(), NatsError> {
     Ok(())
 }
 
+#[cfg(any(test, feature = "test-internals"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SubscriptionPatternToken<'a> {
     Literal(&'a str),
@@ -534,6 +535,7 @@ enum SubscriptionPatternToken<'a> {
     TailWildcard,
 }
 
+#[cfg(any(test, feature = "test-internals"))]
 fn is_valid_nats_segment(token: &str) -> bool {
     !token.is_empty()
         && !token
@@ -541,6 +543,7 @@ fn is_valid_nats_segment(token: &str) -> bool {
             .any(|ch| ch.is_ascii_control() || ch.is_whitespace())
 }
 
+#[cfg(any(test, feature = "test-internals"))]
 fn parse_subscription_pattern(pattern: &str) -> Option<Vec<SubscriptionPatternToken<'_>>> {
     if pattern.is_empty() {
         return None;
@@ -568,6 +571,7 @@ fn parse_subscription_pattern(pattern: &str) -> Option<Vec<SubscriptionPatternTo
     Some(parsed)
 }
 
+#[cfg(any(test, feature = "test-internals"))]
 fn parse_publish_subject(subject: &str) -> Option<Vec<&str>> {
     if subject.is_empty() {
         return None;
@@ -584,6 +588,7 @@ fn parse_publish_subject(subject: &str) -> Option<Vec<&str>> {
     Some(tokens)
 }
 
+#[cfg(any(test, feature = "test-internals"))]
 fn subscription_matches_subject_impl(pattern: &str, subject: &str) -> bool {
     let Some(pattern_tokens) = parse_subscription_pattern(pattern) else {
         return false;
