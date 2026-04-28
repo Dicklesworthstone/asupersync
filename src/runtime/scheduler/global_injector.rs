@@ -10,7 +10,7 @@ use std::cmp::Ordering as CmpOrdering;
 use std::collections::BinaryHeap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-use super::global_queue::FaaFifoQueue;
+use super::global_queue::{CountReservation, FaaFifoQueue};
 
 /// A scheduled task with its priority metadata.
 #[derive(Debug, Clone, Copy)]
@@ -195,10 +195,9 @@ impl GlobalInjector {
             .push_uncounted(PriorityTask { task, priority });
     }
 
-    /// Bulk increments the atomic ready count.
     #[inline]
-    pub(crate) fn add_ready_count(&self, count: usize) {
-        self.ready_queue.add_count(count);
+    pub(crate) fn reserve_ready_count(&self, count: usize) -> CountReservation<'_, PriorityTask> {
+        self.ready_queue.reserve_count(count)
     }
 
     /// Pops a task from the cancel lane.

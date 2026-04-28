@@ -44,6 +44,16 @@ impl<T: Send> FaaFifoQueue<T> {
     }
 
     #[inline]
+    fn saturating_sub(counter: &AtomicUsize, count: usize) {
+        if count == 0 {
+            return;
+        }
+        let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            Some(current.saturating_sub(count))
+        });
+    }
+
+    #[inline]
     pub(crate) fn push(&self, item: T) {
         self.count.fetch_add(1, Ordering::Relaxed);
         self.inner.enqueue(item);
@@ -77,6 +87,20 @@ impl<T: Send> FaaFifoQueue<T> {
     }
 
     #[inline]
+    pub(crate) fn reserve_count(&self, count: usize) -> CountReservation<'_, T> {
+        self.add_count(count);
+        CountReservation {
+            queue: self,
+            remaining: count,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn rollback_count(&self, count: usize) {
+        Self::saturating_sub(&self.count, count);
+    }
+
+    #[inline]
     pub(crate) fn decrement_count(&self) {
         Self::saturating_decrement(&self.count);
     }
@@ -98,6 +122,24 @@ impl<T: Send> FaaFifoQueue<T> {
     #[inline]
     pub(crate) fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+pub(crate) struct CountReservation<'a, T: Send> {
+    queue: &'a FaaFifoQueue<T>,
+    remaining: usize,
+}
+
+impl<T: Send> CountReservation<'_, T> {
+    #[inline]
+    pub(crate) fn publish_one(&mut self) {
+        self.remaining = self.remaining.saturating_sub(1);
+    }
+}
+
+impl<T: Send> Drop for CountReservation<'_, T> {
+    fn drop(&mut self) {
+        self.queue.rollback_count(self.remaining);
     }
 }
 
@@ -527,6 +569,47 @@ mod tests {
         assert!(
             queue.is_empty(),
             "queue should report empty after convergence"
+        );
+    }
+
+    #[test]
+    fn precounted_publish_reservation_rolls_back_abandoned_credit() {
+        let queue = GlobalQueue::new();
+        {
+            let _reservation = queue.inner.reserve_count(2);
+            assert_eq!(
+                queue.len(),
+                2,
+                "reserved publication advertises pending work while in flight"
+            );
+        }
+
+        assert_eq!(
+            queue.len(),
+            0,
+            "dropping an unused reservation must roll back phantom ready-count credit"
+        );
+        assert!(queue.is_empty(), "queue should report empty after rollback");
+    }
+
+    #[test]
+    fn precounted_publish_reservation_rolls_back_unpublished_suffix_only() {
+        let queue = GlobalQueue::new();
+        {
+            let mut reservation = queue.inner.reserve_count(3);
+            queue.inner.push_uncounted(task(21));
+            reservation.publish_one();
+        }
+
+        assert_eq!(
+            queue.len(),
+            1,
+            "rollback must preserve credit for already published tasks"
+        );
+        assert_eq!(queue.pop(), Some(task(21)));
+        assert!(
+            queue.is_empty(),
+            "queue should converge after draining the published prefix"
         );
     }
 

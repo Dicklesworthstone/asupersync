@@ -4078,9 +4078,10 @@ impl ThreeLaneWorker {
         if global_wakes > 0 {
             // Increment the counter BEFORE pushing tasks to prevent concurrent stealers
             // from falsely seeing an empty queue and failing to decrement the counter.
-            self.global.add_ready_count(global_wakes);
+            let mut reservation = self.global.reserve_ready_count(global_wakes);
             for (task, priority) in global_tasks {
                 self.global.inject_ready_uncounted(task, priority);
+                reservation.publish_one();
             }
             self.coordinator.wake_many(global_wakes);
         }
@@ -4127,11 +4128,13 @@ impl ThreeLaneWorker {
 
                     let finalizer_wakes = finalizers.len();
                     if finalizer_wakes > 0 {
-                        self.worker.global.add_ready_count(finalizer_wakes);
+                        let mut reservation =
+                            self.worker.global.reserve_ready_count(finalizer_wakes);
                         for (finalizer_task, priority) in finalizers {
                             self.worker
                                 .global
                                 .inject_ready_uncounted(finalizer_task, priority);
+                            reservation.publish_one();
                         }
                         self.worker.coordinator.wake_many(finalizer_wakes);
                     }
@@ -4403,9 +4406,10 @@ impl ThreeLaneWorker {
 
                 let finalizer_wakes = finalizers.len();
                 if finalizer_wakes > 0 {
-                    self.global.add_ready_count(finalizer_wakes);
+                    let mut reservation = self.global.reserve_ready_count(finalizer_wakes);
                     for (finalizer_task, priority) in finalizers {
                         self.global.inject_ready_uncounted(finalizer_task, priority);
+                        reservation.publish_one();
                     }
                     self.coordinator.wake_many(finalizer_wakes);
                 }
@@ -4540,9 +4544,10 @@ impl ThreeLaneWorker {
 
                 let finalizer_wakes = finalizers.len();
                 if finalizer_wakes > 0 {
-                    self.global.add_ready_count(finalizer_wakes);
+                    let mut reservation = self.global.reserve_ready_count(finalizer_wakes);
                     for (finalizer_task, priority) in finalizers {
                         self.global.inject_ready_uncounted(finalizer_task, priority);
+                        reservation.publish_one();
                     }
                     self.coordinator.wake_many(finalizer_wakes);
                 }
@@ -4567,9 +4572,10 @@ impl ThreeLaneWorker {
         }
         let finalizer_wakes = tasks.len();
         if finalizer_wakes > 0 {
-            self.global.add_ready_count(finalizer_wakes);
+            let mut reservation = self.global.reserve_ready_count(finalizer_wakes);
             for (task_id, priority) in tasks {
                 self.global.inject_ready_uncounted(task_id, priority);
+                reservation.publish_one();
             }
             self.coordinator.wake_many(finalizer_wakes);
         }
