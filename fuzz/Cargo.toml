@@ -2348,3 +2348,13 @@ path = "fuzz_targets/postgres_frame_decoder.rs"
 test = false
 doc = false
 bench = false
+
+# br-asupersync-qs0zoz: RESP protocol adapter lifecycle and decode fuzzer.
+# Tests src/messaging/protocol/mod.rs handshake/health/transport state changes,
+# cancellation handling, RESP frame prefix consumption, and round-trip decode.
+[[bin]]
+name = "messaging_resp_protocol_adapter"
+path = "fuzz_targets/messaging_resp_protocol_adapter.rs"
+test = false
+doc = false
+bench = false
