@@ -5989,6 +5989,56 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_scram_sha256_rfc7677_section3_conformance() {
+        // RFC 7677 Section 3 test vectors - SCRAM-SHA-256 authentication exchange
+        // when client doesn't support channel bindings
+        // Username: "user", Password: "pencil"
+
+        let cx = Cx::for_testing();
+
+        // Create SCRAM auth with RFC test credentials
+        let mut auth = ScramAuth::new(&cx, "user", "pencil", ScramChannelBinding::None);
+
+        // Override client nonce to match RFC vector exactly
+        auth.client_nonce = "rOprNGfwEbeRWgbNEkqO".to_string();
+        auth.client_first_bare = "n=user,r=rOprNGfwEbeRWgbNEkqO".to_string();
+
+        // Test 1: Client first message should match RFC 7677 §3
+        let client_first = auth.client_first_message();
+        let expected_client_first = b"n,,n=user,r=rOprNGfwEbeRWgbNEkqO";
+        assert_eq!(
+            client_first, expected_client_first,
+            "Client first message should match RFC 7677 §3 vector"
+        );
+
+        // Test 2: Process server first message from RFC
+        let server_first = "r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096";
+        let client_final = auth.process_server_first(server_first)
+            .expect("Should process RFC server first message");
+
+        // Test 3: Client final message should match RFC proof value
+        let client_final_str = String::from_utf8(client_final)
+            .expect("Client final should be valid UTF-8");
+
+        // Verify channel binding (c=biws is base64 for "n,,")
+        assert!(client_final_str.contains("c=biws"),
+               "Client final should contain correct channel binding");
+
+        // Verify nonce echoes full server nonce
+        assert!(client_final_str.contains("r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0"),
+               "Client final should echo full server nonce");
+
+        // Verify proof value matches RFC (this is the critical cryptographic test)
+        assert!(client_final_str.contains("p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ="),
+               "Client final proof should match RFC 7677 §3 expected value");
+
+        // Test 4: Server final verification with RFC server signature
+        let server_final = "v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=";
+        auth.verify_server_final(server_final)
+            .expect("Should verify RFC 7677 §3 server signature");
+    }
+
     /// Create a PgConnection backed by a dummy socket pair for unit-testing
     /// parse methods that only inspect a byte slice.
     fn make_test_connection() -> PgConnection {
