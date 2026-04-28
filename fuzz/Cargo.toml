@@ -2532,3 +2532,15 @@ path = "fuzz_targets/raptorq_encoder_rfc6330_limits.rs"
 test = false
 doc = false
 bench = false
+
+# Structure-aware QPACK Huffman literal-name encoding fuzzer.
+# Tests src/http/h3_native.rs qpack_encode_string and literal field encoding
+# with intelligent input generation for name/value combinations, Huffman vs raw
+# encoding decision logic, efficiency boundaries, edge cases, and round-trip consistency.
+# Exercises encoding paths that the qpack_decoder target doesn't cover.
+[[bin]]
+name = "qpack_huffman_literal_encoding"
+path = "fuzz_targets/qpack_huffman_literal_encoding.rs"
+test = false
+doc = false
+bench = false
