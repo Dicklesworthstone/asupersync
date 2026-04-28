@@ -161,6 +161,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "postgres_row_description_packet"
+path = "fuzz_targets/postgres_row_description_packet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_typed_symbol_parser"
 path = "fuzz_targets/typed_symbol_parser.rs"
 test = false
@@ -2377,6 +2384,17 @@ bench = false
 [[bin]]
 name = "raptorq_proof_bytes_enhanced"
 path = "fuzz_targets/raptorq_proof_bytes_enhanced.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-6ba4qs: Dedicated structure-aware fuzz target for JetStream ack control token parser.
+# Exercises the ack/nak/term/in-progress/release control token parser with intelligent input
+# generation to find edge cases in protocol parsing logic. Tests +ACK, -NAK, +WPI, +TERM
+# tokens with malformed variants, case variations, null injection, and boundary conditions.
+[[bin]]
+name = "jetstream_ack_control"
+path = "fuzz_targets/jetstream_ack_control.rs"
 test = false
 doc = false
 bench = false
