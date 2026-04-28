@@ -1280,6 +1280,104 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_cancelled_head_waiter_matches_plain_drop() {
+        init_test("metamorphic_cancelled_head_waiter_matches_plain_drop");
+
+        fn run(cancel_head_waiter: bool) -> (u32, usize, usize, bool, u32) {
+            let holder_cx = test_cx();
+            let successor_cx = test_cx();
+            let removable_waiter_cx = Cx::new(
+                RegionId::from_arena(ArenaIndex::new(0, if cancel_head_waiter { 26 } else { 25 })),
+                TaskId::from_arena(ArenaIndex::new(0, if cancel_head_waiter { 26 } else { 25 })),
+                Budget::INFINITE,
+            );
+            let mutex = Mutex::new(7u32);
+
+            let mut fut_hold = mutex.lock(&holder_cx);
+            let hold_guard = poll_once(&mut fut_hold).expect("immediate").expect("lock");
+
+            let mut fut_head = mutex.lock(&removable_waiter_cx);
+            let head_pending = poll_once(&mut fut_head).is_none();
+            crate::assert_with_log!(head_pending, "head waiter queued", true, head_pending);
+
+            let mut fut_successor = mutex.lock(&successor_cx);
+            let successor_pending = poll_once(&mut fut_successor).is_none();
+            crate::assert_with_log!(
+                successor_pending,
+                "successor waiter queued",
+                true,
+                successor_pending
+            );
+
+            let waiters_before_remove = mutex.waiters();
+            crate::assert_with_log!(
+                waiters_before_remove == 2,
+                "two waiters queued before transformation",
+                2usize,
+                waiters_before_remove
+            );
+
+            if cancel_head_waiter {
+                removable_waiter_cx.set_cancel_requested(true);
+                let cancelled = matches!(poll_once(&mut fut_head), Some(Err(LockError::Cancelled)));
+                crate::assert_with_log!(
+                    cancelled,
+                    "head waiter cancelled before drop",
+                    true,
+                    cancelled
+                );
+            }
+
+            drop(fut_head);
+
+            let waiters_after_remove = mutex.waiters();
+            crate::assert_with_log!(
+                waiters_after_remove == 1,
+                "exactly one waiter remains after head removal",
+                1usize,
+                waiters_after_remove
+            );
+
+            drop(hold_guard);
+
+            let successor_guard = poll_once(&mut fut_successor)
+                .expect("successor should acquire")
+                .expect("successor acquires cleanly");
+            let successor_value = *successor_guard;
+
+            let waiters_while_successor_holds = mutex.waiters();
+            let try_lock_blocked = matches!(mutex.try_lock(), Err(TryLockError::Locked));
+
+            drop(successor_guard);
+
+            let final_guard = mutex
+                .try_lock()
+                .expect("mutex relocks after successor drop");
+            let final_value = *final_guard;
+            drop(final_guard);
+
+            (
+                successor_value,
+                waiters_after_remove,
+                waiters_while_successor_holds,
+                try_lock_blocked,
+                final_value,
+            )
+        }
+
+        let plain_drop = run(false);
+        let cancel_then_drop = run(true);
+        crate::assert_with_log!(
+            cancel_then_drop == plain_drop,
+            "cancel+drop matches plain drop for surviving waiter",
+            plain_drop,
+            cancel_then_drop
+        );
+
+        crate::test_complete!("metamorphic_cancelled_head_waiter_matches_plain_drop");
+    }
+
+    #[test]
     fn new_waiter_does_not_bypass_granted_waiter() {
         init_test("new_waiter_does_not_bypass_granted_waiter");
         let cx1 = test_cx();
