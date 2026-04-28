@@ -2292,8 +2292,8 @@ struct PgConnectionInner {
     /// CLOSE message never reached the server (or whose response was
     /// lost). Pre-fix the eviction was fire-and-forget — a transient
     /// network blip silently leaked the server-side statement. The
-    /// retry queue is drained at the start of every public query
-    /// method via `flush_pending_deallocates`. Bounded by
+    /// retry queue is drained at the start of public query, execute,
+    /// and prepare paths via `flush_pending_deallocates`. Bounded by
     /// `DEALLOCATE_RETRY_QUEUE_CAP` so a misbehaving server cannot
     /// itself force unbounded growth on the client.
     deallocate_retry_queue: VecDeque<String>,
@@ -3244,6 +3244,12 @@ impl PgConnection {
         if self.inner.closed {
             return Outcome::Err(PgError::ConnectionClosed);
         }
+        match self.flush_pending_deallocates_before_request(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
 
         match self.ensure_no_orphaned_transaction(cx).await {
             Outcome::Ok(()) => {}
@@ -3413,6 +3419,12 @@ impl PgConnection {
 
         if self.inner.closed {
             return Outcome::Err(PgError::ConnectionClosed);
+        }
+        match self.flush_pending_deallocates_before_request(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
 
         match self.ensure_no_orphaned_transaction(cx).await {
@@ -3729,6 +3741,12 @@ impl PgConnection {
         if self.inner.closed {
             return Outcome::Err(PgError::ConnectionClosed);
         }
+        match self.flush_pending_deallocates_before_request(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
 
         let param_oids: Vec<u32> = params.iter().map(ToSql::type_oid).collect();
         let parse = match build_parse_msg("", sql, &param_oids) {
@@ -3825,6 +3843,12 @@ impl PgConnection {
         if self.inner.closed {
             return Outcome::Err(PgError::ConnectionClosed);
         }
+        match self.flush_pending_deallocates_before_request(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
 
         let param_oids: Vec<u32> = params.iter().map(ToSql::type_oid).collect();
         let parse = match build_parse_msg("", sql, &param_oids) {
@@ -3902,9 +3926,11 @@ impl PgConnection {
         // eviction failed do we incur the per-statement Sync exchange.
         // Stops at the first failure to avoid hammering a flaky
         // server, leaving the remainder for the next query.
-        self.flush_pending_deallocates(cx).await;
-        if cx.checkpoint().is_err() {
-            return Outcome::Cancelled(cancelled_reason(cx));
+        match self.flush_pending_deallocates_before_request(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
 
         // br-asupersync-cvkoe9: fast-path for repeat-SQL. Bypasses the
@@ -4055,7 +4081,7 @@ impl PgConnection {
             param_oids: Vec::new(),
             columns: Vec::new(),
         };
-        match self.close_statement(cx, &victim_stmt).await {
+        match self.close_statement_exchange(cx, &victim_stmt).await {
             Outcome::Ok(()) => {
                 self.inner.consecutive_deallocate_failures = 0;
             }
@@ -4104,12 +4130,27 @@ impl PgConnection {
         // or set unhealthy=true for caller cancellation
     }
 
+    fn restore_deallocate_remainder(&mut self, remainder: Vec<String>) {
+        let restore_len = remainder.len().min(DEALLOCATE_RETRY_QUEUE_CAP);
+        let drop_count = remainder.len().saturating_sub(restore_len);
+        if drop_count > 0 {
+            // Drop the oldest entries to honour the CAP (older entries
+            // are most likely to have been stale by now anyway).
+            self.inner
+                .deallocate_retry_queue
+                .extend(remainder.into_iter().skip(drop_count));
+        } else {
+            self.inner.deallocate_retry_queue.extend(remainder);
+        }
+    }
+
     /// br-asupersync-7v80ju: drain the deallocate retry queue,
     /// retrying each pending CLOSE. Stops at the first failure (so we
     /// don't hammer a flaky server) and re-enqueues the name plus any
-    /// remaining queue tail. Called at the start of every public
-    /// query method so retries piggy-back on the next round-trip.
-    async fn flush_pending_deallocates(&mut self, cx: &Cx) {
+    /// remaining queue tail. Called at the start of public query,
+    /// execute, and prepare paths so retries piggy-back on the next
+    /// request.
+    async fn flush_pending_deallocates(&mut self, cx: &Cx) -> Outcome<(), PgError> {
         // Drain the queue into a local Vec so we can re-enqueue the
         // remainder if any retry fails. Splitting the borrow this way
         // avoids holding `&mut self.inner.deallocate_retry_queue`
@@ -4122,11 +4163,11 @@ impl PgConnection {
                 param_oids: Vec::new(),
                 columns: Vec::new(),
             };
-            match self.close_statement(cx, &stmt).await {
+            match self.close_statement_exchange(cx, &stmt).await {
                 Outcome::Ok(()) => {
                     self.inner.consecutive_deallocate_failures = 0;
                 }
-                Outcome::Err(_) | Outcome::Panicked(_) => {
+                Outcome::Err(err) => {
                     // Real backend failure - increment failure counter and mark unhealthy
                     remainder.push(name);
                     self.inner.consecutive_deallocate_failures =
@@ -4137,29 +4178,51 @@ impl PgConnection {
                         self.inner.unhealthy = true;
                     }
                     remainder.extend(pending);
-                    break;
+                    self.restore_deallocate_remainder(remainder);
+                    return if self.inner.closed {
+                        Outcome::Err(err)
+                    } else {
+                        Outcome::Ok(())
+                    };
                 }
-                Outcome::Cancelled(_) => {
+                Outcome::Panicked(payload) => {
+                    remainder.push(name);
+                    self.inner.consecutive_deallocate_failures =
+                        self.inner.consecutive_deallocate_failures.saturating_add(1);
+                    if self.inner.consecutive_deallocate_failures
+                        >= DEALLOCATE_FAILURE_UNHEALTHY_THRESHOLD
+                    {
+                        self.inner.unhealthy = true;
+                    }
+                    remainder.extend(pending);
+                    self.restore_deallocate_remainder(remainder);
+                    return Outcome::Panicked(payload);
+                }
+                Outcome::Cancelled(reason) => {
                     // Caller cancellation - preserve name for retry but don't count as backend failure
                     remainder.push(name);
                     remainder.extend(pending);
-                    break;
+                    self.restore_deallocate_remainder(remainder);
+                    return Outcome::Cancelled(reason);
                 }
             }
         }
-        // Restore any remainder (capped at CAP; if remainder is huge
-        // due to mass failures, cap it the same way the enqueue path
-        // does).
-        let restore_len = remainder.len().min(DEALLOCATE_RETRY_QUEUE_CAP);
-        let drop_count = remainder.len().saturating_sub(restore_len);
-        if drop_count > 0 {
-            // Drop the oldest entries to honour the CAP (older entries
-            // are most likely to have been stale by now anyway).
-            self.inner
-                .deallocate_retry_queue
-                .extend(remainder.into_iter().skip(drop_count));
-        } else {
-            self.inner.deallocate_retry_queue.extend(remainder);
+        self.restore_deallocate_remainder(remainder);
+        Outcome::Ok(())
+    }
+
+    async fn flush_pending_deallocates_before_request(&mut self, cx: &Cx) -> Outcome<(), PgError> {
+        match self.flush_pending_deallocates(cx).await {
+            Outcome::Ok(()) => {
+                if self.inner.closed {
+                    Outcome::Err(PgError::ConnectionClosed)
+                } else {
+                    Outcome::Ok(())
+                }
+            }
+            Outcome::Err(err) => Outcome::Err(err),
+            Outcome::Cancelled(reason) => Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => Outcome::Panicked(payload),
         }
     }
 
@@ -4195,6 +4258,12 @@ impl PgConnection {
         }
         if self.inner.closed {
             return Outcome::Err(PgError::ConnectionClosed);
+        }
+        match self.flush_pending_deallocates_before_request(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
 
         let bind = match build_bind_msg("", &stmt.name, params, Format::Text) {
@@ -4254,6 +4323,12 @@ impl PgConnection {
         if self.inner.closed {
             return Outcome::Err(PgError::ConnectionClosed);
         }
+        match self.flush_pending_deallocates_before_request(cx).await {
+            Outcome::Ok(()) => {}
+            Outcome::Err(err) => return Outcome::Err(err),
+            Outcome::Cancelled(reason) => return Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => return Outcome::Panicked(payload),
+        }
 
         let bind = match build_bind_msg("", &stmt.name, params, Format::Text) {
             Ok(b) => b,
@@ -4302,7 +4377,14 @@ impl PgConnection {
         if self.inner.closed {
             return Outcome::Err(PgError::ConnectionClosed);
         }
+        self.close_statement_exchange(cx, stmt).await
+    }
 
+    async fn close_statement_exchange(
+        &mut self,
+        cx: &Cx,
+        stmt: &PgStatement,
+    ) -> Outcome<(), PgError> {
         match self.ensure_no_orphaned_transaction(cx).await {
             Outcome::Ok(()) => {}
             Outcome::Err(err) => return Outcome::Err(err),
@@ -9267,7 +9349,7 @@ mod tests {
 
             // Test flush_pending_deallocates with pre-cancelled context as well
             let initial_queue_len = conn.inner.deallocate_retry_queue.len();
-            conn.flush_pending_deallocates(&cx).await;
+            assert_user_cancelled(conn.flush_pending_deallocates(&cx).await);
 
             // Should still not increment failure counter or mark unhealthy
             assert_eq!(
@@ -9332,6 +9414,109 @@ mod tests {
             .prepared_cache
             .get_and_touch(sql)
             .expect("cached statement should still be present");
+        assert_eq!(cached_after.name, cached.name);
+    }
+
+    #[test]
+    fn deallocate_retry_flushes_before_simple_query() {
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let cx = crate::cx::Cx::for_testing();
+        conn.inner
+            .deallocate_retry_queue
+            .push_back("__stale_stmt".to_string());
+
+        let responder = std::thread::spawn(move || {
+            let close_request = read_until_contains(&mut peer, b"__stale_stmt")
+                .expect("simple query should first flush pending deallocates");
+            assert!(
+                close_request
+                    .windows("__stale_stmt".len())
+                    .any(|window| window == b"__stale_stmt"),
+                "close request should target the queued stale statement"
+            );
+            std::io::Write::write_all(&mut peer, &backend_message(b'3', b""))
+                .expect("close complete should be written");
+            std::io::Write::write_all(&mut peer, &ready_for_query(b'I'))
+                .expect("close ready should be written");
+
+            let query_request = read_until_contains(&mut peer, b"SELECT 1")
+                .expect("simple query should run after flush");
+            assert!(
+                query_request
+                    .windows("SELECT 1".len())
+                    .any(|window| window == b"SELECT 1"),
+                "query request should contain the caller SQL"
+            );
+            std::io::Write::write_all(&mut peer, &backend_message(b'C', b"SELECT 0\0"))
+                .expect("command complete should be written");
+            std::io::Write::write_all(&mut peer, &ready_for_query(b'I'))
+                .expect("query ready should be written");
+        });
+
+        match run(conn.query_unchecked(&cx, "SELECT 1")) {
+            Outcome::Ok(rows) => assert!(rows.is_empty(), "unexpected rows: {rows:?}"),
+            other => panic!("expected successful query after flush, got {other:?}"),
+        }
+        responder
+            .join()
+            .expect("flush/query responder should exit cleanly");
+
+        assert_eq!(conn.pending_deallocate_count(), 0);
+        assert_eq!(conn.inner.consecutive_deallocate_failures, 0);
+        assert!(!conn.inner.closed);
+    }
+
+    #[test]
+    fn deallocate_retry_flush_error_beats_prepare_cache_hit() {
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let cx = crate::cx::Cx::for_testing();
+        let sql = "SELECT 1";
+        let cached = fake_pg_statement("__cached_stmt");
+        conn.inner
+            .prepared_cache
+            .insert_returning_evicted_name(sql.to_string(), cached.clone());
+        conn.inner
+            .deallocate_retry_queue
+            .push_back("__stale_stmt".to_string());
+
+        let responder = std::thread::spawn(move || {
+            let close_request = read_until_contains(&mut peer, b"__stale_stmt")
+                .expect("prepare should flush pending deallocates before cache hit");
+            assert!(
+                close_request
+                    .windows("__stale_stmt".len())
+                    .any(|window| window == b"__stale_stmt"),
+                "close request should target the queued stale statement"
+            );
+            std::io::Write::write_all(&mut peer, &backend_message(b'D', &0i16.to_be_bytes()))
+                .expect("protocol fault should be written");
+        });
+
+        match run(conn.prepare(&cx, sql)) {
+            Outcome::Err(PgError::Protocol(msg)) => {
+                assert!(msg.contains("close statement response"), "got: {msg}");
+            }
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
+        responder
+            .join()
+            .expect("flush fault responder should exit cleanly");
+
+        assert!(
+            conn.inner.closed,
+            "protocol fault should poison the connection"
+        );
+        assert_eq!(conn.inner.consecutive_deallocate_failures, 1);
+        assert_eq!(
+            conn.inner.deallocate_retry_queue,
+            VecDeque::from(["__stale_stmt".to_string()]),
+            "failed flush should preserve the queued retry"
+        );
+        let cached_after = conn
+            .inner
+            .prepared_cache
+            .get_and_touch(sql)
+            .expect("cached statement should remain present");
         assert_eq!(cached_after.name, cached.name);
     }
 
