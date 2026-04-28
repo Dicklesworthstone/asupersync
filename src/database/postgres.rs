@@ -5582,8 +5582,8 @@ pub fn fuzz_parse_parameter_description(data: &[u8]) -> Result<Vec<u32>, PgError
 )]
 mod tests {
     use super::*;
-    use crate::{Budget, Cx, RegionId, TaskId};
     use crate::types::CancelKind;
+    use crate::{Budget, Cx, RegionId, TaskId};
 
     fn run<F: std::future::Future>(future: F) -> F::Output {
         futures_lite::future::block_on(future)
@@ -5606,10 +5606,7 @@ mod tests {
                 ),
                 Ok(n) => {
                     seen.extend_from_slice(&chunk[..n]);
-                    if seen
-                        .windows(needle.len())
-                        .any(|window| window == needle)
-                    {
+                    if seen.windows(needle.len()).any(|window| window == needle) {
                         return seen;
                     }
                 }
@@ -6099,10 +6096,8 @@ mod tests {
         let cancel_cx = cx.clone();
 
         let io_thread = std::thread::spawn(move || {
-            let mut client_bytes = read_until_contains(
-                &mut peer,
-                b"BEGIN ISOLATION LEVEL SERIALIZABLE READ WRITE",
-            );
+            let mut client_bytes =
+                read_until_contains(&mut peer, b"BEGIN ISOLATION LEVEL SERIALIZABLE READ WRITE");
             cancel_cx.cancel_fast(CancelKind::User);
 
             std::io::Write::write_all(&mut peer, &backend_message(b'C', b"BEGIN\0"))
@@ -9223,7 +9218,7 @@ mod tests {
     /// failure counters or mark connection unhealthy.
     #[test]
     fn deallocate_caller_cancellation_not_backend_failure() {
-        use crate::types::{Budget, CancelReason, RegionId, TaskId};
+        use crate::types::CancelReason;
 
         run(async {
             let mut conn = make_test_connection();
@@ -9234,12 +9229,12 @@ mod tests {
             assert!(conn.inner.deallocate_retry_queue.is_empty());
 
             // Create a pre-cancelled context
-            let cx = Cx::new_with_cancel(
+            let cx = Cx::new(
                 RegionId::new_for_test(1, 0),
                 TaskId::new_for_test(1, 0),
                 Budget::INFINITE,
-                CancelReason::user("pre-cancelled for test"),
             );
+            cx.cancel(CancelReason::user("pre-cancelled for test"));
 
             // Verify the context is already cancelled
             assert!(
@@ -9310,7 +9305,7 @@ mod tests {
             assert_eq!(conn.inner.consecutive_deallocate_failures, 0);
             assert!(!conn.inner.unhealthy);
 
-            let cx = Cx::new_for_test(
+            let cx = Cx::new(
                 RegionId::new_for_test(1, 0),
                 TaskId::new_for_test(1, 0),
                 Budget::INFINITE,
@@ -9352,7 +9347,7 @@ mod tests {
             let mut conn = make_test_connection();
 
             // Create a pre-cancelled context to simulate cancellation during verification
-            let cx = Cx::new_for_test(
+            let cx = Cx::new(
                 RegionId::new_for_test(1, 0),
                 TaskId::new_for_test(1, 0),
                 Budget::INFINITE,
@@ -9367,7 +9362,9 @@ mod tests {
 
             // Attempt begin_with_isolation with pre-cancelled context
             // This should fail with Cancelled after rolling back the transaction
-            let result = conn.begin_with_isolation(&cx, IsolationLevel::ReadCommitted, false).await;
+            let result = conn
+                .begin_with_isolation(&cx, IsolationLevel::ReadCommitted, false)
+                .await;
 
             // Should return Cancelled outcome
             assert!(
