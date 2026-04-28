@@ -1465,6 +1465,12 @@ impl RedisConnection {
                 &self.config.protocol_limits,
             )? {
                 self.read_buf.consume(consumed);
+                if matches!(value, RespValue::Attribute(_)) {
+                    // RESP3 attributes are metadata that prefix the actual
+                    // reply; they must not be surfaced as standalone command
+                    // responses or left queued to desynchronize the socket.
+                    continue;
+                }
                 return Ok(value);
             }
 
@@ -2902,7 +2908,6 @@ mod tests {
     use std::thread;
     use std::time::Duration;
     use crate::channel::oneshot;
-    use crate::time::timeout;
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()
@@ -3806,6 +3811,71 @@ mod tests {
             }
 
             client.ping(&cx).await.expect("second ping should succeed");
+        });
+
+        server.join().expect("server join");
+    }
+
+    #[test]
+    fn resp3_attributes_do_not_desynchronize_pooled_command_replies() {
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept redis client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set read timeout");
+
+            let hello = read_resp_frame(&mut stream);
+            assert_resp_command(hello, &[b"HELLO", b"3"]);
+            let hello_reply = RespValue::Map(vec![(
+                RespValue::SimpleString("proto".to_string()),
+                RespValue::Integer(3),
+            )])
+            .encode();
+            stream.write_all(&hello_reply).expect("write HELLO reply");
+            stream.flush().expect("flush HELLO reply");
+
+            let first = read_resp_frame(&mut stream);
+            assert_resp_command(first, &[b"PING"]);
+
+            let attribute = RespValue::Attribute(vec![(
+                RespValue::SimpleString("meta".to_string()),
+                RespValue::SimpleString("first".to_string()),
+            )])
+            .encode();
+            let first_reply = RespValue::SimpleString("FIRST".to_string()).encode();
+            stream
+                .write_all(&attribute)
+                .expect("write RESP3 attribute metadata");
+            stream.write_all(&first_reply).expect("write first reply");
+            stream.flush().expect("flush first reply");
+
+            let second = read_resp_frame(&mut stream);
+            assert_resp_command(second, &[b"PING"]);
+            let second_reply = RespValue::SimpleString("SECOND".to_string()).encode();
+            stream.write_all(&second_reply).expect("write second reply");
+            stream.flush().expect("flush second reply");
+        });
+
+        run_test_with_cx(|cx| async move {
+            let url = format!("redis://{}:{}/0", addr.ip(), addr.port());
+            let client = RedisClient::connect(&cx, &url)
+                .await
+                .expect("connect redis client");
+
+            let first = client
+                .cmd(&cx, &["PING"])
+                .await
+                .expect("first PING should ignore RESP3 attributes");
+            assert_eq!(first, RespValue::SimpleString("FIRST".to_string()));
+
+            let second = client
+                .cmd(&cx, &["PING"])
+                .await
+                .expect("second PING should stay synchronized");
+            assert_eq!(second, RespValue::SimpleString("SECOND".to_string()));
         });
 
         server.join().expect("server join");
