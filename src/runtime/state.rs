@@ -1220,6 +1220,16 @@ impl RuntimeState {
         self.tasks.tasks_arena().is_empty()
     }
 
+    /// Returns the number of occupied task arena slots (live + terminal-but-
+    /// not-yet-removed). Used by snapshot paths that need to pre-size a
+    /// `Vec` while iterating under the state lock — a slight allocator
+    /// optimisation when many tasks are live.
+    #[inline]
+    #[must_use]
+    pub fn tasks_len(&self) -> usize {
+        self.tasks.tasks_arena().len()
+    }
+
     /// Provides direct access to the tasks arena.
     ///
     /// Used by intrusive data structures (LocalQueue) that operate on the arena.

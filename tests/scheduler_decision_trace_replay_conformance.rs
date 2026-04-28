@@ -106,7 +106,7 @@ fn lab_runtime_decision_trace_known_good_seed_replays_to_golden() {
 
     // Known-good golden: any change to the lab scheduler's decision
     // policy that perturbs this order surfaces here.
-    insta::assert_yaml_snapshot!(
+    insta::assert_json_snapshot!(
         "lab_runtime_decision_trace_seed_0191",
         &trace_run_a,
     );
