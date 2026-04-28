@@ -1521,7 +1521,7 @@ and known limitations.
 |-------|-------|--------|
 | **Phase 0** | Single-thread deterministic kernel | ✅ Complete |
 | **Phase 1** | Parallel scheduler + region heap | ✅ Complete |
-| **Phase 2** | I/O integration (Linux epoll, optional io_uring, TCP, HTTP/1.1-2, TLS, HTTP/3 static-only; BSD/Windows reactors currently expose narrower interest support) | ✅ Complete |
+| **Phase 2** | I/O integration (Linux epoll, optional io_uring, TCP, HTTP/1.1-2, TLS, HTTP/3 static-only; BSD/Windows reactors currently expose narrower interest support) | ⚠️ Partial |
 | **Phase 3** | Actors + supervision (GenServer, links, monitors) | ✅ Complete |
 | **Phase 4** | Distributed structured concurrency | ✅ Complete |
 | **Phase 5** | DPOR + formal tooling | ⚠️ Partial (DPOR landed; TLA+ export and Lean coverage artifacts exist, but mechanization is still in progress) |
