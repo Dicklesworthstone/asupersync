@@ -1216,7 +1216,11 @@ impl<S: CancelSink> CancelBroadcaster<S> {
     /// Returns the forwarded message if the message should be relayed, or `None`
     /// if the message was a duplicate or reached max hops. This is the
     /// synchronous core of [`handle_message`][Self::handle_message].
-    pub fn receive_message(&self, msg: &CancelMessage, now: Time) -> Option<CancelMessage> {
+    pub fn receive_message(
+        &self,
+        msg: &CancelMessage,
+        _received_at: Time,
+    ) -> Option<CancelMessage> {
         // Check for duplicate
         if self.is_seen(msg.object_id(), msg.token_id(), msg.sequence()) {
             self.duplicates.fetch_add(1, Ordering::Relaxed);
@@ -1230,7 +1234,10 @@ impl<S: CancelSink> CancelBroadcaster<S> {
         let token = self.active_tokens.read().get(&msg.object_id()).cloned(); // ubs:ignore - internal cancellation token, not a secret
         if let Some(token) = token {
             let reason = CancelReason::new(msg.kind()).with_timestamp(msg.initiated_at());
-            token.cancel(&reason, now);
+            // br-asupersync-zmeazg: a forwarded cancel must preserve the origin
+            // timestamp carried on the wire. Using the local receipt time here
+            // skews cancelled_at/listener observations on every downstream peer.
+            token.cancel(&reason, msg.initiated_at());
         }
 
         // Forward if allowed
@@ -2489,6 +2496,50 @@ mod tests {
         let metrics = broadcaster.metrics();
         assert_eq!(metrics.received, 1);
         assert_eq!(metrics.forwarded, 1);
+    }
+
+    #[test]
+    fn receive_message_preserves_origin_initiated_at_for_local_tokens() {
+        let mut rng = DetRng::new(88);
+        let object_id = ObjectId::new_for_test(88);
+        let token = SymbolCancelToken::new(object_id, &mut rng);
+        let child = token.child(&mut rng);
+        let seen_at = Arc::new(StdMutex::new(None::<Time>));
+        let seen_at_clone = Arc::clone(&seen_at);
+        token.add_listener(move |_reason: &CancelReason, at: Time| {
+            *seen_at_clone.lock().unwrap() = Some(at);
+        });
+
+        let broadcaster = CancelBroadcaster::new(NullSink);
+        broadcaster.register_token(token.clone());
+
+        let initiated_at = Time::from_millis(125);
+        let received_at = Time::from_millis(500);
+        let msg = CancelMessage::new(
+            token.token_id(),
+            object_id,
+            CancelKind::Shutdown,
+            initiated_at,
+            0,
+        );
+
+        let forwarded = broadcaster.receive_message(&msg, received_at);
+        assert!(forwarded.is_some(), "fresh cancel should still forward");
+        assert_eq!(
+            token.cancelled_at(),
+            Some(initiated_at),
+            "br-asupersync-zmeazg: remote cancel must preserve origin initiated_at"
+        );
+        assert_eq!(
+            child.cancelled_at(),
+            Some(initiated_at),
+            "child cascade should inherit the same origin initiated_at"
+        );
+        assert_eq!(
+            *seen_at.lock().unwrap(),
+            Some(initiated_at),
+            "listener callbacks must observe the origin initiated_at, not local receipt time"
+        );
     }
 
     #[test]
