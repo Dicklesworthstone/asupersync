@@ -2808,6 +2808,7 @@ impl ThreeLaneWorker {
         }
 
         if let Some(reward_value) = reward {
+            let _ = reward_value;
             // Log the unwrapped f64 directly. The previous form was
             // `if let Some(_reward) = reward { trace!(reward = reward, ...) }`
             // which bound `_reward` but referenced the outer `Option<f64>` —
@@ -3236,17 +3237,15 @@ impl ThreeLaneWorker {
         //
         // OPTIMIZATION: Defer blocked_local_task peek to Phase 3b to eliminate
         // redundant lock acquisition (next_task hotpath optimization).
-        let mut blocked_local_task = None;
-
         if let Some(task) = self.fast_queue.pop() {
-            blocked_local_task = self.local.lock().peek_ready_task();
+            let blocked_local_task = self.local.lock().peek_ready_task();
             let dispatched_priority = self.task_sched_priority(task);
             self.record_ready_priority_inversion(blocked_local_task, task, dispatched_priority);
             self.record_ready_dispatch();
             return Some(self.finish_dispatch(task));
         }
         if let Some(pt) = self.global.pop_ready() {
-            blocked_local_task = self.local.lock().peek_ready_task();
+            let blocked_local_task = self.local.lock().peek_ready_task();
             self.record_ready_priority_inversion(blocked_local_task, pt.task, Some(pt.priority));
             self.record_ready_dispatch();
             return Some(self.finish_dispatch(pt.task));
@@ -3254,13 +3253,12 @@ impl ThreeLaneWorker {
 
         // ── PHASE 3b: Local Ready Lane ───────────────────────────────
         // All global/fast ready paths returned nothing. Check local ready.
-        // Combined lock acquisition for both peek (inversion check) and pop operations.
+        // The local ready path only needs the pop; inversion tracking is relevant
+        // only when a higher-priority fast/global dispatch jumps ahead of blocked
+        // local ready work.
         let rng_hint = self.rng.next_u64();
         let local_task = {
             let mut local = self.local.lock();
-            if blocked_local_task.is_none() {
-                blocked_local_task = local.peek_ready_task(); // Only peek if not already done
-            }
             local.pop_ready_only_with_hint(rng_hint)
         };
         if let Some(task) = local_task {

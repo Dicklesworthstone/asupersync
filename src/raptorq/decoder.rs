@@ -5629,6 +5629,65 @@ mod tests {
             })
         }
 
+        fn progress_trace_snapshot(
+            scenario: &str,
+            seed: u64,
+            proof: &DecodeProof,
+        ) -> serde_json::Value {
+            use serde_json::json;
+
+            json!({
+                "scenario": scenario,
+                "seed": seed,
+                "config": {
+                    "k": proof.config.k,
+                    "l": proof.config.l,
+                    "h": proof.config.h,
+                    "s": proof.config.s,
+                    "symbol_size": proof.config.symbol_size,
+                    "sbn": proof.config.sbn,
+                },
+                "peeling_trace": {
+                    "solved": proof.peeling.solved,
+                    "solved_indices": proof.peeling.solved_indices,
+                    "truncated": proof.peeling.truncated,
+                },
+                "elimination_trace": {
+                    "strategy": format!("{:?}", proof.elimination.strategy),
+                    "inactivated": proof.elimination.inactivated,
+                    "inactive_cols": proof.elimination.inactive_cols,
+                    "inactive_cols_truncated": proof.elimination.inactive_cols_truncated,
+                    "pivots": proof.elimination.pivots,
+                    "pivot_events": proof.elimination.pivot_events,
+                    "pivot_events_truncated": proof.elimination.pivot_events_truncated,
+                    "row_ops": proof.elimination.row_ops,
+                    "strategy_transitions": proof.elimination.strategy_transitions,
+                    "strategy_transitions_truncated": proof.elimination.strategy_transitions_truncated,
+                },
+                "outcome": match &proof.outcome {
+                    crate::raptorq::proof::ProofOutcome::Success { symbols_recovered, .. } => {
+                        json!({
+                            "kind": "Success",
+                            "symbols_recovered": symbols_recovered,
+                        })
+                    }
+                    crate::raptorq::proof::ProofOutcome::Failure { reason } => {
+                        json!({
+                            "kind": "Failure",
+                            "reason": format!("{reason:?}"),
+                        })
+                    }
+                },
+                "received_summary": {
+                    "total": proof.received.total,
+                    "source_count": proof.received.source_count,
+                    "repair_count": proof.received.repair_count,
+                    "esis_length": proof.received.esis.len(),
+                    "truncated": proof.received.truncated,
+                },
+            })
+        }
+
         /// Test successful decode transcript with systematic symbols only
         #[test]
         fn golden_transcript_systematic_success() {
@@ -5640,7 +5699,8 @@ mod tests {
             let decoder = InactivationDecoder::new(k, symbol_size, seed);
 
             // Use only systematic source symbols (should succeed via peeling)
-            let received = make_received_source(&decoder, &source);
+            let mut received = decoder.constraint_symbols();
+            received.extend(make_received_source(&decoder, &source));
 
             let result = decoder
                 .decode_with_proof(&received, ObjectId::new_for_test(1000), 0)
@@ -5749,6 +5809,109 @@ mod tests {
                 "strategy_transitions",
                 &result.proof,
                 &TranscriptGolden::scrubbed(),
+            );
+        }
+
+        #[test]
+        fn decoder_progress_trace_fixed_seeds() {
+            let systematic_k = 6;
+            let systematic_symbol_size = 16;
+            let systematic_seed = 12345u64;
+            let systematic_source =
+                make_deterministic_source_data(systematic_k, systematic_symbol_size);
+            let systematic_decoder =
+                InactivationDecoder::new(systematic_k, systematic_symbol_size, systematic_seed);
+            let mut systematic_received = systematic_decoder.constraint_symbols();
+            systematic_received.extend(make_received_source(
+                &systematic_decoder,
+                &systematic_source,
+            ));
+            let systematic_result = systematic_decoder
+                .decode_with_proof(&systematic_received, ObjectId::new_for_test(5000), 0)
+                .expect("systematic symbols should decode successfully");
+
+            let mixed_k = 8;
+            let mixed_symbol_size = 32;
+            let mixed_seed = 54321u64;
+            let mixed_source = make_deterministic_source_data(mixed_k, mixed_symbol_size);
+            let mixed_encoder =
+                SystematicEncoder::new(&mixed_source, mixed_symbol_size, mixed_seed).unwrap();
+            let mixed_decoder = InactivationDecoder::new(mixed_k, mixed_symbol_size, mixed_seed);
+            let mut mixed_received = mixed_decoder.constraint_symbols();
+            mixed_received.extend(make_received_source(&mixed_decoder, &mixed_source));
+            for esi in (mixed_k as u32)..(mixed_k as u32 + 3) {
+                let (cols, coefs) = mixed_decoder.repair_equation(esi).unwrap();
+                let repair_data = mixed_encoder.repair_symbol(esi);
+                mixed_received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+            }
+            let mixed_result = mixed_decoder
+                .decode_with_proof(&mixed_received, ObjectId::new_for_test(6000), 0)
+                .expect("mixed scenario should decode successfully");
+
+            let failure_k = 10;
+            let failure_symbol_size = 32;
+            let failure_seed = 99999u64;
+            let failure_source = make_deterministic_source_data(failure_k, failure_symbol_size);
+            let failure_decoder =
+                InactivationDecoder::new(failure_k, failure_symbol_size, failure_seed);
+            let failure_received: Vec<_> = make_received_source(&failure_decoder, &failure_source)
+                .into_iter()
+                .take(3)
+                .collect();
+            let (_failure_err, failure_proof) = failure_decoder
+                .decode_with_proof(&failure_received, ObjectId::new_for_test(7000), 0)
+                .expect_err("insufficient symbols should fail");
+
+            let transition_k = 12;
+            let transition_symbol_size = 64;
+            let transition_seed = 777u64;
+            let transition_source =
+                make_deterministic_source_data(transition_k, transition_symbol_size);
+            let transition_encoder =
+                SystematicEncoder::new(&transition_source, transition_symbol_size, transition_seed)
+                    .unwrap();
+            let transition_decoder =
+                InactivationDecoder::new(transition_k, transition_symbol_size, transition_seed);
+            let transition_l = transition_decoder.params().l;
+            let mut transition_received = transition_decoder.constraint_symbols();
+            transition_received.extend(
+                make_received_source(&transition_decoder, &transition_source)
+                    .into_iter()
+                    .take(transition_k - 2),
+            );
+            for esi in (transition_k as u32)..(transition_l as u32) {
+                let (cols, coefs) = transition_decoder.repair_equation(esi).unwrap();
+                let repair_data = transition_encoder.repair_symbol(esi);
+                transition_received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+            }
+            let transition_result = transition_decoder
+                .decode_with_proof(&transition_received, ObjectId::new_for_test(8000), 0)
+                .expect("strategy transition scenario should succeed");
+
+            insta::assert_json_snapshot!(
+                "decoder_progress_trace_fixed_seeds",
+                serde_json::json!({
+                    "systematic_success": progress_trace_snapshot(
+                        "systematic_success",
+                        systematic_seed,
+                        &systematic_result.proof,
+                    ),
+                    "mixed_peeling_elimination": progress_trace_snapshot(
+                        "mixed_peeling_elimination",
+                        mixed_seed,
+                        &mixed_result.proof,
+                    ),
+                    "insufficient_symbols_failure": progress_trace_snapshot(
+                        "insufficient_symbols_failure",
+                        failure_seed,
+                        &failure_proof,
+                    ),
+                    "strategy_transitions": progress_trace_snapshot(
+                        "strategy_transitions",
+                        transition_seed,
+                        &transition_result.proof,
+                    ),
+                })
             );
         }
 
