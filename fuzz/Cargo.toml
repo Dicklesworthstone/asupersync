@@ -1261,6 +1261,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "codec_framed_lifecycle"
+path = "fuzz_targets/codec_framed_lifecycle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "quic_stream"
 path = "fuzz_targets/quic_stream.rs"
 test = false
