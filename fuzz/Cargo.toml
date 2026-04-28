@@ -2556,3 +2556,15 @@ path = "fuzz_targets/grpc_codec_length_prefix.rs"
 test = false
 doc = false
 bench = false
+
+# Structure-aware JetStream ConsumerInfo/StreamInfo wire decoder fuzzer.
+# Tests src/messaging/jetstream.rs JSON response parsing with intelligent input generation
+# for stream state, consumer config, API errors, and metadata extraction.
+# Exercises JSON field extraction, type validation, error classification, unicode handling,
+# numeric edge cases, and malformed structure recovery (separate from PubAck/ack-subject).
+[[bin]]
+name = "jetstream_consumer_stream_info_decoder"
+path = "fuzz_targets/jetstream_consumer_stream_info_decoder.rs"
+test = false
+doc = false
+bench = false
