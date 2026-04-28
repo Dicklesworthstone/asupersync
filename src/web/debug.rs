@@ -500,6 +500,8 @@ mod tests {
             tasks: vec![],
             obligations: vec![],
             recent_events: vec![],
+            finalizer_history: vec![],
+            loser_drain_history: vec![],
         }
     }
 

@@ -1,7 +1,9 @@
 //! Deterministic consistent hashing ring with virtual nodes.
 //!
 //! Used for stable key-to-replica assignment with minimal remapping when
-//! replicas are added or removed.
+//! replicas are added or removed. For ephemeral routing decisions over a
+//! transient candidate set, prefer the salted HRW helpers below so callers do
+//! not pay to rebuild and sort a virtual-node ring on every lookup.
 
 use crate::util::det_hash::DetHasher;
 use std::collections::BTreeSet;
@@ -215,6 +217,110 @@ impl HashRing {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct HrwScore {
+    score: f64,
+    tie_break: u64,
+}
+
+impl Eq for HrwScore {}
+
+impl PartialOrd for HrwScore {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for HrwScore {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.score
+            .total_cmp(&other.score)
+            .then_with(|| self.tie_break.cmp(&other.tie_break))
+    }
+}
+
+/// Salted Highest Random Weight (rendezvous) selection over a transient
+/// candidate set.
+///
+/// This is the preferred hot-path scoring primitive when the membership set is
+/// not persistent enough to justify materializing a [`HashRing`].
+#[must_use]
+pub(crate) fn select_hrw<'a, I, T, K, N, Node, Weight>(
+    candidates: I,
+    key: &K,
+    seed: u64,
+    node_id: Node,
+    weight: Weight,
+) -> Option<&'a T>
+where
+    I: IntoIterator<Item = &'a T>,
+    K: Hash,
+    N: Hash + ?Sized + 'a,
+    Node: Fn(&'a T) -> &'a N,
+    Weight: Fn(&T) -> u32,
+{
+    let mut best = None;
+    for candidate in candidates {
+        let candidate_node = node_id(candidate);
+        let Some(score) = hrw_score(seed, key, candidate_node, weight(candidate)) else {
+            continue;
+        };
+        if best.is_none_or(|(best_score, _)| score > best_score) {
+            best = Some((score, candidate));
+        }
+    }
+    best.map(|(_, candidate)| candidate)
+}
+
+/// Exact duplicate-free top-k HRW selection over a transient candidate set.
+///
+/// For the small `k` used in routing and placement policies, keeping a sorted
+/// in-memory winner buffer avoids the old ring-build churn without introducing
+/// heap traffic.
+#[must_use]
+#[allow(dead_code)]
+pub(crate) fn select_top_k_hrw<'a, I, T, K, N, Node, Weight>(
+    candidates: I,
+    limit: usize,
+    key: &K,
+    seed: u64,
+    node_id: Node,
+    weight: Weight,
+) -> Vec<&'a T>
+where
+    I: IntoIterator<Item = &'a T>,
+    K: Hash,
+    N: Hash + ?Sized + 'a,
+    Node: Fn(&'a T) -> &'a N,
+    Weight: Fn(&T) -> u32,
+{
+    if limit == 0 {
+        return Vec::new();
+    }
+
+    let mut winners = Vec::with_capacity(limit);
+    for candidate in candidates {
+        let candidate_node = node_id(candidate);
+        let Some(score) = hrw_score(seed, key, candidate_node, weight(candidate)) else {
+            continue;
+        };
+
+        let insert_at = winners.partition_point(|(winner_score, _)| *winner_score > score);
+        if insert_at >= limit {
+            continue;
+        }
+        winners.insert(insert_at, (score, candidate));
+        if winners.len() > limit {
+            winners.pop();
+        }
+    }
+
+    winners
+        .into_iter()
+        .map(|(_, candidate)| candidate)
+        .collect()
+}
+
 /// br-asupersync-rnybb1: salted vnode placement hash. The `seed` is
 /// hashed FIRST so that two HashRings with different seeds produce
 /// disjoint vnode placements even for identical (node_id, vnode)
@@ -235,6 +341,37 @@ fn hash_value<T: Hash>(seed: u64, value: &T) -> u64 {
     seed.hash(&mut hasher);
     value.hash(&mut hasher);
     hasher.finish()
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn hrw_score<K: Hash, N: Hash + ?Sized>(
+    seed: u64,
+    key: &K,
+    node_id: &N,
+    weight: u32,
+) -> Option<HrwScore> {
+    if weight == 0 {
+        return None;
+    }
+
+    let mut hasher = DetHasher::default();
+    seed.hash(&mut hasher);
+    "hrw-score".hash(&mut hasher);
+    key.hash(&mut hasher);
+    node_id.hash(&mut hasher);
+    let hash = hasher.finish();
+
+    let mut tie_break_hasher = DetHasher::default();
+    seed.hash(&mut tie_break_hasher);
+    "hrw-tie-break".hash(&mut tie_break_hasher);
+    node_id.hash(&mut tie_break_hasher);
+    let tie_break = tie_break_hasher.finish();
+
+    let unit = (hash as f64 + 1.0) / (u64::MAX as f64 + 1.0);
+    Some(HrwScore {
+        score: f64::from(weight) / -unit.ln(),
+        tie_break,
+    })
 }
 
 #[cfg(test)]
@@ -557,5 +694,123 @@ mod tests {
         // single registered node and lookups succeed.
         assert!(ring.vnode_count() >= 1);
         assert!(ring.node_for_key(&"key").is_some());
+    }
+
+    #[test]
+    fn hrw_is_deterministic_for_fixed_seed() {
+        let nodes = [("node-a", 1_u32), ("node-b", 1), ("node-c", 1)];
+        let first = select_hrw(
+            nodes.iter(),
+            &"alpha",
+            42,
+            |candidate| &candidate.0,
+            |candidate| candidate.1,
+        )
+        .expect("winner");
+        let second = select_hrw(
+            nodes.iter(),
+            &"alpha",
+            42,
+            |candidate| &candidate.0,
+            |candidate| candidate.1,
+        )
+        .expect("winner");
+        assert_eq!(first.0, second.0);
+    }
+
+    #[test]
+    fn hrw_add_node_minimal_remap() {
+        let keys: Vec<u64> = (0..10_000u64).collect();
+        let mut nodes: Vec<(String, u32)> = (0..5).map(|i| (format!("node-{i}"), 1)).collect();
+
+        let before: Vec<String> = keys
+            .iter()
+            .map(|key| {
+                select_hrw(
+                    nodes.iter(),
+                    key,
+                    7,
+                    |candidate| candidate.0.as_str(),
+                    |candidate| candidate.1,
+                )
+                .expect("winner")
+                .0
+                .clone()
+            })
+            .collect();
+
+        nodes.push(("node-new".to_owned(), 1));
+        let after: Vec<String> = keys
+            .iter()
+            .map(|key| {
+                select_hrw(
+                    nodes.iter(),
+                    key,
+                    7,
+                    |candidate| candidate.0.as_str(),
+                    |candidate| candidate.1,
+                )
+                .expect("winner")
+                .0
+                .clone()
+            })
+            .collect();
+
+        let changed = before
+            .iter()
+            .zip(after.iter())
+            .filter(|(left, right)| left != right)
+            .count();
+        let ratio = changed as f64 / keys.len() as f64;
+        assert!(ratio <= 0.30, "remap ratio too high: {ratio}");
+    }
+
+    #[test]
+    fn hrw_top_k_is_unique_and_weighted() {
+        let nodes = [("light", 1_u32), ("heavy", 4_u32), ("medium", 2_u32)];
+        let winners = select_top_k_hrw(
+            nodes.iter(),
+            3,
+            &"orders.created",
+            17,
+            |candidate| &candidate.0,
+            |candidate| candidate.1,
+        );
+        let unique = winners
+            .iter()
+            .map(|candidate| candidate.0)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(unique.len(), winners.len());
+
+        let heavy_wins = (0..4096_u64)
+            .filter(|key| {
+                select_hrw(
+                    nodes.iter(),
+                    key,
+                    17,
+                    |candidate| &candidate.0,
+                    |candidate| candidate.1,
+                )
+                .expect("winner")
+                .0 == "heavy"
+            })
+            .count();
+        let light_wins = (0..4096_u64)
+            .filter(|key| {
+                select_hrw(
+                    nodes.iter(),
+                    key,
+                    17,
+                    |candidate| &candidate.0,
+                    |candidate| candidate.1,
+                )
+                .expect("winner")
+                .0 == "light"
+            })
+            .count();
+        assert!(
+            heavy_wins > light_wins,
+            "weights must influence HRW selection"
+        );
     }
 }

@@ -748,6 +748,8 @@ mod tests {
             tasks,
             obligations,
             recent_events: Vec::new(),
+            finalizer_history: Vec::new(),
+            loser_drain_history: Vec::new(),
         })
     }
 

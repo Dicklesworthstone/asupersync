@@ -70,8 +70,8 @@ fn log_cancel_protocol_violation(operation: &'static str, validation_result: &Tr
     );
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FinalizerHistoryEvent {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FinalizerHistoryEvent {
     Registered {
         id: u64,
         region: RegionId,
@@ -85,6 +85,79 @@ pub(crate) enum FinalizerHistoryEvent {
         region: RegionId,
         time: Time,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LoserDrainHistoryEvent {
+    RaceStarted {
+        race_id: u64,
+        region: RegionId,
+        participants: Vec<TaskId>,
+        time: Time,
+    },
+    TaskCompleted {
+        task: TaskId,
+        time: Time,
+    },
+    RaceCompleted {
+        race_id: u64,
+        winner: TaskId,
+        time: Time,
+    },
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct LoserDrainHistoryRecorder {
+    next_race_id: AtomicU64,
+    events: parking_lot::Mutex<Vec<LoserDrainHistoryEvent>>,
+}
+
+pub(crate) type LoserDrainHistoryHandle = Arc<LoserDrainHistoryRecorder>;
+
+impl LoserDrainHistoryRecorder {
+    #[must_use]
+    pub(crate) fn new_handle() -> LoserDrainHistoryHandle {
+        Arc::new(Self::default())
+    }
+
+    pub(crate) fn record_race_start(
+        &self,
+        region: RegionId,
+        participants: Vec<TaskId>,
+        time: Time,
+    ) -> u64 {
+        let race_id = self.next_race_id.fetch_add(1, Ordering::Relaxed);
+        self.events
+            .lock()
+            .push(LoserDrainHistoryEvent::RaceStarted {
+                race_id,
+                region,
+                participants,
+                time,
+            });
+        race_id
+    }
+
+    pub(crate) fn record_task_complete(&self, task: TaskId, time: Time) {
+        self.events
+            .lock()
+            .push(LoserDrainHistoryEvent::TaskCompleted { task, time });
+    }
+
+    pub(crate) fn record_race_complete(&self, race_id: u64, winner: TaskId, time: Time) {
+        self.events
+            .lock()
+            .push(LoserDrainHistoryEvent::RaceCompleted {
+                race_id,
+                winner,
+                time,
+            });
+    }
+
+    #[must_use]
+    pub(crate) fn snapshot(&self) -> Vec<LoserDrainHistoryEvent> {
+        self.events.lock().clone()
+    }
 }
 
 /// Errors that can occur when spawning a task.
@@ -441,6 +514,8 @@ pub struct RuntimeState {
     active_async_finalizers: HashMap<RegionId, TaskId>,
     /// Append-only finalizer lifecycle history for post-run oracle hydration.
     finalizer_history: Vec<FinalizerHistoryEvent>,
+    /// Append-only loser-drain evidence for post-run oracle hydration.
+    loser_drain_history: LoserDrainHistoryHandle,
     /// Monotonic id source for finalizer registrations.
     next_finalizer_id: u64,
     /// Per-module epoch cursors feeding the runtime epoch tracker.
@@ -504,6 +579,10 @@ impl std::fmt::Debug for RuntimeState {
                 &self.active_async_finalizers.len(),
             )
             .field("finalizer_history_len", &self.finalizer_history.len())
+            .field(
+                "loser_drain_history_len",
+                &self.loser_drain_history.snapshot().len(),
+            )
             .field("next_finalizer_id", &self.next_finalizer_id)
             .field("region_table_epoch", &self.region_table_epoch)
             .field("task_table_epoch", &self.task_table_epoch)
@@ -568,6 +647,7 @@ impl RuntimeState {
             async_finalizer_tasks: HashMap::new(),
             active_async_finalizers: HashMap::new(),
             finalizer_history: Vec::new(),
+            loser_drain_history: LoserDrainHistoryRecorder::new_handle(),
             next_finalizer_id: 0,
             region_table_epoch: EpochId::GENESIS,
             task_table_epoch: EpochId::GENESIS,
@@ -683,6 +763,7 @@ impl RuntimeState {
             async_finalizer_tasks: HashMap::new(),
             active_async_finalizers: HashMap::new(),
             finalizer_history: Vec::new(),
+            loser_drain_history: LoserDrainHistoryRecorder::new_handle(),
             next_finalizer_id: 0,
             region_table_epoch: EpochId::GENESIS,
             task_table_epoch: EpochId::GENESIS,
@@ -1244,6 +1325,8 @@ impl RuntimeState {
             tasks,
             obligations,
             recent_events,
+            finalizer_history: self.finalizer_history.clone(),
+            loser_drain_history: self.loser_drain_history(),
         }
     }
 
@@ -1428,6 +1511,7 @@ impl RuntimeState {
         .with_blocking_pool_handle(self.blocking_pool_handle())
         .with_logical_clock(logical_clock);
         cx.set_trace_buffer(self.trace_handle());
+        cx.set_loser_drain_history_handle(self.loser_drain_history_handle());
         let cx_weak = std::sync::Arc::downgrade(&cx.inner);
 
         // Link the shared state to the TaskRecord
@@ -3510,6 +3594,16 @@ impl RuntimeState {
         &self.finalizer_history
     }
 
+    #[must_use]
+    pub(crate) fn loser_drain_history(&self) -> Vec<LoserDrainHistoryEvent> {
+        self.loser_drain_history.snapshot()
+    }
+
+    #[must_use]
+    pub(crate) fn loser_drain_history_handle(&self) -> LoserDrainHistoryHandle {
+        Arc::clone(&self.loser_drain_history)
+    }
+
     #[cfg(test)]
     pub(crate) fn record_finalizer_close_for_test(&mut self, region: RegionId) {
         self.record_finalizer_close(region);
@@ -3700,6 +3794,10 @@ pub struct RuntimeSnapshot {
     pub obligations: Vec<ObligationSnapshot>,
     /// Recent trace events (if tracing is enabled).
     pub recent_events: Vec<EventSnapshot>,
+    /// Finalizer lifecycle history for oracle hydration.
+    pub finalizer_history: Vec<FinalizerHistoryEvent>,
+    /// Loser-drain race history for oracle hydration.
+    pub loser_drain_history: Vec<LoserDrainHistoryEvent>,
 }
 
 /// Serializable region snapshot.
@@ -8178,7 +8276,7 @@ mod tests {
             })
             .expect("create task");
         runtime.scheduler.lock().schedule(task_id, 0);
-        runtime.step();
+        runtime.step_for_test();
 
         let cancel_reason = CancelReason::user("validator regression");
         let cancelled = runtime.state.cancel_task(task_id, &cancel_reason);
