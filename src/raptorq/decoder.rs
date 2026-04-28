@@ -5926,6 +5926,68 @@ mod tests {
         }
     }
 
+    #[test]
+    fn metamorphic_repair_only_decode_preserves_prefixes_under_zero_padding() {
+        let k = 8;
+        let symbol_size = 32;
+        let padding = 11;
+        let seed = 0x4D_0001_u64;
+
+        let source = make_source_data(k, symbol_size);
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let l = decoder.params().l;
+
+        let mut received = decoder.constraint_symbols();
+        for esi in (k as u32)..(k as u32 + l as u32) {
+            let (cols, coefs) = decoder.repair_equation(esi).unwrap();
+            let repair_data = encoder.repair_symbol(esi);
+            received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+        }
+
+        let baseline = decoder
+            .decode(&received)
+            .expect("baseline repair-only decode");
+
+        let padded_source: Vec<Vec<u8>> = source
+            .iter()
+            .map(|symbol| {
+                let mut padded = symbol.clone();
+                padded.resize(symbol_size + padding, 0);
+                padded
+            })
+            .collect();
+        let padded_symbol_size = symbol_size + padding;
+        let padded_decoder = InactivationDecoder::new(k, padded_symbol_size, seed);
+        let padded_encoder =
+            SystematicEncoder::new(&padded_source, padded_symbol_size, seed).unwrap();
+
+        let mut padded_received = padded_decoder.constraint_symbols();
+        for esi in (k as u32)..(k as u32 + l as u32) {
+            let (cols, coefs) = padded_decoder.repair_equation(esi).unwrap();
+            let repair_data = padded_encoder.repair_symbol(esi);
+            padded_received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+        }
+
+        let padded = padded_decoder
+            .decode(&padded_received)
+            .expect("padded repair-only decode");
+
+        for (index, (baseline_symbol, padded_symbol)) in
+            baseline.source.iter().zip(padded.source.iter()).enumerate()
+        {
+            assert_eq!(
+                &padded_symbol[..symbol_size],
+                baseline_symbol,
+                "decoded prefix mismatch for source symbol {index}"
+            );
+            assert!(
+                padded_symbol[symbol_size..].iter().all(|&byte| byte == 0),
+                "decoded padded suffix must stay zero for source symbol {index}"
+            );
+        }
+    }
+
     // ── Peeling + Gaussian coverage invariant (br-3narc.2.7) ──
 
     #[test]
