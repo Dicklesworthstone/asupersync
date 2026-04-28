@@ -1230,6 +1230,152 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_owned_try_lock_matches_borrowed_try_lock() {
+        init_test("metamorphic_owned_try_lock_matches_borrowed_try_lock");
+
+        fn run(use_owned: bool) -> (u32, bool, bool, u32, u32, usize, bool) {
+            let holder_cx = test_cx();
+            let waiter_cx = test_cx();
+            let mutex = Arc::new(Mutex::new(5u32));
+
+            let initial_seen = if use_owned {
+                let mut guard =
+                    OwnedMutexGuard::try_lock(Arc::clone(&mutex)).expect("owned try_lock succeeds");
+                let seen = *guard;
+                *guard += 1;
+                drop(guard);
+                seen
+            } else {
+                let mut guard = mutex
+                    .as_ref()
+                    .try_lock()
+                    .expect("borrowed try_lock succeeds");
+                let seen = *guard;
+                *guard += 1;
+                drop(guard);
+                seen
+            };
+
+            let mut fut_hold = mutex.as_ref().lock(&holder_cx);
+            let hold_guard = poll_once(&mut fut_hold)
+                .expect("immediate")
+                .expect("holder lock");
+
+            let mut fut_waiter = mutex.as_ref().lock(&waiter_cx);
+            let waiter_pending = poll_once(&mut fut_waiter).is_none();
+
+            drop(hold_guard);
+
+            let blocked_while_granted = if use_owned {
+                matches!(
+                    OwnedMutexGuard::try_lock(Arc::clone(&mutex)),
+                    Err(TryLockError::Locked)
+                )
+            } else {
+                matches!(mutex.as_ref().try_lock(), Err(TryLockError::Locked))
+            };
+
+            let mut waiter_guard = poll_once(&mut fut_waiter)
+                .expect("waiter completes")
+                .expect("waiter acquires");
+            let waiter_seen = *waiter_guard;
+            *waiter_guard += 10;
+            drop(waiter_guard);
+
+            let final_seen = if use_owned {
+                let guard = OwnedMutexGuard::try_lock(Arc::clone(&mutex))
+                    .expect("owned try_lock succeeds after waiter release");
+                let seen = *guard;
+                drop(guard);
+                seen
+            } else {
+                let guard = mutex
+                    .as_ref()
+                    .try_lock()
+                    .expect("borrowed try_lock succeeds after waiter release");
+                let seen = *guard;
+                drop(guard);
+                seen
+            };
+
+            let waiters_end = mutex.waiters();
+            let unlocked_end = !mutex.is_locked();
+            (
+                initial_seen,
+                waiter_pending,
+                blocked_while_granted,
+                waiter_seen,
+                final_seen,
+                waiters_end,
+                unlocked_end,
+            )
+        }
+
+        let borrowed = run(false);
+        let owned = run(true);
+        crate::assert_with_log!(
+            owned == borrowed,
+            "owned and borrowed try_lock stay state-equivalent across the same trace",
+            borrowed,
+            owned
+        );
+
+        let (
+            initial_seen,
+            waiter_pending,
+            blocked_while_granted,
+            waiter_seen,
+            final_seen,
+            waiters_end,
+            unlocked_end,
+        ) = borrowed;
+        crate::assert_with_log!(
+            initial_seen == 5,
+            "initial try_lock observes the seed value",
+            5u32,
+            initial_seen
+        );
+        crate::assert_with_log!(
+            waiter_pending,
+            "waiter queues behind holder before the transformation",
+            true,
+            waiter_pending
+        );
+        crate::assert_with_log!(
+            blocked_while_granted,
+            "both try_lock variants stay blocked while the granted waiter owns the turn",
+            true,
+            blocked_while_granted
+        );
+        crate::assert_with_log!(
+            waiter_seen == 6,
+            "waiter observes the same prior mutation in both traces",
+            6u32,
+            waiter_seen
+        );
+        crate::assert_with_log!(
+            final_seen == 16,
+            "post-waiter reacquire observes the same final value",
+            16u32,
+            final_seen
+        );
+        crate::assert_with_log!(
+            waiters_end == 0,
+            "no waiters remain after either trace",
+            0usize,
+            waiters_end
+        );
+        crate::assert_with_log!(
+            unlocked_end,
+            "mutex is unlocked after the final guard drops in either trace",
+            true,
+            unlocked_end
+        );
+
+        crate::test_complete!("metamorphic_owned_try_lock_matches_borrowed_try_lock");
+    }
+
+    #[test]
     fn cancel_head_waiter_does_not_skip_granted_predecessor() {
         init_test("cancel_head_waiter_does_not_skip_granted_predecessor");
         let cx1 = test_cx();
