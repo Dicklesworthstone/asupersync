@@ -247,8 +247,11 @@ impl Worker {
     }
 
     #[inline]
-    fn pop_backoff_work(&self) -> Option<TaskId> {
-        self.local.pop().or_else(|| self.global.pop())
+    fn pop_backoff_work(&mut self) -> Option<TaskId> {
+        self.local
+            .pop()
+            .or_else(|| self.global.pop())
+            .or_else(|| stealing::steal_task(&self.stealers, &mut self.rng))
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1451,6 +1454,32 @@ mod tests {
         global.push(global_task);
 
         assert_eq!(worker.pop_backoff_work(), Some(global_task));
+        assert_eq!(worker.pop_backoff_work(), None);
+    }
+
+    #[test]
+    fn test_backoff_probe_can_steal_work() {
+        use crate::runtime::RuntimeState;
+        use crate::runtime::scheduler::local_queue::LocalQueue;
+        use crate::sync::ContendedMutex;
+
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let global = Arc::new(GlobalQueue::new());
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let donor = LocalQueue::new(Arc::clone(&state));
+        let stolen_task = TaskId::new_for_test(333, 0);
+        donor.push(stolen_task);
+
+        let mut worker = Worker::new(
+            0,
+            vec![donor.stealer()],
+            Arc::clone(&global),
+            Arc::clone(&state),
+            Arc::clone(&shutdown),
+        );
+
+        assert_eq!(worker.pop_backoff_work(), Some(stolen_task));
         assert_eq!(worker.pop_backoff_work(), None);
     }
 
