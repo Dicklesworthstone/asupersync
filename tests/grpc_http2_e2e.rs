@@ -22,10 +22,11 @@ use common::init_test_logging;
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::cx::Cx;
 use asupersync::http::h2::{Connection, ConnectionState, Frame, FrameHeader, FrameType, Settings};
-use asupersync::net::tcp::TcpListener;
+use asupersync::net::TcpListener;
 use asupersync::grpc::{
     CallContext, Channel, ChannelConfig, Code, GrpcClient, GrpcCodec, GrpcError, GrpcMessage,
-    Metadata, MetadataValue, MethodDescriptor, Request, Response, Server, ServingStatus, Status
+    HealthService, Metadata, MetadataValue, MethodDescriptor, Request, Response, Server,
+    ServingStatus, Status,
 };
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -63,12 +64,16 @@ async fn start_grpc_http2_server(port: u16) -> Result<(), GrpcError> {
         "host": "localhost"
     }));
 
+    let health = HealthService::new();
+    health.set_server_status(ServingStatus::Serving);
+
     let mut server = Server::builder()
         .max_recv_message_size(1024 * 1024) // 1MB
         .max_send_message_size(1024 * 1024) // 1MB
-        .keepalive_interval_ms(Some(30000))  // 30 seconds
-        .keepalive_timeout_ms(Some(5000))    // 5 seconds
+        .keepalive_interval(30000)  // 30 seconds
+        .keepalive_timeout(5000)    // 5 seconds
         .max_concurrent_streams(100)
+        .add_service(health)
         .build();
 
     let addr = format!("127.0.0.1:{}", port);
@@ -347,11 +352,11 @@ fn http2_grpc_metadata_and_trailers() {
         let mut request = Request::new("metadata_test".to_string());
         request.metadata_mut().insert(
             "x-test-header",
-            MetadataValue::Ascii("test_value".to_string())
+            "test_value"
         );
         request.metadata_mut().insert(
             "x-client-id",
-            MetadataValue::Ascii("grpc_http2_e2e_test".to_string())
+            "grpc_http2_e2e_test"
         );
 
         log_test_event("request_metadata_added", json!({
