@@ -2857,6 +2857,7 @@ impl PgConnection {
 
     /// Handle the authentication handshake.
     async fn authenticate(&mut self, cx: &Cx, options: &PgConnectOptions) -> Result<(), PgError> {
+        let mut auth_challenged = false;
         loop {
             if cx.checkpoint().is_err() {
                 return Err(PgError::Cancelled(cancelled_reason(cx)));
@@ -2873,10 +2874,17 @@ impl PgConnection {
                     match auth_type {
                         0 => {
                             // AuthenticationOk
+                            if options.password.is_some() && !auth_challenged {
+                                return Err(PgError::AuthenticationFailed(
+                                    "server accepted connection without challenging configured password"
+                                        .to_string(),
+                                ));
+                            }
                             return Ok(());
                         }
                         3 => {
                             // AuthenticationCleartextPassword
+                            auth_challenged = true;
                             let password = options.password.as_ref().ok_or_else(|| {
                                 PgError::AuthenticationFailed("password required".to_string())
                             })?;
@@ -2884,6 +2892,7 @@ impl PgConnection {
                         }
                         5 => {
                             // AuthenticationMD5Password
+                            auth_challenged = true;
                             let salt = reader.read_bytes(4)?;
                             let password = options.password.as_ref().ok_or_else(|| {
                                 PgError::AuthenticationFailed("password required".to_string())
@@ -2893,6 +2902,7 @@ impl PgConnection {
                         }
                         10 => {
                             // AuthenticationSASL
+                            auth_challenged = true;
                             let mechanisms = Self::read_sasl_mechanisms(&mut reader)?;
                             // Channel-binding selection (br-asupersync-7n2xsi):
                             //   * If TLS is in use AND the server advertised
@@ -7376,6 +7386,57 @@ mod tests {
                 assert!(msg.contains("'D'"), "got: {msg}");
             }
             other => panic!("expected Protocol error, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn authenticate_rejects_auth_ok_without_challenging_configured_password() {
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        std::io::Write::write_all(&mut peer, &backend_message(b'R', &0i32.to_be_bytes())).unwrap();
+
+        let cx = crate::cx::Cx::for_testing();
+        let options = PgConnectOptions {
+            host: "localhost".to_string(),
+            port: 5432,
+            database: "testdb".to_string(),
+            user: "postgres".to_string(),
+            password: Some(SecretString::new("secret")),
+            application_name: None,
+            connect_timeout: None,
+            ssl_mode: SslMode::Disable,
+        };
+
+        match run(conn.authenticate(&cx, &options)) {
+            Err(PgError::AuthenticationFailed(msg)) => {
+                assert!(
+                    msg.contains("without challenging configured password"),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected AuthenticationFailed, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn authenticate_allows_auth_ok_without_challenge_when_no_password_is_configured() {
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        std::io::Write::write_all(&mut peer, &backend_message(b'R', &0i32.to_be_bytes())).unwrap();
+
+        let cx = crate::cx::Cx::for_testing();
+        let options = PgConnectOptions {
+            host: "localhost".to_string(),
+            port: 5432,
+            database: "testdb".to_string(),
+            user: "postgres".to_string(),
+            password: None,
+            application_name: None,
+            connect_timeout: None,
+            ssl_mode: SslMode::Disable,
+        };
+
+        match run(conn.authenticate(&cx, &options)) {
+            Ok(()) => {}
+            other => panic!("expected auth success, got: {other:?}"),
         }
     }
 
