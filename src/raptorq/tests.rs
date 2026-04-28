@@ -600,7 +600,7 @@ fn send_symbols_directly() {
 
 mod conformance {
     use crate::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
-    use crate::raptorq::gf256::{Gf256, gf256_addmul_slice};
+    use crate::raptorq::gf256::gf256_addmul_slice;
     use crate::raptorq::rfc6330::repair_indices_for_esi;
     use crate::raptorq::systematic::SystematicEncoder;
     use crate::raptorq::test_log_schema::UnitLogEntry;
@@ -2759,7 +2759,8 @@ mod failure_modes {
 // =========================================================================
 
 mod encoder_invariants {
-    use crate::raptorq::gf256::gf256_addmul_slice;
+    use crate::raptorq::decoder::InactivationDecoder;
+    use crate::raptorq::gf256::{Gf256, gf256_addmul_slice};
     use crate::raptorq::systematic::SystematicEncoder;
     use crate::raptorq::test_log_schema::UnitLogEntry;
 
@@ -2984,8 +2985,10 @@ mod encoder_invariants {
         let expected_columns = vec![10usize, 6, 22, 19];
         let expected_coefficients = vec![Gf256::ONE; expected_columns.len()];
 
-        let (encoder_columns, encoder_coefficients) =
-            encoder.params().rfc_repair_equation(esi).unwrap_or_else(|err| {
+        let (encoder_columns, encoder_coefficients) = encoder
+            .params()
+            .rfc_repair_equation(esi)
+            .unwrap_or_else(|err| {
                 panic!("{context} encoder RFC repair equation should succeed; got {err:?}")
             });
         let (decoder_columns, decoder_coefficients) =

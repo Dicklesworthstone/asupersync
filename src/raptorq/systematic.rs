@@ -28,7 +28,7 @@
 #![allow(clippy::many_single_char_names)]
 
 use crate::raptorq::gf256::{Gf256, gf256_add_slice, gf256_addmul_slice};
-use crate::raptorq::rfc6330::repair_indices_for_esi;
+use crate::raptorq::rfc6330::{next_prime_ge, repair_indices_for_esi, try_tuple};
 #[cfg(test)]
 use crate::util::DetRng;
 
@@ -1142,18 +1142,62 @@ impl SystematicEncoder {
     fn repair_symbol_into_with_degree(&self, esi: u32, buf: &mut [u8]) -> usize {
         let symbol_size = self.params.symbol_size;
         buf[..symbol_size].fill(0);
+        let padding_delta = u32::try_from(self.params.k_prime - self.params.k)
+            .expect("RFC systematic padding delta must fit in u32");
+        let Some(repair_isi) = esi.checked_add(padding_delta) else {
+            debug_assert!(
+                false,
+                "repair ESI overflowed while mapping to RFC 6330 repair ISI"
+            );
+            return 0;
+        };
 
-        let columns = self.params.rfc_repair_indices(esi).unwrap();
-        debug_assert!(
-            columns.iter().all(|&idx| idx < self.params.l),
-            "RFC repair equation index out of range"
-        );
+        let pi_modulus = next_prime_ge(self.params.p);
+        let Some(lt_tuple) = try_tuple(
+            self.params.j,
+            self.params.w,
+            self.params.p,
+            pi_modulus,
+            repair_isi,
+        ) else {
+            debug_assert!(false, "RFC repair tuple must be valid for encoder params");
+            return 0;
+        };
 
-        for &column in &columns {
-            gf256_add_slice(&mut buf[..symbol_size], &self.intermediate[column]);
+        let mut degree = 0usize;
+
+        let mut lt_index = lt_tuple.b % self.params.w;
+        gf256_add_slice(&mut buf[..symbol_size], &self.intermediate[lt_index]);
+        degree += 1;
+        for _ in 1..lt_tuple.d {
+            lt_index = (lt_index + lt_tuple.a) % self.params.w;
+            gf256_add_slice(&mut buf[..symbol_size], &self.intermediate[lt_index]);
+            degree += 1;
         }
 
-        columns.len()
+        let mut pi_index = lt_tuple.b1 % pi_modulus;
+        while pi_index >= self.params.p {
+            pi_index = (pi_index + lt_tuple.a1) % pi_modulus;
+        }
+        gf256_add_slice(
+            &mut buf[..symbol_size],
+            &self.intermediate[self.params.w + pi_index],
+        );
+        degree += 1;
+        for _ in 1..lt_tuple.d1 {
+            pi_index = (pi_index + lt_tuple.a1) % pi_modulus;
+            while pi_index >= self.params.p {
+                pi_index = (pi_index + lt_tuple.a1) % pi_modulus;
+            }
+            gf256_add_slice(
+                &mut buf[..symbol_size],
+                &self.intermediate[self.params.w + pi_index],
+            );
+            degree += 1;
+        }
+
+        debug_assert!(degree == lt_tuple.d + lt_tuple.d1);
+        degree
     }
 
     /// Generate a repair symbol and return both data and degree.
