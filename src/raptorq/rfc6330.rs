@@ -1915,4 +1915,174 @@ mod tests {
             test_vector.expected_k
         );
     }
+
+    /// RFC 6330 Section 5 Systematic Encoder Parameter Validation Conformance Test
+    ///
+    /// This test validates systematic encoder parameter derivation and encoding
+    /// behavior against RFC 6330 §5 specification requirements for source block
+    /// parameters and systematic encoding constraints.
+    ///
+    /// **Specification Reference:**
+    /// RFC 6330, Section 5: "Object Transmission Information" - systematic encoder
+    /// parameter derivation, source block structure, and encoding symbol generation.
+    ///
+    /// **Test ID:** RFC6330-5.1-1
+    /// **Requirement Level:** MUST
+    /// **Description:** Systematic encoder parameter derivation must conform to
+    /// RFC 6330 §5.3 systematic index table and §5.6 parameter relationships.
+    #[test]
+    fn rfc6330_section_5_systematic_encoder_parameter_conformance() {
+        use crate::raptorq::systematic::{SystematicParams, derive_systematic_params};
+        use crate::encoding::{EncodingPipeline, EncodedSymbol};
+        use crate::config::EncodingConfig;
+        use crate::types::{ObjectId, resource::{PoolConfig, SymbolPool}};
+
+        /// RFC 6330 Section 5 Parameter Conformance Test Case
+        /// Source: RFC 6330 Section 5.3 systematic index table requirements
+        struct Rfc6330Section5Vector {
+            /// Test case identifier for traceability
+            test_id: &'static str,
+            /// Requirement level (MUST/SHOULD/MAY)
+            requirement_level: &'static str,
+            /// Input source block size (K)
+            k: usize,
+            /// Symbol size in bytes
+            symbol_size: u16,
+            /// Test payload data
+            source_data: Vec<u8>,
+            /// Expected systematic parameters per RFC 6330 Table 2
+            expected_k_prime: usize,
+            expected_j: usize,
+            expected_s: usize,
+            expected_h: usize,
+        }
+
+        // Test vector covering mid-range K value with known RFC 6330 parameters
+        let test_vector = Rfc6330Section5Vector {
+            test_id: "RFC6330-5.1-1",
+            requirement_level: "MUST",
+            k: 10,  // K=10 maps to specific RFC 6330 Table 2 row
+            symbol_size: 8,
+            source_data: (0..80).collect(), // 10 symbols * 8 bytes = 80 bytes
+            // Expected values from RFC 6330 Table 2 for K=10
+            expected_k_prime: 10,
+            expected_j: 254,
+            expected_s: 7,
+            expected_h: 10,
+        };
+
+        // RFC 6330 Section 5.3 Conformance Check 1: Parameter Derivation
+        let params = derive_systematic_params(test_vector.k, test_vector.symbol_size as usize)
+            .expect("RFC6330-5.1-1: Parameter derivation must succeed for supported K");
+
+        assert_eq!(
+            params.k, test_vector.k,
+            "RFC6330-5.1-1: Source block size K must match input"
+        );
+
+        assert_eq!(
+            params.k_prime, test_vector.expected_k_prime,
+            "RFC6330-5.1-1: K' derivation must match RFC 6330 Table 2. \
+             Expected K'={}, actual K'={}",
+            test_vector.expected_k_prime, params.k_prime
+        );
+
+        assert_eq!(
+            params.j, test_vector.expected_j,
+            "RFC6330-5.1-1: J(K') derivation must match RFC 6330 Table 2. \
+             Expected J={}, actual J={}",
+            test_vector.expected_j, params.j
+        );
+
+        assert_eq!(
+            params.s, test_vector.expected_s,
+            "RFC6330-5.1-1: S parameter must match RFC 6330 Table 2. \
+             Expected S={}, actual S={}",
+            test_vector.expected_s, params.s
+        );
+
+        assert_eq!(
+            params.h, test_vector.expected_h,
+            "RFC6330-5.1-1: H parameter must match RFC 6330 Table 2. \
+             Expected H={}, actual H={}",
+            test_vector.expected_h, params.h
+        );
+
+        // RFC 6330 Section 5.3 Conformance Check 2: Parameter Relationships
+        let expected_l = params.k_prime + params.s + params.h;
+        assert_eq!(
+            params.l, expected_l,
+            "RFC6330-5.1-1: L = K' + S + H relationship must hold. \
+             L={}, K'={}, S={}, H={}",
+            params.l, params.k_prime, params.s, params.h
+        );
+
+        assert!(
+            params.w <= params.l,
+            "RFC6330-5.1-1: W ≤ L constraint must hold. W={}, L={}",
+            params.w, params.l
+        );
+
+        let expected_p = params.l - params.w;
+        assert_eq!(
+            params.p, expected_p,
+            "RFC6330-5.1-1: P = L - W relationship must hold. \
+             P={}, L={}, W={}",
+            params.p, params.l, params.w
+        );
+
+        // RFC 6330 Section 5 Conformance Check 3: Encoding Behavior Validation
+        let config = EncodingConfig {
+            repair_overhead: 1.5,
+            max_block_size: 64,
+            symbol_size: test_vector.symbol_size,
+            encoding_parallelism: 1,
+            decoding_parallelism: 1,
+        };
+
+        let mut pipeline = EncodingPipeline::new(config, SymbolPool::new(PoolConfig::default()));
+        let object_id = ObjectId::new_for_test(0x5555);  // Deterministic object ID
+
+        // Encode using derived parameters
+        let symbols: Vec<EncodedSymbol> = pipeline
+            .encode(object_id, &test_vector.source_data)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("RFC6330-5.1-1: Encoding with valid §5 parameters must succeed");
+
+        // Validate systematic property with RFC 6330 §5 parameter constraints
+        assert!(
+            symbols.len() >= test_vector.k,
+            "RFC6330-5.1-1: Must produce at least K={} symbols with §5 parameters",
+            test_vector.k
+        );
+
+        // Verify source symbols preserve systematic property under §5 constraints
+        for (i, symbol) in symbols.iter().take(test_vector.k).enumerate() {
+            let esi = symbol.id().esi();
+            assert!(
+                esi < test_vector.k as u32,
+                "RFC6330-5.1-1: Source symbol ESI must be < K under §5 constraints. \
+                 Symbol {} has ESI {} ≥ K={}",
+                i, esi, test_vector.k
+            );
+
+            // Verify systematic data preservation
+            let expected_start = i * test_vector.symbol_size as usize;
+            let expected_end = expected_start + test_vector.symbol_size as usize;
+            let expected_data = &test_vector.source_data[expected_start..expected_end];
+
+            assert_eq!(
+                symbol.symbol().data(),
+                expected_data,
+                "RFC6330-5.1-1: Systematic symbol {} data must match source under §5 encoding",
+                i
+            );
+        }
+
+        println!(
+            "RFC 6330 §5 CONFORMANCE: ✅ PASS - Systematic encoder parameters conform to \
+             §5.3 table (K={}, K'={}, J={}, S={}, H={}, L={}) and preserve systematic property",
+            params.k, params.k_prime, params.j, params.s, params.h, params.l
+        );
+    }
 }
