@@ -1637,6 +1637,89 @@ mod tests {
         }
 
         #[test]
+        fn metamorphic_race_all_arbitrary_permutation_preserves_projection(
+            branch_count in 1usize..12,
+            raw_winner_index in 0usize..24,
+            permutation_seed in any::<u64>(),
+            winner_case in race_winner_case_strategy(),
+        ) {
+            let winner_index = raw_winner_index % branch_count;
+
+            let mut base_outcomes =
+                vec![Outcome::Cancelled(CancelReason::race_loser()); branch_count];
+            base_outcomes[winner_index] = winner_case.clone().into_outcome();
+
+            let base_result = race_all_outcomes(winner_index, base_outcomes.clone());
+            prop_assert_eq!(base_result.winner_index, winner_index);
+            prop_assert_eq!(
+                race_outcome_signature(&base_result.winner_outcome),
+                race_outcome_signature(&winner_case.clone().into_outcome()),
+            );
+
+            let mut permutation = (0..branch_count).collect::<Vec<_>>();
+            let mut state = permutation_seed;
+            for i in (1..branch_count).rev() {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                let j = (state as usize) % (i + 1);
+                permutation.swap(i, j);
+            }
+
+            let permuted_outcomes = permutation
+                .iter()
+                .map(|&old_index| base_outcomes[old_index].clone())
+                .collect::<Vec<_>>();
+            let permuted_winner_index = permutation
+                .iter()
+                .position(|&old_index| old_index == winner_index)
+                .expect("winner must remain present after permutation");
+
+            let permuted_result =
+                race_all_outcomes(permuted_winner_index, permuted_outcomes.clone());
+            prop_assert_eq!(permuted_result.winner_index, permuted_winner_index);
+            prop_assert_eq!(
+                race_outcome_signature(&base_result.winner_outcome),
+                race_outcome_signature(&permuted_result.winner_outcome),
+                "arbitrary branch permutation must preserve the winner outcome class"
+            );
+
+            let mut base_loser_projection = base_result
+                .loser_outcomes
+                .iter()
+                .map(|(index, outcome)| (*index, race_outcome_signature(outcome)))
+                .collect::<Vec<_>>();
+            let mut permuted_loser_projection = permuted_result
+                .loser_outcomes
+                .iter()
+                .map(|(index, outcome)| (permutation[*index], race_outcome_signature(outcome)))
+                .collect::<Vec<_>>();
+            base_loser_projection.sort_unstable_by_key(|(index, _)| *index);
+            permuted_loser_projection.sort_unstable_by_key(|(index, _)| *index);
+            prop_assert_eq!(
+                base_loser_projection,
+                permuted_loser_projection,
+                "inverse-permuting loser indices must recover the original loser projection"
+            );
+
+            let base_final = make_race_all_result(winner_index, base_outcomes);
+            let permuted_final = make_race_all_result(permuted_winner_index, permuted_outcomes);
+            match (&base_final, &permuted_final) {
+                (Ok(base_value), Ok(permuted_value)) => {
+                    prop_assert_eq!(base_value, permuted_value);
+                }
+                (Err(base_error), Err(permuted_error)) => {
+                    let base_sig = race_all_error_signature(base_error);
+                    let permuted_sig = race_all_error_signature(permuted_error);
+                    prop_assert_eq!(base_sig.0, permuted_sig.0);
+                    prop_assert_eq!(base_sig.2, permuted_sig.2);
+                    prop_assert_eq!(permuted_sig.1, permuted_winner_index);
+                }
+                _ => prop_assert!(false, "arbitrary permutation changed race_all terminal class"),
+            }
+        }
+
+        #[test]
         fn metamorphic_drained_loser_substitution_preserves_race_all_result(
             branch_count in 1usize..12,
             raw_winner_index in 0usize..24,
