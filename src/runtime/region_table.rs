@@ -221,6 +221,15 @@ impl RegionTable {
         budget: Budget,
         now: Time,
     ) -> Result<RegionId, RegionCreateError> {
+        // Invariant: on `Err` return, the arena length is unchanged from
+        // entry; on `Ok`, the arena length is exactly `entry_len + 1`. The
+        // rollback path is the only thing keeping that invariant in the
+        // non-attached / parent-rejected case, so any future refactor that
+        // forgets to call `regions.remove(idx)` on failure must trip a
+        // debug assertion here rather than silently leak an orphan region
+        // record into the arena.
+        let entry_len = self.regions.len();
+
         let parent_budget = self
             .regions
             .get(parent.arena_index())
@@ -258,9 +267,19 @@ impl RegionTable {
 
         if let Err(err) = add_result {
             self.regions.remove(idx);
+            debug_assert_eq!(
+                self.regions.len(),
+                entry_len,
+                "create_child rollback must restore arena length on failure",
+            );
             return Err(err);
         }
 
+        debug_assert_eq!(
+            self.regions.len(),
+            entry_len + 1,
+            "create_child success path must grow arena by exactly one",
+        );
         Ok(id)
     }
 
