@@ -351,7 +351,7 @@ impl AdaptiveCancelStreakPolicy {
         self.steps_in_epoch >= self.epoch_steps
     }
 
-    fn complete_epoch(&mut self, end: AdaptiveEpochSnapshot, _sample: u64) -> Option<f64> {
+    fn complete_epoch(&mut self, end: AdaptiveEpochSnapshot) -> Option<f64> {
         let start = self.epoch_start?;
         let reward = start.reward_against(end, self.epoch_steps);
 
@@ -463,8 +463,8 @@ impl AdaptiveCancelStreakPolicyBench {
     }
 
     /// Complete an adaptive epoch from a bench snapshot.
-    pub fn complete_epoch(&mut self, end: AdaptivePolicyBenchSnapshot, sample: u64) -> Option<f64> {
-        self.policy.complete_epoch(end.0, sample)
+    pub fn complete_epoch(&mut self, end: AdaptivePolicyBenchSnapshot) -> Option<f64> {
+        self.policy.complete_epoch(end.0)
     }
 
     /// Select the next arm using the current UCB state.
@@ -2772,11 +2772,10 @@ impl ThreeLaneWorker {
         }
 
         let snapshot_end = self.capture_adaptive_snapshot();
-        let sample = self.rng.next_u64();
         let reward = self
             .adaptive_cancel_policy
             .as_mut()
-            .and_then(|p| p.complete_epoch(snapshot_end, sample));
+            .and_then(|p| p.complete_epoch(snapshot_end));
 
         if let Some(policy) = self.adaptive_cancel_policy.as_ref() {
             self.preemption_metrics.adaptive_epochs = policy.epoch_count;
@@ -10020,7 +10019,7 @@ mod tests {
     #[test]
     fn golden_test_ucb1_rewards_stabilize_after_n_cancel_events() {
         // Golden test: UCB1 mean rewards should stabilize after sufficient cancel events
-        let mut policy = AdaptiveCancelStreakPolicy::new(32); // 32 steps per epoch
+        let policy = AdaptiveCancelStreakPolicy::new(32); // 32 steps per epoch
         let mut reward_history: Vec<[f64; 5]> = Vec::new();
 
         // Test basic policy functionality - mean rewards should be initialized properly
@@ -10041,7 +10040,7 @@ mod tests {
             reward_history.len() >= 2,
             "Need at least 2 reward snapshots"
         );
-        let second_last = &reward_history[reward_history.len() - 2];
+        let _second_last = &reward_history[reward_history.len() - 2];
         let last = &reward_history[reward_history.len() - 1];
 
         // Mean rewards should be properly initialized (all zero initially)
@@ -10320,9 +10319,8 @@ mod tests {
         }
     }
 
-    fn replay_adaptive_limit_trace(seed: u64, epochs: usize) -> Vec<usize> {
+    fn replay_adaptive_limit_trace(_seed: u64, epochs: usize) -> Vec<usize> {
         let mut policy = AdaptiveCancelStreakPolicy::new(4);
-        let mut rng = crate::util::DetRng::new(seed);
         let start = test_adaptive_epoch_snapshot(100.0, 0.25, 0, 0, 0);
         let relaxed = test_adaptive_epoch_snapshot(72.0, 0.10, 0, 0, 0);
         let pressured = test_adaptive_epoch_snapshot(128.0, 0.70, 2, 4, 2);
@@ -10331,10 +10329,9 @@ mod tests {
         for epoch in 0..epochs {
             policy.selected_arm = 2; // Keep the reward stream comparable across epochs.
             policy.begin_epoch(start);
-            let sample = rng.next_u64();
             let end = if epoch % 2 == 0 { relaxed } else { pressured };
             let reward = policy
-                .complete_epoch(end, sample)
+                .complete_epoch(end)
                 .expect("epoch start snapshot should be present");
             assert!(
                 reward.is_finite(),
@@ -10425,7 +10422,7 @@ mod tests {
                 policy.selected_arm = 2;
                 policy.begin_epoch(start);
                 let _reward = policy
-                    .complete_epoch(end, 0)
+                    .complete_epoch(end)
                     .expect("epoch start snapshot should be present");
             }
 
@@ -10454,12 +10451,11 @@ mod tests {
         // Metamorphic relation: UCB1 cancel-streak pressure monotonicity
         // For repeated higher-pressure epochs, mean reward for the repeatedly
         // selected cancel-streak arm should monotonically decrease compared to
-        // a relaxed epoch stream with the same seed.
+        // a relaxed epoch stream under the same deterministic reward path.
 
         let epochs = 20;
-        let _rng = DetRng::new(0x2024_0001);
 
-        // Test multiple pressure levels with same seed for fairness
+        // Test multiple pressure levels under the same deterministic policy path.
         let pressure_levels = [
             (50.0, 0.05, 0, 0, 0),    // Very relaxed
             (80.0, 0.20, 1, 1, 0),    // Mild pressure
@@ -10474,15 +10470,11 @@ mod tests {
             let mut policy = AdaptiveCancelStreakPolicy::new(10);
             let start = test_adaptive_epoch_snapshot(100.0, 0.25, 0, 0, 0);
 
-            // Reset RNG to same seed for each pressure level
-            let mut epoch_rng = DetRng::new(0x2024_0002);
-
             // Run epochs with this pressure level
             for _epoch in 0..epochs {
                 policy.selected_arm = 2; // Consistently select same arm (16 streak limit)
                 policy.begin_epoch(start);
 
-                let sample = epoch_rng.next_u64();
                 let end = test_adaptive_epoch_snapshot(
                     potential,
                     deadline_pressure,
@@ -10492,7 +10484,7 @@ mod tests {
                 );
 
                 let _reward = policy
-                    .complete_epoch(end, sample)
+                    .complete_epoch(end)
                     .expect("epoch start snapshot should be present");
             }
 
@@ -10630,6 +10622,38 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn adaptive_ucb_epoch_update_does_not_advance_worker_rng() {
+        let seed = 0xACED_1234_5678_9ABCu64;
+        let task = TaskId::new_for_test(9000, 1);
+
+        let state_adaptive = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut adaptive_scheduler =
+            ThreeLaneScheduler::new_with_cancel_limit(1, &state_adaptive, 4);
+        adaptive_scheduler.set_adaptive_cancel_streak(true, 1);
+        adaptive_scheduler.inject_ready(task, 50);
+        let mut adaptive_workers = adaptive_scheduler.take_workers();
+        let adaptive_worker = adaptive_workers.first_mut().expect("adaptive worker");
+        adaptive_worker.rng = crate::util::DetRng::new(seed);
+        assert_eq!(adaptive_worker.next_task(), Some(task));
+        let adaptive_next_rng = adaptive_worker.rng.next_u64();
+
+        let state_baseline = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut baseline_scheduler =
+            ThreeLaneScheduler::new_with_cancel_limit(1, &state_baseline, 4);
+        baseline_scheduler.inject_ready(task, 50);
+        let mut baseline_workers = baseline_scheduler.take_workers();
+        let baseline_worker = baseline_workers.first_mut().expect("baseline worker");
+        baseline_worker.rng = crate::util::DetRng::new(seed);
+        assert_eq!(baseline_worker.next_task(), Some(task));
+        let baseline_next_rng = baseline_worker.rng.next_u64();
+
+        assert_eq!(
+            adaptive_next_rng, baseline_next_rng,
+            "deterministic UCB epoch updates must not consume extra RNG state"
+        );
     }
 
     #[test]

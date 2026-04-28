@@ -3542,7 +3542,7 @@ pub mod backpressure_metamorphic {
                             let cx = crate::cx::Cx::for_testing();
                             let _test_res: Result<(), proptest::test_runner::TestCaseError> =
                                 async {
-                                    let (sender, mut receiver) = channel::<u32>(config.capacity);
+                                    let (sender, receiver) = channel::<u32>(config.capacity);
 
                                     // Fill channel to capacity to create backpressure
                                     let mut sent_before_backpressure = Vec::new();
@@ -3597,7 +3597,7 @@ pub mod backpressure_metamorphic {
                                     crate::runtime::yield_now().await;
 
                                     // Verify backpressure state
-                                    let (queued, reserved, available, waiting) =
+                                    let (queued, _reserved, available, _waiting) =
                                         observe_channel_state(&sender);
                                     assert_eq!(queued, config.capacity, "Channel should be full");
                                     assert_eq!(available, 0, "No capacity should be available");
@@ -3618,7 +3618,7 @@ pub mod backpressure_metamorphic {
                                     );
 
                                     // Create new receiver and verify messages sent before drop are preserved
-                                    let (new_sender, mut new_receiver) =
+                                    let (_new_sender, _new_receiver) =
                                         channel::<u32>(config.capacity);
 
                                     // The original channel is disconnected - we can't drain from it

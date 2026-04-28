@@ -24,7 +24,7 @@
 
 use asupersync::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::proof::{
-    DecodeConfig, DecodeProof, FailureReason, ProofOutcome, PROOF_SCHEMA_VERSION,
+    DecodeConfig, DecodeProof, FailureReason, PROOF_SCHEMA_VERSION, ProofOutcome,
 };
 use asupersync::raptorq::systematic::SystematicEncoder;
 use asupersync::types::ObjectId;
@@ -36,9 +36,7 @@ fn make_source_block(k: usize, symbol_size: usize, seed_offset: u8) -> Vec<Vec<u
     (0..k)
         .map(|i| {
             (0..symbol_size)
-                .map(|j| {
-                    ((i * 73 + j * 41 + usize::from(seed_offset) * 17 + 0x5A) % 256) as u8
-                })
+                .map(|j| ((i * 73 + j * 41 + usize::from(seed_offset) * 17 + 0x5A) % 256) as u8)
                 .collect()
         })
         .collect()
@@ -169,7 +167,7 @@ fn scrub_proof_for_snapshot(proof: &DecodeProof, label: &str) -> serde_json::Val
     json!({
         "test_vector": label,
         "version": proof.version,
-        "content_hash": format!("0x{:016x}", proof.content_hash()),
+        "content_hash": format!("0x{}", proof.content_hash().to_hex()),
         "config": {
             "object_id": "[deterministic]",
             "sbn": proof.config.sbn,
@@ -237,7 +235,10 @@ fn scrub_failure_reason_for_snapshot(reason: &FailureReason) -> serde_json::Valu
             "received": received,
             "required": required
         }),
-        FailureReason::SingularMatrix { row, attempted_cols } => json!({
+        FailureReason::SingularMatrix {
+            row,
+            attempted_cols,
+        } => json!({
             "type": "SingularMatrix",
             "row": row,
             "attempted_cols": attempted_cols
@@ -247,13 +248,21 @@ fn scrub_failure_reason_for_snapshot(reason: &FailureReason) -> serde_json::Valu
             "expected": expected,
             "actual": actual
         }),
-        FailureReason::SymbolEquationArityMismatch { esi, columns, coefficients } => json!({
+        FailureReason::SymbolEquationArityMismatch {
+            esi,
+            columns,
+            coefficients,
+        } => json!({
             "type": "SymbolEquationArityMismatch",
             "esi": esi,
             "columns": columns,
             "coefficients": coefficients
         }),
-        FailureReason::ColumnIndexOutOfRange { esi, column, max_valid } => json!({
+        FailureReason::ColumnIndexOutOfRange {
+            esi,
+            column,
+            max_valid,
+        } => json!({
             "type": "ColumnIndexOutOfRange",
             "esi": esi,
             "column": column,
@@ -264,18 +273,26 @@ fn scrub_failure_reason_for_snapshot(reason: &FailureReason) -> serde_json::Valu
             "esi": esi,
             "max_valid": max_valid
         }),
-        FailureReason::InvalidSourceSymbolEquation { esi, expected_column } => json!({
+        FailureReason::InvalidSourceSymbolEquation {
+            esi,
+            expected_column,
+        } => json!({
             "type": "InvalidSourceSymbolEquation",
             "esi": esi,
             "expected_column": expected_column
         }),
-        FailureReason::CorruptDecodedOutput { esi, byte_index, expected, actual } => json!({
+        FailureReason::CorruptDecodedOutput {
+            esi,
+            byte_index,
+            expected,
+            actual,
+        } => json!({
             "type": "CorruptDecodedOutput",
             "esi": esi,
             "byte_index": byte_index,
             "expected": expected,
             "actual": actual
-        })
+        }),
     }
 }
 

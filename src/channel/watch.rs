@@ -2935,8 +2935,8 @@ mod tests {
             .state
             .create_root_region(crate::types::Budget::INFINITE);
 
-        let (tx1, rx1) = channel(0u32);
-        let (tx2, mut rx2) = channel(String::from("initial"));
+        let (_tx1, rx1) = channel(0u32);
+        let (tx2, rx2) = channel(String::from("initial"));
 
         // Create a scenario where send_modify closure tries to read from another watch channel.
         // This would deadlock in the old implementation but should work in the new one.

@@ -145,15 +145,20 @@ impl ConnectionRegistry {
         idle_timeout: Option<Duration>,
     ) -> Result<(), String> {
         let mut connections = self.connections.lock().unwrap();
-        let connection = connections.get_mut(connection_id)
+        let connection = connections
+            .get_mut(connection_id)
             .ok_or_else(|| format!("connection not registered: {}", connection_id))?;
 
         // Clean up idle streams first
         if let Some(timeout) = idle_timeout {
             let removed_streams = connection.cleanup_idle_streams(timeout);
             if !removed_streams.is_empty() {
-                eprintln!("Cleaned up {} idle streams on connection {}: {:?}",
-                          removed_streams.len(), connection_id, removed_streams);
+                eprintln!(
+                    "Cleaned up {} idle streams on connection {}: {:?}",
+                    removed_streams.len(),
+                    connection_id,
+                    removed_streams
+                );
             }
         }
 
@@ -181,7 +186,8 @@ impl ConnectionRegistry {
     pub fn get_stats(&self) -> (usize, usize) {
         let connections = self.connections.lock().unwrap();
         let connection_count = connections.len();
-        let total_streams: usize = connections.values()
+        let total_streams: usize = connections
+            .values()
             .map(|conn| conn.active_stream_count())
             .sum();
         (connection_count, total_streams)
@@ -777,7 +783,8 @@ impl Server {
             self.config.stream_idle_timeout,
         ) {
             return Err(Status::resource_exhausted(format!(
-                "stream limit enforcement failed: {}", limit_error
+                "stream limit enforcement failed: {}",
+                limit_error
             )));
         }
 
@@ -800,7 +807,8 @@ impl Server {
     /// (data, headers, or control frames) on a stream to reset its idle timer.
     /// (br-asupersync-8vn9iu.)
     pub fn update_stream_activity(&self, connection_id: &str, stream_id: u32) {
-        self.connection_registry.update_stream_activity(connection_id, stream_id);
+        self.connection_registry
+            .update_stream_activity(connection_id, stream_id);
     }
 
     /// Get connection and stream statistics for monitoring.
@@ -2796,7 +2804,6 @@ mod tests {
     // br-asupersync-8vn9iu: Regression tests for connection hoarding protection
     #[test]
     fn test_connection_registry_enforces_stream_limits() {
-        use futures_lite::future::block_on;
         init_test("test_connection_registry_enforces_stream_limits");
 
         let registry = ConnectionRegistry::new();
@@ -2808,13 +2815,24 @@ mod tests {
         // Should be able to add streams up to limit (default 100)
         for stream_id in 1..=5 {
             let result = registry.enforce_stream_limits(&connection_id, stream_id, 5, None);
-            assert!(result.is_ok(), "Should accept stream {} within limit", stream_id);
+            assert!(
+                result.is_ok(),
+                "Should accept stream {} within limit",
+                stream_id
+            );
         }
 
         // Should reject stream that exceeds limit
         let result = registry.enforce_stream_limits(&connection_id, 6, 5, None);
-        assert!(result.is_err(), "Should reject stream that exceeds max_concurrent_streams");
-        assert!(result.unwrap_err().contains("exceeds max_concurrent_streams"));
+        assert!(
+            result.is_err(),
+            "Should reject stream that exceeds max_concurrent_streams"
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .contains("exceeds max_concurrent_streams")
+        );
 
         // Clean up
         registry.remove_connection(&connection_id);
@@ -2847,7 +2865,10 @@ mod tests {
 
         // Try to add another stream with short idle timeout - should clean up the old one
         let result = registry.enforce_stream_limits(&connection_id, 2, 10, Some(short_timeout));
-        assert!(result.is_ok(), "Should accept new stream after idle cleanup");
+        assert!(
+            result.is_ok(),
+            "Should accept new stream after idle cleanup"
+        );
 
         // Should now have 1 stream (the old one was cleaned up)
         let (connections, streams) = registry.get_stats();
@@ -2864,7 +2885,7 @@ mod tests {
         init_test("test_server_stream_enforcement_integration");
 
         let server = Server::builder()
-            .max_concurrent_streams(2)  // Very low limit for testing
+            .max_concurrent_streams(2) // Very low limit for testing
             .stream_idle_timeout(Some(std::time::Duration::from_secs(1)))
             .build();
 
@@ -2877,7 +2898,7 @@ mod tests {
             connection_id.clone(),
             1,
             request1,
-            |req| async move { Ok(Response::new(req.into_inner())) }
+            |req| async move { Ok(Response::new(req.into_inner())) },
         ));
         assert!(result1.is_ok(), "First stream should succeed");
 
@@ -2887,7 +2908,7 @@ mod tests {
             connection_id.clone(),
             2,
             request2,
-            |req| async move { Ok(Response::new(req.into_inner())) }
+            |req| async move { Ok(Response::new(req.into_inner())) },
         ));
         assert!(result2.is_ok(), "Second stream should succeed");
 
@@ -2897,10 +2918,13 @@ mod tests {
             connection_id.clone(),
             3,
             request3,
-            |req| async move { Ok(Response::new(req.into_inner())) }
+            |req| async move { Ok(Response::new(req.into_inner())) },
         ));
         assert!(result3.is_err(), "Third stream should be rejected");
-        assert_eq!(result3.unwrap_err().code(), crate::grpc::status::Code::ResourceExhausted);
+        assert_eq!(
+            result3.unwrap_err().code(),
+            crate::grpc::status::Code::ResourceExhausted
+        );
 
         server.unregister_connection(&connection_id);
         crate::test_complete!("test_server_stream_enforcement_integration");
@@ -2924,14 +2948,20 @@ mod tests {
 
             // Try to max out streams on each connection
             for stream_id in 1..=3 {
-                let request = Request::with_metadata(Bytes::from_static(b"attack"), Metadata::new());
+                let request =
+                    Request::with_metadata(Bytes::from_static(b"attack"), Metadata::new());
                 let result = block_on(server.dispatch_unary_with_stream_enforcement(
                     connection_id.clone(),
                     stream_id,
                     request,
-                    |req| async move { Ok(Response::new(req.into_inner())) }
+                    |req| async move { Ok(Response::new(req.into_inner())) },
                 ));
-                assert!(result.is_ok(), "Stream {} on connection {} should succeed within limits", stream_id, conn_num);
+                assert!(
+                    result.is_ok(),
+                    "Stream {} on connection {} should succeed within limits",
+                    stream_id,
+                    conn_num
+                );
             }
 
             // Fourth stream should be rejected
@@ -2940,13 +2970,16 @@ mod tests {
                 connection_id.clone(),
                 4,
                 request,
-                |req| async move { Ok(Response::new(req.into_inner())) }
+                |req| async move { Ok(Response::new(req.into_inner())) },
             ));
-            assert!(result.is_err(), "Fourth stream should be rejected due to limit");
+            assert!(
+                result.is_err(),
+                "Fourth stream should be rejected due to limit"
+            );
         }
 
         // Verify connection stats show limits are being enforced
-        let (active_connections, total_streams) = server.get_connection_stats();
+        let (active_connections, _total_streams) = server.get_connection_stats();
         assert_eq!(active_connections, 5, "Should track 5 connections");
         // Note: streams may be 0 here because dispatch_unary_with_stream_enforcement
         // removes them after completion, which is correct behavior
