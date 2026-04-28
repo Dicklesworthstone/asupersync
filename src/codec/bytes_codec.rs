@@ -65,6 +65,11 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use crate::codec::FramedWrite;
+    use crate::io::AsyncWrite;
+    use std::collections::VecDeque;
+    use std::pin::Pin;
+    use std::task::{Context, Poll, Waker};
 
     #[test]
     fn decode_returns_all_bytes() {
@@ -289,5 +294,164 @@ mod tests {
         }
 
         insta::assert_snapshot!("dns279_decode_buffer_consumed_golden", report);
+    }
+
+    fn noop_waker() -> Waker {
+        std::task::Waker::noop().clone()
+    }
+
+    #[derive(Clone, Copy)]
+    enum WriteStep {
+        Write(usize),
+        Pending,
+    }
+
+    struct ScriptedWriter {
+        inner: Vec<u8>,
+        steps: VecDeque<WriteStep>,
+    }
+
+    impl ScriptedWriter {
+        fn new(steps: impl IntoIterator<Item = WriteStep>) -> Self {
+            Self {
+                inner: Vec::new(),
+                steps: steps.into_iter().collect(),
+            }
+        }
+    }
+
+    impl AsyncWrite for ScriptedWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let this = self.get_mut();
+            match this
+                .steps
+                .pop_front()
+                .unwrap_or(WriteStep::Write(buf.len()))
+            {
+                WriteStep::Pending => Poll::Pending,
+                WriteStep::Write(limit) => {
+                    let n = limit.min(buf.len());
+                    this.inner.extend_from_slice(&buf[..n]);
+                    Poll::Ready(Ok(n))
+                }
+            }
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    struct TokioUtilBytesCodecWriteRef<W> {
+        inner: W,
+        encoder: tokio_util::codec::BytesCodec,
+        buffer: tokio_util::bytes::BytesMut,
+    }
+
+    impl<W> TokioUtilBytesCodecWriteRef<W> {
+        fn new(inner: W) -> Self {
+            Self {
+                inner,
+                encoder: tokio_util::codec::BytesCodec::new(),
+                buffer: tokio_util::bytes::BytesMut::new(),
+            }
+        }
+
+        fn get_ref(&self) -> &W {
+            &self.inner
+        }
+
+        fn write_buffer(&self) -> &[u8] {
+            &self.buffer
+        }
+    }
+
+    impl<W> TokioUtilBytesCodecWriteRef<W>
+    where
+        W: AsyncWrite + Unpin,
+    {
+        fn send(&mut self, item: tokio_util::bytes::Bytes) -> Result<(), io::Error> {
+            tokio_util::codec::Encoder::encode(&mut self.encoder, item, &mut self.buffer)
+        }
+
+        fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            while !self.buffer.is_empty() {
+                let n = match Pin::new(&mut self.inner).poll_write(cx, &self.buffer) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+                    Poll::Ready(Ok(n)) => n,
+                };
+
+                if n == 0 {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "failed to write frame to transport",
+                    )));
+                }
+
+                let _ = self.buffer.split_to(n);
+            }
+
+            Pin::new(&mut self.inner).poll_flush(cx)
+        }
+    }
+
+    #[test]
+    fn conformance_partial_flush_boundary_matches_tokio_util_bytes_codec() {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let payload = b"abcdef";
+
+        let mut actual = FramedWrite::new(
+            ScriptedWriter::new([WriteStep::Write(3), WriteStep::Pending]),
+            BytesCodec::new(),
+        );
+        let mut reference = TokioUtilBytesCodecWriteRef::new(ScriptedWriter::new([
+            WriteStep::Write(3),
+            WriteStep::Pending,
+        ]));
+
+        actual
+            .send(Bytes::copy_from_slice(payload))
+            .expect("encode actual payload");
+        reference
+            .send(tokio_util::bytes::Bytes::copy_from_slice(payload))
+            .expect("encode reference payload");
+
+        assert!(
+            matches!(actual.poll_flush(&mut cx), Poll::Pending),
+            "our framed writer should stop at the partial-flush boundary"
+        );
+        assert!(
+            matches!(reference.poll_flush(&mut cx), Poll::Pending),
+            "tokio-util reference should stop at the same partial-flush boundary"
+        );
+
+        assert_eq!(actual.get_ref().inner, reference.get_ref().inner);
+        assert_eq!(&actual.get_ref().inner, b"abc");
+        assert_eq!(&actual.write_buffer()[..], reference.write_buffer());
+        assert_eq!(&actual.write_buffer()[..], b"def");
+
+        assert!(
+            matches!(actual.poll_flush(&mut cx), Poll::Ready(Ok(()))),
+            "our framed writer should drain the buffered suffix on the next flush"
+        );
+        assert!(
+            matches!(reference.poll_flush(&mut cx), Poll::Ready(Ok(()))),
+            "tokio-util reference should drain the buffered suffix on the next flush"
+        );
+
+        assert!(actual.write_buffer().is_empty());
+        assert!(reference.write_buffer().is_empty());
+        assert_eq!(actual.get_ref().inner, reference.get_ref().inner);
+        assert_eq!(&actual.get_ref().inner, payload);
     }
 }
