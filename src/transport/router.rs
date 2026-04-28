@@ -1152,26 +1152,38 @@ impl RoutingTable {
 
     /// Looks up a route.
     #[must_use]
-    pub fn lookup(&self, key: &RouteKey) -> Option<RoutingEntry> {
+    pub fn lookup(&self, key: &RouteKey, now: Time) -> Option<RoutingEntry> {
         // Try exact match first
         if let Some(entry) = self.routes.read().get(key) {
-            return Some(entry.clone());
+            if !entry.is_expired(now) {
+                return Some(entry.clone());
+            }
         }
 
         // Try fallback strategies
         if let RouteKey::ObjectAndRegion(oid, rid) = key {
             // Try object-only
             if let Some(entry) = self.routes.read().get(&RouteKey::Object(*oid)) {
-                return Some(entry.clone());
+                if !entry.is_expired(now) {
+                    return Some(entry.clone());
+                }
             }
             // Try region-only
             if let Some(entry) = self.routes.read().get(&RouteKey::Region(*rid)) {
-                return Some(entry.clone());
+                if !entry.is_expired(now) {
+                    return Some(entry.clone());
+                }
             }
         }
 
         // Fall back to default
-        self.default_route.read().clone()
+        self.default_route.read().as_ref().and_then(|entry| {
+            if !entry.is_expired(now) {
+                Some(entry.clone())
+            } else {
+                None
+            }
+        })
     }
 
     /// Looks up a route without falling back to the default route.
@@ -1179,17 +1191,23 @@ impl RoutingTable {
     /// This preserves object/region fallback behavior for compound keys but
     /// never consults `default_route`.
     #[must_use]
-    pub fn lookup_without_default(&self, key: &RouteKey) -> Option<RoutingEntry> {
+    pub fn lookup_without_default(&self, key: &RouteKey, now: Time) -> Option<RoutingEntry> {
         if let Some(entry) = self.routes.read().get(key) {
-            return Some(entry.clone());
+            if !entry.is_expired(now) {
+                return Some(entry.clone());
+            }
         }
 
         if let RouteKey::ObjectAndRegion(oid, rid) = key {
             if let Some(entry) = self.routes.read().get(&RouteKey::Object(*oid)) {
-                return Some(entry.clone());
+                if !entry.is_expired(now) {
+                    return Some(entry.clone());
+                }
             }
             if let Some(entry) = self.routes.read().get(&RouteKey::Region(*rid)) {
-                return Some(entry.clone());
+                if !entry.is_expired(now) {
+                    return Some(entry.clone());
+                }
             }
         }
 
@@ -1370,11 +1388,11 @@ impl SymbolRouter {
     }
 
     /// Routes a symbol to an endpoint.
-    pub fn route(&self, symbol: &Symbol) -> Result<RouteResult, RoutingError> {
+    pub fn route(&self, symbol: &Symbol, now: Time) -> Result<RouteResult, RoutingError> {
         let object_id = symbol.object_id();
         let primary_key = RouteKey::Object(object_id);
 
-        let primary_entry = self.table.lookup_without_default(&primary_key);
+        let primary_entry = self.table.lookup_without_default(&primary_key, now);
 
         if let Some(entry) = primary_entry.as_ref() {
             if let Some(endpoint) = self.select_preferred_endpoint(entry, object_id) {
@@ -1388,7 +1406,7 @@ impl SymbolRouter {
 
         if self.allow_fallback {
             let fallback_key = RouteKey::Default;
-            if let Some(entry) = self.table.lookup(&fallback_key) {
+            if let Some(entry) = self.table.lookup(&fallback_key, now) {
                 if let Some(endpoint) = entry.select_endpoint(Some(object_id)) {
                     return Ok(RouteResult {
                         endpoint,
@@ -1415,18 +1433,19 @@ impl SymbolRouter {
         &self,
         symbol: &Symbol,
         count: usize,
+        now: Time,
     ) -> Result<Vec<RouteResult>, RoutingError> {
         let object_id = symbol.object_id();
 
         let key = RouteKey::Object(object_id);
         let (entry, matched_key, is_fallback) =
-            if let Some(entry) = self.table.lookup_without_default(&key) {
+            if let Some(entry) = self.table.lookup_without_default(&key, now) {
                 (entry, key, false)
             } else if self.allow_fallback {
                 let fallback_key = RouteKey::Default;
                 let fallback =
                     self.table
-                        .lookup(&fallback_key)
+                        .lookup(&fallback_key, now)
                         .ok_or_else(|| RoutingError::NoRoute {
                             object_id,
                             reason: "No route for multicast".into(),
@@ -1770,15 +1789,14 @@ impl SymbolDispatcher {
         cx: &Cx,
         symbol: AuthenticatedSymbol,
     ) -> Result<DispatchResult, DispatchError> {
-        let route = self.router.route(symbol.symbol())?;
-
-        let _guard = route.endpoint.acquire_connection_guard();
-
         // br-asupersync-kfk19o: see dispatch_multicast for rationale.
         let now_fn = || {
             cx.timer_driver()
                 .map_or_else(crate::time::wall_now, |d| d.now())
         };
+        let route = self.router.route(symbol.symbol(), now_fn())?;
+
+        let _guard = route.endpoint.acquire_connection_guard();
 
         match self.send_to_endpoint(cx, route.endpoint.id, symbol).await {
             Ok(()) => {
@@ -1818,17 +1836,6 @@ impl SymbolDispatcher {
             });
         }
 
-        // Use router to resolve endpoints with load balancing strategy
-        let routes = match self.router.route_multicast(symbol.symbol(), count) {
-            Ok(routes) => routes,
-            Err(RoutingError::NoHealthyEndpoints { object_id }) => {
-                return Err(DispatchError::RoutingFailed(
-                    RoutingError::NoHealthyEndpoints { object_id },
-                ));
-            }
-            Err(e) => return Err(DispatchError::RoutingFailed(e)),
-        };
-
         // br-asupersync-kfk19o: route timestamps through the caller's
         // Cx so endpoint health metrics observe meaningful time. The
         // pre-fix shape passed Time::ZERO into every record_success /
@@ -1843,6 +1850,17 @@ impl SymbolDispatcher {
         let now_fn = || {
             cx.timer_driver()
                 .map_or_else(crate::time::wall_now, |d| d.now())
+        };
+
+        // Use router to resolve endpoints with load balancing strategy
+        let routes = match self.router.route_multicast(symbol.symbol(), count, now_fn()) {
+            Ok(routes) => routes,
+            Err(RoutingError::NoHealthyEndpoints { object_id }) => {
+                return Err(DispatchError::RoutingFailed(
+                    RoutingError::NoHealthyEndpoints { object_id },
+                ));
+            }
+            Err(e) => return Err(DispatchError::RoutingFailed(e)),
         };
 
         // Actually dispatch to selected endpoints
@@ -2868,7 +2886,7 @@ mod tests {
         table.add_route(RouteKey::Object(oid), specific);
 
         // Lookup specific route
-        let found = table.lookup(&RouteKey::Object(oid));
+        let found = table.lookup(&RouteKey::Object(oid), Time::ZERO);
         assert!(found.is_some());
 
         // Lookup unknown object falls back to default
@@ -2896,7 +2914,7 @@ mod tests {
         let router = SymbolRouter::new(table.clone());
         let symbol = Symbol::new_for_test(42, 0, 0, &[1, 2, 3]);
 
-        let initial = router.route(&symbol).expect("initial specific route");
+        let initial = router.route(&symbol, Time::ZERO).expect("initial specific route");
         assert_eq!(initial.endpoint.id, specific.id);
 
         let removed = table
@@ -2910,7 +2928,7 @@ mod tests {
 
         assert!(
             table
-                .lookup_without_default(&RouteKey::Object(object_id))
+                .lookup_without_default(&RouteKey::Object(object_id), Time::ZERO)
                 .is_none(),
             "endpoint removal must prune now-empty keyed routes so default fallback can apply"
         );
@@ -3002,7 +3020,7 @@ mod tests {
         let router = SymbolRouter::new(table);
 
         let symbol = Symbol::new_for_test(1, 0, 0, &[1, 2, 3]);
-        let result = router.route(&symbol);
+        let result = router.route(&symbol, Time::ZERO);
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap().endpoint.id, EndpointId(1));
@@ -3021,7 +3039,7 @@ mod tests {
         let router = SymbolRouter::new(table).without_fallback();
 
         let symbol = Symbol::new_for_test(1, 0, 0, &[1, 2, 3]);
-        let result = router.route(&symbol);
+        let result = router.route(&symbol, Time::ZERO);
 
         assert!(
             result.is_err(),
@@ -3044,7 +3062,7 @@ mod tests {
 
         let router = SymbolRouter::new(table);
         let symbol = Symbol::new_for_test(1, 0, 0, &[1, 2, 3]);
-        let result = router.route(&symbol).expect("route");
+        let result = router.route(&symbol, Time::ZERO).expect("route");
 
         assert_eq!(result.endpoint.id, backup.id);
     }
@@ -3062,7 +3080,7 @@ mod tests {
         let router = SymbolRouter::new(table);
         let symbol = Symbol::new_for_test(77, 0, 0, &[1, 2, 3]);
 
-        let result = router.route(&symbol);
+        let result = router.route(&symbol, Time::ZERO);
         assert!(matches!(
             result,
             Err(RoutingError::NoHealthyEndpoints { object_id: oid }) if oid == object_id
@@ -3082,7 +3100,7 @@ mod tests {
         let router = SymbolRouter::new(table);
         let symbol = Symbol::new_for_test(88, 0, 0, &[1, 2, 3]);
 
-        let result = router.route(&symbol);
+        let result = router.route(&symbol, Time::ZERO);
         assert!(matches!(
             result,
             Err(RoutingError::NoHealthyEndpoints { object_id: oid }) if oid == object_id
@@ -3096,7 +3114,7 @@ mod tests {
         let object_id = ObjectId::new_for_test(99);
         let symbol = Symbol::new_for_test(99, 0, 0, &[1, 2, 3]);
 
-        let result = router.route(&symbol);
+        let result = router.route(&symbol, Time::ZERO);
         assert!(matches!(
             result,
             Err(RoutingError::NoRoute { object_id: oid, .. }) if oid == object_id
@@ -3127,7 +3145,7 @@ mod tests {
 
         let router = SymbolRouter::new(table).with_local_preference(local_region);
         let symbol = Symbol::new_for_test(42, 0, 0, &[1, 2, 3]);
-        let result = router.route(&symbol).expect("route with local preference");
+        let result = router.route(&symbol, Time::ZERO).expect("route with local preference");
 
         assert_eq!(result.endpoint.id, local.id);
         assert!(!result.is_fallback);
@@ -3147,7 +3165,7 @@ mod tests {
         let router = SymbolRouter::new(table);
 
         let symbol = Symbol::new_for_test(1, 0, 0, &[1, 2, 3]);
-        let results = router.route_multicast(&symbol, 2);
+        let results = router.route_multicast(&symbol, 2, Time::ZERO);
 
         assert!(results.is_ok());
         assert_eq!(results.unwrap().len(), 2);
@@ -3172,19 +3190,19 @@ mod tests {
         let symbol = Symbol::new_for_test(77, 0, 0, &[7, 7]);
 
         let first: Vec<_> = router
-            .route_multicast(&symbol, 2)
+            .route_multicast(&symbol, 2, Time::ZERO)
             .expect("first weighted multicast")
             .into_iter()
             .map(|route| route.endpoint.id)
             .collect();
         let second: Vec<_> = router
-            .route_multicast(&symbol, 2)
+            .route_multicast(&symbol, 2, Time::ZERO)
             .expect("second weighted multicast")
             .into_iter()
             .map(|route| route.endpoint.id)
             .collect();
         let third: Vec<_> = router
-            .route_multicast(&symbol, 2)
+            .route_multicast(&symbol, 2, Time::ZERO)
             .expect("third weighted multicast")
             .into_iter()
             .map(|route| route.endpoint.id)
@@ -3225,7 +3243,7 @@ mod tests {
         let router = SymbolRouter::new(table).with_local_preference(local_region);
         let symbol = Symbol::new_for_test(9, 0, 0, &[9]);
         let multicast_routes = router
-            .route_multicast(&symbol, 2)
+            .route_multicast(&symbol, 2, Time::ZERO)
             .expect("multicast with local preference");
 
         let selected: HashSet<_> = multicast_routes
