@@ -4275,6 +4275,21 @@ impl PgConnection {
         self.inner.deallocate_retry_queue.len()
     }
 
+    fn validate_prepared_bind_arity(
+        stmt: &PgStatement,
+        params: &[&dyn ToSql],
+    ) -> Result<(), PgError> {
+        let expected = stmt.param_oids.len();
+        let got = params.len();
+        if expected != got {
+            return Err(PgError::Protocol(format!(
+                "prepared statement '{}' expects {} parameters, got {}",
+                stmt.name, expected, got
+            )));
+        }
+        Ok(())
+    }
+
     /// Execute a prepared statement returning rows.
     pub async fn query_prepared(
         &mut self,
@@ -4298,6 +4313,9 @@ impl PgConnection {
             Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
 
+        if let Err(err) = Self::validate_prepared_bind_arity(stmt, params) {
+            return Outcome::Err(err);
+        }
         let bind = match build_bind_msg("", &stmt.name, params, Format::Text) {
             Ok(b) => b,
             Err(e) => return Outcome::Err(e),
@@ -4362,6 +4380,9 @@ impl PgConnection {
             Outcome::Panicked(payload) => return Outcome::Panicked(payload),
         }
 
+        if let Err(err) = Self::validate_prepared_bind_arity(stmt, params) {
+            return Outcome::Err(err);
+        }
         let bind = match build_bind_msg("", &stmt.name, params, Format::Text) {
             Ok(b) => b,
             Err(e) => return Outcome::Err(e),
@@ -8392,6 +8413,64 @@ mod tests {
         assert_user_cancelled(run(conn.query_prepared(&cx, &stmt, &params)));
         assert_user_cancelled(run(conn.execute_prepared(&cx, &stmt, &params)));
         assert_user_cancelled(run(conn.close_statement(&cx, &stmt)));
+    }
+
+    #[test]
+    fn query_prepared_rejects_bind_arity_mismatch_before_io() {
+        let (mut conn, peer) = make_test_connection_with_peer();
+        drop(peer);
+
+        let cx = Cx::for_testing();
+        let first: i32 = 7;
+        let params: [&dyn ToSql; 1] = [&first];
+        let stmt = PgStatement {
+            name: "s1".to_string(),
+            param_oids: vec![oid::INT4, oid::TEXT],
+            columns: vec![],
+        };
+
+        match run(conn.query_prepared(&cx, &stmt, &params)) {
+            Outcome::Err(PgError::Protocol(msg)) => {
+                assert!(
+                    msg.contains("prepared statement 's1' expects 2 parameters, got 1"),
+                    "unexpected mismatch error: {msg}"
+                );
+            }
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
+        assert!(
+            !conn.inner.closed,
+            "arity mismatch should fail before entering in-flight closed state"
+        );
+    }
+
+    #[test]
+    fn execute_prepared_rejects_bind_arity_mismatch_before_io() {
+        let (mut conn, peer) = make_test_connection_with_peer();
+        drop(peer);
+
+        let cx = Cx::for_testing();
+        let only: i32 = 9;
+        let params: [&dyn ToSql; 1] = [&only];
+        let stmt = PgStatement {
+            name: "s2".to_string(),
+            param_oids: Vec::new(),
+            columns: vec![],
+        };
+
+        match run(conn.execute_prepared(&cx, &stmt, &params)) {
+            Outcome::Err(PgError::Protocol(msg)) => {
+                assert!(
+                    msg.contains("prepared statement 's2' expects 0 parameters, got 1"),
+                    "unexpected mismatch error: {msg}"
+                );
+            }
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
+        assert!(
+            !conn.inner.closed,
+            "arity mismatch should fail before entering in-flight closed state"
+        );
     }
 
     // -----------------------------------------------------------------------
