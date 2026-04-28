@@ -167,12 +167,26 @@ impl DecodeProof {
         hasher.update((self.elimination.pivots as u32).to_le_bytes());
         hasher.update((self.elimination.row_ops as u32).to_le_bytes());
         hasher.update((self.elimination.inactivated as u32).to_le_bytes());
-        // Hash strategy enum discriminant
-        match self.elimination.strategy {
-            InactivationStrategy::AllAtOnce => hasher.update([0u8]),
-            InactivationStrategy::HighSupportFirst => hasher.update([1u8]),
-            InactivationStrategy::BlockSchurLowRank => hasher.update([2u8]),
+        hash_inactivation_strategy(&mut hasher, self.elimination.strategy);
+        hasher.update((self.elimination.inactive_cols.len() as u32).to_le_bytes());
+        for col in &self.elimination.inactive_cols {
+            hasher.update((*col as u32).to_le_bytes());
         }
+        hasher.update([u8::from(self.elimination.inactive_cols_truncated)]);
+        hasher.update((self.elimination.pivot_events.len() as u32).to_le_bytes());
+        for pivot in &self.elimination.pivot_events {
+            hasher.update((pivot.col as u32).to_le_bytes());
+            hasher.update((pivot.row as u32).to_le_bytes());
+        }
+        hasher.update([u8::from(self.elimination.pivot_events_truncated)]);
+        hasher.update((self.elimination.strategy_transitions.len() as u32).to_le_bytes());
+        for transition in &self.elimination.strategy_transitions {
+            hash_inactivation_strategy(&mut hasher, transition.from);
+            hash_inactivation_strategy(&mut hasher, transition.to);
+            hasher.update((transition.reason.len() as u32).to_le_bytes());
+            hasher.update(transition.reason.as_bytes());
+        }
+        hasher.update([u8::from(self.elimination.strategy_transitions_truncated)]);
 
         // Hash outcome
         match &self.outcome {
@@ -275,6 +289,15 @@ impl DecodeProof {
                 Err((_err, proof)) => proof,
             };
         compare_proofs(self, &actual)
+    }
+}
+
+#[inline]
+fn hash_inactivation_strategy(hasher: &mut Sha256, strategy: InactivationStrategy) {
+    match strategy {
+        InactivationStrategy::AllAtOnce => hasher.update([0u8]),
+        InactivationStrategy::HighSupportFirst => hasher.update([1u8]),
+        InactivationStrategy::BlockSchurLowRank => hasher.update([2u8]),
     }
 }
 
@@ -2623,6 +2646,37 @@ mod tests {
             proof1.content_hash().as_bytes(),
             proof2.content_hash().as_bytes(),
             "Different elimination strategies must produce different hashes"
+        );
+    }
+
+    #[test]
+    fn forged_proof_elimination_pivot_trace_tampering_detected() {
+        // RFC 6330 Section 6 recommends integrity checks before accepting a
+        // decoded artifact. A forged proof must not be able to rewrite the
+        // elimination trace while preserving the attested hash.
+
+        let config = make_test_config();
+        let received = ReceivedSummary::from_received([(0, true), (1, true)].iter().copied());
+
+        let mut builder1 = DecodeProof::builder(config.clone());
+        builder1.set_received(received.clone());
+        builder1.elimination_mut().record_pivot(3, 0);
+        let proof1 = builder1.build();
+
+        let mut builder2 = DecodeProof::builder(config);
+        builder2.set_received(received);
+        builder2.elimination_mut().record_pivot(7, 1);
+        let proof2 = builder2.build();
+
+        assert_eq!(proof1.elimination.pivots, proof2.elimination.pivots);
+        assert_ne!(
+            proof1.elimination.pivot_events,
+            proof2.elimination.pivot_events
+        );
+        assert_ne!(
+            proof1.content_hash().as_bytes(),
+            proof2.content_hash().as_bytes(),
+            "Forged pivot traces must change the attested proof hash"
         );
     }
 
