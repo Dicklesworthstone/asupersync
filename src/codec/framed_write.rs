@@ -167,6 +167,7 @@ mod tests {
     )]
     use super::*;
     use crate::codec::LinesCodec;
+    use std::collections::VecDeque;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::task::Waker;
@@ -190,6 +191,69 @@ mod tests {
 
     fn track_waker(flag: Arc<AtomicBool>) -> Waker {
         Waker::from(Arc::new(TrackWaker(flag)))
+    }
+
+    /// Minimal reference adapter for the `tokio-util` 0.7.x flush loop.
+    ///
+    /// This mirrors the `FramedImpl::poll_flush` write-side behavior from
+    /// `tokio-util`'s `src/codec/framed_impl.rs` against our local
+    /// `AsyncWrite`/`Encoder` traits so conformance drift is easy to detect
+    /// without importing tokio into the core crate's test surface.
+    struct TokioUtilFramedWriteRef<W, E> {
+        inner: W,
+        encoder: E,
+        buffer: BytesMut,
+    }
+
+    impl<W, E> TokioUtilFramedWriteRef<W, E> {
+        fn new(inner: W, encoder: E) -> Self {
+            Self {
+                inner,
+                encoder,
+                buffer: BytesMut::with_capacity(DEFAULT_CAPACITY),
+            }
+        }
+
+        fn get_ref(&self) -> &W {
+            &self.inner
+        }
+
+        fn write_buffer(&self) -> &BytesMut {
+            &self.buffer
+        }
+    }
+
+    impl<W, E> TokioUtilFramedWriteRef<W, E>
+    where
+        W: AsyncWrite + Unpin,
+    {
+        fn send<I>(&mut self, item: I) -> Result<(), <E as Encoder<I>>::Error>
+        where
+            E: Encoder<I>,
+        {
+            self.encoder.encode(item, &mut self.buffer)
+        }
+
+        fn poll_flush(&mut self, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            while !self.buffer.is_empty() {
+                let n = match Pin::new(&mut self.inner).poll_write(cx, &self.buffer) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                    Poll::Ready(Ok(n)) => n,
+                };
+
+                if n == 0 {
+                    return Poll::Ready(Err(io::Error::new(
+                        io::ErrorKind::WriteZero,
+                        "failed to write frame to transport",
+                    )));
+                }
+
+                let _ = self.buffer.split_to(n);
+            }
+
+            Pin::new(&mut self.inner).poll_flush(cx)
+        }
     }
 
     #[test]
@@ -369,6 +433,102 @@ mod tests {
         assert!(
             !framed.write_buffer().is_empty(),
             "buffered frame bytes must remain after the cooperative yield"
+        );
+    }
+
+    #[derive(Clone, Copy)]
+    enum WriteStep {
+        Write(usize),
+        WriteZero,
+    }
+
+    struct ScriptedWriter {
+        inner: Vec<u8>,
+        steps: VecDeque<WriteStep>,
+    }
+
+    impl ScriptedWriter {
+        fn new(steps: impl IntoIterator<Item = WriteStep>) -> Self {
+            Self {
+                inner: Vec::new(),
+                steps: steps.into_iter().collect(),
+            }
+        }
+    }
+
+    impl AsyncWrite for ScriptedWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let this = self.get_mut();
+            match this
+                .steps
+                .pop_front()
+                .unwrap_or(WriteStep::Write(buf.len()))
+            {
+                WriteStep::WriteZero => Poll::Ready(Ok(0)),
+                WriteStep::Write(limit) => {
+                    let n = limit.min(buf.len());
+                    this.inner.extend_from_slice(&buf[..n]);
+                    Poll::Ready(Ok(n))
+                }
+            }
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[test]
+    fn framed_write_write_zero_after_partial_progress_matches_tokio_util_reference() {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+
+        let mut actual = FramedWrite::new(
+            ScriptedWriter::new([WriteStep::Write(3), WriteStep::WriteZero]),
+            LinesCodec::new(),
+        );
+        let mut reference = TokioUtilFramedWriteRef::new(
+            ScriptedWriter::new([WriteStep::Write(3), WriteStep::WriteZero]),
+            LinesCodec::new(),
+        );
+
+        actual
+            .send("abcdef".to_string())
+            .expect("encode actual frame");
+        reference
+            .send("abcdef".to_string())
+            .expect("encode reference frame");
+
+        let actual_err = match actual.poll_flush(&mut cx) {
+            Poll::Ready(Err(err)) => err,
+            other => panic!("expected WriteZero from actual flush, got {other:?}"),
+        };
+        let reference_err = match reference.poll_flush(&mut cx) {
+            Poll::Ready(Err(err)) => err,
+            other => panic!("expected WriteZero from reference flush, got {other:?}"),
+        };
+
+        assert_eq!(actual_err.kind(), io::ErrorKind::WriteZero);
+        assert_eq!(actual_err.kind(), reference_err.kind());
+        assert_eq!(actual.get_ref().inner, reference.get_ref().inner);
+        assert_eq!(&actual.write_buffer()[..], &reference.write_buffer()[..]);
+        assert_eq!(
+            &actual.get_ref().inner,
+            b"abc",
+            "partial progress should commit only the written prefix"
+        );
+        assert_eq!(
+            &actual.write_buffer()[..],
+            b"def\n",
+            "remaining suffix should stay buffered after WriteZero"
         );
     }
 }
