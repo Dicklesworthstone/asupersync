@@ -822,28 +822,26 @@ impl LoadBalancer {
                     Self::compare_weighted_load(a.1, b.1).then(a.0.cmp(&b.0))
                 })
             }
-            LoadBalanceStrategy::HashBased => {
-                object_id.map_or_else(
-                    || {
-                        let start_idx =
-                            self.rr_counter.fetch_add(count as u64, Ordering::Relaxed) as usize;
-                        let len = available.len();
-                        (0..count)
-                            .map(|i| available[(start_idx + i) % len])
-                            .collect()
-                    },
-                    |oid| {
-                        crate::distributed::consistent_hash::select_top_k_hrw(
-                            available.iter().copied(),
-                            count,
-                            &oid.as_u128(),
-                            self.hash_ring_salt,
-                            |endpoint| &endpoint.id,
-                            |endpoint| endpoint.weight.max(1),
-                        )
-                    },
-                )
-            }
+            LoadBalanceStrategy::HashBased => object_id.map_or_else(
+                || {
+                    let start_idx =
+                        self.rr_counter.fetch_add(count as u64, Ordering::Relaxed) as usize;
+                    let len = available.len();
+                    (0..count)
+                        .map(|i| available[(start_idx + i) % len])
+                        .collect()
+                },
+                |oid| {
+                    crate::distributed::consistent_hash::select_top_k_hrw(
+                        available.iter().copied(),
+                        count,
+                        &oid.as_u128(),
+                        self.hash_ring_salt,
+                        |endpoint| &endpoint.id,
+                        |endpoint| endpoint.weight.max(1),
+                    )
+                },
+            ),
             LoadBalanceStrategy::WeightedRoundRobin => {
                 self.select_n_weighted_round_robin(&available, count)
             }

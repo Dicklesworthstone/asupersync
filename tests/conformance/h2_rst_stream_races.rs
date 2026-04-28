@@ -66,7 +66,10 @@ fn multiple_rst_stream_on_same_stream_is_idempotent() {
     assert_reset(first, 1, ErrorCode::Cancel);
 
     let second = conn
-        .process_frame(Frame::RstStream(RstStreamFrame::new(1, ErrorCode::StreamClosed)))
+        .process_frame(Frame::RstStream(RstStreamFrame::new(
+            1,
+            ErrorCode::StreamClosed,
+        )))
         .expect("duplicate RST_STREAM on a closed stream should stay idempotent");
     assert_reset(second, 1, ErrorCode::StreamClosed);
 
@@ -89,8 +92,14 @@ fn rst_stream_and_settings_interleavings_preserve_connection_consistency() {
     settings_then_rst
         .process_frame(race_settings_frame())
         .expect("SETTINGS before RST_STREAM should succeed");
-    assert_eq!(settings_then_rst.remote_settings().max_concurrent_streams, 10);
-    assert_eq!(settings_then_rst.remote_settings().initial_window_size, 32_768);
+    assert_eq!(
+        settings_then_rst.remote_settings().max_concurrent_streams,
+        10
+    );
+    assert_eq!(
+        settings_then_rst.remote_settings().initial_window_size,
+        32_768
+    );
 
     let reset = settings_then_rst
         .process_frame(Frame::RstStream(RstStreamFrame::new(
@@ -115,8 +124,14 @@ fn rst_stream_and_settings_interleavings_preserve_connection_consistency() {
     rst_then_settings
         .process_frame(race_settings_frame())
         .expect("SETTINGS after RST_STREAM should still succeed");
-    assert_eq!(rst_then_settings.remote_settings().max_concurrent_streams, 10);
-    assert_eq!(rst_then_settings.remote_settings().initial_window_size, 32_768);
+    assert_eq!(
+        rst_then_settings.remote_settings().max_concurrent_streams,
+        10
+    );
+    assert_eq!(
+        rst_then_settings.remote_settings().initial_window_size,
+        32_768
+    );
     open_stream(&mut rst_then_settings, 3);
 }
 

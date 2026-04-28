@@ -632,7 +632,10 @@ fn validate_channel_uri(uri: &str) -> Result<(), GrpcError> {
     if host.is_empty() {
         return Err(GrpcError::transport("channel URI is missing a host"));
     }
-    if !host.eq_ignore_ascii_case("loopback") && !host.eq_ignore_ascii_case("localhost") && host != "127.0.0.1" {
+    if !host.eq_ignore_ascii_case("loopback")
+        && !host.eq_ignore_ascii_case("localhost")
+        && host != "127.0.0.1"
+    {
         return Err(GrpcError::transport(
             "gRPC client transport supports loopback and localhost only; use a URI with host `loopback`, `localhost`, or `127.0.0.1`",
         ));

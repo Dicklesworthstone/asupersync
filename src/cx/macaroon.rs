@@ -1037,7 +1037,8 @@ impl MacaroonToken {
             caveat_key_bytes
                 .try_into()
                 .map_err(|_| VerificationError::InvalidSignature)?,
-        ).map_err(|_| VerificationError::WeakCaveatKey)?;
+        )
+        .map_err(|_| VerificationError::WeakCaveatKey)?;
         let discharge = Self::find_discharge(index, tp_id, verification.discharges)?;
         let discharge_ptr = Self::discharge_stack_id(discharge);
         if verification.active_discharges.contains(&discharge_ptr) {
@@ -3520,7 +3521,11 @@ mod tests {
 
         // Verification should succeed with proper key derivation
         let ctx = VerificationContext::new();
-        assert!(token_with_caveat.verify_for_identifier(&root_key, "test:capability", &ctx).is_ok());
+        assert!(
+            token_with_caveat
+                .verify_for_identifier(&root_key, "test:capability", &ctx)
+                .is_ok()
+        );
 
         // Test that we properly validate HMAC-derived keys by attempting
         // verification - if our fix works, all internal key derivations

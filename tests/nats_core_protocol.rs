@@ -165,22 +165,34 @@ mod protocol_parsing {
             ("PING\r\n", ControlFrame::Ping),
             ("PONG\r\n", ControlFrame::Pong),
             ("+OK\r\n", ControlFrame::Ok),
-            ("-ERR 'Invalid Subject'\r\n", ControlFrame::Err("Invalid Subject".to_string())),
-            ("-ERR 'Authorization Violation'\r\n", ControlFrame::Err("Authorization Violation".to_string())),
+            (
+                "-ERR 'Invalid Subject'\r\n",
+                ControlFrame::Err("Invalid Subject".to_string()),
+            ),
+            (
+                "-ERR 'Authorization Violation'\r\n",
+                ControlFrame::Err("Authorization Violation".to_string()),
+            ),
             // Invalid frames for protocol violation testing
             ("PING\n", ControlFrame::Invalid("missing CRLF".to_string())),
-            ("PONG extra data\r\n", ControlFrame::Invalid("extra data after PONG".to_string())),
+            (
+                "PONG extra data\r\n",
+                ControlFrame::Invalid("extra data after PONG".to_string()),
+            ),
         ];
 
         for (frame_str, expected_frame) in control_cases {
             let parsed = parse_control_frame_for_test(frame_str.as_bytes());
             match (parsed, expected_frame) {
-                (ControlFrame::Ping, ControlFrame::Ping) => {},
-                (ControlFrame::Pong, ControlFrame::Pong) => {},
-                (ControlFrame::Ok, ControlFrame::Ok) => {},
+                (ControlFrame::Ping, ControlFrame::Ping) => {}
+                (ControlFrame::Pong, ControlFrame::Pong) => {}
+                (ControlFrame::Ok, ControlFrame::Ok) => {}
                 (ControlFrame::Err(a), ControlFrame::Err(b)) => assert_eq!(a, b),
                 (ControlFrame::Invalid(a), ControlFrame::Invalid(b)) => assert_eq!(a, b),
-                (actual, expected) => panic!("Mismatch for '{}': expected {:?}, got {:?}", frame_str, expected, actual),
+                (actual, expected) => panic!(
+                    "Mismatch for '{}': expected {:?}, got {:?}",
+                    frame_str, expected, actual
+                ),
             }
         }
     }
@@ -348,9 +360,11 @@ mod protocol_parsing {
     fn parse_info_for_test(info_json: &str) -> ExpectedInfo {
         // Extract server_id from JSON (simple string extraction for testing)
         let server_id = extract_json_string_test(info_json, "server_id")
-            .unwrap_or("").to_string();
+            .unwrap_or("")
+            .to_string();
         let version = extract_json_string_test(info_json, "version")
-            .unwrap_or("2.10.0").to_string();
+            .unwrap_or("2.10.0")
+            .to_string();
         let proto = extract_json_i64_test(info_json, "proto").unwrap_or(1);
         let max_payload = extract_json_i64_test(info_json, "max_payload").unwrap_or(1048576);
         let tls_required = extract_json_bool_test(info_json, "tls_required").unwrap_or(false);
@@ -370,13 +384,34 @@ mod protocol_parsing {
 
     fn serialize_connect_for_test(config: &ConnectConfig) -> String {
         let mut json = HashMap::new();
-        json.insert("verbose".to_string(), serde_json::Value::Bool(config.verbose));
-        json.insert("pedantic".to_string(), serde_json::Value::Bool(config.pedantic));
-        json.insert("lang".to_string(), serde_json::Value::String("rust".to_string()));
-        json.insert("version".to_string(), serde_json::Value::String("0.1.0".to_string()));
-        json.insert("protocol".to_string(), serde_json::Value::Number(serde_json::Number::from(1)));
-        json.insert("headers".to_string(), serde_json::Value::Bool(config.headers));
-        json.insert("no_responders".to_string(), serde_json::Value::Bool(config.no_responders));
+        json.insert(
+            "verbose".to_string(),
+            serde_json::Value::Bool(config.verbose),
+        );
+        json.insert(
+            "pedantic".to_string(),
+            serde_json::Value::Bool(config.pedantic),
+        );
+        json.insert(
+            "lang".to_string(),
+            serde_json::Value::String("rust".to_string()),
+        );
+        json.insert(
+            "version".to_string(),
+            serde_json::Value::String("0.1.0".to_string()),
+        );
+        json.insert(
+            "protocol".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(1)),
+        );
+        json.insert(
+            "headers".to_string(),
+            serde_json::Value::Bool(config.headers),
+        );
+        json.insert(
+            "no_responders".to_string(),
+            serde_json::Value::Bool(config.no_responders),
+        );
 
         if let Some(name) = &config.name {
             json.insert("name".to_string(), serde_json::Value::String(name.clone()));
@@ -385,10 +420,16 @@ mod protocol_parsing {
             json.insert("user".to_string(), serde_json::Value::String(user.clone()));
         }
         if let Some(password) = &config.password {
-            json.insert("pass".to_string(), serde_json::Value::String(password.clone()));
+            json.insert(
+                "pass".to_string(),
+                serde_json::Value::String(password.clone()),
+            );
         }
         if let Some(token) = &config.token {
-            json.insert("auth_token".to_string(), serde_json::Value::String(token.clone()));
+            json.insert(
+                "auth_token".to_string(),
+                serde_json::Value::String(token.clone()),
+            );
         }
 
         serde_json::to_string(&json).expect("valid JSON serialization")
@@ -438,7 +479,9 @@ mod protocol_parsing {
             let headers_start = frame_str.find("\r\n").expect("first CRLF") + 2;
             let headers = frame_str[headers_start..header_end + 4].to_string();
             let payload_start = header_end + 4;
-            let payload = frame_str[payload_start..payload_start + payload_len].as_bytes().to_vec();
+            let payload = frame_str[payload_start..payload_start + payload_len]
+                .as_bytes()
+                .to_vec();
 
             return ExpectedMessage {
                 subject,
@@ -490,22 +533,30 @@ mod protocol_parsing {
             let hdr_len = headers.len();
             let payload_len = command.payload.len();
             if let Some(reply_to) = &command.reply_to {
-                result.extend_from_slice(format!("HPUB {} {} {} {}\r\n",
-                    command.subject, reply_to, hdr_len, payload_len).as_bytes());
+                result.extend_from_slice(
+                    format!(
+                        "HPUB {} {} {} {}\r\n",
+                        command.subject, reply_to, hdr_len, payload_len
+                    )
+                    .as_bytes(),
+                );
             } else {
-                result.extend_from_slice(format!("HPUB {} {} {}\r\n",
-                    command.subject, hdr_len, payload_len).as_bytes());
+                result.extend_from_slice(
+                    format!("HPUB {} {} {}\r\n", command.subject, hdr_len, payload_len).as_bytes(),
+                );
             }
             result.extend_from_slice(headers.as_bytes());
         } else {
             // PUB command
             let payload_len = command.payload.len();
             if let Some(reply_to) = &command.reply_to {
-                result.extend_from_slice(format!("PUB {} {} {}\r\n",
-                    command.subject, reply_to, payload_len).as_bytes());
+                result.extend_from_slice(
+                    format!("PUB {} {} {}\r\n", command.subject, reply_to, payload_len).as_bytes(),
+                );
             } else {
-                result.extend_from_slice(format!("PUB {} {}\r\n",
-                    command.subject, payload_len).as_bytes());
+                result.extend_from_slice(
+                    format!("PUB {} {}\r\n", command.subject, payload_len).as_bytes(),
+                );
             }
         }
 
@@ -516,7 +567,11 @@ mod protocol_parsing {
 
     fn serialize_subscription_for_test(command: &SubscriptionCommand) -> Vec<u8> {
         match command {
-            SubscriptionCommand::Subscribe { subject, queue_group, sid } => {
+            SubscriptionCommand::Subscribe {
+                subject,
+                queue_group,
+                sid,
+            } => {
                 if let Some(queue) = queue_group {
                     format!("SUB {} {} {}\r\n", subject, queue, sid).into_bytes()
                 } else {
@@ -549,8 +604,9 @@ mod protocol_parsing {
         let pattern = format!(r#""{key}":"#);
         if let Some(start) = json.find(&pattern) {
             let value_start = start + pattern.len();
-            let value_end = json[value_start..].find(',').unwrap_or_else(||
-                json[value_start..].find('}').unwrap_or(0));
+            let value_end = json[value_start..]
+                .find(',')
+                .unwrap_or_else(|| json[value_start..].find('}').unwrap_or(0));
             if let Ok(value) = json[value_start..value_start + value_end].parse() {
                 return Some(value);
             }
@@ -589,7 +645,10 @@ mod handshake_protocol {
             // Invalid: Multiple INFO
             (vec!["INFO {}", "INFO {}", "CONNECT {}"], false),
             // Valid: INFO -> CONNECT -> other commands
-            (vec!["INFO {}", "CONNECT {}", "SUB foo 1", "PUB bar 3"], true),
+            (
+                vec!["INFO {}", "CONNECT {}", "SUB foo 1", "PUB bar 3"],
+                true,
+            ),
         ];
 
         for (sequence, should_be_valid) in handshake_sequences {
@@ -625,18 +684,37 @@ mod handshake_protocol {
         // Test that HPUB is only allowed when server advertises headers:true
         let capability_cases = [
             // Server supports headers, HPUB allowed
-            (ServerCapabilities { headers: true }, vec!["HPUB foo 5 3"], true),
+            (
+                ServerCapabilities { headers: true },
+                vec!["HPUB foo 5 3"],
+                true,
+            ),
             // Server doesn't support headers, HPUB rejected
-            (ServerCapabilities { headers: false }, vec!["HPUB foo 5 3"], false),
+            (
+                ServerCapabilities { headers: false },
+                vec!["HPUB foo 5 3"],
+                false,
+            ),
             // PUB always allowed regardless of headers capability
-            (ServerCapabilities { headers: false }, vec!["PUB foo 3"], true),
-            (ServerCapabilities { headers: true }, vec!["PUB foo 3"], true),
+            (
+                ServerCapabilities { headers: false },
+                vec!["PUB foo 3"],
+                true,
+            ),
+            (
+                ServerCapabilities { headers: true },
+                vec!["PUB foo 3"],
+                true,
+            ),
         ];
 
         for (capabilities, commands, should_be_valid) in capability_cases {
             let result = validate_commands_against_capabilities(&capabilities, &commands);
-            assert_eq!(result, should_be_valid,
-                "Capabilities: {:?}, Commands: {:?}", capabilities, commands);
+            assert_eq!(
+                result, should_be_valid,
+                "Capabilities: {:?}, Commands: {:?}",
+                capabilities, commands
+            );
         }
     }
 
@@ -691,7 +769,7 @@ mod handshake_protocol {
 
     fn validate_commands_against_capabilities(
         capabilities: &ServerCapabilities,
-        commands: &[&str]
+        commands: &[&str],
     ) -> bool {
         for command in commands {
             if command.starts_with("HPUB") && !capabilities.headers {
@@ -715,15 +793,14 @@ mod token_validation {
             ("foo.bar", true),
             ("_INBOX.abc123", true),
             ("123.456", true),
-
             // Invalid subjects (for publishing - wildcards not allowed)
-            ("foo.*", false), // wildcard in publish subject
-            ("foo.>", false), // wildcard in publish subject
-            ("", false), // empty
+            ("foo.*", false),    // wildcard in publish subject
+            ("foo.>", false),    // wildcard in publish subject
+            ("", false),         // empty
             ("foo..bar", false), // empty token
-            (".foo", false), // leading dot
-            ("foo.", false), // trailing dot
-            ("foo bar", false), // embedded space
+            (".foo", false),     // leading dot
+            ("foo.", false),     // trailing dot
+            ("foo bar", false),  // embedded space
             ("foo\tbar", false), // embedded tab
             ("foo\nbar", false), // embedded newline
             ("foo\rbar", false), // embedded carriage return
@@ -744,15 +821,14 @@ mod token_validation {
             ("worker-1", true),
             ("queue_group", true),
             ("123", true),
-
             // Invalid queue groups
-            ("", false), // empty
+            ("", false),             // empty
             ("worker group", false), // embedded space
             ("queue\tgroup", false), // embedded tab
             ("queue\ngroup", false), // embedded newline
             ("queue\rgroup", false), // embedded carriage return
-            ("queue*group", false), // wildcard not allowed
-            ("queue>group", false), // wildcard not allowed
+            ("queue*group", false),  // wildcard not allowed
+            ("queue>group", false),  // wildcard not allowed
         ];
 
         for (queue_group, should_be_valid) in queue_cases {
@@ -773,17 +849,20 @@ mod token_validation {
             ("*.bar", true),
             (">", true),
             ("foo.*.bar", true),
-
             // Invalid subscription subjects
-            ("", false), // empty
+            ("", false),         // empty
             ("foo..bar", false), // empty token
-            ("foo bar", false), // embedded space
+            ("foo bar", false),  // embedded space
             ("foo\tbar", false), // embedded tab
         ];
 
         for (subject, should_be_valid) in subscription_cases {
             let result = validate_subscription_subject(subject);
-            assert_eq!(result, should_be_valid, "Subscription subject: '{}'", subject);
+            assert_eq!(
+                result, should_be_valid,
+                "Subscription subject: '{}'",
+                subject
+            );
         }
     }
 

@@ -1863,11 +1863,11 @@ mod tests {
         let leaf_certs = Certificate::from_pem(TEST_CERT_PEM).unwrap();
         let leaf = leaf_certs.into_iter().next().unwrap();
 
-        let builder = TlsConnectorBuilder::new()
-            .insecure_add_root_certificate(&leaf);
+        let builder = TlsConnectorBuilder::new().insecure_add_root_certificate(&leaf);
 
         assert_eq!(
-            builder.root_certs.len(), 1,
+            builder.root_certs.len(),
+            1,
             "insecure_add_root_certificate should work in test builds"
         );
 

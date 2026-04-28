@@ -329,12 +329,18 @@ mod tests {
 
         // Zero tag must always fail verification
         let zero_tag = AuthenticationTag::zero();
-        assert!(!zero_tag.verify(&key, &symbol), "zero tag must fail verification");
+        assert!(
+            !zero_tag.verify(&key, &symbol),
+            "zero tag must fail verification"
+        );
         assert!(zero_tag.is_zero(), "zero tag must report as zero");
 
         // Non-zero tag should pass verification when computed correctly
         let valid_tag = AuthenticationTag::compute(&key, &symbol);
-        assert!(valid_tag.verify(&key, &symbol), "valid tag must pass verification");
+        assert!(
+            valid_tag.verify(&key, &symbol),
+            "valid tag must pass verification"
+        );
         assert!(!valid_tag.is_zero(), "valid tag must not report as zero");
     }
 }

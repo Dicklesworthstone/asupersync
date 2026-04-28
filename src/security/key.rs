@@ -204,7 +204,6 @@ impl AuthKey {
         Ok(Self { bytes })
     }
 
-
     /// Returns the raw bytes of the key.
     #[inline]
     #[must_use]
@@ -481,7 +480,6 @@ mod tests {
         // also failing distinct. Skip explicit test for that branch
         // since it's covered by the type-level enum.
     }
-
 
     #[test]
     fn test_derive_subkey_deterministic() {

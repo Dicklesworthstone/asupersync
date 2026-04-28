@@ -133,7 +133,6 @@ impl std::fmt::Display for RecvError {
 
 impl std::error::Error for RecvError {}
 
-
 /// Internal channel state shared between senders and receivers.
 #[derive(Debug)]
 struct ChannelInner<T> {
@@ -205,7 +204,8 @@ impl<T> ChannelInner<T> {
     /// for removing itself upon successfully acquiring a permit.
     #[inline]
     fn take_next_sender_waker(&self) -> Option<Waker> {
-        self.waiter_queue.front()
+        self.waiter_queue
+            .front()
             .and_then(|&token| self.send_wakers.get(token))
             .cloned()
     }
@@ -2230,7 +2230,10 @@ mod tests {
             let mut inner = tx.shared.inner.lock();
             let waiter_token_a = reserve_a.waiter_token.expect("waiter token for A");
             // Remove from slab
-            inner.send_wakers.remove(waiter_token_a).expect("A queued in slab");
+            inner
+                .send_wakers
+                .remove(waiter_token_a)
+                .expect("A queued in slab");
             // Remove from FIFO queue
             if let Some(pos) = inner.waiter_queue.iter().position(|&t| t == waiter_token_a) {
                 inner.waiter_queue.remove(pos);
@@ -3419,7 +3422,8 @@ pub mod backpressure_metamorphic {
                                         config.messages_per_sender,
                                         ProducerOrdering::Sequential,
                                         config.seed,
-                                    ).await;
+                                    )
+                                    .await;
 
                                     let interleaved_result = run_multi_producer_drain_test(
                                         &cx,
@@ -3428,7 +3432,8 @@ pub mod backpressure_metamorphic {
                                         config.messages_per_sender,
                                         ProducerOrdering::Interleaved,
                                         config.seed,
-                                    ).await;
+                                    )
+                                    .await;
 
                                     let round_robin_result = run_multi_producer_drain_test(
                                         &cx,
@@ -3437,10 +3442,12 @@ pub mod backpressure_metamorphic {
                                         config.messages_per_sender,
                                         ProducerOrdering::RoundRobin,
                                         config.seed,
-                                    ).await;
+                                    )
+                                    .await;
 
                                     // Conservation property: verify total message count conservation
-                                    let expected_total_messages = config.sender_count * config.messages_per_sender;
+                                    let expected_total_messages =
+                                        config.sender_count * config.messages_per_sender;
                                     assert_eq!(
                                         sequential_result.received_messages.len(),
                                         expected_total_messages,
@@ -3458,9 +3465,15 @@ pub mod backpressure_metamorphic {
                                     );
 
                                     // Order independence: same multiset across orderings
-                                    let seq_multiset = multiset_from_messages(&sequential_result.received_messages);
-                                    let interleaved_multiset = multiset_from_messages(&interleaved_result.received_messages);
-                                    let rr_multiset = multiset_from_messages(&round_robin_result.received_messages);
+                                    let seq_multiset = multiset_from_messages(
+                                        &sequential_result.received_messages,
+                                    );
+                                    let interleaved_multiset = multiset_from_messages(
+                                        &interleaved_result.received_messages,
+                                    );
+                                    let rr_multiset = multiset_from_messages(
+                                        &round_robin_result.received_messages,
+                                    );
 
                                     assert_eq!(
                                         seq_multiset, interleaved_multiset,
@@ -3472,12 +3485,24 @@ pub mod backpressure_metamorphic {
                                     );
 
                                     // FIFO property: verify per-producer ordering
-                                    verify_fifo_per_producer(&sequential_result.received_messages, config.sender_count);
-                                    verify_fifo_per_producer(&interleaved_result.received_messages, config.sender_count);
-                                    verify_fifo_per_producer(&round_robin_result.received_messages, config.sender_count);
+                                    verify_fifo_per_producer(
+                                        &sequential_result.received_messages,
+                                        config.sender_count,
+                                    );
+                                    verify_fifo_per_producer(
+                                        &interleaved_result.received_messages,
+                                        config.sender_count,
+                                    );
+                                    verify_fifo_per_producer(
+                                        &round_robin_result.received_messages,
+                                        config.sender_count,
+                                    );
 
                                     // Verify expected sent vs received multisets
-                                    let expected_multiset = compute_expected_multiset(config.sender_count, config.messages_per_sender);
+                                    let expected_multiset = compute_expected_multiset(
+                                        config.sender_count,
+                                        config.messages_per_sender,
+                                    );
                                     assert_eq!(
                                         seq_multiset, expected_multiset,
                                         "Received multiset doesn't match expected sent multiset"
@@ -3523,7 +3548,9 @@ pub mod backpressure_metamorphic {
                                     let mut sent_before_backpressure = Vec::new();
                                     for i in 0..config.capacity {
                                         let encoded = encode_sender_message(0, i);
-                                        sender.try_send(encoded).expect("Fill to capacity should succeed");
+                                        sender
+                                            .try_send(encoded)
+                                            .expect("Fill to capacity should succeed");
                                         sent_before_backpressure.push(encoded);
                                     }
 
@@ -3539,13 +3566,21 @@ pub mod backpressure_metamorphic {
                                             futures_lite::future::block_on(async move {
                                                 // Try to send messages - should get backpressured then disconnected
                                                 for msg_ordinal in 0..config.messages_per_sender {
-                                                    let encoded = encode_sender_message(producer_id, msg_ordinal);
-                                                    match sender_clone.send(&producer_cx, encoded).await {
+                                                    let encoded = encode_sender_message(
+                                                        producer_id,
+                                                        msg_ordinal,
+                                                    );
+                                                    match sender_clone
+                                                        .send(&producer_cx, encoded)
+                                                        .await
+                                                    {
                                                         Err(SendError::Disconnected(_)) => {
-                                                            counter_clone.fetch_add(1, Ordering::SeqCst);
+                                                            counter_clone
+                                                                .fetch_add(1, Ordering::SeqCst);
                                                             break;
                                                         }
-                                                        Err(SendError::Cancelled(_)) | Err(SendError::Full(_)) => {
+                                                        Err(SendError::Cancelled(_))
+                                                        | Err(SendError::Full(_)) => {
                                                             // Continue trying if cancelled or full
                                                         }
                                                         Ok(()) => {
@@ -3562,7 +3597,8 @@ pub mod backpressure_metamorphic {
                                     crate::runtime::yield_now().await;
 
                                     // Verify backpressure state
-                                    let (queued, reserved, available, waiting) = observe_channel_state(&sender);
+                                    let (queued, reserved, available, waiting) =
+                                        observe_channel_state(&sender);
                                     assert_eq!(queued, config.capacity, "Channel should be full");
                                     assert_eq!(available, 0, "No capacity should be available");
 
@@ -3582,11 +3618,15 @@ pub mod backpressure_metamorphic {
                                     );
 
                                     // Create new receiver and verify messages sent before drop are preserved
-                                    let (new_sender, mut new_receiver) = channel::<u32>(config.capacity);
+                                    let (new_sender, mut new_receiver) =
+                                        channel::<u32>(config.capacity);
 
                                     // The original channel is disconnected - we can't drain from it
                                     // This tests the invariant that disconnection is atomic and clean
-                                    assert!(matches!(sender.try_send(999), Err(SendError::Disconnected(_))));
+                                    assert!(matches!(
+                                        sender.try_send(999),
+                                        Err(SendError::Disconnected(_))
+                                    ));
 
                                     Ok(())
                                 }
@@ -3604,9 +3644,9 @@ pub mod backpressure_metamorphic {
 
     #[derive(Debug, Clone, Copy)]
     enum ProducerOrdering {
-        Sequential,   // Producer 1 sends all, then Producer 2, etc.
-        Interleaved,  // Producers alternate randomly
-        RoundRobin,   // Strict round-robin across producers
+        Sequential,  // Producer 1 sends all, then Producer 2, etc.
+        Interleaved, // Producers alternate randomly
+        RoundRobin,  // Strict round-robin across producers
     }
 
     #[derive(Debug)]
@@ -3639,31 +3679,33 @@ pub mod backpressure_metamorphic {
         });
 
         // Generate producer send sequences based on ordering
-        let send_sequence = generate_send_sequence(producer_count, messages_per_producer, ordering, seed);
+        let send_sequence =
+            generate_send_sequence(producer_count, messages_per_producer, ordering, seed);
 
         // Execute the send sequence
-        let producer_handles: Vec<_> = (0..producer_count).map(|producer_id| {
-            let sender_clone = sender.clone();
-            let producer_cx = cx.clone();
-            let message_sequence: Vec<usize> = match ordering {
-                ProducerOrdering::Sequential => (0..messages_per_producer).collect(),
-                ProducerOrdering::Interleaved | ProducerOrdering::RoundRobin => {
-                    send_sequence.iter()
+        let producer_handles: Vec<_> = (0..producer_count)
+            .map(|producer_id| {
+                let sender_clone = sender.clone();
+                let producer_cx = cx.clone();
+                let message_sequence: Vec<usize> = match ordering {
+                    ProducerOrdering::Sequential => (0..messages_per_producer).collect(),
+                    ProducerOrdering::Interleaved | ProducerOrdering::RoundRobin => send_sequence
+                        .iter()
                         .filter(|(pid, _)| *pid == producer_id)
                         .map(|(_, ordinal)| *ordinal)
-                        .collect()
-                }
-            };
+                        .collect(),
+                };
 
-            std::thread::spawn(move || {
-                futures_lite::future::block_on(async move {
-                    for msg_ordinal in message_sequence {
-                        let encoded = encode_sender_message(producer_id, msg_ordinal);
-                        let _ = sender_clone.send(&producer_cx, encoded).await;
-                    }
+                std::thread::spawn(move || {
+                    futures_lite::future::block_on(async move {
+                        for msg_ordinal in message_sequence {
+                            let encoded = encode_sender_message(producer_id, msg_ordinal);
+                            let _ = sender_clone.send(&producer_cx, encoded).await;
+                        }
+                    })
                 })
             })
-        }).collect();
+            .collect();
 
         // Wait for all producers to complete
         for handle in producer_handles {
@@ -3697,16 +3739,19 @@ pub mod backpressure_metamorphic {
             ProducerOrdering::Sequential => {
                 // Not used for sequential (producers send independently)
                 Vec::new()
-            },
-            ProducerOrdering::RoundRobin => {
-                (0..messages_per_producer)
-                    .flat_map(|msg_round| (0..producer_count).map(move |producer_id| (producer_id, msg_round)))
-                    .collect()
-            },
+            }
+            ProducerOrdering::RoundRobin => (0..messages_per_producer)
+                .flat_map(|msg_round| {
+                    (0..producer_count).map(move |producer_id| (producer_id, msg_round))
+                })
+                .collect(),
             ProducerOrdering::Interleaved => {
                 // Pseudo-random interleaving based on seed
                 let mut sequence: Vec<_> = (0..producer_count)
-                    .flat_map(|producer_id| (0..messages_per_producer).map(move |msg_ordinal| (producer_id, msg_ordinal)))
+                    .flat_map(|producer_id| {
+                        (0..messages_per_producer)
+                            .map(move |msg_ordinal| (producer_id, msg_ordinal))
+                    })
                     .collect();
                 // Simple deterministic shuffle based on seed
                 let mut rng_state = seed;
@@ -3721,10 +3766,13 @@ pub mod backpressure_metamorphic {
     }
 
     fn multiset_from_messages(messages: &[u32]) -> std::collections::BTreeMap<u32, usize> {
-        messages.iter().copied().fold(std::collections::BTreeMap::new(), |mut acc, msg| {
-            *acc.entry(msg).or_insert(0) += 1;
-            acc
-        })
+        messages
+            .iter()
+            .copied()
+            .fold(std::collections::BTreeMap::new(), |mut acc, msg| {
+                *acc.entry(msg).or_insert(0) += 1;
+                acc
+            })
     }
 
     fn verify_fifo_per_producer(messages: &[u32], producer_count: usize) {
@@ -3752,9 +3800,15 @@ pub mod backpressure_metamorphic {
         }
     }
 
-    fn compute_expected_multiset(producer_count: usize, messages_per_producer: usize) -> std::collections::BTreeMap<u32, usize> {
+    fn compute_expected_multiset(
+        producer_count: usize,
+        messages_per_producer: usize,
+    ) -> std::collections::BTreeMap<u32, usize> {
         (0..producer_count)
-            .flat_map(|producer_id| (0..messages_per_producer).map(move |msg_ordinal| encode_sender_message(producer_id, msg_ordinal)))
+            .flat_map(|producer_id| {
+                (0..messages_per_producer)
+                    .map(move |msg_ordinal| encode_sender_message(producer_id, msg_ordinal))
+            })
             .fold(std::collections::BTreeMap::new(), |mut acc, encoded| {
                 *acc.entry(encoded).or_insert(0) += 1;
                 acc

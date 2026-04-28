@@ -14,10 +14,10 @@
 //! - Commit/abort after region cancellation is handled gracefully via try_* methods
 //! - All conservation violations represent genuine bugs, not test harness artifacts
 
-use asupersync::lab::runtime::LabRuntime;
 use asupersync::lab::config::LabConfig;
 use asupersync::lab::explorer::{DporExplorer, ExplorerConfig};
-use asupersync::obligation::ledger::{ObligationLedger, ObligationToken, LedgerStats};
+use asupersync::lab::runtime::LabRuntime;
+use asupersync::obligation::ledger::{LedgerStats, ObligationLedger, ObligationToken};
 use asupersync::record::{ObligationAbortReason, ObligationKind};
 use asupersync::types::{RegionId, TaskId};
 use proptest::prelude::*;
@@ -48,7 +48,10 @@ enum OperationType {
     /// Commit a previously acquired permit
     Commit { token_index: usize },
     /// Abort a previously acquired permit
-    Abort { token_index: usize, reason: ObligationAbortReason },
+    Abort {
+        token_index: usize,
+        reason: ObligationAbortReason,
+    },
     /// Cancel all pending obligations in a region (mid-flight cancellation)
     CancelRegion { region_id: RegionId },
     /// Finalize a region
@@ -73,15 +76,16 @@ fn operation_strategy() -> impl Strategy<Value = ObligationOperation> {
         obligation_kind_strategy(),
         operation_type_strategy(),
         0u64..1_000_000u64, // delay up to 1ms in virtual time
-    ).prop_map(|(task_raw, region_raw, kind, op_type, delay)| {
-        ObligationOperation {
-            task_id: TaskId::new_for_test(task_raw, 1),
-            region_id: RegionId::new_for_test(region_raw, 1),
-            kind,
-            operation_type: op_type,
-            delay_nanos: delay,
-        }
-    })
+    )
+        .prop_map(
+            |(task_raw, region_raw, kind, op_type, delay)| ObligationOperation {
+                task_id: TaskId::new_for_test(task_raw, 1),
+                region_id: RegionId::new_for_test(region_raw, 1),
+                kind,
+                operation_type: op_type,
+                delay_nanos: delay,
+            },
+        )
 }
 
 fn obligation_kind_strategy() -> impl Strategy<Value = ObligationKind> {
@@ -126,14 +130,13 @@ fn scenario_strategy() -> impl Strategy<Value = ConcurrentScenario> {
     (
         prop::collection::vec(operation_strategy(), 1..=MAX_OPERATIONS),
         0u64..1_000_000u64, // initial time
-        any::<bool>(), // use_dpor flag
-    ).prop_map(|(operations, initial_time, use_dpor)| {
-        ConcurrentScenario {
+        any::<bool>(),      // use_dpor flag
+    )
+        .prop_map(|(operations, initial_time, use_dpor)| ConcurrentScenario {
             operations,
             initial_time,
             use_dpor,
-        }
-    })
+        })
 }
 
 /// Test the conservation invariant across all possible schedules
@@ -176,12 +179,17 @@ fn test_conservation_with_dpor(scenario: &ConcurrentScenario) {
         }
     });
 
-    println!("DPOR exploration: {} runs across {} unique schedule classes",
-             report.total_runs, report.unique_classes);
+    println!(
+        "DPOR exploration: {} runs across {} unique schedule classes",
+        report.total_runs, report.unique_classes
+    );
 
     if report.has_violations() {
-        panic!("Found conservation violations in {} runs: {:?}",
-               report.violations.len(), report.violation_seeds());
+        panic!(
+            "Found conservation violations in {} runs: {:?}",
+            report.violations.len(),
+            report.violation_seeds()
+        );
     }
 }
 
@@ -200,7 +208,10 @@ fn test_conservation_single_schedule(scenario: &ConcurrentScenario) {
     }
 }
 
-fn run_scenario_in_runtime(runtime: &mut LabRuntime, scenario: &ConcurrentScenario) -> Result<(), String> {
+fn run_scenario_in_runtime(
+    runtime: &mut LabRuntime,
+    scenario: &ConcurrentScenario,
+) -> Result<(), String> {
     // Advance to initial time for this scenario
     runtime.advance_time(scenario.initial_time);
 
@@ -208,8 +219,8 @@ fn run_scenario_in_runtime(runtime: &mut LabRuntime, scenario: &ConcurrentScenar
     let ledger = Arc::new(Mutex::new(ObligationLedger::new()));
 
     // Track tokens by task and index for commit/abort operations
-    let tokens_by_task: Arc<Mutex<HashMap<TaskId, Vec<Option<ObligationToken>>>>>
-        = Arc::new(Mutex::new(HashMap::new()));
+    let tokens_by_task: Arc<Mutex<HashMap<TaskId, Vec<Option<ObligationToken>>>>> =
+        Arc::new(Mutex::new(HashMap::new()));
 
     // Execute operations with virtual time advancement
     for (op_idx, operation) in scenario.operations.iter().enumerate() {
@@ -226,7 +237,7 @@ fn run_scenario_in_runtime(runtime: &mut LabRuntime, scenario: &ConcurrentScenar
                     operation.kind,
                     operation.task_id,
                     operation.region_id,
-                    now
+                    now,
                 );
 
                 // Store token for later commit/abort
@@ -254,7 +265,10 @@ fn run_scenario_in_runtime(runtime: &mut LabRuntime, scenario: &ConcurrentScenar
                 }
             }
 
-            OperationType::Abort { token_index, reason } => {
+            OperationType::Abort {
+                token_index,
+                reason,
+            } => {
                 let mut tokens = tokens_by_task.lock().unwrap();
 
                 if let Some(task_tokens) = tokens.get_mut(&operation.task_id) {
@@ -280,7 +294,8 @@ fn run_scenario_in_runtime(runtime: &mut LabRuntime, scenario: &ConcurrentScenar
                 // Cancel all pending obligations (concurrent cancel scenario)
                 // abort_by_id returns duration held, not success/failure
                 for obligation_id in pending_ids {
-                    let _duration = ledger_lock.abort_by_id(obligation_id, now, ObligationAbortReason::Cancel);
+                    let _duration =
+                        ledger_lock.abort_by_id(obligation_id, now, ObligationAbortReason::Cancel);
                 }
 
                 // Verify all obligations in the region were actually cancelled
@@ -343,7 +358,11 @@ fn verify_conservation_invariant(stats: &LedgerStats, checkpoint: usize) -> Resu
     if total_issued != total_resolved + pending {
         return Err(format!(
             "Conservation invariant violation at checkpoint {}: issued={}, resolved={}, pending={}, expected_total={}",
-            checkpoint, total_issued, total_resolved, pending, total_resolved + pending
+            checkpoint,
+            total_issued,
+            total_resolved,
+            pending,
+            total_resolved + pending
         ));
     }
 
@@ -405,7 +424,9 @@ fn test_concurrent_cancel_mid_flight() {
             task_id: TaskId::new_for_test(3, 1),
             region_id: RegionId::new_for_test(1, 1),
             kind: ObligationKind::SendPermit,
-            operation_type: OperationType::CancelRegion { region_id: RegionId::new_for_test(1, 1) },
+            operation_type: OperationType::CancelRegion {
+                region_id: RegionId::new_for_test(1, 1),
+            },
             delay_nanos: 500,
         },
         // Check invariant after cancellation
@@ -470,7 +491,9 @@ fn test_proper_region_cancellation() {
                 task_id: TaskId::new_for_test(2, 1),
                 region_id: RegionId::new_for_test(1, 1),
                 kind: ObligationKind::SendPermit,
-                operation_type: OperationType::CancelRegion { region_id: RegionId::new_for_test(1, 1) },
+                operation_type: OperationType::CancelRegion {
+                    region_id: RegionId::new_for_test(1, 1),
+                },
                 delay_nanos: 500,
             },
             // Verify conservation after cancellation
@@ -486,7 +509,9 @@ fn test_proper_region_cancellation() {
                 task_id: TaskId::new_for_test(1, 1),
                 region_id: RegionId::new_for_test(1, 1),
                 kind: ObligationKind::SendPermit,
-                operation_type: OperationType::FinalizeRegion { region_id: RegionId::new_for_test(1, 1) },
+                operation_type: OperationType::FinalizeRegion {
+                    region_id: RegionId::new_for_test(1, 1),
+                },
                 delay_nanos: 100,
             },
         ],
