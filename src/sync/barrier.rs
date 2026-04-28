@@ -156,7 +156,7 @@ impl Future for BarrierWaitFuture<'_> {
                     // cost for typical (parties <= 7) uses.
                     let _ = slot; // recorded slot is now an unused hint
                     if let Some(idx) = state.waiters.iter().position(|w| w.0 == id) {
-                        state.waiters.swap_remove(idx);
+                        state.waiters.remove(idx);
                     }
                     drop(state);
 
