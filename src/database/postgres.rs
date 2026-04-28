@@ -3903,6 +3903,9 @@ impl PgConnection {
         // Stops at the first failure to avoid hammering a flaky
         // server, leaving the remainder for the next query.
         self.flush_pending_deallocates(cx).await;
+        if cx.checkpoint().is_err() {
+            return Outcome::Cancelled(cancelled_reason(cx));
+        }
 
         // br-asupersync-cvkoe9: fast-path for repeat-SQL. Bypasses the
         // Parse/Describe/Sync wire exchange entirely and returns the
@@ -9282,6 +9285,54 @@ mod tests {
                 "cancelled flush should preserve queued statements"
             );
         });
+    }
+
+    /// br-asupersync-8k3s80: if caller cancellation lands while
+    /// piggy-backed DEALLOCATE retries are flushing, prepare() must
+    /// surface Cancelled before the prepared-cache fast path can
+    /// return a stale success.
+    #[test]
+    fn prepare_cached_statement_observes_cancellation_during_deallocate_flush() {
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let cx = crate::cx::Cx::for_testing();
+        let cancel_cx = cx.clone();
+        let sql = "SELECT 1";
+        let cached = fake_pg_statement("__cached_stmt");
+        conn.inner
+            .prepared_cache
+            .insert_returning_evicted_name(sql.to_string(), cached.clone());
+        conn.inner
+            .deallocate_retry_queue
+            .push_back("__stale_stmt".to_string());
+
+        let wake_writer = std::thread::spawn(move || {
+            let _ = read_until_contains(&mut peer, b"__stale_stmt");
+            cancel_cx.cancel_fast(CancelKind::User);
+            std::io::Write::write_all(&mut peer, b"x").expect("wake close_statement read");
+        });
+
+        assert_user_cancelled(run(conn.prepare(&cx, sql)));
+        wake_writer.join().expect("wake writer should exit cleanly");
+
+        assert_eq!(
+            conn.inner.consecutive_deallocate_failures, 0,
+            "cancelled flush should not count as backend failure"
+        );
+        assert!(
+            !conn.inner.unhealthy,
+            "cancelled flush should not mark connection unhealthy"
+        );
+        assert_eq!(
+            conn.inner.deallocate_retry_queue,
+            VecDeque::from(["__stale_stmt".to_string()]),
+            "cancelled flush should preserve the queued deallocate retry"
+        );
+        let cached_after = conn
+            .inner
+            .prepared_cache
+            .get_and_touch(sql)
+            .expect("cached statement should still be present");
+        assert_eq!(cached_after.name, cached.name);
     }
 
     /// br-asupersync-pqia0o: verify that real backend failures (as opposed
