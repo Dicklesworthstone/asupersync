@@ -2900,8 +2900,9 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::task::{Context, Poll, Waker};
     use std::thread;
+    use std::time::Duration;
     use crate::channel::oneshot;
-    use crate::time::{timeout, Duration};
+    use crate::time::timeout;
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()
