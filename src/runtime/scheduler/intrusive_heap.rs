@@ -83,6 +83,9 @@ pub struct IntrusivePriorityHeap {
     /// Compact array of TaskIds forming the heap structure.
     heap: Vec<TaskId>,
     /// Monotonic counter for FIFO tie-breaking within equal priorities.
+    ///
+    /// The counter wraps explicitly and is reset when the heap drains, so an
+    /// empty heap always starts a fresh generation epoch.
     next_generation: u64,
 }
 
@@ -156,7 +159,7 @@ impl IntrusivePriorityHeap {
         }
 
         let generation = self.next_generation;
-        self.next_generation += 1;
+        self.next_generation = self.next_generation.wrapping_add(1);
 
         record.sched_priority = priority;
         record.sched_generation = generation;
@@ -230,6 +233,7 @@ impl IntrusivePriorityHeap {
 
         if pos == last {
             self.heap.pop();
+            self.reset_generation_if_empty();
             return;
         }
 
@@ -334,6 +338,14 @@ impl IntrusivePriorityHeap {
             }
         }
         self.heap.clear();
+        self.reset_generation_if_empty();
+    }
+
+    #[inline]
+    fn reset_generation_if_empty(&mut self) {
+        if self.heap.is_empty() {
+            self.next_generation = 0;
+        }
     }
 }
 
@@ -758,5 +770,37 @@ mod tests {
         assert!(record.heap_index.is_none());
         assert_eq!(record.sched_priority, 0);
         assert_eq!(record.sched_generation, 0);
+    }
+
+    #[test]
+    fn generation_wrap_preserves_fifo_within_same_priority() {
+        let mut arena = setup_arena(2);
+        let mut heap = IntrusivePriorityHeap::new();
+        heap.next_generation = u64::MAX;
+
+        heap.push(task(0), 9, &mut arena);
+        heap.push(task(1), 9, &mut arena);
+
+        assert_eq!(heap.pop(&mut arena), Some(task(0)));
+        assert_eq!(heap.pop(&mut arena), Some(task(1)));
+        assert_eq!(heap.next_generation, 0);
+    }
+
+    #[test]
+    fn generation_epoch_resets_when_heap_becomes_empty() {
+        let mut arena = setup_arena(3);
+        let mut heap = IntrusivePriorityHeap::new();
+        heap.next_generation = 41;
+
+        heap.push(task(0), 5, &mut arena);
+        assert_eq!(heap.next_generation, 42);
+        assert_eq!(heap.pop(&mut arena), Some(task(0)));
+        assert_eq!(heap.next_generation, 0);
+
+        heap.push(task(1), 7, &mut arena);
+        heap.push(task(2), 3, &mut arena);
+        assert_eq!(heap.next_generation, 2);
+        heap.clear(&mut arena);
+        assert_eq!(heap.next_generation, 0);
     }
 }
