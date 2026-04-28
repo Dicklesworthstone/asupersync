@@ -246,6 +246,77 @@ fn create_test_headers(scenario: &str) -> Vec<Header> {
     }
 }
 
+fn create_rfc7541_static_table_headers() -> Vec<Header> {
+    const STATIC_TABLE: [(&str, &str); 61] = [
+        (":authority", ""),
+        (":method", "GET"),
+        (":method", "POST"),
+        (":path", "/"),
+        (":path", "/index.html"),
+        (":scheme", "http"),
+        (":scheme", "https"),
+        (":status", "200"),
+        (":status", "204"),
+        (":status", "206"),
+        (":status", "304"),
+        (":status", "400"),
+        (":status", "404"),
+        (":status", "500"),
+        ("accept-charset", ""),
+        ("accept-encoding", "gzip, deflate"),
+        ("accept-language", ""),
+        ("accept-ranges", ""),
+        ("accept", ""),
+        ("access-control-allow-origin", ""),
+        ("age", ""),
+        ("allow", ""),
+        ("authorization", ""),
+        ("cache-control", ""),
+        ("content-disposition", ""),
+        ("content-encoding", ""),
+        ("content-language", ""),
+        ("content-length", ""),
+        ("content-location", ""),
+        ("content-range", ""),
+        ("content-type", ""),
+        ("cookie", ""),
+        ("date", ""),
+        ("etag", ""),
+        ("expect", ""),
+        ("expires", ""),
+        ("from", ""),
+        ("host", ""),
+        ("if-match", ""),
+        ("if-modified-since", ""),
+        ("if-none-match", ""),
+        ("if-range", ""),
+        ("if-unmodified-since", ""),
+        ("last-modified", ""),
+        ("link", ""),
+        ("location", ""),
+        ("max-forwards", ""),
+        ("proxy-authenticate", ""),
+        ("proxy-authorization", ""),
+        ("range", ""),
+        ("referer", ""),
+        ("refresh", ""),
+        ("retry-after", ""),
+        ("server", ""),
+        ("set-cookie", ""),
+        ("strict-transport-security", ""),
+        ("transfer-encoding", ""),
+        ("user-agent", ""),
+        ("vary", ""),
+        ("via", ""),
+        ("www-authenticate", ""),
+    ];
+
+    STATIC_TABLE
+        .into_iter()
+        .map(|(name, value)| Header::new(name, value))
+        .collect()
+}
+
 /// Simulates dynamic table state extraction (simplified for golden tests).
 fn extract_dynamic_table_state(_encoder_or_decoder: &str) -> DynamicTableStateGolden {
     // In a real implementation, we'd extract actual dynamic table state
@@ -557,6 +628,27 @@ fn test_hpack_static_table_hits() {
     ];
     let golden = test_hpack_encoding(&headers, false, "Headers with exact static table matches");
     assert_json_snapshot!("hpack_static_table_hits", golden);
+}
+
+#[test]
+fn test_hpack_static_table_all_entries_round_trip() {
+    let headers = create_rfc7541_static_table_headers();
+    let golden = test_hpack_round_trip(
+        &headers,
+        false,
+        "RFC 7541 Appendix A full static table in canonical order",
+    );
+
+    assert!(
+        golden.round_trip_successful,
+        "Full static table should round-trip successfully"
+    );
+    assert_eq!(
+        golden.encoded_bytes,
+        (0x81..=0xbd).collect::<Vec<_>>(),
+        "Each static table entry should encode as its indexed representation"
+    );
+    assert_json_snapshot!("hpack_static_table_all_entries_round_trip", golden);
 }
 
 #[test]

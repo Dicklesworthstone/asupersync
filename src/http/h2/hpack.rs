@@ -3829,4 +3829,73 @@ mod tests {
         // Verify round-trip correctness
         assert_eq!(test_headers, decoded_headers);
     }
+
+    #[test]
+    fn conformance_rfc7541_b3_response_encoding() {
+        /// RFC 7541 §B.3 Response Example Conformance Test
+        ///
+        /// Requirement Level: MUST
+        /// Section: B.3 (Response Examples)
+        /// Description: HPACK encoder MUST produce byte-for-byte identical output
+        ///             to RFC 7541 specification for standard response headers
+        ///
+        /// This test verifies our encoder produces the exact wire format specified
+        /// in RFC 7541 §B.3 response example, ensuring full specification compliance.
+
+        // RFC 7541 §B.3 response headers as specified
+        let headers = vec![
+            Header::new(":status", "302"),
+            Header::new("cache-control", "private"),
+            Header::new("date", "Mon, 21 Oct 2013 20:13:21 GMT"),
+            Header::new("location", "https://www.example.com"),
+        ];
+
+        // Expected wire format from RFC 7541 §B.3 (byte-for-byte specification)
+        let expected_rfc_wire: &[u8] = &[
+            0x48, 0x03, 0x33, 0x30, 0x32, 0x58, 0x07, 0x70, 0x72, 0x69, 0x76, 0x61, 0x74, 0x65,
+            0x61, 0x1d, 0x4d, 0x6f, 0x6e, 0x2c, 0x20, 0x32, 0x31, 0x20, 0x4f, 0x63, 0x74, 0x20,
+            0x32, 0x30, 0x31, 0x33, 0x20, 0x32, 0x30, 0x3a, 0x31, 0x33, 0x3a, 0x32, 0x31, 0x20,
+            0x47, 0x4d, 0x54, 0x6e, 0x17, 0x68, 0x74, 0x74, 0x70, 0x73, 0x3a, 0x2f, 0x2f, 0x77,
+            0x77, 0x77, 0x2e, 0x65, 0x78, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x2e, 0x63, 0x6f, 0x6d,
+        ];
+
+        // Configure encoder to match RFC specification (no Huffman encoding)
+        let mut encoder = Encoder::new();
+        encoder.set_use_huffman(false);
+
+        // Encode headers and capture actual output
+        let mut encoded = BytesMut::new();
+        encoder.encode(&headers, &mut encoded);
+
+        // CONFORMANCE CHECK: Byte-for-byte comparison with RFC specification
+        assert_eq!(
+            encoded.as_ref(),
+            expected_rfc_wire,
+            "CONFORMANCE FAILURE: RFC 7541 §B.3 encoder output diverges from specification\n\
+             Expected (RFC): {:02x?}\n\
+             Actual (ours):  {:02x?}\n\
+             \n\
+             This is a MUST-level requirement for HPACK conformance.\n\
+             Our encoder must produce identical byte sequences to ensure\n\
+             interoperability with other HPACK implementations.",
+            expected_rfc_wire,
+            encoded.as_ref()
+        );
+
+        // Verify decoder can parse our output (round-trip conformance)
+        let mut decoder = Decoder::new();
+        let mut encoded_bytes = encoded.freeze();
+        let decoded = decoder.decode(&mut encoded_bytes).expect(
+            "RFC 7541 §B.3 conformance: decoder must parse encoder output"
+        );
+
+        // Verify header semantic correctness
+        assert_eq!(decoded, headers,
+            "RFC 7541 §B.3 round-trip conformance: decoded headers must match original");
+
+        // Additional conformance checks
+        assert_eq!(decoded.len(), 4, "RFC 7541 §B.3: must encode exactly 4 headers");
+        assert_eq!(decoded[0].name, ":status", "RFC 7541 §B.3: first header must be :status");
+        assert_eq!(decoded[0].value, "302", "RFC 7541 §B.3: status value must be 302");
+    }
 }
