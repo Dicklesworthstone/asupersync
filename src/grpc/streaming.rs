@@ -105,6 +105,15 @@ impl<T> Request<T> {
             extensions: self.extensions,
         }
     }
+
+    /// Clone request metadata and typed extensions onto a new message.
+    pub(crate) fn snapshot<U>(&self, message: U) -> Request<U> {
+        Request {
+            metadata: self.metadata.clone(),
+            message,
+            extensions: self.extensions.clone(),
+        }
+    }
 }
 
 // ─── Extensions ──────────────────────────────────────────────────────────────
@@ -908,6 +917,24 @@ mod tests {
         let value = mapped.into_inner();
         crate::assert_with_log!(value == 84, "mapped", 84, value);
         crate::test_complete!("test_request_map");
+    }
+
+    #[test]
+    fn test_request_snapshot_preserves_metadata_and_extensions() {
+        init_test("test_request_snapshot_preserves_metadata_and_extensions");
+        let mut request = Request::new("hello");
+        request.metadata_mut().insert("x-custom", "value");
+        request.extensions_mut().insert_typed(7u32);
+
+        let snapshot = request.snapshot("world");
+        let metadata_ok = snapshot.metadata().get("x-custom").is_some();
+        let extension_ok = snapshot.extensions().get_typed::<u32>() == Some(&7);
+        let message_ok = snapshot.get_ref() == &"world";
+
+        crate::assert_with_log!(metadata_ok, "snapshot metadata", true, metadata_ok);
+        crate::assert_with_log!(extension_ok, "snapshot extension", true, extension_ok);
+        crate::assert_with_log!(message_ok, "snapshot message", true, message_ok);
+        crate::test_complete!("test_request_snapshot_preserves_metadata_and_extensions");
     }
 
     #[test]

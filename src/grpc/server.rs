@@ -732,7 +732,7 @@ impl Server {
         // BEFORE invoking. This matches the AuthInterceptor contract
         // where downstream response-side interceptors may need to
         // read the request that produced the response.
-        let request_snapshot = Request::with_metadata(Bytes::new(), request.metadata().clone());
+        let request_snapshot = request.snapshot(Bytes::new());
         let response_result = handler(request).await;
 
         // ── Phase 3: response-side chain (REVERSE order on success). ─
@@ -2519,6 +2519,38 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct AuthContextEchoInterceptor {
+        seen_principal: Arc<parking_lot::Mutex<Option<String>>>,
+    }
+
+    impl Interceptor for AuthContextEchoInterceptor {
+        fn intercept_request(&self, request: &mut Request<Bytes>) -> Result<(), Status> {
+            request.extensions_mut().insert_typed(
+                crate::grpc::interceptor::AuthContext::with_principal("svc-a")
+                    .with_scopes(["read:rpc"]),
+            );
+            Ok(())
+        }
+
+        fn intercept_response(&self, _response: &mut Response<Bytes>) -> Result<(), Status> {
+            Ok(())
+        }
+
+        fn intercept_response_with_request(
+            &self,
+            request: &Request<Bytes>,
+            _response: &mut Response<Bytes>,
+        ) -> Result<(), Status> {
+            let seen = request
+                .extensions()
+                .get_typed::<crate::grpc::interceptor::AuthContext>()
+                .map(|auth| auth.principal.clone());
+            *self.seen_principal.lock() = seen;
+            Ok(())
+        }
+    }
+
     fn block_on<F: Future>(fut: F) -> F::Output {
         use std::task::{Context, Waker};
         let waker = Waker::noop();
@@ -2670,6 +2702,28 @@ mod tests {
         }));
         let response = result.expect("dispatch must succeed");
         assert_eq!(response.get_ref().as_ref(), b"echo");
+    }
+
+    #[test]
+    fn dispatch_unary_preserves_auth_context_for_response_interceptors() {
+        init_test("dispatch_unary_preserves_auth_context_for_response_interceptors");
+
+        let seen_principal = Arc::new(parking_lot::Mutex::new(None));
+        let server = Server::builder()
+            .add_service(TestService)
+            .interceptor(AuthContextEchoInterceptor {
+                seen_principal: Arc::clone(&seen_principal),
+            })
+            .build();
+
+        let request = Request::with_metadata(Bytes::from_static(b"ping"), Metadata::new());
+        let result = block_on(server.dispatch_unary(request, |req| async move {
+            Ok(Response::new(req.into_inner()))
+        }));
+
+        let response = result.expect("dispatch must succeed");
+        assert_eq!(response.get_ref().as_ref(), b"ping");
+        assert_eq!(seen_principal.lock().clone(), Some("svc-a".to_string()));
     }
 
     #[test]
