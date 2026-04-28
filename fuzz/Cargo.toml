@@ -2544,3 +2544,15 @@ path = "fuzz_targets/qpack_huffman_literal_encoding.rs"
 test = false
 doc = false
 bench = false
+
+# Structure-aware gRPC codec message length-prefix + compression-flag fuzzer.
+# Tests src/grpc/codec.rs decode function with intelligent input generation
+# for gRPC message framing: 1 byte compression flag + 4 bytes big-endian length + payload.
+# Exercises compression flag validation (0/1/invalid), length boundary conditions,
+# malformed headers, buffer chunking strategies, and message sequence processing.
+[[bin]]
+name = "grpc_codec_length_prefix"
+path = "fuzz_targets/grpc_codec_length_prefix.rs"
+test = false
+doc = false
+bench = false
