@@ -118,7 +118,7 @@ impl ReadyDispatchInvarianceTest {
     pub fn new(config: ReadyDispatchInvarianceConfig) -> Self {
         Self {
             config,
-            rng: DetRng::with_seed(0x1234_5678_9abc_def0),
+            rng: DetRng::new(0x1234_5678_9abc_def0),
         }
     }
 
@@ -175,7 +175,7 @@ impl ReadyDispatchInvarianceTest {
     /// Fisher-Yates shuffle implementation using deterministic RNG.
     fn fisher_yates_shuffle<T>(&mut self, slice: &mut [T]) {
         for i in (1..slice.len()).rev() {
-            let j = self.rng.gen_range(0..=i);
+            let j = self.rng.next_usize(i + 1);
             slice.swap(i, j);
         }
     }

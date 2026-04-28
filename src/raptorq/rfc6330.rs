@@ -1787,9 +1787,12 @@ mod tests {
     /// as the first K encoding symbols in the specified order.
     #[test]
     fn rfc6330_section_4_4_systematic_encoder_reference_vector() {
-        use crate::encoding::{EncodingPipeline, EncodedSymbol};
         use crate::config::EncodingConfig;
-        use crate::types::{ObjectId, resource::{PoolConfig, SymbolPool}};
+        use crate::encoding::{EncodedSymbol, EncodingPipeline};
+        use crate::types::{
+            ObjectId,
+            resource::{PoolConfig, SymbolPool},
+        };
 
         /// RFC 6330 Section 4.4 Reference Vector Test Case
         /// Source: RFC 6330 Appendix A (conceptual example)
@@ -1813,13 +1816,13 @@ mod tests {
             requirement_level: "MUST",
             // Simple test payload: 16 bytes arranged as pattern for easy verification
             source_data: &[
-                0x41, 0x42, 0x43, 0x44,  // "ABCD" - Symbol 0
-                0x45, 0x46, 0x47, 0x48,  // "EFGH" - Symbol 1
-                0x49, 0x4A, 0x4B, 0x4C,  // "IJKL" - Symbol 2
-                0x4D, 0x4E, 0x4F, 0x50,  // "MNOP" - Symbol 3
+                0x41, 0x42, 0x43, 0x44, // "ABCD" - Symbol 0
+                0x45, 0x46, 0x47, 0x48, // "EFGH" - Symbol 1
+                0x49, 0x4A, 0x4B, 0x4C, // "IJKL" - Symbol 2
+                0x4D, 0x4E, 0x4F, 0x50, // "MNOP" - Symbol 3
             ],
-            symbol_size: 4,  // 4 bytes per symbol
-            expected_k: 4,   // Should produce exactly 4 source symbols
+            symbol_size: 4, // 4 bytes per symbol
+            expected_k: 4,  // Should produce exactly 4 source symbols
             systematic_property: true,
         };
 
@@ -1833,7 +1836,7 @@ mod tests {
         };
 
         let mut pipeline = EncodingPipeline::new(config, SymbolPool::new(PoolConfig::default()));
-        let object_id = ObjectId::new_for_test(0x4444);  // Deterministic object ID
+        let object_id = ObjectId::new_for_test(0x4444); // Deterministic object ID
 
         // Encode the source data and collect all symbols
         let symbols: Vec<EncodedSymbol> = pipeline
@@ -1858,7 +1861,10 @@ mod tests {
                 esi < test_vector.expected_k as u32,
                 "RFC6330-4.4-1: First {} symbols must be source symbols (ESI < K), \
                  but symbol {} has ESI {} >= K={}",
-                test_vector.expected_k, i, esi, test_vector.expected_k
+                test_vector.expected_k,
+                i,
+                esi,
+                test_vector.expected_k
             );
 
             // Verify the symbol data matches the original source data exactly
@@ -1888,8 +1894,7 @@ mod tests {
             let actual_esi = symbol.id().esi();
 
             assert_eq!(
-                actual_esi,
-                expected_esi,
+                actual_esi, expected_esi,
                 "RFC6330-4.4-1: Source symbols must appear in order. \
                  Symbol at position {} must have ESI {}, but has ESI {}",
                 i, expected_esi, actual_esi
@@ -1905,7 +1910,9 @@ mod tests {
                 expected_sbn,
                 "RFC6330-4.4-1: All symbols must have consistent Source Block Number. \
                  Symbol {} has SBN {}, expected SBN {}",
-                i, symbol.id().sbn(), expected_sbn
+                i,
+                symbol.id().sbn(),
+                expected_sbn
             );
         }
 
@@ -1932,10 +1939,13 @@ mod tests {
     /// RFC 6330 §5.3 systematic index table and §5.6 parameter relationships.
     #[test]
     fn rfc6330_section_5_systematic_encoder_parameter_conformance() {
-        use crate::raptorq::systematic::{SystematicParams, derive_systematic_params};
-        use crate::encoding::{EncodingPipeline, EncodedSymbol};
         use crate::config::EncodingConfig;
-        use crate::types::{ObjectId, resource::{PoolConfig, SymbolPool}};
+        use crate::encoding::{EncodedSymbol, EncodingPipeline};
+        use crate::raptorq::systematic::SystematicParams;
+        use crate::types::{
+            ObjectId,
+            resource::{PoolConfig, SymbolPool},
+        };
 
         /// RFC 6330 Section 5 Parameter Conformance Test Case
         /// Source: RFC 6330 Section 5.3 systematic index table requirements
@@ -1961,7 +1971,7 @@ mod tests {
         let test_vector = Rfc6330Section5Vector {
             test_id: "RFC6330-5.1-1",
             requirement_level: "MUST",
-            k: 10,  // K=10 maps to specific RFC 6330 Table 2 row
+            k: 10, // K=10 maps to specific RFC 6330 Table 2 row
             symbol_size: 8,
             source_data: (0..80).collect(), // 10 symbols * 8 bytes = 80 bytes
             // Expected values from RFC 6330 Table 2 for K=10
@@ -1972,8 +1982,9 @@ mod tests {
         };
 
         // RFC 6330 Section 5.3 Conformance Check 1: Parameter Derivation
-        let params = derive_systematic_params(test_vector.k, test_vector.symbol_size as usize)
-            .expect("RFC6330-5.1-1: Parameter derivation must succeed for supported K");
+        let params =
+            SystematicParams::try_for_source_block(test_vector.k, test_vector.symbol_size as usize)
+                .expect("RFC6330-5.1-1: Parameter derivation must succeed for supported K");
 
         assert_eq!(
             params.k, test_vector.k,
@@ -2020,7 +2031,8 @@ mod tests {
         assert!(
             params.w <= params.l,
             "RFC6330-5.1-1: W ≤ L constraint must hold. W={}, L={}",
-            params.w, params.l
+            params.w,
+            params.l
         );
 
         let expected_p = params.l - params.w;
@@ -2041,7 +2053,7 @@ mod tests {
         };
 
         let mut pipeline = EncodingPipeline::new(config, SymbolPool::new(PoolConfig::default()));
-        let object_id = ObjectId::new_for_test(0x5555);  // Deterministic object ID
+        let object_id = ObjectId::new_for_test(0x5555); // Deterministic object ID
 
         // Encode using derived parameters
         let symbols: Vec<EncodedSymbol> = pipeline
@@ -2063,7 +2075,9 @@ mod tests {
                 esi < test_vector.k as u32,
                 "RFC6330-5.1-1: Source symbol ESI must be < K under §5 constraints. \
                  Symbol {} has ESI {} ≥ K={}",
-                i, esi, test_vector.k
+                i,
+                esi,
+                test_vector.k
             );
 
             // Verify systematic data preservation

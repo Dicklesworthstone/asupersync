@@ -2457,4 +2457,109 @@ mod tests {
             proptest::prop_assert!(wire.is_empty(), "wire fully consumed after two decodes");
         }
     }
+
+    // ── Differential Conformance Tests vs tokio-util ────────────────────────────
+
+    /// Differential test: asupersync vs tokio-util on max_frame_length boundary.
+    ///
+    /// This test ensures our LengthDelimitedCodec matches tokio-util's behavior
+    /// exactly when frames exceed the max_frame_length limit, testing both
+    /// boundary conditions and error message compatibility.
+    #[cfg(test)]
+    #[test]
+    fn conformance_differential_max_frame_length_vs_tokio_util() {
+        use tokio_util::codec::{LengthDelimitedCodec as TokioCodec, Decoder as TokioDecoder};
+
+        let test_cases = [
+            ("exact_boundary", 100, 100),    // Exactly at max (should pass)
+            ("exceeds_by_one", 100, 101),    // Exceeds by 1 (should fail)
+            ("large_excess", 100, 1000),     // Large excess (should fail)
+            ("zero_max", 0, 1),              // Edge case: zero max
+        ];
+
+        for (case_name, max_len, frame_len) in test_cases {
+            // Build test frame data
+            let payload = vec![0xAB; frame_len];
+            let mut encoded = BytesMut::new();
+
+            // Encode with default settings (4-byte BE length prefix)
+            encoded.put_u32(frame_len as u32);
+            encoded.put_slice(&payload);
+
+            // Test our implementation
+            let mut our_codec = LengthDelimitedCodec::builder()
+                .max_frame_length(max_len)
+                .new_codec();
+            let mut our_buf = encoded.clone();
+            let our_result = our_codec.decode(&mut our_buf);
+
+            // Test tokio-util implementation
+            let mut tokio_codec = TokioCodec::builder()
+                .max_frame_len(max_len)
+                .new_codec();
+            let mut tokio_buf = encoded.clone();
+            let tokio_result = tokio_codec.decode(&mut tokio_buf);
+
+            // Compare results: both should succeed or both should fail
+            match (&our_result, &tokio_result) {
+                (Ok(Some(our_frame)), Ok(Some(tokio_frame))) => {
+                    // Both succeeded - frames should be identical
+                    assert_eq!(
+                        our_frame.as_ref(),
+                        tokio_frame.as_ref(),
+                        "Case {case_name}: decoded frames differ\n\
+                         Our frame:    {:?}\n\
+                         Tokio frame:  {:?}",
+                        our_frame.as_ref(),
+                        tokio_frame.as_ref()
+                    );
+                }
+                (Ok(None), Ok(None)) => {
+                    // Both indicate more data needed - acceptable
+                }
+                (Err(our_err), Err(tokio_err)) => {
+                    // Both failed - error kinds should match
+                    assert_eq!(
+                        our_err.kind(),
+                        tokio_err.kind(),
+                        "Case {case_name}: error kinds differ\n\
+                         Our error:    {our_err:?}\n\
+                         Tokio error:  {tokio_err:?}"
+                    );
+
+                    // Both should mention frame length or max length in error message
+                    let our_msg = our_err.to_string().to_lowercase();
+                    let tokio_msg = tokio_err.to_string().to_lowercase();
+                    assert!(
+                        (our_msg.contains("frame") && our_msg.contains("length")) ||
+                        (our_msg.contains("max") && our_msg.contains("frame")),
+                        "Case {case_name}: our error message should mention frame/length: {our_err}"
+                    );
+                    assert!(
+                        (tokio_msg.contains("frame") && tokio_msg.contains("length")) ||
+                        (tokio_msg.contains("max") && tokio_msg.contains("frame")),
+                        "Case {case_name}: tokio error message should mention frame/length: {tokio_err}"
+                    );
+                }
+                _ => {
+                    panic!(
+                        "Case {case_name}: result types differ\n\
+                         Our result:    {our_result:?}\n\
+                         Tokio result:  {tokio_result:?}"
+                    );
+                }
+            }
+
+            // Test buffer consumption behavior - both should consume the same amount
+            assert_eq!(
+                our_buf.len(),
+                tokio_buf.len(),
+                "Case {case_name}: buffer consumption differs\n\
+                 Our remaining:    {} bytes\n\
+                 Tokio remaining:  {} bytes",
+                our_buf.len(),
+                tokio_buf.len()
+            );
+        }
+    }
 }

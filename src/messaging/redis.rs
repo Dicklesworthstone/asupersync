@@ -1169,7 +1169,7 @@ impl std::fmt::Debug for RedisConfig {
                 #[cfg(feature = "tls")]
                 &self.tls_connector.as_ref().map(|_| "[REDACTED]"),
                 #[cfg(not(feature = "tls"))]
-                &"[TLS_DISABLED]"
+                &"[TLS_DISABLED]",
             )
             .field("protocol_limits", &self.protocol_limits)
             .field("pubsub_max_backlog", &self.pubsub_max_backlog)
@@ -1264,7 +1264,9 @@ impl RedisConfig {
         }
         #[cfg(not(feature = "tls"))]
         if use_tls {
-            return Err(RedisError::InvalidUrl("TLS support not enabled".to_string()));
+            return Err(RedisError::InvalidUrl(
+                "TLS support not enabled".to_string(),
+            ));
         }
 
         Ok(config)
@@ -1305,7 +1307,10 @@ impl AsyncWrite for RedisStream {
         }
     }
 
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), io::Error>> {
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), io::Error>> {
         match self.get_mut() {
             Self::Plain(stream) => Pin::new(stream).poll_flush(cx),
             #[cfg(feature = "tls")]
@@ -1313,7 +1318,10 @@ impl AsyncWrite for RedisStream {
         }
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), io::Error>> {
+    fn poll_shutdown(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), io::Error>> {
         match self.get_mut() {
             Self::Plain(stream) => Pin::new(stream).poll_shutdown(cx),
             #[cfg(feature = "tls")]
@@ -1321,7 +1329,6 @@ impl AsyncWrite for RedisStream {
         }
     }
 }
-
 
 #[derive(Debug)]
 struct RedisConnection {
@@ -1339,15 +1346,22 @@ impl RedisConnection {
         let stream = if config.use_tls {
             #[cfg(feature = "tls")]
             {
-                let tls_connector = config.tls_connector.as_ref()
-                    .ok_or_else(|| RedisError::InvalidUrl("TLS enabled but no connector configured".to_string()))?;
-                let tls_stream = tls_connector.connect(&config.host, tcp_stream).await
-                    .map_err(|e| RedisError::Io(io::Error::new(io::ErrorKind::ConnectionRefused, e)))?;
+                let tls_connector = config.tls_connector.as_ref().ok_or_else(|| {
+                    RedisError::InvalidUrl("TLS enabled but no connector configured".to_string())
+                })?;
+                let tls_stream = tls_connector
+                    .connect(&config.host, tcp_stream)
+                    .await
+                    .map_err(|e| {
+                        RedisError::Io(io::Error::new(io::ErrorKind::ConnectionRefused, e))
+                    })?;
                 RedisStream::Tls(tls_stream)
             }
             #[cfg(not(feature = "tls"))]
             {
-                return Err(RedisError::InvalidUrl("TLS support not enabled".to_string()));
+                return Err(RedisError::InvalidUrl(
+                    "TLS support not enabled".to_string(),
+                ));
             }
         } else {
             RedisStream::Plain(tcp_stream)
@@ -2902,12 +2916,11 @@ mod tests {
     use std::net::TcpListener as StdTcpListener;
     use std::pin::Pin;
 
-    use std::sync::mpsc;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::mpsc;
     use std::task::{Context, Poll, Waker};
     use std::thread;
     use std::time::Duration;
-    use crate::channel::oneshot;
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()
@@ -4369,15 +4382,13 @@ mod tests {
     impl RealRedisConfig {
         fn new() -> Self {
             let enabled = std::env::var("REAL_REDIS_TESTS").unwrap_or_default() == "true";
-            let redis_url = std::env::var("REDIS_URL")
-                .unwrap_or_else(|_| "redis://localhost:6379".to_string());
+            let redis_url =
+                std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string());
 
-            let config = RedisConfig::from_url(&redis_url).unwrap_or_else(|_| {
-                RedisConfig {
-                    host: "localhost".to_string(),
-                    port: 6379,
-                    ..Default::default()
-                }
+            let config = RedisConfig::from_url(&redis_url).unwrap_or_else(|_| RedisConfig {
+                host: "localhost".to_string(),
+                port: 6379,
+                ..Default::default()
             });
 
             // Production safety guards (Pattern 4 from testing-perfect-e2e-integration-tests)
@@ -4399,12 +4410,8 @@ mod tests {
             }
         }
 
-        fn to_redis_config(&self) -> RedisConfig {
-            RedisConfig {
-                host: self.host.clone(),
-                port: self.port,
-                ..Default::default()
-            }
+        fn url(&self) -> String {
+            format!("redis://{}:{}/0", self.host, self.port)
         }
     }
 
@@ -4526,41 +4533,47 @@ mod tests {
         let log = RedisTestLogger::new("real_redis_pubsub_ping_interleaved");
 
         run_test_with_cx(|cx| async move {
-            let redis_config = config.to_redis_config();
+            let redis_url = config.url();
             let channel_prefix = unique_key_prefix("ping-interleaved");
             let channel = format!("{}:chan", channel_prefix);
 
             log.phase("setup");
 
-            // Create Redis pubsub client with real Redis connection
-            let mut pubsub = RedisPubSub::new(redis_config.clone()).unwrap();
+            let client = RedisClient::connect(&cx, &redis_url)
+                .await
+                .expect("connect redis client");
+            let mut pubsub = client.pubsub(&cx).await.expect("open pubsub client");
 
             log.phase("subscribe");
 
             // Subscribe to real Redis channel
-            pubsub.subscribe(&cx, &channel).await.unwrap();
+            pubsub.subscribe(&cx, &[channel.as_str()]).await.unwrap();
             log.redis_operation("subscribe", "success", Some(&channel));
 
             log.phase("ping_with_message");
 
             // Send ping while message is pending (tests real Redis interleaving behavior)
-            let ping_future = pubsub.ping(&cx);
-
-            // In real Redis, we can't control timing as precisely as with mocks,
-            // but we can verify the ping succeeds even with concurrent pub/sub activity
-
-            let ping_result = ping_future.await;
-            assert!(ping_result.is_ok(), "Real Redis ping should succeed during pub/sub");
+            let ping_result = pubsub.ping(&cx, None).await;
+            assert!(
+                ping_result.is_ok(),
+                "Real Redis ping should succeed during pub/sub"
+            );
             log.redis_operation("ping", "success", None);
 
             log.phase("verify_subscription_intact");
 
             // Verify subscription is still active after ping
             // In real Redis, the subscription should remain intact
-            assert!(pubsub.is_subscribed(&channel), "Subscription should remain active after ping");
+            assert!(
+                pubsub
+                    .channels()
+                    .iter()
+                    .any(|existing| existing == &channel),
+                "Subscription should remain active after ping"
+            );
 
             log.phase("cleanup");
-            pubsub.unsubscribe(&cx, &channel).await.unwrap();
+            pubsub.unsubscribe(&cx, &[channel.as_str()]).await.unwrap();
             log.redis_operation("unsubscribe", "success", Some(&channel));
 
             log.test_end("pass");
@@ -4577,46 +4590,44 @@ mod tests {
         let log = RedisTestLogger::new("real_redis_pubsub_reconnect");
 
         run_test_with_cx(|cx| async move {
-            let redis_config = config.to_redis_config();
+            let redis_url = config.url();
             let channel_prefix = unique_key_prefix("reconnect");
             let channel = format!("{}:events", channel_prefix);
 
             log.phase("setup");
 
-            let mut pubsub = RedisPubSub::new(redis_config.clone()).unwrap();
+            let client = RedisClient::connect(&cx, &redis_url)
+                .await
+                .expect("connect redis client");
+            let mut pubsub = client.pubsub(&cx).await.expect("open pubsub client");
 
             log.phase("initial_connection");
 
             // Subscribe to real Redis
-            pubsub.subscribe(&cx, &channel).await.unwrap();
+            pubsub.subscribe(&cx, &[channel.as_str()]).await.unwrap();
             log.redis_operation("initial_subscribe", "success", Some(&channel));
 
             log.phase("force_reconnect");
 
-            // Force reconnection by disconnecting and reconnecting
-            // This tests real Redis reconnection behavior vs mock behavior
-            pubsub.disconnect().await;
-            log.redis_operation("disconnect", "success", None);
-
-            // Reconnect to real Redis server
             let reconnect_result = pubsub.reconnect(&cx).await;
-            assert!(reconnect_result.is_ok(), "Real Redis reconnection should succeed");
+            assert!(
+                reconnect_result.is_ok(),
+                "Real Redis reconnection should succeed"
+            );
             log.redis_operation("reconnect", "success", None);
 
-            log.phase("verify_clean_state");
+            log.phase("verify_restored_state");
 
-            // After reconnection, subscription state should be clean
-            // Real Redis behavior: subscriptions don't persist across connections
-            assert!(!pubsub.is_subscribed(&channel), "Subscriptions should not persist across reconnections in real Redis");
-
-            log.phase("resubscribe");
-
-            // Re-subscribe after reconnection
-            pubsub.subscribe(&cx, &channel).await.unwrap();
-            log.redis_operation("resubscribe", "success", Some(&channel));
+            assert!(
+                pubsub
+                    .channels()
+                    .iter()
+                    .any(|existing| existing == &channel),
+                "Tracked subscriptions should persist across reconnect and be restored"
+            );
 
             log.phase("cleanup");
-            pubsub.unsubscribe(&cx, &channel).await.unwrap();
+            pubsub.unsubscribe(&cx, &[channel.as_str()]).await.unwrap();
 
             log.test_end("pass");
         });
@@ -4632,33 +4643,39 @@ mod tests {
         let log = RedisTestLogger::new("real_redis_pubsub_cancellation");
 
         run_test_with_cx(|cx| async move {
-            let redis_config = config.to_redis_config();
+            let redis_url = config.url();
             let channel_prefix = unique_key_prefix("cancel");
             let channel = format!("{}:test", channel_prefix);
 
             log.phase("setup");
 
-            let mut pubsub = RedisPubSub::new(redis_config.clone()).unwrap();
+            let client = RedisClient::connect(&cx, &redis_url)
+                .await
+                .expect("connect redis client");
+            let mut pubsub = client.pubsub(&cx).await.expect("open pubsub client");
 
             log.phase("subscribe_with_cancellation");
 
-            // Start subscription but cancel it midway
-            let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
-
-            let subscribe_task = async {
-                pubsub.subscribe(&cx, &channel).await
-            };
-
-            // Cancel the subscription task
-            let _ = cancel_tx.send(());
-
-            // In real Redis, cancelled operations should properly clean up connection state
-            // This is different from mock behavior which might not handle cleanup properly
+            match crate::time::timeout(
+                cx.now(),
+                Duration::from_millis(1),
+                pubsub.subscribe(&cx, &[channel.as_str()]),
+            )
+            .await
+            {
+                Ok(Ok(())) => {
+                    log.redis_operation("subscribe", "completed_before_timeout", Some(&channel));
+                }
+                Ok(Err(err)) => panic!("real Redis subscribe failed unexpectedly: {err}"),
+                Err(_) => {
+                    log.redis_operation("subscribe", "timed_out", Some(&channel));
+                }
+            }
 
             log.phase("verify_connection_health");
 
             // Test that the connection is still healthy for future operations
-            let health_check = pubsub.ping(&cx).await;
+            let health_check = pubsub.ping(&cx, None).await;
 
             match health_check {
                 Ok(_) => {
@@ -4667,19 +4684,27 @@ mod tests {
                 Err(_) => {
                     // Real Redis might require reconnection after cancelled subscribe
                     let reconnect_result = pubsub.reconnect(&cx).await;
-                    assert!(reconnect_result.is_ok(), "Should be able to reconnect after cancellation");
+                    assert!(
+                        reconnect_result.is_ok(),
+                        "Should be able to reconnect after cancellation"
+                    );
                     log.redis_operation("health_check", "reconnect_required", None);
                 }
             }
 
             log.phase("verify_normal_operation");
 
-            // Verify normal operations work after cancellation
-            pubsub.subscribe(&cx, &channel).await.unwrap();
-            log.redis_operation("post_cancel_subscribe", "success", Some(&channel));
+            if !pubsub
+                .channels()
+                .iter()
+                .any(|existing| existing == &channel)
+            {
+                pubsub.subscribe(&cx, &[channel.as_str()]).await.unwrap();
+                log.redis_operation("post_cancel_subscribe", "success", Some(&channel));
+            }
 
             log.phase("cleanup");
-            pubsub.unsubscribe(&cx, &channel).await.unwrap();
+            pubsub.unsubscribe(&cx, &[channel.as_str()]).await.unwrap();
 
             log.test_end("pass");
         });
@@ -4695,18 +4720,20 @@ mod tests {
         let log = RedisTestLogger::new("real_redis_cmd_cancellation");
 
         run_test_with_cx(|cx| async move {
-            let redis_config = config.to_redis_config();
+            let redis_url = config.url();
             let key_prefix = unique_key_prefix("cmd-cancel");
 
             log.phase("setup");
 
-            let client = RedisClient::new(redis_config.clone()).unwrap();
+            let client = RedisClient::connect(&cx, &redis_url)
+                .await
+                .expect("connect redis client");
 
             log.phase("normal_operation");
 
             // Establish baseline with normal operation
             let baseline_key = format!("{}:baseline", key_prefix);
-            client.set(&cx, &baseline_key, b"test").await.unwrap();
+            client.set(&cx, &baseline_key, b"test", None).await.unwrap();
             log.redis_operation("baseline_set", "success", Some(&baseline_key));
 
             log.phase("cancelled_operation");
@@ -4716,27 +4743,42 @@ mod tests {
             let cancel_key = format!("{}:cancelled", key_prefix);
 
             // Start a potentially long operation
-            let set_task = client.set(&cx, &cancel_key, b"will_be_cancelled");
-
-            // Cancel the operation (simulated by timing out)
-            let timeout_result = crate::time::timeout(&cx, Duration::from_millis(1), set_task).await;
-
-            // Operation likely timed out, which is expected for this test
-            log.redis_operation("cancelled_set", "timeout", Some(&cancel_key));
+            match crate::time::timeout(
+                cx.now(),
+                Duration::from_millis(1),
+                client.set(&cx, &cancel_key, b"will_be_cancelled", None),
+            )
+            .await
+            {
+                Ok(Ok(())) => {
+                    log.redis_operation(
+                        "cancelled_set",
+                        "completed_before_timeout",
+                        Some(&cancel_key),
+                    );
+                }
+                Ok(Err(err)) => panic!("real Redis SET failed unexpectedly: {err}"),
+                Err(_) => {
+                    log.redis_operation("cancelled_set", "timed_out", Some(&cancel_key));
+                }
+            }
 
             log.phase("verify_connection_health");
 
             // Critical test: verify connection pool handles cancellation correctly in real Redis
             let health_key = format!("{}:health", key_prefix);
-            let health_result = client.set(&cx, &health_key, b"healthy").await;
+            let health_result = client.set(&cx, &health_key, b"healthy", None).await;
 
-            assert!(health_result.is_ok(), "Real Redis connection should recover from cancelled operations");
+            assert!(
+                health_result.is_ok(),
+                "Real Redis connection should recover from cancelled operations"
+            );
             log.redis_operation("post_cancel_health", "success", Some(&health_key));
 
             log.phase("cleanup");
-            let _ = client.del(&cx, &baseline_key).await;
-            let _ = client.del(&cx, &cancel_key).await;
-            let _ = client.del(&cx, &health_key).await;
+            let _ = client.del(&cx, &[baseline_key.as_str()]).await;
+            let _ = client.del(&cx, &[cancel_key.as_str()]).await;
+            let _ = client.del(&cx, &[health_key.as_str()]).await;
 
             log.test_end("pass");
         });
@@ -4752,22 +4794,30 @@ mod tests {
         let log = RedisTestLogger::new("real_redis_transaction_cancellation");
 
         run_test_with_cx(|cx| async move {
-            let redis_config = config.to_redis_config();
+            let redis_url = config.url();
             let key_prefix = unique_key_prefix("tx-cancel");
 
             log.phase("setup");
 
-            let client = RedisClient::new(redis_config.clone()).unwrap();
+            let client = RedisClient::connect(&cx, &redis_url)
+                .await
+                .expect("connect redis client");
 
             log.phase("normal_transaction");
 
             // Start with normal transaction to establish baseline
             let tx_key = format!("{}:tx", key_prefix);
-            let mut transaction = client.multi(&cx).await.unwrap();
-            transaction.set(&tx_key, b"normal").unwrap();
+            let mut transaction = client.transaction(&cx).await.unwrap();
+            transaction
+                .cmd(&cx, &["SET", tx_key.as_str(), "normal"])
+                .await
+                .unwrap();
             let tx_result = transaction.exec(&cx).await;
 
-            assert!(tx_result.is_ok(), "Normal transaction should succeed with real Redis");
+            assert!(
+                tx_result.is_ok(),
+                "Normal transaction should succeed with real Redis"
+            );
             log.redis_operation("normal_transaction", "success", Some(&tx_key));
 
             log.phase("cancelled_transaction");
@@ -4776,36 +4826,56 @@ mod tests {
             let cancel_key = format!("{}:cancel", key_prefix);
 
             // Simulate cancellation during MULTI command
-            let multi_task = client.multi(&cx);
-            let timeout_result = crate::time::timeout(&cx, Duration::from_millis(1), multi_task).await;
-
-            // Transaction begin was cancelled/timed out
-            log.redis_operation("cancelled_multi", "timeout", Some(&cancel_key));
+            match crate::time::timeout(cx.now(), Duration::from_millis(1), client.transaction(&cx))
+                .await
+            {
+                Ok(Ok(transaction)) => {
+                    drop(transaction);
+                    log.redis_operation(
+                        "cancelled_multi",
+                        "completed_before_timeout",
+                        Some(&cancel_key),
+                    );
+                }
+                Ok(Err(err)) => panic!("real Redis MULTI failed unexpectedly: {err}"),
+                Err(_) => {
+                    log.redis_operation("cancelled_multi", "timed_out", Some(&cancel_key));
+                }
+            }
 
             log.phase("verify_connection_recovery");
 
             // Real Redis should handle cancelled transaction begin cleanly
             let recovery_key = format!("{}:recovery", key_prefix);
-            let recovery_result = client.set(&cx, &recovery_key, b"recovered").await;
+            let recovery_result = client.set(&cx, &recovery_key, b"recovered", None).await;
 
-            assert!(recovery_result.is_ok(), "Real Redis should recover from cancelled transaction begin");
+            assert!(
+                recovery_result.is_ok(),
+                "Real Redis should recover from cancelled transaction begin"
+            );
             log.redis_operation("post_cancel_recovery", "success", Some(&recovery_key));
 
             log.phase("verify_new_transaction");
 
             // Verify new transaction works after cancellation
             let new_tx_key = format!("{}:new_tx", key_prefix);
-            let mut new_transaction = client.multi(&cx).await.unwrap();
-            new_transaction.set(&new_tx_key, b"new").unwrap();
+            let mut new_transaction = client.transaction(&cx).await.unwrap();
+            new_transaction
+                .cmd(&cx, &["SET", new_tx_key.as_str(), "new"])
+                .await
+                .unwrap();
             let new_tx_result = new_transaction.exec(&cx).await;
 
-            assert!(new_tx_result.is_ok(), "New transaction should work after cancellation recovery");
+            assert!(
+                new_tx_result.is_ok(),
+                "New transaction should work after cancellation recovery"
+            );
             log.redis_operation("new_transaction", "success", Some(&new_tx_key));
 
             log.phase("cleanup");
-            let _ = client.del(&cx, &tx_key).await;
-            let _ = client.del(&cx, &recovery_key).await;
-            let _ = client.del(&cx, &new_tx_key).await;
+            let _ = client.del(&cx, &[tx_key.as_str()]).await;
+            let _ = client.del(&cx, &[recovery_key.as_str()]).await;
+            let _ = client.del(&cx, &[new_tx_key.as_str()]).await;
 
             log.test_end("pass");
         });
@@ -4821,19 +4891,24 @@ mod tests {
         let log = RedisTestLogger::new("real_redis_transaction_queue_cancel");
 
         run_test_with_cx(|cx| async move {
-            let redis_config = config.to_redis_config();
+            let redis_url = config.url();
             let key_prefix = unique_key_prefix("queue-cancel");
 
             log.phase("setup");
 
-            let client = RedisClient::new(redis_config.clone()).unwrap();
+            let client = RedisClient::connect(&cx, &redis_url)
+                .await
+                .expect("connect redis client");
 
             log.phase("queue_transaction");
 
             // Create a queued transaction (MULTI without immediate EXEC)
             let queue_key = format!("{}:queued", key_prefix);
-            let mut transaction = client.multi(&cx).await.unwrap();
-            transaction.set(&queue_key, b"queued_value").unwrap();
+            let mut transaction = client.transaction(&cx).await.unwrap();
+            transaction
+                .cmd(&cx, &["SET", queue_key.as_str(), "queued_value"])
+                .await
+                .unwrap();
             // Don't exec yet - keep it queued
 
             log.redis_operation("transaction_queued", "pending", Some(&queue_key));
@@ -4851,10 +4926,10 @@ mod tests {
             let get_result = client.get(&cx, &queue_key).await;
 
             match get_result {
-                Ok(value) if value == b"queued_value" => {
+                Ok(Some(value)) if value.as_slice() == b"queued_value" => {
                     panic!("Dropped transaction should NOT have committed in real Redis");
                 }
-                Ok(_) | Err(_) => {
+                Ok(None) | Ok(Some(_)) | Err(_) => {
                     // Good: either key doesn't exist or has different value
                     log.redis_operation("verify_fail_closed", "correct_behavior", Some(&queue_key));
                 }
@@ -4864,14 +4939,17 @@ mod tests {
 
             // Connection should remain healthy after dropped transaction
             let health_key = format!("{}:health", key_prefix);
-            let health_result = client.set(&cx, &health_key, b"healthy").await;
+            let health_result = client.set(&cx, &health_key, b"healthy", None).await;
 
-            assert!(health_result.is_ok(), "Connection should be healthy after dropped transaction");
+            assert!(
+                health_result.is_ok(),
+                "Connection should be healthy after dropped transaction"
+            );
             log.redis_operation("connection_health", "success", Some(&health_key));
 
             log.phase("cleanup");
-            let _ = client.del(&cx, &queue_key).await;
-            let _ = client.del(&cx, &health_key).await;
+            let _ = client.del(&cx, &[queue_key.as_str()]).await;
+            let _ = client.del(&cx, &[health_key.as_str()]).await;
 
             log.test_end("pass");
         });
@@ -4887,12 +4965,14 @@ mod tests {
         let log = RedisTestLogger::new("real_redis_pipeline_errors");
 
         run_test_with_cx(|cx| async move {
-            let redis_config = config.to_redis_config();
+            let redis_url = config.url();
             let key_prefix = unique_key_prefix("pipeline-err");
 
             log.phase("setup");
 
-            let client = RedisClient::new(redis_config.clone()).unwrap();
+            let client = RedisClient::connect(&cx, &redis_url)
+                .await
+                .expect("connect redis client");
 
             log.phase("setup_test_data");
 
@@ -4901,18 +4981,18 @@ mod tests {
             let key2 = format!("{}:second", key_prefix);
             let key3 = format!("{}:third", key_prefix);
 
-            client.set(&cx, &key1, b"first").await.unwrap();
-            client.set(&cx, &key3, b"third").await.unwrap();
-            // key2 deliberately not set to cause error
+            client.set(&cx, &key1, b"first", None).await.unwrap();
+            client.set(&cx, &key2, b"not-an-int", None).await.unwrap();
+            client.set(&cx, &key3, b"third", None).await.unwrap();
 
             log.phase("execute_pipeline");
 
             // Create pipeline with intentional error in middle command
-            let pipeline_result = client.pipeline(&cx, |pipe| {
-                pipe.get(&key1); // Should succeed
-                pipe.incr(&key2); // Should fail - key doesn't exist and can't be incremented
-                pipe.get(&key3); // Should succeed
-            }).await;
+            let mut pipeline = client.pipeline();
+            pipeline.cmd(&["GET", key1.as_str()]);
+            pipeline.cmd(&["INCR", key2.as_str()]);
+            pipeline.cmd(&["GET", key3.as_str()]);
+            let pipeline_result = pipeline.exec(&cx).await;
 
             log.redis_operation("pipeline_execution", "completed", None);
 
@@ -4947,23 +5027,29 @@ mod tests {
                         other => panic!("Third pipeline result should be 'third', got {:?}", other),
                     }
                 }
-                Err(e) => panic!("Pipeline should not fail entirely due to single command error: {}", e),
+                Err(e) => panic!(
+                    "Pipeline should not fail entirely due to single command error: {}",
+                    e
+                ),
             }
 
             log.phase("verify_connection_health");
 
             // Connection should remain healthy after pipeline with errors
             let health_key = format!("{}:health", key_prefix);
-            let health_result = client.set(&cx, &health_key, b"healthy").await;
+            let health_result = client.set(&cx, &health_key, b"healthy", None).await;
 
-            assert!(health_result.is_ok(), "Connection should remain healthy after pipeline errors");
+            assert!(
+                health_result.is_ok(),
+                "Connection should remain healthy after pipeline errors"
+            );
             log.redis_operation("post_pipeline_health", "success", Some(&health_key));
 
             log.phase("cleanup");
-            let _ = client.del(&cx, &key1).await;
-            let _ = client.del(&cx, &key2).await;
-            let _ = client.del(&cx, &key3).await;
-            let _ = client.del(&cx, &health_key).await;
+            let _ = client.del(&cx, &[key1.as_str()]).await;
+            let _ = client.del(&cx, &[key2.as_str()]).await;
+            let _ = client.del(&cx, &[key3.as_str()]).await;
+            let _ = client.del(&cx, &[health_key.as_str()]).await;
 
             log.test_end("pass");
         });
@@ -4979,19 +5065,24 @@ mod tests {
         let log = RedisTestLogger::new("real_redis_transaction_errors");
 
         run_test_with_cx(|cx| async move {
-            let redis_config = config.to_redis_config();
+            let redis_url = config.url();
             let key_prefix = unique_key_prefix("tx-err");
 
             log.phase("setup");
 
-            let client = RedisClient::new(redis_config.clone()).unwrap();
+            let client = RedisClient::connect(&cx, &redis_url)
+                .await
+                .expect("connect redis client");
 
             log.phase("normal_transaction");
 
             // First establish normal transaction works
             let normal_key = format!("{}:normal", key_prefix);
-            let mut normal_tx = client.multi(&cx).await.unwrap();
-            normal_tx.set(&normal_key, b"normal_value").unwrap();
+            let mut normal_tx = client.transaction(&cx).await.unwrap();
+            normal_tx
+                .cmd(&cx, &["SET", normal_key.as_str(), "normal_value"])
+                .await
+                .unwrap();
             let normal_result = normal_tx.exec(&cx).await;
 
             assert!(normal_result.is_ok(), "Normal transaction should succeed");
@@ -5003,27 +5094,48 @@ mod tests {
             let error_key = format!("{}:error", key_prefix);
             let nonexist_key = format!("{}:nonexistent", key_prefix);
 
-            let mut error_tx = client.multi(&cx).await.unwrap();
-            error_tx.set(&error_key, b"before_error").unwrap();
-            error_tx.incr(&nonexist_key).unwrap(); // This should cause an error in real Redis
-            error_tx.set(&error_key, b"after_error").unwrap();
+            client
+                .set(&cx, &nonexist_key, b"not-an-int", None)
+                .await
+                .unwrap();
+            let mut error_tx = client.transaction(&cx).await.unwrap();
+            error_tx
+                .cmd(&cx, &["SET", error_key.as_str(), "before_error"])
+                .await
+                .unwrap();
+            error_tx
+                .cmd(&cx, &["INCR", nonexist_key.as_str()])
+                .await
+                .unwrap();
+            error_tx
+                .cmd(&cx, &["SET", error_key.as_str(), "after_error"])
+                .await
+                .unwrap();
 
             let error_result = error_tx.exec(&cx).await;
 
             log.phase("verify_error_behavior");
 
-            // Real Redis transaction behavior with errors
             match error_result {
                 Ok(results) => {
-                    // Redis executed the transaction but some commands failed
-                    log.redis_operation("transaction_with_errors", "partial_success", Some(&error_key));
-
-                    // Verify the structure of results matches real Redis behavior
-                    assert!(results.len() >= 2, "Transaction should return results for all commands");
+                    log.redis_operation(
+                        "transaction_with_errors",
+                        "partial_success",
+                        Some(&error_key),
+                    );
+                    assert_eq!(
+                        results.len(),
+                        3,
+                        "Transaction should return results for all queued commands"
+                    );
+                    assert!(
+                        matches!(&results[1], RespValue::Error(message) if message.to_ascii_lowercase().contains("not an integer")),
+                        "Second transaction result should be an integer-type Redis error, got {:?}",
+                        results[1]
+                    );
                 }
-                Err(_) => {
-                    // Some Redis configurations might abort the entire transaction on error
-                    log.redis_operation("transaction_with_errors", "aborted", Some(&error_key));
+                Err(err) => {
+                    panic!("EXEC should surface per-command errors inside the result array: {err}")
                 }
             }
 
@@ -5031,28 +5143,37 @@ mod tests {
 
             // Most important: connection should remain usable after transaction error
             let recovery_key = format!("{}:recovery", key_prefix);
-            let recovery_result = client.set(&cx, &recovery_key, b"recovered").await;
+            let recovery_result = client.set(&cx, &recovery_key, b"recovered", None).await;
 
-            assert!(recovery_result.is_ok(), "Connection should recover after transaction error");
+            assert!(
+                recovery_result.is_ok(),
+                "Connection should recover after transaction error"
+            );
             log.redis_operation("post_error_recovery", "success", Some(&recovery_key));
 
             log.phase("verify_new_transaction");
 
             // New transaction should work normally
             let new_key = format!("{}:new", key_prefix);
-            let mut new_tx = client.multi(&cx).await.unwrap();
-            new_tx.set(&new_key, b"new_value").unwrap();
+            let mut new_tx = client.transaction(&cx).await.unwrap();
+            new_tx
+                .cmd(&cx, &["SET", new_key.as_str(), "new_value"])
+                .await
+                .unwrap();
             let new_result = new_tx.exec(&cx).await;
 
-            assert!(new_result.is_ok(), "New transaction should work after error recovery");
+            assert!(
+                new_result.is_ok(),
+                "New transaction should work after error recovery"
+            );
             log.redis_operation("new_transaction", "success", Some(&new_key));
 
             log.phase("cleanup");
-            let _ = client.del(&cx, &normal_key).await;
-            let _ = client.del(&cx, &error_key).await;
-            let _ = client.del(&cx, &nonexist_key).await;
-            let _ = client.del(&cx, &recovery_key).await;
-            let _ = client.del(&cx, &new_key).await;
+            let _ = client.del(&cx, &[normal_key.as_str()]).await;
+            let _ = client.del(&cx, &[error_key.as_str()]).await;
+            let _ = client.del(&cx, &[nonexist_key.as_str()]).await;
+            let _ = client.del(&cx, &[recovery_key.as_str()]).await;
+            let _ = client.del(&cx, &[new_key.as_str()]).await;
 
             log.test_end("pass");
         });

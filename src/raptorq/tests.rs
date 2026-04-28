@@ -600,7 +600,7 @@ fn send_symbols_directly() {
 
 mod conformance {
     use crate::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
-    use crate::raptorq::gf256::gf256_addmul_slice;
+    use crate::raptorq::gf256::{Gf256, gf256_addmul_slice};
     use crate::raptorq::rfc6330::repair_indices_for_esi;
     use crate::raptorq::systematic::SystematicEncoder;
     use crate::raptorq::test_log_schema::UnitLogEntry;
@@ -2949,5 +2949,80 @@ mod encoder_invariants {
                 "{context} repair symbol esi={esi} must match GF(256) projection"
             );
         }
+    }
+
+    #[test]
+    fn rfc6330_repair_tuple_reference_vector_matches_codec_equations() {
+        let k = 10;
+        let symbol_size = 24;
+        let seed = 123u64;
+        let esi = 100u32;
+        let replay_ref = "replay:rq-u-rfc6330-repair-tuple-reference-vector-v1";
+        let context = failure_context(
+            "RQ-U-RFC6330-REPAIR-TUPLE-REFERENCE-VECTOR",
+            seed,
+            &format!("k={k},symbol_size={symbol_size},esi={esi}"),
+            replay_ref,
+        );
+
+        let source: Vec<Vec<u8>> = (0..k)
+            .map(|i| {
+                (0..symbol_size)
+                    .map(|j| ((i * 17 + j * 29 + 5) % 256) as u8)
+                    .collect()
+            })
+            .collect();
+
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed)
+            .unwrap_or_else(|| panic!("{context} encoder creation should succeed"));
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+
+        // RFC 6330 tuple reference vector for K=10, X=100:
+        // LtTuple { d: 2, a: 13, b: 10, d1: 2, a1: 8, b1: 5 }.
+        // With W=17 and P=10 this expands to LT columns [10, 6]
+        // and PI columns [17 + 5, 17 + 2].
+        let expected_columns = vec![10usize, 6, 22, 19];
+        let expected_coefficients = vec![Gf256::ONE; expected_columns.len()];
+
+        let (encoder_columns, encoder_coefficients) =
+            encoder.params().rfc_repair_equation(esi).unwrap_or_else(|err| {
+                panic!("{context} encoder RFC repair equation should succeed; got {err:?}")
+            });
+        let (decoder_columns, decoder_coefficients) =
+            decoder.repair_equation(esi).unwrap_or_else(|err| {
+                panic!("{context} decoder repair equation should succeed; got {err:?}")
+            });
+
+        assert_eq!(
+            encoder_columns, expected_columns,
+            "{context} encoder RFC repair columns must match the fixed RFC reference vector"
+        );
+        assert_eq!(
+            encoder_coefficients, expected_coefficients,
+            "{context} encoder RFC repair coefficients must stay in GF(256) identity form"
+        );
+        assert_eq!(
+            decoder_columns, expected_columns,
+            "{context} decoder repair columns must match the fixed RFC reference vector"
+        );
+        assert_eq!(
+            decoder_coefficients, expected_coefficients,
+            "{context} decoder repair coefficients must stay in GF(256) identity form"
+        );
+
+        let repair = encoder.repair_symbol(esi);
+        let mut expected = vec![0u8; symbol_size];
+        for &column in &expected_columns {
+            gf256_addmul_slice(
+                &mut expected,
+                encoder.intermediate_symbol(column),
+                Gf256::ONE,
+            );
+        }
+
+        assert_eq!(
+            repair, expected,
+            "{context} repair bytes must equal the manual RFC tuple projection"
+        );
     }
 }

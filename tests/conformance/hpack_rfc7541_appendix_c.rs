@@ -9,8 +9,8 @@
 //! - C.5: Literal Header Field without Indexing — Indexed Name
 //! - C.6: Literal Header Field with Never Index — Indexed Name
 
-use asupersync::bytes::Bytes;
-use asupersync::http::h2::hpack::{Decoder, Header};
+use asupersync::bytes::{Bytes, BytesMut};
+use asupersync::http::h2::hpack::{Decoder, Encoder, Header};
 
 /// Basic test to verify the decoder is working
 #[test]
@@ -324,6 +324,40 @@ fn rfc7541_appendix_c_integration_request_with_huffman() {
     assert_eq!(headers[2].value, "/");
     assert_eq!(headers[3].name, ":authority");
     assert_eq!(headers[3].value, "www.example.com");
+}
+
+/// RFC 7541 Appendix C.4.1 exact wire image for the first Huffman-coded request.
+#[test]
+#[allow(dead_code)]
+fn rfc7541_c4_1_first_request_exact_wire_with_huffman() {
+    let headers = vec![
+        Header::new(":method", "GET"),
+        Header::new(":scheme", "http"),
+        Header::new(":path", "/"),
+        Header::new(":authority", "www.example.com"),
+    ];
+    let expected_wire: &[u8] = &[
+        0x82, 0x86, 0x84, 0x41, 0x8c, 0xf1, 0xe3, 0xc2, 0xe5, 0xf2, 0x3a, 0x6b, 0xa0, 0xab, 0x90,
+        0xf4, 0xff,
+    ];
+
+    let mut decoder = Decoder::new();
+    let mut bytes = Bytes::copy_from_slice(expected_wire);
+    let decoded = decoder
+        .decode(&mut bytes)
+        .expect("RFC 7541 C.4.1 decode should succeed");
+    assert_eq!(decoded, headers);
+
+    let mut encoder = Encoder::new();
+    encoder.set_use_huffman(true);
+    let mut encoded = BytesMut::new();
+    encoder.encode(&headers, &mut encoded);
+
+    assert_eq!(
+        encoded.as_ref(),
+        expected_wire,
+        "RFC 7541 C.4.1 Huffman request wire image must match exactly"
+    );
 }
 
 /// RFC 7541 Appendix C Integration Test: Response Headers

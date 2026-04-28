@@ -1404,9 +1404,7 @@ mod tests {
     )]
     use super::*;
     use crate::cx::Cx;
-    use crate::time::TimeDriver;
     use serde_json::json;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Instant;
 
@@ -2115,8 +2113,11 @@ mod tests {
 
             // Production safety guard
             assert!(
-                !nats_url.contains("prod") && !nats_url.contains("live") &&
-                (nats_url.contains("localhost") || nats_url.contains("127.0.0.1") || nats_url.contains("test")),
+                !nats_url.contains("prod")
+                    && !nats_url.contains("live")
+                    && (nats_url.contains("localhost")
+                        || nats_url.contains("127.0.0.1")
+                        || nats_url.contains("test")),
                 "SAFETY: Test harness must not connect to production NATS. Got: {}",
                 nats_url
             );
@@ -2163,7 +2164,8 @@ mod tests {
         }
 
         fn track_consumer(&mut self, stream: &str, consumer: &str) {
-            self.cleanup_consumers.push((stream.to_string(), consumer.to_string()));
+            self.cleanup_consumers
+                .push((stream.to_string(), consumer.to_string()));
         }
 
         async fn cleanup(&mut self, client: &mut NatsClient, cx: &Cx) {
@@ -2257,7 +2259,8 @@ mod tests {
 
     /// Factory for creating realistic test streams with randomized names
     fn create_test_stream_config(test_name: &str) -> StreamConfig {
-        let stream_name = format!("TEST_{}_{}_{}",
+        let stream_name = format!(
+            "TEST_{}_{}_{}",
             test_name.to_uppercase(),
             std::process::id(),
             std::thread::current().id().as_u64() % 10000
@@ -2273,7 +2276,8 @@ mod tests {
 
     /// Factory for creating realistic test consumers with randomized names
     fn create_test_consumer_config(test_name: &str) -> ConsumerConfig {
-        let consumer_name = format!("test_consumer_{}_{}_{}",
+        let consumer_name = format!(
+            "test_consumer_{}_{}_{}",
             test_name,
             std::process::id(),
             std::thread::current().id().as_u64() % 10000
@@ -2290,8 +2294,8 @@ mod tests {
     // Or set up CI to run integration tests against a test NATS instance.
 
     #[ignore = "requires real NATS server - run with NATS_TEST_URL"]
-    #[tokio::test]
-    async fn test_jetstream_consumer_pull_real_server() {
+    #[test]
+    fn test_jetstream_consumer_pull_real_server() {
         let mut harness = JetStreamTestHarness::new("jetstream_integration", "consumer_pull");
         let cx = Cx::root(); // Simple context for test
 
@@ -2344,8 +2348,8 @@ mod tests {
     }
 
     #[ignore = "requires real NATS server - run with NATS_TEST_URL"]
-    #[tokio::test]
-    async fn test_jetstream_message_ack_nack_real_server() {
+    #[test]
+    fn test_jetstream_message_ack_nack_real_server() {
         let mut harness = JetStreamTestHarness::new("jetstream_integration", "message_ack_nack");
         let cx = Cx::root();
 
@@ -2368,8 +2372,8 @@ mod tests {
     }
 
     #[ignore = "requires real NATS server - run with NATS_TEST_URL"]
-    #[tokio::test]
-    async fn test_jetstream_publish_with_deduplication() {
+    #[test]
+    fn test_jetstream_publish_with_deduplication() {
         let mut harness = JetStreamTestHarness::new("jetstream_integration", "deduplication");
         let cx = Cx::root();
 
@@ -2384,8 +2388,8 @@ mod tests {
     }
 
     #[ignore = "requires real NATS server - run with NATS_TEST_URL"]
-    #[tokio::test]
-    async fn test_jetstream_consumer_timeout_behavior() {
+    #[test]
+    fn test_jetstream_consumer_timeout_behavior() {
         let mut harness = JetStreamTestHarness::new("jetstream_integration", "consumer_timeout");
         let cx = Cx::root();
 
@@ -2400,8 +2404,8 @@ mod tests {
     }
 
     #[ignore = "requires real NATS server - run with NATS_TEST_URL"]
-    #[tokio::test]
-    async fn test_jetstream_connection_failure_recovery() {
+    #[test]
+    fn test_jetstream_connection_failure_recovery() {
         let mut harness = JetStreamTestHarness::new("jetstream_integration", "connection_recovery");
         let cx = Cx::root();
 

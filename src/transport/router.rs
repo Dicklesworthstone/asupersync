@@ -1853,7 +1853,10 @@ impl SymbolDispatcher {
         };
 
         // Use router to resolve endpoints with load balancing strategy
-        let routes = match self.router.route_multicast(symbol.symbol(), count, now_fn()) {
+        let routes = match self
+            .router
+            .route_multicast(symbol.symbol(), count, now_fn())
+        {
             Ok(routes) => routes,
             Err(RoutingError::NoHealthyEndpoints { object_id }) => {
                 return Err(DispatchError::RoutingFailed(
@@ -2582,7 +2585,9 @@ mod tests {
         // Remove endpoints 2 and 6 (membership churn)
         let reduced_endpoints: Vec<Arc<Endpoint>> = endpoints
             .iter()
-            .filter(|endpoint| endpoint.id != EndpointId::new_for_test(2) && endpoint.id != EndpointId::new_for_test(6))
+            .filter(|endpoint| {
+                endpoint.id != EndpointId::new(2) && endpoint.id != EndpointId::new(6)
+            })
             .cloned()
             .collect();
 
@@ -2602,7 +2607,7 @@ mod tests {
 
         let surviving_in_churn: Vec<_> = churn_selected
             .iter()
-            .filter(|&&id| original_selected.contains(id))
+            .filter(|&&id| original_selected.contains(&id))
             .copied()
             .collect();
 
@@ -2891,7 +2896,7 @@ mod tests {
 
         // Lookup unknown object falls back to default
         let other_oid = ObjectId::new_for_test(999);
-        let found = table.lookup(&RouteKey::Object(other_oid));
+        let found = table.lookup(&RouteKey::Object(other_oid), Time::ZERO);
         assert!(found.is_some()); // Default route
     }
 
@@ -2914,7 +2919,9 @@ mod tests {
         let router = SymbolRouter::new(table.clone());
         let symbol = Symbol::new_for_test(42, 0, 0, &[1, 2, 3]);
 
-        let initial = router.route(&symbol, Time::ZERO).expect("initial specific route");
+        let initial = router
+            .route(&symbol, Time::ZERO)
+            .expect("initial specific route");
         assert_eq!(initial.endpoint.id, specific.id);
 
         let removed = table
@@ -2923,7 +2930,9 @@ mod tests {
         assert_eq!(removed.id, specific.id);
         assert!(table.get_endpoint(specific.id).is_none());
 
-        let routed = router.route(&symbol).expect("fallback route after removal");
+        let routed = router
+            .route(&symbol, Time::ZERO)
+            .expect("fallback route after removal");
         assert_eq!(routed.endpoint.id, fallback.id);
 
         assert!(
@@ -2947,13 +2956,13 @@ mod tests {
             .remove_endpoint(endpoint.id)
             .expect("default endpoint removed");
         assert_eq!(removed.id, endpoint.id);
-        assert!(table.lookup(&RouteKey::Default).is_none());
+        assert!(table.lookup(&RouteKey::Default, Time::ZERO).is_none());
         assert!(table.dispatchable_endpoints().is_empty());
 
         let router = SymbolRouter::new(table);
         let symbol = Symbol::new_for_test(1, 0, 0, &[9]);
         assert!(matches!(
-            router.route(&symbol),
+            router.route(&symbol, Time::ZERO),
             Err(RoutingError::NoRoute { .. })
         ));
     }
@@ -3145,7 +3154,9 @@ mod tests {
 
         let router = SymbolRouter::new(table).with_local_preference(local_region);
         let symbol = Symbol::new_for_test(42, 0, 0, &[1, 2, 3]);
-        let result = router.route(&symbol, Time::ZERO).expect("route with local preference");
+        let result = router
+            .route(&symbol, Time::ZERO)
+            .expect("route with local preference");
 
         assert_eq!(result.endpoint.id, local.id);
         assert!(!result.is_fallback);

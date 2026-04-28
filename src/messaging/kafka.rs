@@ -2006,13 +2006,15 @@ pub fn fuzz_parse_kafka_error_response(data: &[u8]) -> Result<KafkaError, String
         11..=20 => Ok(KafkaError::InvalidTopic(message)),
         21..=30 => Ok(KafkaError::MessageTooLarge {
             size: (error_code as usize).saturating_mul(100),
-            max_size: 1024 * 1024
+            max_size: 1024 * 1024,
         }),
         31..=40 => Ok(KafkaError::Transaction(message)),
         41..=50 => Ok(KafkaError::QueueFull),
         51..=60 => Ok(KafkaError::Config(message)),
         61..=70 => Ok(KafkaError::Cancelled),
-        _ => Ok(KafkaError::Protocol(format!("unknown error code: {error_code}"))),
+        _ => Ok(KafkaError::Protocol(format!(
+            "unknown error code: {error_code}"
+        ))),
     }
 }
 
@@ -2030,15 +2032,14 @@ pub fn fuzz_parse_response_metadata(data: &[u8]) -> Result<RecordMetadata, Strin
     // bytes 16+: topic name (length-prefixed string)
 
     let offset = i64::from_be_bytes([
-        data[0], data[1], data[2], data[3],
-        data[4], data[5], data[6], data[7]
+        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
     ]);
 
     let partition = i32::from_be_bytes([data[8], data[9], data[10], data[11]]);
 
     let timestamp_low = i32::from_be_bytes([data[12], data[13], data[14], data[15]]);
     let timestamp = if timestamp_low >= 0 {
-        Some(timestamp_low as u64 * 1000) // Convert to millis
+        Some(i64::from(timestamp_low) * 1000) // Convert to millis
     } else {
         None
     };
@@ -2103,7 +2104,8 @@ pub fn fuzz_validate_response_frame(data: &[u8]) -> Result<(), String> {
         return Err(format!("negative response_length: {response_length}"));
     }
 
-    if response_length > 50 * 1024 * 1024 { // 50MB limit
+    if response_length > 50 * 1024 * 1024 {
+        // 50MB limit
         return Err(format!("response_length too large: {response_length}"));
     }
 
@@ -2143,7 +2145,9 @@ pub fn fuzz_parse_delivery_result(data: &[u8]) -> Result<RecordMetadata, KafkaEr
         .map_err(|e| KafkaError::Protocol(format!("frame validation failed: {e}")))?;
 
     if data.len() < 12 {
-        return Err(KafkaError::Protocol("insufficient data for delivery result".to_string()));
+        return Err(KafkaError::Protocol(
+            "insufficient data for delivery result".to_string(),
+        ));
     }
 
     // Skip correlation_id and response_length (8 bytes), parse result
@@ -2152,12 +2156,16 @@ pub fn fuzz_parse_delivery_result(data: &[u8]) -> Result<RecordMetadata, KafkaEr
     // Check for error indicator (first byte)
     if payload[0] != 0 {
         let error_code = payload[0];
-        return Err(fuzz_parse_kafka_error_response(&[error_code])?);
+        let kafka_error =
+            fuzz_parse_kafka_error_response(&[error_code]).map_err(KafkaError::Protocol)?;
+        return Err(kafka_error);
     }
 
     // Parse successful delivery result from remaining payload
     if payload.len() < 4 {
-        return Err(KafkaError::Protocol("incomplete delivery result".to_string()));
+        return Err(KafkaError::Protocol(
+            "incomplete delivery result".to_string(),
+        ));
     }
 
     fuzz_parse_response_metadata(&payload[1..])

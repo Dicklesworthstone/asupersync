@@ -670,16 +670,29 @@ fn parse_part_headers(data: &[u8]) -> HashMap<String, String> {
 /// 3. Trimming leading/trailing dots and spaces (Windows/macOS issues)
 /// 4. Providing fallback for empty results
 fn sanitize_filename(filename: &str) -> String {
-    // Split on common path separators and take the last component (base name)
-    let base_name = filename
-        .split(['/', '\\', ':', '?', '*', '"', '<', '>', '|'])
-        .last()
-        .unwrap_or("file");
+    // Split on path separators and take the last path component first.
+    let path_tail = filename.rsplit(['/', '\\']).next().unwrap_or("file");
+
+    // Strip a raw Windows drive prefix like `C:report.txt` before processing
+    // other colon-bearing forms such as alternate data streams.
+    let without_drive = if path_tail.len() >= 2
+        && path_tail.as_bytes()[1] == b':'
+        && path_tail.as_bytes()[0].is_ascii_alphabetic()
+    {
+        &path_tail[2..]
+    } else {
+        path_tail
+    };
+
+    // Discard Windows alternate data stream suffixes like
+    // `invoice.pdf:payload.exe` without letting the suffix become the
+    // sanitized filename.
+    let base_name = without_drive.split(':').next().unwrap_or("file");
 
     // Filter out control characters and normalize
     let sanitized = base_name
         .chars()
-        .filter(|c| !c.is_control())
+        .filter(|c| !c.is_control() && !matches!(c, '?' | '*' | '"' | '<' | '>' | '|'))
         .collect::<String>();
 
     // Trim problematic leading/trailing characters
@@ -1119,6 +1132,16 @@ mod tests {
         assert_eq!(fields[0].filename().unwrap(), "€ exchange rates");
         assert_eq!(fields[0].content_type().unwrap(), "text/plain");
         assert_eq!(fields[0].text().unwrap(), "Hello, world!");
+    }
+
+    #[test]
+    fn sanitize_filename_discards_windows_drive_and_ads_suffixes() {
+        assert_eq!(sanitize_filename("C:report.txt"), "report.txt");
+        assert_eq!(sanitize_filename("invoice.pdf:payload.exe"), "invoice.pdf");
+        assert_eq!(
+            sanitize_filename(r"C:\temp\invoice.pdf:payload.exe"),
+            "invoice.pdf"
+        );
     }
 
     #[test]
