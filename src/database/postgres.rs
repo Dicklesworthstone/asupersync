@@ -3548,6 +3548,11 @@ impl PgConnection {
             Outcome::Panicked(p) => return Outcome::Panicked(p),
         }
 
+        if cx.checkpoint().is_err() {
+            self.rollback_isolated_begin_or_mark(cx).await;
+            return Outcome::Cancelled(cancelled_reason(cx));
+        }
+
         // br-asupersync-dvgvcu — verify the server-applied
         // transaction isolation matches what was requested. The
         // BEGIN ISOLATION LEVEL form is atomic against the server's
@@ -3566,7 +3571,7 @@ impl PgConnection {
             {
                 Some(s) => s,
                 None => {
-                    let _ = self.execute_unchecked(cx, "ROLLBACK").await;
+                    self.rollback_isolated_begin_or_mark(cx).await;
                     return Outcome::Err(PgError::IsolationLevelMismatch {
                         requested: level,
                         observed: String::new(),
@@ -3574,15 +3579,15 @@ impl PgConnection {
                 }
             },
             Outcome::Err(e) => {
-                let _ = self.execute_unchecked(cx, "ROLLBACK").await;
+                self.rollback_isolated_begin_or_mark(cx).await;
                 return Outcome::Err(e);
             }
             Outcome::Cancelled(r) => {
-                let _ = self.execute_unchecked(cx, "ROLLBACK").await;
+                self.rollback_isolated_begin_or_mark(cx).await;
                 return Outcome::Cancelled(r);
             }
             Outcome::Panicked(p) => {
-                let _ = self.execute_unchecked(cx, "ROLLBACK").await;
+                self.rollback_isolated_begin_or_mark(cx).await;
                 return Outcome::Panicked(p);
             }
         };
@@ -3595,11 +3600,49 @@ impl PgConnection {
                 read_only,
             }),
             _ => {
-                let _ = self.execute_unchecked(cx, "ROLLBACK").await;
+                self.rollback_isolated_begin_or_mark(cx).await;
                 Outcome::Err(PgError::IsolationLevelMismatch {
                     requested: level,
                     observed: observed_level,
                 })
+            }
+        }
+    }
+
+    /// br-asupersync-9g47af — once `BEGIN ...` succeeds, any verification
+    /// failure must either return the connection to idle or mark it for orphan
+    /// cleanup before the caller can reuse it.
+    async fn rollback_isolated_begin_or_mark(&mut self, cx: &Cx) {
+        const MASKED_ROLLBACK_POLLS: u32 = 32;
+
+        match crate::combinator::commit_section(
+            cx,
+            MASKED_ROLLBACK_POLLS,
+            self.execute_unchecked(cx, "ROLLBACK"),
+        )
+        .await
+        {
+            Outcome::Ok(_) => {}
+            Outcome::Err(err) => {
+                self.inner.needs_rollback = true;
+                self.inner.needs_discard = true;
+                cx.trace(&format!(
+                    "begin_with_isolation cleanup rollback failed; marking connection for orphan cleanup: {err}"
+                ));
+            }
+            Outcome::Cancelled(reason) => {
+                self.inner.needs_rollback = true;
+                self.inner.needs_discard = true;
+                cx.trace(&format!(
+                    "begin_with_isolation cleanup rollback was cancelled; marking connection for orphan cleanup: {reason}"
+                ));
+            }
+            Outcome::Panicked(_) => {
+                self.inner.needs_rollback = true;
+                self.inner.needs_discard = true;
+                cx.trace(
+                    "begin_with_isolation cleanup rollback panicked; marking connection for orphan cleanup",
+                );
             }
         }
     }
@@ -5544,6 +5587,47 @@ mod tests {
 
     fn run<F: std::future::Future>(future: F) -> F::Output {
         futures_lite::future::block_on(future)
+    }
+
+    fn read_until_contains(peer: &mut std::net::TcpStream, needle: &[u8]) -> Vec<u8> {
+        use std::io::Read;
+
+        peer.set_read_timeout(Some(std::time::Duration::from_millis(200)))
+            .expect("set_read_timeout");
+
+        let mut seen = Vec::new();
+        loop {
+            let mut chunk = [0u8; 256];
+            match peer.read(&mut chunk) {
+                Ok(0) => panic!(
+                    "peer closed before client wrote {:?}; saw {:?}",
+                    String::from_utf8_lossy(needle),
+                    seen
+                ),
+                Ok(n) => {
+                    seen.extend_from_slice(&chunk[..n]);
+                    if seen
+                        .windows(needle.len())
+                        .any(|window| window == needle)
+                    {
+                        return seen;
+                    }
+                }
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    panic!(
+                        "timed out waiting for client to write {:?}; saw {:?}",
+                        String::from_utf8_lossy(needle),
+                        seen
+                    );
+                }
+                Err(err) => panic!("failed reading client bytes: {err}"),
+            }
+        }
     }
 
     // ================================================================
