@@ -766,15 +766,19 @@ struct WaitGraphTaskSnapshot {
 }
 
 fn wait_graph_snapshot_from_state(state: &RuntimeState) -> Vec<WaitGraphTaskSnapshot> {
-    state
-        .tasks_iter()
-        .filter_map(|(_, task)| {
-            (!task.state.is_terminal()).then(|| WaitGraphTaskSnapshot {
+    // br-asupersync-1ckzhy: minimize allocations under state lock by
+    // avoiding filter_map chains and using direct iteration.
+    let mut snapshots = Vec::new();
+
+    for (_, task) in state.tasks_iter() {
+        if !task.state.is_terminal() {
+            snapshots.push(WaitGraphTaskSnapshot {
                 id: task.id,
                 waiters: task.waiters.to_vec(),
-            })
-        })
-        .collect()
+            });
+        }
+    }
+    snapshots
 }
 
 fn wait_graph_signals_from_snapshot(
@@ -3439,21 +3443,25 @@ impl ThreeLaneWorker {
         }
         self.steps_since_snapshot = 0;
 
-        // Take a snapshot under the state lock (bounded work, no allocs).
+        // Take a snapshot under the state lock.
+        // br-asupersync-1ckzhy: minimize allocation and iteration time under lock.
         let state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let snapshot = StateSnapshot::from_runtime_state(&state);
-        // br-asupersync-y5n8au: only snapshot live waiter lists while the
-        // runtime state lock is held. The BTree/Tarjan analysis can run after
-        // the lock is dropped, just like the late-child timestamp wait moved
-        // out from under `children` in asupersync-53nvge.
-        let wait_graph_snapshot = self
-            .spectral_monitor
-            .is_some()
-            .then(|| wait_graph_snapshot_from_state(&state));
+
+        // br-asupersync-y5n8au + br-asupersync-1ckzhy: extract minimal wait graph
+        // data under lock, defer expensive BTree/Tarjan analysis until after drop.
+        let wait_graph_snapshot = if self.spectral_monitor.is_some() {
+            Some(wait_graph_snapshot_from_state(&state))
+        } else {
+            None
+        };
         drop(state);
+
+        // br-asupersync-1ckzhy: expensive BTree construction, sorting, and trapped-SCC
+        // detection (Tarjan's algorithm) happens here AFTER the state lock is dropped.
         let (wait_graph_nodes, wait_graph_edges, trapped_wait_cycle) = wait_graph_snapshot
             .as_ref()
             .map_or((0, Vec::new(), false), |snapshot| {
