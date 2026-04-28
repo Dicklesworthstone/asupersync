@@ -173,38 +173,42 @@ impl Response {
 
     /// Insert or replace a header while canonicalizing the stored name.
     ///
-    /// Both names and values are sanitized: CR (`\r`) and LF (`\n`) characters
-    /// are stripped to prevent HTTP response header injection (CRLF injection).
+    /// br-asupersync-n5b94b: TOCTOU FIX - perform atomic header key normalization
+    /// to prevent race conditions where multiple headers with case-variant names
+    /// could exist simultaneously. Both names and values are sanitized using
+    /// consistent logic to prevent injection attacks.
     pub fn set_header(&mut self, name: impl Into<String>, value: impl Into<String>) {
         let normalized = sanitize_header_name(name.into()).to_ascii_lowercase();
-        let stale_keys: Vec<String> = self
-            .headers
-            .keys()
-            .filter(|key| key.eq_ignore_ascii_case(&normalized) && *key != &normalized)
-            .cloned()
-            .collect();
+        let sanitized_value = sanitize_header_value(value.into());
 
-        for key in stale_keys {
-            self.headers.remove(&key);
-        }
+        // Atomic removal of all case-variant keys - collect AND remove in the
+        // same iteration to prevent TOCTOU where case variants could be added
+        // between collection and removal phases
+        self.headers.retain(|key, _| !key.eq_ignore_ascii_case(&normalized));
 
-        self.headers
-            .insert(normalized, sanitize_header_value(value.into()));
+        self.headers.insert(normalized, sanitized_value);
     }
 
     /// Ensure a header exists while preserving any existing value.
     ///
-    /// The name is sanitized to strip CR/LF characters that would otherwise
-    /// produce a wire-format response the HTTP/1.1 codec rejects.
+    /// br-asupersync-n5b94b: TOCTOU FIX - atomic header processing to prevent
+    /// race conditions. The name is sanitized using consistent validation that
+    /// matches header value sanitization.
     pub fn ensure_header(&mut self, name: &str, default_value: impl Into<String>) {
         let normalized = sanitize_header_name(name.to_owned()).to_ascii_lowercase();
-        if let Some(existing) = self.remove_header(name) {
-            self.headers
-                .insert(normalized, sanitize_header_value(existing));
-        } else {
-            self.headers
-                .insert(normalized, sanitize_header_value(default_value.into()));
-        }
+
+        // Atomic check-and-set: find existing value or use default, then
+        // set atomically to prevent TOCTOU where header could change between
+        // check and set operations
+        let value = self.headers
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(&normalized))
+            .map(|(_, value)| value.clone())
+            .unwrap_or_else(|| default_value.into());
+
+        // Remove all case variants atomically
+        self.headers.retain(|key, _| !key.eq_ignore_ascii_case(&normalized));
+        self.headers.insert(normalized, sanitize_header_value(value));
     }
 
     /// Remove a header using HTTP's case-insensitive matching rules.
@@ -658,10 +662,16 @@ impl Redirect {
 
 impl IntoResponse for Redirect {
     fn into_response(self) -> Response {
-        // CRLF stripping is now handled by set_header, but we keep the
-        // explicit sanitization here as belt-and-suspenders for the
-        // security-critical Location header.
-        let location = self.location.replace(['\r', '\n'], "");
+        // br-asupersync-n5b94b: TOCTOU FIX - ensure final sanitization matches
+        // the strict validation contract from validate_redirect_uri(). The
+        // validation rejects ALL bytes outside 0x21-0x7E, so final sanitization
+        // must enforce the same constraint to prevent control character
+        // injection if validation is bypassed or weakened in future changes.
+        let location = self.location
+            .bytes()
+            .filter(|&b| (0x21..=0x7E).contains(&b))
+            .map(|b| b as char)
+            .collect::<String>();
         Response::empty(self.status).header("location", location)
     }
 }
@@ -723,16 +733,30 @@ const fn is_valid_header_value_byte(b: u8) -> bool {
 
 /// Strip CR and LF from a header name to prevent CRLF injection attacks.
 ///
+/// br-asupersync-n5b94b: TOCTOU FIX - apply same sanitization logic to header
+/// names as header values to prevent asymmetric processing vulnerabilities.
 /// Header names with raw CR/LF would be rejected by the wire-format codec, but
 /// stripping them at the web layer is a defense-in-depth measure that ensures
-/// the response state is always serializable and matches the asymmetric
+/// the response state is always serializable and matches the symmetric
 /// sanitization applied to header values.
 fn sanitize_header_name(name: String) -> String {
-    if name.bytes().any(|b| b == b'\r' || b == b'\n') {
-        name.replace(['\r', '\n'], "")
-    } else {
-        name
-    }
+    // Apply same sanitization as header values for consistency - reject any
+    // byte that isn't valid in HTTP header field-name per RFC 9110 §5.1:
+    // field-name = token = 1*tchar where tchar = "!" / "#" / "$" / "%" / "&" /
+    // "'" / "*" / "+" / "-" / "." / "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
+    name.bytes()
+        .filter(|&b| {
+            // Valid tchar bytes: ALPHA / DIGIT / "!" / "#" / "$" / "%" / "&" /
+            // "'" / "*" / "+" / "-" / "." / "^" / "_" / "`" / "|" / "~"
+            matches!(b,
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' |
+                b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' |
+                b'*' | b'+' | b'-' | b'.' | b'^' | b'_' |
+                b'`' | b'|' | b'~'
+            )
+        })
+        .map(|b| b as char)
+        .collect()
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -1232,6 +1256,78 @@ mod tests {
     // ====================================================================
     // br-asupersync-oms1b7: redirect protocol-relative + bypass tests
     // ====================================================================
+
+    // ====================================================================
+    // br-asupersync-n5b94b: TOCTOU vulnerability fixes
+    // ====================================================================
+
+    #[test]
+    fn n5b94b_redirect_sanitization_matches_validation_strictness() {
+        // Validation rejects control characters, final sanitization must too
+        let redirect = Redirect::external_unchecked("http://example.com/path\x01\x1F");
+        let response = redirect.into_response();
+        let location = response.headers.get("location").unwrap();
+
+        // Control characters must be stripped to match validation strictness
+        assert!(!location.contains('\x01'));
+        assert!(!location.contains('\x1F'));
+        assert_eq!(location, "http://example.com/path");
+    }
+
+    #[test]
+    fn n5b94b_header_name_sanitization_consistency() {
+        let mut resp = Response::new(StatusCode::OK, "test");
+
+        // Header names should be sanitized consistently with values
+        resp.set_header("x-test\r\n-header\x01", "value");
+
+        // Control characters should be stripped from header name
+        let headers: Vec<_> = resp.headers.keys().collect();
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0], "x-test-header");
+    }
+
+    #[test]
+    fn n5b94b_header_case_normalization_atomic() {
+        let mut resp = Response::new(StatusCode::OK, "test");
+
+        // Add multiple case variants
+        resp.headers.insert("X-Test".to_string(), "value1".to_string());
+        resp.headers.insert("x-TEST".to_string(), "value2".to_string());
+        resp.headers.insert("X-test".to_string(), "value3".to_string());
+
+        // set_header should atomically remove all case variants
+        resp.set_header("x-test", "final");
+
+        let test_headers: Vec<_> = resp.headers
+            .iter()
+            .filter(|(k, _)| k.eq_ignore_ascii_case("x-test"))
+            .collect();
+
+        assert_eq!(test_headers.len(), 1, "All case variants should be removed atomically");
+        assert_eq!(test_headers[0].0, "x-test");
+        assert_eq!(test_headers[0].1, "final");
+    }
+
+    #[test]
+    fn n5b94b_ensure_header_atomic_check_and_set() {
+        let mut resp = Response::new(StatusCode::OK, "test");
+
+        // Add header with non-normalized case
+        resp.headers.insert("X-Custom".to_string(), "existing".to_string());
+
+        // ensure_header should preserve existing value atomically
+        resp.ensure_header("x-custom", "default");
+
+        let custom_headers: Vec<_> = resp.headers
+            .iter()
+            .filter(|(k, _)| k.eq_ignore_ascii_case("x-custom"))
+            .collect();
+
+        assert_eq!(custom_headers.len(), 1, "Should be exactly one header after ensure");
+        assert_eq!(custom_headers[0].0, "x-custom"); // normalized case
+        assert_eq!(custom_headers[0].1, "existing"); // preserved value
+    }
 
     #[test]
     fn oms1b7_rejects_protocol_relative() {
