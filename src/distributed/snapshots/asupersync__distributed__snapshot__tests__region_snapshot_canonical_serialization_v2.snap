@@ -1,0 +1,59 @@
+---
+source: src/distributed/snapshot.rs
+expression: canonical_snapshot_serialization_snapshot_test_output()
+---
+{
+  "format_version": 2,
+  "byte_len": 147,
+  "content_hash_hex": "6db00798fd5fe62c",
+  "region_id": {
+    "index": 5,
+    "generation": 2
+  },
+  "state": "Closing",
+  "timestamp_nanos": 999000000000,
+  "sequence": 42,
+  "origin_id": 77,
+  "epoch": 9,
+  "tasks": [
+    {
+      "task_id": {
+        "index": 1,
+        "generation": 0
+      },
+      "state": "Running",
+      "priority": 5
+    },
+    {
+      "task_id": {
+        "index": 2,
+        "generation": 1
+      },
+      "state": "Completed",
+      "priority": 3
+    }
+  ],
+  "children": [
+    {
+      "index": 10,
+      "generation": 0
+    },
+    {
+      "index": 11,
+      "generation": 0
+    }
+  ],
+  "finalizer_count": 7,
+  "budget": {
+    "deadline_nanos": 5000000000,
+    "polls_remaining": 50,
+    "cost_remaining": 1000
+  },
+  "cancel_reason": "timeout",
+  "parent": {
+    "index": 0,
+    "generation": 0
+  },
+  "metadata_hex": "01 02 03 04 05",
+  "serialized_hex": "53 4e 41 50 02 05 00 00 00 02 00 00 00 02 00 46 0a 99 e8 00 00 00 2a 00 00 00 00 00 00 00 4d 00 00 00 00 00 00 00 09 00 00 00 00 00 00 00 02 00 00 00 01 00 00 00 00 00 00 00 01 05 02 00 00 00 01 00 00 00 02 03 02 00 00 00 0a 00 00 00 00 00 00 00 0b 00 00 00 00 00 00 00 07 00 00 00 01 00 f2 05 2a 01 00 00 00 01 32 00 00 00 01 e8 03 00 00 00 00 00 00 01 07 00 00 00 74 69 6d 65 6f 75 74 01 00 00 00 00 00 00 00 00 05 00 00 00 01 02 03 04 05"
+}

@@ -896,6 +896,60 @@ mod tests {
             .join(" ")
     }
 
+    fn region_id_json(region_id: RegionId) -> serde_json::Value {
+        let arena = region_id.arena_index();
+        json!({
+            "index": arena.index(),
+            "generation": arena.generation(),
+        })
+    }
+
+    fn task_snapshot_json(task: &TaskSnapshot) -> serde_json::Value {
+        let arena = task.task_id.arena_index();
+        json!({
+            "task_id": {
+                "index": arena.index(),
+                "generation": arena.generation(),
+            },
+            "state": format!("{:?}", task.state),
+            "priority": task.priority,
+        })
+    }
+
+    fn canonical_snapshot_serialization_snapshot_test_output() -> String {
+        let snapshot = create_all_fields_snapshot();
+        let bytes = snapshot.to_bytes();
+        let payload = json!({
+            "format_version": SNAP_VERSION,
+            "byte_len": bytes.len(),
+            "content_hash_hex": format!("{:016x}", snapshot.content_hash()),
+            "region_id": region_id_json(snapshot.region_id),
+            "state": format!("{:?}", snapshot.state),
+            "timestamp_nanos": snapshot.timestamp.as_nanos(),
+            "sequence": snapshot.sequence,
+            "origin_id": snapshot.origin_id,
+            "epoch": snapshot.epoch,
+            "tasks": snapshot.tasks.iter().map(task_snapshot_json).collect::<Vec<_>>(),
+            "children": snapshot
+                .children
+                .iter()
+                .map(|child| region_id_json(*child))
+                .collect::<Vec<_>>(),
+            "finalizer_count": snapshot.finalizer_count,
+            "budget": {
+                "deadline_nanos": snapshot.budget.deadline_nanos,
+                "polls_remaining": snapshot.budget.polls_remaining,
+                "cost_remaining": snapshot.budget.cost_remaining,
+            },
+            "cancel_reason": snapshot.cancel_reason,
+            "parent": snapshot.parent.map(region_id_json),
+            "metadata_hex": format_hex(&snapshot.metadata),
+            "serialized_hex": format_hex(&bytes),
+        });
+
+        serde_json::to_string_pretty(&payload).expect("canonical snapshot payload is valid json")
+    }
+
     fn scrub_snapshot_wire_layout_for_snapshot_test(bytes: &[u8], task_count: usize) -> String {
         use std::fmt::Write;
 
@@ -1200,6 +1254,14 @@ mod tests {
         insta::assert_snapshot!(
             "region_snapshot_wire_layout_scrubbed",
             scrub_snapshot_wire_layout_for_snapshot_test(&bytes, snapshot.tasks.len())
+        );
+    }
+
+    #[test]
+    fn region_snapshot_canonical_serialization_v2() {
+        insta::assert_snapshot!(
+            "region_snapshot_canonical_serialization_v2",
+            canonical_snapshot_serialization_snapshot_test_output()
         );
     }
 
