@@ -3577,6 +3577,9 @@ impl RuntimeState {
                                 .regions
                                 .get(region_id.arena_index())
                                 .and_then(|region| region.close_outcome());
+                            if self.root_region == Some(region_id) {
+                                self.root_region = None;
+                            }
                             self.remember_closed_region(region_id, close_outcome);
                             // Cleanup: Remove the closed region from the arena to prevent memory leaks
                             self.regions.remove(region_id.arena_index());
@@ -8078,6 +8081,41 @@ mod tests {
             format!("{:?}", state.region_close_outcome(region))
         );
         crate::test_complete!("region_close_outcome_tracks_error_after_region_teardown");
+    }
+
+    #[test]
+    fn root_region_cleared_after_root_teardown() {
+        init_test("root_region_cleared_after_root_teardown");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+
+        let region_record = state.regions.get(root.arena_index()).expect("region");
+        assert!(region_record.begin_close(None));
+
+        state.advance_region_state(root);
+
+        crate::assert_with_log!(
+            state.region_was_closed(root),
+            "root region torn down",
+            true,
+            state.region_was_closed(root)
+        );
+        crate::assert_with_log!(
+            state.root_region.is_none(),
+            "closed root must clear root_region handle",
+            true,
+            state.root_region.is_none()
+        );
+
+        let replacement_root = state.create_root_region(Budget::INFINITE);
+        crate::assert_with_log!(
+            state.root_region == Some(replacement_root),
+            "new root can be installed after prior root teardown",
+            Some(replacement_root),
+            state.root_region
+        );
+
+        crate::test_complete!("root_region_cleared_after_root_teardown");
     }
 
     #[test]
