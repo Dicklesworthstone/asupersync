@@ -177,7 +177,13 @@ impl RegionTable {
     /// Removes a region record from the arena.
     #[inline]
     pub fn remove(&mut self, index: ArenaIndex) -> Option<RegionRecord> {
-        self.regions.remove(index)
+        let removed = self.regions.remove(index)?;
+        if let Some(parent) = removed.parent {
+            if let Some(parent_record) = self.regions.get(parent.arena_index()) {
+                parent_record.remove_child(removed.id);
+            }
+        }
+        Some(removed)
     }
 
     /// Returns an iterator over all region records.
@@ -490,6 +496,31 @@ mod tests {
 
         let actual = table.budget(child).unwrap();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn remove_unlinks_child_from_parent_before_close() {
+        let mut table = RegionTable::new();
+        let root = table.create_root(Budget::default(), Time::ZERO);
+        let child = table
+            .create_child(root, Budget::default(), Time::ZERO)
+            .unwrap();
+
+        let removed = table
+            .remove(child.arena_index())
+            .expect("child region should exist");
+        assert_eq!(removed.id, child);
+        assert_eq!(table.len(), 1);
+        assert!(table.child_ids(root).unwrap().is_empty());
+
+        let root_record = table.get(root.arena_index()).unwrap();
+        assert!(root_record.begin_close(None));
+        assert!(root_record.begin_finalize());
+        assert!(
+            root_record.complete_close(),
+            "parent close should not be blocked by a removed child that was already reclaimed"
+        );
+        assert_eq!(table.state(root), Some(RegionState::Closed));
     }
 
     #[test]
