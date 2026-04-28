@@ -85,6 +85,10 @@ enum MalformedToken {
 }
 
 impl AckControlToken {
+    fn repeat_count(&self) -> usize {
+        usize::from(self.params.repetition_count % 10) + 1
+    }
+
     /// Generate the raw bytes for this token configuration
     fn materialize(&self) -> Vec<u8> {
         let mut result = Vec::new();
@@ -122,14 +126,11 @@ impl AckControlToken {
                     b"+TERM".to_vec()
                 }
             }
-            ControlTokenVariant::Malformed(malformed) => {
-                self.materialize_malformed(malformed)
-            }
+            ControlTokenVariant::Malformed(malformed) => self.materialize_malformed(malformed),
         };
 
         // Apply repetition if specified
-        let repeat_count = (self.params.repetition_count % 10) + 1; // 1-10 repetitions
-        for _ in 0..repeat_count {
+        for _ in 0..self.repeat_count() {
             result.extend_from_slice(&base_token);
 
             // Add null injection between repetitions
@@ -175,7 +176,9 @@ impl AckControlToken {
         match &self.variant {
             ControlTokenVariant::Ack if !self.params.wrong_case => FuzzJsAckControl::Ack,
             ControlTokenVariant::Nak if !self.params.wrong_case => FuzzJsAckControl::Nak,
-            ControlTokenVariant::InProgress if !self.params.wrong_case => FuzzJsAckControl::InProgress,
+            ControlTokenVariant::InProgress if !self.params.wrong_case => {
+                FuzzJsAckControl::InProgress
+            }
             ControlTokenVariant::Term if !self.params.wrong_case => FuzzJsAckControl::Term,
             // Everything else should parse as Unknown
             _ => FuzzJsAckControl::Unknown,
@@ -204,33 +207,41 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Test 2: Structure-aware fuzzing if we can parse the input
-    if let Ok(mut u) = Unstructured::new(data) {
-        if let Ok(token) = AckControlToken::arbitrary(&mut u) {
-            let generated_bytes = token.materialize();
+    let mut u = Unstructured::new(data);
+    if let Ok(token) = AckControlToken::arbitrary(&mut u) {
+        let generated_bytes = token.materialize();
 
-            // Don't fuzz empty tokens (not interesting)
-            if generated_bytes.is_empty() {
-                return;
-            }
+        // Don't fuzz empty tokens (not interesting)
+        if generated_bytes.is_empty() {
+            return;
+        }
 
-            let structured_result = fuzz_parse_ack_control(&generated_bytes);
-            let expected = token.expected_result();
+        let structured_result = fuzz_parse_ack_control(&generated_bytes);
+        let expected = token.expected_result();
 
-            // For well-formed tokens, verify the parser behaves correctly
-            if !token.params.leading_junk.is_empty()
-               || !token.params.trailing_junk.is_empty()
-               || token.params.null_injection
-               || token.params.repetition_count > 1 {
-                // Malformed due to extra junk - should be Unknown
-                assert_eq!(structured_result, FuzzJsAckControl::Unknown,
-                          "Junk-padded token should parse as Unknown: {:?}",
-                          String::from_utf8_lossy(&generated_bytes));
-            } else {
-                // Clean token - should match expected result
-                assert_eq!(structured_result, expected,
-                          "Clean token parse mismatch: {:?} -> expected {:?}, got {:?}",
-                          String::from_utf8_lossy(&generated_bytes), expected, structured_result);
-            }
+        // For well-formed tokens, verify the parser behaves correctly
+        if !token.params.leading_junk.is_empty()
+            || !token.params.trailing_junk.is_empty()
+            || token.params.null_injection
+            || token.repeat_count() > 1
+        {
+            // Malformed due to extra junk - should be Unknown
+            assert_eq!(
+                structured_result,
+                FuzzJsAckControl::Unknown,
+                "Junk-padded token should parse as Unknown: {:?}",
+                String::from_utf8_lossy(&generated_bytes)
+            );
+        } else {
+            // Clean token - should match expected result
+            assert_eq!(
+                structured_result,
+                expected,
+                "Clean token parse mismatch: {:?} -> expected {:?}, got {:?}",
+                String::from_utf8_lossy(&generated_bytes),
+                expected,
+                structured_result
+            );
         }
     }
 
@@ -246,8 +257,8 @@ fn fuzz_boundary_conditions(data: &[u8]) {
     }
 
     // Test exact valid token lengths
-    let valid_tokens = [b"+ACK", b"-NAK", b"+WPI", b"+TERM"];
-    for &token in &valid_tokens {
+    let valid_tokens: [&[u8]; 4] = [b"+ACK", b"-NAK", b"+WPI", b"+TERM"];
+    for token in valid_tokens {
         if data.len() >= token.len() {
             let mut modified = token.to_vec();
             // Corrupt the token using input data
