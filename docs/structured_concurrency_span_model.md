@@ -585,41 +585,37 @@ mod tests {
 
 ### Integration Tests
 
-Test span hierarchy and context propagation:
+Test span hierarchy and context propagation with the current runtime API:
 
 ```rust
-#[cfg(test)]
-mod integration_tests {
-    use super::*;
-    
-    #[tokio::test]
-    async fn test_hierarchical_spans() {
-        let runtime = RuntimeBuilder::new()
-            .with_otel_structured_concurrency(Default::default())
-            .build()
-            .unwrap();
-            
-        runtime.region(|cx| async move {
-            // Region span created automatically
-            
-            let task_handle = cx.spawn(|cx| async move {
-                // Task span created automatically
-                
-                let _guard = cx.enter_operation_span("test_op", "resource_1");
-                // Operation span created automatically
-                
-                crate::time::sleep(Duration::from_millis(10), &cx).await;
-                // Timer operation span created
-                
+use asupersync::Cx;
+use asupersync::runtime::{Runtime, RuntimeBuilder};
+use std::time::Duration;
+
+#[test]
+fn test_hierarchical_spans() {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("build runtime");
+
+    let result = runtime.block_on(runtime.handle().spawn(async move {
+        let cx = Cx::current().expect("runtime task context");
+        let _task_span = cx.enter_span("task_execution");
+
+        let child = Runtime::current_handle()
+            .expect("runtime handle inside spawned task")
+            .spawn(async move {
+                let cx = Cx::current().expect("runtime task context");
+                let _operation_span = cx.enter_span("test_op");
+
+                asupersync::time::sleep(cx.now(), Duration::from_millis(1)).await;
                 "result"
             });
-            
-            task_handle.await
-        }).await;
-        
-        // Verify span hierarchy was created correctly
-        // (Would need access to collected spans for verification)
-    }
+
+        child.await
+    }));
+
+    assert_eq!(result, "result");
 }
 ```
 
