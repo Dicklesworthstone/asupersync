@@ -393,7 +393,14 @@ impl WebFrameCodec {
         let payload = src.split_to(length).freeze();
 
         let is_trailer = flag & TRAILER_FLAG != 0;
+        let compressed = flag & 0x01 != 0;
         if is_trailer {
+            if compressed {
+                self.poisoned.set(true);
+                return Err(GrpcError::compression(
+                    "compressed gRPC-Web trailer frames are unsupported",
+                ));
+            }
             // br-asupersync-nln9sc: a malformed trailer block also
             // poisons — once a trailer arrives, the gRPC-Web stream
             // is by definition over, so any decode failure here is
@@ -403,7 +410,6 @@ impl WebFrameCodec {
             })?;
             Ok(Some(WebFrame::Trailers(trailer)))
         } else {
-            let compressed = flag & 0x01 != 0;
             Ok(Some(WebFrame::Data {
                 compressed,
                 data: payload,
@@ -1443,10 +1449,11 @@ mod tests {
     #[test]
     fn ood365_legal_flag_values_decode_successfully() {
         init_test("ood365_legal_flag_values_decode_successfully");
-        let codec = WebFrameCodec::new();
-        // The four legal flag values per spec: data, compressed-data,
-        // trailer, compressed-trailer.
-        for &flag in &[0x00u8, 0x01, 0x80, 0x81] {
+        // Currently supported flag values: data, compressed-data, and
+        // uncompressed trailers. Compressed trailers (0x81) must fail
+        // closed until the codec can actually decompress trailer blocks.
+        for &flag in &[0x00u8, 0x01, 0x80] {
+            let codec = WebFrameCodec::new();
             let payload_len = if flag & TRAILER_FLAG != 0 {
                 // Trailer payloads must be a parseable header block; use
                 // an empty block (decoder treats missing grpc-status as
@@ -1463,6 +1470,33 @@ mod tests {
             );
         }
         crate::test_complete!("ood365_legal_flag_values_decode_successfully");
+    }
+
+    #[test]
+    fn compressed_trailer_frames_fail_closed() {
+        init_test("compressed_trailer_frames_fail_closed");
+        let codec = WebFrameCodec::new();
+        let mut buf = BytesMut::new();
+        buf.put_u8(0x81);
+        buf.put_u32(0);
+
+        let err = codec
+            .decode(&mut buf)
+            .expect_err("compressed trailer frames must not be silently accepted");
+        match err {
+            GrpcError::Compression(message) => {
+                assert!(
+                    message.contains("compressed gRPC-Web trailer frames are unsupported"),
+                    "unexpected compression error: {message}"
+                );
+            }
+            other => panic!("expected compression error, got {other:?}"),
+        }
+        assert!(
+            codec.is_poisoned(),
+            "unsupported compressed trailers must poison the codec"
+        );
+        crate::test_complete!("compressed_trailer_frames_fail_closed");
     }
 
     #[test]
@@ -1915,4 +1949,5 @@ mod tests {
         out.extend(decoder.finish().unwrap());
         assert_eq!(out, payload);
     }
+
 }

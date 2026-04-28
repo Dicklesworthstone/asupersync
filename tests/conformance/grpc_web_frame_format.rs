@@ -399,8 +399,7 @@ fn grpc_web_text_mode_streaming_base64_decoder_handles_chunked_input() {
     result.extend(decoder.finish().expect("finish must succeed"));
 
     assert_eq!(
-        result,
-        binary_data,
+        result, binary_data,
         "chunked base64 decoding must reconstruct original binary data"
     );
     assert!(
@@ -478,8 +477,7 @@ fn grpc_web_trailer_block_http_header_format_conformance() {
 
     // Extract the HTTP/1.1 header block from the trailer frame
     let header_block = &wire[5..]; // Skip 5-byte gRPC frame header
-    let header_text = std::str::from_utf8(header_block)
-        .expect("header block must be valid UTF-8");
+    let header_text = std::str::from_utf8(header_block).expect("header block must be valid UTF-8");
 
     // Verify HTTP/1.1 header format conformance
     let lines: Vec<&str> = header_text.split("\r\n").collect();

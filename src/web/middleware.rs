@@ -1465,9 +1465,9 @@ impl<H: Handler> NormalizePathMiddleware<H> {
 ///
 /// Security: br-asupersync-aqdic1 - prevents //evil.com → //evil.com redirects
 fn sanitize_redirect_path(path: &str) -> String {
-    if path.starts_with("//") {
+    if let Some(stripped) = path.strip_prefix("//") {
         // URL-encode the leading slashes to prevent protocol-relative redirect
-        format!("%2F%2F{}", &path[2..])
+        format!("%2F%2F{}", stripped)
     } else {
         path.to_string()
     }
