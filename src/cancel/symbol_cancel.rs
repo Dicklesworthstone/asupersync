@@ -284,7 +284,12 @@ impl SymbolCancelToken {
             }
         }
 
-        loop {
+        // br-asupersync-4txkrb: Bound iteration count to prevent livelock
+        // if concurrent threads keep strengthening the reason. After MAX_CATCH_UP_ITERATIONS
+        // we yield and use snapshot semantics to avoid chasing a moving target.
+        const MAX_CATCH_UP_ITERATIONS: u32 = 8;
+
+        for iteration in 0..MAX_CATCH_UP_ITERATIONS {
             let reason_guard = state.reason.write();
             let Some(current_reason) = reason_guard.clone() else {
                 let mut listeners = state.listeners.write();
@@ -313,7 +318,39 @@ impl SymbolCancelToken {
                     entry.notified_severity = current_severity;
                 }
             }
+
+            // Yield after each iteration except the last to allow other threads to progress
+            if iteration < MAX_CATCH_UP_ITERATIONS - 1 {
+                // Use cooperative yielding hint instead of async yield to avoid
+                // changing function signature and breaking callers
+                std::hint::spin_loop();
+            }
         }
+
+        // If we reach here, we've hit the iteration limit. Use snapshot semantics:
+        // notify listeners with the final observed severity and return. This prevents
+        // livelock while ensuring listeners see a reasonably recent severity level.
+        let final_reason = {
+            let reason_guard = state.reason.write();
+            reason_guard.clone().unwrap_or_else(CancelReason::parent_cancelled)
+        };
+        let final_severity = final_reason.kind.severity();
+
+        for entry in &mut retained {
+            if entry.notified_severity < final_severity {
+                Self::notify_listener_with_panic_logging(
+                    state,
+                    entry.listener.as_ref(),
+                    &final_reason,
+                    notify_at,
+                );
+                entry.notified_severity = final_severity;
+            }
+        }
+
+        // Restore retained listeners to the listener slab
+        let mut listeners = state.listeners.write();
+        listeners.extend(retained);
     }
 
     /// Returns the token ID.
@@ -4233,5 +4270,87 @@ mod tests {
 
         let child_cancelled_at = join.join().expect("child thread must complete");
         assert_eq!(child_cancelled_at, Some(cancel_time.as_nanos()));
+    }
+
+    /// Regression test for asupersync-4txkrb: notify_retained_listeners_until_current()
+    /// infinite loop livelock bug. Tests that bounded iteration prevents CPU burnout
+    /// when concurrent threads keep strengthening cancel reasons.
+    #[test]
+    fn notify_listeners_bounded_iteration_prevents_livelock() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, AtomicU32, Ordering},
+        };
+        use std::time::{Duration, Instant};
+        use std::thread;
+
+        let mut rng = DetRng::new(0x4321);
+        let token = SymbolCancelToken::new(ObjectId::new(42, 0), &mut rng);
+
+        // Add several listeners that track notification count
+        let notification_count = Arc::new(AtomicU32::new(0));
+        for i in 0..5 {
+            let count = Arc::clone(&notification_count);
+            token.add_listener(move |reason: &CancelReason, _time: Time| {
+                count.fetch_add(1, Ordering::Relaxed);
+                // Simulate listener work to make race condition more likely
+                std::hint::spin_loop();
+            });
+        }
+
+        // Initial cancel with low severity
+        let initial_time = Time::from_nanos(1000);
+        token.cancel(&CancelReason::new(CancelKind::Timeout), initial_time);
+
+        // Track if the notification process completes in reasonable time
+        let completed = Arc::new(AtomicBool::new(false));
+        let completed_for_thread = Arc::clone(&completed);
+
+        // Spawn thread that continuously strengthens the reason to trigger
+        // the race condition that would cause infinite loop
+        let token_for_strengthener = token.clone();
+        let strengthener_thread = thread::spawn(move || {
+            for severity in [CancelKind::Deadline, CancelKind::Shutdown, CancelKind::FailFast].iter() {
+                thread::sleep(Duration::from_millis(1));
+                token_for_strengthener.cancel(&CancelReason::new(*severity), initial_time);
+            }
+        });
+
+        // Main test: trigger listener notification which could previously livelock
+        let start = Instant::now();
+        let token_for_notify = token.clone();
+        let notification_thread = thread::spawn(move || {
+            // This call would previously infinite loop if reasons keep strengthening
+            // Now it should complete in bounded time due to iteration limit
+            token_for_notify.cancel(&CancelReason::new(CancelKind::User), initial_time);
+            completed_for_thread.store(true, Ordering::Release);
+        });
+
+        // Wait for threads to complete or timeout
+        strengthener_thread.join().expect("strengthener thread should complete");
+        notification_thread.join().expect("notification thread should complete");
+
+        let elapsed = start.elapsed();
+
+        // Verify the fix: operation should complete quickly (under 100ms)
+        // and not hang indefinitely as it would with the original infinite loop
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "Notification should complete quickly, took {:?}",
+            elapsed
+        );
+
+        assert!(
+            completed.load(Ordering::Acquire),
+            "Notification process should have completed"
+        );
+
+        // Verify listeners were actually notified (at least once)
+        let final_count = notification_count.load(Ordering::Relaxed);
+        assert!(
+            final_count > 0,
+            "Listeners should have been notified, count: {}",
+            final_count
+        );
     }
 }
