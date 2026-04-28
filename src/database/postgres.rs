@@ -9057,7 +9057,10 @@ mod tests {
             );
 
             // Verify the context is already cancelled
-            assert!(cx.checkpoint().is_err(), "test context should be pre-cancelled");
+            assert!(
+                cx.checkpoint().is_err(),
+                "test context should be pre-cancelled"
+            );
 
             // Call try_close_or_enqueue_deallocate with pre-cancelled context
             let victim_name = "test_stmt_cancelled".to_string();
@@ -9077,7 +9080,8 @@ mod tests {
                 "caller cancellation should not mark connection unhealthy"
             );
             assert_eq!(
-                conn.inner.deallocate_retry_queue.len(), 1,
+                conn.inner.deallocate_retry_queue.len(),
+                1,
                 "statement name should be preserved for retry"
             );
             assert_eq!(
@@ -9100,7 +9104,8 @@ mod tests {
             );
             // Statement should remain in queue since cancellation occurred
             assert_eq!(
-                conn.inner.deallocate_retry_queue.len(), initial_queue_len,
+                conn.inner.deallocate_retry_queue.len(),
+                initial_queue_len,
                 "cancelled flush should preserve queued statements"
             );
         });
@@ -9133,13 +9138,15 @@ mod tests {
 
                 assert_eq!(
                     conn.inner.consecutive_deallocate_failures, i,
-                    "real failure {} should increment counter", i
+                    "real failure {} should increment counter",
+                    i
                 );
 
                 if i >= DEALLOCATE_FAILURE_UNHEALTHY_THRESHOLD {
                     assert!(
                         conn.inner.unhealthy,
-                        "connection should be marked unhealthy after {} failures", i
+                        "connection should be marked unhealthy after {} failures",
+                        i
                     );
                 } else {
                     assert!(
