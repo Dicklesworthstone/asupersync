@@ -202,7 +202,8 @@ impl RegionSnapshot {
             &mut buf,
             u32::try_from(self.tasks.len()).expect("tasks exceed u32::MAX"),
         );
-        for task in &self.tasks {
+        let task_order = canonical_task_order(&self.tasks);
+        for task in task_order {
             write_task_id(&mut buf, task.task_id);
             buf.push(task.state.as_u8());
             buf.push(task.priority);
@@ -213,7 +214,8 @@ impl RegionSnapshot {
             &mut buf,
             u32::try_from(self.children.len()).expect("children exceed u32::MAX"),
         );
-        for child in &self.children {
+        let child_order = canonical_child_order(&self.children);
+        for child in child_order {
             write_region_id(&mut buf, *child);
         }
 
@@ -524,9 +526,43 @@ fn task_key(task_id: TaskId) -> (u32, u32) {
     (arena.index(), arena.generation())
 }
 
+fn task_serialization_key(task: &TaskSnapshot) -> (u32, u32, u8, u8) {
+    let arena = task.task_id.0;
+    (
+        arena.index(),
+        arena.generation(),
+        task.state.as_u8(),
+        task.priority,
+    )
+}
+
+fn canonical_task_order(tasks: &[TaskSnapshot]) -> Vec<&TaskSnapshot> {
+    let mut ordered: Vec<_> = tasks.iter().collect();
+    if ordered
+        .windows(2)
+        .all(|pair| task_serialization_key(pair[0]) <= task_serialization_key(pair[1]))
+    {
+        return ordered;
+    }
+    ordered.sort_unstable_by_key(|task| task_serialization_key(task));
+    ordered
+}
+
 fn region_key(region_id: RegionId) -> (u32, u32) {
     let arena = region_id.0;
     (arena.index(), arena.generation())
+}
+
+fn canonical_child_order(children: &[RegionId]) -> Vec<&RegionId> {
+    let mut ordered: Vec<_> = children.iter().collect();
+    if ordered
+        .windows(2)
+        .all(|pair| region_key(*pair[0]) <= region_key(*pair[1]))
+    {
+        return ordered;
+    }
+    ordered.sort_unstable_by_key(|child| region_key(**child));
+    ordered
 }
 
 fn max_region_state(left: RegionState, right: RegionState) -> RegionState {
@@ -1193,6 +1229,48 @@ mod tests {
         let hash2 = snapshot.content_hash();
 
         assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn snapshot_serialization_is_invariant_to_task_and_child_permutation() {
+        let canonical = create_all_fields_snapshot();
+        let mut permuted = canonical.clone();
+        permuted.tasks.reverse();
+        permuted.children.reverse();
+
+        let canonical_bytes = canonical.to_bytes();
+        let permuted_bytes = permuted.to_bytes();
+        assert_eq!(
+            canonical_bytes, permuted_bytes,
+            "canonical snapshot bytes must not drift across task/child insertion order"
+        );
+        assert_eq!(
+            canonical.content_hash(),
+            permuted.content_hash(),
+            "content hash must stay stable across semantically equivalent task/child permutations"
+        );
+
+        let restored = RegionSnapshot::from_bytes(&permuted_bytes).expect("permuted bytes decode");
+        let restored_tasks: Vec<_> = restored.tasks.iter().map(task_serialization_key).collect();
+        let canonical_tasks: Vec<_> = canonical.tasks.iter().map(task_serialization_key).collect();
+        assert_eq!(
+            restored_tasks, canonical_tasks,
+            "decoded canonical task order must match the stable task ordering"
+        );
+        let restored_children: Vec<_> = restored
+            .children
+            .iter()
+            .map(|child| region_key(*child))
+            .collect();
+        let canonical_children: Vec<_> = canonical
+            .children
+            .iter()
+            .map(|child| region_key(*child))
+            .collect();
+        assert_eq!(
+            restored_children, canonical_children,
+            "decoded child order must match the stable child ordering"
+        );
     }
 
     #[test]
