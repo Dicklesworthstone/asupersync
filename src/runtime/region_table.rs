@@ -16,8 +16,13 @@ use crate::util::{Arena, ArenaIndex};
 pub enum RegionCreateError {
     /// The parent region does not exist.
     ParentNotFound(RegionId),
-    /// The parent region is closed or draining and cannot accept new children.
-    ParentClosed(RegionId),
+    /// The parent region is not open and cannot accept new children.
+    ParentClosed {
+        /// The parent region that rejected the child.
+        region: RegionId,
+        /// The exact lifecycle phase observed at rejection time.
+        state: crate::record::region::RegionState,
+    },
     /// The parent region has reached its admission limit for children.
     ParentAtCapacity {
         /// The parent region that rejected the child.
@@ -40,7 +45,9 @@ impl std::fmt::Display for RegionCreateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ParentNotFound(id) => write!(f, "parent region not found: {id:?}"),
-            Self::ParentClosed(id) => write!(f, "parent region closed: {id:?}"),
+            Self::ParentClosed { region, state } => {
+                write!(f, "parent region not open: {region:?} state={state:?}")
+            }
             Self::ParentAtCapacity {
                 region,
                 limit,
@@ -254,7 +261,10 @@ impl RegionTable {
             .ok_or(RegionCreateError::ParentNotFound(parent))
             .and_then(|record| {
                 record.add_child(id).map_err(|err| match err {
-                    AdmissionError::Closed => RegionCreateError::ParentClosed(parent),
+                    AdmissionError::Closed => RegionCreateError::ParentClosed {
+                        region: parent,
+                        state: record.state(),
+                    },
                     AdmissionError::LimitReached { limit, live, .. } => {
                         RegionCreateError::ParentAtCapacity {
                             region: parent,
@@ -447,7 +457,13 @@ mod tests {
         assert!(parent_record.begin_close(None));
 
         let result = table.create_child(parent, Budget::default(), Time::ZERO);
-        assert!(matches!(result, Err(RegionCreateError::ParentClosed(_))));
+        assert!(matches!(
+            result,
+            Err(RegionCreateError::ParentClosed {
+                region,
+                state: RegionState::Closing,
+            }) if region == parent
+        ));
         assert_eq!(table.len(), 1); // Child insert must be rolled back
         assert!(table.child_ids(parent).unwrap().is_empty());
     }
@@ -593,7 +609,13 @@ mod tests {
                 Budget::default(),
                 Time::from_nanos((attempt + 1) as u64),
             );
-            assert!(matches!(result, Err(RegionCreateError::ParentClosed(id)) if id == root));
+            assert!(matches!(
+                result,
+                Err(RegionCreateError::ParentClosed {
+                    region,
+                    state: RegionState::Closed,
+                }) if region == root
+            ));
             assert_eq!(table.len(), 1);
             assert!(table.child_ids(root).unwrap().is_empty());
         }
@@ -732,7 +754,10 @@ mod tests {
         };
 
         let e1 = RegionCreateError::ParentNotFound(id);
-        let e2 = RegionCreateError::ParentClosed(id);
+        let e2 = RegionCreateError::ParentClosed {
+            region: id,
+            state: RegionState::Closing,
+        };
         let e3 = RegionCreateError::ParentAtCapacity {
             region: id,
             limit: 10,
@@ -751,7 +776,8 @@ mod tests {
         let s1 = format!("{e1}");
         assert!(s1.contains("parent region not found"), "{s1}");
         let s2 = format!("{e2}");
-        assert!(s2.contains("parent region closed"), "{s2}");
+        assert!(s2.contains("parent region not open"), "{s2}");
+        assert!(s2.contains("Closing"), "{s2}");
         let s3 = format!("{e3}");
         assert!(s3.contains("admission limit reached"), "{s3}");
 

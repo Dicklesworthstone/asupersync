@@ -319,7 +319,7 @@ pub mod error {
         fn region_create_severity(error: &RegionCreateError) -> SporkSeverity {
             match error {
                 RegionCreateError::ParentAtCapacity { .. } => SporkSeverity::Transient,
-                RegionCreateError::ParentNotFound(_) | RegionCreateError::ParentClosed(_) => {
+                RegionCreateError::ParentNotFound(_) | RegionCreateError::ParentClosed { .. } => {
                     SporkSeverity::Permanent
                 }
                 RegionCreateError::ResourcePressure { .. } => SporkSeverity::Transient,
