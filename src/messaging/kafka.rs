@@ -752,18 +752,18 @@ fn validate_topic(topic: &str) -> Result<(), KafkaError> {
 /// Check if a topic contains critical production data that should never use StubBroker.
 fn is_critical_production_topic(topic: &str) -> bool {
     // Payment and transaction topics are critical - message loss = financial loss
-    topic.contains("payment") ||
-    topic.contains("transaction") ||
-    topic.contains("billing") ||
-    topic.contains("charge") ||
-    topic.contains("refund") ||
-    topic.contains("settle") ||
-    topic.contains("wallet") ||
-    topic.contains("invoice") ||
-    topic.contains("subscription") ||
-    topic.starts_with("fabric.payment.") ||
-    topic.starts_with("fabric.billing.") ||
-    topic.starts_with("fabric.transaction.")
+    topic.contains("payment")
+        || topic.contains("transaction")
+        || topic.contains("billing")
+        || topic.contains("charge")
+        || topic.contains("refund")
+        || topic.contains("settle")
+        || topic.contains("wallet")
+        || topic.contains("invoice")
+        || topic.contains("subscription")
+        || topic.starts_with("fabric.payment.")
+        || topic.starts_with("fabric.billing.")
+        || topic.starts_with("fabric.transaction.")
 }
 
 /// Compression algorithm for Kafka messages.
@@ -806,6 +806,22 @@ impl Acks {
     }
 }
 
+fn bootstrap_server_host(endpoint: &str) -> &str {
+    if let Some(rest) = endpoint.strip_prefix('[') {
+        return rest.split_once(']').map_or(endpoint, |(host, _)| host);
+    }
+
+    endpoint.rsplit_once(':').map_or(endpoint, |(host, _)| host)
+}
+
+fn is_loopback_bootstrap_server(endpoint: &str) -> bool {
+    let host = bootstrap_server_host(endpoint).trim();
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
 /// Configuration for Kafka producer.
 #[derive(Debug, Clone)]
 pub struct ProducerConfig {
@@ -829,6 +845,13 @@ pub struct ProducerConfig {
     pub request_timeout: Duration,
     /// Maximum message size in bytes.
     pub max_message_size: usize,
+    /// Scary opt-in for PLAINTEXT / unauthenticated remote brokers.
+    ///
+    /// `src/messaging/kafka.rs` does not yet expose TLS or SASL settings, so
+    /// the secure default is fail-closed for non-loopback bootstrap servers.
+    /// Set this only for local labs that intentionally exercise an insecure
+    /// broker. Production callers should wait for real TLS/SASL support.
+    pub allow_insecure_transport_for_testing: bool,
 }
 
 impl Default for ProducerConfig {
@@ -844,6 +867,7 @@ impl Default for ProducerConfig {
             retries: 3,
             request_timeout: Duration::from_secs(30),
             max_message_size: 1_048_576, // 1MB
+            allow_insecure_transport_for_testing: false,
         }
     }
 }
@@ -907,6 +931,13 @@ impl ProducerConfig {
         self
     }
 
+    /// Scary opt-in for remote PLAINTEXT / unauthenticated brokers.
+    #[must_use]
+    pub const fn allow_insecure_transport_for_testing(mut self, allow: bool) -> Self {
+        self.allow_insecure_transport_for_testing = allow;
+        self
+    }
+
     /// Validate the configuration.
     pub fn validate(&self) -> Result<(), KafkaError> {
         if self.bootstrap_servers.is_empty() {
@@ -921,6 +952,17 @@ impl ProducerConfig {
             return Err(KafkaError::Config(
                 "max_message_size must be > 0".to_string(),
             ));
+        }
+        if !self.allow_insecure_transport_for_testing {
+            for server in &self.bootstrap_servers {
+                if !is_loopback_bootstrap_server(server) {
+                    return Err(KafkaError::Config(format!(
+                        "remote Kafka bootstrap server '{server}' is rejected by default: \
+                         src/messaging/kafka.rs has no TLS/SASL knobs yet, so only loopback \
+                         brokers are allowed unless allow_insecure_transport_for_testing(true) is set"
+                    )));
+                }
+            }
         }
         Ok(())
     }
@@ -1950,6 +1992,7 @@ mod tests {
         assert_eq!(config.linger_ms, 5);
         assert!(config.enable_idempotence);
         assert_eq!(config.acks, Acks::All);
+        assert!(!config.allow_insecure_transport_for_testing);
     }
 
     #[test]
@@ -1977,6 +2020,18 @@ mod tests {
 
         let valid = ProducerConfig::default();
         assert!(valid.validate().is_ok());
+
+        let remote_plaintext = ProducerConfig::new(vec!["broker.example.com:9092".to_string()]);
+        let err = remote_plaintext.validate().expect_err(
+            "remote non-loopback bootstrap servers must fail closed until TLS/SASL support lands",
+        );
+        assert!(
+            matches!(err, KafkaError::Config(msg) if msg.contains("allow_insecure_transport_for_testing"))
+        );
+
+        let explicit_insecure = ProducerConfig::new(vec!["broker.example.com:9092".to_string()])
+            .allow_insecure_transport_for_testing(true);
+        assert!(explicit_insecure.validate().is_ok());
     }
 
     #[test]
@@ -2185,6 +2240,7 @@ mod tests {
         assert_eq!(cfg.retries, 3);
         assert_eq!(cfg.request_timeout, Duration::from_secs(30));
         assert_eq!(cfg.max_message_size, 1_048_576);
+        assert!(!cfg.allow_insecure_transport_for_testing);
     }
 
     #[test]
@@ -2325,9 +2381,18 @@ mod tests {
 
     #[test]
     fn kafka_producer_config_accessor() {
-        let cfg = ProducerConfig::new(vec!["host:9092".into()]).batch_size(999);
+        let cfg = ProducerConfig::new(vec!["localhost:9092".into()]).batch_size(999);
         let producer = KafkaProducer::new(cfg).unwrap();
         assert_eq!(producer.config().batch_size, 999);
+    }
+
+    #[test]
+    fn producer_config_allows_loopback_ipv4_and_ipv6_without_insecure_opt_in() {
+        let ipv4 = ProducerConfig::new(vec!["127.0.0.1:9092".into()]);
+        assert!(ipv4.validate().is_ok());
+
+        let ipv6 = ProducerConfig::new(vec!["[::1]:9092".into()]);
+        assert!(ipv6.validate().is_ok());
     }
 
     #[test]
