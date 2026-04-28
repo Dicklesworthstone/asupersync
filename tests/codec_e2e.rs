@@ -50,6 +50,11 @@ fn assert_next_frame_eq(
     assert_with_log!(&frame[..] == expected, section, expected, &frame[..]);
 }
 
+fn assert_next_line_eq(codec: &mut LinesCodec, buf: &mut BytesMut, section: &str, expected: &str) {
+    let actual = codec.decode(buf).expect("decode").expect("line");
+    assert_with_log!(actual == expected, section, expected, actual);
+}
+
 // ============================================================================
 // LINES CODEC TESTS
 // ============================================================================
@@ -67,18 +72,14 @@ fn e2e_codec_001_lines_multi_decode() {
     let mut buf = BytesMut::from("line1\nline2\nline3\n");
 
     test_section!("decode");
-    for (decode_label, line_label, expected) in [
-        ("decode 1", "line 1", "line1"),
-        ("decode 2", "line 2", "line2"),
-        ("decode 3", "line 3", "line3"),
+    for (section, expected) in [
+        ("line 1", "line1"),
+        ("line 2", "line2"),
+        ("line 3", "line3"),
     ] {
-        let actual = codec
-            .decode(&mut buf)
-            .expect(decode_label)
-            .expect(line_label);
-        assert_with_log!(actual == expected, expected, expected, actual);
+        assert_next_line_eq(&mut codec, &mut buf, section, expected);
     }
-    let none = codec.decode(&mut buf).expect("decode 4");
+    let none = codec.decode(&mut buf).expect("decode");
 
     test_section!("verify");
     assert_with_log!(none.is_none(), "no more lines", true, none.is_none());
@@ -98,13 +99,12 @@ fn e2e_codec_002_lines_crlf() {
     let mut buf = BytesMut::from("windows\r\nunix\nmixed\r\n");
 
     test_section!("decode");
-    for (decode_label, section, expected) in [
-        ("decode 1", "windows line", "windows"),
-        ("decode 2", "unix line", "unix"),
-        ("decode 3", "mixed line", "mixed"),
+    for (section, expected) in [
+        ("windows line", "windows"),
+        ("unix line", "unix"),
+        ("mixed line", "mixed"),
     ] {
-        let actual = codec.decode(&mut buf).expect(decode_label).expect(expected);
-        assert_with_log!(actual == expected, section, expected, actual);
+        assert_next_line_eq(&mut codec, &mut buf, section, expected);
     }
 
     test_complete!("e2e_codec_002_lines_crlf");
@@ -120,19 +120,13 @@ fn e2e_codec_003_lines_max_length() {
 
     let mut codec = LinesCodec::new_with_max_length(10);
 
-    for (section, input, decode_label, expected) in [
-        ("short line ok", "short\n", "decode short", "short"),
-        (
-            "exact limit ok",
-            "exactly10!\n",
-            "decode exact",
-            "exactly10!",
-        ),
+    for (section, input, expected) in [
+        ("short line ok", "short\n", "short"),
+        ("exact limit ok", "exactly10!\n", "exactly10!"),
     ] {
         test_section!(section);
         let mut buf = BytesMut::from(input);
-        let actual = codec.decode(&mut buf).expect(decode_label).expect(expected);
-        assert_with_log!(actual == expected, section, expected, actual);
+        assert_next_line_eq(&mut codec, &mut buf, section, expected);
     }
 
     test_section!("over limit rejected");
@@ -166,16 +160,7 @@ fn e2e_codec_004_lines_partial() {
 
     test_section!("complete with more data");
     buf.put_slice(b" line\n");
-    let complete = codec
-        .decode(&mut buf)
-        .expect("decode complete")
-        .expect("complete");
-    assert_with_log!(
-        complete == "partial line",
-        "completed line",
-        "partial line",
-        complete
-    );
+    assert_next_line_eq(&mut codec, &mut buf, "completed line", "partial line");
 
     test_complete!("e2e_codec_004_lines_partial");
 }
@@ -197,11 +182,8 @@ fn e2e_codec_005_lines_roundtrip() {
         .encode(original.clone(), &mut buf)
         .expect("encode failed");
 
-    test_section!("decode");
-    let decoded = codec.decode(&mut buf).expect("decode").expect("line");
-
-    test_section!("verify");
-    assert_with_log!(decoded == original, "roundtrip", original, decoded);
+    test_section!("decode + verify");
+    assert_next_line_eq(&mut codec, &mut buf, "roundtrip", &original);
 
     test_complete!("e2e_codec_005_lines_roundtrip");
 }
@@ -264,8 +246,7 @@ fn e2e_codec_007_lines_discard_and_recover() {
 
     test_section!("recover after oversized newline");
     buf.put_slice(b"\nok\n");
-    let line = codec.decode(&mut buf).expect("decode").expect("line");
-    assert_with_log!(line == "ok", "recovered line", "ok", line);
+    assert_next_line_eq(&mut codec, &mut buf, "recovered line", "ok");
 
     test_complete!("e2e_codec_007_lines_discard_and_recover");
 }
@@ -472,8 +453,7 @@ fn e2e_codec_020_empty_frames() {
     test_section!("empty line");
     let mut codec = LinesCodec::new();
     let mut buf = BytesMut::from("\n");
-    let empty = codec.decode(&mut buf).expect("decode").expect("empty line");
-    assert_with_log!(empty.is_empty(), "empty line", true, empty.is_empty());
+    assert_next_line_eq(&mut codec, &mut buf, "empty line", "");
 
     test_section!("empty length-delimited frame");
     let mut codec = LengthDelimitedCodec::new();
@@ -496,15 +476,12 @@ fn e2e_codec_021_unicode_content() {
     let unicode_line = "Hello 世界 🦀 Привет\n";
     let mut buf = BytesMut::from(unicode_line);
 
-    test_section!("decode");
-    let decoded = codec.decode(&mut buf).expect("decode").expect("unicode");
-
-    test_section!("verify");
-    assert_with_log!(
-        decoded == "Hello 世界 🦀 Привет",
+    test_section!("decode + verify");
+    assert_next_line_eq(
+        &mut codec,
+        &mut buf,
         "unicode content",
         "Hello 世界 🦀 Привет",
-        decoded
     );
 
     test_complete!("e2e_codec_021_unicode_content");
@@ -568,13 +545,7 @@ fn e2e_codec_023_buffer_state_preservation() {
 
     test_section!("complete");
     buf.put_slice(b"\n");
-    let line = codec.decode(&mut buf).expect("decode").expect("line");
-    assert_with_log!(
-        line == "partial more",
-        "completed line",
-        "partial more",
-        line
-    );
+    assert_next_line_eq(&mut codec, &mut buf, "completed line", "partial more");
     assert_with_log!(buf.is_empty(), "buffer empty", true, buf.is_empty());
 
     test_complete!("e2e_codec_023_buffer_state_preservation");
@@ -757,19 +728,13 @@ fn e2e_codec_040_codec_reuse() {
 
     let mut codec = LinesCodec::new();
 
-    for (decode_label, section, input, expected) in [
-        ("decode 1", "first cycle", "first\n", "first"),
-        (
-            "decode 2",
-            "second cycle - new buffer",
-            "second\n",
-            "second",
-        ),
+    for (section, input, expected) in [
+        ("first cycle", "first\n", "first"),
+        ("second cycle - new buffer", "second\n", "second"),
     ] {
         test_section!(section);
         let mut buf = BytesMut::from(input);
-        let actual = codec.decode(&mut buf).expect(decode_label).expect(expected);
-        assert_with_log!(actual == expected, expected, expected, actual);
+        assert_next_line_eq(&mut codec, &mut buf, expected, expected);
     }
 
     test_complete!("e2e_codec_040_codec_reuse");
