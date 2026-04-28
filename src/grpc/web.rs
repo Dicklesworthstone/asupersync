@@ -2082,20 +2082,28 @@ mod tests {
         );
 
         let flag = encoded_buf[0];
-        let length = u32::from_be_bytes([encoded_buf[1], encoded_buf[2], encoded_buf[3], encoded_buf[4]]);
+        let length = u32::from_be_bytes([
+            encoded_buf[1],
+            encoded_buf[2],
+            encoded_buf[3],
+            encoded_buf[4],
+        ]);
         let header_block = &encoded_buf[5..];
 
         // Verify flag byte compliance with gRPC-Web spec
         assert_eq!(
-            flag & TRAILER_FLAG, TRAILER_FLAG,
+            flag & TRAILER_FLAG,
+            TRAILER_FLAG,
             "gRPC-Web spec: trailer frames must have bit 7 set (0x80)"
         );
         assert_eq!(
-            flag & RESERVED_FLAG_MASK, 0,
+            flag & RESERVED_FLAG_MASK,
+            0,
             "gRPC-Web spec: reserved flag bits 1-6 must be zero"
         );
         assert_eq!(
-            flag & 0x01, 0,
+            flag & 0x01,
+            0,
             "gRPC-Web spec: compressed trailers (0x81) not supported, bit 0 must be zero"
         );
 
@@ -2162,7 +2170,12 @@ mod tests {
             use base64::Engine;
             base64::engine::general_purpose::STANDARD
                 .decode(base64_value)
-                .unwrap_or_else(|_| panic!("gRPC-Web spec: binary metadata must be valid base64: {}", base64_value));
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "gRPC-Web spec: binary metadata must be valid base64: {}",
+                        base64_value
+                    )
+                });
         }
 
         // Test round-trip decoding to verify our encoder/decoder consistency
@@ -2251,7 +2264,7 @@ mod tests {
             (Code::Unauthenticated, 16),
         ];
 
-        for (grpc_code, expected_wire_value) in test_cases {
+        for &(grpc_code, expected_wire_value) in &test_cases {
             let test_message = format!("Test message for status {}", grpc_code.as_str());
 
             // Create Status with the gRPC code
@@ -2263,31 +2276,48 @@ mod tests {
             encode_trailers(&original_status, &metadata, &mut encoded_buf);
 
             // Parse the encoded frame manually to verify wire format compliance
-            assert!(encoded_buf.len() >= 5, "trailer frame must have at least 5-byte header");
-            assert_eq!(encoded_buf[0], TRAILER_FLAG, "first byte must be trailer flag 0x80");
+            assert!(
+                encoded_buf.len() >= 5,
+                "trailer frame must have at least 5-byte header"
+            );
+            assert_eq!(
+                encoded_buf[0], TRAILER_FLAG,
+                "first byte must be trailer flag 0x80"
+            );
 
-            let length = u32::from_be_bytes([
-                encoded_buf[1], encoded_buf[2], encoded_buf[3], encoded_buf[4]
+            let _length = u32::from_be_bytes([
+                encoded_buf[1],
+                encoded_buf[2],
+                encoded_buf[3],
+                encoded_buf[4],
             ]);
-            let header_block = std::str::from_utf8(&encoded_buf[5..])
-                .expect("trailer block must be valid UTF-8");
+            let header_block =
+                std::str::from_utf8(&encoded_buf[5..]).expect("trailer block must be valid UTF-8");
 
             // CONFORMANCE CHECK 1: Wire format must contain "grpc-status: <code>"
             let expected_status_line = format!("grpc-status: {}", expected_wire_value);
             assert!(
                 header_block.contains(&expected_status_line),
                 "Wire format must contain 'grpc-status: {}' for code {:?}, got: {:?}",
-                expected_wire_value, grpc_code, header_block
+                expected_wire_value,
+                grpc_code,
+                header_block
             );
 
             // CONFORMANCE CHECK 2: Message encoding must be percent-escaped per spec
             if !test_message.is_empty() {
-                let expected_message_line = format!("grpc-message: {}",
-                    test_message.replace('%', "%25").replace('\r', "%0D").replace('\n', "%0A"));
+                let expected_message_line = format!(
+                    "grpc-message: {}",
+                    test_message
+                        .replace('%', "%25")
+                        .replace('\r', "%0D")
+                        .replace('\n', "%0A")
+                );
                 assert!(
                     header_block.contains(&expected_message_line),
                     "Message must be percent-encoded per gRPC-Web spec, expected: {}, got: {}",
-                    expected_message_line, header_block
+                    expected_message_line,
+                    header_block
                 );
             }
 
@@ -2300,14 +2330,16 @@ mod tests {
             assert_eq!(
                 decoded_trailer.status.code(),
                 grpc_code,
-                "Decoded status code must match original for wire value {}", expected_wire_value
+                "Decoded status code must match original for wire value {}",
+                expected_wire_value
             );
 
             // CONFORMANCE CHECK 4: Message must round-trip with percent-decoding
             assert_eq!(
                 decoded_trailer.status.message(),
                 test_message,
-                "Message must round-trip with percent-decoding for code {:?}", grpc_code
+                "Message must round-trip with percent-decoding for code {:?}",
+                grpc_code
             );
 
             // CONFORMANCE CHECK 5: Wire value mapping must be bijective
@@ -2329,14 +2361,19 @@ mod tests {
             let result = decode_trailers(invalid_block.as_bytes());
             match description {
                 "non-numeric status" => {
-                    assert!(result.is_err(),
-                        "Non-numeric grpc-status must be rejected per spec (br-asupersync-6qwzl0)");
+                    assert!(
+                        result.is_err(),
+                        "Non-numeric grpc-status must be rejected per spec (br-asupersync-6qwzl0)"
+                    );
                 }
                 "out-of-range status code" | "negative status code" => {
                     // Per gRPC spec, unknown codes should be treated as UNKNOWN (2)
                     if let Ok(trailer) = result {
-                        assert_eq!(trailer.status.code(), Code::Unknown,
-                            "Out-of-range status codes should map to UNKNOWN per gRPC spec");
+                        assert_eq!(
+                            trailer.status.code(),
+                            Code::Unknown,
+                            "Out-of-range status codes should map to UNKNOWN per gRPC spec"
+                        );
                     }
                 }
                 _ => {}
@@ -2346,18 +2383,26 @@ mod tests {
         // CONFORMANCE TEST 4: Duplicate status headers are rejected per spec
         let duplicate_status_block = "grpc-status: 0\r\ngrpc-status: 2\r\n";
         let result = decode_trailers(duplicate_status_block.as_bytes());
-        assert!(result.is_err(),
-            "Duplicate grpc-status headers must be rejected per grpcweb-protocol spec (br-nbryje)");
+        assert!(
+            result.is_err(),
+            "Duplicate grpc-status headers must be rejected per grpcweb-protocol spec (br-nbryje)"
+        );
 
         // CONFORMANCE TEST 5: Missing grpc-status is treated as INTERNAL per spec
         let missing_status_block = "grpc-message: Missing status\r\n";
         let result = decode_trailers(missing_status_block.as_bytes())
             .expect("missing status should default to INTERNAL");
-        assert_eq!(result.status.code(), Code::Internal,
-            "Missing grpc-status must default to INTERNAL (13) per grpcweb-protocol spec");
+        assert_eq!(
+            result.status.code(),
+            Code::Internal,
+            "Missing grpc-status must default to INTERNAL (13) per grpcweb-protocol spec"
+        );
 
         println!("✓ gRPC-Web STATUS-trailer mapping differential conformance verified");
-        println!("  - All {} standard gRPC status codes correctly encoded/decoded", test_cases.len());
+        println!(
+            "  - All {} standard gRPC status codes correctly encoded/decoded",
+            test_cases.len()
+        );
         println!("  - Invalid status formats properly rejected per grpcweb-protocol spec");
         println!("  - Duplicate status headers rejected per spec (br-nbryje)");
         println!("  - Missing status defaults to INTERNAL per spec");

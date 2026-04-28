@@ -2468,6 +2468,7 @@ mod tests {
     #[cfg(test)]
     #[test]
     fn conformance_differential_max_frame_length_vs_tokio_util() {
+        use prost::bytes::BytesMut as TokioBytesMut;
         use tokio_util::codec::{Decoder as TokioDecoder, LengthDelimitedCodec as TokioCodec};
 
         let test_cases = [
@@ -2495,7 +2496,7 @@ mod tests {
 
             // Test tokio-util implementation
             let mut tokio_codec = TokioCodec::builder().max_frame_length(max_len).new_codec();
-            let mut tokio_buf = encoded.clone();
+            let mut tokio_buf = TokioBytesMut::from(encoded.as_ref());
             let tokio_result = tokio_codec.decode(&mut tokio_buf);
 
             // Compare results: both should succeed or both should fail

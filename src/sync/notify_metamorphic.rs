@@ -7,11 +7,10 @@
 #![allow(clippy::unwrap_used)] // Test code
 
 use super::notify::Notify;
-use crate::cx::Cx;
 use crate::lab::{LabConfig, runtime::LabRuntime};
-use crate::{time, Time};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use crate::{Time, time};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 /// Metamorphic Relation: Notification Conservation
@@ -37,7 +36,6 @@ fn mr_notification_conservation() {
                 let notify_clone = Arc::clone(&notify);
                 let count_clone = Arc::clone(&notified_count);
                 let future = async move {
-                    let cx = Cx::for_testing();
                     notify_clone.notified().await;
                     count_clone.fetch_add(1, Ordering::Relaxed);
                     i
@@ -71,7 +69,8 @@ fn mr_notification_conservation() {
 
         // No remaining waiters should be blocked
         assert_eq!(
-            notify.waiter_count(), 0,
+            notify.waiter_count(),
+            0,
             "All waiters should be notified, but {} are still waiting",
             notify.waiter_count()
         );
@@ -106,7 +105,6 @@ fn mr_stored_notification_invariance() {
             let notify1_clone = Arc::clone(&notify1);
             let notified1_clone = Arc::clone(&notified1);
             let future1 = async {
-                let cx = Cx::for_testing();
                 notify1_clone.notified().await;
                 notified1_clone.fetch_add(1, Ordering::Relaxed);
             };
@@ -121,7 +119,6 @@ fn mr_stored_notification_invariance() {
             let notify2_clone = Arc::clone(&notify2);
             let notified2_clone = Arc::clone(&notified2);
             let waiter_future = async {
-                let cx = Cx::for_testing();
                 notify2_clone.notified().await;
                 notified2_clone.fetch_add(1, Ordering::Relaxed);
             };
@@ -181,7 +178,6 @@ fn mr_broadcast_equivalence() {
                 let notify_clone = Arc::clone(&notify1);
                 let count_clone = Arc::clone(&notified_count1);
                 let future = async move {
-                    let cx = Cx::for_testing();
                     notify_clone.notified().await;
                     count_clone.fetch_add(1, Ordering::Relaxed);
                     i
@@ -210,7 +206,6 @@ fn mr_broadcast_equivalence() {
                 let notify_clone = Arc::clone(&notify2);
                 let count_clone = Arc::clone(&notified_count2);
                 let future = async move {
-                    let cx = Cx::for_testing();
                     notify_clone.notified().await;
                     count_clone.fetch_add(1, Ordering::Relaxed);
                     i
@@ -254,8 +249,6 @@ fn mr_broadcast_equivalence() {
 
 #[cfg(test)]
 mod mutation_tests {
-    use super::*;
-
     /// Validates that the MR suite detects planted bugs through mutation testing.
     /// This ensures our metamorphic relations actually catch real defects.
     #[test]

@@ -1442,7 +1442,7 @@ mod tests {
         let global = Arc::new(GlobalQueue::new());
         let shutdown = Arc::new(AtomicBool::new(false));
 
-        let worker = Worker::new(
+        let mut worker = Worker::new(
             0,
             Vec::new(),
             Arc::clone(&global),

@@ -2254,13 +2254,10 @@ mod tests {
         // Phase 3: Verify fail-closed semantics match grpc-go behavior
         let waker = noop_waker();
         let mut cx = Context::from_waker(&waker);
-        let mut pinned_client = Pin::new(&mut client_request_stream);
-        let mut pinned_server = Pin::new(&mut server_response_stream);
-
         // Client stream should drain buffered messages before returning cancellation
         assert!(
             matches!(
-                pinned_client.as_mut().poll_next(&mut cx),
+                Pin::new(&mut client_request_stream).poll_next(&mut cx),
                 Poll::Ready(Some(Ok(ref msg))) if msg == "client_msg_1"
             ),
             "grpc-go semantics: buffered messages drain before cancellation"
@@ -2268,14 +2265,14 @@ mod tests {
 
         assert!(
             matches!(
-                pinned_client.as_mut().poll_next(&mut cx),
+                Pin::new(&mut client_request_stream).poll_next(&mut cx),
                 Poll::Ready(Some(Ok(ref msg))) if msg == "client_msg_2"
             ),
             "grpc-go semantics: all buffered messages drained"
         );
 
         // After draining, cancellation status must be returned (fail-closed)
-        match pinned_client.as_mut().poll_next(&mut cx) {
+        match Pin::new(&mut client_request_stream).poll_next(&mut cx) {
             Poll::Ready(Some(Err(status))) => {
                 assert_eq!(
                     status.code(),
@@ -2300,7 +2297,7 @@ mod tests {
         // Server response stream should also follow fail-closed semantics
         assert!(
             matches!(
-                pinned_server.as_mut().poll_next(&mut cx),
+                Pin::new(&mut server_response_stream).poll_next(&mut cx),
                 Poll::Ready(Some(Ok(ref msg))) if msg == "server_resp_1"
             ),
             "grpc-go: server drains responses before cancellation"
@@ -2308,14 +2305,14 @@ mod tests {
 
         assert!(
             matches!(
-                pinned_server.as_mut().poll_next(&mut cx),
+                Pin::new(&mut server_response_stream).poll_next(&mut cx),
                 Poll::Ready(Some(Ok(ref msg))) if msg == "server_resp_2"
             ),
             "grpc-go: server drains all responses"
         );
 
         // Server cancellation status returned after drain
-        match pinned_server.as_mut().poll_next(&mut cx) {
+        match Pin::new(&mut server_response_stream).poll_next(&mut cx) {
             Poll::Ready(Some(Err(status))) => {
                 assert_eq!(
                     status.code(),
@@ -2348,7 +2345,7 @@ mod tests {
 
         // Phase 6: Verify idempotent cancellation status (grpc-go behavior)
         // Subsequent polls should consistently return the same cancellation status
-        match pinned_client.as_mut().poll_next(&mut cx) {
+        match Pin::new(&mut client_request_stream).poll_next(&mut cx) {
             Poll::Ready(Some(Err(status))) => {
                 assert_eq!(
                     status.code(),
@@ -2359,7 +2356,7 @@ mod tests {
             other => panic!("grpc-go idempotent cancellation violated: {other:?}"),
         }
 
-        match pinned_server.as_mut().poll_next(&mut cx) {
+        match Pin::new(&mut server_response_stream).poll_next(&mut cx) {
             Poll::Ready(Some(Err(status))) => {
                 assert_eq!(
                     status.code(),
