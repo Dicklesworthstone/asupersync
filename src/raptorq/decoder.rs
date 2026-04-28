@@ -509,6 +509,32 @@ impl Equation {
         Some(self.terms.remove(idx).1)
     }
 
+    /// Optimized removal for degree-2 equations that avoids binary search.
+    /// Returns (coefficient, remaining_column) if the column was found and removed
+    /// from a degree-2 equation, None otherwise.
+    #[inline]
+    fn take_coef_degree2_fast(&mut self, col: usize) -> Option<(Gf256, usize)> {
+        if self.terms.len() != 2 {
+            return None;
+        }
+        if self.terms[0].0 == col {
+            let coef = self.terms[0].1;
+            let remaining = self.terms[1].0;
+            // Remove the first element by moving the second to first position
+            self.terms[0] = self.terms[1];
+            self.terms.truncate(1);
+            Some((coef, remaining))
+        } else if self.terms[1].0 == col {
+            let coef = self.terms[1].1;
+            let remaining = self.terms[0].0;
+            // Remove the second element by truncating
+            self.terms.truncate(1);
+            Some((coef, remaining))
+        } else {
+            None
+        }
+    }
+
     #[inline]
     fn extract_solved_terms(
         &mut self,
@@ -1923,20 +1949,37 @@ impl InactivationDecoder {
                 if eq.used {
                     continue;
                 }
-                let Some(eq_coef) = eq.take_coef(col) else {
-                    continue;
-                };
-                // rhs[i] -= eq_coef * solution
-                gf256_addmul_slice(&mut state.rhs[i], &solution, eq_coef);
 
-                if !queued[i] && !eq.used && eq.degree() == 1 {
-                    let next_col = eq.terms[0].0;
-                    if state.column_states[next_col] == ColumnState::Active
-                        && solved[next_col].is_none()
+                // Fast path: for degree-2 equations, avoid binary search
+                if let Some((eq_coef, remaining_col)) = eq.take_coef_degree2_fast(col) {
+                    // rhs[i] -= eq_coef * solution
+                    gf256_addmul_slice(&mut state.rhs[i], &solution, eq_coef);
+
+                    // We know it's now degree-1 with remaining_col, no need to check
+                    if !queued[i] && state.column_states[remaining_col] == ColumnState::Active
+                        && solved[remaining_col].is_none()
                     {
                         queue.push_back(i);
                         queued[i] = true;
                         state.stats.peel_queue_pushes += 1;
+                    }
+                } else {
+                    // Fallback to binary search for other degrees
+                    let Some(eq_coef) = eq.take_coef(col) else {
+                        continue;
+                    };
+                    // rhs[i] -= eq_coef * solution
+                    gf256_addmul_slice(&mut state.rhs[i], &solution, eq_coef);
+
+                    if !queued[i] && !eq.used && eq.degree() == 1 {
+                        let next_col = eq.terms[0].0;
+                        if state.column_states[next_col] == ColumnState::Active
+                            && solved[next_col].is_none()
+                        {
+                            queue.push_back(i);
+                            queued[i] = true;
+                            state.stats.peel_queue_pushes += 1;
+                        }
                     }
                 }
             }
