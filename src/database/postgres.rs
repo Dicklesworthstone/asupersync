@@ -1426,11 +1426,18 @@ fn tls_server_end_point_cbind(cert_der: &[u8]) -> Vec<u8> {
 /// truncated attacker inputs into a variable-time prefix oracle.
 #[inline]
 fn scram_constant_time_eq_expected_len(expected: &[u8], actual: &[u8]) -> bool {
+    use std::hint::black_box;
+
     let mut diff = u8::from(expected.len() != actual.len());
-    for (idx, &expected_byte) in expected.iter().enumerate() {
-        diff |= expected_byte ^ actual.get(idx).copied().unwrap_or(0);
+
+    // Use direct indexing instead of enumerate to avoid potential iterator overhead
+    // that could introduce timing variations
+    for i in 0..expected.len() {
+        let actual_byte = actual.get(i).copied().unwrap_or(0);
+        diff |= expected[i] ^ actual_byte;
     }
-    std::hint::black_box(diff) == 0
+
+    black_box(diff) == 0
 }
 
 /// SCRAM-SHA-256 authentication state machine.
@@ -2994,30 +3001,31 @@ impl PgConnection {
         tls_leaf_cert: Option<Vec<u8>>,
     ) -> Result<ScramChannelBinding, PgError> {
         let server_offers_plus = mechanisms.iter().any(|m| m == "SCRAM-SHA-256-PLUS");
+
         #[cfg(feature = "tls")]
-        if tls_active && tls_leaf_cert.is_none() {
-            return Err(PgError::AuthenticationFailed(
-                "TLS peer certificate required for PostgreSQL SCRAM authentication".to_string(),
-            ));
+        if tls_active {
+            // TLS connections MUST have a certificate for secure channel binding
+            let cert = tls_leaf_cert.ok_or_else(|| {
+                PgError::AuthenticationFailed(
+                    "TLS peer certificate required for PostgreSQL SCRAM authentication".to_string(),
+                )
+            })?;
+
+            return Ok(if server_offers_plus {
+                ScramChannelBinding::TlsServerEndPoint {
+                    cbind_data: tls_server_end_point_cbind(&cert),
+                }
+            } else {
+                // TLS is in use but server didn't advertise -PLUS. The `y` GS2
+                // signal still defends against the downgrade attack.
+                ScramChannelBinding::SupportedNotUsed
+            });
         }
-        #[cfg(feature = "tls")]
-        return Ok(match (tls_leaf_cert, server_offers_plus) {
-            #[cfg(feature = "tls")]
-            (Some(cert), true) => ScramChannelBinding::TlsServerEndPoint {
-                cbind_data: tls_server_end_point_cbind(&cert),
-            },
-            // TLS is in use but server didn't advertise -PLUS. The `y` GS2
-            // signal still defends against the downgrade attack.
-            #[cfg(feature = "tls")]
-            (Some(_), false) => ScramChannelBinding::SupportedNotUsed,
-            #[cfg(feature = "tls")]
-            (None, _) => ScramChannelBinding::None,
-        });
+
         #[cfg(not(feature = "tls"))]
-        {
-            let _ = (mechanisms, tls_active, tls_leaf_cert);
-            Ok(ScramChannelBinding::None)
-        }
+        let _ = (mechanisms, tls_active, tls_leaf_cert);
+
+        Ok(ScramChannelBinding::None)
     }
 
     /// Read SASL mechanism list.
