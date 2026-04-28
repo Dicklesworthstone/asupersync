@@ -1843,6 +1843,16 @@ mod tests {
         }
     }
 
+    fn observable_token_state_json(token: &SymbolCancelToken) -> Value {
+        serde_json::json!({
+            "cancelled": token.is_cancelled(),
+            "cancelled_at_nanos": token.cancelled_at().map(Time::as_nanos),
+            "queued_children": token.state.children.read().len(),
+            "queued_listeners": token.state.listeners.read().len(),
+            "reason_kind": token.reason().map(|reason| format!("{:?}", reason.kind)),
+        })
+    }
+
     #[derive(Debug, PartialEq, Eq)]
     struct DescendantInvariantScenario {
         creation_order: Vec<&'static str>,
@@ -2265,6 +2275,77 @@ mod tests {
 
             insta::assert_snapshot!(format!("cancel_token_serialization_{}", name), hex_output);
         }
+    }
+
+    #[test]
+    fn cancel_token_phase_transition_trace_canonical() {
+        let mut rng = DetRng::new(0x53A9_0001_0002_0003);
+        let parent = SymbolCancelToken::new(
+            ObjectId::new(0x1111_2222_3333_4444, 0x5555_6666_7777_8888),
+            &mut rng,
+        );
+        let preexisting_child = parent.child(&mut rng);
+        let listener_events = Arc::new(StdMutex::new(Vec::<Value>::new()));
+        let listener_events_for_callback = Arc::clone(&listener_events);
+        parent.add_listener(move |reason: &CancelReason, at: Time| {
+            listener_events_for_callback
+                .lock()
+                .unwrap()
+                .push(serde_json::json!({
+                    "at_nanos": at.as_nanos(),
+                    "kind": format!("{:?}", reason.kind),
+                }));
+        });
+
+        let fresh_parent = observable_token_state_json(&parent);
+        let fresh_preexisting_child = observable_token_state_json(&preexisting_child);
+
+        let first_cancel_at = Time::from_nanos(991);
+        assert!(
+            parent.cancel(&CancelReason::user("phase-zero"), first_cancel_at),
+            "first cancel should transition the token"
+        );
+
+        let after_first_cancel_events = listener_events.lock().unwrap().clone();
+        let after_first_cancel_parent = observable_token_state_json(&parent);
+        let after_first_cancel_preexisting_child = observable_token_state_json(&preexisting_child);
+
+        let late_child = parent.child(&mut rng);
+        let after_late_child_parent = observable_token_state_json(&parent);
+        let after_late_child_late_child = observable_token_state_json(&late_child);
+
+        let strengthened_returned_first_caller =
+            parent.cancel(&CancelReason::shutdown(), Time::from_nanos(4096));
+
+        let after_strengthen_events = listener_events.lock().unwrap().clone();
+        let after_strengthen_parent = observable_token_state_json(&parent);
+        let after_strengthen_preexisting_child = observable_token_state_json(&preexisting_child);
+        let after_strengthen_late_child = observable_token_state_json(&late_child);
+
+        let trace = serde_json::json!({
+            "fresh": {
+                "parent": fresh_parent,
+                "preexisting_child": fresh_preexisting_child,
+            },
+            "after_first_cancel": {
+                "listener_events": after_first_cancel_events,
+                "parent": after_first_cancel_parent,
+                "preexisting_child": after_first_cancel_preexisting_child,
+            },
+            "after_late_child": {
+                "late_child": after_late_child_late_child,
+                "parent": after_late_child_parent,
+            },
+            "after_strengthen": {
+                "late_child": after_strengthen_late_child,
+                "listener_events": after_strengthen_events,
+                "parent": after_strengthen_parent,
+                "preexisting_child": after_strengthen_preexisting_child,
+                "strengthened_returned_first_caller": strengthened_returned_first_caller,
+            },
+        });
+
+        insta::assert_json_snapshot!("cancel_token_phase_transition_trace_canonical", trace);
     }
 
     /// br-asupersync-64ijds — Conformance: a panic inside a registered
