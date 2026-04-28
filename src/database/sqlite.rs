@@ -102,6 +102,95 @@ fn rollback_orphaned_transaction(
     }
 }
 
+fn skip_sql_trivia(sql: &str, mut index: usize) -> usize {
+    let bytes = sql.as_bytes();
+    while index < bytes.len() {
+        match bytes[index] {
+            b' ' | b'\t' | b'\n' | b'\r' | 0x0C => {
+                index += 1;
+            }
+            b'-' if bytes.get(index + 1) == Some(&b'-') => {
+                index += 2;
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index += 2;
+                while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/')
+                {
+                    index += 1;
+                }
+                if index + 1 < bytes.len() {
+                    index += 2;
+                }
+            }
+            _ => break,
+        }
+    }
+    index
+}
+
+fn checked_sql_surface_violation(sql: &str) -> Option<&'static str> {
+    let bytes = sql.as_bytes();
+    let mut index = 0usize;
+    let mut statement_start = true;
+
+    while index < bytes.len() {
+        index = skip_sql_trivia(sql, index);
+        if index >= bytes.len() {
+            break;
+        }
+
+        if bytes[index] == b';' {
+            statement_start = true;
+            index += 1;
+            continue;
+        }
+
+        if statement_start {
+            if bytes[index].is_ascii_alphabetic() {
+                let start = index;
+                index += 1;
+                while index < bytes.len()
+                    && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+                {
+                    index += 1;
+                }
+                let keyword = &sql[start..index];
+                if keyword.eq_ignore_ascii_case("PRAGMA") {
+                    return Some("PRAGMA");
+                }
+                if keyword.eq_ignore_ascii_case("BEGIN")
+                    || keyword.eq_ignore_ascii_case("COMMIT")
+                    || keyword.eq_ignore_ascii_case("END")
+                    || keyword.eq_ignore_ascii_case("ROLLBACK")
+                    || keyword.eq_ignore_ascii_case("SAVEPOINT")
+                    || keyword.eq_ignore_ascii_case("RELEASE")
+                    || keyword.eq_ignore_ascii_case("ATTACH")
+                    || keyword.eq_ignore_ascii_case("DETACH")
+                {
+                    return Some("transaction or connection control");
+                }
+            }
+            statement_start = false;
+        }
+
+        index += 1;
+    }
+
+    None
+}
+
+fn ensure_checked_sql_surface(sql: &str) -> Result<(), SqliteError> {
+    if let Some(kind) = checked_sql_surface_violation(sql) {
+        return Err(SqliteError::UnsafeSql(format!(
+            "{kind} statements require the explicit *_unchecked SQLite APIs"
+        )));
+    }
+    Ok(())
+}
+
 /// Error type for SQLite operations.
 #[derive(Debug)]
 pub enum SqliteError {
@@ -128,6 +217,8 @@ pub enum SqliteError {
     TransactionFinished,
     /// Lock poisoned.
     LockPoisoned,
+    /// Raw engine-control SQL hit a checked surface.
+    UnsafeSql(String),
 }
 
 impl SqliteError {
@@ -246,6 +337,9 @@ impl fmt::Display for SqliteError {
             Self::Io(e) => write!(f, "SQLite I/O error: {e}"),
             Self::TransactionFinished => write!(f, "Transaction already finished"),
             Self::LockPoisoned => write!(f, "SQLite connection lock poisoned"),
+            Self::UnsafeSql(msg) => {
+                write!(f, "Unsafe SQLite control SQL on checked surface: {msg}")
+            }
         }
     }
 }
@@ -670,6 +764,25 @@ impl SqliteConnection {
         sql: &str,
         params: &[SqliteValue],
     ) -> Outcome<u64, SqliteError> {
+        if let Err(err) = ensure_checked_sql_surface(sql) {
+            return Outcome::Err(err);
+        }
+        self.execute_unchecked(cx, sql, params).await
+    }
+
+    /// Execute an unparameterized SQL command on the underlying connection.
+    ///
+    /// # Security
+    ///
+    /// This bypasses the checked surface and therefore permits engine-control
+    /// statements such as `BEGIN`, `ROLLBACK`, and `PRAGMA`. Use it only for
+    /// static literals or version-controlled migration/control SQL.
+    pub async fn execute_unchecked(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        params: &[SqliteValue],
+    ) -> Outcome<u64, SqliteError> {
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
@@ -708,6 +821,15 @@ impl SqliteConnection {
     ///
     /// This operation checks for cancellation before starting.
     pub async fn execute_batch(&self, cx: &Cx, sql: &str) -> Outcome<(), SqliteError> {
+        if let Err(err) = ensure_checked_sql_surface(sql) {
+            return Outcome::Err(err);
+        }
+        self.execute_batch_unchecked(cx, sql).await
+    }
+
+    /// Execute a trusted batch of SQL statements without checked-surface
+    /// validation.
+    pub async fn execute_batch_unchecked(&self, cx: &Cx, sql: &str) -> Outcome<(), SqliteError> {
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
@@ -741,6 +863,19 @@ impl SqliteConnection {
     ///
     /// This operation checks for cancellation before starting.
     pub async fn query(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        params: &[SqliteValue],
+    ) -> Outcome<Vec<SqliteRow>, SqliteError> {
+        if let Err(err) = ensure_checked_sql_surface(sql) {
+            return Outcome::Err(err);
+        }
+        self.query_unchecked(cx, sql, params).await
+    }
+
+    /// Execute a trusted raw SQL query without checked-surface validation.
+    pub async fn query_unchecked(
         &self,
         cx: &Cx,
         sql: &str,
@@ -824,6 +959,19 @@ impl SqliteConnection {
         sql: &str,
         params: &[SqliteValue],
     ) -> Outcome<Option<SqliteRow>, SqliteError> {
+        if let Err(err) = ensure_checked_sql_surface(sql) {
+            return Outcome::Err(err);
+        }
+        self.query_row_unchecked(cx, sql, params).await
+    }
+
+    /// Execute a trusted raw SQL query_row without checked-surface validation.
+    pub async fn query_row_unchecked(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        params: &[SqliteValue],
+    ) -> Outcome<Option<SqliteRow>, SqliteError> {
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
@@ -901,7 +1049,7 @@ impl SqliteConnection {
     ///
     /// This operation checks for cancellation before starting.
     pub async fn begin(&self, cx: &Cx) -> Outcome<SqliteTransaction<'_>, SqliteError> {
-        match self.execute(cx, "BEGIN", &[]).await {
+        match self.execute_unchecked(cx, "BEGIN", &[]).await {
             Outcome::Ok(_) => Outcome::Ok(SqliteTransaction {
                 conn: self,
                 finished: false,
@@ -918,7 +1066,7 @@ impl SqliteConnection {
     ///
     /// This operation checks for cancellation before starting.
     pub async fn begin_immediate(&self, cx: &Cx) -> Outcome<SqliteTransaction<'_>, SqliteError> {
-        match self.execute(cx, "BEGIN IMMEDIATE", &[]).await {
+        match self.execute_unchecked(cx, "BEGIN IMMEDIATE", &[]).await {
             Outcome::Ok(_) => Outcome::Ok(SqliteTransaction {
                 conn: self,
                 finished: false,
@@ -935,7 +1083,7 @@ impl SqliteConnection {
     ///
     /// This operation checks for cancellation before starting.
     pub async fn begin_exclusive(&self, cx: &Cx) -> Outcome<SqliteTransaction<'_>, SqliteError> {
-        match self.execute(cx, "BEGIN EXCLUSIVE", &[]).await {
+        match self.execute_unchecked(cx, "BEGIN EXCLUSIVE", &[]).await {
             Outcome::Ok(_) => Outcome::Ok(SqliteTransaction {
                 conn: self,
                 finished: false,
@@ -1005,7 +1153,7 @@ impl SqliteTransaction<'_> {
         if self.finished {
             return Outcome::Err(SqliteError::TransactionFinished);
         }
-        match self.conn.execute(cx, "COMMIT", &[]).await {
+        match self.conn.execute_unchecked(cx, "COMMIT", &[]).await {
             Outcome::Ok(_) => {
                 self.finished = true;
                 Outcome::Ok(())
@@ -1025,7 +1173,7 @@ impl SqliteTransaction<'_> {
         if self.finished {
             return Outcome::Err(SqliteError::TransactionFinished);
         }
-        match self.conn.execute(cx, "ROLLBACK", &[]).await {
+        match self.conn.execute_unchecked(cx, "ROLLBACK", &[]).await {
             Outcome::Ok(_) => {
                 self.finished = true;
                 Outcome::Ok(())
@@ -1264,6 +1412,15 @@ mod tests {
         );
     }
 
+    #[test]
+    fn sqlite_error_display_unsafe_sql() {
+        let err = SqliteError::UnsafeSql("PRAGMA statements require *_unchecked".into());
+        assert_eq!(
+            err.to_string(),
+            "Unsafe SQLite control SQL on checked surface: PRAGMA statements require *_unchecked"
+        );
+    }
+
     // ---- SqliteError source() ----
 
     #[test]
@@ -1281,7 +1438,50 @@ mod tests {
         assert!(SqliteError::Sqlite("oops".into()).source().is_none());
         assert!(SqliteError::LockPoisoned.source().is_none());
         assert!(SqliteError::TransactionFinished.source().is_none());
+        assert!(SqliteError::UnsafeSql("oops".into()).source().is_none());
         assert!(SqliteError::ColumnNotFound("x".into()).source().is_none());
+    }
+
+    #[test]
+    fn checked_sql_surface_rejects_transaction_control_keywords() {
+        for sql in [
+            "BEGIN IMMEDIATE",
+            "  -- comment\nROLLBACK",
+            "/* comment */ SAVEPOINT sp1",
+            "ATTACH 'tenant.db' AS tenant",
+        ] {
+            let err = ensure_checked_sql_surface(sql).unwrap_err();
+            assert!(
+                matches!(err, SqliteError::UnsafeSql(_)),
+                "expected unsafe SQL rejection for {sql:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn checked_sql_surface_rejects_pragma_keywords() {
+        for sql in [
+            "PRAGMA read_uncommitted = 1",
+            "  /* comment */ PRAGMA foreign_keys = OFF",
+        ] {
+            let err = ensure_checked_sql_surface(sql).unwrap_err();
+            assert!(
+                matches!(err, SqliteError::UnsafeSql(_)),
+                "expected unsafe SQL rejection for {sql:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn checked_sql_surface_allows_regular_dml() {
+        for sql in [
+            "SELECT * FROM users",
+            "INSERT INTO users(name) VALUES ('alice')",
+            "WITH cte AS (SELECT 1) SELECT * FROM cte",
+        ] {
+            ensure_checked_sql_surface(sql)
+                .unwrap_or_else(|err| panic!("checked surface should allow {sql:?}: {err:?}"));
+        }
     }
 
     // ---- SqliteError From<io::Error> ----
@@ -1791,7 +1991,7 @@ mod tests {
                 other => panic!("open failed: {other:?}"),
             };
 
-            let rows = match conn.query(&cx, "PRAGMA journal_mode", &[]).await {
+            let rows = match conn.query_unchecked(&cx, "PRAGMA journal_mode", &[]).await {
                 Outcome::Ok(rows) => rows,
                 other => panic!("query pragma failed: {other:?}"),
             };
@@ -2450,7 +2650,7 @@ mod tests {
                 // but acknowledge that atomicity is not guaranteed
 
                 // Begin explicit transaction
-                match conn.execute(&cx, "BEGIN TRANSACTION", &[]).await {
+                match conn.execute_unchecked(&cx, "BEGIN TRANSACTION", &[]).await {
                     Outcome::Ok(_) => {}
                     other => panic!("Failed to begin transaction: {other:?}"),
                 };
@@ -2481,7 +2681,7 @@ mod tests {
                 };
 
                 // Commit transaction
-                match conn.execute(&cx, "COMMIT", &[]).await {
+                match conn.execute_unchecked(&cx, "COMMIT", &[]).await {
                     Outcome::Ok(_) => {}
                     other => panic!("Failed to commit: {other:?}"),
                 };
@@ -2771,8 +2971,8 @@ mod tests {
         impl RealSqliteConfig {
             fn new() -> Self {
                 let enabled = std::env::var("REAL_SQLITE_TESTS").unwrap_or_default() == "true";
-                let db_path = std::env::var("SQLITE_TEST_PATH")
-                    .unwrap_or_else(|_| ":memory:".to_string());
+                let db_path =
+                    std::env::var("SQLITE_TEST_PATH").unwrap_or_else(|_| ":memory:".to_string());
 
                 // Production safety guards (Pattern 4 from testing-perfect-e2e-integration-tests)
                 let reason = if !enabled {
@@ -2923,7 +3123,11 @@ mod tests {
                     .collect()
             }
 
-            fn create_transaction_batch(&self, user_id: i64, count: usize) -> Vec<(i64, String, f64)> {
+            fn create_transaction_batch(
+                &self,
+                user_id: i64,
+                count: usize,
+            ) -> Vec<(i64, String, f64)> {
                 (0..count)
                     .map(|i| {
                         let tx_id = self.counter.fetch_add(1, Ordering::SeqCst) as i64;
@@ -2976,7 +3180,7 @@ mod tests {
                 log.phase("transaction_isolation_setup");
 
                 // Begin transaction for rollback isolation
-                match conn.execute(&cx, "BEGIN TRANSACTION", &[]).await {
+                match conn.execute_unchecked(&cx, "BEGIN TRANSACTION", &[]).await {
                     Outcome::Ok(_) => log.sqlite_operation("begin_transaction", "success", None),
                     other => panic!("Failed to begin transaction: {other:?}"),
                 }
@@ -3054,12 +3258,21 @@ mod tests {
                     }
                 }
 
-                log.sqlite_operation("test_data_inserted", "success", Some(&format!("{} users, {} transactions", users.len(), users.len() * 3)));
+                log.sqlite_operation(
+                    "test_data_inserted",
+                    "success",
+                    Some(&format!(
+                        "{} users, {} transactions",
+                        users.len(),
+                        users.len() * 3
+                    )),
+                );
 
                 log.phase("journal_mode_testing");
 
                 // Test journal mode transitions with real data
-                let initial_mode = match conn.query(&cx, "PRAGMA journal_mode", &[]).await {
+                let initial_mode = match conn.query_unchecked(&cx, "PRAGMA journal_mode", &[]).await
+                {
                     Outcome::Ok(rows) => rows[0].get_idx(0).unwrap().as_text().unwrap().to_owned(),
                     other => panic!("Failed to get initial journal mode: {other:?}"),
                 };
@@ -3067,24 +3280,36 @@ mod tests {
                 log.sqlite_operation("get_initial_journal_mode", "success", Some(&initial_mode));
 
                 // Verify data integrity before mode change
-                let user_count_before = match conn.query(&cx, "SELECT COUNT(*) FROM users", &[]).await {
-                    Outcome::Ok(rows) => rows[0].get_idx(0).unwrap().as_integer().unwrap(),
-                    other => panic!("Failed to count users: {other:?}"),
-                };
+                let user_count_before =
+                    match conn.query(&cx, "SELECT COUNT(*) FROM users", &[]).await {
+                        Outcome::Ok(rows) => rows[0].get_idx(0).unwrap().as_integer().unwrap(),
+                        other => panic!("Failed to count users: {other:?}"),
+                    };
 
-                assert!(log.assert_match("user_count_before_journal_change", "10", &user_count_before.to_string()));
+                assert!(log.assert_match(
+                    "user_count_before_journal_change",
+                    "10",
+                    &user_count_before.to_string()
+                ));
 
                 log.phase("wal_mode_transition");
 
                 // Test transition to WAL mode
-                match conn.query(&cx, "PRAGMA journal_mode = WAL", &[]).await {
+                match conn
+                    .query_unchecked(&cx, "PRAGMA journal_mode = WAL", &[])
+                    .await
+                {
                     Outcome::Ok(rows) => {
                         let new_mode = rows[0].get_idx(0).unwrap().as_text().unwrap();
                         log.sqlite_operation("set_journal_mode_wal", "success", Some(new_mode));
 
                         // For file databases, verify WAL mode is actually set
                         if config.database_path != ":memory:" {
-                            assert!(log.assert_match("journal_mode_after_wal", "wal", &new_mode.to_lowercase()));
+                            assert!(log.assert_match(
+                                "journal_mode_after_wal",
+                                "wal",
+                                &new_mode.to_lowercase()
+                            ));
                         }
                     }
                     other => panic!("Failed to set WAL mode: {other:?}"),
@@ -3093,15 +3318,23 @@ mod tests {
                 log.phase("data_integrity_verification");
 
                 // Verify data integrity after journal mode change
-                let user_count_after = match conn.query(&cx, "SELECT COUNT(*) FROM users", &[]).await {
-                    Outcome::Ok(rows) => rows[0].get_idx(0).unwrap().as_integer().unwrap(),
-                    other => panic!("Failed to count users after mode change: {other:?}"),
-                };
+                let user_count_after =
+                    match conn.query(&cx, "SELECT COUNT(*) FROM users", &[]).await {
+                        Outcome::Ok(rows) => rows[0].get_idx(0).unwrap().as_integer().unwrap(),
+                        other => panic!("Failed to count users after mode change: {other:?}"),
+                    };
 
-                assert!(log.assert_match("user_count_after_journal_change", "10", &user_count_after.to_string()));
+                assert!(log.assert_match(
+                    "user_count_after_journal_change",
+                    "10",
+                    &user_count_after.to_string()
+                ));
 
                 // Verify transaction data integrity
-                let tx_count = match conn.query(&cx, "SELECT COUNT(*) FROM transactions", &[]).await {
+                let tx_count = match conn
+                    .query(&cx, "SELECT COUNT(*) FROM transactions", &[])
+                    .await
+                {
                     Outcome::Ok(rows) => rows[0].get_idx(0).unwrap().as_integer().unwrap(),
                     other => panic!("Failed to count transactions: {other:?}"),
                 };
@@ -3128,13 +3361,20 @@ mod tests {
                     other => panic!("Failed to execute complex query: {other:?}"),
                 };
 
-                assert!(user_tx_summary.len() >= 5, "Should have at least 5 users in summary");
-                log.sqlite_operation("complex_query", "success", Some(&format!("{} user summaries", user_tx_summary.len())));
+                assert!(
+                    user_tx_summary.len() >= 5,
+                    "Should have at least 5 users in summary"
+                );
+                log.sqlite_operation(
+                    "complex_query",
+                    "success",
+                    Some(&format!("{} user summaries", user_tx_summary.len())),
+                );
 
                 log.phase("transaction_rollback");
 
                 // Rollback transaction for perfect test isolation
-                match conn.execute(&cx, "ROLLBACK", &[]).await {
+                match conn.execute_unchecked(&cx, "ROLLBACK", &[]).await {
                     Outcome::Ok(_) => log.sqlite_operation("rollback_transaction", "success", None),
                     other => panic!("Failed to rollback transaction: {other:?}"),
                 }
@@ -3167,7 +3407,10 @@ mod tests {
                 log.phase("wal_mode_setup");
 
                 // Set WAL mode for better concurrency
-                match conn.query(&cx, "PRAGMA journal_mode = WAL", &[]).await {
+                match conn
+                    .query_unchecked(&cx, "PRAGMA journal_mode = WAL", &[])
+                    .await
+                {
                     Outcome::Ok(_) => log.sqlite_operation("set_wal_mode", "success", None),
                     other => panic!("Failed to set WAL mode: {other:?}"),
                 }
@@ -3177,7 +3420,7 @@ mod tests {
                 let factory = SqliteDataFactory::new();
 
                 // Begin transaction for isolation
-                match conn.execute(&cx, "BEGIN TRANSACTION", &[]).await {
+                match conn.execute_unchecked(&cx, "BEGIN TRANSACTION", &[]).await {
                     Outcome::Ok(_) => {}
                     other => panic!("Failed to begin transaction: {other:?}"),
                 }
@@ -3310,7 +3553,11 @@ mod tests {
 
                 // Verify final balances
                 let final_balances = match conn
-                    .query(&cx, "SELECT id, name, balance FROM accounts ORDER BY id", &[])
+                    .query(
+                        &cx,
+                        "SELECT id, name, balance FROM accounts ORDER BY id",
+                        &[],
+                    )
                     .await
                 {
                     Outcome::Ok(rows) => rows,
@@ -3321,22 +3568,37 @@ mod tests {
                     let id = row.get_idx(0).unwrap().as_integer().unwrap();
                     let name = row.get_idx(1).unwrap().as_text().unwrap();
                     let balance = row.get_idx(2).unwrap().as_real().unwrap();
-                    log.sqlite_operation("final_balance", "verified", Some(&format!("{} ({}): {}", name, id, balance)));
+                    log.sqlite_operation(
+                        "final_balance",
+                        "verified",
+                        Some(&format!("{} ({}): {}", name, id, balance)),
+                    );
                 }
 
                 // Verify transfer count
-                let transfer_count = match conn.query(&cx, "SELECT COUNT(*) FROM transfers WHERE status = 'completed'", &[]).await {
+                let transfer_count = match conn
+                    .query(
+                        &cx,
+                        "SELECT COUNT(*) FROM transfers WHERE status = 'completed'",
+                        &[],
+                    )
+                    .await
+                {
                     Outcome::Ok(rows) => rows[0].get_idx(0).unwrap().as_integer().unwrap(),
                     other => panic!("Failed to count transfers: {other:?}"),
                 };
 
                 assert!(transfer_count > 0, "Should have completed transfers");
-                log.sqlite_operation("transfer_verification", "success", Some(&format!("{} completed transfers", transfer_count)));
+                log.sqlite_operation(
+                    "transfer_verification",
+                    "success",
+                    Some(&format!("{} completed transfers", transfer_count)),
+                );
 
                 log.phase("rollback_cleanup");
 
                 // Rollback for clean test isolation
-                match conn.execute(&cx, "ROLLBACK", &[]).await {
+                match conn.execute_unchecked(&cx, "ROLLBACK", &[]).await {
                     Outcome::Ok(_) => log.sqlite_operation("rollback", "success", None),
                     other => panic!("Failed to rollback: {other:?}"),
                 }
