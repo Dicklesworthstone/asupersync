@@ -23,7 +23,7 @@
 //! // Single middleware
 //! let protected = TimeoutMiddleware::new(handler, Duration::from_secs(5));
 //!
-//! // Composed middleware (outermost applied first)
+//! // Composed middleware (last-added layer runs first)
 //! let resilient = MiddlewareStack::new(handler)
 //!     .with_timeout(Duration::from_secs(5))
 //!     .with_rate_limit(RateLimitPolicy::default())
@@ -33,12 +33,18 @@
 //!
 //! # Execution Order
 //!
-//! When composing middleware via [`MiddlewareStack`], the order is outermost
-//! first. For a stack built as `.with_timeout().with_rate_limit()`:
+//! When composing middleware via [`MiddlewareStack`], each `with_*` call wraps
+//! the stack built so far, so the **last-added layer becomes the outermost
+//! layer**. For a stack built as `.with_timeout().with_rate_limit()`:
 //!
 //! ```text
-//! Request → Timeout → RateLimit → Handler → Response
+//! Request → RateLimit → Timeout → Handler → Response
 //! ```
+//!
+//! Security note: header-setting layers such as CSP / `x-frame-options` /
+//! `x-content-type-options` should be added **after** short-circuiting layers
+//! like rate-limit, timeout, circuit-breaker, and load-shed so their synthetic
+//! 4xx/5xx responses still carry the security headers.
 
 use std::convert::Infallible;
 use std::fmt;
@@ -1590,8 +1596,8 @@ impl<H: Handler> Handler for SetResponseHeaderMiddleware<H> {
 
 /// Builder for composing multiple middleware layers around a handler.
 ///
-/// Middleware is applied in the order specified (outermost first). The
-/// resulting type implements [`Handler`].
+/// Each `with_*` call wraps the stack built so far, so the last-added layer is
+/// the outermost layer. The resulting type implements [`Handler`].
 ///
 /// # Example
 ///
@@ -1603,7 +1609,7 @@ impl<H: Handler> Handler for SetResponseHeaderMiddleware<H> {
 ///     .build();
 /// ```
 ///
-/// Execution order: Timeout → RateLimit → CircuitBreaker → Handler
+/// Execution order: CircuitBreaker → RateLimit → Timeout → Handler
 pub struct MiddlewareStack<H> {
     inner: H,
 }
@@ -2924,6 +2930,54 @@ mod tests {
         let resp = stacked.call(make_request());
         assert_eq!(resp.status, StatusCode::GATEWAY_TIMEOUT);
         assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn middleware_stack_last_added_header_covers_rate_limit_short_circuit() {
+        let inner_header = MiddlewareStack::new(FnHandler::new(ok_handler))
+            .with_response_header(
+                "content-security-policy",
+                "default-src 'none'",
+                HeaderOverwrite::IfMissing,
+            )
+            .with_rate_limit(RateLimitPolicy {
+                rate: 1,
+                burst: 1,
+                period: Duration::from_secs(60),
+                ..Default::default()
+            })
+            .build();
+
+        let outer_header = MiddlewareStack::new(FnHandler::new(ok_handler))
+            .with_rate_limit(RateLimitPolicy {
+                rate: 1,
+                burst: 1,
+                period: Duration::from_secs(60),
+                ..Default::default()
+            })
+            .with_response_header(
+                "content-security-policy",
+                "default-src 'none'",
+                HeaderOverwrite::IfMissing,
+            )
+            .build();
+
+        assert_eq!(inner_header.call(make_request()).status, StatusCode::OK);
+        let inner_limited = inner_header.call(make_request());
+        assert_eq!(inner_limited.status, StatusCode::TOO_MANY_REQUESTS);
+        assert!(
+            !inner_limited
+                .headers
+                .contains_key("content-security-policy")
+        );
+
+        assert_eq!(outer_header.call(make_request()).status, StatusCode::OK);
+        let outer_limited = outer_header.call(make_request());
+        assert_eq!(outer_limited.status, StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            outer_limited.headers.get("content-security-policy"),
+            Some(&"default-src 'none'".to_string())
+        );
     }
 
     // --- Observability ---
