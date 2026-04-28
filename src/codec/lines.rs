@@ -301,6 +301,22 @@ mod tests {
     }
 
     #[test]
+    fn test_lines_codec_tokio_max_length_boundary_crlf_then_recovers() {
+        // Mirrors tokio-util's max_length boundary: with max_length=5, a
+        // visible five-byte line followed by CRLF still exceeds the bound
+        // because the '\n' sits beyond the max_length+1 scan window.
+        let mut codec = LinesCodec::new_with_max_length(5);
+        let mut buf = BytesMut::from("hello\r\nok\n");
+
+        assert!(matches!(
+            codec.decode(&mut buf),
+            Err(LinesCodecError::MaxLineLengthExceeded)
+        ));
+        assert_eq!(codec.decode(&mut buf).unwrap(), Some("ok".to_string()));
+        assert_eq!(codec.decode(&mut buf).unwrap(), None);
+    }
+
+    #[test]
     fn test_lines_codec_reused_shorter_buffer_after_partial_line() {
         let mut codec = LinesCodec::new();
         let mut buf = BytesMut::from("partial");
