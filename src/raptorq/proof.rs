@@ -1257,6 +1257,26 @@ mod tests {
         })
     }
 
+    fn serialize_decode_proof_bytes_for_snapshot_test(proof: &DecodeProof) -> String {
+        use std::fmt::Write as _;
+
+        let bytes = serde_json::to_vec(proof).expect("serialize DecodeProof to JSON bytes");
+        let mut rendered = String::new();
+        let _ = writeln!(&mut rendered, "len={}", bytes.len());
+        for (line_index, chunk) in bytes.chunks(16).enumerate() {
+            if line_index > 0 {
+                rendered.push('\n');
+            }
+            for (index, byte) in chunk.iter().enumerate() {
+                if index > 0 {
+                    rendered.push(' ');
+                }
+                let _ = write!(&mut rendered, "{byte:02x}");
+            }
+        }
+        rendered
+    }
+
     fn make_success_proof_for_snapshot_test() -> DecodeProof {
         let config = make_test_config();
         let recovered = make_test_recovered(&config);
@@ -1474,6 +1494,16 @@ mod tests {
                 "source_block_success": scrub_decode_proof_for_snapshot_test(&source_block_success),
                 "source_block_failure": scrub_decode_proof_for_snapshot_test(&source_block_failure),
             })
+        );
+    }
+
+    #[test]
+    fn decode_proof_byte_serialization() {
+        let proof = make_success_proof_for_snapshot_test();
+
+        insta::assert_snapshot!(
+            "decode_proof_byte_serialization",
+            serialize_decode_proof_bytes_for_snapshot_test(&proof)
         );
     }
 
