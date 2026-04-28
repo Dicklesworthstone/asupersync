@@ -652,7 +652,7 @@ mod tests {
     }
 
     impl crate::observability::metrics::MetricsProvider for CapturingMetrics {
-        fn task_spawned(&self, _region_id: RegionId, task_id: TaskId) {
+        fn task_spawned(&self, region_id: RegionId, task_id: TaskId) {
             self.tasks_spawned
                 .lock()
                 .unwrap()
@@ -663,7 +663,7 @@ mod tests {
             &self,
             task_id: TaskId,
             outcome: crate::observability::metrics::OutcomeKind,
-            _duration: std::time::Duration,
+            duration: std::time::Duration,
         ) {
             self.tasks_completed
                 .lock()
@@ -671,14 +671,14 @@ mod tests {
                 .push((task_id, outcome, duration));
         }
 
-        fn region_created(&self, _region_id: RegionId, parent_id: Option<RegionId>) {
+        fn region_created(&self, region_id: RegionId, parent_id: Option<RegionId>) {
             self.regions_created
                 .lock()
                 .unwrap()
                 .push((region_id, parent_id));
         }
 
-        fn region_closed(&self, _region_id: RegionId, _duration: std::time::Duration) {
+        fn region_closed(&self, region_id: RegionId, duration: std::time::Duration) {
             self.regions_closed
                 .lock()
                 .unwrap()
@@ -696,7 +696,7 @@ mod tests {
                 .push((region_id, cancel_kind));
         }
 
-        fn drain_completed(&self, _region_id: RegionId, _duration: std::time::Duration) {
+        fn drain_completed(&self, region_id: RegionId, duration: std::time::Duration) {
             self.drain_completions
                 .lock()
                 .unwrap()
@@ -736,15 +736,15 @@ mod tests {
             // Simple implementation - could extend if needed for testing
         }
 
-        fn obligation_created(&self, _region_id: RegionId) {
+        fn obligation_created(&self, region_id: RegionId) {
             self.obligations_created.lock().unwrap().push(region_id);
         }
 
-        fn obligation_discharged(&self, _region_id: RegionId) {
+        fn obligation_discharged(&self, region_id: RegionId) {
             self.obligations_discharged.lock().unwrap().push(region_id);
         }
 
-        fn obligation_leaked(&self, _region_id: RegionId) {
+        fn obligation_leaked(&self, region_id: RegionId) {
             self.obligations_leaked.lock().unwrap().push(region_id);
         }
 
@@ -978,7 +978,7 @@ mod tests {
         }
 
         impl crate::observability::metrics::MetricsProvider for CapturingMetrics {
-            fn task_spawned(&self, _region_id: RegionId, task_id: TaskId) {
+            fn task_spawned(&self, region_id: RegionId, task_id: TaskId) {
                 self.tasks_spawned
                     .lock()
                     .unwrap()
@@ -989,7 +989,7 @@ mod tests {
                 &self,
                 task_id: TaskId,
                 outcome_kind: crate::observability::metrics::OutcomeKind,
-                _duration: std::time::Duration,
+                duration: std::time::Duration,
             ) {
                 self.tasks_completed
                     .lock()
@@ -997,14 +997,14 @@ mod tests {
                     .push((task_id, outcome_kind, duration));
             }
 
-            fn region_created(&self, _region_id: RegionId, parent_id: Option<RegionId>) {
+            fn region_created(&self, region_id: RegionId, parent_id: Option<RegionId>) {
                 self.regions_created
                     .lock()
                     .unwrap()
                     .push((region_id, parent_id));
             }
 
-            fn region_closed(&self, _region_id: RegionId, _duration: std::time::Duration) {
+            fn region_closed(&self, region_id: RegionId, duration: std::time::Duration) {
                 self.regions_closed
                     .lock()
                     .unwrap()
@@ -1022,7 +1022,7 @@ mod tests {
                     .push((region_id, cancel_kind));
             }
 
-            fn drain_completed(&self, _region_id: RegionId, _duration: std::time::Duration) {
+            fn drain_completed(&self, region_id: RegionId, duration: std::time::Duration) {
                 self.drain_completions
                     .lock()
                     .unwrap()
@@ -1062,15 +1062,15 @@ mod tests {
                 // Simple implementation - could extend if needed for testing
             }
 
-            fn obligation_created(&self, _region_id: RegionId) {
+            fn obligation_created(&self, region_id: RegionId) {
                 self.obligations_created.lock().unwrap().push(region_id);
             }
 
-            fn obligation_discharged(&self, _region_id: RegionId) {
+            fn obligation_discharged(&self, region_id: RegionId) {
                 self.obligations_discharged.lock().unwrap().push(region_id);
             }
 
-            fn obligation_leaked(&self, _region_id: RegionId) {
+            fn obligation_leaked(&self, region_id: RegionId) {
                 self.obligations_leaked.lock().unwrap().push(region_id);
             }
 
