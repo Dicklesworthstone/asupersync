@@ -1213,6 +1213,39 @@ mod tests {
         crate::test_complete!("streaming_request_open_push_poll_close");
     }
 
+    /// GRPC-CONF-011: Client-streaming close must drain buffered requests before EOF.
+    /// Per gRPC streaming semantics, half-closing the request stream prevents
+    /// further sends but does not discard already-framed messages.
+    #[test]
+    fn conformance_client_streaming_close_drains_buffered_requests_before_eof() {
+        init_test("conformance_client_streaming_close_drains_buffered_requests_before_eof");
+        let mut stream = StreamingRequest::<u32>::open();
+        stream.push(10).expect("first request buffered");
+        stream.push(20).expect("second request buffered");
+        stream.close();
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut pinned = Pin::new(&mut stream);
+
+        assert!(matches!(
+            pinned.as_mut().poll_next(&mut cx),
+            Poll::Ready(Some(Ok(10)))
+        ));
+        assert!(matches!(
+            pinned.as_mut().poll_next(&mut cx),
+            Poll::Ready(Some(Ok(20)))
+        ));
+        assert!(matches!(
+            pinned.as_mut().poll_next(&mut cx),
+            Poll::Ready(None)
+        ));
+
+        crate::test_complete!(
+            "conformance_client_streaming_close_drains_buffered_requests_before_eof"
+        );
+    }
+
     #[test]
     fn response_stream_push_and_close() {
         init_test("response_stream_push_and_close");
