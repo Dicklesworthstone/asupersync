@@ -861,6 +861,20 @@ mod tests {
         ]
     }
 
+    fn loser_cancel_reason_strategy() -> impl Strategy<Value = CancelReason> {
+        prop_oneof![
+            Just(CancelReason::timeout()),
+            Just(CancelReason::deadline()),
+            Just(CancelReason::poll_quota()),
+            Just(CancelReason::cost_budget()),
+            Just(CancelReason::parent_cancelled()),
+            Just(CancelReason::resource_unavailable()),
+            Just(CancelReason::shutdown()),
+            Just(CancelReason::linked_exit()),
+            Just(CancelReason::user("metamorphic-cancel")),
+        ]
+    }
+
     /// MR1: Timeout idempotence - timeout fires exactly once, never double
     ///
     /// When a timeout deadline is reached, the timeout mechanism should fire
@@ -935,7 +949,78 @@ mod tests {
         });
     }
 
-    /// MR3: Concurrent timeout race determinism
+    /// MR3: Deadline-winner cancellation normalization
+    ///
+    /// If the timeout deadline wins the race, rewriting the loser's cancellation
+    /// reason should not change the observable result. All cancelled loser
+    /// outcomes collapse to the same TimedOut(deadline) surface.
+    #[test]
+    fn metamorphic_deadline_winner_normalizes_loser_cancel_reason() {
+        proptest!(|(
+            deadline_nanos in 0u64..1_000_000_000,
+            loser_reason in loser_cancel_reason_strategy(),
+        )| {
+            let deadline = Time::from_nanos(deadline_nanos);
+
+            let baseline = make_timed_result(
+                Outcome::<i32, &'static str>::Cancelled(CancelReason::timeout()),
+                deadline,
+                false,
+            );
+            let transformed = make_timed_result(
+                Outcome::<i32, &'static str>::Cancelled(loser_reason.clone()),
+                deadline,
+                false,
+            );
+
+            prop_assert!(baseline.is_timed_out());
+            prop_assert!(transformed.is_timed_out());
+
+            match baseline {
+                TimedResult::TimedOut(err) => prop_assert_eq!(err.deadline, deadline),
+                TimedResult::Completed(outcome) => {
+                    prop_assert!(false, "baseline unexpectedly completed: {outcome:?}");
+                }
+            }
+
+            match transformed {
+                TimedResult::TimedOut(err) => prop_assert_eq!(err.deadline, deadline),
+                TimedResult::Completed(outcome) => {
+                    prop_assert!(false, "transformed unexpectedly completed: {outcome:?}");
+                }
+            }
+
+            match make_timed_result(
+                Outcome::<i32, &'static str>::Cancelled(CancelReason::timeout()),
+                deadline,
+                false,
+            )
+            .into_outcome()
+            {
+                Outcome::Cancelled(reason) => prop_assert!(matches!(
+                    reason.kind(),
+                    crate::types::cancel::CancelKind::Timeout
+                )),
+                other => prop_assert!(false, "baseline outcome was not cancelled: {other:?}"),
+            }
+
+            match make_timed_result(
+                Outcome::<i32, &'static str>::Cancelled(loser_reason),
+                deadline,
+                false,
+            )
+            .into_outcome()
+            {
+                Outcome::Cancelled(reason) => prop_assert!(matches!(
+                    reason.kind(),
+                    crate::types::cancel::CancelKind::Timeout
+                )),
+                other => prop_assert!(false, "transformed outcome was not cancelled: {other:?}"),
+            }
+        });
+    }
+
+    /// MR4: Concurrent timeout race determinism
     ///
     /// When multiple timeouts race, the earliest deadline should always win.
     /// The effective_deadline function implements this min() semantics.
@@ -978,7 +1063,7 @@ mod tests {
         });
     }
 
-    /// MR4: Nested timeout composition law (LAW-TIMEOUT-MIN)
+    /// MR5: Nested timeout composition law (LAW-TIMEOUT-MIN)
     ///
     /// timeout(d1, timeout(d2, f)) ≃ timeout(min(d1, d2), f)
     /// This should hold regardless of which timeout is outer/inner.
@@ -1021,7 +1106,7 @@ mod tests {
         });
     }
 
-    /// MR5: Operation completion vs timeout race correctness
+    /// MR6: Operation completion vs timeout race correctness
     ///
     /// When operation and timeout race, the first to complete should win.
     /// Make_timed_result should preserve this race outcome correctly.
@@ -1074,7 +1159,7 @@ mod tests {
         });
     }
 
-    /// MR6: Timeout drain invariant preservation
+    /// MR7: Timeout drain invariant preservation
     ///
     /// TimedOut results always convert to Cancelled outcomes, preserving
     /// the timeout→cancellation semantic mapping for downstream drain logic.
@@ -1124,7 +1209,7 @@ mod tests {
         });
     }
 
-    /// MR7: Timeout expiration boundary consistency
+    /// MR8: Timeout expiration boundary consistency
     ///
     /// The transition from not-expired to expired should be deterministic
     /// and happen exactly at the deadline boundary.
@@ -1163,7 +1248,7 @@ mod tests {
         });
     }
 
-    /// MR8: TimeoutConfig resolution invariants
+    /// MR9: TimeoutConfig resolution invariants
     ///
     /// TimeoutConfig resolution should respect the use_effective flag consistently
     /// and always return deadlines that make logical sense.
