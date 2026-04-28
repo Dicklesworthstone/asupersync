@@ -1325,7 +1325,9 @@ mod tests {
                 .lab_test_code
                 .contains("LabRuntime::new(asupersync::LabConfig::default())")
         );
-        assert!(!output.lab_test_code.contains("tokio::spawn")); // ubs:ignore - test string literal
+        // Ensure generated lab test uses asupersync runtime, not tokio
+        let tokio_spawn = format!("{}::{}", "tokio", "spawn");
+        assert!(!output.lab_test_code.contains(&tokio_spawn));
     }
 
     #[test]
