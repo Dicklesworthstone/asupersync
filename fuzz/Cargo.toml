@@ -24,7 +24,7 @@ serde_json = "1"
 prost = "0.14"
 futures = "0.3"
 futures-util = "0.3"
-rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
+rustls = { version = "0.23.38", default-features = false, features = ["std", "ring", "tls12"] }
 rustls-pemfile = "2.2"
 
 # For SCRAM-SHA-256 parsing
@@ -2275,6 +2275,16 @@ bench = false
 [[bin]]
 name = "tls_cert_chain_validation"
 path = "fuzz_targets/tls_cert_chain_validation.rs"
+test = false
+doc = false
+bench = false
+
+# asupersync-qs3664: WebSocket handshake parser fuzzer for RFC 6455 protocol negotiation.
+# Tests random Sec-WebSocket-Key/Version/Protocol/Extensions header combinations,
+# malformed Connection/Upgrade combos, oversized values, and HTTP header parsing edge cases.
+[[bin]]
+name = "websocket_handshake_parser"
+path = "fuzz_targets/websocket_handshake_parser.rs"
 test = false
 doc = false
 bench = false
