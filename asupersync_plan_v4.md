@@ -152,7 +152,15 @@ There is an even deeper view (useful later, not required day‑1): the space of 
 
 *Practical note:* For finite discrete systems, Mazurkiewicz trace equivalence *is* the discrete version of dihomotopy equivalence—optimal DPOR already achieves the topological reduction. The d‑space perspective is a cleaner mathematical lens, not a more powerful algorithm.
 
-#### Experiment: geodesic schedule normalization (Phase 5+)
+#### Geodesic schedule normalization — IMPLEMENTED (originally a Phase 5+ experiment)
+
+**Status (2026-04-28):** shipped. The procedure described below lives in
+`src/trace/geodesic.rs` (~77KB module) and is wired into the deterministic
+lab-runtime replay path at `src/lab/replay.rs:1405` via
+`crate::trace::normalize_trace(events, config)`, which returns the canonical
+representative plus the switch count and chosen algorithm (`normalized_switches`,
+`algorithm` in `ReplayResult`). This block is preserved as the design
+specification; the "Experiment" framing is historical.
 
 **Goal:** define a canonical representative per trace class that reduces context switches while preserving observable meaning.
 
