@@ -1797,6 +1797,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "transport_router_resolution_contention"
+path = "fuzz_targets/transport_router_resolution_contention.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_security_mac_verifier"
 path = "fuzz_targets/fuzz_security_mac_verifier.rs"
 test = false
