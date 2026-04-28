@@ -2580,3 +2580,16 @@ path = "fuzz_targets/jetstream_pull_subscribe_opts_wire_format.rs"
 test = false
 doc = false
 bench = false
+
+# Structure-aware CORS preflight negotiation fuzzer.
+# Tests src/web/middleware.rs CORS Origin / Access-Control-Request-* handling
+# with policy-aware request generation instead of raw random headers.
+# Exercises simple-vs-preflight routing, exact-origin matching, credentialed
+# responses, wildcard-vs-static allow-header behavior, and blocked-origin
+# fail-closed negotiation paths.
+[[bin]]
+name = "cors_preflight_negotiation"
+path = "fuzz_targets/cors_preflight_negotiation.rs"
+test = false
+doc = false
+bench = false
