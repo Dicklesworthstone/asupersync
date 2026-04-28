@@ -3376,6 +3376,19 @@ impl ThreeLaneWorker {
         task
     }
 
+    #[inline]
+    fn ready_queue_depth_signal(&self) -> usize {
+        let global_ready = self.global.ready_count();
+        let fast_ready = self.fast_queue.len();
+        let pinned_local_ready = self.local_ready.lock().len();
+        let local_priority_ready = self.local.lock().approx_ready_len();
+
+        global_ready
+            .saturating_add(fast_ready)
+            .saturating_add(pinned_local_ready)
+            .saturating_add(local_priority_ready)
+    }
+
     /// Consult the governor for a scheduling suggestion, taking a fresh
     /// snapshot every `governor_interval` steps. When the governor is
     /// disabled, always returns `NoPreference`.
@@ -3405,8 +3418,10 @@ impl ThreeLaneWorker {
             };
         drop(state);
 
-        // Enrich with local queue depth.
-        let queue_depth = self.local.lock().len();
+        // Enrich with ready-only queue depth. The governor/decision contract
+        // should react to runnable backlog, not to cancel/timed entries that
+        // are already represented elsewhere in the snapshot.
+        let queue_depth = self.ready_queue_depth_signal();
         #[allow(clippy::cast_possible_truncation)]
         let snapshot = snapshot.with_ready_queue_depth(queue_depth as u32);
 
@@ -7274,11 +7289,39 @@ mod tests {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let ready_depth = worker.local.lock().len();
+        let ready_depth = worker.ready_queue_depth_signal();
         #[allow(clippy::cast_possible_truncation)]
         let snapshot =
             StateSnapshot::from_runtime_state(&state).with_ready_queue_depth(ready_depth as u32);
         governor.compute_record(&snapshot).total
+    }
+
+    #[test]
+    fn ready_queue_depth_signal_counts_ready_lanes_only() {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 16, true, 1);
+        let mut workers = scheduler.take_workers();
+        let worker = workers.first_mut().expect("worker");
+
+        let tasks: Vec<TaskId> = (0..6)
+            .map(|i| TaskId::from_arena(crate::util::ArenaIndex::new(0, i)))
+            .collect();
+
+        worker.local.lock().schedule(tasks[0], 80);
+        worker.local.lock().schedule_cancel(tasks[1], 90);
+        worker
+            .local
+            .lock()
+            .schedule_timed(tasks[2], Time::from_secs(10));
+        worker.local_ready.lock().push_back(tasks[3]);
+        worker.fast_queue.push(tasks[4]);
+        worker.global.inject_ready(tasks[5], 70);
+
+        assert_eq!(
+            worker.ready_queue_depth_signal(),
+            4,
+            "ready depth should count ready-only lanes and exclude cancel/timed backlog"
+        );
     }
 
     fn collect_ready_drain_potentials(worker: &mut ThreeLaneWorker, dispatches: usize) -> Vec<f64> {

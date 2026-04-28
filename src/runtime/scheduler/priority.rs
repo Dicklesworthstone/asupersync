@@ -1117,6 +1117,18 @@ impl Scheduler {
         self.next_valid_ready_entry().is_some()
     }
 
+    /// Returns an approximate count of queued ready-lane entries.
+    ///
+    /// This is intentionally ready-lane-only. It may include stale heap
+    /// entries awaiting pruning after a promotion into another lane, so it is
+    /// suitable for scheduler heuristics and observability but not for exact
+    /// invariant checks.
+    #[inline]
+    #[must_use]
+    pub fn approx_ready_len(&self) -> usize {
+        self.ready_lane.len()
+    }
+
     /// Returns the current ready-lane head without removing it.
     #[inline]
     #[must_use]
