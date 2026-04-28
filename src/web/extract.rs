@@ -316,7 +316,7 @@ where
 {
     fn from_request_parts(req: &Request) -> Result<Self, ExtractionError> {
         let qs = req.query.as_deref().unwrap_or("");
-        let parsed = parse_urlencoded(qs);
+        let parsed = parse_urlencoded(qs, "query parameter")?;
 
         if parsed.len() == 1
             && let Some(first) = parsed.values().next()
@@ -387,17 +387,25 @@ fn coerce_json_scalar(raw: &str) -> serde_json::Value {
 }
 
 /// Parse a URL-encoded string into key-value pairs.
-fn parse_urlencoded(input: &str) -> HashMap<String, String> {
-    input
-        .split('&')
-        .filter(|s| !s.is_empty())
-        .filter_map(|pair| {
-            let mut parts = pair.splitn(2, '=');
-            let key = parts.next()?;
-            let value = parts.next().unwrap_or("");
-            Some((percent_decode(key), percent_decode(value)))
-        })
-        .collect()
+fn parse_urlencoded(
+    input: &str,
+    field_kind: &str,
+) -> Result<HashMap<String, String>, ExtractionError> {
+    let mut parsed = HashMap::new();
+    for pair in input.split('&').filter(|s| !s.is_empty()) {
+        let mut parts = pair.splitn(2, '=');
+        let Some(key) = parts.next() else {
+            continue;
+        };
+        let key = percent_decode(key);
+        let value = percent_decode(parts.next().unwrap_or(""));
+        if parsed.insert(key.clone(), value).is_some() {
+            return Err(ExtractionError::bad_request(format!(
+                "duplicate {field_kind} `{key}`"
+            )));
+        }
+    }
+    Ok(parsed)
 }
 
 /// Simple percent-decoding (handles %XX and + as space).
@@ -740,7 +748,7 @@ impl<T: DeserializeOwned> FromRequest for Form<T> {
         let body_str = std::str::from_utf8(req.body.as_ref())
             .map_err(|e| ExtractionError::bad_request(format!("invalid UTF-8 body: {e}")))?;
 
-        let parsed = parse_urlencoded(body_str);
+        let parsed = parse_urlencoded(body_str, "form field")?;
 
         if parsed.len() == 1
             && let Some(first) = parsed.values().next()
@@ -1173,7 +1181,11 @@ mod tests {
         let Form(parsed_form) = Form::<HashMap<String, String>>::from_request(form_req).unwrap();
         assert_eq!(
             parsed_form,
-            parse_urlencoded(std::str::from_utf8(raw_form.as_ref()).unwrap())
+            parse_urlencoded(
+                std::str::from_utf8(raw_form.as_ref()).unwrap(),
+                "form field"
+            )
+            .unwrap()
         );
 
         let limit = 8;
@@ -1279,6 +1291,16 @@ mod tests {
     }
 
     #[test]
+    fn form_duplicate_keys_reject_instead_of_last_write_wins() {
+        let req = Request::new("POST", "/form")
+            .with_header("content-type", "application/x-www-form-urlencoded")
+            .with_body(Bytes::from_static(b"role=user&role=admin"));
+        let err = Form::<HashMap<String, String>>::from_request(req).unwrap_err();
+        assert_eq!(err.status, crate::web::response::StatusCode::BAD_REQUEST);
+        assert_eq!(err.message, "duplicate form field `role`");
+    }
+
+    #[test]
     fn json_invalid_body() {
         let req = Request::new("POST", "/data")
             .with_header("content-type", "application/json")
@@ -1341,6 +1363,14 @@ mod tests {
         let err = Query::<u32>::from_request_parts(&req).unwrap_err();
         assert_eq!(err.status, crate::web::response::StatusCode::BAD_REQUEST);
         assert!(err.message.contains("invalid query parameters"));
+    }
+
+    #[test]
+    fn query_duplicate_keys_reject_instead_of_collapsing_to_scalar() {
+        let req = Request::new("GET", "/items").with_query("value=17&value=18");
+        let err = Query::<u32>::from_request_parts(&req).unwrap_err();
+        assert_eq!(err.status, crate::web::response::StatusCode::BAD_REQUEST);
+        assert_eq!(err.message, "duplicate query parameter `value`");
     }
 
     #[test]
