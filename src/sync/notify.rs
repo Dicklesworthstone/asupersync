@@ -626,8 +626,8 @@ mod tests {
     )]
     use super::*;
     use crate::test_utils::init_test_logging;
-    use std::sync::mpsc;
     use std::sync::Arc;
+    use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
 
@@ -786,6 +786,34 @@ mod tests {
         drop(late);
 
         (ready_pair, stored, late_pending)
+    }
+
+    fn notify_one_ready_prefix_signature(extra_tail_waiters: usize) -> (Vec<bool>, usize, bool) {
+        let notify = Notify::new();
+
+        let mut waiters: Vec<_> = (0..(3 + extra_tail_waiters))
+            .map(|_| notify.notified())
+            .collect();
+        for waiter in &mut waiters {
+            assert!(poll_once(waiter).is_pending());
+        }
+
+        notify.notify_one();
+        notify.notify_one();
+        notify.notify_one();
+
+        let ready = waiters
+            .iter_mut()
+            .map(|waiter| poll_once(waiter).is_ready())
+            .collect::<Vec<_>>();
+        drop(waiters);
+
+        let stored = notify.stored_notifications.load(Ordering::Acquire);
+        let mut late = notify.notified();
+        let late_pending = poll_once(&mut late).is_pending();
+        drop(late);
+
+        (ready, stored, late_pending)
     }
 
     #[test]
@@ -1756,6 +1784,49 @@ mod tests {
         );
 
         crate::test_complete!("metamorphic_middle_cancel_timing_preserves_notify_one_ready_prefix");
+    }
+
+    #[test]
+    fn metamorphic_extra_tail_waiters_do_not_expand_notify_one_ready_prefix() {
+        init_test("metamorphic_extra_tail_waiters_do_not_expand_notify_one_ready_prefix");
+
+        let baseline = notify_one_ready_prefix_signature(0);
+        let extended = notify_one_ready_prefix_signature(2);
+
+        crate::assert_with_log!(
+            extended.0[..3] == baseline.0,
+            "adding parked tail waiters preserves the ready prefix for the first three notify_one deliveries",
+            format!("{:?}", baseline.0),
+            format!("{:?}", &extended.0[..3])
+        );
+        crate::assert_with_log!(
+            baseline.0 == vec![true, true, true],
+            "three notify_one calls wake the first three parked waiters",
+            vec![true, true, true],
+            baseline.0.clone()
+        );
+        crate::assert_with_log!(
+            extended.0[3..].iter().all(|ready| !ready),
+            "extra parked tail waiters stay pending once the three notify_one permits are consumed",
+            vec![false, false],
+            extended.0[3..].to_vec()
+        );
+        crate::assert_with_log!(
+            baseline.1 == 0 && extended.1 == 0,
+            "exactly three parked consumers absorb the three notify_one permits without leaking a stored token",
+            (0usize, 0usize),
+            (baseline.1, extended.1)
+        );
+        crate::assert_with_log!(
+            baseline.2 && extended.2,
+            "a late waiter remains pending because no extra notify_one permit was minted",
+            (true, true),
+            (baseline.2, extended.2)
+        );
+
+        crate::test_complete!(
+            "metamorphic_extra_tail_waiters_do_not_expand_notify_one_ready_prefix"
+        );
     }
 
     #[test]
