@@ -8533,6 +8533,78 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_ready_dispatch_is_invariant_under_enqueue_order_shuffles() {
+        fn ready_dispatch_trace(order: &[(TaskId, u8)]) -> Vec<TaskId> {
+            let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+            let mut scheduler = ThreeLaneScheduler::new(1, &state);
+
+            for &(task_id, priority) in order {
+                scheduler.inject_ready(task_id, priority);
+            }
+
+            let mut workers = scheduler.take_workers();
+            let worker = workers
+                .first_mut()
+                .expect("scheduler should create a worker");
+            let mut trace = Vec::new();
+
+            while let Some(task_id) = worker.next_task() {
+                trace.push(task_id);
+            }
+
+            trace
+        }
+
+        let workload = [
+            (TaskId::new_for_test(5100, 0), 27),
+            (TaskId::new_for_test(5101, 0), 91),
+            (TaskId::new_for_test(5102, 0), 48),
+            (TaskId::new_for_test(5103, 0), 73),
+            (TaskId::new_for_test(5104, 0), 12),
+            (TaskId::new_for_test(5105, 0), 55),
+        ];
+
+        let baseline_trace = ready_dispatch_trace(&workload);
+        assert_eq!(
+            baseline_trace.len(),
+            workload.len(),
+            "baseline ready-only run should dispatch every enqueued task exactly once"
+        );
+
+        let shuffled_orders = [
+            [
+                workload[3],
+                workload[0],
+                workload[5],
+                workload[1],
+                workload[4],
+                workload[2],
+            ],
+            [
+                workload[4],
+                workload[2],
+                workload[0],
+                workload[5],
+                workload[3],
+                workload[1],
+            ],
+        ];
+
+        for shuffled in shuffled_orders {
+            let shuffled_trace = ready_dispatch_trace(&shuffled);
+            assert_eq!(
+                shuffled_trace.len(),
+                workload.len(),
+                "shuffled ready-only run should dispatch every enqueued task exactly once"
+            );
+            assert_eq!(
+                shuffled_trace, baseline_trace,
+                "ready dispatch trace should be invariant when enqueue order changes but task priorities stay attached to the same tasks"
+            );
+        }
+    }
+
+    #[test]
     fn test_local_queue_fast_path() {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let scheduler = ThreeLaneScheduler::new(1, &state);
