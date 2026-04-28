@@ -27,7 +27,7 @@
 
 #![allow(clippy::many_single_char_names)]
 
-use crate::raptorq::gf256::{Gf256, gf256_addmul_slice};
+use crate::raptorq::gf256::{Gf256, gf256_add_slice, gf256_addmul_slice};
 use crate::raptorq::rfc6330::repair_indices_for_esi;
 #[cfg(test)]
 use crate::util::DetRng;
@@ -179,6 +179,12 @@ impl SystematicParams {
         &self,
         esi: u32,
     ) -> Result<(Vec<usize>, Vec<Gf256>), SystematicError> {
+        let columns = self.rfc_repair_indices(esi)?;
+        let coefficients = vec![Gf256::ONE; columns.len()];
+        Ok((columns, coefficients))
+    }
+
+    fn rfc_repair_indices(&self, esi: u32) -> Result<Vec<usize>, SystematicError> {
         let padding_delta = u32::try_from(self.k_prime - self.k)
             .expect("RFC systematic padding delta must fit in u32");
         // RFC 6330 repair ISI domain starts at K' and extends upward.
@@ -187,9 +193,7 @@ impl SystematicParams {
         let repair_isi = esi
             .checked_add(padding_delta)
             .ok_or(SystematicError::EsiOverflow { esi, padding_delta })?;
-        let columns = repair_indices_for_esi(self.j, self.w, self.p, repair_isi);
-        let coefficients = vec![Gf256::ONE; columns.len()];
-        Ok((columns, coefficients))
+        Ok(repair_indices_for_esi(self.j, self.w, self.p, repair_isi))
     }
 }
 
@@ -1139,26 +1143,14 @@ impl SystematicEncoder {
         let symbol_size = self.params.symbol_size;
         buf[..symbol_size].fill(0);
 
-        let (columns, coefficients) = self.params.rfc_repair_equation(esi).unwrap();
-        debug_assert_eq!(
-            columns.len(),
-            coefficients.len(),
-            "RFC repair equation columns/coefficients mismatch"
-        );
+        let columns = self.params.rfc_repair_indices(esi).unwrap();
         debug_assert!(
             columns.iter().all(|&idx| idx < self.params.l),
             "RFC repair equation index out of range"
         );
 
-        for (&column, &coefficient) in columns.iter().zip(coefficients.iter()) {
-            if coefficient.is_zero() {
-                continue;
-            }
-            gf256_addmul_slice(
-                &mut buf[..symbol_size],
-                &self.intermediate[column],
-                coefficient,
-            );
+        for &column in &columns {
+            gf256_add_slice(&mut buf[..symbol_size], &self.intermediate[column]);
         }
 
         columns.len()

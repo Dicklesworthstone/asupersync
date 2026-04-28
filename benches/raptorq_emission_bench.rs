@@ -1,5 +1,8 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
+#![allow(missing_docs)]
+
 use asupersync::raptorq::systematic::SystematicEncoder;
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use std::hint::black_box;
 
 /// Benchmark FEC-Payload-ID emission path in RaptorQ encoder.
 ///
@@ -20,36 +23,39 @@ fn bench_fec_payload_id_emission(c: &mut Criterion) {
             .collect();
 
         // Create encoder once outside timing loop
-        let mut encoder = SystematicEncoder::new(&source_symbols, symbol_size, 42).unwrap();
+        let encoder = SystematicEncoder::new(&source_symbols, symbol_size, 42).unwrap();
 
-        group.bench_with_input(
-            BenchmarkId::new("emit_repair_hot_path", k),
-            &k,
-            |b, _| {
-                b.iter(|| {
-                    // Reset state for clean measurement
-                    let mut enc = SystematicEncoder::new(&source_symbols, symbol_size, 42).unwrap();
+        group.bench_with_input(BenchmarkId::new("repair_equation_only", k), &k, |b, _| {
+            b.iter(|| {
+                let esi = k as u32; // First repair ESI
+                let equation = encoder
+                    .params()
+                    .rfc_repair_equation(black_box(esi))
+                    .unwrap();
+                black_box(equation);
+            });
+        });
 
-                    // This is the hot path: emit_repair() calls repair_symbol_into_with_degree()
-                    // in a loop for each repair ESI
-                    let symbols = enc.emit_repair(black_box(repair_count));
-                    black_box(symbols);
-                });
-            }
-        );
+        group.bench_with_input(BenchmarkId::new("emit_repair_hot_path", k), &k, |b, _| {
+            b.iter(|| {
+                // Reset state for clean measurement
+                let mut enc = SystematicEncoder::new(&source_symbols, symbol_size, 42).unwrap();
+
+                // This is the hot path: emit_repair() calls repair_symbol_into_with_degree()
+                // in a loop for each repair ESI
+                let symbols = enc.emit_repair(black_box(repair_count));
+                black_box(symbols);
+            });
+        });
 
         // Also benchmark single repair symbol generation (the inner hot loop)
-        group.bench_with_input(
-            BenchmarkId::new("single_repair_symbol", k),
-            &k,
-            |b, _| {
-                b.iter(|| {
-                    let esi = k as u32; // First repair ESI
-                    let symbol = encoder.repair_symbol(black_box(esi));
-                    black_box(symbol);
-                });
-            }
-        );
+        group.bench_with_input(BenchmarkId::new("single_repair_symbol", k), &k, |b, _| {
+            b.iter(|| {
+                let esi = k as u32; // First repair ESI
+                let symbol = encoder.repair_symbol(black_box(esi));
+                black_box(symbol);
+            });
+        });
     }
 
     group.finish();
