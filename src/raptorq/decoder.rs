@@ -1108,14 +1108,30 @@ fn row_nonzero_count(a: &[Gf256], n_cols: usize, row: usize) -> usize {
         .count()
 }
 
-fn sparse_update_columns_if_beneficial(pivot_row: &[Gf256], n_cols: usize) -> Option<Vec<usize>> {
+fn sparse_update_column_capacity(n_cols: usize) -> usize {
     if n_cols == 0 {
-        return None;
+        return 0;
+    }
+
+    let threshold =
+        n_cols.saturating_mul(HYBRID_SPARSE_COST_NUMERATOR) / HYBRID_SPARSE_COST_DENOMINATOR;
+    threshold.max(1).min(n_cols)
+}
+
+fn sparse_update_columns_if_beneficial(
+    pivot_row: &[Gf256],
+    n_cols: usize,
+    scratch: &mut Vec<usize>,
+) -> bool {
+    if n_cols == 0 {
+        scratch.clear();
+        return false;
     }
 
     // Equivalent threshold to should_use_sparse_row_update(pivot_nnz, n_cols).
     let threshold =
         n_cols.saturating_mul(HYBRID_SPARSE_COST_NUMERATOR) / HYBRID_SPARSE_COST_DENOMINATOR;
+    scratch.clear();
 
     if n_cols <= SMALL_ROW_DENSE_FASTPATH_COLS {
         // Very small rows are sensitive to per-pivot heap allocation overhead.
@@ -1127,33 +1143,33 @@ fn sparse_update_columns_if_beneficial(pivot_row: &[Gf256], n_cols: usize) -> Op
             }
             sparse_nnz += 1;
             if sparse_nnz > threshold {
-                return None;
+                scratch.clear();
+                return false;
             }
         }
 
-        let mut cols = Vec::with_capacity(sparse_nnz.max(1));
         for (idx, coef) in pivot_row.iter().take(n_cols).enumerate() {
             if !coef.is_zero() {
-                cols.push(idx);
+                scratch.push(idx);
             }
         }
-        return Some(cols);
+        return true;
     }
 
     // For larger rows, one-pass collection avoids an extra scan on sparse pivots.
     let mut seen = 0usize;
-    let mut cols = Vec::with_capacity((threshold + 1).min(n_cols).max(1));
     for (idx, coef) in pivot_row.iter().take(n_cols).enumerate() {
         if coef.is_zero() {
             continue;
         }
         seen += 1;
         if seen > threshold {
-            return None;
+            scratch.clear();
+            return false;
         }
-        cols.push(idx);
+        scratch.push(idx);
     }
-    Some(cols)
+    true
 }
 
 fn select_hard_regime_plan(n_rows: usize, n_cols: usize, a: &[Gf256]) -> HardRegimePlan {
@@ -2126,6 +2142,7 @@ impl InactivationDecoder {
             let mut row_used = vec![false; n_rows];
             let mut pivot_buf = vec![Gf256::ZERO; n_cols];
             let mut pivot_rhs = vec![0u8; symbol_size];
+            let mut sparse_cols_buf = Vec::with_capacity(sparse_update_column_capacity(n_cols));
             let mut gauss_ops = 0usize;
             let mut pivots_selected = 0usize;
             let mut markowitz_pivots = 0usize;
@@ -2158,29 +2175,46 @@ impl InactivationDecoder {
                 // Copy pivot row into reusable buffers (no heap allocation)
                 pivot_buf[..n_cols].copy_from_slice(&a[prow_off..prow_off + n_cols]);
                 pivot_rhs[..symbol_size].copy_from_slice(&b[prow]);
-                let sparse_cols = sparse_update_columns_if_beneficial(&pivot_buf[..n_cols], n_cols);
+                let sparse_cols = sparse_update_columns_if_beneficial(
+                    &pivot_buf[..n_cols],
+                    n_cols,
+                    &mut sparse_cols_buf,
+                );
 
                 // Eliminate column in all other rows.
-                for (row, rhs) in b.iter_mut().enumerate().take(n_rows) {
-                    if row == prow {
-                        continue;
-                    }
-                    let row_off = row * n_cols;
-                    let factor = a[row_off + col];
-                    if factor.is_zero() {
-                        continue;
-                    }
-                    if let Some(cols) = sparse_cols.as_ref() {
-                        for &c in cols {
+                if sparse_cols {
+                    let sparse_cols = sparse_cols_buf.as_slice();
+                    for (row, rhs) in b.iter_mut().enumerate().take(n_rows) {
+                        if row == prow {
+                            continue;
+                        }
+                        let row_off = row * n_cols;
+                        let factor = a[row_off + col];
+                        if factor.is_zero() {
+                            continue;
+                        }
+                        for &c in sparse_cols {
                             a[row_off + c] += factor * pivot_buf[c];
                         }
-                    } else {
+                        gf256_addmul_slice(rhs, &pivot_rhs[..symbol_size], factor);
+                        gauss_ops += 1;
+                    }
+                } else {
+                    for (row, rhs) in b.iter_mut().enumerate().take(n_rows) {
+                        if row == prow {
+                            continue;
+                        }
+                        let row_off = row * n_cols;
+                        let factor = a[row_off + col];
+                        if factor.is_zero() {
+                            continue;
+                        }
                         for c in 0..n_cols {
                             a[row_off + c] += factor * pivot_buf[c];
                         }
+                        gf256_addmul_slice(rhs, &pivot_rhs[..symbol_size], factor);
+                        gauss_ops += 1;
                     }
-                    gf256_addmul_slice(rhs, &pivot_rhs[..symbol_size], factor);
-                    gauss_ops += 1;
                 }
             }
 
@@ -2421,6 +2455,7 @@ impl InactivationDecoder {
             let mut row_used = vec![false; n_rows];
             let mut pivot_buf = vec![Gf256::ZERO; n_cols];
             let mut pivot_rhs = vec![0u8; symbol_size];
+            let mut sparse_cols_buf = Vec::with_capacity(sparse_update_column_capacity(n_cols));
             let mut gauss_ops = 0usize;
             let mut pivots_selected = 0usize;
             let mut markowitz_pivots = 0usize;
@@ -2455,31 +2490,50 @@ impl InactivationDecoder {
                 // Copy pivot row into reusable buffers
                 pivot_buf[..n_cols].copy_from_slice(&a[prow_off..prow_off + n_cols]);
                 pivot_rhs[..symbol_size].copy_from_slice(&b[prow]);
-                let sparse_cols = sparse_update_columns_if_beneficial(&pivot_buf[..n_cols], n_cols);
+                let sparse_cols = sparse_update_columns_if_beneficial(
+                    &pivot_buf[..n_cols],
+                    n_cols,
+                    &mut sparse_cols_buf,
+                );
 
                 // Eliminate column in all other rows.
-                for (row, rhs) in b.iter_mut().enumerate().take(n_rows) {
-                    if row == prow {
-                        continue;
-                    }
-                    let row_off = row * n_cols;
-                    let factor = a[row_off + col];
-                    if factor.is_zero() {
-                        continue;
-                    }
-                    if let Some(cols) = sparse_cols.as_ref() {
-                        for &c in cols {
+                if sparse_cols {
+                    let sparse_cols = sparse_cols_buf.as_slice();
+                    for (row, rhs) in b.iter_mut().enumerate().take(n_rows) {
+                        if row == prow {
+                            continue;
+                        }
+                        let row_off = row * n_cols;
+                        let factor = a[row_off + col];
+                        if factor.is_zero() {
+                            continue;
+                        }
+                        for &c in sparse_cols {
                             a[row_off + c] += factor * pivot_buf[c];
                         }
-                    } else {
+                        gf256_addmul_slice(rhs, &pivot_rhs[..symbol_size], factor);
+                        gauss_ops += 1;
+                        // Record row operation in proof trace
+                        trace.record_row_op();
+                    }
+                } else {
+                    for (row, rhs) in b.iter_mut().enumerate().take(n_rows) {
+                        if row == prow {
+                            continue;
+                        }
+                        let row_off = row * n_cols;
+                        let factor = a[row_off + col];
+                        if factor.is_zero() {
+                            continue;
+                        }
                         for c in 0..n_cols {
                             a[row_off + c] += factor * pivot_buf[c];
                         }
+                        gf256_addmul_slice(rhs, &pivot_rhs[..symbol_size], factor);
+                        gauss_ops += 1;
+                        // Record row operation in proof trace
+                        trace.record_row_op();
                     }
-                    gf256_addmul_slice(rhs, &pivot_rhs[..symbol_size], factor);
-                    gauss_ops += 1;
-                    // Record row operation in proof trace
-                    trace.record_row_op();
                 }
             }
 
@@ -3118,10 +3172,19 @@ mod tests {
             Gf256::ZERO,
         ];
 
-        let sparse_cols = sparse_update_columns_if_beneficial(&row_sparse, 10)
-            .expect("row_sparse should take sparse update path");
-        assert_eq!(sparse_cols, vec![0, 1, 3, 5, 6, 7]);
-        assert!(sparse_update_columns_if_beneficial(&row_dense, 10).is_none());
+        let mut scratch = Vec::with_capacity(sparse_update_column_capacity(10));
+        assert!(sparse_update_columns_if_beneficial(
+            &row_sparse,
+            10,
+            &mut scratch
+        ));
+        assert_eq!(scratch, vec![0, 1, 3, 5, 6, 7]);
+        assert!(!sparse_update_columns_if_beneficial(
+            &row_dense,
+            10,
+            &mut scratch
+        ));
+        assert!(scratch.is_empty());
     }
 
     fn make_source_data(k: usize, symbol_size: usize) -> Vec<Vec<u8>> {
