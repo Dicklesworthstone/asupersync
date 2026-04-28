@@ -36,7 +36,7 @@ use crate::security::SecretString;
 use crate::types::{CancelReason, Outcome};
 use std::collections::BTreeMap;
 use std::fmt;
-use std::io;
+use std::io::{self, Write};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Poll;
@@ -1597,6 +1597,29 @@ impl MySqlConnection {
     async fn read_handshake(&mut self) -> Result<Handshake, MySqlError> {
         let (data, seq) = self.read_packet().await?;
         self.inner.sequence = seq.wrapping_add(1);
+
+        // Security: Reject malformed 0x00-length packets in authentication context
+        // A valid MySQL handshake packet has minimum 36 bytes:
+        // - 1 byte protocol version
+        // - null-terminated server version (>=1 byte + null)
+        // - 4 bytes connection ID
+        // - 8 bytes auth data part 1
+        // - 1 byte filler
+        // - 2 bytes capabilities lower
+        // - 1 byte charset
+        // - 2 bytes status flags
+        // - 2 bytes capabilities upper
+        // - 1 byte auth data length
+        // - 10 bytes reserved
+        // - at least 1 byte auth data part 2
+        // Minimum: 1 + 2 + 4 + 8 + 1 + 2 + 1 + 2 + 2 + 1 + 10 + 1 = 35 bytes
+        const MIN_HANDSHAKE_SIZE: usize = 35;
+        if data.len() < MIN_HANDSHAKE_SIZE {
+            return Err(MySqlError::InvalidPacket(format!(
+                "handshake packet too short: {} bytes, minimum required: {}",
+                data.len(), MIN_HANDSHAKE_SIZE
+            )));
+        }
 
         let mut reader = PacketReader::new(&data);
 
@@ -6251,6 +6274,53 @@ mod tests {
         match err {
             MySqlError::InvalidUrl(msg) => assert!(msg.contains("host"), "{msg}"),
             other => panic!("expected InvalidUrl, got {other:?}"), // ubs:ignore - test logic
+        }
+    }
+
+    #[test]
+    fn test_handshake_rejects_malformed_zero_length_packet() {
+        // Security test: Ensure 0x00-length handshake packets are rejected
+        // This prevents authentication bypass via malformed packets
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+
+            // Send malformed 0-length handshake packet
+            // MySQL packet header: 3 bytes length (0x00 0x00 0x00) + 1 byte sequence (0x00)
+            let malformed_packet = [0x00, 0x00, 0x00, 0x00]; // length=0, seq=0
+            stream.write_all(&malformed_packet).expect("write malformed packet");
+        });
+
+        let std_stream = std::net::TcpStream::connect(addr).expect("connect");
+        let stream = TcpStream::from_std(std_stream).expect("from_std");
+
+        let mut conn = MySqlConnection {
+            inner: MySqlConnectionInner {
+                stream,
+                sequence: 0,
+                connection_id: 0,
+                charset: 0,
+                status_flags: 0,
+                server_version: String::new(),
+                transaction_state: super::TransactionState::NotInTransaction,
+                client_capabilities: 0,
+            },
+        };
+
+        let cx = Cx::for_testing();
+        let result = run(conn.read_handshake());
+
+        server.join().expect("join server");
+
+        // Should reject malformed packet with specific error
+        match result {
+            Outcome::Err(MySqlError::InvalidPacket(msg)) => {
+                assert!(msg.contains("handshake packet too short"), "Expected handshake size error, got: {msg}");
+            },
+            other => panic!("Expected InvalidPacket error for 0-length handshake, got: {:?}", other),
         }
     }
 }
