@@ -3588,15 +3588,18 @@ mod tests {
     #[test]
     fn normalize_path_redirect_always_prevents_protocol_relative_open_redirect() {
         // br-asupersync-aqdic1: Regression test for open redirect vulnerability.
-        // Protocol-relative URLs like //evil.com must not redirect to external hosts.
+        // Protocol-relative URLs like //evil must not redirect to external hosts.
         let mw =
             NormalizePathMiddleware::new(FnHandler::new(ok_handler), TrailingSlash::RedirectAlways);
-        let resp = mw.call(Request::new("GET", "//evil.com"));
+
+        // RedirectAlways triggers when path doesn't end with '/' and has no '.'
+        // Use //evil (no dot) to trigger redirect condition
+        let resp = mw.call(Request::new("GET", "//evil"));
         assert_eq!(resp.status, StatusCode::MOVED_PERMANENTLY);
         // Location should be URL-encoded to prevent redirect to external host
         assert_eq!(
             resp.headers.get("location"),
-            Some(&"%2F%2Fevil.com/".to_string()),
+            Some(&"%2F%2Fevil/".to_string()),
             "Protocol-relative URL must be sanitized to prevent open redirect"
         );
     }
@@ -3604,23 +3607,35 @@ mod tests {
     #[test]
     fn normalize_path_redirect_handles_complex_protocol_relative_attacks() {
         // br-asupersync-aqdic1: Additional security regression tests.
+
+        // Test RedirectTrim with trailing slash (triggers redirect)
         let mw =
             NormalizePathMiddleware::new(FnHandler::new(ok_handler), TrailingSlash::RedirectTrim);
 
-        // Test with path and query parameters
-        let resp = mw.call(Request::new("GET", "//attacker.example.com/path?redirect=victim"));
+        // Path with trailing slash will trigger RedirectTrim (use path without dots)
+        let resp = mw.call(Request::new("GET", "//attacker-host/path/"));
         assert_eq!(resp.status, StatusCode::MOVED_PERMANENTLY);
         assert_eq!(
             resp.headers.get("location"),
-            Some(&"%2F%2Fattacker.example.com/path?redirect=victim".to_string())
+            Some(&"%2F%2Fattacker-host/path".to_string())
         );
 
-        // Test with multiple slashes
+        // Test with multiple slashes and trailing slash
         let resp = mw.call(Request::new("GET", "///triple-slash.example/"));
         assert_eq!(resp.status, StatusCode::MOVED_PERMANENTLY);
         assert_eq!(
             resp.headers.get("location"),
             Some(&"%2F%2F/triple-slash.example".to_string())
+        );
+
+        // Test RedirectAlways variant - no trailing slash, no dot (use path without dots)
+        let mw_always =
+            NormalizePathMiddleware::new(FnHandler::new(ok_handler), TrailingSlash::RedirectAlways);
+        let resp = mw_always.call(Request::new("GET", "//evilhost"));
+        assert_eq!(resp.status, StatusCode::MOVED_PERMANENTLY);
+        assert_eq!(
+            resp.headers.get("location"),
+            Some(&"%2F%2Fevilhost/".to_string())
         );
     }
 
