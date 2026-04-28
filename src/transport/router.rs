@@ -823,14 +823,26 @@ impl LoadBalancer {
                 })
             }
             LoadBalanceStrategy::HashBased => {
-                let start_idx = object_id.map_or_else(
-                    || self.rr_counter.fetch_add(count as u64, Ordering::Relaxed) as usize,
-                    |oid| oid.as_u128() as usize,
-                );
-                let len = available.len();
-                (0..count)
-                    .map(|i| available[(start_idx + i) % len])
-                    .collect()
+                object_id.map_or_else(
+                    || {
+                        let start_idx =
+                            self.rr_counter.fetch_add(count as u64, Ordering::Relaxed) as usize;
+                        let len = available.len();
+                        (0..count)
+                            .map(|i| available[(start_idx + i) % len])
+                            .collect()
+                    },
+                    |oid| {
+                        crate::distributed::consistent_hash::select_top_k_hrw(
+                            available.iter().copied(),
+                            count,
+                            &oid.as_u128(),
+                            self.hash_ring_salt,
+                            |endpoint| &endpoint.id,
+                            |endpoint| endpoint.weight.max(1),
+                        )
+                    },
+                )
             }
             LoadBalanceStrategy::WeightedRoundRobin => {
                 self.select_n_weighted_round_robin(&available, count)
@@ -2480,6 +2492,42 @@ mod tests {
             mismatches <= 51,
             "non-trivial cross-endpoint remapping after single removal: {mismatches}/1024 (must be <= ~5%)",
         );
+    }
+
+    #[test]
+    fn test_load_balancer_hash_based_select_n_is_order_invariant() {
+        let lb = LoadBalancer::with_seed(LoadBalanceStrategy::HashBased, 0x0057_AF1D_u64);
+        let endpoints: Vec<Arc<Endpoint>> = (1..=8).map(|i| Arc::new(test_endpoint(i))).collect();
+        let permuted = vec![
+            endpoints[5].clone(),
+            endpoints[2].clone(),
+            endpoints[7].clone(),
+            endpoints[1].clone(),
+            endpoints[4].clone(),
+            endpoints[0].clone(),
+            endpoints[6].clone(),
+            endpoints[3].clone(),
+        ];
+        let oid = ObjectId::new_for_test(42);
+
+        let selected: Vec<_> = lb
+            .select_n(&endpoints, 3, Some(oid))
+            .into_iter()
+            .map(|endpoint| endpoint.id)
+            .collect();
+        let permuted_selected: Vec<_> = lb
+            .select_n(&permuted, 3, Some(oid))
+            .into_iter()
+            .map(|endpoint| endpoint.id)
+            .collect();
+
+        assert_eq!(
+            selected, permuted_selected,
+            "hash-based fanout must depend on membership, not endpoint iteration order",
+        );
+
+        let unique_ids: HashSet<_> = selected.iter().copied().collect();
+        assert_eq!(unique_ids.len(), selected.len());
     }
 
     #[test]

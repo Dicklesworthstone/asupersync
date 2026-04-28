@@ -156,7 +156,7 @@ fn bench_load_balancer_hash_based(c: &mut Criterion) {
 
     for &endpoint_count in &[8usize, 32, 128, 512] {
         let endpoints = build_loaded_endpoints(endpoint_count, Some(7), true);
-        let lb = LoadBalancer::with_seed(LoadBalanceStrategy::HashBased, 0x57AF_1D_u64);
+        let lb = LoadBalancer::with_seed(LoadBalanceStrategy::HashBased, 0x0057_AF1D_u64);
         group.throughput(Throughput::Elements(endpoint_count as u64));
         group.bench_with_input(
             BenchmarkId::from_parameter(endpoint_count),
@@ -177,10 +177,48 @@ fn bench_load_balancer_hash_based(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_load_balancer_hash_based_select_n(c: &mut Criterion) {
+    let mut group = c.benchmark_group("transport/load_balancer/hash_based_select_n");
+
+    for &endpoint_count in &[8usize, 32, 128, 512] {
+        let endpoints = build_loaded_endpoints(endpoint_count, Some(7), true);
+        let available = endpoints
+            .iter()
+            .filter(|endpoint| endpoint.state().can_receive())
+            .count();
+        let lb = LoadBalancer::with_seed(LoadBalanceStrategy::HashBased, 0x0057_AF1D_u64);
+
+        for &fanout in &[3usize, 8] {
+            if fanout > available {
+                continue;
+            }
+
+            let bench_id = BenchmarkId::new(format!("endpoints={endpoint_count}"), fanout);
+            group.throughput(Throughput::Elements(fanout as u64));
+            group.bench_with_input(bench_id, &fanout, |b, &fanout| {
+                let mut key = 0_u64;
+                b.iter(|| {
+                    key = key.wrapping_add(1);
+                    let selected = lb.select_n(
+                        black_box(&endpoints),
+                        fanout,
+                        Some(ObjectId::new_for_test(key)),
+                    );
+                    black_box(selected.first().map_or(0, |endpoint| endpoint.id.0));
+                    black_box(selected.len())
+                });
+            });
+        }
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_load_balancer_select_n_random,
     bench_load_balancer_select_n_ordered,
-    bench_load_balancer_hash_based
+    bench_load_balancer_hash_based,
+    bench_load_balancer_hash_based_select_n
 );
 criterion_main!(benches);
