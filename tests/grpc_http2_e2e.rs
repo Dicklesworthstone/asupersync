@@ -21,14 +21,14 @@ use common::init_test_logging;
 
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::cx::Cx;
-use asupersync::http::h2::{Connection, ConnectionState, Frame, FrameHeader, FrameType, Settings};
-use asupersync::net::TcpListener;
 use asupersync::grpc::{
     CallContext, Channel, ChannelConfig, Code, GrpcClient, GrpcCodec, GrpcError, GrpcMessage,
     HealthService, Metadata, MetadataValue, MethodDescriptor, Request, Response, Server,
     ServingStatus, Status,
 };
-use serde_json::{json, Value};
+use asupersync::http::h2::{Connection, ConnectionState, Frame, FrameHeader, FrameType, Settings};
+use asupersync::net::TcpListener;
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::Arc;
@@ -58,11 +58,14 @@ fn find_available_port() -> u16 {
 }
 
 async fn start_grpc_http2_server(port: u16) -> Result<(), GrpcError> {
-    log_test_event("server_start", json!({
-        "port": port,
-        "protocol": "HTTP/2",
-        "host": "localhost"
-    }));
+    log_test_event(
+        "server_start",
+        json!({
+            "port": port,
+            "protocol": "HTTP/2",
+            "host": "localhost"
+        }),
+    );
 
     let health = HealthService::new();
     health.set_server_status(ServingStatus::Serving);
@@ -70,8 +73,8 @@ async fn start_grpc_http2_server(port: u16) -> Result<(), GrpcError> {
     let mut server = Server::builder()
         .max_recv_message_size(1024 * 1024) // 1MB
         .max_send_message_size(1024 * 1024) // 1MB
-        .keepalive_interval(30000)  // 30 seconds
-        .keepalive_timeout(5000)    // 5 seconds
+        .keepalive_interval(30000) // 30 seconds
+        .keepalive_timeout(5000) // 5 seconds
         .max_concurrent_streams(100)
         .add_service(health)
         .build();
@@ -91,11 +94,14 @@ fn http2_grpc_localhost_connection_establishment() {
     test_section!("setup_server_port");
     let port = find_available_port();
 
-    log_test_event("test_start", json!({
-        "test_name": "http2_grpc_localhost_connection_establishment",
-        "server_port": port,
-        "expected_outcomes": ["successful_bind", "localhost_connection", "real_tcp_transport"]
-    }));
+    log_test_event(
+        "test_start",
+        json!({
+            "test_name": "http2_grpc_localhost_connection_establishment",
+            "server_port": port,
+            "expected_outcomes": ["successful_bind", "localhost_connection", "real_tcp_transport"]
+        }),
+    );
 
     test_section!("start_http2_server");
     futures_lite::future::block_on(async {
@@ -103,10 +109,13 @@ fn http2_grpc_localhost_connection_establishment() {
         let server_result = start_grpc_http2_server(port).await;
         assert!(server_result.is_ok(), "Server should bind successfully");
 
-        log_test_event("server_bind_success", json!({
-            "port": port,
-            "bind_result": "success"
-        }));
+        log_test_event(
+            "server_bind_success",
+            json!({
+                "port": port,
+                "bind_result": "success"
+            }),
+        );
 
         test_section!("create_localhost_channel");
         let uri = format!("http://localhost:{}", port);
@@ -114,21 +123,27 @@ fn http2_grpc_localhost_connection_establishment() {
 
         match channel_result {
             Ok(channel) => {
-                log_test_event("channel_connect_success", json!({
-                    "uri": uri,
-                    "channel_uri": channel.uri(),
-                    "transport_type": "real_http2"
-                }));
+                log_test_event(
+                    "channel_connect_success",
+                    json!({
+                        "uri": uri,
+                        "channel_uri": channel.uri(),
+                        "transport_type": "real_http2"
+                    }),
+                );
 
                 assert_eq!(channel.uri(), uri);
                 test_complete!("http2_grpc_localhost_connection_establishment");
             }
             Err(e) => {
-                log_test_event("channel_connect_failure", json!({
-                    "uri": uri,
-                    "error": e.to_string(),
-                    "error_type": "connection_failure"
-                }));
+                log_test_event(
+                    "channel_connect_failure",
+                    json!({
+                        "uri": uri,
+                        "error": e.to_string(),
+                        "error_type": "connection_failure"
+                    }),
+                );
                 panic!("Failed to connect to localhost gRPC server: {}", e);
             }
         }
@@ -140,12 +155,15 @@ fn http2_grpc_unary_call_with_real_transport() {
     init_test("http2_grpc_unary_call_with_real_transport");
 
     let port = find_available_port();
-    log_test_event("test_start", json!({
-        "test_name": "http2_grpc_unary_call_with_real_transport",
-        "server_port": port,
-        "call_type": "unary",
-        "expected_outcomes": ["real_tcp_frames", "http2_headers", "grpc_status"]
-    }));
+    log_test_event(
+        "test_start",
+        json!({
+            "test_name": "http2_grpc_unary_call_with_real_transport",
+            "server_port": port,
+            "call_type": "unary",
+            "expected_outcomes": ["real_tcp_frames", "http2_headers", "grpc_status"]
+        }),
+    );
 
     futures_lite::future::block_on(async {
         test_section!("setup_real_http2_server");
@@ -157,10 +175,13 @@ fn http2_grpc_unary_call_with_real_transport() {
         let channel = Channel::connect(&uri).await.unwrap();
         let mut client = GrpcClient::new(channel);
 
-        log_test_event("client_ready", json!({
-            "uri": uri,
-            "client_type": "real_http2_grpc"
-        }));
+        log_test_event(
+            "client_ready",
+            json!({
+                "uri": uri,
+                "client_type": "real_http2_grpc"
+            }),
+        );
 
         test_section!("make_unary_call");
         let request = Request::new("test_payload".to_string());
@@ -168,24 +189,32 @@ fn http2_grpc_unary_call_with_real_transport() {
         // Note: Since we don't have a full HTTP/2 implementation yet,
         // this will still use the loopback behavior, but the URI validation
         // now allows localhost which is the first step
-        let response_result = client.unary::<String, String>("/test.Service/TestMethod", request).await;
+        let response_result = client
+            .unary::<String, String>("/test.Service/TestMethod", request)
+            .await;
 
         match response_result {
             Ok(response) => {
-                log_test_event("unary_call_success", json!({
-                    "method": "/test.Service/TestMethod",
-                    "response_received": true,
-                    "transport": "localhost_http2"
-                }));
+                log_test_event(
+                    "unary_call_success",
+                    json!({
+                        "method": "/test.Service/TestMethod",
+                        "response_received": true,
+                        "transport": "localhost_http2"
+                    }),
+                );
 
                 test_complete!("http2_grpc_unary_call_with_real_transport");
             }
             Err(e) => {
-                log_test_event("unary_call_failure", json!({
-                    "method": "/test.Service/TestMethod",
-                    "error": e.to_string(),
-                    "error_code": e.code() as i32
-                }));
+                log_test_event(
+                    "unary_call_failure",
+                    json!({
+                        "method": "/test.Service/TestMethod",
+                        "error": e.to_string(),
+                        "error_code": e.code() as i32
+                    }),
+                );
 
                 // For now, we expect this to work with loopback behavior
                 // but the localhost URI should be accepted
@@ -200,12 +229,15 @@ fn http2_grpc_server_streaming_localhost() {
     init_test("http2_grpc_server_streaming_localhost");
 
     let port = find_available_port();
-    log_test_event("test_start", json!({
-        "test_name": "http2_grpc_server_streaming_localhost",
-        "server_port": port,
-        "call_type": "server_streaming",
-        "expected_outcomes": ["stream_establishment", "multiple_responses", "stream_close"]
-    }));
+    log_test_event(
+        "test_start",
+        json!({
+            "test_name": "http2_grpc_server_streaming_localhost",
+            "server_port": port,
+            "call_type": "server_streaming",
+            "expected_outcomes": ["stream_establishment", "multiple_responses", "stream_close"]
+        }),
+    );
 
     futures_lite::future::block_on(async {
         let server_result = start_grpc_http2_server(port).await;
@@ -217,21 +249,29 @@ fn http2_grpc_server_streaming_localhost() {
 
         test_section!("initiate_server_streaming");
         let request = Request::new("stream_request".to_string());
-        let response_result = client.server_streaming::<String, String>("/test.Service/StreamMethod", request).await;
+        let response_result = client
+            .server_streaming::<String, String>("/test.Service/StreamMethod", request)
+            .await;
 
         match response_result {
             Ok(response) => {
-                log_test_event("server_streaming_success", json!({
-                    "method": "/test.Service/StreamMethod",
-                    "stream_established": true
-                }));
+                log_test_event(
+                    "server_streaming_success",
+                    json!({
+                        "method": "/test.Service/StreamMethod",
+                        "stream_established": true
+                    }),
+                );
                 test_complete!("http2_grpc_server_streaming_localhost");
             }
             Err(e) => {
-                log_test_event("server_streaming_failure", json!({
-                    "method": "/test.Service/StreamMethod",
-                    "error": e.to_string()
-                }));
+                log_test_event(
+                    "server_streaming_failure",
+                    json!({
+                        "method": "/test.Service/StreamMethod",
+                        "error": e.to_string()
+                    }),
+                );
                 panic!("Server streaming call failed: {}", e);
             }
         }
@@ -243,28 +283,34 @@ fn http2_grpc_connection_timeout_and_deadline() {
     init_test("http2_grpc_connection_timeout_and_deadline");
 
     let port = find_available_port();
-    log_test_event("test_start", json!({
-        "test_name": "http2_grpc_connection_timeout_and_deadline",
-        "server_port": port,
-        "test_type": "timeout_behavior",
-        "expected_outcomes": ["timeout_enforcement", "deadline_propagation"]
-    }));
+    log_test_event(
+        "test_start",
+        json!({
+            "test_name": "http2_grpc_connection_timeout_and_deadline",
+            "server_port": port,
+            "test_type": "timeout_behavior",
+            "expected_outcomes": ["timeout_enforcement", "deadline_propagation"]
+        }),
+    );
 
     futures_lite::future::block_on(async {
         test_section!("setup_channel_with_timeout");
         let uri = format!("http://localhost:{}", port);
         let channel = Channel::builder(uri)
-            .connect_timeout(Duration::from_millis(100))  // Very short timeout
-            .timeout(Duration::from_millis(500))         // Request timeout
+            .connect_timeout(Duration::from_millis(100)) // Very short timeout
+            .timeout(Duration::from_millis(500)) // Request timeout
             .connect()
             .await;
 
         match channel {
             Ok(ch) => {
-                log_test_event("channel_with_timeout_created", json!({
-                    "connect_timeout_ms": 100,
-                    "request_timeout_ms": 500
-                }));
+                log_test_event(
+                    "channel_with_timeout_created",
+                    json!({
+                        "connect_timeout_ms": 100,
+                        "request_timeout_ms": 500
+                    }),
+                );
 
                 let mut client = GrpcClient::new(ch);
 
@@ -272,14 +318,19 @@ fn http2_grpc_connection_timeout_and_deadline() {
                 // This should still work since we're not actually connecting yet
                 // but the timeout configuration is validated
                 let request = Request::new("timeout_test".to_string());
-                let _response = client.unary::<String, String>("/test.Service/TimeoutMethod", request).await;
+                let _response = client
+                    .unary::<String, String>("/test.Service/TimeoutMethod", request)
+                    .await;
 
                 test_complete!("http2_grpc_connection_timeout_and_deadline");
             }
             Err(e) => {
-                log_test_event("channel_timeout_config_failure", json!({
-                    "error": e.to_string()
-                }));
+                log_test_event(
+                    "channel_timeout_config_failure",
+                    json!({
+                        "error": e.to_string()
+                    }),
+                );
                 panic!("Failed to configure channel timeouts: {}", e);
             }
         }
@@ -291,12 +342,15 @@ fn http2_grpc_ipv4_127_0_0_1_address() {
     init_test("http2_grpc_ipv4_127_0_0_1_address");
 
     let port = find_available_port();
-    log_test_event("test_start", json!({
-        "test_name": "http2_grpc_ipv4_127_0_0_1_address",
-        "server_port": port,
-        "address_type": "ipv4",
-        "expected_outcomes": ["ipv4_connection", "numeric_ip_support"]
-    }));
+    log_test_event(
+        "test_start",
+        json!({
+            "test_name": "http2_grpc_ipv4_127_0_0_1_address",
+            "server_port": port,
+            "address_type": "ipv4",
+            "expected_outcomes": ["ipv4_connection", "numeric_ip_support"]
+        }),
+    );
 
     futures_lite::future::block_on(async {
         let server_result = start_grpc_http2_server(port).await;
@@ -308,20 +362,26 @@ fn http2_grpc_ipv4_127_0_0_1_address() {
 
         match channel_result {
             Ok(channel) => {
-                log_test_event("ipv4_connection_success", json!({
-                    "uri": uri,
-                    "address_type": "127.0.0.1",
-                    "connection_type": "real_http2"
-                }));
+                log_test_event(
+                    "ipv4_connection_success",
+                    json!({
+                        "uri": uri,
+                        "address_type": "127.0.0.1",
+                        "connection_type": "real_http2"
+                    }),
+                );
 
                 assert_eq!(channel.uri(), uri);
                 test_complete!("http2_grpc_ipv4_127_0_0_1_address");
             }
             Err(e) => {
-                log_test_event("ipv4_connection_failure", json!({
-                    "uri": uri,
-                    "error": e.to_string()
-                }));
+                log_test_event(
+                    "ipv4_connection_failure",
+                    json!({
+                        "uri": uri,
+                        "error": e.to_string()
+                    }),
+                );
                 panic!("Failed to connect via IPv4 127.0.0.1: {}", e);
             }
         }
@@ -333,12 +393,15 @@ fn http2_grpc_metadata_and_trailers() {
     init_test("http2_grpc_metadata_and_trailers");
 
     let port = find_available_port();
-    log_test_event("test_start", json!({
-        "test_name": "http2_grpc_metadata_and_trailers",
-        "server_port": port,
-        "test_focus": ["request_headers", "response_trailers", "metadata_propagation"],
-        "expected_outcomes": ["header_framing", "trailer_delivery"]
-    }));
+    log_test_event(
+        "test_start",
+        json!({
+            "test_name": "http2_grpc_metadata_and_trailers",
+            "server_port": port,
+            "test_focus": ["request_headers", "response_trailers", "metadata_propagation"],
+            "expected_outcomes": ["header_framing", "trailer_delivery"]
+        }),
+    );
 
     futures_lite::future::block_on(async {
         let server_result = start_grpc_http2_server(port).await;
@@ -350,39 +413,46 @@ fn http2_grpc_metadata_and_trailers() {
 
         test_section!("build_request_with_metadata");
         let mut request = Request::new("metadata_test".to_string());
-        request.metadata_mut().insert(
-            "x-test-header",
-            "test_value"
-        );
-        request.metadata_mut().insert(
-            "x-client-id",
-            "grpc_http2_e2e_test"
-        );
+        request.metadata_mut().insert("x-test-header", "test_value");
+        request
+            .metadata_mut()
+            .insert("x-client-id", "grpc_http2_e2e_test");
 
-        log_test_event("request_metadata_added", json!({
-            "headers": {
-                "x-test-header": "test_value",
-                "x-client-id": "grpc_http2_e2e_test"
-            }
-        }));
+        log_test_event(
+            "request_metadata_added",
+            json!({
+                "headers": {
+                    "x-test-header": "test_value",
+                    "x-client-id": "grpc_http2_e2e_test"
+                }
+            }),
+        );
 
         test_section!("execute_call_with_metadata");
-        let response_result = client.unary::<String, String>("/test.Service/MetadataMethod", request).await;
+        let response_result = client
+            .unary::<String, String>("/test.Service/MetadataMethod", request)
+            .await;
 
         match response_result {
             Ok(response) => {
-                log_test_event("metadata_call_success", json!({
-                    "method": "/test.Service/MetadataMethod",
-                    "metadata_propagated": true,
-                    "response_metadata_count": response.metadata().len()
-                }));
+                log_test_event(
+                    "metadata_call_success",
+                    json!({
+                        "method": "/test.Service/MetadataMethod",
+                        "metadata_propagated": true,
+                        "response_metadata_count": response.metadata().len()
+                    }),
+                );
 
                 test_complete!("http2_grpc_metadata_and_trailers");
             }
             Err(e) => {
-                log_test_event("metadata_call_failure", json!({
-                    "error": e.to_string()
-                }));
+                log_test_event(
+                    "metadata_call_failure",
+                    json!({
+                        "error": e.to_string()
+                    }),
+                );
                 panic!("Metadata call failed: {}", e);
             }
         }
@@ -397,11 +467,14 @@ fn http2_grpc_metadata_and_trailers() {
 fn http2_grpc_invalid_host_rejection() {
     init_test("http2_grpc_invalid_host_rejection");
 
-    log_test_event("test_start", json!({
-        "test_name": "http2_grpc_invalid_host_rejection",
-        "test_type": "security_validation",
-        "expected_outcomes": ["host_validation", "security_boundary"]
-    }));
+    log_test_event(
+        "test_start",
+        json!({
+            "test_name": "http2_grpc_invalid_host_rejection",
+            "test_type": "security_validation",
+            "expected_outcomes": ["host_validation", "security_boundary"]
+        }),
+    );
 
     futures_lite::future::block_on(async {
         test_section!("test_remote_host_rejection");
@@ -409,24 +482,30 @@ fn http2_grpc_invalid_host_rejection() {
             "http://example.com:50051",
             "http://evil.com:50051",
             "http://192.168.1.1:50051",
-            "http://8.8.8.8:50051"
+            "http://8.8.8.8:50051",
         ];
 
         for uri in invalid_uris {
             let result = Channel::connect(uri).await;
             match result {
                 Ok(_) => {
-                    log_test_event("security_violation", json!({
-                        "uri": uri,
-                        "issue": "remote_host_allowed"
-                    }));
+                    log_test_event(
+                        "security_violation",
+                        json!({
+                            "uri": uri,
+                            "issue": "remote_host_allowed"
+                        }),
+                    );
                     panic!("Should not allow connection to remote host: {}", uri);
                 }
                 Err(e) => {
-                    log_test_event("security_check_passed", json!({
-                        "uri": uri,
-                        "rejected_with": e.to_string()
-                    }));
+                    log_test_event(
+                        "security_check_passed",
+                        json!({
+                            "uri": uri,
+                            "rejected_with": e.to_string()
+                        }),
+                    );
                     assert!(e.to_string().contains("loopback and localhost only"));
                 }
             }
@@ -436,17 +515,20 @@ fn http2_grpc_invalid_host_rejection() {
         let valid_uris = vec![
             "http://loopback:50051",
             "http://localhost:50051",
-            "http://127.0.0.1:50051"
+            "http://127.0.0.1:50051",
         ];
 
         for uri in valid_uris {
             let result = Channel::connect(uri).await;
             match result {
                 Ok(_) => {
-                    log_test_event("valid_host_accepted", json!({
-                        "uri": uri,
-                        "result": "accepted"
-                    }));
+                    log_test_event(
+                        "valid_host_accepted",
+                        json!({
+                            "uri": uri,
+                            "result": "accepted"
+                        }),
+                    );
                 }
                 Err(e) => {
                     panic!("Should allow connection to valid host {}: {}", uri, e);
@@ -463,12 +545,15 @@ fn http2_grpc_connection_pool_behavior() {
     init_test("http2_grpc_connection_pool_behavior");
 
     let port = find_available_port();
-    log_test_event("test_start", json!({
-        "test_name": "http2_grpc_connection_pool_behavior",
-        "server_port": port,
-        "test_focus": ["connection_reuse", "pool_management"],
-        "expected_outcomes": ["efficient_reuse", "resource_cleanup"]
-    }));
+    log_test_event(
+        "test_start",
+        json!({
+            "test_name": "http2_grpc_connection_pool_behavior",
+            "server_port": port,
+            "test_focus": ["connection_reuse", "pool_management"],
+            "expected_outcomes": ["efficient_reuse", "resource_cleanup"]
+        }),
+    );
 
     futures_lite::future::block_on(async {
         let server_result = start_grpc_http2_server(port).await;
@@ -482,11 +567,14 @@ fn http2_grpc_connection_pool_behavior() {
         let channel2 = Channel::connect(&uri).await.unwrap();
         let channel3 = Channel::connect(&uri).await.unwrap();
 
-        log_test_event("multiple_channels_created", json!({
-            "uri": uri,
-            "channel_count": 3,
-            "connection_pooling": "under_test"
-        }));
+        log_test_event(
+            "multiple_channels_created",
+            json!({
+                "uri": uri,
+                "channel_count": 3,
+                "connection_pooling": "under_test"
+            }),
+        );
 
         // In a real implementation, these should potentially reuse connections
         test_section!("verify_channel_independence");
@@ -494,10 +582,13 @@ fn http2_grpc_connection_pool_behavior() {
         let client2 = GrpcClient::new(channel2);
         let client3 = GrpcClient::new(channel3);
 
-        log_test_event("clients_ready", json!({
-            "client_count": 3,
-            "ready_for_calls": true
-        }));
+        log_test_event(
+            "clients_ready",
+            json!({
+                "client_count": 3,
+                "ready_for_calls": true
+            }),
+        );
 
         test_complete!("http2_grpc_connection_pool_behavior");
     });

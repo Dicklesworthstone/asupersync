@@ -332,7 +332,9 @@ impl SymbolCancelToken {
         // livelock while ensuring listeners see a reasonably recent severity level.
         let final_reason = {
             let reason_guard = state.reason.write();
-            reason_guard.clone().unwrap_or_else(CancelReason::parent_cancelled)
+            reason_guard
+                .clone()
+                .unwrap_or_else(CancelReason::parent_cancelled)
         };
         let final_severity = final_reason.kind.severity();
 
@@ -4275,7 +4277,10 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_nanos(100));
         }
-        assert!(started.load(Ordering::Acquire), "Test thread failed to start within timeout");
+        assert!(
+            started.load(Ordering::Acquire),
+            "Test thread failed to start within timeout"
+        );
 
         parent
             .state
@@ -4296,8 +4301,8 @@ mod tests {
             Arc,
             atomic::{AtomicBool, AtomicU32, Ordering},
         };
-        use std::time::{Duration, Instant};
         use std::thread;
+        use std::time::{Duration, Instant};
 
         let mut rng = DetRng::new(0x4321);
         let token = SymbolCancelToken::new(ObjectId::new(42, 0), &mut rng);
@@ -4325,7 +4330,13 @@ mod tests {
         // the race condition that would cause infinite loop
         let token_for_strengthener = token.clone();
         let strengthener_thread = thread::spawn(move || {
-            for severity in [CancelKind::Deadline, CancelKind::Shutdown, CancelKind::FailFast].iter() {
+            for severity in [
+                CancelKind::Deadline,
+                CancelKind::Shutdown,
+                CancelKind::FailFast,
+            ]
+            .iter()
+            {
                 thread::sleep(Duration::from_millis(1));
                 token_for_strengthener.cancel(&CancelReason::new(*severity), initial_time);
             }
@@ -4342,8 +4353,12 @@ mod tests {
         });
 
         // Wait for threads to complete or timeout
-        strengthener_thread.join().expect("strengthener thread should complete");
-        notification_thread.join().expect("notification thread should complete");
+        strengthener_thread
+            .join()
+            .expect("strengthener thread should complete");
+        notification_thread
+            .join()
+            .expect("notification thread should complete");
 
         let elapsed = start.elapsed();
 
@@ -4399,10 +4414,13 @@ mod tests {
 
             // Acquire the reason write lock and set cancelled flag
             let reason = CancelReason::user("livelock test");
-            let _reason_guard = token_for_cancel.state.reason.write();
+            let mut reason_guard = token_for_cancel.state.reason.write();
 
             // Signal that cancel has started (flag will be visible)
-            token_for_cancel.state.cancelled.store(true, Ordering::Release);
+            token_for_cancel
+                .state
+                .cancelled
+                .store(true, Ordering::Release);
             cancel_started_for_cancel.store(true, Ordering::Release);
 
             // Hold the lock for a bit to ensure race condition
@@ -4411,8 +4429,13 @@ mod tests {
             // Set the timestamp (this will unblock the child creation)
             token_for_cancel.state.cancelled_at.store(
                 crate::types::Time::from_millis(12345).as_nanos(),
-                Ordering::Release
+                Ordering::Release,
             );
+
+            // Complete the same reason publication cancel() performs
+            // before releasing the write lock so the final token state
+            // is reachable in production.
+            *reason_guard = Some(reason);
 
             // Lock will be dropped here, completing the cancel
         });
@@ -4434,7 +4457,7 @@ mod tests {
             // This would previously cause infinite livelock in cancelled_at_snapshot_for_child
             let start = Instant::now();
             let mut child_rng = DetRng::new(0x8765_4321);
-            let _child = token_for_child.child(&mut child_rng);
+            let child = token_for_child.child(&mut child_rng);
             let elapsed = start.elapsed();
 
             // With the fix, this should complete in bounded time
@@ -4445,12 +4468,13 @@ mod tests {
             );
 
             child_created_for_child.store(true, Ordering::Release);
+            child
         });
 
         // Wait for both threads with timeout
         let start = Instant::now();
         cancel_thread.join().expect("Cancel thread should complete");
-        child_thread.join().expect("Child thread should complete");
+        let child = child_thread.join().expect("Child thread should complete");
         let total_elapsed = start.elapsed();
 
         // Verify the test completed quickly (no livelock)
@@ -4472,6 +4496,19 @@ mod tests {
 
         // Verify final state is consistent
         assert!(token.is_cancelled(), "Token should be cancelled");
-        assert!(token.cancelled_at().is_some(), "Cancelled timestamp should be available");
+        assert!(
+            token.cancelled_at().is_some(),
+            "Cancelled timestamp should be available"
+        );
+        assert_eq!(
+            token.reason(),
+            Some(CancelReason::user("livelock test")),
+            "manual race setup must still publish a real final cancel reason"
+        );
+        assert_eq!(
+            child.cancelled_at(),
+            Some(crate::types::Time::from_millis(12345)),
+            "child created during in-flight cancel must inherit the canonical parent timestamp"
+        );
     }
 }
