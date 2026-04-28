@@ -876,7 +876,7 @@ Define a **potential function** `V(Σ)` over runtime state (regions/tasks/obliga
 Then require the governor/scheduler to choose steps that (in expectation or under a bound) **decrease `V`**, or decrease it under cancellation lanes first.
 Under standard assumptions (cooperative checkpoints, bounded masking, fairness), LaSalle‑style arguments give: **cancellation converges to quiescence** rather than "we hope it drains."
 
-*Implementation note:* The intuition here is sufficient for design; formal `V(Σ)` transition rules can be added to the operational semantics when the scheduler is actually built and needs verification.
+*Implementation note:* This is no longer a future seam: the repository already ships `LyapunovGovernor` in `src/obligation/lyapunov.rs` and wires it into the live three-lane scheduler through `src/runtime/scheduler/three_lane.rs::governor_suggest`, including drain/deadline suggestions, adaptive fairness hooks, and decision-contract evidence emission. The remaining documentation debt is to keep the written operational semantics aligned with that implemented scheduler/governor path by formalizing the concrete `V(Σ)` transition rules now that the scheduler exists and is under active hardening.
 
 #### Policy seam + determinism rules
 
