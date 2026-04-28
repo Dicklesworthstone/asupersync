@@ -1064,6 +1064,10 @@ pub struct CancelBroadcaster<S: CancelSink> {
     /// instead of dropping them on broadcast errors. The retry queue maintains
     /// failed messages in order for deterministic re-attempt behavior.
     pending_retries: RwLock<VecDeque<CancelMessage>>,
+    /// Ensures only one retry pass drains the retry queue at a time.
+    /// Concurrent retry callers otherwise can split the queue and violate
+    /// the FIFO "stop on first failure" contract documented below.
+    retry_in_progress: AtomicBool,
     /// br-asupersync-ml5ba5 — Per-broadcaster random tag mixed into
     /// the synthetic token_id `prepare_cancel` mints when no local
     /// `SymbolCancelToken` exists for an object. Without this,
@@ -1138,6 +1142,7 @@ impl<S: CancelSink> CancelBroadcaster<S> {
             next_sequence: AtomicU64::new(0),
             sender_tag,
             pending_retries: RwLock::new(VecDeque::new()),
+            retry_in_progress: AtomicBool::new(false),
             initiated: AtomicU64::new(0),
             received: AtomicU64::new(0),
             forwarded: AtomicU64::new(0),
@@ -1284,10 +1289,29 @@ impl<S: CancelSink> CancelBroadcaster<S> {
     /// failed due to network or sink errors. Messages are retried in FIFO order
     /// to preserve temporal causality. Successfully broadcast messages are removed
     /// from the retry queue; failed messages remain queued for subsequent retries.
+    /// Only one retry pass may run at a time; concurrent callers return without
+    /// consuming queue state so they cannot reorder pending messages.
     ///
     /// Returns the number of messages successfully retried and any error from the
     /// last failed retry attempt.
     pub async fn retry_failed_broadcasts(&self) -> (usize, Option<crate::error::Error>) {
+        struct RetryGuard<'a>(&'a AtomicBool);
+
+        impl Drop for RetryGuard<'_> {
+            fn drop(&mut self) {
+                self.0.store(false, Ordering::Release);
+            }
+        }
+
+        if self
+            .retry_in_progress
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return (0, None);
+        }
+        let _retry_guard = RetryGuard(&self.retry_in_progress);
+
         let mut retried_count = 0;
         let mut last_error = None;
 
@@ -1621,7 +1645,8 @@ impl CleanupCoordinator {
                 let mut restored_set = set;
                 if let Some(buffered_symbols) = cleanup_buffer.remove(&object_id) {
                     for symbol in buffered_symbols {
-                        restored_set.total_bytes = restored_set.total_bytes.saturating_add(symbol.len());
+                        restored_set.total_bytes =
+                            restored_set.total_bytes.saturating_add(symbol.len());
                         restored_set.symbols.push(symbol);
                     }
                 }
@@ -4708,8 +4733,8 @@ mod tests {
         let now = Time::from_nanos(1000);
 
         // Register initial symbols
-        coordinator.register_pending(object_id, Symbol::from_slice(b"initial1"), now);
-        coordinator.register_pending(object_id, Symbol::from_slice(b"initial2"), now);
+        coordinator.register_pending(object_id, Symbol::new_for_test(42, 0, 0, b"initial1"), now);
+        coordinator.register_pending(object_id, Symbol::new_for_test(42, 0, 1, b"initial2"), now);
 
         // Create a failing handler
         #[derive(Debug)]
@@ -4718,60 +4743,103 @@ mod tests {
         }
 
         impl CleanupHandler for FailingHandler {
-            fn name(&self) -> &str { "failing_test_handler" }
+            fn name(&self) -> &'static str {
+                "failing_test_handler"
+            }
 
-            fn cleanup(&self, _object_id: ObjectId, symbols: Vec<Symbol>) -> crate::error::Result<usize> {
+            fn cleanup(
+                &self,
+                _object_id: ObjectId,
+                symbols: Vec<Symbol>,
+            ) -> crate::error::Result<usize> {
                 let mut attempts = self.attempts.lock().unwrap();
                 *attempts += 1;
 
                 if *attempts == 1 {
                     // First attempt fails, triggering retry logic
-                    Err(crate::error::Error::new(crate::error::ErrorKind::NetworkTimeout)
-                        .with_message("simulated failure"))
+                    Err(
+                        crate::error::Error::new(crate::error::ErrorKind::ConnectionLost)
+                            .with_message("simulated failure"),
+                    )
                 } else {
                     // Second attempt succeeds
                     assert_eq!(symbols.len(), 4, "Should have initial + buffered symbols");
-                    let data: Vec<&[u8]> = symbols.iter().map(|s| s.as_ref()).collect();
+                    let data: Vec<&[u8]> = symbols.iter().map(Symbol::data).collect();
                     // Should contain initial symbols plus symbols added during first cleanup
-                    assert!(data.contains(&b"initial1"[..]));
-                    assert!(data.contains(&b"initial2"[..]));
-                    assert!(data.contains(&b"during_cleanup1"[..]));
-                    assert!(data.contains(&b"during_cleanup2"[..]));
+                    assert!(data.iter().any(|payload| *payload == b"initial1"));
+                    assert!(data.iter().any(|payload| *payload == b"initial2"));
+                    assert!(data.iter().any(|payload| *payload == b"during_cleanup1"));
+                    assert!(data.iter().any(|payload| *payload == b"during_cleanup2"));
                     Ok(4) // Return count of cleaned symbols
                 }
             }
         }
 
         let attempts = Arc::new(Mutex::new(0u32));
-        let handler = FailingHandler { attempts: Arc::clone(&attempts) };
+        let handler = FailingHandler {
+            attempts: Arc::clone(&attempts),
+        };
         coordinator.register_handler(object_id, handler);
 
         // Start first cleanup (will fail)
         let result1 = coordinator.cleanup(object_id, None);
-        assert!(!result1.completed, "First cleanup should fail and not complete");
-        assert!(!result1.handler_errors.is_empty(), "Should have handler error");
+        assert!(
+            !result1.completed,
+            "First cleanup should fail and not complete"
+        );
+        assert!(
+            !result1.handler_errors.is_empty(),
+            "Should have handler error"
+        );
 
         // Add symbols during retry state (these used to be dropped)
-        coordinator.register_pending(object_id, Symbol::from_slice(b"during_cleanup1"), now);
-        coordinator.register_pending(object_id, Symbol::from_slice(b"during_cleanup2"), now);
+        coordinator.register_pending(
+            object_id,
+            Symbol::new_for_test(42, 0, 2, b"during_cleanup1"),
+            now,
+        );
+        coordinator.register_pending(
+            object_id,
+            Symbol::new_for_test(42, 0, 3, b"during_cleanup2"),
+            now,
+        );
 
         // Verify symbols are in cleanup buffer, not dropped
         let stats = coordinator.stats();
-        assert_eq!(stats.pending_objects, 1, "Should have pending object after failure");
+        assert_eq!(
+            stats.pending_objects, 1,
+            "Should have pending object after failure"
+        );
 
         // Retry cleanup (will succeed and include buffered symbols)
         let result2 = coordinator.cleanup(object_id, None);
         assert!(result2.completed, "Second cleanup should succeed");
-        assert!(result2.handler_errors.is_empty(), "Should have no handler errors");
-        assert_eq!(result2.symbols_cleaned, 4, "Should clean initial + buffered symbols");
+        assert!(
+            result2.handler_errors.is_empty(),
+            "Should have no handler errors"
+        );
+        assert_eq!(
+            result2.symbols_cleaned, 4,
+            "Should clean initial + buffered symbols"
+        );
 
         // Verify no pending symbols remain
         let final_stats = coordinator.stats();
-        assert_eq!(final_stats.pending_objects, 0, "Should have no pending objects");
-        assert_eq!(final_stats.pending_symbols, 0, "Should have no pending symbols");
+        assert_eq!(
+            final_stats.pending_objects, 0,
+            "Should have no pending objects"
+        );
+        assert_eq!(
+            final_stats.pending_symbols, 0,
+            "Should have no pending symbols"
+        );
 
         // Verify handler was called twice (fail, then success)
-        assert_eq!(*attempts.lock().unwrap(), 2, "Handler should be called twice");
+        assert_eq!(
+            *attempts.lock().unwrap(),
+            2,
+            "Handler should be called twice"
+        );
     }
 
     #[test]
@@ -4785,16 +4853,19 @@ mod tests {
         let now = Time::from_nanos(2000);
 
         // Register initial symbol
-        coordinator.register_pending(object_id, Symbol::from_slice(b"original"), now);
+        coordinator.register_pending(object_id, Symbol::new_for_test(99, 0, 0, b"original"), now);
 
         // Create handler that always fails (forces retry)
         #[derive(Debug)]
         struct AlwaysFailHandler;
 
         impl CleanupHandler for AlwaysFailHandler {
-            fn name(&self) -> &str { "always_fail" }
-            fn cleanup(&self, _: ObjectId, _: Vec<Symbol>) -> Result<(), CleanupError> {
-                Err(CleanupError::new("always fails"))
+            fn name(&self) -> &'static str {
+                "always_fail"
+            }
+            fn cleanup(&self, _: ObjectId, _: Vec<Symbol>) -> crate::error::Result<usize> {
+                Err(crate::error::Error::new(crate::error::ErrorKind::Internal)
+                    .with_message("always fails"))
             }
         }
 
@@ -4805,20 +4876,39 @@ mod tests {
         assert!(!result.completed);
 
         // Register more symbols during retry state
-        coordinator.register_pending(object_id, Symbol::from_slice(b"during_retry1"), now);
-        coordinator.register_pending(object_id, Symbol::from_slice(b"during_retry2"), now);
+        coordinator.register_pending(
+            object_id,
+            Symbol::new_for_test(99, 0, 1, b"during_retry1"),
+            now,
+        );
+        coordinator.register_pending(
+            object_id,
+            Symbol::new_for_test(99, 0, 2, b"during_retry2"),
+            now,
+        );
 
         // Verify all symbols are preserved (not dropped)
         let stats = coordinator.stats();
         assert_eq!(stats.pending_objects, 1);
         // Original symbol + two added during retry should all be preserved
-        assert!(stats.pending_symbols >= 3, "All symbols should be preserved, got {}", stats.pending_symbols);
+        assert!(
+            stats.pending_symbols >= 3,
+            "All symbols should be preserved, got {}",
+            stats.pending_symbols
+        );
 
         // Additional symbols after restoration should also work
-        coordinator.register_pending(object_id, Symbol::from_slice(b"after_retry"), now);
+        coordinator.register_pending(
+            object_id,
+            Symbol::new_for_test(99, 0, 3, b"after_retry"),
+            now,
+        );
 
         let final_stats = coordinator.stats();
-        assert!(final_stats.pending_symbols >= 4, "All symbols including post-retry should be preserved");
+        assert!(
+            final_stats.pending_symbols >= 4,
+            "All symbols including post-retry should be preserved"
+        );
     }
 
     /// Basic integration test for br-asupersync-dm6ci4: CancelBroadcaster retry mechanism.
@@ -4827,20 +4917,24 @@ mod tests {
     /// More complex retry scenarios are tested via integration tests.
     #[test]
     fn cancel_broadcaster_tracks_pending_retries_in_metrics() {
-        use std::sync::Arc;
-        use std::collections::VecDeque;
-
         // Mock sink for testing - not used in this test
         #[derive(Debug)]
         struct TestSink;
 
         impl CancelSink for TestSink {
-            async fn send(&self, _peer: &PeerId, _msg: &CancelMessage) -> crate::error::Result<()> {
-                Ok(())
+            fn send_to(
+                &self,
+                _peer: &PeerId,
+                _msg: &CancelMessage,
+            ) -> impl std::future::Future<Output = crate::error::Result<()>> + Send {
+                std::future::ready(Ok(()))
             }
 
-            async fn broadcast(&self, _msg: &CancelMessage) -> crate::error::Result<usize> {
-                Ok(1)
+            fn broadcast(
+                &self,
+                _msg: &CancelMessage,
+            ) -> impl std::future::Future<Output = crate::error::Result<usize>> + Send {
+                std::future::ready(Ok(1))
             }
         }
 
@@ -4849,27 +4943,163 @@ mod tests {
 
         // Initially no pending retries
         let initial_metrics = broadcaster.metrics();
-        assert_eq!(initial_metrics.pending_retries, 0, "Should start with no pending retries");
+        assert_eq!(
+            initial_metrics.pending_retries, 0,
+            "Should start with no pending retries"
+        );
 
         // Manually add a message to retry queue (simulating failed broadcast)
-        let test_message = CancelMessage::new(
-            42,
-            object_id,
-            CancelKind::User,
-            Time::from_nanos(1000),
-            1,
-        );
+        let test_message =
+            CancelMessage::new(42, object_id, CancelKind::User, Time::from_nanos(1000), 1);
         broadcaster.pending_retries.write().push_back(test_message);
 
         // Metrics should reflect the pending retry
         let metrics_with_pending = broadcaster.metrics();
-        assert_eq!(metrics_with_pending.pending_retries, 1, "Should show 1 pending retry");
+        assert_eq!(
+            metrics_with_pending.pending_retries, 1,
+            "Should show 1 pending retry"
+        );
 
         // Clear the retry queue
         broadcaster.pending_retries.write().clear();
 
         // Metrics should show no pending retries again
         let final_metrics = broadcaster.metrics();
-        assert_eq!(final_metrics.pending_retries, 0, "Should show no pending retries after clear");
+        assert_eq!(
+            final_metrics.pending_retries, 0,
+            "Should show no pending retries after clear"
+        );
+    }
+
+    #[test]
+    fn cancel_broadcaster_serializes_concurrent_retry_passes() {
+        use std::sync::Condvar;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        #[derive(Debug)]
+        struct BlockingFirstRetrySink {
+            broadcast_calls: Arc<AtomicUsize>,
+            first_call_entered: std::sync::Mutex<Option<mpsc::Sender<()>>>,
+            release_gate: Arc<(std::sync::Mutex<bool>, Condvar)>,
+        }
+
+        impl CancelSink for BlockingFirstRetrySink {
+            fn send_to(
+                &self,
+                _peer: &PeerId,
+                _msg: &CancelMessage,
+            ) -> impl std::future::Future<Output = crate::error::Result<()>> + Send {
+                std::future::ready(Ok(()))
+            }
+
+            fn broadcast(
+                &self,
+                _msg: &CancelMessage,
+            ) -> impl std::future::Future<Output = crate::error::Result<usize>> + Send {
+                let call_index = self.broadcast_calls.fetch_add(1, Ordering::SeqCst);
+                let entered = if call_index == 0 {
+                    self.first_call_entered.lock().unwrap().take()
+                } else {
+                    None
+                };
+                let release_gate = Arc::clone(&self.release_gate);
+
+                async move {
+                    if let Some(entered) = entered {
+                        entered.send(()).expect("first retry should signal entry");
+                        let (released_lock, released_cv) = &*release_gate;
+                        let mut released = released_lock.lock().unwrap();
+                        while !*released {
+                            released = released_cv.wait(released).unwrap();
+                        }
+                    }
+
+                    Ok(1)
+                }
+            }
+        }
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let release_gate = Arc::new((std::sync::Mutex::new(false), Condvar::new()));
+        let broadcast_calls = Arc::new(AtomicUsize::new(0));
+        let sink = BlockingFirstRetrySink {
+            broadcast_calls: Arc::clone(&broadcast_calls),
+            first_call_entered: std::sync::Mutex::new(Some(entered_tx)),
+            release_gate: Arc::clone(&release_gate),
+        };
+        let broadcaster = Arc::new(CancelBroadcaster::new(sink));
+        let object_id = ObjectId::new_for_test(321);
+        broadcaster
+            .pending_retries
+            .write()
+            .push_back(CancelMessage::new(
+                1,
+                object_id,
+                CancelKind::User,
+                Time::from_nanos(10),
+                0,
+            ));
+        broadcaster
+            .pending_retries
+            .write()
+            .push_back(CancelMessage::new(
+                1,
+                object_id,
+                CancelKind::User,
+                Time::from_nanos(20),
+                1,
+            ));
+
+        let retry_owner = Arc::clone(&broadcaster);
+        let retry_handle = std::thread::spawn(move || {
+            futures_lite::future::block_on(retry_owner.retry_failed_broadcasts())
+        });
+
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("primary retry loop should enter first broadcast");
+
+        let concurrent_result =
+            futures_lite::future::block_on(broadcaster.retry_failed_broadcasts());
+        assert_eq!(
+            concurrent_result.0, 0,
+            "concurrent retry callers must not steal later messages from the FIFO queue"
+        );
+        assert!(
+            concurrent_result.1.is_none(),
+            "concurrent retry callers must return without surfacing an error: {:?}",
+            concurrent_result.1
+        );
+        assert_eq!(
+            broadcaster.pending_retries.read().len(),
+            1,
+            "the second message should remain queued for the active retry loop"
+        );
+
+        let (released_lock, released_cv) = &*release_gate;
+        *released_lock.lock().unwrap() = true;
+        released_cv.notify_all();
+
+        let owner_result = retry_handle.join().expect("retry thread should join");
+        assert_eq!(
+            owner_result.0, 2,
+            "the owning retry pass should drain both queued messages in order"
+        );
+        assert!(
+            owner_result.1.is_none(),
+            "the owning retry pass should complete without surfacing an error: {:?}",
+            owner_result.1
+        );
+        assert_eq!(
+            broadcaster.pending_retries.read().len(),
+            0,
+            "all retry messages should be drained after the owner completes"
+        );
+        assert_eq!(
+            broadcast_calls.load(Ordering::SeqCst),
+            2,
+            "only the owning retry pass should broadcast the queued messages"
+        );
     }
 }
