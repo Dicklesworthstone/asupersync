@@ -1,5 +1,14 @@
 #![allow(warnings)]
 #![allow(clippy::all)]
+//! Archived historical QUIC compat integration suite.
+//!
+//! The core crate no longer defines a `quic-compat` feature, so this file does
+//! not participate in executable coverage today.
+//!
+//! TODO(br-asupersync-369xc1): if any of these vectors still matter, either
+//! move them under a real compat owner such as `asupersync-tokio-compat`, or
+//! port the relevant cases into the active native QUIC conformance surface in
+//! `src/net/quic/conformance/mod.rs`.
 //! QUIC Integration Tests
 //!
 //! End-to-end integration tests for QUIC protocol with real connections.
@@ -16,7 +25,10 @@
 //! - QUIC-CANCEL-002: Cancel during read cleans up stream
 //! - QUIC-CANCEL-003: Connection close cleans up all streams
 
-#![cfg(feature = "quic-compat")]
+// Historical compat gate kept visible for inventory tests and grep-based
+// reality checks:
+// #![cfg(feature = "quic-compat")]
+#![cfg(any())]
 
 #[macro_use]
 mod common;
