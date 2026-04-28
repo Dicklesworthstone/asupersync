@@ -57,15 +57,20 @@ fn e2e_codec_001_lines_multi_decode() {
     let mut buf = BytesMut::from("line1\nline2\nline3\n");
 
     test_section!("decode");
-    let line1 = codec.decode(&mut buf).expect("decode 1").expect("line 1");
-    let line2 = codec.decode(&mut buf).expect("decode 2").expect("line 2");
-    let line3 = codec.decode(&mut buf).expect("decode 3").expect("line 3");
+    for (decode_label, line_label, expected) in [
+        ("decode 1", "line 1", "line1"),
+        ("decode 2", "line 2", "line2"),
+        ("decode 3", "line 3", "line3"),
+    ] {
+        let actual = codec
+            .decode(&mut buf)
+            .expect(decode_label)
+            .expect(line_label);
+        assert_with_log!(actual == expected, expected, expected, actual);
+    }
     let none = codec.decode(&mut buf).expect("decode 4");
 
     test_section!("verify");
-    assert_with_log!(line1 == "line1", "line1", "line1", line1);
-    assert_with_log!(line2 == "line2", "line2", "line2", line2);
-    assert_with_log!(line3 == "line3", "line3", "line3", line3);
     assert_with_log!(none.is_none(), "no more lines", true, none.is_none());
 
     test_complete!("e2e_codec_001_lines_multi_decode");
@@ -83,14 +88,14 @@ fn e2e_codec_002_lines_crlf() {
     let mut buf = BytesMut::from("windows\r\nunix\nmixed\r\n");
 
     test_section!("decode");
-    let win = codec.decode(&mut buf).expect("decode 1").expect("windows");
-    let unix = codec.decode(&mut buf).expect("decode 2").expect("unix");
-    let mixed = codec.decode(&mut buf).expect("decode 3").expect("mixed");
-
-    test_section!("verify");
-    assert_with_log!(win == "windows", "windows line", "windows", win);
-    assert_with_log!(unix == "unix", "unix line", "unix", unix);
-    assert_with_log!(mixed == "mixed", "mixed line", "mixed", mixed);
+    for (decode_label, section, expected) in [
+        ("decode 1", "windows line", "windows"),
+        ("decode 2", "unix line", "unix"),
+        ("decode 3", "mixed line", "mixed"),
+    ] {
+        let actual = codec.decode(&mut buf).expect(decode_label).expect(expected);
+        assert_with_log!(actual == expected, section, expected, actual);
+    }
 
     test_complete!("e2e_codec_002_lines_crlf");
 }
@@ -412,34 +417,32 @@ fn e2e_codec_014_length_delimited_adjustment() {
 fn e2e_codec_015_length_delimited_field_lengths() {
     init_test("e2e_codec_015_length_delimited_field_lengths");
 
-    test_section!("1-byte length field");
-    let mut codec = LengthDelimitedCodec::builder()
-        .length_field_length(1)
-        .num_skip(1)
-        .new_codec();
-    let mut buf = BytesMut::new();
-    buf.put_u8(5);
-    buf.put_slice(b"hello");
-    let frame = codec
-        .decode(&mut buf)
-        .expect("decode 1-byte")
-        .expect("frame");
-    assert_with_log!(&frame[..] == b"hello", "1-byte field", "hello", &frame[..]);
-
-    test_section!("2-byte length field");
-    let mut codec = LengthDelimitedCodec::builder()
-        .length_field_length(2)
-        .num_skip(2)
-        .new_codec();
-    let mut buf = BytesMut::new();
-    buf.put_u8(0);
-    buf.put_u8(5);
-    buf.put_slice(b"hello");
-    let frame = codec
-        .decode(&mut buf)
-        .expect("decode 2-byte")
-        .expect("frame");
-    assert_with_log!(&frame[..] == b"hello", "2-byte field", "hello", &frame[..]);
+    for (section, field_len, prefix, decode_label, assert_label) in [
+        (
+            "1-byte length field",
+            1usize,
+            &b"\x05"[..],
+            "decode 1-byte",
+            "1-byte field",
+        ),
+        (
+            "2-byte length field",
+            2usize,
+            &b"\0\x05"[..],
+            "decode 2-byte",
+            "2-byte field",
+        ),
+    ] {
+        test_section!(section);
+        let mut codec = LengthDelimitedCodec::builder()
+            .length_field_length(field_len)
+            .num_skip(field_len)
+            .new_codec();
+        let mut buf = BytesMut::from(prefix);
+        buf.put_slice(b"hello");
+        let frame = codec.decode(&mut buf).expect(decode_label).expect("frame");
+        assert_with_log!(&frame[..] == b"hello", assert_label, "hello", &frame[..]);
+    }
 
     test_complete!("e2e_codec_015_length_delimited_field_lengths");
 }
@@ -736,15 +739,20 @@ fn e2e_codec_040_codec_reuse() {
 
     let mut codec = LinesCodec::new();
 
-    test_section!("first cycle");
-    let mut buf = BytesMut::from("first\n");
-    let first = codec.decode(&mut buf).expect("decode 1").expect("first");
-    assert_with_log!(first == "first", "first", "first", first);
-
-    test_section!("second cycle - new buffer");
-    let mut buf = BytesMut::from("second\n");
-    let second = codec.decode(&mut buf).expect("decode 2").expect("second");
-    assert_with_log!(second == "second", "second", "second", second);
+    for (decode_label, section, input, expected) in [
+        ("decode 1", "first cycle", "first\n", "first"),
+        (
+            "decode 2",
+            "second cycle - new buffer",
+            "second\n",
+            "second",
+        ),
+    ] {
+        test_section!(section);
+        let mut buf = BytesMut::from(input);
+        let actual = codec.decode(&mut buf).expect(decode_label).expect(expected);
+        assert_with_log!(actual == expected, expected, expected, actual);
+    }
 
     test_complete!("e2e_codec_040_codec_reuse");
 }
@@ -760,15 +768,18 @@ fn e2e_codec_041_length_delimited_state_reset() {
     let mut codec = LengthDelimitedCodec::new();
     let mut buf = BytesMut::new();
 
-    test_section!("frame 1 - complete");
-    put_be_frame(&mut buf, b"abc");
-    let f1 = codec.decode(&mut buf).expect("decode 1").expect("frame 1");
-    assert_with_log!(&f1[..] == b"abc", "frame 1", "abc", &f1[..]);
-
-    test_section!("frame 2 - complete");
-    put_be_frame(&mut buf, b"xyz");
-    let f2 = codec.decode(&mut buf).expect("decode 2").expect("frame 2");
-    assert_with_log!(&f2[..] == b"xyz", "frame 2", "xyz", &f2[..]);
+    for (section, payload, decode_label, assert_label) in [
+        ("frame 1 - complete", &b"abc"[..], "decode 1", "frame 1"),
+        ("frame 2 - complete", &b"xyz"[..], "decode 2", "frame 2"),
+    ] {
+        test_section!(section);
+        put_be_frame(&mut buf, payload);
+        let frame = codec
+            .decode(&mut buf)
+            .expect(decode_label)
+            .expect(assert_label);
+        assert_with_log!(&frame[..] == payload, assert_label, payload, &frame[..]);
+    }
 
     test_complete!("e2e_codec_041_length_delimited_state_reset");
 }
