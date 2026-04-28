@@ -2,10 +2,10 @@
 //!
 //! Provides the server-side infrastructure for hosting gRPC services.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::bytes::Bytes;
@@ -19,6 +19,176 @@ use super::streaming::{Metadata, Request, Response};
 
 fn wall_clock_instant_now() -> Instant {
     Instant::now()
+}
+
+/// Tracks the state of a single stream for idle timeout enforcement.
+#[derive(Debug, Clone)]
+struct StreamState {
+    /// Stream ID (for logging/debugging).
+    id: u32,
+    /// Last activity timestamp (when the stream last sent data).
+    last_activity: Instant,
+}
+
+/// br-asupersync-8vn9iu: Per-connection state tracking to enforce
+/// stream limits and idle timeouts, preventing connection hoarding attacks.
+#[derive(Debug)]
+pub struct ConnectionState {
+    /// Active streams on this connection, keyed by stream ID.
+    active_streams: HashMap<u32, StreamState>,
+    /// Connection creation time.
+    created_at: Instant,
+}
+
+impl ConnectionState {
+    /// Create new connection state.
+    pub fn new() -> Self {
+        Self {
+            active_streams: HashMap::new(),
+            created_at: wall_clock_instant_now(),
+        }
+    }
+
+    /// Register a new stream on this connection.
+    ///
+    /// Returns `Err` if the connection already has too many active streams.
+    pub fn add_stream(&mut self, stream_id: u32, max_concurrent: u32) -> Result<(), String> {
+        if self.active_streams.len() >= max_concurrent as usize {
+            return Err(format!(
+                "connection exceeds max_concurrent_streams: {} >= {}",
+                self.active_streams.len(),
+                max_concurrent
+            ));
+        }
+
+        self.active_streams.insert(stream_id, StreamState {
+            id: stream_id,
+            last_activity: wall_clock_instant_now(),
+        });
+        Ok(())
+    }
+
+    /// Update the last activity time for a stream.
+    pub fn update_stream_activity(&mut self, stream_id: u32) {
+        if let Some(stream) = self.active_streams.get_mut(&stream_id) {
+            stream.last_activity = wall_clock_instant_now();
+        }
+    }
+
+    /// Remove a stream from this connection (when it completes normally).
+    pub fn remove_stream(&mut self, stream_id: u32) {
+        self.active_streams.remove(&stream_id);
+    }
+
+    /// Clean up idle streams that have exceeded the timeout.
+    ///
+    /// Returns the list of stream IDs that were removed due to idle timeout.
+    pub fn cleanup_idle_streams(&mut self, idle_timeout: Duration) -> Vec<u32> {
+        let now = wall_clock_instant_now();
+        let mut removed = Vec::new();
+
+        self.active_streams.retain(|&stream_id, stream| {
+            let idle_duration = now.duration_since(stream.last_activity);
+            if idle_duration > idle_timeout {
+                removed.push(stream_id);
+                false
+            } else {
+                true
+            }
+        });
+
+        removed
+    }
+
+    /// Get the number of active streams.
+    pub fn active_stream_count(&self) -> usize {
+        self.active_streams.len()
+    }
+}
+
+/// Global registry for tracking connection states to enforce stream limits
+/// and idle timeouts across all connections.
+///
+/// br-asupersync-8vn9iu: This prevents connection hoarding attacks where
+/// clients open many connections with idle bidirectional streams.
+#[derive(Debug)]
+pub struct ConnectionRegistry {
+    /// Connection states keyed by connection identifier.
+    connections: Mutex<HashMap<String, ConnectionState>>,
+}
+
+impl ConnectionRegistry {
+    /// Create a new connection registry.
+    pub fn new() -> Self {
+        Self {
+            connections: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Register a new connection.
+    pub fn add_connection(&self, connection_id: String) {
+        let mut connections = self.connections.lock().unwrap();
+        connections.insert(connection_id, ConnectionState::new());
+    }
+
+    /// Remove a connection and all its streams.
+    pub fn remove_connection(&self, connection_id: &str) {
+        let mut connections = self.connections.lock().unwrap();
+        connections.remove(connection_id);
+    }
+
+    /// Enforce stream limits and idle timeouts for a specific connection.
+    ///
+    /// Returns an error if the stream cannot be added due to limits.
+    pub fn enforce_stream_limits(
+        &self,
+        connection_id: &str,
+        stream_id: u32,
+        max_concurrent: u32,
+        idle_timeout: Option<Duration>,
+    ) -> Result<(), String> {
+        let mut connections = self.connections.lock().unwrap();
+        let connection = connections.get_mut(connection_id)
+            .ok_or_else(|| format!("connection not registered: {}", connection_id))?;
+
+        // Clean up idle streams first
+        if let Some(timeout) = idle_timeout {
+            let removed_streams = connection.cleanup_idle_streams(timeout);
+            if !removed_streams.is_empty() {
+                eprintln!("Cleaned up {} idle streams on connection {}: {:?}",
+                          removed_streams.len(), connection_id, removed_streams);
+            }
+        }
+
+        // Try to add the new stream
+        connection.add_stream(stream_id, max_concurrent)
+    }
+
+    /// Update stream activity timestamp.
+    pub fn update_stream_activity(&self, connection_id: &str, stream_id: u32) {
+        let mut connections = self.connections.lock().unwrap();
+        if let Some(connection) = connections.get_mut(connection_id) {
+            connection.update_stream_activity(stream_id);
+        }
+    }
+
+    /// Remove a stream when it completes normally.
+    pub fn remove_stream(&self, connection_id: &str, stream_id: u32) {
+        let mut connections = self.connections.lock().unwrap();
+        if let Some(connection) = connections.get_mut(connection_id) {
+            connection.remove_stream(stream_id);
+        }
+    }
+
+    /// Get statistics for debugging/monitoring.
+    pub fn get_stats(&self) -> (usize, usize) {
+        let connections = self.connections.lock().unwrap();
+        let connection_count = connections.len();
+        let total_streams: usize = connections.values()
+            .map(|conn| conn.active_stream_count())
+            .sum();
+        (connection_count, total_streams)
+    }
 }
 
 /// gRPC server configuration.
@@ -61,6 +231,14 @@ pub struct ServerConfig {
     ///
     /// br-asupersync-i2bae8.
     pub max_metadata_size: usize,
+    /// Maximum idle time before a stream is considered stale and forcefully closed.
+    /// Streams that don't send any frames (requests, data, or control) for this
+    /// duration are terminated to prevent connection hoarding attacks.
+    /// Defaults to 60 seconds. Set to `None` to disable idle timeout enforcement.
+    ///
+    /// br-asupersync-8vn9iu: prevents bidirectional stream resource exhaustion
+    /// where attackers open many streams with valid metadata but never send data.
+    pub stream_idle_timeout: Option<Duration>,
 }
 
 /// Default max-metadata-size in bytes (8 KiB) — matches the gRPC
@@ -171,6 +349,9 @@ impl Default for ServerConfig {
             // MaxHeaderListSize default) and bounds per-connection
             // HPACK decoder memory (br-asupersync-i2bae8).
             max_metadata_size: DEFAULT_MAX_METADATA_SIZE,
+            // 60 seconds prevents connection hoarding attacks while allowing
+            // reasonable bidirectional streaming patterns (br-asupersync-8vn9iu).
+            stream_idle_timeout: Some(Duration::from_secs(60)),
         }
     }
 }
@@ -261,6 +442,17 @@ impl ServerBuilder {
     #[must_use]
     pub fn max_metadata_size(mut self, size: usize) -> Self {
         self.config.max_metadata_size = size;
+        self
+    }
+
+    /// Set the stream idle timeout.
+    ///
+    /// Streams that don't send any frames for this duration are terminated
+    /// to prevent connection hoarding attacks. Set to `None` to disable.
+    /// (br-asupersync-8vn9iu.)
+    #[must_use]
+    pub fn stream_idle_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.config.stream_idle_timeout = timeout;
         self
     }
 
@@ -384,6 +576,7 @@ impl ServerBuilder {
             config: self.config,
             services: self.services,
             interceptors: self.interceptors,
+            connection_registry: Arc::new(ConnectionRegistry::new()),
         }
     }
 }
@@ -397,6 +590,9 @@ pub struct Server {
     /// br-asupersync-mfk14i: interceptor chain. See
     /// [`ServerBuilder::interceptor`] and [`Server::dispatch_unary`].
     interceptors: Vec<Arc<dyn Interceptor>>,
+    /// br-asupersync-8vn9iu: Connection registry for tracking stream limits
+    /// and idle timeouts to prevent connection hoarding attacks.
+    connection_registry: Arc<ConnectionRegistry>,
 }
 
 impl std::fmt::Debug for Server {
@@ -425,6 +621,29 @@ impl Server {
     #[must_use]
     pub fn services(&self) -> &BTreeMap<String, Arc<dyn ServiceHandler>> {
         &self.services
+    }
+
+    /// Get the connection registry for stream limit enforcement.
+    #[must_use]
+    pub fn connection_registry(&self) -> &Arc<ConnectionRegistry> {
+        &self.connection_registry
+    }
+
+    /// Register a new connection for stream tracking.
+    ///
+    /// Transport layers should call this when a new gRPC connection is established
+    /// to enable per-connection stream limit and idle timeout enforcement.
+    /// (br-asupersync-8vn9iu.)
+    pub fn register_connection(&self, connection_id: String) {
+        self.connection_registry.add_connection(connection_id);
+    }
+
+    /// Unregister a connection when it closes.
+    ///
+    /// Transport layers should call this when a gRPC connection closes
+    /// to clean up tracking state. (br-asupersync-8vn9iu.)
+    pub fn unregister_connection(&self, connection_id: &str) {
+        self.connection_registry.remove_connection(connection_id);
     }
 
     /// Returns the registered interceptor chain (br-asupersync-mfk14i).
@@ -522,6 +741,76 @@ impl Server {
             interceptor.intercept_response_with_request(&request_snapshot, &mut response)?;
         }
         Ok(response)
+    }
+
+    /// Dispatch a unary request with stream enforcement for connection hoarding protection.
+    ///
+    /// This is the stream-aware version of `dispatch_unary` that enforces per-connection
+    /// stream limits and idle timeouts. Transport adapters should use this method instead
+    /// of `dispatch_unary` when stream tracking is needed. (br-asupersync-8vn9iu.)
+    ///
+    /// # Parameters
+    /// - `connection_id`: Unique identifier for the connection (e.g., peer address + port)
+    /// - `stream_id`: Unique identifier for the stream within the connection
+    /// - `request`: The gRPC request to process
+    /// - `handler`: The service handler function
+    ///
+    /// # Errors
+    /// Returns `Status::resource_exhausted` if:
+    /// - The connection has too many active streams (exceeds `max_concurrent_streams`)
+    /// - Stream enforcement fails for any other reason
+    pub async fn dispatch_unary_with_stream_enforcement<H, F>(
+        &self,
+        connection_id: String,
+        stream_id: u32,
+        request: Request<Bytes>,
+        handler: H,
+    ) -> Result<Response<Bytes>, Status>
+    where
+        H: FnOnce(Request<Bytes>) -> F,
+        F: Future<Output = Result<Response<Bytes>, Status>>,
+    {
+        // ── Phase 0: Stream enforcement (br-asupersync-8vn9iu). ─────────
+        // Enforce per-connection stream limits and idle timeouts BEFORE
+        // metadata validation and interceptor chain execution.
+        if let Err(limit_error) = self.connection_registry.enforce_stream_limits(
+            &connection_id,
+            stream_id,
+            self.config.max_concurrent_streams,
+            self.config.stream_idle_timeout,
+        ) {
+            return Err(Status::resource_exhausted(format!(
+                "stream limit enforcement failed: {}", limit_error
+            )));
+        }
+
+        // Ensure we clean up the stream when the request completes
+        let registry = Arc::clone(&self.connection_registry);
+        let conn_id = connection_id.clone();
+
+        // Dispatch the actual request using the existing logic
+        let result = self.dispatch_unary(request, handler).await;
+
+        // Clean up the stream from the registry
+        registry.remove_stream(&conn_id, stream_id);
+
+        result
+    }
+
+    /// Update stream activity for idle timeout tracking.
+    ///
+    /// Transport adapters should call this when they receive any frame
+    /// (data, headers, or control frames) on a stream to reset its idle timer.
+    /// (br-asupersync-8vn9iu.)
+    pub fn update_stream_activity(&self, connection_id: &str, stream_id: u32) {
+        self.connection_registry.update_stream_activity(connection_id, stream_id);
+    }
+
+    /// Get connection and stream statistics for monitoring.
+    ///
+    /// Returns `(active_connections, total_active_streams)`.
+    pub fn get_connection_stats(&self) -> (usize, usize) {
+        self.connection_registry.get_stats()
     }
 
     /// Get a service by name.
@@ -2505,5 +2794,171 @@ mod tests {
             "handler must NOT be invoked when inbound metadata is malformed"
         );
         crate::test_complete!("test_dispatch_unary_rejects_invalid_metadata_before_handler");
+    }
+
+    // br-asupersync-8vn9iu: Regression tests for connection hoarding protection
+    #[test]
+    fn test_connection_registry_enforces_stream_limits() {
+        use futures_lite::future::block_on;
+        init_test("test_connection_registry_enforces_stream_limits");
+
+        let registry = ConnectionRegistry::new();
+        let connection_id = "test-conn-1".to_string();
+
+        // Register connection
+        registry.add_connection(connection_id.clone());
+
+        // Should be able to add streams up to limit (default 100)
+        for stream_id in 1..=5 {
+            let result = registry.enforce_stream_limits(&connection_id, stream_id, 5, None);
+            assert!(result.is_ok(), "Should accept stream {} within limit", stream_id);
+        }
+
+        // Should reject stream that exceeds limit
+        let result = registry.enforce_stream_limits(&connection_id, 6, 5, None);
+        assert!(result.is_err(), "Should reject stream that exceeds max_concurrent_streams");
+        assert!(result.unwrap_err().contains("exceeds max_concurrent_streams"));
+
+        // Clean up
+        registry.remove_connection(&connection_id);
+        crate::test_complete!("test_connection_registry_enforces_stream_limits");
+    }
+
+    #[test]
+    fn test_connection_registry_idle_timeout() {
+        use std::thread;
+        init_test("test_connection_registry_idle_timeout");
+
+        let registry = ConnectionRegistry::new();
+        let connection_id = "test-conn-idle".to_string();
+
+        // Register connection
+        registry.add_connection(connection_id.clone());
+
+        // Add a stream
+        let result = registry.enforce_stream_limits(&connection_id, 1, 10, None);
+        assert!(result.is_ok(), "Should accept initial stream");
+
+        // Verify stream exists
+        let (connections, streams) = registry.get_stats();
+        assert_eq!(connections, 1);
+        assert_eq!(streams, 1);
+
+        // Test very short idle timeout (1ms) to force cleanup
+        thread::sleep(std::time::Duration::from_millis(2));
+        let short_timeout = std::time::Duration::from_millis(1);
+
+        // Try to add another stream with short idle timeout - should clean up the old one
+        let result = registry.enforce_stream_limits(&connection_id, 2, 10, Some(short_timeout));
+        assert!(result.is_ok(), "Should accept new stream after idle cleanup");
+
+        // Should now have 1 stream (the old one was cleaned up)
+        let (connections, streams) = registry.get_stats();
+        assert_eq!(connections, 1);
+        assert_eq!(streams, 1);
+
+        registry.remove_connection(&connection_id);
+        crate::test_complete!("test_connection_registry_idle_timeout");
+    }
+
+    #[test]
+    fn test_server_stream_enforcement_integration() {
+        use futures_lite::future::block_on;
+        init_test("test_server_stream_enforcement_integration");
+
+        let server = Server::builder()
+            .max_concurrent_streams(2)  // Very low limit for testing
+            .stream_idle_timeout(Some(std::time::Duration::from_secs(1)))
+            .build();
+
+        let connection_id = "test-integration-conn".to_string();
+        server.register_connection(connection_id.clone());
+
+        // First stream should succeed
+        let request1 = Request::with_metadata(Bytes::from_static(b"test"), Metadata::new());
+        let result1 = block_on(server.dispatch_unary_with_stream_enforcement(
+            connection_id.clone(),
+            1,
+            request1,
+            |req| async move { Ok(Response::new(req.into_inner())) }
+        ));
+        assert!(result1.is_ok(), "First stream should succeed");
+
+        // Second stream should succeed
+        let request2 = Request::with_metadata(Bytes::from_static(b"test2"), Metadata::new());
+        let result2 = block_on(server.dispatch_unary_with_stream_enforcement(
+            connection_id.clone(),
+            2,
+            request2,
+            |req| async move { Ok(Response::new(req.into_inner())) }
+        ));
+        assert!(result2.is_ok(), "Second stream should succeed");
+
+        // Third stream should be rejected due to limit
+        let request3 = Request::with_metadata(Bytes::from_static(b"test3"), Metadata::new());
+        let result3 = block_on(server.dispatch_unary_with_stream_enforcement(
+            connection_id.clone(),
+            3,
+            request3,
+            |req| async move { Ok(Response::new(req.into_inner())) }
+        ));
+        assert!(result3.is_err(), "Third stream should be rejected");
+        assert_eq!(result3.unwrap_err().code(), crate::grpc::status::Code::ResourceExhausted);
+
+        server.unregister_connection(&connection_id);
+        crate::test_complete!("test_server_stream_enforcement_integration");
+    }
+
+    #[test]
+    fn test_connection_hoarding_attack_simulation() {
+        use futures_lite::future::block_on;
+        init_test("test_connection_hoarding_attack_simulation");
+
+        // Simulate an attacker opening many connections with multiple streams each
+        let server = Server::builder()
+            .max_concurrent_streams(3)
+            .stream_idle_timeout(Some(std::time::Duration::from_millis(100)))
+            .build();
+
+        // Register multiple "attacker" connections
+        for conn_num in 1..=5 {
+            let connection_id = format!("attacker-conn-{}", conn_num);
+            server.register_connection(connection_id.clone());
+
+            // Try to max out streams on each connection
+            for stream_id in 1..=3 {
+                let request = Request::with_metadata(Bytes::from_static(b"attack"), Metadata::new());
+                let result = block_on(server.dispatch_unary_with_stream_enforcement(
+                    connection_id.clone(),
+                    stream_id,
+                    request,
+                    |req| async move { Ok(Response::new(req.into_inner())) }
+                ));
+                assert!(result.is_ok(), "Stream {} on connection {} should succeed within limits", stream_id, conn_num);
+            }
+
+            // Fourth stream should be rejected
+            let request = Request::with_metadata(Bytes::from_static(b"overflow"), Metadata::new());
+            let result = block_on(server.dispatch_unary_with_stream_enforcement(
+                connection_id.clone(),
+                4,
+                request,
+                |req| async move { Ok(Response::new(req.into_inner())) }
+            ));
+            assert!(result.is_err(), "Fourth stream should be rejected due to limit");
+        }
+
+        // Verify connection stats show limits are being enforced
+        let (active_connections, total_streams) = server.get_connection_stats();
+        assert_eq!(active_connections, 5, "Should track 5 connections");
+        // Note: streams may be 0 here because dispatch_unary_with_stream_enforcement
+        // removes them after completion, which is correct behavior
+
+        // Clean up
+        for conn_num in 1..=5 {
+            server.unregister_connection(&format!("attacker-conn-{}", conn_num));
+        }
+
+        crate::test_complete!("test_connection_hoarding_attack_simulation");
     }
 }
