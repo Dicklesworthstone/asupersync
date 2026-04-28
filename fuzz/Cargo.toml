@@ -2369,3 +2369,14 @@ path = "fuzz_targets/messaging_resp_protocol_adapter.rs"
 test = false
 doc = false
 bench = false
+
+# asupersync-m4quv5: Enhanced structure-aware DecodeProof proof-bytes adversarial fuzzer.
+# Tests src/raptorq/proof.rs DecodeProof serialization/deserialization with byte-level
+# corruptions, length field attacks, hash collisions, integer overflows, and format
+# confusion. Verifies replay_and_verify never panics on corrupted proof bytes.
+[[bin]]
+name = "raptorq_proof_bytes_enhanced"
+path = "fuzz_targets/raptorq_proof_bytes_enhanced.rs"
+test = false
+doc = false
+bench = false
