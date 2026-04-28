@@ -1,0 +1,10 @@
+---
+source: src/cancel/symbol_cancel.rs
+expression: hex_output
+---
+Token: fresh_token
+Token ID: 0xc35d712d21a92850
+Object ID: 0x1111222233334444:0x5555666677778888
+Cancelled: false
+Wire bytes: [c3, 5d, 71, 2d, 21, a9, 28, 50, 11, 11, 22, 22, 33, 33, 44, 44, 55, 55, 66, 66, 77, 77, 88, 88, 00]
+Hex: c35d712d21a928501111222233334444555566667777888800
