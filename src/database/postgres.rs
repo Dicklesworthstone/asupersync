@@ -4007,8 +4007,13 @@ impl PgConnection {
             Outcome::Ok(()) => {
                 self.inner.consecutive_deallocate_failures = 0;
             }
-            Outcome::Err(_) | Outcome::Cancelled(_) | Outcome::Panicked(_) => {
+            Outcome::Err(_) | Outcome::Panicked(_) => {
+                // Real backend failure - increment failure counter
                 self.enqueue_failed_deallocate(victim_name);
+            }
+            Outcome::Cancelled(_) => {
+                // Caller cancellation - preserve statement for retry but don't count as backend failure
+                self.enqueue_cancelled_deallocate(victim_name);
             }
         }
     }
@@ -4032,6 +4037,19 @@ impl PgConnection {
         if self.inner.consecutive_deallocate_failures >= DEALLOCATE_FAILURE_UNHEALTHY_THRESHOLD {
             self.inner.unhealthy = true;
         }
+    }
+
+    /// Enqueue a statement name for later deallocate retry due to caller
+    /// cancellation. Unlike `enqueue_failed_deallocate`, this does NOT
+    /// increment the consecutive failure counter or mark the connection
+    /// unhealthy, since caller cancellation is not a backend failure.
+    fn enqueue_cancelled_deallocate(&mut self, name: String) {
+        if self.inner.deallocate_retry_queue.len() >= DEALLOCATE_RETRY_QUEUE_CAP {
+            let _ = self.inner.deallocate_retry_queue.pop_front();
+        }
+        self.inner.deallocate_retry_queue.push_back(name);
+        // Notably: do NOT increment consecutive_deallocate_failures
+        // or set unhealthy=true for caller cancellation
     }
 
     /// br-asupersync-7v80ju: drain the deallocate retry queue,
@@ -4063,7 +4081,8 @@ impl PgConnection {
                 Outcome::Ok(()) => {
                     self.inner.consecutive_deallocate_failures = 0;
                 }
-                Outcome::Err(_) | Outcome::Cancelled(_) | Outcome::Panicked(_) => {
+                Outcome::Err(_) | Outcome::Panicked(_) => {
+                    // Real backend failure - increment failure counter and mark unhealthy
                     remainder.push(name);
                     self.inner.consecutive_deallocate_failures =
                         self.inner.consecutive_deallocate_failures.saturating_add(1);
@@ -4072,6 +4091,11 @@ impl PgConnection {
                     {
                         self.inner.unhealthy = true;
                     }
+                    break_after_first_failure = true;
+                }
+                Outcome::Cancelled(_) => {
+                    // Caller cancellation - preserve name for retry but don't count as backend failure
+                    remainder.push(name);
                     break_after_first_failure = true;
                 }
             }
@@ -9006,5 +9030,124 @@ mod tests {
             !mgr.release_check(&mut conn),
             "closed connection must reject"
         );
+    }
+
+    /// br-asupersync-pqia0o: regression test for deallocate retry path
+    /// treating caller cancellation as backend failure. This test
+    /// verifies that pre-cancelled Cx doesn't increment consecutive
+    /// failure counters or mark connection unhealthy.
+    #[test]
+    fn deallocate_caller_cancellation_not_backend_failure() {
+        use crate::types::{Budget, CancelReason, RegionId, TaskId};
+
+        run(async {
+            let mut conn = make_test_connection();
+
+            // Start with a healthy connection
+            assert_eq!(conn.inner.consecutive_deallocate_failures, 0);
+            assert!(!conn.inner.unhealthy);
+            assert!(conn.inner.deallocate_retry_queue.is_empty());
+
+            // Create a pre-cancelled context
+            let cx = Cx::new_with_cancel(
+                RegionId::new_for_test(1, 0),
+                TaskId::new_for_test(1, 0),
+                Budget::INFINITE,
+                CancelReason::user("pre-cancelled for test"),
+            );
+
+            // Verify the context is already cancelled
+            assert!(cx.checkpoint().is_err(), "test context should be pre-cancelled");
+
+            // Call try_close_or_enqueue_deallocate with pre-cancelled context
+            let victim_name = "test_stmt_cancelled".to_string();
+            conn.try_close_or_enqueue_deallocate(&cx, victim_name.clone())
+                .await;
+
+            // Caller cancellation should:
+            // 1. NOT increment consecutive_deallocate_failures
+            // 2. NOT mark connection as unhealthy
+            // 3. BUT preserve the statement name for later retry
+            assert_eq!(
+                conn.inner.consecutive_deallocate_failures, 0,
+                "caller cancellation should not increment failure counter"
+            );
+            assert!(
+                !conn.inner.unhealthy,
+                "caller cancellation should not mark connection unhealthy"
+            );
+            assert_eq!(
+                conn.inner.deallocate_retry_queue.len(), 1,
+                "statement name should be preserved for retry"
+            );
+            assert_eq!(
+                conn.inner.deallocate_retry_queue[0], victim_name,
+                "correct statement name should be queued"
+            );
+
+            // Test flush_pending_deallocates with pre-cancelled context as well
+            let initial_queue_len = conn.inner.deallocate_retry_queue.len();
+            conn.flush_pending_deallocates(&cx).await;
+
+            // Should still not increment failure counter or mark unhealthy
+            assert_eq!(
+                conn.inner.consecutive_deallocate_failures, 0,
+                "flush with cancelled context should not increment failures"
+            );
+            assert!(
+                !conn.inner.unhealthy,
+                "flush with cancelled context should not mark unhealthy"
+            );
+            // Statement should remain in queue since cancellation occurred
+            assert_eq!(
+                conn.inner.deallocate_retry_queue.len(), initial_queue_len,
+                "cancelled flush should preserve queued statements"
+            );
+        });
+    }
+
+    /// br-asupersync-pqia0o: verify that real backend failures (as opposed
+    /// to caller cancellation) still properly increment the failure counter
+    /// and mark connection unhealthy after threshold.
+    #[test]
+    fn deallocate_real_failures_still_mark_unhealthy() {
+        run(async {
+            let mut conn = make_test_connection();
+            // Force connection to closed state to simulate backend failure
+            conn.inner.closed = true;
+
+            // Start with healthy connection
+            assert_eq!(conn.inner.consecutive_deallocate_failures, 0);
+            assert!(!conn.inner.unhealthy);
+
+            let cx = Cx::new_for_test(
+                RegionId::new_for_test(1, 0),
+                TaskId::new_for_test(1, 0),
+                Budget::INFINITE,
+            );
+
+            // Simulate multiple backend failures (closed connection will cause Err)
+            for i in 1..=DEALLOCATE_FAILURE_UNHEALTHY_THRESHOLD {
+                let victim_name = format!("test_stmt_fail_{}", i);
+                conn.try_close_or_enqueue_deallocate(&cx, victim_name).await;
+
+                assert_eq!(
+                    conn.inner.consecutive_deallocate_failures, i,
+                    "real failure {} should increment counter", i
+                );
+
+                if i >= DEALLOCATE_FAILURE_UNHEALTHY_THRESHOLD {
+                    assert!(
+                        conn.inner.unhealthy,
+                        "connection should be marked unhealthy after {} failures", i
+                    );
+                } else {
+                    assert!(
+                        !conn.inner.unhealthy,
+                        "connection should not be unhealthy before threshold"
+                    );
+                }
+            }
+        });
     }
 }
