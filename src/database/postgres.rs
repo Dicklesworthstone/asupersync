@@ -4111,16 +4111,9 @@ impl PgConnection {
         // remainder if any retry fails. Splitting the borrow this way
         // avoids holding `&mut self.inner.deallocate_retry_queue`
         // across the `.await` on close_statement.
-        let pending: Vec<String> = std::mem::take(&mut self.inner.deallocate_retry_queue)
-            .into_iter()
-            .collect();
+        let mut pending = std::mem::take(&mut self.inner.deallocate_retry_queue).into_iter();
         let mut remainder: Vec<String> = Vec::new();
-        let mut break_after_first_failure = false;
-        for name in pending {
-            if break_after_first_failure {
-                remainder.push(name);
-                continue;
-            }
+        while let Some(name) = pending.next() {
             let stmt = PgStatement {
                 name: name.clone(),
                 param_oids: Vec::new(),
@@ -4140,12 +4133,14 @@ impl PgConnection {
                     {
                         self.inner.unhealthy = true;
                     }
-                    break_after_first_failure = true;
+                    remainder.extend(pending);
+                    break;
                 }
                 Outcome::Cancelled(_) => {
                     // Caller cancellation - preserve name for retry but don't count as backend failure
                     remainder.push(name);
-                    break_after_first_failure = true;
+                    remainder.extend(pending);
+                    break;
                 }
             }
         }

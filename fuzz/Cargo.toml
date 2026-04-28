@@ -752,6 +752,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_distributed_recovery_decode"
+path = "fuzz_targets/distributed_recovery_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_trace_streaming"
 path = "fuzz_targets/trace_streaming.rs"
 test = false
