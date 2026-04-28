@@ -40,6 +40,16 @@ fn put_be_frame(buf: &mut BytesMut, payload: &[u8]) {
     buf.put_slice(payload);
 }
 
+fn assert_next_frame_eq(
+    codec: &mut LengthDelimitedCodec,
+    buf: &mut BytesMut,
+    section: &str,
+    expected: &[u8],
+) {
+    let frame = codec.decode(buf).expect("decode").expect("frame");
+    assert_with_log!(&frame[..] == expected, section, expected, &frame[..]);
+}
+
 // ============================================================================
 // LINES CODEC TESTS
 // ============================================================================
@@ -278,11 +288,8 @@ fn e2e_codec_010_length_delimited_basic() {
     // Frame: 4-byte BE length (5) + 5-byte payload "hello"
     put_be_frame(&mut buf, b"hello");
 
-    test_section!("decode");
-    let frame = codec.decode(&mut buf).expect("decode").expect("frame");
-
-    test_section!("verify");
-    assert_with_log!(&frame[..] == b"hello", "frame content", "hello", &frame[..]);
+    test_section!("decode + verify");
+    assert_next_frame_eq(&mut codec, &mut buf, "frame content", b"hello");
     assert_with_log!(buf.is_empty(), "buffer empty", true, buf.is_empty());
 
     test_complete!("e2e_codec_010_length_delimited_basic");
@@ -311,16 +318,7 @@ fn e2e_codec_011_length_delimited_partial() {
 
     test_section!("complete");
     buf.put_slice(b"ial_da");
-    let frame = codec
-        .decode(&mut buf)
-        .expect("decode complete")
-        .expect("frame");
-    assert_with_log!(
-        &frame[..] == b"partial_da",
-        "frame content",
-        "partial_da",
-        &frame[..]
-    );
+    assert_next_frame_eq(&mut codec, &mut buf, "frame content", b"partial_da");
 
     test_complete!("e2e_codec_011_length_delimited_partial");
 }
@@ -343,11 +341,8 @@ fn e2e_codec_012_length_delimited_little_endian() {
     buf.put_u8(0); // MSB
     buf.put_slice(b"hello");
 
-    test_section!("decode");
-    let frame = codec.decode(&mut buf).expect("decode").expect("frame");
-
-    test_section!("verify");
-    assert_with_log!(&frame[..] == b"hello", "frame content", "hello", &frame[..]);
+    test_section!("decode + verify");
+    assert_next_frame_eq(&mut codec, &mut buf, "frame content", b"hello");
 
     test_complete!("e2e_codec_012_length_delimited_little_endian");
 }
@@ -400,11 +395,8 @@ fn e2e_codec_014_length_delimited_adjustment() {
     put_be_len(&mut buf, 3); // length field = 3, adjusted = 5
     buf.put_slice(b"hello"); // 5 bytes
 
-    test_section!("decode");
-    let frame = codec.decode(&mut buf).expect("decode").expect("frame");
-
-    test_section!("verify");
-    assert_with_log!(&frame[..] == b"hello", "frame content", "hello", &frame[..]);
+    test_section!("decode + verify");
+    assert_next_frame_eq(&mut codec, &mut buf, "frame content", b"hello");
 
     test_complete!("e2e_codec_014_length_delimited_adjustment");
 }
@@ -416,19 +408,12 @@ fn e2e_codec_014_length_delimited_adjustment() {
 fn e2e_codec_015_length_delimited_field_lengths() {
     init_test("e2e_codec_015_length_delimited_field_lengths");
 
-    for (section, field_len, prefix, decode_label, assert_label) in [
-        (
-            "1-byte length field",
-            1usize,
-            &b"\x05"[..],
-            "decode 1-byte",
-            "1-byte field",
-        ),
+    for (section, field_len, prefix, assert_label) in [
+        ("1-byte length field", 1usize, &b"\x05"[..], "1-byte field"),
         (
             "2-byte length field",
             2usize,
             &b"\0\x05"[..],
-            "decode 2-byte",
             "2-byte field",
         ),
     ] {
@@ -439,8 +424,7 @@ fn e2e_codec_015_length_delimited_field_lengths() {
             .new_codec();
         let mut buf = BytesMut::from(prefix);
         buf.put_slice(b"hello");
-        let frame = codec.decode(&mut buf).expect(decode_label).expect("frame");
-        assert_with_log!(&frame[..] == b"hello", assert_label, "hello", &frame[..]);
+        assert_next_frame_eq(&mut codec, &mut buf, assert_label, b"hello");
     }
 
     test_complete!("e2e_codec_015_length_delimited_field_lengths");
@@ -464,13 +448,11 @@ fn e2e_codec_016_length_delimited_multi_frame() {
     put_be_frame(&mut buf, b"world");
 
     test_section!("decode frames");
-    let frame1 = codec.decode(&mut buf).expect("decode 1").expect("frame 1");
-    let frame2 = codec.decode(&mut buf).expect("decode 2").expect("frame 2");
-    let none = codec.decode(&mut buf).expect("decode 3");
+    assert_next_frame_eq(&mut codec, &mut buf, "frame 1", b"hello");
+    assert_next_frame_eq(&mut codec, &mut buf, "frame 2", b"world");
+    let none = codec.decode(&mut buf).expect("decode");
 
     test_section!("verify");
-    assert_with_log!(&frame1[..] == b"hello", "frame 1", "hello", &frame1[..]);
-    assert_with_log!(&frame2[..] == b"world", "frame 2", "world", &frame2[..]);
     assert_with_log!(none.is_none(), "no more frames", true, none.is_none());
 
     test_complete!("e2e_codec_016_length_delimited_multi_frame");
@@ -497,11 +479,7 @@ fn e2e_codec_020_empty_frames() {
     let mut codec = LengthDelimitedCodec::new();
     let mut buf = BytesMut::new();
     put_be_len(&mut buf, 0);
-    let empty = codec
-        .decode(&mut buf)
-        .expect("decode")
-        .expect("empty frame");
-    assert_with_log!(empty.is_empty(), "empty frame", true, empty.is_empty());
+    assert_next_frame_eq(&mut codec, &mut buf, "empty frame", b"");
 
     test_complete!("e2e_codec_020_empty_frames");
 }
@@ -623,11 +601,8 @@ fn e2e_codec_024_length_field_offset() {
     put_be_len(&mut buf, 5);
     buf.put_slice(b"hello");
 
-    test_section!("decode");
-    let frame = codec.decode(&mut buf).expect("decode").expect("frame");
-
-    test_section!("verify");
-    assert_with_log!(&frame[..] == b"hello", "frame content", "hello", &frame[..]);
+    test_section!("decode + verify");
+    assert_next_frame_eq(&mut codec, &mut buf, "frame content", b"hello");
 
     test_complete!("e2e_codec_024_length_field_offset");
 }
@@ -811,17 +786,13 @@ fn e2e_codec_041_length_delimited_state_reset() {
     let mut codec = LengthDelimitedCodec::new();
     let mut buf = BytesMut::new();
 
-    for (section, payload, decode_label, assert_label) in [
-        ("frame 1 - complete", &b"abc"[..], "decode 1", "frame 1"),
-        ("frame 2 - complete", &b"xyz"[..], "decode 2", "frame 2"),
+    for (section, payload, assert_label) in [
+        ("frame 1 - complete", &b"abc"[..], "frame 1"),
+        ("frame 2 - complete", &b"xyz"[..], "frame 2"),
     ] {
         test_section!(section);
         put_be_frame(&mut buf, payload);
-        let frame = codec
-            .decode(&mut buf)
-            .expect(decode_label)
-            .expect(assert_label);
-        assert_with_log!(&frame[..] == payload, assert_label, payload, &frame[..]);
+        assert_next_frame_eq(&mut codec, &mut buf, assert_label, payload);
     }
 
     test_complete!("e2e_codec_041_length_delimited_state_reset");
