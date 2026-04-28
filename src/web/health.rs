@@ -140,6 +140,26 @@ impl HealthResponse {
         buf.push('}');
         buf
     }
+
+    /// Serialize to the public probe JSON form.
+    ///
+    /// Liveness/readiness probe endpoints are intentionally coarse and do not
+    /// expose per-check names or failure detail to unauthenticated callers.
+    #[must_use]
+    pub fn to_probe_json(&self) -> String {
+        format!("{{\"status\":\"{}\"}}", self.status.as_str())
+    }
+
+    fn into_probe_response(self) -> Response {
+        let status_code = if self.status.is_operational() {
+            StatusCode::OK
+        } else {
+            StatusCode::SERVICE_UNAVAILABLE
+        };
+
+        Response::new(status_code, self.to_probe_json().into_bytes())
+            .header("content-type", "application/json")
+    }
 }
 
 impl IntoResponse for HealthResponse {
@@ -284,7 +304,7 @@ impl HealthCheck {
         let health = self.clone();
         FnHandler::new(move || {
             let response = health.run_checks();
-            response.into_response()
+            response.into_probe_response()
         })
     }
 
@@ -305,7 +325,7 @@ impl HealthCheck {
                 .header("content-type", "application/json");
             }
             let response = health.run_checks();
-            response.into_response()
+            response.into_probe_response()
         })
     }
 
@@ -432,6 +452,21 @@ mod tests {
             resp.to_json(),
             r#"{"status":"unhealthy","detail":"error: \"bad\"\nretry"}"#
         );
+    }
+
+    #[test]
+    fn health_response_probe_json_redacts_detail_and_checks() {
+        let mut checks = BTreeMap::new();
+        checks.insert(
+            "database".to_string(),
+            HealthStatus::Unhealthy("connection refused".into()),
+        );
+        let resp = HealthResponse {
+            status: HealthStatus::Unhealthy("one or more checks unhealthy".into()),
+            checks,
+        };
+
+        assert_eq!(resp.to_probe_json(), r#"{"status":"unhealthy"}"#);
     }
 
     #[test]
@@ -625,16 +660,26 @@ mod tests {
         let req = super::super::extract::Request::new("GET", "/healthz");
         let resp = handler.call(req);
         assert_eq!(resp.status, StatusCode::SERVICE_UNAVAILABLE);
+        let body = std::str::from_utf8(&resp.body).unwrap();
+        assert_eq!(body, r#"{"status":"unhealthy"}"#);
+        assert!(!body.contains("connection refused"));
+        assert!(!body.contains("db"));
     }
 
     #[test]
     fn readiness_handler_ready() {
-        let hc = HealthCheck::new().check("db", || HealthStatus::Healthy);
+        let hc = HealthCheck::new()
+            .check("db", || HealthStatus::Healthy)
+            .check("cache", || HealthStatus::Degraded("high latency".into()));
         let handler = hc.readiness_handler();
 
         let req = super::super::extract::Request::new("GET", "/readyz");
         let resp = handler.call(req);
         assert_eq!(resp.status, StatusCode::OK);
+        let body = std::str::from_utf8(&resp.body).unwrap();
+        assert_eq!(body, r#"{"status":"degraded"}"#);
+        assert!(!body.contains("high latency"));
+        assert!(!body.contains("cache"));
     }
 
     #[test]
