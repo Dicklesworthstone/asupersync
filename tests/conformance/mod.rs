@@ -101,6 +101,8 @@ pub mod websocket_extension_negotiation_rfc6455;
 
 // Wired (compile against current APIs):
 pub mod hpack_rfc7541_appendix_c;
+pub mod macaroon_attenuation_vectors;
+pub mod raptorq_proof_correctness;
 pub mod tcp_listener;
 pub mod tls_key_share;
 pub mod tls_sni;
