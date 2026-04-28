@@ -1,10 +1,13 @@
 #![no_main]
 
-//! Fuzz target for src/codec/framed_read.rs partial-frame buffering.
+//! Structure-aware fuzz target for src/codec/framed_read.rs decoder lifecycle.
 //!
-//! This target asserts that chunk boundaries do not change the decoded output
-//! or terminal outcome for a simple length-prefixed wire format. It also checks
-//! that truncated final frames fail closed instead of silently dropping bytes.
+//! This harness freezes the narrow seam where `FramedRead` drains a complete
+//! length-prefixed prefix via `decode`, then transitions to `decode_eof` once
+//! the underlying reader reaches EOF. Chunking must not change:
+//! - the frames emitted via `decode`
+//! - whether a truncated tail is emitted or rejected by `decode_eof`
+//! - the terminal post-error poisoning behavior
 
 use arbitrary::Arbitrary;
 use asupersync::{
@@ -20,27 +23,65 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
-const MAX_FRAMES: usize = 32;
+const MAX_FRAMES: usize = 24;
 const MAX_FRAME_LEN: usize = 64;
+const MAX_TAIL_PAYLOAD_LEN: usize = 64;
 const MAX_CHUNK_PLAN: usize = 64;
 
 #[derive(Arbitrary, Debug, Clone)]
-struct PartialBufferingInput {
+struct LifecycleInput {
     frames: Vec<Vec<u8>>,
+    tail_payload: Vec<u8>,
+    tail_policy: TailPolicy,
     chunk_sizes: Vec<u8>,
-    truncate_tail: u8,
     initial_capacity: u8,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct DecodeOutcome {
-    frames: Vec<Vec<u8>>,
-    error_kind: Option<io::ErrorKind>,
+#[derive(Arbitrary, Debug, Clone, Copy, PartialEq, Eq)]
+enum TailPolicy {
+    EmitRemainder,
+    RejectRemainder,
 }
 
-struct LengthPrefixedDecoder;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmitSource {
+    Decode,
+    DecodeEof,
+}
 
-impl Decoder for LengthPrefixedDecoder {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TerminalOutcome {
+    Eof,
+    Error(io::ErrorKind),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LifecycleOutcome {
+    frames: Vec<Vec<u8>>,
+    sources: Vec<EmitSource>,
+    terminal: TerminalOutcome,
+    decode_eof_calls: usize,
+    post_terminal_is_none: bool,
+}
+
+#[derive(Debug)]
+struct LifecycleDecoder {
+    tail_policy: TailPolicy,
+    sources: Vec<EmitSource>,
+    decode_eof_calls: usize,
+}
+
+impl LifecycleDecoder {
+    fn new(tail_policy: TailPolicy) -> Self {
+        Self {
+            tail_policy,
+            sources: Vec::new(),
+            decode_eof_calls: 0,
+        }
+    }
+}
+
+impl Decoder for LifecycleDecoder {
     type Item = Vec<u8>;
     type Error = io::Error;
 
@@ -48,24 +89,34 @@ impl Decoder for LengthPrefixedDecoder {
         let Some(&len) = src.first() else {
             return Ok(None);
         };
-        let frame_len = len as usize;
+        let frame_len = usize::from(len);
         if src.len() < frame_len + 1 {
             return Ok(None);
         }
 
         let mut frame = src.split_to(frame_len + 1);
         let _ = frame.split_to(1);
+        self.sources.push(EmitSource::Decode);
         Ok(Some(frame.to_vec()))
     }
 
     fn decode_eof(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        self.decode_eof_calls += 1;
+
         if src.is_empty() {
             return Ok(None);
         }
-        Err(io::Error::new(
-            io::ErrorKind::UnexpectedEof,
-            "truncated partial frame",
-        ))
+
+        match self.tail_policy {
+            TailPolicy::EmitRemainder => {
+                self.sources.push(EmitSource::DecodeEof);
+                Ok(Some(src.split_to(src.len()).to_vec()))
+            }
+            TailPolicy::RejectRemainder => Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "truncated frame at EOF",
+            )),
+        }
     }
 }
 
@@ -116,41 +167,24 @@ impl AsyncRead for ChunkedReader {
     }
 }
 
-fuzz_target!(|input: PartialBufferingInput| {
-    let normalized_frames = normalize_frames(input.frames);
-    let full_wire = encode_frames(&normalized_frames);
-    let truncated_wire = truncate_wire(&full_wire, input.truncate_tail);
+fuzz_target!(|input: LifecycleInput| {
+    let frames = normalize_frames(input.frames);
+    let tail_wire = encode_truncated_tail(input.tail_payload);
+    let wire = encode_frames(&frames, &tail_wire);
     let capacity = usize::from(input.initial_capacity.max(1));
 
-    let baseline = decode_with_chunks(truncated_wire.clone(), &[u8::MAX], capacity);
-    let chunked = decode_with_chunks(truncated_wire.clone(), &input.chunk_sizes, capacity);
+    let baseline = drive_lifecycle(wire.clone(), &[u8::MAX], capacity, input.tail_policy);
+    let chunked = drive_lifecycle(wire, &input.chunk_sizes, capacity, input.tail_policy);
     assert_eq!(
         chunked, baseline,
-        "chunk boundaries changed FramedRead decoding outcome"
+        "chunk boundaries changed the decode/decode_eof lifecycle"
     );
 
-    let expected_prefix = parse_complete_prefix(&truncated_wire);
+    let expected = expected_outcome(frames, tail_wire, input.tail_policy);
     assert_eq!(
-        chunked.frames, expected_prefix,
-        "FramedRead lost or duplicated bytes across partial buffering"
+        chunked, expected,
+        "FramedRead decode/decode_eof lifecycle diverged from the structured oracle"
     );
-
-    if truncated_wire.len() == full_wire.len() {
-        assert_eq!(
-            chunked.frames, normalized_frames,
-            "complete wire decode must preserve all frames"
-        );
-        assert_eq!(
-            chunked.error_kind, None,
-            "complete wire decode must succeed"
-        );
-    } else {
-        assert_eq!(
-            chunked.error_kind,
-            Some(io::ErrorKind::UnexpectedEof),
-            "truncated final frame must fail closed with UnexpectedEof"
-        );
-    }
 });
 
 fn normalize_frames(frames: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
@@ -164,56 +198,99 @@ fn normalize_frames(frames: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
         .collect()
 }
 
-fn encode_frames(frames: &[Vec<u8>]) -> Vec<u8> {
+fn encode_frames(frames: &[Vec<u8>], tail_wire: &[u8]) -> Vec<u8> {
     let mut wire = Vec::new();
     for frame in frames {
         wire.push(frame.len() as u8);
         wire.extend_from_slice(frame);
     }
+    wire.extend_from_slice(tail_wire);
     wire
 }
 
-fn truncate_wire(wire: &[u8], truncate_tail: u8) -> Vec<u8> {
-    let truncate_by = usize::from(truncate_tail).min(wire.len());
-    wire[..wire.len() - truncate_by].to_vec()
-}
-
-fn parse_complete_prefix(wire: &[u8]) -> Vec<Vec<u8>> {
-    let mut frames = Vec::new();
-    let mut offset = 0usize;
-    while offset < wire.len() {
-        let frame_len = usize::from(wire[offset]);
-        let Some(end) = offset.checked_add(frame_len + 1) else {
-            break;
-        };
-        if end > wire.len() {
-            break;
-        }
-        frames.push(wire[offset + 1..end].to_vec());
-        offset = end;
+fn encode_truncated_tail(mut tail_payload: Vec<u8>) -> Vec<u8> {
+    tail_payload.truncate(MAX_TAIL_PAYLOAD_LEN);
+    if tail_payload.is_empty() {
+        return Vec::new();
     }
-    frames
+
+    let announced_len = tail_payload.len() + 1;
+    let mut tail = Vec::with_capacity(tail_payload.len() + 1);
+    tail.push(announced_len as u8);
+    tail.extend_from_slice(&tail_payload);
+    tail
 }
 
-fn decode_with_chunks(data: Vec<u8>, chunk_sizes: &[u8], capacity: usize) -> DecodeOutcome {
+fn expected_outcome(
+    mut frames: Vec<Vec<u8>>,
+    tail_wire: Vec<u8>,
+    tail_policy: TailPolicy,
+) -> LifecycleOutcome {
+    let mut sources = vec![EmitSource::Decode; frames.len()];
+
+    if tail_wire.is_empty() {
+        return LifecycleOutcome {
+            frames,
+            sources,
+            terminal: TerminalOutcome::Eof,
+            decode_eof_calls: 1,
+            post_terminal_is_none: true,
+        };
+    }
+
+    match tail_policy {
+        TailPolicy::EmitRemainder => {
+            frames.push(tail_wire);
+            sources.push(EmitSource::DecodeEof);
+            LifecycleOutcome {
+                frames,
+                sources,
+                terminal: TerminalOutcome::Eof,
+                decode_eof_calls: 2,
+                post_terminal_is_none: true,
+            }
+        }
+        TailPolicy::RejectRemainder => LifecycleOutcome {
+            frames,
+            sources,
+            terminal: TerminalOutcome::Error(io::ErrorKind::UnexpectedEof),
+            decode_eof_calls: 1,
+            post_terminal_is_none: true,
+        },
+    }
+}
+
+fn drive_lifecycle(
+    data: Vec<u8>,
+    chunk_sizes: &[u8],
+    capacity: usize,
+    tail_policy: TailPolicy,
+) -> LifecycleOutcome {
     let reader = ChunkedReader::new(data, chunk_sizes);
-    let mut framed = FramedRead::with_capacity(reader, LengthPrefixedDecoder, capacity);
+    let decoder = LifecycleDecoder::new(tail_policy);
+    let mut framed = FramedRead::with_capacity(reader, decoder, capacity);
     let waker = Waker::noop().clone();
     let mut cx = Context::from_waker(&waker);
     let mut frames = Vec::new();
-    let mut error_kind = None;
-
-    for _ in 0..4096 {
+    let terminal = loop {
         match Pin::new(&mut framed).poll_next(&mut cx) {
             Poll::Ready(Some(Ok(frame))) => frames.push(frame),
-            Poll::Ready(Some(Err(err))) => {
-                error_kind = Some(err.kind());
-                break;
-            }
-            Poll::Ready(None) => break,
+            Poll::Ready(Some(Err(err))) => break TerminalOutcome::Error(err.kind()),
+            Poll::Ready(None) => break TerminalOutcome::Eof,
             Poll::Pending => panic!("ChunkedReader should not yield pending"),
         }
-    }
+    };
 
-    DecodeOutcome { frames, error_kind }
+    let sources = framed.decoder().sources.clone();
+    let decode_eof_calls = framed.decoder().decode_eof_calls;
+    let post_terminal_is_none =
+        matches!(Pin::new(&mut framed).poll_next(&mut cx), Poll::Ready(None));
+
+    LifecycleOutcome {
+        frames,
+        sources,
+        terminal,
+        decode_eof_calls,
+        post_terminal_is_none,
+    }
 }
