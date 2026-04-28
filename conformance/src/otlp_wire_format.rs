@@ -191,11 +191,6 @@ pub fn otlp_001_protobuf_validation<RT: RuntimeInterface>() -> ConformanceTest<R
             let mut failed_count = 0;
 
             for vector in test_vectors {
-                // In a real implementation, we would:
-                // 1. Parse the protobuf_hex into bytes
-                // 2. Decode using the actual OTLP protobuf definitions
-                // 3. Validate the decoded structure matches expected_metric
-
                 checkpoint("otlp_validation", json!({
                     "test_case": vector.name,
                     "expected_pass": vector.should_pass,
@@ -404,11 +399,6 @@ pub fn otlp_005_compatibility<RT: RuntimeInterface>() -> ConformanceTest<RT> {
         tags: ["otlp", "compatibility", "interop"],
         expected: "Exported OTLP data is consumable by standard OpenTelemetry collectors",
         test: |_rt| {
-            // Test that our OTLP export is compatible with:
-            // 1. OpenTelemetry Collector
-            // 2. Prometheus remote write
-            // 3. Jaeger (for traces, but similar protocol patterns)
-
             let compatibility_tests = vec![
                 "opentelemetry_collector_v0.95.0",
                 "prometheus_remote_write",
@@ -450,10 +440,6 @@ pub fn otlp_005_compatibility<RT: RuntimeInterface>() -> ConformanceTest<RT> {
 
 /// Mock OTLP message validation.
 fn validate_otlp_message(vector: &OtlpTestVector) -> bool {
-    // In real implementation:
-    // 1. Decode OTLP protobuf metrics bytes
-    // 2. Validate structure and required fields
-
     // For mock: pass if name is non-empty, fail otherwise
     !vector.expected_metric.name.is_empty()
 }
@@ -497,11 +483,6 @@ fn handle_cardinality_overflow(_metric_name: &str, _label_value: &str) -> bool {
 
 /// Mock compatibility validation.
 fn validate_compatibility(_implementation: &str) -> bool {
-    // Real implementation would:
-    // 1. Generate test OTLP export data
-    // 2. Validate against known-good reference outputs
-    // 3. Check protocol version compatibility
-    // 4. Test error handling for malformed inputs
     true
 }
 
