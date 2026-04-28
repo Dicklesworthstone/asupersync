@@ -1231,6 +1231,10 @@ mod tests {
         assert_eq!(hash1, hash2);
     }
 
+    /// Regression test for br-asupersync-r9f8ch: distributed snapshot bytes drift
+    /// across task/child insertion order. This test ensures that semantically
+    /// identical snapshots with different task/child insertion orders produce
+    /// identical serialized bytes and content hashes via canonical ordering.
     #[test]
     fn snapshot_serialization_is_invariant_to_task_and_child_permutation() {
         let canonical = create_all_fields_snapshot();
