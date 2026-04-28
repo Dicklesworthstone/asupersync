@@ -30,6 +30,7 @@ pub mod tls_handshake;
 //
 // h1_protocol.rs is the new RFC 7230 obs-fold + TE/CL precedence suite
 // (no bit-rot — built against current Http1Codec API).
+pub mod h1_ows_normalization;
 pub mod h1_protocol;
 pub mod h1_request_target;
 pub mod h1_rfc9112;
