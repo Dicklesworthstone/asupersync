@@ -6224,4 +6224,48 @@ mod tests {
         // Smoke check: params populated.
         assert!(decoder.params().k >= 10);
     }
+
+    /// br-asupersync-h2k7ep: differential RFC 6330 §5.1 upper-edge
+    /// K_max boundary. The decoder must accept the final systematic
+    /// table row (K=56403), mirror the canonical parameter derivation,
+    /// and reject K=56404 with the same fail-closed error as the
+    /// systematic-index reference path.
+    #[test]
+    fn inactivation_decoder_matches_rfc6330_k_max_boundary_reference() {
+        const K_MAX: usize = 56_403;
+        const SYMBOL_SIZE: usize = 64;
+        const SEED: u64 = 0x6330_5101;
+
+        let reference = SystematicParams::try_for_source_block(K_MAX, SYMBOL_SIZE)
+            .expect("RFC 6330 K_max boundary must be accepted");
+        let decoder = InactivationDecoder::try_new(K_MAX, SYMBOL_SIZE, SEED)
+            .expect("decoder must accept exact RFC K_max boundary");
+        let params = decoder.params();
+
+        assert_eq!(params.k, reference.k, "K_max: K must echo input");
+        assert_eq!(
+            params.k_prime, reference.k_prime,
+            "K_max: K' must match RFC 6330 table maximum row"
+        );
+        assert_eq!(params.j, reference.j, "K_max: J(K') must match reference");
+        assert_eq!(params.s, reference.s, "K_max: S must match reference");
+        assert_eq!(params.h, reference.h, "K_max: H must match reference");
+        assert_eq!(params.l, reference.l, "K_max: L must match reference");
+        assert_eq!(params.w, reference.w, "K_max: W must match reference");
+        assert_eq!(params.p, reference.p, "K_max: P must match reference");
+        assert_eq!(params.b, reference.b, "K_max: B must match reference");
+        assert_eq!(
+            params.symbol_size, reference.symbol_size,
+            "K_max: symbol_size must be preserved in derived params"
+        );
+
+        let reference_err = SystematicParams::try_for_source_block(K_MAX + 1, SYMBOL_SIZE)
+            .expect_err("RFC 6330 K_max+1 boundary must reject");
+        let decoder_err = InactivationDecoder::try_new(K_MAX + 1, SYMBOL_SIZE, SEED)
+            .expect_err("decoder must reject K beyond RFC K_max boundary");
+        assert_eq!(
+            decoder_err, reference_err,
+            "K_max+1: decoder rejection must match the systematic-table reference error"
+        );
+    }
 }
