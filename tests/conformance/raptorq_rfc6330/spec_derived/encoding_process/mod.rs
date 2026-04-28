@@ -8,6 +8,7 @@
 pub mod systematic_encoding_tests;
 pub mod repair_symbol_tests;
 pub mod esi_validation_tests;
+pub mod fec_payload_id_packet_format_tests;
 
 use super::{Rfc6330ConformanceCase, Rfc6330ConformanceSuite};
 
@@ -17,4 +18,5 @@ pub fn register_tests(suite: &mut Rfc6330ConformanceSuite) {
     systematic_encoding_tests::register_tests(suite);
     repair_symbol_tests::register_tests(suite);
     esi_validation_tests::register_tests(suite);
+    fec_payload_id_packet_format_tests::register_tests(suite);
 }
