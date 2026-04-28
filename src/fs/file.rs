@@ -31,6 +31,15 @@ pub struct File {
 }
 
 impl File {
+    async fn with_inner<R, F>(&self, op: F) -> io::Result<R>
+    where
+        R: Send + 'static,
+        F: FnOnce(Arc<std::fs::File>) -> io::Result<R> + Send + 'static,
+    {
+        let inner = Arc::clone(&self.inner);
+        spawn_blocking_io(move || op(inner)).await
+    }
+
     /// Opens a file in read-only mode.
     ///
     /// See [`OpenOptions::open`] for more options.
@@ -79,41 +88,35 @@ impl File {
 
     /// Attempts to sync all OS-internal metadata to disk.
     pub async fn sync_all(&self) -> io::Result<()> {
-        let inner = Arc::clone(&self.inner);
-        spawn_blocking_io(move || inner.sync_all()).await
+        self.with_inner(|inner| inner.sync_all()).await
     }
 
     /// This function is similar to `sync_all`, except that it will not sync file metadata.
     pub async fn sync_data(&self) -> io::Result<()> {
-        let inner = Arc::clone(&self.inner);
-        spawn_blocking_io(move || inner.sync_data()).await
+        self.with_inner(|inner| inner.sync_data()).await
     }
 
     /// Truncates or extends the underlying file.
     pub async fn set_len(&self, size: u64) -> io::Result<()> {
-        let inner = Arc::clone(&self.inner);
-        spawn_blocking_io(move || inner.set_len(size)).await
+        self.with_inner(move |inner| inner.set_len(size)).await
     }
 
     /// Queries metadata about the underlying file.
     pub async fn metadata(&self) -> io::Result<Metadata> {
-        let inner = Arc::clone(&self.inner);
-        spawn_blocking_io(move || inner.metadata()).await
+        self.with_inner(|inner| inner.metadata()).await
     }
 
     /// Creates a new `File` instance that shares the same underlying file handle.
     pub async fn try_clone(&self) -> io::Result<Self> {
-        let inner = Arc::clone(&self.inner);
-        let file = spawn_blocking_io(move || inner.try_clone()).await?;
-        Ok(Self {
-            inner: Arc::new(file),
-        })
+        self.with_inner(|inner| inner.try_clone())
+            .await
+            .map(Self::from_std)
     }
 
     /// Changes the permissions on the underlying file.
     pub async fn set_permissions(&self, perm: Permissions) -> io::Result<()> {
-        let inner = Arc::clone(&self.inner);
-        spawn_blocking_io(move || inner.set_permissions(perm)).await
+        self.with_inner(move |inner| inner.set_permissions(perm))
+            .await
     }
 
     // Helper methods that match std::fs::File but async.
