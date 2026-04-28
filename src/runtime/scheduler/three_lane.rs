@@ -759,24 +759,38 @@ where
     false
 }
 
-fn wait_graph_signals_from_state(state: &RuntimeState) -> (usize, Vec<(usize, usize)>, bool) {
-    let mut tasks: Vec<TaskId> = state
+#[derive(Debug, Clone)]
+struct WaitGraphTaskSnapshot {
+    id: TaskId,
+    waiters: Vec<TaskId>,
+}
+
+fn wait_graph_snapshot_from_state(state: &RuntimeState) -> Vec<WaitGraphTaskSnapshot> {
+    state
         .tasks_iter()
-        .filter_map(|(_, task)| (!task.state.is_terminal()).then_some(task.id))
-        .collect();
-    tasks.sort();
-    let index_by_task: BTreeMap<TaskId, usize> = tasks
+        .filter_map(|(_, task)| {
+            (!task.state.is_terminal()).then(|| WaitGraphTaskSnapshot {
+                id: task.id,
+                waiters: task.waiters.to_vec(),
+            })
+        })
+        .collect()
+}
+
+fn wait_graph_signals_from_snapshot(
+    tasks: &[WaitGraphTaskSnapshot],
+) -> (usize, Vec<(usize, usize)>, bool) {
+    let mut live_tasks: Vec<TaskId> = tasks.iter().map(|task| task.id).collect();
+    live_tasks.sort();
+    let index_by_task: BTreeMap<TaskId, usize> = live_tasks
         .iter()
         .enumerate()
         .map(|(idx, id)| (*id, idx))
         .collect();
     let mut undirected_edges: BTreeSet<(usize, usize)> = BTreeSet::new();
-    let mut adjacency = vec![Vec::new(); tasks.len()];
+    let mut adjacency = vec![Vec::new(); live_tasks.len()];
 
-    for (_, task) in state.tasks_iter() {
-        if task.state.is_terminal() {
-            continue;
-        }
+    for task in tasks {
         let Some(&task_idx) = index_by_task.get(&task.id) else {
             continue;
         };
@@ -802,10 +816,16 @@ fn wait_graph_signals_from_state(state: &RuntimeState) -> (usize, Vec<(usize, us
     let trapped_cycle = has_trapped_scc(&adjacency);
 
     (
-        tasks.len(),
+        live_tasks.len(),
         undirected_edges.into_iter().collect(),
         trapped_cycle,
     )
+}
+
+#[cfg(test)]
+fn wait_graph_signals_from_state(state: &RuntimeState) -> (usize, Vec<(usize, usize)>, bool) {
+    let snapshot = wait_graph_snapshot_from_state(state);
+    wait_graph_signals_from_snapshot(&snapshot)
 }
 
 #[inline]
@@ -3409,13 +3429,20 @@ impl ThreeLaneWorker {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let snapshot = StateSnapshot::from_runtime_state(&state);
-        let (wait_graph_nodes, wait_graph_edges, trapped_wait_cycle) =
-            if self.spectral_monitor.is_some() {
-                wait_graph_signals_from_state(&state)
-            } else {
-                (0, Vec::new(), false)
-            };
+        // br-asupersync-y5n8au: only snapshot live waiter lists while the
+        // runtime state lock is held. The BTree/Tarjan analysis can run after
+        // the lock is dropped, just like the late-child timestamp wait moved
+        // out from under `children` in asupersync-53nvge.
+        let wait_graph_snapshot = self
+            .spectral_monitor
+            .is_some()
+            .then(|| wait_graph_snapshot_from_state(&state));
         drop(state);
+        let (wait_graph_nodes, wait_graph_edges, trapped_wait_cycle) = wait_graph_snapshot
+            .as_ref()
+            .map_or((0, Vec::new(), false), |snapshot| {
+                wait_graph_signals_from_snapshot(snapshot)
+            });
 
         // Enrich with ready-only queue depth. The governor/decision contract
         // should react to runnable backlog, not to cancel/timed entries that
