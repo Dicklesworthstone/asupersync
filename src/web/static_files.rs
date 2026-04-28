@@ -22,6 +22,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::fmt::Write as _;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
@@ -146,11 +147,35 @@ impl StaticFiles {
         }
     }
 
+    fn validated_current_path(&self, path: &Path) -> Option<PathBuf> {
+        let root_canonical = self.root.canonicalize().ok()?;
+        let relative_path = path.strip_prefix(&root_canonical).ok()?;
+        if path_contains_symlink(&root_canonical, relative_path) {
+            return None;
+        }
+
+        let canonical = path.canonicalize().ok()?;
+        if !canonical.starts_with(&root_canonical) || !canonical.is_file() {
+            return None;
+        }
+
+        Some(canonical)
+    }
+
     /// Serve a file, handling ETag and conditional requests.
     fn serve_file(&self, path: &Path, if_none_match: Option<&str>) -> Response {
-        // Read file metadata.
-        let Ok(metadata) = std::fs::metadata(path) else {
+        let Some(path) = self.validated_current_path(path) else {
             return Response::empty(StatusCode::NOT_FOUND);
+        };
+
+        let Ok(mut file) = open_static_file(&path) else {
+            return Response::empty(StatusCode::NOT_FOUND);
+        };
+
+        // Read file metadata from the opened handle so the file we size-check is
+        // the same one whose body we later hash and serve.
+        let Ok(metadata) = file.metadata() else {
+            return Response::empty(StatusCode::INTERNAL_SERVER_ERROR);
         };
 
         if metadata.len() > self.max_file_size {
@@ -159,9 +184,10 @@ impl StaticFiles {
 
         // Read file contents before generating the ETag. Strong ETags must be
         // content-derived, not just metadata-derived.
-        let Ok(body) = std::fs::read(path) else {
+        let mut body = Vec::with_capacity(metadata.len().try_into().unwrap_or(0));
+        if file.read_to_end(&mut body).is_err() {
             return Response::empty(StatusCode::INTERNAL_SERVER_ERROR);
-        };
+        }
 
         let etag = generate_etag(&body);
 
@@ -174,7 +200,7 @@ impl StaticFiles {
             }
         }
 
-        let mime = guess_mime(path);
+        let mime = guess_mime(&path);
 
         let mut response = Response::new(StatusCode::OK, body)
             .header("content-type", mime)
@@ -198,6 +224,21 @@ impl StaticFiles {
             config: self.clone(),
         }
     }
+}
+
+#[cfg(unix)]
+fn open_static_file(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_static_file(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new().read(true).open(path)
 }
 
 /// Handler that serves static files from a configured directory.
@@ -661,6 +702,25 @@ mod tests {
             sf.resolve_path("/sub-link/").is_none(),
             "directory indexes behind symlinks must not be served"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn serve_file_rejects_post_resolution_symlink_swap() {
+        let dir = setup_dir();
+        let outside = TempDir::new().unwrap();
+        let outside_path = outside.path().join("secret.txt");
+        fs::write(&outside_path, "top secret").unwrap();
+
+        let sf = StaticFiles::new(dir.path());
+        let resolved = sf.resolve_path("/hello.txt").unwrap();
+        let backup = dir.path().join("hello.backup.txt");
+        fs::rename(&resolved, &backup).unwrap();
+        std::os::unix::fs::symlink(&outside_path, &resolved).unwrap();
+
+        let resp = sf.serve_file(&resolved, None);
+        assert_eq!(resp.status, StatusCode::NOT_FOUND);
+        assert_ne!(resp.body.as_ref(), b"top secret");
     }
 
     // ================================================================
