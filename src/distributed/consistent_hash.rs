@@ -813,4 +813,94 @@ mod tests {
             "weights must influence HRW selection"
         );
     }
+
+    /// Metamorphic relation: adding a node to a HashRing should cause minimal
+    /// key reassignment, preserving the core consistent hashing property of
+    /// minimal disruption.
+    ///
+    /// **Property**: When a new node is added to an existing ring, the majority
+    /// of keys should remain assigned to their original nodes.
+    ///
+    /// **Transformation**: HashRing with N nodes → HashRing with N+1 nodes
+    /// **Relation**: |keys_reassigned| / |total_keys| should be minimal (≤ 1/N ideally)
+    /// **Detects**: Bugs in virtual node placement, hash distribution issues,
+    /// incorrect ring reconstruction after node addition.
+    #[test]
+    fn mr_node_addition_minimal_disruption() {
+        let keys: Vec<u64> = (0..4096u64).collect(); // Large key space for statistical validity
+        let initial_nodes = ["node-a", "node-b", "node-c", "node-d"];
+
+        // Build initial ring with fixed seed for determinism
+        let mut ring = HashRing::new(64, 0); // More vnodes for better distribution
+        for node in &initial_nodes {
+            ring.add_node(*node);
+        }
+
+        // Record initial key-to-node assignments
+        let initial_assignments: Vec<String> = keys
+            .iter()
+            .map(|key| ring.node_for_key(key).expect("ring should assign key").to_owned())
+            .collect();
+
+        // Add a new node
+        ring.add_node("node-new");
+
+        // Record assignments after adding the new node
+        let final_assignments: Vec<String> = keys
+            .iter()
+            .map(|key| ring.node_for_key(key).expect("ring should assign key").to_owned())
+            .collect();
+
+        // Count how many keys were reassigned
+        let reassigned_count = initial_assignments
+            .iter()
+            .zip(final_assignments.iter())
+            .filter(|(before, after)| before != after)
+            .count();
+
+        let disruption_ratio = reassigned_count as f64 / keys.len() as f64;
+
+        // Theoretical minimum: with N nodes initially, adding 1 node should ideally
+        // reassign ~1/(N+1) of keys to the new node. We use a slightly more generous
+        // threshold to account for hash distribution variance.
+        let max_acceptable_disruption = 0.30; // 30% threshold, same as HRW test
+
+        assert!(
+            disruption_ratio <= max_acceptable_disruption,
+            "Node addition caused excessive disruption: {:.2}% of keys reassigned \
+             (expected ≤ {:.0}%). This violates the consistent hashing minimal \
+             disruption property. Initial nodes: {:?}, Keys reassigned: {}/{}",
+            disruption_ratio * 100.0,
+            max_acceptable_disruption * 100.0,
+            initial_nodes,
+            reassigned_count,
+            keys.len()
+        );
+
+        // Additional check: the new node should receive some keys (not zero)
+        let new_node_assignments = final_assignments
+            .iter()
+            .filter(|node| *node == "node-new")
+            .count();
+        assert!(
+            new_node_assignments > 0,
+            "New node received zero key assignments, indicating a placement bug"
+        );
+
+        // Additional check: all original nodes should still have some keys
+        // (unless the new node completely displaced one, which shouldn't happen
+        // with good consistent hashing)
+        for original_node in &initial_nodes {
+            let remaining_assignments = final_assignments
+                .iter()
+                .filter(|node| node == original_node)
+                .count();
+            assert!(
+                remaining_assignments > 0,
+                "Original node '{}' lost all key assignments after adding new node, \
+                 indicating poor hash distribution",
+                original_node
+            );
+        }
+    }
 }
