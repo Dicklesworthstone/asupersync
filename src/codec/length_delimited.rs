@@ -2468,13 +2468,13 @@ mod tests {
     #[cfg(test)]
     #[test]
     fn conformance_differential_max_frame_length_vs_tokio_util() {
-        use tokio_util::codec::{LengthDelimitedCodec as TokioCodec, Decoder as TokioDecoder};
+        use tokio_util::codec::{Decoder as TokioDecoder, LengthDelimitedCodec as TokioCodec};
 
         let test_cases = [
-            ("exact_boundary", 100, 100),    // Exactly at max (should pass)
-            ("exceeds_by_one", 100, 101),    // Exceeds by 1 (should fail)
-            ("large_excess", 100, 1000),     // Large excess (should fail)
-            ("zero_max", 0, 1),              // Edge case: zero max
+            ("exact_boundary", 100, 100), // Exactly at max (should pass)
+            ("exceeds_by_one", 100, 101), // Exceeds by 1 (should fail)
+            ("large_excess", 100, 1000),  // Large excess (should fail)
+            ("zero_max", 0, 1),           // Edge case: zero max
         ];
 
         for (case_name, max_len, frame_len) in test_cases {
@@ -2494,9 +2494,7 @@ mod tests {
             let our_result = our_codec.decode(&mut our_buf);
 
             // Test tokio-util implementation
-            let mut tokio_codec = TokioCodec::builder()
-                .max_frame_len(max_len)
-                .new_codec();
+            let mut tokio_codec = TokioCodec::builder().max_frame_length(max_len).new_codec();
             let mut tokio_buf = encoded.clone();
             let tokio_result = tokio_codec.decode(&mut tokio_buf);
 
@@ -2531,13 +2529,13 @@ mod tests {
                     let our_msg = our_err.to_string().to_lowercase();
                     let tokio_msg = tokio_err.to_string().to_lowercase();
                     assert!(
-                        (our_msg.contains("frame") && our_msg.contains("length")) ||
-                        (our_msg.contains("max") && our_msg.contains("frame")),
+                        (our_msg.contains("frame") && our_msg.contains("length"))
+                            || (our_msg.contains("max") && our_msg.contains("frame")),
                         "Case {case_name}: our error message should mention frame/length: {our_err}"
                     );
                     assert!(
-                        (tokio_msg.contains("frame") && tokio_msg.contains("length")) ||
-                        (tokio_msg.contains("max") && tokio_msg.contains("frame")),
+                        (tokio_msg.contains("frame") && tokio_msg.contains("length"))
+                            || (tokio_msg.contains("max") && tokio_msg.contains("frame")),
                         "Case {case_name}: tokio error message should mention frame/length: {tokio_err}"
                     );
                 }
