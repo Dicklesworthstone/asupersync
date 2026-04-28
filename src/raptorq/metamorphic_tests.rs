@@ -9,6 +9,7 @@ use crate::config::RaptorQConfig;
 use crate::cx::Cx;
 use crate::raptorq::builder::RaptorQSenderBuilder;
 use crate::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
+use crate::raptorq::systematic::SystematicEncoder;
 use crate::security::AuthenticatedSymbol;
 use crate::transport::sink::SymbolSink;
 use crate::types::symbol::ObjectId;
@@ -1413,4 +1414,112 @@ fn mr_byte_identical_determinism_across_runs() {
             }
         }
     });
+}
+
+/// MR-EncoderLinearity: SystematicEncoder is linear over GF(2) in its source vector.
+///
+/// Property: for any pair of K-symbol source vectors `A`, `B` (same `K`,
+/// same `symbol_size`, same seed), the encoder must satisfy
+///
+/// ```text
+/// repair_symbol(esi, A XOR B) == repair_symbol(esi, A) XOR repair_symbol(esi, B)
+/// ```
+///
+/// for every `esi >= K`, where XOR is componentwise byte-XOR.
+///
+/// Why this catches real bugs:
+///   - The systematic RaptorQ encoder is built from a precode (LDPC + HDPC)
+///     and an LT layer; both are linear maps over GF(2). Linearity in the
+///     source slot is therefore a structural invariant of any conformant
+///     implementation, independent of the seed or padding choice.
+///   - It catches: a corrupt LDPC/HDPC matrix that introduces non-linear
+///     cross-terms, a buggy intermediate-symbol solve that drops or
+///     duplicates rows for non-zero input, padding-related bugs that only
+///     manifest for non-zero `K..K'` rows, and seed-derived randomness that
+///     accidentally depends on input bytes (rather than only on `seed`).
+///   - It is independent of the decoder, so it isolates encoder bugs from
+///     decoder bugs that the existing `mr_encode_decode_identity` would
+///     conflate.
+#[test]
+fn mr_encoder_linearity_under_xor_of_source_vectors() {
+    use crate::util::DetRng;
+
+    // Stress a handful of (K, symbol_size, seed) corners so the test does
+    // not over-fit to one matrix shape. K is held >= 10 to clear the
+    // RFC 6330 systematic K' >= 10 floor.
+    const CASES: &[(usize, usize, u64)] = &[
+        (10, 8, 0x0123_4567_89AB_CDEF),
+        (12, 16, 0xDEAD_BEEF_CAFE_BABE),
+        (20, 8, 0xFEED_FACE_F00D_F00D),
+    ];
+
+    for &(k, symbol_size, seed) in CASES {
+        let mut rng_a = DetRng::new(seed ^ 0xA5A5_A5A5_A5A5_A5A5);
+        let mut rng_b = DetRng::new(seed ^ 0x5A5A_5A5A_5A5A_5A5A);
+
+        let source_a: Vec<Vec<u8>> = (0..k)
+            .map(|_| (0..symbol_size).map(|_| rng_a.next_u32() as u8).collect())
+            .collect();
+        let source_b: Vec<Vec<u8>> = (0..k)
+            .map(|_| (0..symbol_size).map(|_| rng_b.next_u32() as u8).collect())
+            .collect();
+
+        // Componentwise XOR — the source vector at the GF(2)-sum point.
+        let source_xor: Vec<Vec<u8>> = source_a
+            .iter()
+            .zip(source_b.iter())
+            .map(|(a, b)| a.iter().zip(b.iter()).map(|(x, y)| x ^ y).collect())
+            .collect();
+
+        // Sanity: A and B chosen so the XOR is non-trivial in every slot.
+        // Guards against a degenerate fixture that would let a buggy
+        // encoder pass the test by collapsing both inputs to zero.
+        for slot in &source_xor {
+            assert!(
+                slot.iter().any(|&byte| byte != 0),
+                "fixture XOR collapsed to all-zero in some slot for \
+                 (K={k}, T={symbol_size}, seed={seed:#x}) — choose different RNG masks",
+            );
+        }
+
+        let enc_a = SystematicEncoder::new(&source_a, symbol_size, seed)
+            .expect("encoder A construction (K, T, seed) should succeed");
+        let enc_b = SystematicEncoder::new(&source_b, symbol_size, seed)
+            .expect("encoder B construction (K, T, seed) should succeed");
+        let enc_xor = SystematicEncoder::new(&source_xor, symbol_size, seed)
+            .expect("encoder XOR construction (K, T, seed) should succeed");
+
+        // Probe a window of repair ESIs past K. The window is wide enough
+        // to cross at least one LT degree-distribution boundary so a bug
+        // that only fires for high-degree rows still surfaces.
+        let probe_count = 16usize;
+        for offset in 0..probe_count {
+            let esi = k as u32 + offset as u32;
+
+            let r_a = enc_a.repair_symbol(esi);
+            let r_b = enc_b.repair_symbol(esi);
+            let r_xor = enc_xor.repair_symbol(esi);
+
+            assert_eq!(
+                r_a.len(),
+                symbol_size,
+                "repair_symbol must return symbol_size bytes (K={k}, T={symbol_size}, esi={esi})",
+            );
+            assert_eq!(r_b.len(), symbol_size);
+            assert_eq!(r_xor.len(), symbol_size);
+
+            let r_a_xor_r_b: Vec<u8> = r_a
+                .iter()
+                .zip(r_b.iter())
+                .map(|(x, y)| x ^ y)
+                .collect();
+
+            assert_eq!(
+                r_xor, r_a_xor_r_b,
+                "MR-EncoderLinearity VIOLATION: repair_symbol(esi={esi}) on A XOR B \
+                 differs from repair_symbol(esi=A) XOR repair_symbol(esi=B) \
+                 for (K={k}, T={symbol_size}, seed={seed:#x})",
+            );
+        }
+    }
 }
