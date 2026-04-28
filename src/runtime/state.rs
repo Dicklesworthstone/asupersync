@@ -3181,6 +3181,7 @@ impl RuntimeState {
                 region,
                 time: now,
             });
+        self.notify_runtime_epoch_advance(super::epoch_tracker::ModuleId::RegionTable);
     }
 
     fn record_finalizer_run(&mut self, id: u64) {
@@ -5338,6 +5339,43 @@ mod tests {
         );
 
         crate::test_complete!("epoch_tracker_uses_timer_driver_transition_timestamps");
+    }
+
+    #[test]
+    fn finalizer_registration_advances_region_epoch() {
+        init_test("finalizer_registration_advances_region_epoch");
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let before = state.epoch_tracker.transition_statistics();
+        let before_region = before
+            .per_module_stats
+            .get(&ModuleId::RegionTable)
+            .expect("region stats before registration");
+
+        let registered = state.register_sync_finalizer(root, || {});
+        crate::assert_with_log!(registered, "registered sync finalizer", true, registered);
+
+        let after = state.epoch_tracker.transition_statistics();
+        let after_region = after
+            .per_module_stats
+            .get(&ModuleId::RegionTable)
+            .expect("region stats after registration");
+
+        crate::assert_with_log!(
+            after_region.current_epoch == before_region.current_epoch.next(),
+            "finalizer registration advances the region epoch by one",
+            before_region.current_epoch.next(),
+            after_region.current_epoch
+        );
+        crate::assert_with_log!(
+            after_region.transition_count == before_region.transition_count + 1,
+            "finalizer registration increments the region transition count",
+            before_region.transition_count + 1,
+            after_region.transition_count
+        );
+
+        crate::test_complete!("finalizer_registration_advances_region_epoch");
     }
 
     #[test]
