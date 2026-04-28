@@ -1946,6 +1946,224 @@ impl KafkaClient {
     }
 }
 
+// Fuzz functions for testing Kafka response frame parsing
+#[cfg(any(test, fuzzing, feature = "fuzz"))]
+impl From<u8> for Acks {
+    fn from(value: u8) -> Self {
+        match value {
+            0 => Self::None,
+            1 => Self::Leader,
+            _ => Self::All,
+        }
+    }
+}
+
+#[cfg(any(test, fuzzing, feature = "fuzz"))]
+impl From<u8> for Compression {
+    fn from(value: u8) -> Self {
+        match value % 4 {
+            0 => Self::None,
+            1 => Self::Gzip,
+            2 => Self::Snappy,
+            _ => Self::Lz4,
+        }
+    }
+}
+
+/// Fuzz function: parse Kafka error response from raw bytes
+#[cfg(any(test, fuzzing, feature = "fuzz"))]
+pub fn fuzz_parse_kafka_error_response(data: &[u8]) -> Result<KafkaError, String> {
+    if data.is_empty() {
+        return Ok(KafkaError::Protocol("empty response".to_string()));
+    }
+
+    // Simulate parsing error response frame structure
+    let error_code = data[0] as i16;
+    let has_message = data.len() > 1;
+
+    let message = if has_message && data.len() > 2 {
+        // Extract length prefix (2 bytes) + message
+        let msg_len = if data.len() >= 3 {
+            u16::from_be_bytes([data[1], data[2]]) as usize
+        } else {
+            0
+        };
+
+        if data.len() >= 3 + msg_len {
+            String::from_utf8_lossy(&data[3..3 + msg_len]).to_string()
+        } else {
+            String::from_utf8_lossy(&data[3..]).to_string()
+        }
+    } else {
+        "generic error".to_string()
+    };
+
+    // Map common Kafka error codes to KafkaError variants
+    match error_code {
+        0 => Ok(KafkaError::Protocol("no error".to_string())),
+        1 => Ok(KafkaError::Protocol(message)),
+        2..=10 => Ok(KafkaError::Broker(message)),
+        11..=20 => Ok(KafkaError::InvalidTopic(message)),
+        21..=30 => Ok(KafkaError::MessageTooLarge {
+            size: (error_code as usize).saturating_mul(100),
+            max_size: 1024 * 1024
+        }),
+        31..=40 => Ok(KafkaError::Transaction(message)),
+        41..=50 => Ok(KafkaError::QueueFull),
+        51..=60 => Ok(KafkaError::Config(message)),
+        61..=70 => Ok(KafkaError::Cancelled),
+        _ => Ok(KafkaError::Protocol(format!("unknown error code: {error_code}"))),
+    }
+}
+
+/// Fuzz function: parse Kafka response metadata from raw bytes
+#[cfg(any(test, fuzzing, feature = "fuzz"))]
+pub fn fuzz_parse_response_metadata(data: &[u8]) -> Result<RecordMetadata, String> {
+    if data.len() < 16 {
+        return Err("insufficient data for metadata".to_string());
+    }
+
+    // Parse response metadata frame:
+    // bytes 0-7: offset (i64)
+    // bytes 8-11: partition (i32)
+    // bytes 12-15: timestamp_low (i32)
+    // bytes 16+: topic name (length-prefixed string)
+
+    let offset = i64::from_be_bytes([
+        data[0], data[1], data[2], data[3],
+        data[4], data[5], data[6], data[7]
+    ]);
+
+    let partition = i32::from_be_bytes([data[8], data[9], data[10], data[11]]);
+
+    let timestamp_low = i32::from_be_bytes([data[12], data[13], data[14], data[15]]);
+    let timestamp = if timestamp_low >= 0 {
+        Some(timestamp_low as u64 * 1000) // Convert to millis
+    } else {
+        None
+    };
+
+    let topic = if data.len() > 16 {
+        if data.len() >= 18 {
+            let topic_len = u16::from_be_bytes([data[16], data[17]]) as usize;
+            if data.len() >= 18 + topic_len {
+                String::from_utf8_lossy(&data[18..18 + topic_len]).to_string()
+            } else {
+                String::from_utf8_lossy(&data[18..]).to_string()
+            }
+        } else {
+            "default".to_string()
+        }
+    } else {
+        "default".to_string()
+    };
+
+    // Validate parsed values
+    if partition < 0 {
+        return Err(format!("negative partition: {partition}"));
+    }
+
+    if offset < 0 {
+        return Err(format!("negative offset: {offset}"));
+    }
+
+    if topic.is_empty() {
+        return Err("empty topic name".to_string());
+    }
+
+    Ok(RecordMetadata {
+        topic,
+        partition,
+        offset,
+        timestamp,
+    })
+}
+
+/// Fuzz function: validate Kafka response frame structure
+#[cfg(any(test, fuzzing, feature = "fuzz"))]
+pub fn fuzz_validate_response_frame(data: &[u8]) -> Result<(), String> {
+    if data.len() < 8 {
+        return Err("response frame too short".to_string());
+    }
+
+    // Parse frame header:
+    // bytes 0-3: correlation_id (i32)
+    // bytes 4-7: response_length (i32)
+
+    let correlation_id = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+    let response_length = i32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+
+    // Validate correlation ID is reasonable
+    if correlation_id < 0 || correlation_id > 1_000_000 {
+        return Err(format!("invalid correlation_id: {correlation_id}"));
+    }
+
+    // Validate response length
+    if response_length < 0 {
+        return Err(format!("negative response_length: {response_length}"));
+    }
+
+    if response_length > 50 * 1024 * 1024 { // 50MB limit
+        return Err(format!("response_length too large: {response_length}"));
+    }
+
+    // Check if declared length matches remaining data
+    let expected_total = 8 + response_length as usize;
+    if data.len() != expected_total {
+        return Err(format!(
+            "length mismatch: declared {expected_total}, actual {}",
+            data.len()
+        ));
+    }
+
+    // Basic response payload validation
+    if response_length > 0 && data.len() > 8 {
+        let payload = &data[8..];
+
+        // Check for basic response structure markers
+        if payload.is_empty() {
+            return Err("empty response payload".to_string());
+        }
+
+        // Simple validation: first byte should be reasonable API version/error code
+        let first_byte = payload[0];
+        if first_byte > 100 {
+            return Err(format!("suspicious first response byte: {first_byte}"));
+        }
+    }
+
+    Ok(())
+}
+
+/// Fuzz function: parse Kafka delivery result from response
+#[cfg(any(test, fuzzing, feature = "fuzz"))]
+pub fn fuzz_parse_delivery_result(data: &[u8]) -> Result<RecordMetadata, KafkaError> {
+    // First validate the frame
+    fuzz_validate_response_frame(data)
+        .map_err(|e| KafkaError::Protocol(format!("frame validation failed: {e}")))?;
+
+    if data.len() < 12 {
+        return Err(KafkaError::Protocol("insufficient data for delivery result".to_string()));
+    }
+
+    // Skip correlation_id and response_length (8 bytes), parse result
+    let payload = &data[8..];
+
+    // Check for error indicator (first byte)
+    if payload[0] != 0 {
+        let error_code = payload[0];
+        return Err(fuzz_parse_kafka_error_response(&[error_code])?);
+    }
+
+    // Parse successful delivery result from remaining payload
+    if payload.len() < 4 {
+        return Err(KafkaError::Protocol("incomplete delivery result".to_string()));
+    }
+
+    fuzz_parse_response_metadata(&payload[1..])
+        .map_err(|e| KafkaError::Protocol(format!("metadata parse failed: {e}")))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(

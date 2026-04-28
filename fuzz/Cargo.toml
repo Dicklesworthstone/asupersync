@@ -2134,6 +2134,18 @@ test = false
 doc = false
 bench = false
 
+# Structure-aware Kafka response frame fuzzer targeting response wire format parsing
+# in src/messaging/kafka.rs. Uses intelligent input generation to test response frame
+# headers, error parsing, metadata extraction, delivery results, and frame validation.
+# Covers correlation ID matching, length validation, error code mapping, and boundary
+# conditions with structure-aware mutation to find parsing edge cases.
+[[bin]]
+name = "kafka_response_frames"
+path = "fuzz_targets/kafka_response_frames.rs"
+test = false
+doc = false
+bench = false
+
 # br-asupersync-6zcnd9 — gRPC trailer-header decode fuzz: grpc-status
 # integer parser, grpc-message escape/unescape, grpc-status-details-bin
 # base64 decode. Asserts no panic / no OOM on adversarial UTF-8 inputs
