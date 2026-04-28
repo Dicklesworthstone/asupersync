@@ -50,11 +50,26 @@ impl<T: Send> FaaFifoQueue<T> {
     }
 
     #[inline]
+    /// Enqueues an item without touching the advisory count snapshot.
+    ///
+    /// Callers MUST pre-account the item via [`Self::add_count`] before making
+    /// the item visible through this path. Publishing the item first and only
+    /// incrementing the counter later lets a concurrent pop consume the item
+    /// and saturate the counter at zero, after which the delayed increment
+    /// would leave a phantom positive count on an empty queue.
     pub(crate) fn push_uncounted(&self, item: T) {
         self.inner.enqueue(item);
     }
 
     #[inline]
+    /// Bulk increments the advisory count snapshot for subsequent
+    /// [`Self::push_uncounted`] publications.
+    ///
+    /// The intended sequence is `add_count(n)` followed by `n` uncounted
+    /// publishes. Leading with the count avoids false-empty observations in
+    /// scheduler hint paths; the queue may temporarily report work before an
+    /// item is fully visible, but it must never publish an item before its
+    /// counter credit exists.
     pub(crate) fn add_count(&self, count: usize) {
         if count > 0 {
             self.count.fetch_add(count, Ordering::Relaxed);
@@ -467,6 +482,52 @@ mod tests {
         // Queue should still be functional after contention
         queue.push(task(999_999));
         assert_eq!(queue.pop(), Some(task(999_999)));
+    }
+
+    #[test]
+    fn test_precounted_publish_window_does_not_fabricate_work_and_converges() {
+        let queue = GlobalQueue::new();
+
+        // Scheduler hint paths may make the advisory count visible before the
+        // corresponding uncounted publication is visible cross-thread.
+        queue.inner.add_count(1);
+        assert_eq!(
+            queue.len(),
+            1,
+            "pre-counted publish advertises pending work"
+        );
+        assert!(
+            !queue.is_empty(),
+            "pre-counted publish must not report an empty queue"
+        );
+
+        // The advisory count must not fabricate a task before publish.
+        assert_eq!(
+            queue.pop(),
+            None,
+            "count visibility alone must not conjure a dequeuable task"
+        );
+        assert_eq!(
+            queue.len(),
+            1,
+            "observing the lead-count window must not consume the reserved count credit"
+        );
+
+        queue.inner.push_uncounted(task(77));
+        assert_eq!(
+            queue.pop(),
+            Some(task(77)),
+            "once the uncounted publish becomes visible, the reserved credit must pair with the real task"
+        );
+        assert_eq!(
+            queue.len(),
+            0,
+            "after the published task is consumed, the advisory count must converge back to zero"
+        );
+        assert!(
+            queue.is_empty(),
+            "queue should report empty after convergence"
+        );
     }
 
     proptest! {
