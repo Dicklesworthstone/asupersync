@@ -60,6 +60,17 @@ test = false
 doc = false
 bench = false
 
+# br-asupersync-wjai3e — structured AuthenticationTag canonical-input fuzzer
+# for the sign_symbol / verify_authenticated_symbol seam. Drives object_id,
+# sbn, esi, kind, payload, and payload-length mutations as explicit fields,
+# then asserts that only identical canonical tuples preserve verification.
+[[bin]]
+name = "security_authenticated_aad_construction"
+path = "fuzz_targets/security_authenticated_aad_construction.rs"
+test = false
+doc = false
+bench = false
+
 # br-asupersync (testing-fuzzing rotation 2026-04-26) — drives arbitrary
 # 32-byte inputs through AuthKey::from_bytes (q3terg entropy validator).
 # Cross-checks the validator's accept/reject decision against hand-computed
