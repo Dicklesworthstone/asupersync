@@ -962,17 +962,34 @@ error messages. See `docs/macro-dsl.md` for the full pattern catalog.
 
 ## Conformance Suite
 
-`conformance/` is a standalone crate containing runtime-agnostic correctness tests and artifact contracts. It verifies:
+Current reality: the Cargo-compiled conformance registry for this repository is
+the integration-test entrypoint at `tests/conformance.rs`, which includes the
+live module list from `tests/conformance/mod.rs`. That registry currently wires
+55 suites, with a few additional entries gated by `mysql`, `quic`, or
+platform-specific cfgs.
 
-- **Budget enforcement**: deadlines and poll quotas are respected
-- **Channel invariants**: two-phase sends, bounded capacity, waiter cleanup
-- **I/O correctness**: read/write under cancellation
-- **Outcome aggregation**: severity lattice composition
-- **Runtime invariants**: no orphans, region quiescence
-- **Negative tests**: fault injection scenarios (obligation leaks, region hangs)
-- **E2E schema contracts**: deterministic suite summaries, replay pointers, failure taxonomy
+The active registry covers:
 
-Test and CI entrypoints include:
+- **Channel, codec, and capability semantics**: channel cleanup, framing properties, round trips, and `Cx` capability contracts
+- **HTTP and compression surfaces**: active HTTP/1.1, HTTP/2, HTTP/3, HPACK, and request-target/protocol suites built against current APIs
+- **gRPC and transport protocol checks**: max-message framing, status mapping, trailer forwarding, gRPC-Web framing, TCP accept/listener, and timeout harnesses
+- **Security and wire-level protocol lanes**: TLS handshake / key-share / SNI / 0-RTT replay, QUIC retry (plus QUIC migration when enabled), DNS message parsing, Kafka offsets / record batches, and MySQL / PostgreSQL protocol coverage
+- **Deterministic invariant suites**: cancel DAG determinism, obligation lifecycle, race loser-drain, trace replay idempotency, broadcast, and consistent-hash regression coverage
+
+Important limitation: the repository also preserves many conformance files on
+disk that are **not** part of the live registry today. `tests/conformance/mod.rs`
+currently leaves 28 `pub mod` entries commented out as known bit-rot or
+unresolved-dependency follow-ups, including older `h1_*` siblings,
+`sqlite_prepared_statements`, the full `websocket_rfc6455` suite,
+`grpc_deadline`, `grpc_health`, `grpc_status`, `h3_settings`, `quic_initial`,
+and `task_inspector_wire`. Those files remain in-tree for repair work, but they
+do not compile or run until they are re-wired in `tests/conformance/mod.rs`.
+
+The separate `conformance/` workspace member still exists for standalone
+vendor/spec harnesses, but it should not be read as proof that every
+disk-resident file under `tests/conformance/` is active in CI.
+
+Related test and CI entrypoints include:
 
 - `scripts/run_all_e2e.sh` (orchestrated suite execution and summary checks)
 - `scripts/run_raptorq_e2e.sh` (RaptorQ deterministic scenarios)
@@ -981,7 +998,14 @@ Test and CI entrypoints include:
 - `scripts/check_coverage_ratchet.py` (coverage regression ratchet)
 - `scripts/check_wasm_flake_governance.py` (WASM flake/quarantine/forensics release gate)
 
-Tests emit deterministic artifact bundles (`event_log.txt`, `failed_assertions.json`, `repro_manifest.json`) when `ASUPERSYNC_TEST_ARTIFACTS_DIR` is set, and E2E suites emit JSON summaries suitable for replay automation.
+These scripts are broader repository gates, not a substitute for the live
+`tests/conformance/mod.rs` registry when you need the exact wired-vs-dormant
+coverage picture.
+
+Tests emit deterministic artifact bundles (`event_log.txt`,
+`failed_assertions.json`, `repro_manifest.json`) when
+`ASUPERSYNC_TEST_ARTIFACTS_DIR` is set, and the E2E runners emit JSON summaries
+for replay automation.
 
 ---
 

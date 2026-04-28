@@ -25,7 +25,6 @@ use crate::decoding::{
     DecodingConfig as RaptorQDecodingConfig, DecodingPipeline as RaptorQDecodingPipeline,
     RejectReason,
 };
-use crate::distributed::HashRing;
 use crate::encoding::EncodingPipeline as RaptorQEncodingPipeline;
 use crate::error::{Error as AsupersyncError, ErrorKind};
 use crate::obligation::ledger::{ObligationLedger, ObligationToken};
@@ -269,6 +268,10 @@ impl FabricState {
     const DEFAULT_CELL_BUFFER_CAPACITY: usize = 64;
 
     fn new(endpoint: &str) -> Self {
+        use crate::util::EntropySource;
+
+        let mut placement_policy = PlacementPolicy::default();
+        placement_policy.placement_hash_salt = crate::util::OsEntropy.next_u64();
         Self {
             cells: BTreeMap::new(),
             cell_routes: BTreeMap::new(),
@@ -278,7 +281,7 @@ impl FabricState {
             next_sequence: 0,
             next_subscriber_id: 1,
             cell_buffer_capacity: Self::DEFAULT_CELL_BUFFER_CAPACITY,
-            placement_policy: PlacementPolicy::default(),
+            placement_policy,
             repair_policy: RepairPolicy::default(),
             default_data_capsule: DataCapsule::default(),
             default_epoch: CellEpoch::new(0, 1),
@@ -3269,6 +3272,12 @@ impl StewardCandidate {
 pub struct PlacementPolicy {
     /// Virtual node count used by the deterministic hash ring.
     pub vnodes_per_node: usize,
+    /// Salt mixed into HRW placement scoring for transient candidate sets.
+    ///
+    /// Direct tests and lab fixtures keep the deterministic default `0`.
+    /// Live runtime state overrides this with OS entropy so attacker-chosen
+    /// subjects cannot pre-compute a universal load-pinning keyset.
+    pub placement_hash_salt: u64,
     /// Number of candidate nodes to consider before final negotiation.
     pub candidate_pool_size: usize,
     /// Target steward count for cold cells.
@@ -3293,6 +3302,7 @@ impl Default for PlacementPolicy {
     fn default() -> Self {
         Self {
             vnodes_per_node: 64,
+            placement_hash_salt: 0,
             candidate_pool_size: 6,
             cold_stewards: 1,
             warm_stewards: 3,
@@ -3414,37 +3424,15 @@ impl PlacementPolicy {
             .max(self.target_steward_count(temperature))
             .min(eligible.len());
 
-        // br-asupersync-rnybb1: use OS-entropy-seeded ring so the
-        // load-pinning DoS surface (attacker computes keys colliding
-        // on the publicly-known FNV-1a default seed) is closed.
-        let mut ring = HashRing::with_os_entropy(self.vnodes_per_node.max(1));
-        let mut by_node = BTreeMap::new();
-        for candidate in &eligible {
-            let key = candidate.node_id.as_str().to_string();
-            ring.add_node(key.clone());
-            by_node.insert(key, *candidate);
-        }
-
         let subject_key = subject_partition.canonical_key();
-        let mut pool = Vec::new();
-        let mut seen = BTreeSet::new();
-        for salt in 0_u64.. {
-            if pool.len() >= required || seen.len() >= eligible.len() {
-                break;
-            }
-            let lookup = (&subject_key, salt);
-            let Some(node_id) = ring.node_for_key(&lookup) else {
-                break;
-            };
-            if !seen.insert(node_id.to_string()) {
-                continue;
-            }
-            if let Some(candidate) = by_node.get(node_id) {
-                pool.push(*candidate);
-            }
-        }
-
-        Ok(pool)
+        Ok(crate::distributed::consistent_hash::select_top_k_hrw(
+            eligible.iter().copied(),
+            required,
+            &subject_key,
+            self.placement_hash_salt,
+            |candidate| candidate.node_id.as_str(),
+            |_candidate| 1,
+        ))
     }
 
     #[allow(clippy::result_large_err)]
@@ -8114,6 +8102,37 @@ mod tests {
 
         assert_eq!(first, second);
         assert!(first.iter().all(|node| node.as_str() != "observer"));
+    }
+
+    #[test]
+    fn candidate_pool_is_duplicate_free_when_trimmed() {
+        let partition = SubjectPattern::parse("orders.created").expect("pattern");
+        let policy = PlacementPolicy {
+            cold_stewards: 2,
+            warm_stewards: 2,
+            hot_stewards: 2,
+            candidate_pool_size: 3,
+            placement_hash_salt: 99,
+            ..PlacementPolicy::default()
+        };
+        let candidates = vec![
+            candidate("node-a", "rack-a", StorageClass::Durable, 5),
+            candidate("node-b", "rack-b", StorageClass::Durable, 6),
+            candidate("node-c", "rack-c", StorageClass::Standard, 7),
+            candidate("node-d", "rack-d", StorageClass::Standard, 8),
+            candidate("node-e", "rack-e", StorageClass::Standard, 9),
+        ];
+
+        let pool = policy
+            .candidate_pool(&partition, &candidates, CellTemperature::Warm)
+            .expect("candidate pool");
+        let unique = pool
+            .iter()
+            .map(|candidate| candidate.node_id.as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(pool.len(), 3);
+        assert_eq!(unique.len(), pool.len());
     }
 
     #[test]

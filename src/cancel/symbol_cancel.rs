@@ -537,7 +537,11 @@ impl SymbolCancelToken {
             return None;
         }
 
-        loop {
+        // br-asupersync-wze4x9: Replace infinite spin with bounded retry + yield
+        // to prevent livelock under thread contention. The race window should
+        // resolve quickly under normal circumstances.
+        const MAX_RETRIES: u32 = 1000;
+        for _attempt in 0..MAX_RETRIES {
             let nanos = self.state.cancelled_at.load(Ordering::Acquire);
             if nanos != u64::MAX {
                 return Some(Time::from_nanos(nanos));
@@ -561,8 +565,13 @@ impl SymbolCancelToken {
                 });
             }
 
-            std::hint::spin_loop();
+            // Yield control instead of spinning to prevent livelock
+            std::thread::sleep(std::time::Duration::from_nanos(100));
         }
+
+        // If we exceed retry limit, fall back to Time::ZERO (cancelled but unknown timestamp)
+        // This should be extremely rare and indicates a pathological contention scenario.
+        Some(Time::ZERO)
     }
 
     /// Creates a child token linked to this one.
@@ -4258,9 +4267,15 @@ mod tests {
             child.cancelled_at().map(Time::as_nanos)
         });
 
-        while !started.load(Ordering::Acquire) {
-            std::hint::spin_loop();
+        // br-asupersync-wze4x9: Replace infinite spin with bounded retry to prevent test hangs
+        const MAX_WAIT_RETRIES: u32 = 10000;
+        for _attempt in 0..MAX_WAIT_RETRIES {
+            if started.load(Ordering::Acquire) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_nanos(100));
         }
+        assert!(started.load(Ordering::Acquire), "Test thread failed to start within timeout");
 
         parent
             .state

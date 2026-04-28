@@ -3825,7 +3825,16 @@ fn build_request_cx_from_inner(inner: &Arc<RuntimeInner>, budget: Budget) -> cra
     // registered in `state.tasks` — that's a deeper refactor — but
     // the determinism breach is closed.
     let task = inner.next_request_task_id();
-    let (observability, io_driver, timer_driver, blocking_pool, logical_clock, entropy, trace) = {
+    let (
+        observability,
+        io_driver,
+        timer_driver,
+        blocking_pool,
+        logical_clock,
+        entropy,
+        trace,
+        loser_drain_history,
+    ) = {
         let guard = inner
             .state
             .lock()
@@ -3842,6 +3851,7 @@ fn build_request_cx_from_inner(inner: &Arc<RuntimeInner>, budget: Budget) -> cra
             logical_clock,
             guard.entropy_source().fork(task),
             guard.trace_handle(),
+            guard.loser_drain_history_handle(),
         )
     };
 
@@ -3858,6 +3868,7 @@ fn build_request_cx_from_inner(inner: &Arc<RuntimeInner>, budget: Budget) -> cra
     .with_blocking_pool_handle(blocking_pool)
     .with_logical_clock(logical_clock);
     request_cx.set_trace_buffer(trace);
+    request_cx.set_loser_drain_history_handle(loser_drain_history);
     request_cx
 }
 

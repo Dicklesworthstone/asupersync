@@ -288,7 +288,7 @@ pub struct LoadBalancer {
     random_seed: AtomicU64,
 
     /// br-asupersync-5ypgzi: per-router salt used to seed the
-    /// HashRing in the HashBased strategy. Sourced from
+    /// salted HRW score domain in the HashBased strategy. Sourced from
     /// `OsEntropy::next_u64()` at LoadBalancer construction so an
     /// attacker who can choose ObjectId values cannot pre-compute
     /// colliding keys without knowing this specific router's salt.
@@ -576,18 +576,10 @@ impl LoadBalancer {
                 endpoints.iter().rfind(|e| e.state().can_receive())
             }
             LoadBalanceStrategy::HashBased => {
-                // br-asupersync-v535in: use CONSISTENT HASHING via
-                // crate::distributed::HashRing instead of modulo
-                // arithmetic over a counted slice. The previous
-                // implementation computed `hash % count` where
-                // `count` was the number of healthy endpoints —
-                // adding or removing one endpoint changed `count`
-                // and therefore the modulo result for EVERY key,
-                // breaking sticky-routing for callers that rely on
-                // 'same object_id -> same endpoint as long as the
-                // endpoint is healthy'. Consistent hashing remaps
-                // only ~K/N keys when N changes, preserving stickiness
-                // for the vast majority of object_ids.
+                // br-asupersync-v535in: preserve sticky routing under
+                // membership churn by scoring healthy endpoints
+                // directly with salted rendezvous hashing instead of
+                // modulo arithmetic over a counted slice.
                 let healthy: Vec<&Arc<Endpoint>> = endpoints
                     .iter()
                     .filter(|e| e.state().can_receive())
@@ -605,59 +597,13 @@ impl LoadBalancer {
                         Some(healthy[idx])
                     },
                     |oid| {
-                        // Build a per-call HashRing keyed by the
-                        // healthy endpoints' EndpointId. The ring is
-                        // small (one vnode per healthy endpoint
-                        // suffices for stickiness; HashRing internal
-                        // VirtualNode count is O(N * vnodes_per)),
-                        // so per-call construction is O(N) which is
-                        // dwarfed by the typical select() work for
-                        // any realistic endpoint count.
-                        //
-                        // br-asupersync-5ypgzi: the previous comment
-                        // here claimed "seed=0 because the keyspace
-                        // (EndpointId u64) is internal" — but the
-                        // KEY actually hashed below is
-                        // `oid.as_u128().to_string()` (the ObjectId),
-                        // which IS attacker-influenced. With a fixed
-                        // seed an attacker can offline-search for
-                        // ObjectIds that all hash to the same vnode
-                        // and pin the load to one endpoint —
-                        // exactly the load-pinning DoS that the
-                        // rnybb1 fix closed for other HashRing
-                        // callers. The fix here is to use the per-
-                        // router `hash_ring_salt` (sourced from
-                        // OsEntropy at LoadBalancer construction),
-                        // matching the rnybb1 pattern. Within one
-                        // router the salt is stable so stickiness
-                        // is preserved; across routers the salt
-                        // differs so cross-deployment pre-compute
-                        // attacks fail.
-                        let mut ring = crate::distributed::HashRing::new(64, self.hash_ring_salt);
-                        for ep in &healthy {
-                            ring.add_node(ep.id.0.to_string());
-                        }
-                        // Hash the object_id u128 as a stable string
-                        // form so the ring's hashing path treats it
-                        // as opaque bytes — round-trips through
-                        // serialization layers identically.
-                        let key = oid.as_u128().to_string();
-                        ring.node_for_key(&key).and_then(|node_id| {
-                            // br-asupersync-klff8q: pre-fix the find
-                            // predicate called `ep.id.0.to_string() ==
-                            // node_id` per healthy endpoint, allocating
-                            // O(N) Strings per dispatch on the hot path
-                            // and overwhelming jemalloc's tcache at
-                            // high dispatch rates. The node_id we get
-                            // back is the same `u64.to_string()` form
-                            // we registered via `ring.add_node`, so
-                            // we parse it ONCE to a u64 and compare
-                            // numerically — zero allocation per
-                            // endpoint, single allocation amortised
-                            // by the parse error path.
-                            let target_id: u64 = node_id.parse().ok()?;
-                            healthy.iter().copied().find(|ep| ep.id.0 == target_id)
-                        })
+                        crate::distributed::consistent_hash::select_hrw(
+                            healthy.iter().copied(),
+                            &oid.as_u128(),
+                            self.hash_ring_salt,
+                            |endpoint| &endpoint.id,
+                            |endpoint| endpoint.weight.max(1),
+                        )
                     },
                 )
             }

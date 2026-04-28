@@ -1,6 +1,6 @@
 #![allow(missing_docs)]
-//! br-asupersync-vu86e3 — e2e test for JetStream durable-consumer
-//! create + pull semantics.
+//! br-asupersync-vu86e3 — wire-format regression test for JetStream
+//! durable-consumer create + pull semantics.
 //!
 //! ## Why an e2e test
 //!
@@ -45,8 +45,8 @@
 //!
 //! Note: this test does NOT cover the production NATS+JetStream
 //! server. It pins the asupersync client's wire emission against
-//! the JetStream protocol grammar, mirroring the e2e shape of
-//! tests/messaging_nats_handshake.rs.
+//! the JetStream protocol grammar only. The real-broker production
+//! guard now lives in `tests/jetstream_real_server.rs`.
 
 use asupersync::cx::Cx;
 use asupersync::messaging::jetstream::{

@@ -590,6 +590,55 @@ fn bench_pattern_matching(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_steward_selection(c: &mut Criterion) {
+    let mut group = c.benchmark_group("fabric/steward_selection");
+    let subject = SubjectPattern::parse("orders.created").expect("pattern");
+    let repair_policy = RepairPolicy::default();
+    let data_capsule = DataCapsule {
+        temperature: CellTemperature::Warm,
+        retained_message_blocks: 4,
+    };
+    let epoch = CellEpoch::new(17, 29);
+    let policy = PlacementPolicy {
+        cold_stewards: 2,
+        warm_stewards: 3,
+        hot_stewards: 5,
+        candidate_pool_size: 6,
+        placement_hash_salt: 0x57_4D_F1D_u64,
+        ..PlacementPolicy::default()
+    };
+
+    for &candidate_count in &[8usize, 32, 128, 512] {
+        let candidates = (0..candidate_count)
+            .map(|index| {
+                bench_fabric_candidate(&format!("node-{index}"), &format!("rack-{}", index % 16))
+                    .with_latency_millis(5 + (index % 9) as u32)
+            })
+            .collect::<Vec<_>>();
+        group.throughput(Throughput::Elements(candidate_count as u64));
+        group.bench_with_input(
+            BenchmarkId::from_parameter(candidate_count),
+            &candidate_count,
+            |b, _| {
+                b.iter(|| {
+                    let cell = SubjectCell::new(
+                        black_box(&subject),
+                        epoch,
+                        black_box(&candidates),
+                        black_box(&policy),
+                        black_box(repair_policy.clone()),
+                        data_capsule.clone(),
+                    )
+                    .expect("cell");
+                    black_box(cell.steward_set.len())
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 // ---------------------------------------------------------------------------
 // Subscribe/unsubscribe throughput
 // ---------------------------------------------------------------------------
@@ -963,6 +1012,7 @@ criterion_group!(
     bench_transform_apply,
     bench_transform_invertibility,
     bench_pattern_matching,
+    bench_steward_selection,
     bench_subscribe_unsubscribe,
     bench_scaled_lookup,
     bench_capability_checks,

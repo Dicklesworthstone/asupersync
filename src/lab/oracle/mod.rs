@@ -389,6 +389,30 @@ impl OracleSuite {
         self.cancel_signal_ordering.reset();
         self.runtime_epoch.reset();
 
+        if !self.loser_drain.has_observed_events() {
+            for event in state.loser_drain_history() {
+                match event {
+                    crate::runtime::state::LoserDrainHistoryEvent::RaceStarted {
+                        race_id,
+                        region,
+                        participants,
+                        time,
+                    } => {
+                        self.loser_drain
+                            .on_race_start_with_id(race_id, region, participants, time)
+                    }
+                    crate::runtime::state::LoserDrainHistoryEvent::TaskCompleted { task, time } => {
+                        self.loser_drain.on_task_complete(task, time);
+                    }
+                    crate::runtime::state::LoserDrainHistoryEvent::RaceCompleted {
+                        race_id,
+                        winner,
+                        time,
+                    } => self.loser_drain.on_race_complete(race_id, winner, time),
+                }
+            }
+        }
+
         for event in state.finalizer_history() {
             match *event {
                 crate::runtime::state::FinalizerHistoryEvent::Registered { id, region, time } => {
@@ -1480,6 +1504,58 @@ mod tests {
         crate::test_complete!(
             "hydrate_temporal_from_state_preserves_live_cancellation_protocol_history"
         );
+    }
+
+    #[test]
+    fn hydrate_temporal_from_state_replays_loser_drain_history() {
+        init_test("hydrate_temporal_from_state_replays_loser_drain_history");
+        let state = crate::runtime::RuntimeState::new();
+        let history = state.loser_drain_history_handle();
+        let region = crate::types::RegionId::new_for_test(4, 0);
+        let winner = crate::types::TaskId::new_for_test(10, 0);
+        let loser = crate::types::TaskId::new_for_test(11, 0);
+
+        let race_id = history.record_race_start(region, vec![winner, loser], Time::from_nanos(10));
+        history.record_task_complete(winner, Time::from_nanos(50));
+        history.record_race_complete(race_id, winner, Time::from_nanos(100));
+
+        let mut suite = OracleSuite::new();
+        suite.hydrate_temporal_from_state(&state, Time::from_nanos(150));
+
+        let violation = suite
+            .loser_drain
+            .check()
+            .expect_err("missing loser completion must survive post-run hydration");
+        match violation {
+            LoserDrainViolation::UndrainedLosers {
+                race_id: actual_race_id,
+                winner: actual_winner,
+                undrained_losers,
+                race_complete_time,
+            } => {
+                crate::assert_with_log!(
+                    actual_race_id == race_id,
+                    "race id",
+                    race_id,
+                    actual_race_id
+                );
+                crate::assert_with_log!(actual_winner == winner, "winner", winner, actual_winner);
+                crate::assert_with_log!(
+                    undrained_losers == vec![loser],
+                    "undrained losers",
+                    vec![loser],
+                    undrained_losers
+                );
+                crate::assert_with_log!(
+                    race_complete_time == Time::from_nanos(100),
+                    "race complete time",
+                    Time::from_nanos(100),
+                    race_complete_time
+                );
+            }
+            other => panic!("expected undrained-loser violation, got {other:?}"),
+        }
+        crate::test_complete!("hydrate_temporal_from_state_replays_loser_drain_history");
     }
 
     #[test]

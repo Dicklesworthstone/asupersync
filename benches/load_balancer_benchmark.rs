@@ -6,6 +6,7 @@ use std::sync::Arc;
 use asupersync::transport::{
     Endpoint, EndpointId, EndpointState, LoadBalanceStrategy, LoadBalancer,
 };
+use asupersync::types::ObjectId;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 fn build_endpoints(count: usize, unhealthy_stride: Option<usize>) -> Vec<Arc<Endpoint>> {
@@ -150,9 +151,36 @@ fn bench_load_balancer_select_n_ordered(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_load_balancer_hash_based(c: &mut Criterion) {
+    let mut group = c.benchmark_group("transport/load_balancer/hash_based");
+
+    for &endpoint_count in &[8usize, 32, 128, 512] {
+        let endpoints = build_loaded_endpoints(endpoint_count, Some(7), true);
+        let lb = LoadBalancer::with_seed(LoadBalanceStrategy::HashBased, 0x57AF_1D_u64);
+        group.throughput(Throughput::Elements(endpoint_count as u64));
+        group.bench_with_input(
+            BenchmarkId::from_parameter(endpoint_count),
+            &endpoint_count,
+            |b, _| {
+                let mut key = 0_u64;
+                b.iter(|| {
+                    key = key.wrapping_add(1);
+                    let selected = lb
+                        .select(black_box(&endpoints), Some(ObjectId::new_for_test(key)))
+                        .expect("selected endpoint");
+                    black_box(selected.id.0)
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_load_balancer_select_n_random,
-    bench_load_balancer_select_n_ordered
+    bench_load_balancer_select_n_ordered,
+    bench_load_balancer_hash_based
 );
 criterion_main!(benches);

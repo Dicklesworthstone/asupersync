@@ -511,7 +511,6 @@ mod tests {
         // math produces distinct outputs for distinct keys).
         let key1 = test_auth_key(900);
         let key2 = test_auth_key(901);
-        let normal_key = test_auth_key(900);
 
         let symbol = create_test_symbol(1, 0x88, 64);
 
@@ -530,8 +529,8 @@ mod tests {
         assert!(!tag2.verify(&key1, &symbol));
 
         // Self-verification should work
-        assert!(zero_tag.verify(&zero_key, &symbol));
-        assert!(normal_tag.verify(&normal_key, &symbol));
+        assert!(tag1.verify(&key1, &symbol));
+        assert!(tag2.verify(&key2, &symbol));
     }
 
     #[test]

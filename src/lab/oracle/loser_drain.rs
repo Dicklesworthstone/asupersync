@@ -205,16 +205,23 @@ impl LoserDrainOracle {
         time: Time,
     ) -> u64 {
         let id = self.next_race_id;
-        self.next_race_id += 1;
-        self.active_races.insert(
-            id,
-            RaceRecord {
-                region,
-                participants,
-                start_time: time,
-            },
-        );
+        self.on_race_start_with_id(id, region, participants, time);
         id
+    }
+
+    pub(crate) fn on_race_start_with_id(
+        &mut self,
+        race_id: u64,
+        region: RegionId,
+        participants: Vec<TaskId>,
+        time: Time,
+    ) {
+        self.next_race_id = self.next_race_id.max(race_id.saturating_add(1));
+        self.active_races.entry(race_id).or_insert(RaceRecord {
+            region,
+            participants,
+            start_time: time,
+        });
     }
 
     /// Records that a race has completed.
@@ -275,6 +282,16 @@ impl LoserDrainOracle {
     /// Records a task completion event.
     pub fn on_task_complete(&mut self, task: TaskId, time: Time) {
         self.task_completions.insert(task, time);
+    }
+
+    #[must_use]
+    pub(crate) fn has_observed_events(&self) -> bool {
+        self.next_race_id > 0
+            || !self.active_races.is_empty()
+            || !self.completed_races.is_empty()
+            || !self.unknown_completions.is_empty()
+            || !self.task_completions.is_empty()
+            || !self.runtime_violations.is_empty()
     }
 
     /// Verifies the invariant holds.
