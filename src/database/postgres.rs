@@ -3577,8 +3577,14 @@ impl PgConnection {
                 let _ = self.execute_unchecked(cx, "ROLLBACK").await;
                 return Outcome::Err(e);
             }
-            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
-            Outcome::Panicked(p) => return Outcome::Panicked(p),
+            Outcome::Cancelled(r) => {
+                let _ = self.execute_unchecked(cx, "ROLLBACK").await;
+                return Outcome::Cancelled(r);
+            }
+            Outcome::Panicked(p) => {
+                let _ = self.execute_unchecked(cx, "ROLLBACK").await;
+                return Outcome::Panicked(p);
+            }
         };
 
         match IsolationLevel::from_server_string(&observed_level) {
@@ -9155,6 +9161,48 @@ mod tests {
                     );
                 }
             }
+        });
+    }
+
+    /// br-asupersync-9g47af: regression test for transaction leak in begin_with_isolation
+    /// when verification query is cancelled. Ensures ROLLBACK is executed on cancellation
+    /// to prevent leaking open transactions.
+    #[test]
+    fn begin_with_isolation_rollback_on_cancel_verification() {
+        run(async {
+            let mut conn = make_test_connection();
+
+            // Create a pre-cancelled context to simulate cancellation during verification
+            let cx = Cx::new_for_test(
+                RegionId::new_for_test(1, 0),
+                TaskId::new_for_test(1, 0),
+                Budget::INFINITE,
+            );
+            cx.cancel(CancelReason::user("test cancellation"));
+
+            // Verify the context is already cancelled
+            assert!(
+                cx.checkpoint().is_err(),
+                "test context should be pre-cancelled"
+            );
+
+            // Attempt begin_with_isolation with pre-cancelled context
+            // This should fail with Cancelled after rolling back the transaction
+            let result = conn.begin_with_isolation(&cx, IsolationLevel::ReadCommitted, false).await;
+
+            // Should return Cancelled outcome
+            assert!(
+                matches!(result, Outcome::Cancelled(_)),
+                "begin_with_isolation should return Cancelled with pre-cancelled context"
+            );
+
+            // Most importantly: connection should NOT be in a transaction after the cancelled begin
+            // If the bug exists, the BEGIN would succeed but verification would fail with cancellation,
+            // leaving the connection in a transaction state without proper ROLLBACK
+            assert!(
+                !conn.in_transaction(),
+                "connection should not be in transaction state after cancelled begin_with_isolation"
+            );
         });
     }
 }
