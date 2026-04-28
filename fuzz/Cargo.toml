@@ -2623,3 +2623,14 @@ path = "fuzz_targets/distributed_snapshot_boundary.rs"
 test = false
 doc = false
 bench = false
+
+# br-asupersync-uz7ncr: Structure-aware fuzzer for RaptorQ decoder Gaussian elimination boundary conditions.
+# Tests specific mathematical boundary conditions in the Gaussian elimination process, focusing on
+# rank-deficient matrix configurations, pivot selection edge cases, and constraint matrix boundaries.
+# Complements existing raptorq_decoder_gauss_matrix.rs with focused low-level matrix operation testing.
+[[bin]]
+name = "raptorq_gauss_elimination_boundaries"
+path = "fuzz_targets/raptorq_gauss_elimination_boundaries.rs"
+test = false
+doc = false
+bench = false
