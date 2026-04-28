@@ -26,6 +26,7 @@ futures = "0.3"
 futures-util = "0.3"
 rustls = { version = "0.23.38", default-features = false, features = ["std", "ring", "tls12"] }
 rustls-pemfile = "2.2"
+opentelemetry-proto = { version = "0.31", default-features = false, features = ["gen-tonic-messages", "trace", "metrics", "logs"] }
 
 # For SCRAM-SHA-256 parsing
 base64 = "0.22"
@@ -1740,6 +1741,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "otel_otlp_request"
+path = "fuzz_targets/otel_otlp_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "postgres_bind_execute_sync"
 path = "fuzz_targets/postgres_bind_execute_sync.rs"
 test = false
@@ -2415,6 +2423,16 @@ bench = false
 [[bin]]
 name = "postgres_frame_decoder"
 path = "fuzz_targets/postgres_frame_decoder.rs"
+test = false
+doc = false
+bench = false
+
+# PostgreSQL ErrorResponse/NoticeResponse/ParameterStatus message family fuzzer.
+# Tests src/database/postgres.rs auth/error message parsing with structure-aware
+# input generation for field codes, SQLSTATE validation, and parameter handling.
+[[bin]]
+name = "postgres_auth_error_messages"
+path = "fuzz_targets/postgres_auth_error_messages.rs"
 test = false
 doc = false
 bench = false

@@ -5664,6 +5664,24 @@ pub fn fuzz_parse_parameter_description(data: &[u8]) -> Result<Vec<u32>, PgError
     PgConnection::parse_parameter_description(data)
 }
 
+/// Fuzz-target re-exporter for the ParameterStatus message parser.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_parse_parameter_status(data: &[u8]) -> Result<(), PgError> {
+    let (mut conn, _peer) = fuzz_test_connection_with_peer();
+    conn.handle_parameter_status(data)
+}
+
+/// Fuzz-target re-exporter for the NoticeResponse message parser.
+/// NoticeResponse has the same structure as ErrorResponse but is non-fatal.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_parse_notice_response(data: &[u8]) -> Result<PgError, PgError> {
+    let (conn, _peer) = fuzz_test_connection_with_peer();
+    // NoticeResponse uses the same structure as ErrorResponse
+    conn.parse_error_response(data)
+}
+
 #[cfg(test)]
 #[allow(
     clippy::approx_constant,

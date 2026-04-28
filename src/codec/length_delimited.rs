@@ -812,6 +812,86 @@ mod tests {
     }
 
     #[test]
+    fn builder_length_field_length_2_endianness_differential_matches_exact_wire_bytes() {
+        let payload = BytesMut::from(&b"data"[..]);
+
+        let mut be_encoded = BytesMut::new();
+        LengthDelimitedCodec::builder()
+            .length_field_length(2)
+            .new_codec()
+            .encode(payload.clone(), &mut be_encoded)
+            .expect("big-endian encode must succeed");
+        assert_eq!(
+            be_encoded.as_ref(),
+            b"\x00\x04data",
+            "tokio-style big-endian u16 framing must put the most-significant byte first",
+        );
+
+        let mut le_encoded = BytesMut::new();
+        LengthDelimitedCodec::builder()
+            .length_field_length(2)
+            .little_endian()
+            .new_codec()
+            .encode(payload, &mut le_encoded)
+            .expect("little-endian encode must succeed");
+        assert_eq!(
+            le_encoded.as_ref(),
+            b"\x04\x00data",
+            "tokio-style little-endian u16 framing must put the least-significant byte first",
+        );
+        assert_ne!(
+            be_encoded, le_encoded,
+            "endianness must produce distinct TCP byte streams for the same payload"
+        );
+
+        let mut be_decoder = LengthDelimitedCodec::builder()
+            .length_field_length(2)
+            .new_codec();
+        let be_frame = be_decoder
+            .decode(&mut be_encoded)
+            .expect("big-endian decode must succeed")
+            .expect("big-endian frame must be ready");
+        assert_eq!(be_frame.as_ref(), b"data");
+        assert!(be_encoded.is_empty());
+
+        let mut le_decoder = LengthDelimitedCodec::builder()
+            .length_field_length(2)
+            .little_endian()
+            .new_codec();
+        let le_frame = le_decoder
+            .decode(&mut le_encoded)
+            .expect("little-endian decode must succeed")
+            .expect("little-endian frame must be ready");
+        assert_eq!(le_frame.as_ref(), b"data");
+        assert!(le_encoded.is_empty());
+
+        let mut wrong_be = BytesMut::from(&b"\x04\x00data"[..]);
+        assert!(
+            LengthDelimitedCodec::builder()
+                .length_field_length(2)
+                .new_codec()
+                .decode(&mut wrong_be)
+                .expect("wrong-endian big-endian decode must not error")
+                .is_none(),
+            "big-endian decoder must leave a little-endian TCP stream incomplete instead of fabricating a frame",
+        );
+        assert_eq!(wrong_be.as_ref(), b"\x04\x00data");
+
+        let mut wrong_le = BytesMut::from(&b"\x00\x04data"[..]);
+        assert!(
+            LengthDelimitedCodec::builder()
+                .length_field_length(2)
+                .little_endian()
+                .new_codec()
+                .decode(&mut wrong_le)
+                .expect("wrong-endian little-endian decode must not error")
+                .is_none(),
+            "little-endian decoder must leave a big-endian TCP stream incomplete instead of fabricating a frame",
+        );
+        assert_eq!(wrong_le.as_ref(), b"\x00\x04data");
+    }
+
+    #[test]
     fn builder_length_field_offset() {
         let mut codec = LengthDelimitedCodec::builder()
             .length_field_offset(2)
