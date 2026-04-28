@@ -25,6 +25,7 @@ use asupersync::raptorq::gf256::{
     gf256_addmul_slices2, gf256_mul_slice, gf256_mul_slices2, gf256_profile_pack_manifest_snapshot,
 };
 use asupersync::raptorq::linalg::{DenseRow, GaussianSolver, row_scale_add, row_xor};
+use asupersync::raptorq::rfc6330::repair_indices_for_esi;
 use asupersync::raptorq::systematic::SystematicEncoder;
 
 const TRACK_E_ARTIFACT_PATH: &str = "artifacts/raptorq_track_e_gf256_bench_v1.json";
@@ -1892,6 +1893,57 @@ fn bench_decoder_dense_state(c: &mut Criterion) {
     group.finish();
 }
 
+fn legacy_repair_symbol_allocating_columns(encoder: &SystematicEncoder, esi: u32) -> Vec<u8> {
+    let params = encoder.params();
+    let mut buf = vec![0u8; params.symbol_size];
+    let padding_delta = u32::try_from(params.k_prime - params.k)
+        .expect("RFC systematic padding delta must fit in u32");
+    let repair_isi = esi
+        .checked_add(padding_delta)
+        .expect("repair ESI overflow in benchmark");
+    let columns = repair_indices_for_esi(params.j, params.w, params.p, repair_isi);
+    for column in columns {
+        gf256_add_slice(&mut buf, encoder.intermediate_symbol(column));
+    }
+    buf
+}
+
+fn bench_systematic_encoder_hot_paths(c: &mut Criterion) {
+    let mut group = c.benchmark_group("systematic_encoder_hot_paths");
+    group.sample_size(20);
+    group.warm_up_time(std::time::Duration::from_millis(20));
+    group.measurement_time(std::time::Duration::from_millis(80));
+
+    let k = 32usize;
+    let symbol_size = 1024usize;
+    let seed = 0x51A7_E001u64;
+    let source = build_decode_source(k, symbol_size, seed);
+    let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+    let repair_esi = k as u32 + 17;
+
+    let legacy = legacy_repair_symbol_allocating_columns(&encoder, repair_esi);
+    let direct = encoder.repair_symbol(repair_esi);
+    assert_eq!(
+        legacy, direct,
+        "benchmark baseline must match optimized path"
+    );
+
+    group.throughput(Throughput::Bytes(symbol_size as u64));
+    group.bench_function("repair_symbol_allocating_columns", |b| {
+        b.iter(|| {
+            std::hint::black_box(legacy_repair_symbol_allocating_columns(
+                &encoder,
+                std::hint::black_box(repair_esi),
+            ))
+        });
+    });
+    group.bench_function("repair_symbol_direct_tuple", |b| {
+        b.iter(|| std::hint::black_box(encoder.repair_symbol(std::hint::black_box(repair_esi))));
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_gf256_primitives,
@@ -1902,6 +1954,7 @@ criterion_group!(
     bench_repair_campaign,
     bench_decoder_microbench,
     bench_decoder_dense_state,
+    bench_systematic_encoder_hot_paths,
 );
 
 criterion_main!(benches);
