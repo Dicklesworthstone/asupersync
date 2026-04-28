@@ -8088,9 +8088,9 @@ mod tests {
             columns: vec![],
         };
 
-        assert_user_cancelled(run(conn.query(&cx, "SELECT 1")));
+        assert_user_cancelled(run(conn.query_unchecked(&cx, "SELECT 1")));
         assert_user_cancelled(run(conn.query_one(&cx, "SELECT 1")));
-        assert_user_cancelled(run(conn.execute(&cx, "SELECT 1")));
+        assert_user_cancelled(run(conn.execute_unchecked(&cx, "SELECT 1")));
         assert_user_cancelled(run(conn.query_params(&cx, "SELECT $1", &params)));
         assert_user_cancelled(run(conn.query_one_params(&cx, "SELECT $1", &params)));
         assert_user_cancelled(run(conn.execute_params(&cx, "SELECT $1", &params)));
@@ -8289,7 +8289,7 @@ mod tests {
         std::io::Write::write_all(&mut peer, &ready_for_query(b'I')).unwrap();
 
         let cx = crate::cx::Cx::for_testing();
-        match run(conn.query(&cx, "SELECT 1")) {
+        match run(conn.query_unchecked(&cx, "SELECT 1")) {
             Outcome::Err(PgError::Protocol(msg)) => {
                 assert!(msg.contains("DataRow before RowDescription"), "got: {msg}");
             }
@@ -8308,7 +8308,7 @@ mod tests {
         std::io::Write::write_all(&mut peer, &ready_for_query(b'I')).unwrap();
 
         let cx = crate::cx::Cx::for_testing();
-        match run(conn.query(&cx, "SELECT 1")) {
+        match run(conn.query_unchecked(&cx, "SELECT 1")) {
             Outcome::Ok(rows) => assert!(rows.is_empty(), "unexpected rows: {rows:?}"),
             other => panic!("expected successful query, got {other:?}"),
         }
@@ -8324,7 +8324,7 @@ mod tests {
         std::io::Write::write_all(&mut peer, &ready_for_query(b'I')).unwrap();
 
         let cx = crate::cx::Cx::for_testing();
-        match run(conn.execute(&cx, "SET application_name = 'asupersync-test'")) {
+        match run(conn.execute_unchecked(&cx, "SET application_name = 'asupersync-test'")) {
             Outcome::Ok(affected) => assert_eq!(affected, 0),
             other => panic!("expected successful execute, got {other:?}"),
         }
@@ -8341,7 +8341,7 @@ mod tests {
         std::io::Write::write_all(&mut peer, &ready_for_query(b'I')).unwrap();
 
         let cx = crate::cx::Cx::for_testing();
-        match run(conn.execute(&cx, "SELECT 1")) {
+        match run(conn.execute_unchecked(&cx, "SELECT 1")) {
             Outcome::Err(PgError::Protocol(msg)) => {
                 assert!(msg.contains("execute()"), "got: {msg}");
                 assert!(msg.contains("query()"), "got: {msg}");
@@ -9218,8 +9218,6 @@ mod tests {
     /// failure counters or mark connection unhealthy.
     #[test]
     fn deallocate_caller_cancellation_not_backend_failure() {
-        use crate::types::CancelReason;
-
         run(async {
             let mut conn = make_test_connection();
 
@@ -9234,7 +9232,7 @@ mod tests {
                 TaskId::new_for_test(1, 0),
                 Budget::INFINITE,
             );
-            cx.cancel(CancelReason::user("pre-cancelled for test"));
+            cx.cancel_fast(CancelKind::User);
 
             // Verify the context is already cancelled
             assert!(
@@ -9352,7 +9350,7 @@ mod tests {
                 TaskId::new_for_test(1, 0),
                 Budget::INFINITE,
             );
-            cx.cancel(CancelReason::user("test cancellation"));
+            cx.cancel_fast(CancelKind::User);
 
             // Verify the context is already cancelled
             assert!(
