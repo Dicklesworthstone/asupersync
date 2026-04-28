@@ -34,6 +34,7 @@ pub mod h1_ows_normalization;
 pub mod h1_protocol;
 pub mod h1_request_target;
 pub mod h1_rfc9112;
+pub mod h1_trailer_restrictions;
 pub mod h2_alpn_negotiation_rfc7540;
 pub mod h2_connect;
 pub mod h2_must_reject_vectors;
@@ -919,9 +920,7 @@ pub fn run_all_conformance_tests() -> Vec<ConformanceTestResult> {
                 postgres_extended_query::TestCategory::StatementLifecycle => {
                     TestCategory::StateMachine
                 }
-                postgres_extended_query::TestCategory::ErrorRecovery => {
-                    TestCategory::ErrorHandling
-                }
+                postgres_extended_query::TestCategory::ErrorRecovery => TestCategory::ErrorHandling,
                 postgres_extended_query::TestCategory::RowDescriptionMetadata => {
                     TestCategory::MessageEncoding
                 }
