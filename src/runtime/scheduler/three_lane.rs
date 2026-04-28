@@ -2803,10 +2803,17 @@ impl ThreeLaneWorker {
             self.preemption_metrics.adaptive_e_value = policy.e_value();
         }
 
-        if let Some(_reward) = reward {
+        if let Some(reward_value) = reward {
+            // Log the unwrapped f64 directly. The previous form was
+            // `if let Some(_reward) = reward { trace!(reward = reward, ...) }`
+            // which bound `_reward` but referenced the outer `Option<f64>` —
+            // so the emitted field went through tracing's `Value` impl for
+            // `Option<T>` rather than for `f64`, leaving the rendering
+            // dependent on which adapter is active and producing a
+            // `Some(...)`-shaped value when fallbacks pick the Debug path.
             trace!(
                 worker_id = self.id,
-                reward = reward,
+                reward = reward_value,
                 adaptive_limit = self.preemption_metrics.adaptive_current_limit,
                 adaptive_epochs = self.preemption_metrics.adaptive_epochs,
                 adaptive_e_value = self.preemption_metrics.adaptive_e_value,
