@@ -685,6 +685,46 @@ mod tests {
     }
 
     #[test]
+    fn test_grpc_go_max_receive_boundary_accepts_exact_limit_then_rejects_next_byte() {
+        init_test("test_grpc_go_max_receive_boundary_accepts_exact_limit_then_rejects_next_byte");
+
+        let mut codec = FramedCodec::with_message_size_limits(IdentityCodec, 64, 5);
+        let mut producer = GrpcCodec::new();
+        let mut buf = BytesMut::new();
+
+        producer
+            .encode(GrpcMessage::new(Bytes::from_static(b"12345")), &mut buf)
+            .expect("exact-limit frame should encode");
+        producer
+            .encode(GrpcMessage::new(Bytes::from_static(b"123456")), &mut buf)
+            .expect("oversize frame should encode for receive-side test");
+
+        let first = codec
+            .decode_message(&mut buf)
+            .expect("grpc-go accepts a frame exactly at max receive size")
+            .expect("first frame should decode");
+        crate::assert_with_log!(
+            first == Bytes::from_static(b"12345"),
+            "exact-limit frame decodes",
+            Bytes::from_static(b"12345"),
+            first
+        );
+
+        let second = codec.decode_message(&mut buf);
+        let over_limit = matches!(second, Err(GrpcError::MessageTooLarge));
+        crate::assert_with_log!(
+            over_limit,
+            "grpc-go rejects limit-plus-one receive frame",
+            true,
+            over_limit
+        );
+
+        crate::test_complete!(
+            "test_grpc_go_max_receive_boundary_accepts_exact_limit_then_rejects_next_byte"
+        );
+    }
+
+    #[test]
     fn test_grpc_codec_partial_header() {
         init_test("test_grpc_codec_partial_header");
         let mut codec = GrpcCodec::new();
