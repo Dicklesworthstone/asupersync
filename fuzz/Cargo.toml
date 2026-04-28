@@ -1595,6 +1595,17 @@ test = false
 doc = false
 bench = false
 
+# br-asupersync-17dwef — dedicated HPACK literal-header Huffman harness.
+# Builds valid single-header literal blocks first, then mutates length and
+# tail-byte structure so fuzzing reaches successful Huffman decode paths and
+# malformed literal-header edges through the same seam.
+[[bin]]
+name = "hpack_huffman_literal_headers"
+path = "fuzz_targets/hpack_huffman_literal_headers.rs"
+test = false
+doc = false
+bench = false
+
 [[bin]]
 name = "web_extract"
 path = "fuzz_targets/web_extract.rs"
