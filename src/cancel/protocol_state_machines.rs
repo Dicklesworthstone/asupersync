@@ -340,6 +340,7 @@ impl CancelStateMachine for RegionStateMachine {
             }
 
             // Cancelling state transitions
+            (state @ RegionState::Cancelling { .. }, RegionEvent::Cancel { .. }) => state.clone(),
             (
                 RegionState::Cancelling {
                     draining_tasks,
@@ -417,6 +418,9 @@ impl CancelStateMachine for RegionStateMachine {
                 }
             }
 
+            (state @ RegionState::Finalizing { .. }, RegionEvent::Cancel { .. }) => state.clone(),
+            (state @ RegionState::Finalized, RegionEvent::Cancel { .. }) => state.clone(),
+
             // Terminal states - no transitions allowed
             (RegionState::Finalized, _) => {
                 return TransitionResult::Invalid {
@@ -487,11 +491,23 @@ impl CancelStateMachine for RegionStateMachine {
                 },
                 RegionEvent::RequestClose,
             ],
-            RegionState::Cancelling { .. } => {
-                vec![RegionEvent::TaskDrained, RegionEvent::FinalizerStarted]
-            }
-            RegionState::Finalizing { .. } => vec![RegionEvent::FinalizerCompleted],
-            RegionState::Finalized | RegionState::Error { .. } => vec![],
+            RegionState::Cancelling { .. } => vec![
+                RegionEvent::TaskDrained,
+                RegionEvent::FinalizerStarted,
+                RegionEvent::Cancel {
+                    reason: "example".to_string(),
+                },
+            ],
+            RegionState::Finalizing { .. } => vec![
+                RegionEvent::FinalizerCompleted,
+                RegionEvent::Cancel {
+                    reason: "example".to_string(),
+                },
+            ],
+            RegionState::Finalized => vec![RegionEvent::Cancel {
+                reason: "example".to_string(),
+            }],
+            RegionState::Error { .. } => vec![],
         }
     }
 
@@ -644,6 +660,12 @@ impl CancelStateMachine for TaskStateMachine {
                 message: message.clone(),
             },
 
+            // Repeated cancellation is a no-op once the task is already draining/cancelled.
+            (
+                state @ (TaskState::CancelRequested | TaskState::Draining | TaskState::Cancelled),
+                TaskEvent::RequestCancel,
+            ) => state.clone(),
+
             // CancelRequested -> Draining (task acknowledges cancel and starts cleanup)
             (TaskState::CancelRequested, TaskEvent::DrainComplete) => TaskState::Cancelled,
 
@@ -706,10 +728,13 @@ impl CancelStateMachine for TaskStateMachine {
             ],
             TaskState::CancelRequested => vec![
                 TaskEvent::DrainComplete,
+                TaskEvent::RequestCancel,
                 TaskEvent::Panic {
                     message: "example".to_string(),
                 },
             ],
+            TaskState::Draining => vec![TaskEvent::RequestCancel],
+            TaskState::Cancelled => vec![TaskEvent::RequestCancel],
             _ => vec![],
         }
     }
@@ -1069,6 +1094,8 @@ impl CancelStateMachine for ChannelStateMachine {
                     }
                 }
             }
+            (state @ ChannelState::Closing { .. }, ChannelEvent::InitiateClose) => state.clone(),
+            (state @ ChannelState::Closed, ChannelEvent::InitiateClose) => state.clone(),
 
             // Closing state transitions
             (ChannelState::Closing { draining_ops }, ChannelEvent::OperationCompleted) => {
@@ -1141,8 +1168,10 @@ impl CancelStateMachine for ChannelStateMachine {
             ChannelState::Closing { .. } => vec![
                 ChannelEvent::OperationCompleted,
                 ChannelEvent::AllOperationsDrained,
+                ChannelEvent::InitiateClose,
             ],
-            _ => vec![],
+            ChannelState::Closed => vec![ChannelEvent::InitiateClose],
+            ChannelState::Error { .. } => vec![],
         }
     }
 
@@ -1271,6 +1300,7 @@ impl CancelStateMachine for IoStateMachine {
             (IoState::Pending { .. }, IoEvent::IoError { error }) => IoState::Error {
                 io_error: error.clone(),
             },
+            (state @ (IoState::Cancelled | IoState::Cleanup), IoEvent::Cancel) => state.clone(),
 
             // Cancelled -> Cleanup
             (IoState::Cancelled, IoEvent::CleanupComplete) => IoState::Cleanup,
@@ -1317,7 +1347,8 @@ impl CancelStateMachine for IoStateMachine {
                     error: "example".to_string(),
                 },
             ],
-            IoState::Cancelled => vec![IoEvent::CleanupComplete],
+            IoState::Cancelled => vec![IoEvent::CleanupComplete, IoEvent::Cancel],
+            IoState::Cleanup => vec![IoEvent::Cancel],
             _ => vec![],
         }
     }
@@ -1446,6 +1477,7 @@ impl CancelStateMachine for TimerStateMachine {
             (TimerState::Scheduled { .. }, TimerEvent::TimerError { error }) => TimerState::Error {
                 violation: error.clone(),
             },
+            (state @ TimerState::Cancelled, TimerEvent::Cancel) => state.clone(),
 
             // Terminal states - no transitions
             (TimerState::Cancelled | TimerState::Fired | TimerState::Error { .. }, _) => {
@@ -1477,6 +1509,7 @@ impl CancelStateMachine for TimerStateMachine {
                     error: "example".to_string(),
                 },
             ],
+            TimerState::Cancelled => vec![TimerEvent::Cancel],
             _ => vec![],
         }
     }
@@ -1822,6 +1855,429 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use proptest::prelude::*;
+
+    fn region_context(region_id: RegionId) -> RegionContext {
+        RegionContext {
+            region_id,
+            parent_region: None,
+            created_at: Time::ZERO,
+            validation_level: ValidationLevel::Full,
+        }
+    }
+
+    fn task_context(task_id: TaskId, region_id: RegionId) -> TaskContext {
+        TaskContext {
+            task_id,
+            region_id,
+            spawned_at: Time::ZERO,
+            validation_level: ValidationLevel::Full,
+        }
+    }
+
+    fn channel_context(channel_id: u64) -> ChannelContext {
+        ChannelContext {
+            channel_id,
+            validation_level: ValidationLevel::Full,
+        }
+    }
+
+    fn io_context(operation_id: u64, operation_type: &str) -> IoContext {
+        IoContext {
+            operation_id,
+            operation_type: operation_type.to_string(),
+            validation_level: ValidationLevel::Full,
+        }
+    }
+
+    fn timer_context(timer_id: u64, current_time: Time) -> TimerContext {
+        TimerContext {
+            timer_id,
+            current_time,
+            validation_level: ValidationLevel::Full,
+        }
+    }
+
+    fn prime_region_for_cancel(
+        machine: &mut RegionStateMachine,
+        context: &RegionContext,
+        active_tasks: u8,
+        pending_finalizers: u8,
+    ) {
+        machine.transition(RegionEvent::Activate, context).unwrap();
+        for _ in 0..active_tasks {
+            machine
+                .transition(RegionEvent::TaskSpawned, context)
+                .unwrap();
+        }
+        for _ in 0..pending_finalizers {
+            machine
+                .transition(RegionEvent::FinalizerRegistered, context)
+                .unwrap();
+        }
+    }
+
+    fn drive_region_cancel_projection(machine: &mut RegionStateMachine, context: &RegionContext) {
+        loop {
+            match machine.current_state().clone() {
+                RegionState::Cancelling {
+                    draining_tasks: 0,
+                    pending_finalizers: 0,
+                    ..
+                }
+                | RegionState::Finalized => break,
+                RegionState::Cancelling {
+                    draining_tasks: 0,
+                    pending_finalizers: _,
+                    ..
+                } => machine
+                    .transition(RegionEvent::FinalizerStarted, context)
+                    .unwrap(),
+                RegionState::Cancelling {
+                    draining_tasks: _,
+                    pending_finalizers: _,
+                    ..
+                } => machine
+                    .transition(RegionEvent::TaskDrained, context)
+                    .unwrap(),
+                RegionState::Finalizing {
+                    running_finalizers: _,
+                } => machine
+                    .transition(RegionEvent::FinalizerCompleted, context)
+                    .unwrap(),
+                state => {
+                    panic!("unexpected region state while driving cancel projection: {state:?}")
+                }
+            }
+        }
+    }
+
+    fn prime_channel_for_close(
+        machine: &mut ChannelStateMachine,
+        context: &ChannelContext,
+        pending_ops: u8,
+    ) {
+        for _ in 0..pending_ops {
+            machine
+                .transition(ChannelEvent::OperationStarted, context)
+                .unwrap();
+        }
+    }
+
+    fn drive_channel_close_projection(machine: &mut ChannelStateMachine, context: &ChannelContext) {
+        while let ChannelState::Closing { .. } = machine.current_state() {
+            machine
+                .transition(ChannelEvent::OperationCompleted, context)
+                .unwrap();
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn metamorphic_cancel_then_cancel_is_identity_on_cancel_projection(
+            active_tasks in 0u8..4,
+            pending_finalizers in 0u8..4,
+            task_started in any::<bool>(),
+            channel_pending in 0u8..4,
+        ) {
+            prop_assume!(active_tasks > 0 || pending_finalizers > 0);
+
+            let region_id = RegionId::new_for_test(101, 0);
+            let region_context = region_context(region_id);
+            let mut region_once = RegionStateMachine::new(region_id, ValidationLevel::Full);
+            let mut region_twice = RegionStateMachine::new(region_id, ValidationLevel::Full);
+            prime_region_for_cancel(&mut region_once, &region_context, active_tasks, pending_finalizers);
+            prime_region_for_cancel(&mut region_twice, &region_context, active_tasks, pending_finalizers);
+            let region_once_cancel = region_once.transition(
+                RegionEvent::Cancel {
+                    reason: "first".to_string(),
+                },
+                &region_context,
+            );
+            prop_assert!(region_once_cancel.is_valid());
+            let region_twice_first_cancel = region_twice.transition(
+                RegionEvent::Cancel {
+                    reason: "first".to_string(),
+                },
+                &region_context,
+            );
+            prop_assert!(region_twice_first_cancel.is_valid());
+            let region_after_first = region_twice.current_state().clone();
+            let region_twice_second_cancel = region_twice.transition(
+                RegionEvent::Cancel {
+                    reason: "second".to_string(),
+                },
+                &region_context,
+            );
+            prop_assert!(region_twice_second_cancel.is_valid());
+            prop_assert_eq!(
+                region_once.current_state().clone(),
+                region_after_first.clone()
+            );
+            prop_assert_eq!(region_twice.current_state().clone(), region_after_first);
+            drive_region_cancel_projection(&mut region_once, &region_context);
+            drive_region_cancel_projection(&mut region_twice, &region_context);
+            prop_assert_eq!(region_once.current_state().clone(), region_twice.current_state().clone());
+
+            let task_id = TaskId::new_for_test(202, 0);
+            let task_context = task_context(task_id, region_id);
+            let mut task_once = TaskStateMachine::new(task_id, region_id, ValidationLevel::Full);
+            let mut task_twice = TaskStateMachine::new(task_id, region_id, ValidationLevel::Full);
+            if task_started {
+                let task_once_start = task_once.transition(TaskEvent::Start, &task_context);
+                prop_assert!(task_once_start.is_valid());
+                let task_twice_start = task_twice.transition(TaskEvent::Start, &task_context);
+                prop_assert!(task_twice_start.is_valid());
+            }
+            let task_once_cancel = task_once.transition(TaskEvent::RequestCancel, &task_context);
+            prop_assert!(task_once_cancel.is_valid());
+            let task_twice_cancel = task_twice.transition(TaskEvent::RequestCancel, &task_context);
+            prop_assert!(task_twice_cancel.is_valid());
+            let task_after_first = task_twice.current_state().clone();
+            let task_twice_second_cancel =
+                task_twice.transition(TaskEvent::RequestCancel, &task_context);
+            prop_assert!(task_twice_second_cancel.is_valid());
+            prop_assert_eq!(
+                task_once.current_state().clone(),
+                task_after_first.clone()
+            );
+            prop_assert_eq!(task_twice.current_state().clone(), task_after_first);
+            if matches!(task_once.current_state(), TaskState::CancelRequested) {
+                let task_once_drain = task_once.transition(TaskEvent::DrainComplete, &task_context);
+                prop_assert!(task_once_drain.is_valid());
+                let task_twice_drain =
+                    task_twice.transition(TaskEvent::DrainComplete, &task_context);
+                prop_assert!(task_twice_drain.is_valid());
+            }
+            prop_assert_eq!(task_once.current_state().clone(), task_twice.current_state().clone());
+
+            let channel_id = 303;
+            let channel_context = channel_context(channel_id);
+            let mut channel_once = ChannelStateMachine::new(channel_id, ValidationLevel::Full);
+            let mut channel_twice = ChannelStateMachine::new(channel_id, ValidationLevel::Full);
+            prime_channel_for_close(&mut channel_once, &channel_context, channel_pending);
+            prime_channel_for_close(&mut channel_twice, &channel_context, channel_pending);
+            let channel_once_close =
+                channel_once.transition(ChannelEvent::InitiateClose, &channel_context);
+            prop_assert!(channel_once_close.is_valid());
+            let channel_twice_close =
+                channel_twice.transition(ChannelEvent::InitiateClose, &channel_context);
+            prop_assert!(channel_twice_close.is_valid());
+            let channel_after_first = channel_twice.current_state().clone();
+            let channel_twice_second_close =
+                channel_twice.transition(ChannelEvent::InitiateClose, &channel_context);
+            prop_assert!(channel_twice_second_close.is_valid());
+            prop_assert_eq!(
+                channel_once.current_state().clone(),
+                channel_after_first.clone()
+            );
+            prop_assert_eq!(channel_twice.current_state().clone(), channel_after_first);
+            drive_channel_close_projection(&mut channel_once, &channel_context);
+            drive_channel_close_projection(&mut channel_twice, &channel_context);
+            prop_assert_eq!(channel_once.current_state().clone(), channel_twice.current_state().clone());
+
+            let io_context = io_context(404, "read");
+            let mut io_once = IoStateMachine::new(404, 7, ValidationLevel::Full);
+            let mut io_twice = IoStateMachine::new(404, 7, ValidationLevel::Full);
+            let io_once_cancel = io_once.transition(IoEvent::Cancel, &io_context);
+            prop_assert!(io_once_cancel.is_valid());
+            let io_twice_cancel = io_twice.transition(IoEvent::Cancel, &io_context);
+            prop_assert!(io_twice_cancel.is_valid());
+            let io_after_first = io_twice.current_state().clone();
+            let io_twice_second_cancel = io_twice.transition(IoEvent::Cancel, &io_context);
+            prop_assert!(io_twice_second_cancel.is_valid());
+            prop_assert_eq!(io_once.current_state().clone(), io_after_first.clone());
+            prop_assert_eq!(io_twice.current_state().clone(), io_after_first);
+            let io_once_cleanup = io_once.transition(IoEvent::CleanupComplete, &io_context);
+            prop_assert!(io_once_cleanup.is_valid());
+            let io_twice_cleanup = io_twice.transition(IoEvent::CleanupComplete, &io_context);
+            prop_assert!(io_twice_cleanup.is_valid());
+            prop_assert_eq!(io_once.current_state().clone(), io_twice.current_state().clone());
+
+            let timer_context = timer_context(505, Time::ZERO);
+            let mut timer_once =
+                TimerStateMachine::new(505, Time::from_nanos(5), ValidationLevel::Full);
+            let mut timer_twice =
+                TimerStateMachine::new(505, Time::from_nanos(5), ValidationLevel::Full);
+            let timer_once_cancel = timer_once.transition(TimerEvent::Cancel, &timer_context);
+            prop_assert!(timer_once_cancel.is_valid());
+            let timer_twice_cancel = timer_twice.transition(TimerEvent::Cancel, &timer_context);
+            prop_assert!(timer_twice_cancel.is_valid());
+            let timer_after_first = timer_twice.current_state().clone();
+            let timer_twice_second_cancel =
+                timer_twice.transition(TimerEvent::Cancel, &timer_context);
+            prop_assert!(timer_twice_second_cancel.is_valid());
+            prop_assert_eq!(
+                timer_once.current_state().clone(),
+                timer_after_first.clone()
+            );
+            prop_assert_eq!(timer_twice.current_state().clone(), timer_after_first);
+        }
+    }
+
+    #[test]
+    fn validator_repeated_cancel_requests_do_not_increment_violation_count() {
+        let mut validator = CancelProtocolValidator::new(ValidationLevel::Full);
+        let region_id = RegionId::new_for_test(901, 0);
+        let task_id = TaskId::new_for_test(902, 0);
+        let channel_id = 903;
+        let operation_id = 904;
+        let timer_id = 905;
+
+        validator.register_region(region_id);
+        validator.register_task(task_id, region_id);
+        validator.register_channel(channel_id);
+        validator.register_io_operation(operation_id, 7);
+        validator.register_timer(timer_id, Time::from_nanos(5));
+
+        let region_context = region_context(region_id);
+        let task_context = task_context(task_id, region_id);
+        let channel_context = channel_context(channel_id);
+        let io_context = io_context(operation_id, "read");
+        let timer_context = timer_context(timer_id, Time::ZERO);
+
+        validator
+            .validate_region_transition(region_id, RegionEvent::Activate, &region_context)
+            .unwrap();
+        validator
+            .validate_region_transition(region_id, RegionEvent::TaskSpawned, &region_context)
+            .unwrap();
+        validator
+            .validate_region_transition(
+                region_id,
+                RegionEvent::FinalizerRegistered,
+                &region_context,
+            )
+            .unwrap();
+        validator
+            .validate_task_transition(task_id, TaskEvent::Start, &task_context)
+            .unwrap();
+        validator
+            .validate_channel_transition(
+                channel_id,
+                ChannelEvent::OperationStarted,
+                &channel_context,
+            )
+            .unwrap();
+
+        validator
+            .validate_region_transition(
+                region_id,
+                RegionEvent::Cancel {
+                    reason: "first".to_string(),
+                },
+                &region_context,
+            )
+            .unwrap();
+        validator
+            .validate_task_transition(task_id, TaskEvent::RequestCancel, &task_context)
+            .unwrap();
+        validator
+            .validate_channel_transition(channel_id, ChannelEvent::InitiateClose, &channel_context)
+            .unwrap();
+        validator
+            .validate_io_transition(operation_id, IoEvent::Cancel, &io_context)
+            .unwrap();
+        validator
+            .validate_timer_transition(timer_id, TimerEvent::Cancel, &timer_context)
+            .unwrap();
+
+        let baseline_violations = validator.violation_count();
+        let baseline_region = validator
+            .region_machines
+            .get(&region_id)
+            .expect("region machine")
+            .current_state()
+            .clone();
+        let baseline_task = validator
+            .task_machines
+            .get(&task_id)
+            .expect("task machine")
+            .current_state()
+            .clone();
+        let baseline_channel = validator
+            .channel_machines
+            .get(&channel_id)
+            .expect("channel machine")
+            .current_state()
+            .clone();
+        let baseline_io = validator
+            .io_machines
+            .get(&operation_id)
+            .expect("io machine")
+            .current_state()
+            .clone();
+        let baseline_timer = validator
+            .timer_machines
+            .get(&timer_id)
+            .expect("timer machine")
+            .current_state()
+            .clone();
+
+        validator
+            .validate_region_transition(
+                region_id,
+                RegionEvent::Cancel {
+                    reason: "second".to_string(),
+                },
+                &region_context,
+            )
+            .unwrap();
+        validator
+            .validate_task_transition(task_id, TaskEvent::RequestCancel, &task_context)
+            .unwrap();
+        validator
+            .validate_channel_transition(channel_id, ChannelEvent::InitiateClose, &channel_context)
+            .unwrap();
+        validator
+            .validate_io_transition(operation_id, IoEvent::Cancel, &io_context)
+            .unwrap();
+        validator
+            .validate_timer_transition(timer_id, TimerEvent::Cancel, &timer_context)
+            .unwrap();
+
+        assert_eq!(validator.violation_count(), baseline_violations);
+        assert_eq!(
+            validator
+                .region_machines
+                .get(&region_id)
+                .expect("region machine")
+                .current_state(),
+            &baseline_region
+        );
+        assert_eq!(
+            validator
+                .task_machines
+                .get(&task_id)
+                .expect("task machine")
+                .current_state(),
+            &baseline_task
+        );
+        assert_eq!(
+            validator
+                .channel_machines
+                .get(&channel_id)
+                .expect("channel machine")
+                .current_state(),
+            &baseline_channel
+        );
+        assert_eq!(
+            validator
+                .io_machines
+                .get(&operation_id)
+                .expect("io machine")
+                .current_state(),
+            &baseline_io
+        );
+        assert_eq!(
+            validator
+                .timer_machines
+                .get(&timer_id)
+                .expect("timer machine")
+                .current_state(),
+            &baseline_timer
+        );
+    }
 
     #[test]
     fn test_region_is_quiesced() {
