@@ -104,6 +104,7 @@ pub mod policy;
 pub mod privacy;
 pub mod protocol;
 pub mod redis;
+pub mod resp3_nested_conformance;
 #[cfg(feature = "messaging-fabric")]
 pub mod service;
 #[cfg(feature = "messaging-fabric")]
