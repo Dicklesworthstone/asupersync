@@ -25,41 +25,57 @@ fn vector_basic_attenuation_chain() {
     let root_token = MacaroonToken::mint(&root_key, "data:read", "service/data-api");
 
     // Step 2: Holder attenuates with time-based caveat (no root key needed)
-    let time_attenuated = root_token.clone().add_caveat(CaveatPredicate::TimeBefore(10_000));
+    let time_attenuated = root_token
+        .clone()
+        .add_caveat(CaveatPredicate::TimeBefore(10_000));
 
     // Step 3: Further attenuation with resource scope restriction
-    let resource_attenuated = time_attenuated.clone()
+    let resource_attenuated = time_attenuated
+        .clone()
         .add_caveat(CaveatPredicate::ResourceScope("/api/users/*".into()));
 
     // Step 4: Add third-party caveat for authentication check
-    let with_third_party = resource_attenuated.clone()
-        .add_third_party_caveat("auth.example.com", "user:alice", &third_party_key);
+    let with_third_party = resource_attenuated.clone().add_third_party_caveat(
+        "auth.example.com",
+        "user:alice",
+        &third_party_key,
+    );
 
     // Step 5: Third-party authority mints discharge with own restrictions
     let discharge = MacaroonToken::mint(&third_party_key, "user:alice", "auth.example.com")
         .add_caveat(CaveatPredicate::MaxUses(5));
 
     // Step 6: Holder binds discharge to authorizing token
-    let bound_discharge = with_third_party.bind_for_request(&discharge)
+    let bound_discharge = with_third_party
+        .bind_for_request(&discharge)
         .expect("discharge binding should succeed");
 
     // Step 7: Verification context satisfies all caveats
     let ctx = VerificationContext::new()
-        .with_time(5_000)  // Before 10,000 deadline
-        .with_resource("/api/users/123")  // Matches pattern
-        .with_use_count(3);  // Under 5 uses limit
+        .with_time(5_000) // Before 10,000 deadline
+        .with_resource("/api/users/123") // Matches pattern
+        .with_use_count(3); // Under 5 uses limit
 
     // Step 8: End-to-end verification succeeds
-    let verification_result = with_third_party
-        .verify_with_discharges(&root_key, &ctx, &[bound_discharge]);
+    let verification_result =
+        with_third_party.verify_with_discharges(&root_key, &ctx, &[bound_discharge]);
 
-    assert!(verification_result.is_ok(), "Attenuation chain should verify successfully");
+    assert!(
+        verification_result.is_ok(),
+        "Attenuation chain should verify successfully"
+    );
 
     // Freeze binary representations for conformance
     insta::assert_debug_snapshot!("basic_attenuation_root", root_token.to_binary());
     insta::assert_debug_snapshot!("basic_attenuation_time", time_attenuated.to_binary());
-    insta::assert_debug_snapshot!("basic_attenuation_resource", resource_attenuated.to_binary());
-    insta::assert_debug_snapshot!("basic_attenuation_third_party", with_third_party.to_binary());
+    insta::assert_debug_snapshot!(
+        "basic_attenuation_resource",
+        resource_attenuated.to_binary()
+    );
+    insta::assert_debug_snapshot!(
+        "basic_attenuation_third_party",
+        with_third_party.to_binary()
+    );
     insta::assert_debug_snapshot!("basic_attenuation_discharge", discharge.to_binary());
 }
 
@@ -79,33 +95,46 @@ fn vector_multi_third_party_sequence() {
 
     // Auth service issues discharge with time restriction
     let auth_discharge = MacaroonToken::mint(&auth_key, "deploy:permissions", "auth.corp.com")
-        .add_caveat(CaveatPredicate::TimeBefore(86_400_000));  // 24 hours
+        .add_caveat(CaveatPredicate::TimeBefore(86_400_000)); // 24 hours
 
     // Audit service issues discharge with approval ID
-    let audit_discharge = MacaroonToken::mint(&audit_key, "deploy:approval", "audit.corp.com")
-        .add_caveat(CaveatPredicate::Custom("approval_id".into(), "DEPLOY-2024-001".into()));
+    let audit_discharge =
+        MacaroonToken::mint(&audit_key, "deploy:approval", "audit.corp.com").add_caveat(
+            CaveatPredicate::Custom("approval_id".into(), "DEPLOY-2024-001".into()),
+        );
 
     // Both discharges bind to the root token (not each other)
-    let bound_auth = token.bind_for_request(&auth_discharge)
+    let bound_auth = token
+        .bind_for_request(&auth_discharge)
         .expect("auth discharge binding should succeed");
-    let bound_audit = token.bind_for_request(&audit_discharge)
+    let bound_audit = token
+        .bind_for_request(&audit_discharge)
         .expect("audit discharge binding should succeed");
 
     // Verification context satisfies all constraints
     let ctx = VerificationContext::new()
         .with_region(42)
-        .with_time(3_600_000)  // 1 hour, well before 24h deadline
+        .with_time(3_600_000) // 1 hour, well before 24h deadline
         .with_custom("approval_id", "DEPLOY-2024-001");
 
-    let verification_result = token
-        .verify_with_discharges(&root_key, &ctx, &[bound_auth, bound_audit]);
+    let verification_result =
+        token.verify_with_discharges(&root_key, &ctx, &[bound_auth, bound_audit]);
 
-    assert!(verification_result.is_ok(), "Multi third-party chain should verify");
+    assert!(
+        verification_result.is_ok(),
+        "Multi third-party chain should verify"
+    );
 
     // Freeze conformance vectors
     insta::assert_debug_snapshot!("multi_third_party_token", token.to_binary());
-    insta::assert_debug_snapshot!("multi_third_party_auth_discharge", auth_discharge.to_binary());
-    insta::assert_debug_snapshot!("multi_third_party_audit_discharge", audit_discharge.to_binary());
+    insta::assert_debug_snapshot!(
+        "multi_third_party_auth_discharge",
+        auth_discharge.to_binary()
+    );
+    insta::assert_debug_snapshot!(
+        "multi_third_party_audit_discharge",
+        audit_discharge.to_binary()
+    );
 }
 
 /// Test vector with nested third-party discharges:
@@ -122,7 +151,10 @@ fn vector_nested_third_party_discharges() {
 
     // Gateway discharge delegates further to backend service
     let gateway_discharge = MacaroonToken::mint(&gateway_key, "route:backend", "gateway.svc")
-        .add_caveat(CaveatPredicate::RateLimit { max_count: 100, window_secs: 60 })
+        .add_caveat(CaveatPredicate::RateLimit {
+            max_count: 100,
+            window_secs: 60,
+        })
         .add_third_party_caveat("backend.svc", "exec:compute", &backend_key);
 
     // Backend discharge adds final constraints
@@ -130,20 +162,25 @@ fn vector_nested_third_party_discharges() {
         .add_caveat(CaveatPredicate::TaskScope(12345));
 
     // ALL discharges bind to the root auth token (spec compliance)
-    let bound_gateway = root_token.bind_for_request(&gateway_discharge)
+    let bound_gateway = root_token
+        .bind_for_request(&gateway_discharge)
         .expect("gateway discharge binding should succeed");
-    let bound_backend = root_token.bind_for_request(&backend_discharge)
+    let bound_backend = root_token
+        .bind_for_request(&backend_discharge)
         .expect("backend discharge binding should succeed");
 
     // Context satisfies nested constraints
     let ctx = VerificationContext::new()
-        .with_window_use_count(60, 15)  // 15 uses in 60s window, under 100 limit
+        .with_window_use_count(60, 15) // 15 uses in 60s window, under 100 limit
         .with_task(12345);
 
-    let verification_result = root_token
-        .verify_with_discharges(&root_key, &ctx, &[bound_gateway, bound_backend]);
+    let verification_result =
+        root_token.verify_with_discharges(&root_key, &ctx, &[bound_gateway, bound_backend]);
 
-    assert!(verification_result.is_ok(), "Nested discharge chain should verify");
+    assert!(
+        verification_result.is_ok(),
+        "Nested discharge chain should verify"
+    );
 
     // Conformance snapshots
     insta::assert_debug_snapshot!("nested_root_token", root_token.to_binary());
@@ -170,23 +207,35 @@ fn vector_attenuation_failure_modes() {
 
     // Test case 1: Expired time caveat
     let expired_ctx = VerificationContext::new()
-        .with_time(6_000)  // Past 5,000 deadline
+        .with_time(6_000) // Past 5,000 deadline
         .with_resource("/tmp/file.txt")
         .with_use_count(0);
 
-    let expired_result = token.verify_with_discharges(&root_key, &expired_ctx, &[bound_discharge.clone()]);
-    assert!(matches!(expired_result, Err(VerificationError::CaveatFailed { index: 0, .. })),
-            "Should fail on expired time caveat");
+    let expired_result =
+        token.verify_with_discharges(&root_key, &expired_ctx, &[bound_discharge.clone()]);
+    assert!(
+        matches!(
+            expired_result,
+            Err(VerificationError::CaveatFailed { index: 0, .. })
+        ),
+        "Should fail on expired time caveat"
+    );
 
     // Test case 2: Resource path mismatch
     let wrong_path_ctx = VerificationContext::new()
         .with_time(4_000)
-        .with_resource("/home/secret.txt")  // Outside /tmp/* pattern
+        .with_resource("/home/secret.txt") // Outside /tmp/* pattern
         .with_use_count(0);
 
-    let path_result = token.verify_with_discharges(&root_key, &wrong_path_ctx, &[bound_discharge.clone()]);
-    assert!(matches!(path_result, Err(VerificationError::CaveatFailed { index: 1, .. })),
-            "Should fail on resource scope mismatch");
+    let path_result =
+        token.verify_with_discharges(&root_key, &wrong_path_ctx, &[bound_discharge.clone()]);
+    assert!(
+        matches!(
+            path_result,
+            Err(VerificationError::CaveatFailed { index: 1, .. })
+        ),
+        "Should fail on resource scope mismatch"
+    );
 
     // Test case 3: Missing discharge entirely
     let no_discharge_ctx = VerificationContext::new()
@@ -195,8 +244,13 @@ fn vector_attenuation_failure_modes() {
         .with_use_count(0);
 
     let no_discharge_result = token.verify_with_discharges(&root_key, &no_discharge_ctx, &[]);
-    assert!(matches!(no_discharge_result, Err(VerificationError::MissingDischarge { index: 2, .. })),
-            "Should fail when third-party discharge is missing");
+    assert!(
+        matches!(
+            no_discharge_result,
+            Err(VerificationError::MissingDischarge { index: 2, .. })
+        ),
+        "Should fail when third-party discharge is missing"
+    );
 }
 
 /// Test vector for deterministic binary serialization:
@@ -217,20 +271,29 @@ fn vector_deterministic_serialization() {
     // Serializations must be byte-identical
     let bytes_a = token_a.to_binary();
     let bytes_b = token_b.to_binary();
-    assert_eq!(bytes_a, bytes_b, "Identical tokens must produce identical binary serialization");
+    assert_eq!(
+        bytes_a, bytes_b,
+        "Identical tokens must produce identical binary serialization"
+    );
 
     // Round-trip preservation
-    let deserialized = MacaroonToken::from_binary(&bytes_a)
-        .expect("Well-formed binary should deserialize");
+    let deserialized =
+        MacaroonToken::from_binary(&bytes_a).expect("Well-formed binary should deserialize");
 
     assert_eq!(deserialized.identifier(), token_a.identifier());
     assert_eq!(deserialized.location(), token_a.location());
     assert_eq!(deserialized.caveat_count(), token_a.caveat_count());
     assert_eq!(deserialized.caveats(), token_a.caveats());
-    assert_eq!(deserialized.signature().as_bytes(), token_a.signature().as_bytes());
+    assert_eq!(
+        deserialized.signature().as_bytes(),
+        token_a.signature().as_bytes()
+    );
 
     // Verification still works post-deserialization
-    assert!(deserialized.verify_signature(&key), "Deserialized token should verify");
+    assert!(
+        deserialized.verify_signature(&key),
+        "Deserialized token should verify"
+    );
 
     insta::assert_debug_snapshot!("deterministic_binary", bytes_a);
 }
@@ -250,31 +313,41 @@ fn vector_comprehensive_predicate_coverage() {
         .add_caveat(CaveatPredicate::TaskScope(456))
         .add_caveat(CaveatPredicate::MaxUses(10))
         .add_caveat(CaveatPredicate::ResourceScope("/api/v1/*".into()))
-        .add_caveat(CaveatPredicate::RateLimit { max_count: 20, window_secs: 300 })
-        .add_caveat(CaveatPredicate::Custom("environment".into(), "staging".into()))
+        .add_caveat(CaveatPredicate::RateLimit {
+            max_count: 20,
+            window_secs: 300,
+        })
+        .add_caveat(CaveatPredicate::Custom(
+            "environment".into(),
+            "staging".into(),
+        ))
         .add_third_party_caveat("validator.svc", "final:check", &service_key);
 
     // Service discharge adds additional custom constraint
-    let service_discharge = MacaroonToken::mint(&service_key, "final:check", "validator.svc")
-        .add_caveat(CaveatPredicate::Custom("build_id".into(), "build-789".into()));
+    let service_discharge =
+        MacaroonToken::mint(&service_key, "final:check", "validator.svc").add_caveat(
+            CaveatPredicate::Custom("build_id".into(), "build-789".into()),
+        );
 
     let bound_discharge = token.bind_for_request(&service_discharge).unwrap();
 
     // Context satisfies ALL constraints
     let ctx = VerificationContext::new()
-        .with_time(30_000)  // Between 10,000 and 50,000
+        .with_time(30_000) // Between 10,000 and 50,000
         .with_region(123)
         .with_task(456)
-        .with_use_count(5)  // Under 10 limit
-        .with_resource("/api/v1/data")  // Matches pattern
-        .with_window_use_count(300, 8)  // 8 uses in 300s window, under 20 limit
+        .with_use_count(5) // Under 10 limit
+        .with_resource("/api/v1/data") // Matches pattern
+        .with_window_use_count(300, 8) // 8 uses in 300s window, under 20 limit
         .with_custom("environment", "staging")
         .with_custom("build_id", "build-789");
 
-    let verification_result = token
-        .verify_with_discharges(&root_key, &ctx, &[bound_discharge]);
+    let verification_result = token.verify_with_discharges(&root_key, &ctx, &[bound_discharge]);
 
-    assert!(verification_result.is_ok(), "Comprehensive predicate chain should verify");
+    assert!(
+        verification_result.is_ok(),
+        "Comprehensive predicate chain should verify"
+    );
 
     // Freeze comprehensive vector
     insta::assert_debug_snapshot!("comprehensive_token", token.to_binary());
@@ -296,7 +369,9 @@ fn vector_round_trip_verification_invariants() {
     let original_discharge = MacaroonToken::mint(&auth_key, "roundtrip:auth", "auth.test")
         .add_caveat(CaveatPredicate::RegionScope(999));
 
-    let original_bound = original_token.bind_for_request(&original_discharge).unwrap();
+    let original_bound = original_token
+        .bind_for_request(&original_discharge)
+        .unwrap();
 
     // Serialize all components
     let token_bytes = original_token.to_binary();
@@ -304,12 +379,12 @@ fn vector_round_trip_verification_invariants() {
     let bound_bytes = original_bound.to_binary();
 
     // Deserialize all components
-    let restored_token = MacaroonToken::from_binary(&token_bytes)
-        .expect("Token should deserialize");
-    let restored_discharge = MacaroonToken::from_binary(&discharge_bytes)
-        .expect("Discharge should deserialize");
-    let restored_bound = MacaroonToken::from_binary(&bound_bytes)
-        .expect("Bound discharge should deserialize");
+    let restored_token =
+        MacaroonToken::from_binary(&token_bytes).expect("Token should deserialize");
+    let restored_discharge =
+        MacaroonToken::from_binary(&discharge_bytes).expect("Discharge should deserialize");
+    let restored_bound =
+        MacaroonToken::from_binary(&bound_bytes).expect("Bound discharge should deserialize");
 
     // Verification context
     let ctx = VerificationContext::new()
@@ -317,18 +392,19 @@ fn vector_round_trip_verification_invariants() {
         .with_region(999);
 
     // Original verification
-    let original_result = original_token
-        .verify_with_discharges(&root_key, &ctx, &[original_bound]);
+    let original_result = original_token.verify_with_discharges(&root_key, &ctx, &[original_bound]);
     assert!(original_result.is_ok(), "Original chain should verify");
 
     // Round-trip verification using restored components
-    let roundtrip_result = restored_token
-        .verify_with_discharges(&root_key, &ctx, &[restored_bound.clone()]);
-    assert!(roundtrip_result.is_ok(), "Round-trip chain should verify identically");
+    let roundtrip_result =
+        restored_token.verify_with_discharges(&root_key, &ctx, &[restored_bound.clone()]);
+    assert!(
+        roundtrip_result.is_ok(),
+        "Round-trip chain should verify identically"
+    );
 
     // Cross-verification: original token with restored discharge
-    let cross_result = original_token
-        .verify_with_discharges(&root_key, &ctx, &[restored_bound]);
+    let cross_result = original_token.verify_with_discharges(&root_key, &ctx, &[restored_bound]);
     assert!(cross_result.is_ok(), "Cross-validation should succeed");
 
     // Structural invariants preserved
@@ -336,7 +412,10 @@ fn vector_round_trip_verification_invariants() {
     assert_eq!(restored_token.location(), original_token.location());
     assert_eq!(restored_token.caveat_count(), original_token.caveat_count());
     assert_eq!(restored_token.caveats(), original_token.caveats());
-    assert_eq!(restored_token.signature().as_bytes(), original_token.signature().as_bytes());
+    assert_eq!(
+        restored_token.signature().as_bytes(),
+        original_token.signature().as_bytes()
+    );
 
     // Freeze round-trip vectors
     insta::assert_debug_snapshot!("roundtrip_original_token", token_bytes);
