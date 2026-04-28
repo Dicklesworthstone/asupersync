@@ -2937,6 +2937,100 @@ mod tests {
         );
     }
 
+    /// MR6: replenishment batching is observationally equivalent.
+    /// Property: satisfying a front waiter with `add_permits(2)` once or with
+    /// `add_permits(1)` twice yields the same eventual acquisition and final
+    /// released capacity.
+    #[test]
+    fn metamorphic_split_add_permits_matches_batched_replenish() {
+        init_test("metamorphic_split_add_permits_matches_batched_replenish");
+
+        let batched = Semaphore::new(0);
+        let split = Semaphore::new(0);
+
+        let batched_cx = Cx::new(
+            crate::types::RegionId::from_arena(ArenaIndex::new(0, 24)),
+            crate::types::TaskId::from_arena(ArenaIndex::new(0, 24)),
+            crate::types::Budget::INFINITE,
+        );
+        let split_cx = Cx::new(
+            crate::types::RegionId::from_arena(ArenaIndex::new(0, 25)),
+            crate::types::TaskId::from_arena(ArenaIndex::new(0, 25)),
+            crate::types::Budget::INFINITE,
+        );
+
+        let mut batched_waiter = batched.acquire(&batched_cx, 2);
+        let mut split_waiter = split.acquire(&split_cx, 2);
+
+        crate::assert_with_log!(
+            poll_once(&mut batched_waiter).is_none(),
+            "batched waiter initially pending",
+            true,
+            true
+        );
+        crate::assert_with_log!(
+            poll_once(&mut split_waiter).is_none(),
+            "split waiter initially pending",
+            true,
+            true
+        );
+
+        batched.add_permits(2);
+        split.add_permits(1);
+
+        let batched_permit = poll_once(&mut batched_waiter)
+            .expect("batched waiter ready after full replenish")
+            .expect("batched waiter acquires");
+        crate::assert_with_log!(
+            poll_once(&mut split_waiter).is_none(),
+            "split waiter still pending after partial replenish",
+            true,
+            true
+        );
+        crate::assert_with_log!(
+            split.available_permits() == 1,
+            "partial replenish leaves one visible permit",
+            1usize,
+            split.available_permits()
+        );
+
+        split.add_permits(1);
+        let split_permit = poll_once(&mut split_waiter)
+            .expect("split waiter ready after second replenish")
+            .expect("split waiter acquires");
+
+        crate::assert_with_log!(
+            batched.available_permits() == 0,
+            "batched waiter consumes replenished permits",
+            0usize,
+            batched.available_permits()
+        );
+        crate::assert_with_log!(
+            split.available_permits() == 0,
+            "split waiter consumes replenished permits",
+            0usize,
+            split.available_permits()
+        );
+
+        drop(batched_permit);
+        drop(split_permit);
+
+        crate::assert_with_log!(
+            batched.available_permits() == 2,
+            "batched release restores full replenished capacity",
+            2usize,
+            batched.available_permits()
+        );
+        crate::assert_with_log!(
+            split.available_permits() == 2,
+            "split release restores full replenished capacity",
+            2usize,
+            split.available_permits()
+        );
+
+        crate::test_complete!("metamorphic_split_add_permits_matches_batched_replenish");
+    }
+
     fn observe_middle_cancellation_schedule(
         cancel_before_first_permit: bool,
         seed_offset: u32,
