@@ -1,4 +1,3 @@
-#![cfg(any(feature = "postgres", feature = "mysql", feature = "kafka"))]
 #![allow(clippy::all)]
 //! Conformance suite for the messaging crate against documented broker
 //! protocol semantics.
@@ -21,14 +20,11 @@
 //!
 //! Findings from this conformance pass — referenced inline:
 //!
-//! * **Redis RESP3** — the client never sends `HELLO 3` and never decodes
-//!   the RESP3-only `>` (push), `(` (big number), `=` (verbatim string),
-//!   `,` (double), or `_` (null) types. RESP3 was introduced in Redis 6
-//!   (2020) and is the documented modern protocol; the asupersync client
-//!   is RESP2-only. Filed as `br-asupersync-<RESP3 gap>` (see commit
-//!   message). No other RESP3-only features (client-side caching via
-//!   tracking, attribute frames, push notifications) are reachable via
-//!   this client.
+//! * **Redis RESP3** — the conformance gap was not in the client
+//!   implementation, but in this suite: the file carried only a
+//!   placeholder assertion claiming RESP2-only behaviour. The live
+//!   broker test below now verifies Redis 7 `HELLO 3` vendor reply
+//!   shape through the public client surface.
 //! * **Kafka stub-broker fallback** — covered by pre-existing
 //!   `asupersync-w2p2a0` (CRITICAL): production builds without `--features
 //!   kafka` silently swallow `KafkaProducer::send` into an in-process
@@ -207,41 +203,135 @@ mod js_mod {
 
 mod redis_mod {
     use super::*;
+    use asupersync::cx::Cx;
+    use asupersync::messaging::RedisClient;
+    use asupersync::messaging::redis::RespValue;
 
-    /// **CONFORMANCE GAP**: the asupersync Redis client never sends the
-    /// `HELLO 3` command introduced in Redis 6, so it operates strictly in
-    /// RESP2 mode. Modern features that require RESP3 — push-message
-    /// notifications (client-side caching invalidations), attribute
-    /// frames, the `>` / `(` / `=` / `,` / `_` types — are unreachable
-    /// from this client.
-    ///
-    /// This is not a runtime BUG (RESP2 still works fine for the
-    /// command set the client implements), but it IS a conformance gap
-    /// against the canonical Redis 6+ contract.
-    #[test]
-    fn redis_resp_version_is_strictly_resp2() {
-        // Compile-time / source-grep check: the public surface contains
-        // no `RESP3`, no `HELLO`, no `protocol_version` field. We
-        // assert that by reading the module's public name set:
-        let names = [
-            "RESP3",
-            "Resp3",
-            "protocol_version",
-            "ProtocolVersion",
-            "send_hello",
-            "HelloCommand",
-        ];
-        // Self-describing: any future RESP3 work landing in the Redis
-        // client should add at least one of these symbols to the
-        // public surface, at which point this test should be updated
-        // to actually negotiate `HELLO 3` against a real broker.
-        for n in names {
-            // No-op: documenting the absence. A reflection-based check
-            // (e.g. via syn parsing src/messaging/redis.rs) would be
-            // overkill for a conformance test; the bead carries the
-            // gap.
-            let _ = n;
+    fn spawn_redis_container(suite: &str) -> Option<Container> {
+        if !docker_available() {
+            jlog(suite, "skip", "no_docker", "{}");
+            return None;
         }
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default();
+        let name = format!("asupersync-{suite}-{unique}");
+        let out = Command::new("docker")
+            .args([
+                "run",
+                "-d",
+                "-P",
+                "--name",
+                &name,
+                "redis:7-alpine",
+                "redis-server",
+                "--save",
+                "",
+                "--appendonly",
+                "no",
+            ])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            jlog(
+                suite,
+                "skip",
+                "docker_run_failed",
+                &format!(
+                    r#"{{"status":{},"stderr":{:?}}}"#,
+                    out.status.code().unwrap_or(-1),
+                    String::from_utf8_lossy(&out.stderr)
+                ),
+            );
+            return None;
+        }
+
+        let port = read_port(&name, 6379)?;
+        Some(Container { name, port })
+    }
+
+    fn resp_text(value: &RespValue) -> Option<String> {
+        match value {
+            RespValue::SimpleString(text) => Some(text.clone()),
+            RespValue::BulkString(Some(bytes)) => String::from_utf8(bytes.clone()).ok(),
+            _ => None,
+        }
+    }
+
+    fn map_field<'a>(entries: &'a [(RespValue, RespValue)], wanted: &str) -> Option<&'a RespValue> {
+        entries.iter().find_map(|(key, value)| {
+            let key = resp_text(key)?;
+            (key == wanted).then_some(value)
+        })
+    }
+
+    /// Redis 6+ `HELLO 3` replies with a RESP3 map that advertises the
+    /// negotiated protocol version and canonical server metadata keys.
+    /// This is the narrowest vendor-comparison seam that proves our public
+    /// client surface can speak and parse real RESP3 wire replies instead
+    /// of carrying a dead placeholder in the conformance suite.
+    #[test]
+    fn redis_hello3_vendor_shape() {
+        let suite = "redis_hello3_vendor_shape";
+        let Some(container) = spawn_redis_container(suite) else {
+            return;
+        };
+        let url = format!("redis://127.0.0.1:{}", container.port);
+
+        futures_lite::future::block_on(async move {
+            let cx: Cx = Cx::for_testing();
+            let client = RedisClient::connect(&cx, &url)
+                .await
+                .expect("connect redis client");
+            let response = client.cmd(&cx, &["HELLO", "3"]).await.expect("HELLO 3");
+            let entries = match response {
+                RespValue::Map(entries) => entries,
+                other => panic!("HELLO 3 must return a RESP3 map, got {other:?}"),
+            };
+
+            assert_eq!(
+                map_field(&entries, "proto"),
+                Some(&RespValue::Integer(3)),
+                "HELLO 3 must negotiate RESP3 with proto=3"
+            );
+
+            let server = map_field(&entries, "server")
+                .and_then(resp_text)
+                .expect("HELLO 3 must report server");
+            assert_eq!(server, "redis", "vendor server tag must be redis");
+
+            let version = map_field(&entries, "version")
+                .and_then(resp_text)
+                .expect("HELLO 3 must report version");
+            assert!(
+                !version.is_empty(),
+                "HELLO 3 version must be a non-empty vendor string"
+            );
+
+            let mode = map_field(&entries, "mode")
+                .and_then(resp_text)
+                .expect("HELLO 3 must report mode");
+            assert!(
+                !mode.is_empty(),
+                "HELLO 3 mode must be a non-empty RESP3 string"
+            );
+
+            let role = map_field(&entries, "role")
+                .and_then(resp_text)
+                .expect("HELLO 3 must report role");
+            assert!(
+                !role.is_empty(),
+                "HELLO 3 role must be a non-empty RESP3 string"
+            );
+
+            let modules = map_field(&entries, "modules").expect("HELLO 3 must report modules");
+            assert!(
+                matches!(modules, RespValue::Array(Some(_))),
+                "HELLO 3 modules field must be a RESP array, got {modules:?}"
+            );
+        });
     }
 
     /// Pubsub fan-out conformance: a published message reaches every
