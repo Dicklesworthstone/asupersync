@@ -230,7 +230,6 @@ fn normalized_entropy(probs: &[f64]) -> f64 {
 pub(crate) struct AdaptiveEpochSnapshot {
     potential: f64,
     deadline_pressure: f64,
-    base_limit_exceedances: u64,
     effective_limit_exceedances: u64,
     fallback_cancel_dispatches: u64,
 }
@@ -245,15 +244,17 @@ impl AdaptiveEpochSnapshot {
             / (self.deadline_pressure.abs() + 1.0))
             .clamp(0.0, 1.0);
         let eps = f64::from(epoch_steps.max(1));
-        let base_exceedances = u64_to_f64(
-            end.base_limit_exceedances
-                .saturating_sub(self.base_limit_exceedances),
-        );
         let effective_exceedances = u64_to_f64(
             end.effective_limit_exceedances
                 .saturating_sub(self.effective_limit_exceedances),
         );
-        let fairness_penalty = 2.0f64.mul_add(effective_exceedances, base_exceedances) / eps;
+        // `base_limit_exceedances` is redundant when no governor boost is active
+        // (`effective_limit == base_limit`) and actively misleading during
+        // DrainObligations/DrainRegions, where the scheduler intentionally
+        // allows `cancel_streak` to run into the `(L, 2L]` window. Penalize
+        // only true effective-limit violations so adaptive learning does not
+        // widen the baseline limit in response to sanctioned drain-mode work.
+        let fairness_penalty = effective_exceedances / eps;
         let fallback_penalty = u64_to_f64(
             end.fallback_cancel_dispatches
                 .saturating_sub(self.fallback_cancel_dispatches),
@@ -402,14 +403,13 @@ impl AdaptivePolicyBenchSnapshot {
     pub fn new(
         potential: f64,
         deadline_pressure: f64,
-        base_limit_exceedances: u64,
+        _base_limit_exceedances: u64,
         effective_limit_exceedances: u64,
         fallback_cancel_dispatches: u64,
     ) -> Self {
         Self(AdaptiveEpochSnapshot {
             potential,
             deadline_pressure,
-            base_limit_exceedances,
             effective_limit_exceedances,
             fallback_cancel_dispatches,
         })
@@ -2741,7 +2741,6 @@ impl ThreeLaneWorker {
         AdaptiveEpochSnapshot {
             potential: Self::potential_from_snapshot(&snapshot),
             deadline_pressure: snapshot.deadline_pressure,
-            base_limit_exceedances: self.preemption_metrics.base_limit_exceedances,
             effective_limit_exceedances: self.preemption_metrics.effective_limit_exceedances,
             fallback_cancel_dispatches: self.preemption_metrics.fallback_cancel_dispatches,
         }
@@ -10421,17 +10420,31 @@ mod tests {
     fn test_adaptive_epoch_snapshot(
         potential: f64,
         deadline_pressure: f64,
-        base_limit_exceedances: u64,
+        _base_limit_exceedances: u64,
         effective_limit_exceedances: u64,
         fallback_cancel_dispatches: u64,
     ) -> AdaptiveEpochSnapshot {
         AdaptiveEpochSnapshot {
             potential,
             deadline_pressure,
-            base_limit_exceedances,
             effective_limit_exceedances,
             fallback_cancel_dispatches,
         }
+    }
+
+    #[test]
+    fn adaptive_reward_ignores_sanctioned_drain_boost_base_exceedances() {
+        let start = test_adaptive_epoch_snapshot(100.0, 0.25, 0, 0, 0);
+        let relaxed = test_adaptive_epoch_snapshot(100.0, 0.25, 0, 0, 0);
+        let boosted_drain = test_adaptive_epoch_snapshot(100.0, 0.25, 6, 0, 0);
+
+        let relaxed_reward = start.reward_against(relaxed, 8);
+        let boosted_reward = start.reward_against(boosted_drain, 8);
+
+        assert_eq!(
+            boosted_reward, relaxed_reward,
+            "base-only exceedances from sanctioned drain boosts must not reduce adaptive reward"
+        );
     }
 
     fn replay_adaptive_limit_trace(_seed: u64, epochs: usize) -> Vec<usize> {
