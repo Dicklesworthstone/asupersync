@@ -502,12 +502,11 @@ impl Equation {
         self.terms.len()
     }
 
-    /// Returns the coefficient for the given column, or zero.
+    /// Remove and return the coefficient for the given column, if present.
     #[inline]
-    fn coef(&self, col: usize) -> Gf256 {
-        self.terms
-            .binary_search_by_key(&col, |(c, _)| *c)
-            .map_or(Gf256::ZERO, |idx| self.terms[idx].1)
+    fn take_coef(&mut self, col: usize) -> Option<Gf256> {
+        let idx = self.terms.binary_search_by_key(&col, |(c, _)| *c).ok()?;
+        Some(self.terms.remove(idx).1)
     }
 }
 
@@ -1594,14 +1593,10 @@ impl InactivationDecoder {
                 if eq.used {
                     continue;
                 }
-                let eq_coef = eq.coef(col);
-                if eq_coef.is_zero() {
+                let Some(eq_coef) = eq.take_coef(col) else {
                     continue;
-                }
+                };
                 gf256_addmul_slice(rhs, &solution, eq_coef);
-                if let Ok(pos) = eq.terms.binary_search_by_key(&col, |(c, _)| *c) {
-                    eq.terms.remove(pos);
-                }
 
                 if !queued[i] && eq.degree() == 1 {
                     let next_col = eq.terms[0].0;
@@ -1915,17 +1910,11 @@ impl InactivationDecoder {
                 if eq.used {
                     continue;
                 }
-                let eq_coef = eq.coef(col);
-                if eq_coef.is_zero() {
+                let Some(eq_coef) = eq.take_coef(col) else {
                     continue;
-                }
+                };
                 // rhs[i] -= eq_coef * solution
                 gf256_addmul_slice(&mut state.rhs[i], &solution, eq_coef);
-                // Remove the term from the equation.
-                // Binary search is efficient since terms are sorted by column index.
-                if let Ok(pos) = eq.terms.binary_search_by_key(&col, |(c, _)| *c) {
-                    eq.terms.remove(pos);
-                }
 
                 if !queued[i] && !eq.used && eq.degree() == 1 {
                     let next_col = eq.terms[0].0;
