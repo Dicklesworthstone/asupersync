@@ -153,6 +153,14 @@ mod h2_alpn_conformance_tests {
         }
     }
 
+    fn alpn<const N: usize>(protocols: [&str; N]) -> Vec<String> {
+        protocols.into_iter().map(str::to_owned).collect()
+    }
+
+    fn selected(protocol: &str) -> Option<String> {
+        Some(protocol.to_string())
+    }
+
     /// HTTP/2 ALPN conformance test harness.
     #[allow(dead_code)]
     pub struct H2AlpnConformanceHarness {
@@ -211,8 +219,7 @@ mod h2_alpn_conformance_tests {
             let start = Instant::now();
 
             // Test valid client ALPN advertisement
-            let handshake = MockTlsHandshake::new()
-                .with_client_alpn(vec!["h2".to_string(), "http/1.1".to_string()]);
+            let handshake = MockTlsHandshake::new().with_client_alpn(alpn(["h2", "http/1.1"]));
 
             let has_h2 = handshake.client_alpn_protocols.contains(&"h2".to_string());
 
@@ -247,8 +254,7 @@ mod h2_alpn_conformance_tests {
             let start = Instant::now();
 
             // Test that client prefers h2 over http/1.1
-            let handshake = MockTlsHandshake::new()
-                .with_client_alpn(vec!["h2".to_string(), "http/1.1".to_string()]);
+            let handshake = MockTlsHandshake::new().with_client_alpn(alpn(["h2", "http/1.1"]));
 
             let h2_index = handshake
                 .client_alpn_protocols
@@ -292,8 +298,8 @@ mod h2_alpn_conformance_tests {
 
             // Simulate client offering both h2 and h2c
             let handshake = MockTlsHandshake::new()
-                .with_client_alpn(vec!["h2".to_string(), "h2c".to_string()])
-                .with_server_selection(Some("h2".to_string()));
+                .with_client_alpn(alpn(["h2", "h2c"]))
+                .with_server_selection(selected("h2"));
 
             let verdict = match &handshake.server_selected_protocol {
                 Some(selected) if selected == "h2" => TestVerdict::Pass,
@@ -331,18 +337,10 @@ mod h2_alpn_conformance_tests {
 
             // Test various valid protocol selections
             let test_cases = vec![
-                (vec!["h2".to_string()], Some("h2".to_string()), true),
-                (
-                    vec!["http/1.1".to_string()],
-                    Some("http/1.1".to_string()),
-                    true,
-                ),
-                (
-                    vec!["h2".to_string(), "http/1.1".to_string()],
-                    Some("h2".to_string()),
-                    true,
-                ),
-                (vec!["unknown".to_string()], None, true), // Should reject unknown
+                (alpn(["h2"]), selected("h2"), true),
+                (alpn(["http/1.1"]), selected("http/1.1"), true),
+                (alpn(["h2", "http/1.1"]), selected("h2"), true),
+                (alpn(["unknown"]), None, true), // Should reject unknown
             ];
 
             let mut all_passed = true;
@@ -393,7 +391,7 @@ mod h2_alpn_conformance_tests {
 
             // Test server rejecting unknown protocols
             let handshake = MockTlsHandshake::new()
-                .with_client_alpn(vec!["unknown-protocol".to_string(), "invalid".to_string()])
+                .with_client_alpn(alpn(["unknown-protocol", "invalid"]))
                 .with_server_selection(None); // Server should reject
 
             let verdict = if handshake.server_selected_protocol.is_none() {
@@ -427,7 +425,7 @@ mod h2_alpn_conformance_tests {
 
             // Test handling of invalid TLS extensions
             let handshake = MockTlsHandshake::new()
-                .with_client_alpn(vec!["h2".to_string()])
+                .with_client_alpn(alpn(["h2"]))
                 .with_invalid_extensions();
 
             // With invalid extensions, handshake should fail
@@ -461,12 +459,9 @@ mod h2_alpn_conformance_tests {
 
             // Test various malformed ALPN cases
             let test_cases = vec![
-                (vec![], "Empty ALPN protocol list"),
-                (vec!["".to_string()], "Empty protocol identifier"),
-                (
-                    vec!["h2".to_string(), "h2".to_string()],
-                    "Duplicate protocol identifiers",
-                ),
+                (alpn([]), "Empty ALPN protocol list"),
+                (alpn([""]), "Empty protocol identifier"),
+                (alpn(["h2", "h2"]), "Duplicate protocol identifiers"),
             ];
 
             let mut all_handled_correctly = true;
@@ -513,8 +508,8 @@ mod h2_alpn_conformance_tests {
 
             // Test fallback when server doesn't support h2
             let handshake = MockTlsHandshake::new()
-                .with_client_alpn(vec!["h2".to_string(), "http/1.1".to_string()])
-                .with_server_selection(Some("http/1.1".to_string()))
+                .with_client_alpn(alpn(["h2", "http/1.1"]))
+                .with_server_selection(selected("http/1.1"))
                 .completed();
 
             let verdict = match &handshake.server_selected_protocol {
@@ -551,8 +546,8 @@ mod h2_alpn_conformance_tests {
 
             // Test that fallback doesn't break the connection
             let handshake = MockTlsHandshake::new()
-                .with_client_alpn(vec!["h2".to_string(), "http/1.1".to_string()])
-                .with_server_selection(Some("http/1.1".to_string()))
+                .with_client_alpn(alpn(["h2", "http/1.1"]))
+                .with_server_selection(selected("http/1.1"))
                 .completed();
 
             // Connection should complete successfully even with fallback
@@ -587,8 +582,8 @@ mod h2_alpn_conformance_tests {
 
             // Simulate successful h2 ALPN negotiation followed by SETTINGS exchange
             let handshake = MockTlsHandshake::new()
-                .with_client_alpn(vec!["h2".to_string()])
-                .with_server_selection(Some("h2".to_string()))
+                .with_client_alpn(alpn(["h2"]))
+                .with_server_selection(selected("h2"))
                 .completed();
 
             // Create a mock SETTINGS frame that should be sent after ALPN
@@ -631,8 +626,8 @@ mod h2_alpn_conformance_tests {
 
             // Test that client sends connection preface after h2 ALPN
             let handshake = MockTlsHandshake::new()
-                .with_client_alpn(vec!["h2".to_string()])
-                .with_server_selection(Some("h2".to_string()))
+                .with_client_alpn(alpn(["h2"]))
+                .with_server_selection(selected("h2"))
                 .completed();
 
             // Validate connection preface format
@@ -673,8 +668,8 @@ mod h2_alpn_conformance_tests {
 
             // Test SETTINGS ACK requirement
             let handshake = MockTlsHandshake::new()
-                .with_client_alpn(vec!["h2".to_string()])
-                .with_server_selection(Some("h2".to_string()))
+                .with_client_alpn(alpn(["h2"]))
+                .with_server_selection(selected("h2"))
                 .completed();
 
             // Simulate SETTINGS frame and ACK
@@ -714,14 +709,14 @@ mod h2_alpn_conformance_tests {
 
             // Test protection against downgrade attacks
             let legitimate_handshake = MockTlsHandshake::new()
-                .with_client_alpn(vec!["h2".to_string()])
-                .with_server_selection(Some("h2".to_string()))
+                .with_client_alpn(alpn(["h2"]))
+                .with_server_selection(selected("h2"))
                 .completed();
 
             // Simulate potential downgrade attack (server selects weaker protocol)
             let downgrade_handshake = MockTlsHandshake::new()
-                .with_client_alpn(vec!["h2".to_string()])
-                .with_server_selection(Some("http/1.1".to_string()));
+                .with_client_alpn(alpn(["h2"]))
+                .with_server_selection(selected("http/1.1"));
 
             let verdict = if legitimate_handshake.server_selected_protocol == Some("h2".to_string())
             {
@@ -763,8 +758,8 @@ mod h2_alpn_conformance_tests {
 
             for (expected_connected, description) in states {
                 let handshake = MockTlsHandshake::new()
-                    .with_client_alpn(vec!["h2".to_string()])
-                    .with_server_selection(Some("h2".to_string()));
+                    .with_client_alpn(alpn(["h2"]))
+                    .with_server_selection(selected("h2"));
 
                 let handshake = if expected_connected {
                     handshake.completed()
@@ -808,12 +803,12 @@ mod h2_alpn_conformance_tests {
             // Test handling of multiple concurrent ALPN negotiations
             let handshakes = vec![
                 MockTlsHandshake::new()
-                    .with_client_alpn(vec!["h2".to_string()])
-                    .with_server_selection(Some("h2".to_string()))
+                    .with_client_alpn(alpn(["h2"]))
+                    .with_server_selection(selected("h2"))
                     .completed(),
                 MockTlsHandshake::new()
-                    .with_client_alpn(vec!["http/1.1".to_string()])
-                    .with_server_selection(Some("http/1.1".to_string()))
+                    .with_client_alpn(alpn(["http/1.1"]))
+                    .with_server_selection(selected("http/1.1"))
                     .completed(),
             ];
 
