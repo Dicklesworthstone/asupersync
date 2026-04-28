@@ -19,6 +19,43 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+/// Host header validation policy for security against Host header injection attacks.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HostPolicy {
+    /// Allow only hosts in the provided list (secure, recommended).
+    AllowList(Vec<String>),
+    /// Reject all requests - useful for services that don't need Host headers.
+    RejectUnknown,
+    /// Accept any Host header (INSECURE - only for legacy compatibility).
+    /// Use with extreme caution as this enables Host header injection attacks.
+    AllowAll,
+}
+
+impl Default for HostPolicy {
+    fn default() -> Self {
+        // SECURITY: Secure by default - reject unknown hosts rather than fail-open
+        Self::RejectUnknown
+    }
+}
+
+impl HostPolicy {
+    /// Create an allow-list policy for the given hosts.
+    pub fn allow_list(hosts: Vec<String>) -> Self {
+        Self::AllowList(hosts)
+    }
+
+    /// Allow all hosts (INSECURE - use only for legacy compatibility).
+    /// This disables Host header validation and enables injection attacks.
+    pub fn allow_all() -> Self {
+        Self::AllowAll
+    }
+
+    /// Reject all requests (most secure).
+    pub fn reject_unknown() -> Self {
+        Self::RejectUnknown
+    }
+}
+
 /// Configuration for HTTP/1.1 server connections.
 #[derive(Debug, Clone)]
 pub struct Http1Config {
@@ -34,17 +71,15 @@ pub struct Http1Config {
     /// Idle timeout between requests on a keep-alive connection.
     /// `None` means no timeout (wait forever).
     pub idle_timeout: Option<Duration>,
-    /// br-asupersync-t9yqht: optional allow-list of host names that
-    /// the server will accept in the request `Host` header. `None`
-    /// (the default) DISABLES validation — every Host is accepted, the
-    /// legacy behaviour. `Some(vec)` enables strict validation: any
-    /// request whose `Host` header (case-insensitive, port-stripped)
-    /// is not in the list receives a `421 Misdirected Request`
-    /// response and the connection closes. Defends against Host
-    /// header injection (attacker setting `Host: attacker.com` to
-    /// poison absolute URLs the application emits in password-reset
-    /// emails, OAuth `redirect_uri` validation, cache keys, etc.).
-    pub allowed_hosts: Option<Vec<String>>,
+    /// br-asupersync-t9yqht, br-asupersync-scxixg: Host header validation policy.
+    /// SECURITY: Defends against Host header injection attacks where attackers
+    /// set `Host: attacker.com` to poison absolute URLs in password-reset emails,
+    /// OAuth `redirect_uri` validation, cache keys, CSRF tokens, etc.
+    ///
+    /// - `AllowList(hosts)`: Only accept requests with Host headers in the list
+    /// - `RejectUnknown`: Reject all requests (secure default for new deployments)
+    /// - `AllowAll`: Accept any Host header (legacy insecure behavior)
+    pub allowed_hosts: HostPolicy,
 }
 
 impl Default for Http1Config {
@@ -55,7 +90,7 @@ impl Default for Http1Config {
             keep_alive: true,
             max_requests_per_connection: Some(1000),
             idle_timeout: Some(Duration::from_mins(1)),
-            allowed_hosts: None,
+            allowed_hosts: HostPolicy::default(), // Secure by default: RejectUnknown
         }
     }
 }
@@ -96,16 +131,26 @@ impl Http1Config {
         self
     }
 
-    /// Set the allowed-hosts allow-list for the request `Host` header
-    /// (br-asupersync-t9yqht).
+    /// Set the Host header validation policy (br-asupersync-scxixg).
     ///
-    /// `None` (the default) disables validation. `Some(vec)` enables
-    /// strict validation: any request whose `Host` header
-    /// (case-insensitive, port-stripped) is not in the list receives
-    /// `421 Misdirected Request` and the connection closes.
+    /// Replaces legacy allowed_hosts with secure-by-default HostPolicy.
+    /// Use HostPolicy::AllowList(hosts), HostPolicy::RejectUnknown, or
+    /// HostPolicy::AllowAll (insecure legacy mode).
+    #[must_use]
+    pub fn host_policy(mut self, policy: HostPolicy) -> Self {
+        self.allowed_hosts = policy;
+        self
+    }
+
+    /// Legacy method for backwards compatibility (br-asupersync-scxixg).
+    /// Converts Option<Vec<String>> to HostPolicy: None becomes AllowAll,
+    /// Some(hosts) becomes AllowList.
     #[must_use]
     pub fn allowed_hosts(mut self, hosts: Option<Vec<String>>) -> Self {
-        self.allowed_hosts = hosts;
+        self.allowed_hosts = match hosts {
+            None => HostPolicy::AllowAll,
+            Some(hosts) => HostPolicy::AllowList(hosts),
+        };
         self
     }
 }
@@ -130,36 +175,55 @@ fn parse_host_header_host(value: &str) -> Option<String> {
     Some(host.to_ascii_lowercase())
 }
 
-/// br-asupersync-t9yqht: validate the request's `Host` header against
-/// the allow-list. Returns `Ok(())` if validation passes (or is
+/// br-asupersync-scxixg: validate the request's `Host` header against
+/// the host policy. Returns `Ok(())` if validation passes (or is
 /// disabled); `Err(host_value)` carrying the offending host string
 /// for logging if the header is missing or not allow-listed.
 fn validate_host_header(
     headers: &[(String, String)],
-    allowed_hosts: Option<&[String]>,
+    host_policy: &HostPolicy,
 ) -> Result<(), String> {
-    let Some(allow_list) = allowed_hosts else {
-        return Ok(()); // Validation disabled.
-    };
-    if allow_list.is_empty() {
-        return Ok(()); // Empty allow-list = legacy behaviour (accept all).
-    }
-    let host_value = headers
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("host"))
-        .map(|(_, value)| value.as_str());
-    let Some(host_value) = host_value else {
-        // RFC 7230 §5.4: HTTP/1.1 requests MUST include Host. Reject.
-        return Err(String::new());
-    };
-    let parsed = parse_host_header_host(host_value).unwrap_or_default();
-    if allow_list
-        .iter()
-        .any(|allowed| allowed.eq_ignore_ascii_case(&parsed))
-    {
-        Ok(())
-    } else {
-        Err(parsed)
+    match host_policy {
+        HostPolicy::AllowAll => {
+            return Ok(()); // Validation disabled (insecure legacy mode).
+        }
+        HostPolicy::RejectUnknown => {
+            // Reject all requests - most secure default
+            let host_value = headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("host"))
+                .map(|(_, value)| value.as_str());
+            return Err(host_value.unwrap_or("").to_string());
+        }
+        HostPolicy::AllowList(allow_list) => {
+            if allow_list.is_empty() {
+                // br-asupersync-scxixg: Empty allow-list MUST reject all hosts to prevent
+                // Host header injection attacks. Previous behavior of accepting all hosts
+                // with an empty list was a fail-open security vulnerability.
+                let host_value = headers
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case("host"))
+                    .map(|(_, value)| value.as_str());
+                return Err(host_value.unwrap_or("").to_string());
+            }
+            let host_value = headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("host"))
+                .map(|(_, value)| value.as_str());
+            let Some(host_value) = host_value else {
+                // RFC 7230 §5.4: HTTP/1.1 requests MUST include Host. Reject.
+                return Err(String::new());
+            };
+            let parsed = parse_host_header_host(host_value).unwrap_or_default();
+            if allow_list
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(&parsed))
+            {
+                Ok(())
+            } else {
+                Err(parsed)
+            }
+        }
     }
 }
 
@@ -502,7 +566,7 @@ where
             // injection attack surface for absolute-URL emission /
             // OAuth redirect_uri / cache-key computation.
             if let Err(rejected_host) =
-                validate_host_header(&req.headers, self.config.allowed_hosts.as_deref())
+                validate_host_header(&req.headers, &self.config.allowed_hosts)
             {
                 state.phase = ConnectionPhase::Writing;
                 let body_msg = if rejected_host.is_empty() {
@@ -1189,71 +1253,78 @@ mod tests {
     /// case which is itself an HTTP/1.1 protocol violation.
     #[test]
     fn validate_host_header_accepts_listed_rejects_others() {
-        let allowed = vec!["example.com".to_string(), "auth.example.com".to_string()];
+        let policy = HostPolicy::allow_list(vec!["example.com".to_string(), "auth.example.com".to_string()]);
 
         // Listed host — accepted.
         let headers = vec![("Host".to_string(), "example.com".to_string())];
-        assert!(validate_host_header(&headers, Some(&allowed)).is_ok());
+        assert!(validate_host_header(&headers, &policy).is_ok());
 
         // Listed host with port — accepted (port stripped).
         let headers = vec![("Host".to_string(), "example.com:8080".to_string())];
-        assert!(validate_host_header(&headers, Some(&allowed)).is_ok());
+        assert!(validate_host_header(&headers, &policy).is_ok());
 
         // Case-insensitive match.
         let headers = vec![("Host".to_string(), "EXAMPLE.COM".to_string())];
-        assert!(validate_host_header(&headers, Some(&allowed)).is_ok());
+        assert!(validate_host_header(&headers, &policy).is_ok());
 
         // Different listed host.
         let headers = vec![("Host".to_string(), "auth.example.com".to_string())];
-        assert!(validate_host_header(&headers, Some(&allowed)).is_ok());
+        assert!(validate_host_header(&headers, &policy).is_ok());
 
         // Unlisted host — REJECTED. This is the host-injection defense.
         let headers = vec![("Host".to_string(), "attacker.com".to_string())];
-        let err = validate_host_header(&headers, Some(&allowed)).unwrap_err();
+        let err = validate_host_header(&headers, &policy).unwrap_err();
         assert_eq!(err, "attacker.com");
 
         // Subdomain not in allowlist — REJECTED (allowlist is exact match).
         let headers = vec![("Host".to_string(), "evil.example.com".to_string())];
-        let err = validate_host_header(&headers, Some(&allowed)).unwrap_err();
+        let err = validate_host_header(&headers, &policy).unwrap_err();
         assert_eq!(err, "evil.example.com");
 
         // Missing Host header (HTTP/1.1 protocol violation per RFC 7230 §5.4).
         let headers = vec![("X-Other".to_string(), "value".to_string())];
-        let err = validate_host_header(&headers, Some(&allowed)).unwrap_err();
+        let err = validate_host_header(&headers, &policy).unwrap_err();
         assert!(err.is_empty(), "missing Host should yield empty err string");
     }
 
-    /// br-asupersync-t9yqht: validation DISABLED when allowed_hosts is
-    /// None — preserves legacy behaviour for callers that haven't
-    /// opted in. Empty allow-list is also no-op.
+    /// br-asupersync-scxixg: validation policies - AllowAll disables validation,
+    /// empty allow-list now rejects all (security fix), RejectUnknown rejects all.
     #[test]
-    fn validate_host_header_no_validation_when_disabled() {
+    fn validate_host_header_policy_behaviors() {
         let headers = vec![("Host".to_string(), "anywhere.com".to_string())];
-        // None disables validation.
-        assert!(validate_host_header(&headers, None).is_ok());
-        // Empty allowlist also disables validation.
-        let empty: Vec<String> = vec![];
-        assert!(validate_host_header(&headers, Some(&empty)).is_ok());
+
+        // AllowAll disables validation (insecure legacy mode).
+        assert!(validate_host_header(&headers, &HostPolicy::AllowAll).is_ok());
+
+        // Empty allowlist now REJECTS all hosts (security fix for br-asupersync-scxixg).
+        let empty_policy = HostPolicy::allow_list(vec![]);
+        let err = validate_host_header(&headers, &empty_policy).unwrap_err();
+        assert_eq!(err, "anywhere.com");
+
+        // RejectUnknown rejects all requests (secure default).
+        let reject_policy = HostPolicy::RejectUnknown;
+        let err = validate_host_header(&headers, &reject_policy).unwrap_err();
+        assert_eq!(err, "anywhere.com");
     }
 
-    /// br-asupersync-t9yqht: IPv6 literal handling — strip brackets
+    /// br-asupersync-scxixg: IPv6 literal handling — strip brackets
     /// and port correctly so allowed_hosts can be specified as the
     /// bracket-less host.
     #[test]
     fn validate_host_header_ipv6_literal_handling() {
-        let allowed = vec!["::1".to_string()];
+        let policy = HostPolicy::allow_list(vec!["::1".to_string()]);
 
         // IPv6 literal with port.
         let headers = vec![("Host".to_string(), "[::1]:8080".to_string())];
-        assert!(validate_host_header(&headers, Some(&allowed)).is_ok());
+        assert!(validate_host_header(&headers, &policy).is_ok());
 
         // IPv6 literal without port.
         let headers = vec![("Host".to_string(), "[::1]".to_string())];
-        assert!(validate_host_header(&headers, Some(&allowed)).is_ok());
+        assert!(validate_host_header(&headers, &policy).is_ok());
 
         // Different IPv6 — REJECTED.
         let headers = vec![("Host".to_string(), "[fe80::1]:8080".to_string())];
-        assert!(validate_host_header(&headers, Some(&allowed)).is_err());
+        assert!(validate_host_header(&headers, &policy).is_err());
     }
 
     /// br-asupersync-t9yqht: parse_host_header_host handles edge
