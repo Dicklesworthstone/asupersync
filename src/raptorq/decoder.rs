@@ -6487,8 +6487,10 @@ mod tests {
 
         let reference_err = SystematicParams::try_for_source_block(K_MAX + 1, SYMBOL_SIZE)
             .expect_err("RFC 6330 K_max+1 boundary must reject");
-        let decoder_err = InactivationDecoder::try_new(K_MAX + 1, SYMBOL_SIZE, SEED)
-            .expect_err("decoder must reject K beyond RFC K_max boundary");
+        let decoder_err = match InactivationDecoder::try_new(K_MAX + 1, SYMBOL_SIZE, SEED) {
+            Ok(_) => panic!("decoder must reject K beyond RFC K_max boundary"),
+            Err(err) => err,
+        };
         assert_eq!(
             decoder_err, reference_err,
             "K_max+1: decoder rejection must match the systematic-table reference error"
