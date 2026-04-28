@@ -855,12 +855,14 @@ impl<T> ResponseStream<T> {
         self.cancel_with_metadata(status, Metadata::new());
     }
 
-    /// Close the stream with a terminal status and trailing metadata.
-    pub fn cancel_with_metadata(&self, status: Status, metadata: Metadata) {
+    fn set_terminal_status(&self, status: Status, metadata: Metadata, discard_buffered: bool) {
         let waiters = {
             let mut state = lock_unpoisoned(&self.state);
             state.closed = true;
             if state.terminal_status.is_none() {
+                if discard_buffered {
+                    state.items.clear();
+                }
                 state.terminal_status = Some(status);
                 state.terminal_metadata = metadata;
             }
@@ -869,6 +871,22 @@ impl<T> ResponseStream<T> {
         for waker in waiters {
             waker.wake();
         }
+    }
+
+    /// Cancel the stream immediately with a terminal status and trailing metadata.
+    ///
+    /// Cancellation is abrupt: queued response items are discarded so the
+    /// caller observes the terminal status before any stale buffered payloads.
+    pub fn cancel_with_metadata(&self, status: Status, metadata: Metadata) {
+        self.set_terminal_status(status, metadata, true);
+    }
+
+    /// Finish the stream with a terminal status after draining queued items.
+    ///
+    /// This models the gRPC trailers path where already-received response data
+    /// remains visible before the final status/trailers are observed.
+    pub fn finish_with_metadata(&self, status: Status, metadata: Metadata) {
+        self.set_terminal_status(status, metadata, false);
     }
 
     /// Returns the terminal trailing metadata captured for the stream.
@@ -1965,7 +1983,7 @@ mod tests {
         let mut trailers = Metadata::new();
         trailers.insert("grpc-status-details-bin", "ZXJyb3ItZGV0YWlscw==");
         trailers.insert("x-debug-trailer", "final-hop");
-        stream.cancel_with_metadata(Status::internal("stream failed"), trailers.clone());
+        stream.finish_with_metadata(Status::internal("stream failed"), trailers.clone());
 
         let first = futures_lite::future::block_on(futures_lite::future::poll_fn(|cx| {
             Streaming::poll_next(Pin::new(&mut stream), cx)
@@ -1997,6 +2015,35 @@ mod tests {
             Streaming::poll_next(Pin::new(&mut stream), cx)
         }));
         assert!(third.is_none());
+    }
+
+    #[test]
+    fn response_stream_cancel_discards_buffered_items_before_terminal_status() {
+        let mut stream = ResponseStream::<u32>::open();
+        stream.push(Ok(7)).expect("data item should enqueue");
+
+        let mut trailers = Metadata::new();
+        trailers.insert("grpc-status-details-bin", "Y2FuY2VsbGVk");
+        stream.cancel_with_metadata(Status::cancelled("client cancelled stream"), trailers);
+
+        let first = futures_lite::future::block_on(futures_lite::future::poll_fn(|cx| {
+            Streaming::poll_next(Pin::new(&mut stream), cx)
+        }));
+        match first {
+            Some(Err(status)) => {
+                assert_eq!(status.code(), crate::grpc::Code::Cancelled);
+                assert_eq!(status.message(), "client cancelled stream");
+            }
+            other => panic!("expected immediate cancelled status, got {other:?}"),
+        }
+
+        let second = futures_lite::future::block_on(futures_lite::future::poll_fn(|cx| {
+            Streaming::poll_next(Pin::new(&mut stream), cx)
+        }));
+        assert!(
+            second.is_none(),
+            "cancelled stream must terminate after status"
+        );
     }
 
     #[test]
@@ -2146,6 +2193,39 @@ mod tests {
                 .code(),
             crate::grpc::Code::Cancelled
         );
+        let second = futures_lite::future::block_on(futures_lite::future::poll_fn(|cx| {
+            Streaming::poll_next(Pin::new(&mut stream), cx)
+        }));
+        assert!(second.is_none(), "cancelled bidi stream should then close");
+    }
+
+    /// GRPC-CONF-012: Client cancellation must surface CANCELLED immediately.
+    /// Buffered loopback responses must not leak after the client aborts the RPC.
+    #[test]
+    fn conformance_bidi_stream_cancellation_suppresses_buffered_responses() {
+        let channel = make_channel("http://loopback:50051");
+        let mut client = GrpcClient::new(channel);
+
+        let (mut sink, mut stream) = futures_lite::future::block_on(
+            client.bidi_streaming::<u32, u32>("/pkg.Service/Method"),
+        )
+        .expect("bidi streaming setup");
+
+        futures_lite::future::block_on(sink.send(7))
+            .expect("loopback bidi stream should buffer one echoed response");
+        drop(sink);
+
+        let first = futures_lite::future::block_on(futures_lite::future::poll_fn(|cx| {
+            Streaming::poll_next(Pin::new(&mut stream), cx)
+        }));
+        match first {
+            Some(Err(status)) => {
+                assert_eq!(status.code(), crate::grpc::Code::Cancelled);
+                assert_eq!(status.message(), "request stream cancelled by client");
+            }
+            other => panic!("expected immediate CANCELLED after client abort, got {other:?}"),
+        }
+
         let second = futures_lite::future::block_on(futures_lite::future::poll_fn(|cx| {
             Streaming::poll_next(Pin::new(&mut stream), cx)
         }));
