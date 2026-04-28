@@ -33,6 +33,7 @@ cargo +nightly install cargo-fuzz
 | `cancel_signal_ordering_oracle` | CancelOrderingOracle parent/child spawn, cancel, check, and reset state-machine invariants with bounded violation queues and sorted snapshots | High |
 | `cancel_protocol_validator` | `CancelProtocolValidator` region/task/obligation registration and transition-sequence invariants, including unregistered rejects, terminal-state idempotence, and monotonic violation counting | High |
 | `fuzz_distributed_snapshot_merge` | CRDT snapshot merge convergence under delta reordering, malformed-wire rejection, and region-mismatch handling | High |
+| `jetstream_parser` | Real JetStream `StreamInfo`/`PubAck`/API-error/ACK-subject decoders with dotted-name, oversized-number, truncated-reply, and malformed-envelope coverage | High |
 | `h3_native_frames` | HTTP/3 frame-header varint bounds, malformed-frame rejection, unknown-frame preservation, and GREASE tolerance | High |
 | `qpack_field_section` | QPACK encoded field section parsing for static-indexed fields, static-name literals, dynamic-reference rejection, and prefixed-integer overflow | High |
 | `kafka_protocol` | Kafka request-header ApiKey/ApiVersion, correlation echo, tagged-field varint, and size-bound invariants | High |

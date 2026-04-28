@@ -1086,6 +1086,83 @@ impl Consumer {
     }
 }
 
+/// br-asupersync-c2gquz — compact JetStream ACK metadata returned by the real
+/// reply-subject parser for fuzz harnesses.
+#[cfg(feature = "test-internals")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct FuzzJsAckMetadata {
+    /// Original published subject.
+    pub subject: String,
+    /// Parsed JetStream stream sequence number.
+    pub sequence: u64,
+    /// Parsed JetStream delivery count.
+    pub delivered: u32,
+    /// Payload length carried by the source NATS message.
+    pub payload_len: usize,
+}
+
+/// br-asupersync-c2gquz — fuzz-target re-exporter for the StreamInfo parser.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_parse_stream_info(payload: &[u8]) -> Result<StreamInfo, JsError> {
+    JetStreamContext::parse_stream_info(payload)
+}
+
+/// br-asupersync-c2gquz — fuzz-target re-exporter for the PubAck parser.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_parse_pub_ack(payload: &[u8]) -> Result<PubAck, JsError> {
+    JetStreamContext::parse_pub_ack(payload)
+}
+
+/// br-asupersync-c2gquz — fuzz-target re-exporter for the API error parser.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_parse_api_error(json: &str) -> JsError {
+    JetStreamContext::parse_api_error(json)
+}
+
+/// br-asupersync-c2gquz — fuzz-target re-exporter for the JetStream ACK reply
+/// subject parser.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_parse_js_message(msg: Message) -> Option<FuzzJsAckMetadata> {
+    Consumer::parse_js_message(msg).map(|parsed| FuzzJsAckMetadata {
+        subject: parsed.subject.clone(),
+        sequence: parsed.sequence,
+        delivered: parsed.delivered,
+        payload_len: parsed.payload.len(),
+    })
+}
+
+/// br-asupersync-6ba4qs — compact control-token classification for JetStream
+/// ack payload fuzzing.
+#[cfg(feature = "test-internals")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum FuzzJsAckControl {
+    Ack,
+    Nak,
+    InProgress,
+    Term,
+    Unknown,
+}
+
+/// br-asupersync-6ba4qs — fuzz-target re-exporter for JetStream ack control
+/// payload parsing.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_parse_ack_control(payload: &[u8]) -> FuzzJsAckControl {
+    match payload {
+        b"+ACK" => FuzzJsAckControl::Ack,
+        b"-NAK" => FuzzJsAckControl::Nak,
+        b"+WPI" => FuzzJsAckControl::InProgress,
+        b"+TERM" => FuzzJsAckControl::Term,
+        _ => FuzzJsAckControl::Unknown,
+    }
+}
+
 impl JsMessage {
     /// Acknowledge the message (marks as processed).
     ///
