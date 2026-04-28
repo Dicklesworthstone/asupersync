@@ -1,0 +1,93 @@
+---
+source: src/runtime/scheduler/three_lane.rs
+expression: lyapunov_governor_decision_history_fixed_seed_json(0xC0DE_CAFE_BEEF_0191)
+---
+{
+  "seed": "0xC0DECAFEBEEF0191",
+  "steps": [
+    {
+      "phase": "quiescent",
+      "suggestion": "no_preference",
+      "dispatch_task": null,
+      "snapshot": {
+        "time_ns": 0,
+        "live_tasks": 0,
+        "pending_obligations": 0,
+        "obligation_age_sum_ns": 0,
+        "draining_regions": 0,
+        "deadline_pressure": 0.0,
+        "ready_queue_depth": 0
+      },
+      "potential": {
+        "total": 0.0,
+        "tasks": 0.0,
+        "obligations": 0.0,
+        "regions": 0.0,
+        "deadlines": 0.0
+      }
+    },
+    {
+      "phase": "meet_deadlines",
+      "suggestion": "meet_deadlines",
+      "dispatch_task": "TaskId(9901:1)",
+      "snapshot": {
+        "time_ns": 999000000,
+        "live_tasks": 1,
+        "pending_obligations": 0,
+        "obligation_age_sum_ns": 0,
+        "draining_regions": 0,
+        "deadline_pressure": 0.999,
+        "ready_queue_depth": 1
+      },
+      "potential": {
+        "total": 2.998,
+        "tasks": 1.0,
+        "obligations": 0.0,
+        "regions": 0.0,
+        "deadlines": 1.998
+      }
+    },
+    {
+      "phase": "drain_obligations",
+      "suggestion": "drain_obligations",
+      "dispatch_task": "TaskId(9902:1)",
+      "snapshot": {
+        "time_ns": 1000000000,
+        "live_tasks": 1,
+        "pending_obligations": 1,
+        "obligation_age_sum_ns": 1000000000,
+        "draining_regions": 0,
+        "deadline_pressure": 0.0,
+        "ready_queue_depth": 1
+      },
+      "potential": {
+        "total": 6.0,
+        "tasks": 1.0,
+        "obligations": 5.0,
+        "regions": 0.0,
+        "deadlines": 0.0
+      }
+    },
+    {
+      "phase": "drain_regions",
+      "suggestion": "drain_regions",
+      "dispatch_task": "TaskId(9903:1)",
+      "snapshot": {
+        "time_ns": 0,
+        "live_tasks": 0,
+        "pending_obligations": 0,
+        "obligation_age_sum_ns": 0,
+        "draining_regions": 1,
+        "deadline_pressure": 0.0,
+        "ready_queue_depth": 1
+      },
+      "potential": {
+        "total": 3.0,
+        "tasks": 0.0,
+        "obligations": 0.0,
+        "regions": 3.0,
+        "deadlines": 0.0
+      }
+    }
+  ]
+}

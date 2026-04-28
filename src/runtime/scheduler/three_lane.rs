@@ -10518,6 +10518,167 @@ mod tests {
         })
     }
 
+    #[derive(Clone, Copy)]
+    enum LyapunovGovernorDecisionFixture {
+        Quiescent,
+        MeetDeadlines,
+        DrainObligations,
+        DrainRegions,
+    }
+
+    impl LyapunovGovernorDecisionFixture {
+        fn name(self) -> &'static str {
+            match self {
+                Self::Quiescent => "quiescent",
+                Self::MeetDeadlines => "meet_deadlines",
+                Self::DrainObligations => "drain_obligations",
+                Self::DrainRegions => "drain_regions",
+            }
+        }
+    }
+
+    fn scheduling_suggestion_label(suggestion: SchedulingSuggestion) -> &'static str {
+        match suggestion {
+            SchedulingSuggestion::MeetDeadlines => "meet_deadlines",
+            SchedulingSuggestion::DrainObligations => "drain_obligations",
+            SchedulingSuggestion::DrainRegions => "drain_regions",
+            SchedulingSuggestion::NoPreference => "no_preference",
+        }
+    }
+
+    fn lyapunov_governor_decision_step_json(
+        seed: u64,
+        fixture: LyapunovGovernorDecisionFixture,
+    ) -> Value {
+        use crate::record::ObligationKind;
+        use crate::time::{TimerDriverHandle, VirtualClock};
+
+        let mut state = RuntimeState::new();
+        let timer_driver = match fixture {
+            LyapunovGovernorDecisionFixture::MeetDeadlines => {
+                let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(999_000_000)));
+                state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock.clone()));
+                state.now = Time::from_nanos(999_000_000);
+                Some(TimerDriverHandle::with_virtual_clock(clock))
+            }
+            LyapunovGovernorDecisionFixture::DrainObligations => {
+                state.now = Time::from_nanos(1_000_000_000);
+                None
+            }
+            LyapunovGovernorDecisionFixture::DrainRegions
+            | LyapunovGovernorDecisionFixture::Quiescent => None,
+        };
+
+        match fixture {
+            LyapunovGovernorDecisionFixture::MeetDeadlines => {
+                let root = state.create_root_region(Budget::unlimited());
+                let (_task_id, _handle) = state
+                    .create_task(root, Budget::with_deadline_ns(1_000_000_000), async {})
+                    .expect("create deadline-pressured task");
+            }
+            LyapunovGovernorDecisionFixture::DrainObligations => {
+                let root = state.create_root_region(Budget::unlimited());
+                let (task_id, _handle) = state
+                    .create_task(root, Budget::unlimited(), async {})
+                    .expect("create obligation holder");
+                state
+                    .create_obligation(ObligationKind::SendPermit, task_id, root, None)
+                    .expect("create aged obligation");
+            }
+            LyapunovGovernorDecisionFixture::DrainRegions => {
+                let root = state.create_root_region(Budget::unlimited());
+                let branch = state
+                    .create_child_region(root, Budget::unlimited())
+                    .expect("create draining branch");
+                let branch_record = state.region_mut(branch).expect("branch record");
+                assert!(branch_record.begin_close(None));
+                assert!(branch_record.begin_drain());
+            }
+            LyapunovGovernorDecisionFixture::Quiescent => {}
+        }
+
+        let state = Arc::new(ContendedMutex::new("runtime_state", state));
+        let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 2, true, 1);
+        let mut workers = scheduler.take_workers();
+        let worker = workers
+            .first_mut()
+            .expect("scheduler should create a worker");
+        worker.rng = crate::util::DetRng::new(seed);
+        worker.decision_contract = None;
+        worker.decision_posterior = None;
+        worker.timer_driver = timer_driver;
+
+        match fixture {
+            LyapunovGovernorDecisionFixture::MeetDeadlines => {
+                worker.schedule_local_timed(TaskId::new_for_test(9901, 1), Time::from_nanos(0));
+                worker.schedule_local_cancel(TaskId::new_for_test(9901, 2), 7);
+                worker.fast_queue.push(TaskId::new_for_test(9901, 3));
+            }
+            LyapunovGovernorDecisionFixture::DrainObligations => {
+                worker.schedule_local_cancel(TaskId::new_for_test(9902, 1), 9);
+                worker.fast_queue.push(TaskId::new_for_test(9902, 2));
+            }
+            LyapunovGovernorDecisionFixture::DrainRegions => {
+                worker.schedule_local_cancel(TaskId::new_for_test(9903, 1), 11);
+                worker.fast_queue.push(TaskId::new_for_test(9903, 2));
+            }
+            LyapunovGovernorDecisionFixture::Quiescent => {}
+        }
+
+        let snapshot = {
+            let state = worker
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            StateSnapshot::from_runtime_state(&state)
+                .with_ready_queue_depth(worker.ready_queue_depth_signal() as u32)
+        };
+        let record = worker
+            .governor
+            .as_ref()
+            .expect("governor should be enabled")
+            .compute_record(&snapshot);
+        let dispatch_task = worker.next_task().map(|task| format!("{task:?}"));
+
+        json!({
+            "phase": fixture.name(),
+            "suggestion": scheduling_suggestion_label(worker.cached_suggestion),
+            "dispatch_task": dispatch_task,
+            "snapshot": {
+                "time_ns": snapshot.time.as_nanos(),
+                "live_tasks": snapshot.live_tasks,
+                "pending_obligations": snapshot.pending_obligations,
+                "obligation_age_sum_ns": snapshot.obligation_age_sum_ns,
+                "draining_regions": snapshot.draining_regions,
+                "deadline_pressure": snapshot.deadline_pressure,
+                "ready_queue_depth": snapshot.ready_queue_depth,
+            },
+            "potential": {
+                "total": record.total,
+                "tasks": record.task_component,
+                "obligations": record.obligation_component,
+                "regions": record.region_component,
+                "deadlines": record.deadline_component,
+            },
+        })
+    }
+
+    fn lyapunov_governor_decision_history_fixed_seed_json(seed: u64) -> Value {
+        let fixtures = [
+            LyapunovGovernorDecisionFixture::Quiescent,
+            LyapunovGovernorDecisionFixture::MeetDeadlines,
+            LyapunovGovernorDecisionFixture::DrainObligations,
+            LyapunovGovernorDecisionFixture::DrainRegions,
+        ];
+        json!({
+            "seed": format!("0x{:016X}", seed),
+            "steps": fixtures
+                .into_iter()
+                .map(|fixture| lyapunov_governor_decision_step_json(seed, fixture))
+                .collect::<Vec<_>>(),
+        })
+    }
+
     fn scheduler_decision_trace_fixed_seed_json(seed: u64) -> Value {
         let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(999_000_000)));
         let mut state = RuntimeState::new();
@@ -10653,6 +10814,14 @@ mod tests {
         insta::assert_json_snapshot!(
             "three_lane_scheduler_decision_trace_fixed_seed",
             scheduler_decision_trace_fixed_seed_json(0xC0DE_CAFE_BEEF_0191)
+        );
+    }
+
+    #[test]
+    fn three_lane_lyapunov_governor_decision_history_fixed_seed() {
+        insta::assert_json_snapshot!(
+            "three_lane_lyapunov_governor_decision_history_fixed_seed",
+            lyapunov_governor_decision_history_fixed_seed_json(0xC0DE_CAFE_BEEF_0191)
         );
     }
 
