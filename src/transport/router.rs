@@ -2547,6 +2547,61 @@ mod tests {
     }
 
     #[test]
+    fn test_load_balancer_hash_based_select_n_preserves_survivors_under_endpoint_removal_m0izs9() {
+        let lb = LoadBalancer::with_seed(LoadBalanceStrategy::HashBased, 0x0057_AF1D_u64);
+        let oid = ObjectId::new_for_test(42);
+
+        // Original membership: 8 endpoints
+        let endpoints: Vec<Arc<Endpoint>> = (1..=8).map(|i| Arc::new(test_endpoint(i))).collect();
+
+        // Select 3 endpoints from full membership
+        let original_selected: Vec<_> = lb
+            .select_n(&endpoints, 3, Some(oid))
+            .into_iter()
+            .map(|endpoint| endpoint.id)
+            .collect();
+
+        // Remove endpoints 2 and 6 (membership churn)
+        let reduced_endpoints: Vec<Arc<Endpoint>> = endpoints
+            .iter()
+            .filter(|endpoint| endpoint.id != EndpointId::new_for_test(2) && endpoint.id != EndpointId::new_for_test(6))
+            .cloned()
+            .collect();
+
+        // Select 3 endpoints from reduced membership
+        let churn_selected: Vec<_> = lb
+            .select_n(&reduced_endpoints, 3, Some(oid))
+            .into_iter()
+            .map(|endpoint| endpoint.id)
+            .collect();
+
+        // Find survivors: endpoints that were selected originally and are still in the pool
+        let surviving_in_original: Vec<_> = original_selected
+            .iter()
+            .filter(|&&id| reduced_endpoints.iter().any(|e| e.id == id))
+            .copied()
+            .collect();
+
+        let surviving_in_churn: Vec<_> = churn_selected
+            .iter()
+            .filter(|&&id| original_selected.contains(id))
+            .copied()
+            .collect();
+
+        // Hash-based routing should preserve stickiness for survivors
+        assert_eq!(
+            surviving_in_original, surviving_in_churn,
+            "hash-based select_n must preserve survivors under membership churn"
+        );
+
+        // All selections should still be unique
+        let unique_original: HashSet<_> = original_selected.iter().copied().collect();
+        assert_eq!(unique_original.len(), original_selected.len());
+        let unique_churn: HashSet<_> = churn_selected.iter().copied().collect();
+        assert_eq!(unique_churn.len(), churn_selected.len());
+    }
+
+    #[test]
     fn test_load_balancer_random_select_n_returns_unique_healthy() {
         let lb = LoadBalancer::new(LoadBalanceStrategy::Random);
         let endpoints: Vec<Arc<Endpoint>> = (0..10)
