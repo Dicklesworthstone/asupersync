@@ -1246,7 +1246,6 @@ fn bench_adaptive_cancel_streak_policy(c: &mut Criterion) {
     use asupersync::runtime::scheduler::three_lane::{
         AdaptiveCancelStreakPolicyBench, AdaptivePolicyBenchSnapshot,
     };
-    use asupersync::util::DetRng;
 
     let mut group = c.benchmark_group("scheduler/adaptive_cancel_streak");
     group.sample_size(50);
@@ -1275,17 +1274,15 @@ fn bench_adaptive_cancel_streak_policy(c: &mut Criterion) {
                 let mut policy = AdaptiveCancelStreakPolicyBench::new(10);
                 // Pre-train with some data
                 let start = test_snapshot(100.0, 0.25, 0, 0, 0);
-                let mut rng = DetRng::new(0x2024_0001);
                 for i in 0..20 {
                     policy.force_selected_arm(i % policy.arm_count());
                     policy.begin_epoch(start);
-                    let sample = rng.next_u64();
                     let end = if i % 3 == 0 {
                         test_snapshot(120.0, 0.6, 2, 3, 1)
                     } else {
                         test_snapshot(80.0, 0.2, 0, 0, 0)
                     };
-                    let _reward = policy.complete_epoch(end, sample);
+                    let _reward = policy.complete_epoch(end);
                 }
                 policy
             },
@@ -1305,12 +1302,11 @@ fn bench_adaptive_cancel_streak_policy(c: &mut Criterion) {
                 let mut policy = AdaptiveCancelStreakPolicyBench::new(10);
                 let start = test_snapshot(100.0, 0.25, 0, 0, 0);
                 policy.begin_epoch(start);
-                (policy, DetRng::new(0x2024_0002))
+                policy
             },
-            |(mut policy, mut rng)| {
-                let sample = rng.next_u64();
+            |mut policy| {
                 let end = test_snapshot(110.0, 0.4, 1, 1, 0);
-                let reward = policy.complete_epoch(end, sample);
+                let reward = policy.complete_epoch(end);
                 black_box(reward)
             },
             BatchSize::SmallInput,
@@ -1327,10 +1323,9 @@ fn bench_adaptive_cancel_streak_policy(c: &mut Criterion) {
                 b.iter_batched(
                     || {
                         let policy = AdaptiveCancelStreakPolicyBench::new(10);
-                        let rng = DetRng::new(0x2024_0003);
-                        (policy, rng)
+                        policy
                     },
-                    |(mut policy, mut rng)| {
+                    |mut policy| {
                         let start = test_snapshot(100.0, 0.25, 0, 0, 0);
 
                         // Simulate epochs with arm 2 being optimal (gets best rewards)
@@ -1340,7 +1335,6 @@ fn bench_adaptive_cancel_streak_policy(c: &mut Criterion) {
                             policy.force_selected_arm(selected_arm);
                             policy.begin_epoch(start);
 
-                            let sample = rng.next_u64();
                             // Arm 2 gets better rewards, others get worse
                             let end = if selected_arm == 2 {
                                 test_snapshot(90.0, 0.15, 0, 0, 0) // Good performance
@@ -1348,7 +1342,7 @@ fn bench_adaptive_cancel_streak_policy(c: &mut Criterion) {
                                 test_snapshot(130.0, 0.7, 3, 4, 2) // Poor performance
                             };
 
-                            if let Some(reward) = policy.complete_epoch(end, sample) {
+                            if let Some(reward) = policy.complete_epoch(end) {
                                 total_reward += reward;
                             }
                         }
@@ -1374,12 +1368,11 @@ fn bench_adaptive_cancel_streak_policy(c: &mut Criterion) {
                         policy.seed_history([0.5; 5], [history_mass as f64; 5]);
                         let start = test_snapshot(100.0, 0.25, 0, 0, 0);
                         policy.begin_epoch(start);
-                        (policy, DetRng::new(0x2024_0004))
+                        policy
                     },
-                    |(mut policy, mut rng)| {
-                        let sample = rng.next_u64();
+                    |mut policy| {
                         let end = test_snapshot(120.0, 0.5, 2, 2, 1);
-                        let reward = policy.complete_epoch(end, sample);
+                        let reward = policy.complete_epoch(end);
                         black_box(reward)
                     },
                     BatchSize::SmallInput,
@@ -1393,10 +1386,9 @@ fn bench_adaptive_cancel_streak_policy(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let policy = AdaptiveCancelStreakPolicyBench::new(10);
-                let rng = DetRng::new(0x2024_0005);
-                (policy, rng)
+                policy
             },
-            |(mut policy, mut rng)| {
+            |mut policy| {
                 let start = test_snapshot(100.0, 0.25, 0, 0, 0);
                 let pressure_patterns = [
                     (70.0, 0.1, 0, 0, 0),  // Very relaxed
@@ -1413,7 +1405,6 @@ fn bench_adaptive_cancel_streak_policy(c: &mut Criterion) {
                         policy.force_selected_arm(arm);
                         policy.begin_epoch(start);
 
-                        let sample = rng.next_u64();
                         let end = test_snapshot(
                             potential,
                             deadline_pressure,
@@ -1422,7 +1413,7 @@ fn bench_adaptive_cancel_streak_policy(c: &mut Criterion) {
                             fallback,
                         );
 
-                        if let Some(reward) = policy.complete_epoch(end, sample) {
+                        if let Some(reward) = policy.complete_epoch(end) {
                             total_rewards += reward;
                         }
                     }
