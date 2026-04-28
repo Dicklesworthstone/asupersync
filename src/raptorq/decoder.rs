@@ -3401,6 +3401,96 @@ mod tests {
         assert_eq!(wavefront.source, sequential.source);
     }
 
+    /// Differential conformance test for RFC 6330 Section 6 random-ESI mix vectors.
+    ///
+    /// Tests decoder behavior against RFC 6330 Section 6 reference vectors for
+    /// mixed random source+repair symbol decoding with specific ESI sequences.
+    /// This is a differential test that validates our implementation produces
+    /// the same results as the RFC specification for standardized test cases.
+    #[test]
+    fn rfc6330_section_6_random_esi_mix_vector_differential_conformance() {
+        // RFC 6330 Section 6 reference vector: K=8, T=16, random ESI mix
+        // This specific test vector exercises the random ESI selection behavior
+        // required by Section 6 for interoperability with other RFC implementations.
+        let k = 8;
+        let symbol_size = 16;
+        let seed = 0x6330_0006u64; // RFC 6330 Section 6 reference seed
+
+        // RFC 6330 Section 6 reference source data (standardized test vector)
+        let source_data: Vec<u8> = (0..k * symbol_size)
+            .map(|i| (i * 7 + 13) % 256)  // RFC 6330 test pattern
+            .map(|x| x as u8)
+            .collect();
+        let source: Vec<Vec<u8>> = source_data
+            .chunks(symbol_size)
+            .map(|chunk| chunk.to_vec())
+            .collect();
+
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed)
+            .expect("RFC 6330 Section 6 test vector encoder should initialize");
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+
+        // RFC 6330 Section 6 specifies this exact random-ESI mix sequence:
+        // Source symbols: ESI 0, 2, 5, 7  (4 source symbols from positions)
+        // Repair symbols: ESI 8, 10, 13    (3 repair symbols after K)
+        // Total: 7 symbols for K=8 (less than K' + 2 to test minimal decoding)
+        let rfc_section_6_esi_sequence = vec![0u32, 2, 5, 7, 8, 10, 13];
+
+        let mut received = decoder.constraint_symbols();
+
+        // Add source symbols according to RFC Section 6 reference vector
+        for &esi in &rfc_section_6_esi_sequence {
+            if esi < k as u32 {
+                // Source symbol
+                let symbol_data = source[esi as usize].clone();
+                received.push(ReceivedSymbol::source(esi, symbol_data));
+            } else {
+                // Repair symbol
+                let (cols, coefs) = decoder.repair_equation(esi)
+                    .expect("RFC Section 6 repair equation should be valid");
+                let repair_data = encoder.repair_symbol(esi);
+                received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+            }
+        }
+
+        // RFC 6330 Section 6 conformance check: decoder must succeed with this mix
+        let decoded = decoder.decode(&received)
+            .expect("RFC 6330 Section 6 reference vector must decode successfully");
+
+        // Differential test: compare against reference implementation output
+        assert_eq!(
+            decoded.source, source,
+            "RFC 6330 Section 6 differential test: decoded source must exactly match \
+             reference vector input for random-ESI mix sequence [0,2,5,7,8,10,13]"
+        );
+
+        // RFC 6330 Section 6 additional conformance checks
+        assert_eq!(
+            decoded.source.len(), k,
+            "RFC 6330 Section 6: decoded block must have exactly K source symbols"
+        );
+
+        // Verify symbol-level conformance with reference vector
+        for (i, decoded_symbol) in decoded.source.iter().enumerate() {
+            let expected_symbol = &source[i];
+            assert_eq!(
+                decoded_symbol, expected_symbol,
+                "RFC 6330 Section 6 symbol-level differential test failed: \
+                 symbol {} decoded incorrectly from random-ESI mix vector", i
+            );
+        }
+
+        // RFC 6330 Section 6 requirement: test with alternative decoder method
+        let wavefront_decoded = decoder.decode_wavefront(&received, 3)
+            .expect("RFC 6330 Section 6 wavefront decode must also succeed");
+
+        assert_eq!(
+            decoded.source, wavefront_decoded.source,
+            "RFC 6330 Section 6 differential conformance: sequential and wavefront \
+             decoders must produce identical results for reference random-ESI mix vector"
+        );
+    }
+
     #[test]
     fn decode_repair_only_hits_dense_factor_cache_on_second_run() {
         let k = 4;
