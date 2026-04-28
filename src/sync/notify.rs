@@ -550,7 +550,8 @@ impl Future for Notified<'_> {
         match self.state {
             NotifiedState::Init => self.poll_init(cx),
             NotifiedState::Waiting => self.poll_waiting(cx),
-            NotifiedState::Done => panic!("Notified polled after completion"),
+            // Preserve completion on re-poll instead of panicking in library code.
+            NotifiedState::Done => Poll::Ready(()),
         }
     }
 }
@@ -625,8 +626,8 @@ mod tests {
     )]
     use super::*;
     use crate::test_utils::init_test_logging;
-    use std::sync::Arc;
     use std::sync::mpsc;
+    use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
 
@@ -814,8 +815,8 @@ mod tests {
     }
 
     #[test]
-    fn notified_repoll_panics_after_notify_one_completion() {
-        init_test("notified_repoll_panics_after_notify_one_completion");
+    fn notified_repoll_after_notify_one_completion_stays_ready() {
+        init_test("notified_repoll_after_notify_one_completion_stays_ready");
         let notify = Notify::new();
         let mut fut = notify.notified();
 
@@ -823,11 +824,14 @@ mod tests {
         notify.notify_one();
         assert!(poll_once(&mut fut).is_ready());
 
-        let repoll = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = poll_once(&mut fut);
-        }));
-        crate::assert_with_log!(repoll.is_err(), "repoll panics", true, repoll.is_err());
-        crate::test_complete!("notified_repoll_panics_after_notify_one_completion");
+        let repoll = poll_once(&mut fut);
+        crate::assert_with_log!(
+            repoll.is_ready(),
+            "repoll stays ready",
+            true,
+            repoll.is_ready()
+        );
+        crate::test_complete!("notified_repoll_after_notify_one_completion_stays_ready");
     }
 
     #[test]
@@ -846,19 +850,22 @@ mod tests {
     }
 
     #[test]
-    fn notified_repoll_panics_after_stored_notify_completion() {
-        init_test("notified_repoll_panics_after_stored_notify_completion");
+    fn notified_repoll_after_stored_notify_completion_stays_ready() {
+        init_test("notified_repoll_after_stored_notify_completion_stays_ready");
         let notify = Notify::new();
         notify.notify_one();
 
         let mut fut = notify.notified();
         assert!(poll_once(&mut fut).is_ready());
 
-        let repoll = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _ = poll_once(&mut fut);
-        }));
-        crate::assert_with_log!(repoll.is_err(), "repoll panics", true, repoll.is_err());
-        crate::test_complete!("notified_repoll_panics_after_stored_notify_completion");
+        let repoll = poll_once(&mut fut);
+        crate::assert_with_log!(
+            repoll.is_ready(),
+            "repoll stays ready",
+            true,
+            repoll.is_ready()
+        );
+        crate::test_complete!("notified_repoll_after_stored_notify_completion_stays_ready");
     }
 
     #[test]
