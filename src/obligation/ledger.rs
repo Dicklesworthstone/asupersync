@@ -259,13 +259,32 @@ impl ObligationLedger {
     /// [`LedgerError::RegionFinalized`] instead of mutating ledger
     /// state. Idempotent.
     ///
-    /// The region-close path (the runtime's structured-concurrency
-    /// finalize phase) calls this exactly once per region after
-    /// the region's drain has completed. Tokens captured across the
-    /// region boundary (e.g. in a Drop impl outside the scope) that
-    /// arrive after this point are rejected with a clear error
-    /// instead of silently mutating an already-finalized region's
-    /// audit trail.
+    /// **Status (2026-04-28): the fence is implemented and unit-tested
+    /// here, but is NOT wired into the production region-close path.**
+    /// `grep -rn 'mark_region_finalized' src/` returns hits only inside
+    /// this file's own `#[cfg(test)]` mod. The intended wire site is
+    /// `RuntimeState::drive_region_lifecycle` — the same block that
+    /// emits the `RegionCloseComplete` trace event after `complete_close`
+    /// returns true (`src/runtime/state.rs` around the
+    /// `record_finalizer_close(region_id)` call). Wiring there must
+    /// respect the C(Obligations) lock-ordering tail position:
+    /// acquire the obligation ledger AFTER releasing the regions
+    /// guard, since the canonical order is
+    /// `E(Config) → D(Instrumentation) → B(Regions) → A(Tasks) → C(Obligations)`.
+    ///
+    /// Until that wiring lands, the fence checks in
+    /// [`Self::try_commit`] / [`Self::try_abort`] / [`Self::commit`] /
+    /// [`Self::abort`] / [`Self::abort_by_id`] / `acquire_with_context`
+    /// (br-asupersync-u1gcfp, br-asupersync-12cqs2) are
+    /// inert in production: the `finalized_regions` set stays empty,
+    /// so a Drop-late commit/abort that races with region close still
+    /// mutates an already-closed region's audit trail. The structural
+    /// defense exists in this file; only the call site is missing.
+    ///
+    /// Tokens captured across the region boundary (e.g. in a Drop impl
+    /// outside the scope) that arrive after this point are rejected
+    /// with a clear error instead of silently mutating an
+    /// already-finalized region's audit trail — once wiring lands.
     pub fn mark_region_finalized(&mut self, region: RegionId) {
         self.finalized_regions.insert(region);
     }
