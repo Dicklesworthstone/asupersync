@@ -295,71 +295,42 @@ fn extract_parameter_pattern(pattern: &str) -> String {
     format!("params[{}]: {}", params.len(), params.join(", "))
 }
 
+fn known_route<const N: usize>(pattern: &str, methods: [&str; N]) -> (String, Vec<String>) {
+    (
+        pattern.to_string(),
+        methods.into_iter().map(str::to_owned).collect(),
+    )
+}
+
 /// Get known route patterns for analysis
 fn get_known_route_patterns() -> Vec<(String, Vec<String>)> {
     vec![
-        ("/".to_string(), vec!["GET".to_string()]),
-        ("/favicon.ico".to_string(), vec!["GET".to_string()]),
-        ("/static/*".to_string(), vec!["GET".to_string()]),
-        ("/assets/css/:file".to_string(), vec!["GET".to_string()]),
-        ("/assets/js/:file".to_string(), vec!["GET".to_string()]),
-        (
-            "/login".to_string(),
-            vec!["GET".to_string(), "POST".to_string()],
-        ),
-        ("/logout".to_string(), vec!["POST".to_string()]),
-        (
-            "/register".to_string(),
-            vec!["GET".to_string(), "POST".to_string()],
-        ),
-        ("/blog".to_string(), vec!["GET".to_string()]),
-        ("/blog/:slug".to_string(), vec!["GET".to_string()]),
-        (
-            "/blog/:year/:month/:day/:slug".to_string(),
-            vec!["GET".to_string()],
-        ),
-        ("/categories/:category".to_string(), vec!["GET".to_string()]),
-        ("/tags/:tag".to_string(), vec!["GET".to_string()]),
-        (
-            "/posts".to_string(),
-            vec!["GET".to_string(), "POST".to_string()],
-        ),
-        (
-            "/posts/:id".to_string(),
-            vec!["GET".to_string(), "PUT".to_string(), "DELETE".to_string()],
-        ),
-        (
-            "/posts/:id/comments".to_string(),
-            vec!["GET".to_string(), "POST".to_string()],
-        ),
-        (
-            "/posts/:id/comments/:comment_id".to_string(),
-            vec!["GET".to_string(), "PUT".to_string(), "DELETE".to_string()],
-        ),
-        (
-            "/contact".to_string(),
-            vec!["GET".to_string(), "POST".to_string()],
-        ),
-        (
-            "/newsletter/subscribe".to_string(),
-            vec!["POST".to_string()],
-        ),
-        (
-            "/newsletter/unsubscribe".to_string(),
-            vec!["POST".to_string()],
-        ),
-        ("/upload".to_string(), vec!["POST".to_string()]),
-        ("/download/:file_id".to_string(), vec!["GET".to_string()]),
-        (
-            "/files/:bucket/:key".to_string(),
-            vec!["GET".to_string(), "DELETE".to_string()],
-        ),
-        ("/ws".to_string(), vec!["GET".to_string()]),
-        ("/ws/chat/:room".to_string(), vec!["GET".to_string()]),
-        (
-            "/ws/notifications/:user_id".to_string(),
-            vec!["GET".to_string()],
-        ),
+        known_route("/", ["GET"]),
+        known_route("/favicon.ico", ["GET"]),
+        known_route("/static/*", ["GET"]),
+        known_route("/assets/css/:file", ["GET"]),
+        known_route("/assets/js/:file", ["GET"]),
+        known_route("/login", ["GET", "POST"]),
+        known_route("/logout", ["POST"]),
+        known_route("/register", ["GET", "POST"]),
+        known_route("/blog", ["GET"]),
+        known_route("/blog/:slug", ["GET"]),
+        known_route("/blog/:year/:month/:day/:slug", ["GET"]),
+        known_route("/categories/:category", ["GET"]),
+        known_route("/tags/:tag", ["GET"]),
+        known_route("/posts", ["GET", "POST"]),
+        known_route("/posts/:id", ["GET", "PUT", "DELETE"]),
+        known_route("/posts/:id/comments", ["GET", "POST"]),
+        known_route("/posts/:id/comments/:comment_id", ["GET", "PUT", "DELETE"]),
+        known_route("/contact", ["GET", "POST"]),
+        known_route("/newsletter/subscribe", ["POST"]),
+        known_route("/newsletter/unsubscribe", ["POST"]),
+        known_route("/upload", ["POST"]),
+        known_route("/download/:file_id", ["GET"]),
+        known_route("/files/:bucket/:key", ["GET", "DELETE"]),
+        known_route("/ws", ["GET"]),
+        known_route("/ws/chat/:room", ["GET"]),
+        known_route("/ws/notifications/:user_id", ["GET"]),
     ]
 }
 
