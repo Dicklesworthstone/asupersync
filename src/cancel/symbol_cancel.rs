@@ -4368,4 +4368,110 @@ mod tests {
             final_count
         );
     }
+
+    #[test]
+    fn cancelled_at_snapshot_for_child_livelock_regression() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        // br-asupersync-wze4x9: Regression test for infinite spin loop livelock
+        // in cancelled_at_snapshot_for_child() when the cancelled flag is visible
+        // before the timestamp is written.
+
+        let mut rng = DetRng::new(0x1234_5678);
+        let object_id = ObjectId::new_for_test(0x1234_5678);
+        let token = SymbolCancelToken::new(object_id, &mut rng);
+
+        // Create a barrier to synchronize the race condition setup
+        let barrier = Arc::new(Barrier::new(2));
+        let cancel_started = Arc::new(AtomicBool::new(false));
+        let child_created = Arc::new(AtomicBool::new(false));
+
+        let token_for_cancel = token.clone();
+        let barrier_for_cancel = Arc::clone(&barrier);
+        let cancel_started_for_cancel = Arc::clone(&cancel_started);
+
+        // Thread 1: Start cancel process but hold the write lock longer to create race
+        let cancel_thread = thread::spawn(move || {
+            barrier_for_cancel.wait(); // Sync with child thread
+
+            // Acquire the reason write lock and set cancelled flag
+            let reason = CancelReason::user("livelock test");
+            let _reason_guard = token_for_cancel.state.reason.write();
+
+            // Signal that cancel has started (flag will be visible)
+            token_for_cancel.state.cancelled.store(true, Ordering::Release);
+            cancel_started_for_cancel.store(true, Ordering::Release);
+
+            // Hold the lock for a bit to ensure race condition
+            thread::sleep(Duration::from_millis(10));
+
+            // Set the timestamp (this will unblock the child creation)
+            token_for_cancel.state.cancelled_at.store(
+                crate::types::Time::from_millis(12345).as_nanos(),
+                Ordering::Release
+            );
+
+            // Lock will be dropped here, completing the cancel
+        });
+
+        let token_for_child = token.clone();
+        let barrier_for_child = Arc::clone(&barrier);
+        let cancel_started_for_child = Arc::clone(&cancel_started);
+        let child_created_for_child = Arc::clone(&child_created);
+
+        // Thread 2: Try to create child during the race window
+        let child_thread = thread::spawn(move || {
+            barrier_for_child.wait(); // Sync with cancel thread
+
+            // Wait for cancel to start but timestamp not yet set
+            while !cancel_started_for_child.load(Ordering::Acquire) {
+                thread::sleep(Duration::from_nanos(100));
+            }
+
+            // This would previously cause infinite livelock in cancelled_at_snapshot_for_child
+            let start = Instant::now();
+            let mut child_rng = DetRng::new(0x8765_4321);
+            let _child = token_for_child.child(&mut child_rng);
+            let elapsed = start.elapsed();
+
+            // With the fix, this should complete in bounded time
+            assert!(
+                elapsed < Duration::from_millis(500),
+                "Child creation should not livelock, took {:?}",
+                elapsed
+            );
+
+            child_created_for_child.store(true, Ordering::Release);
+        });
+
+        // Wait for both threads with timeout
+        let start = Instant::now();
+        cancel_thread.join().expect("Cancel thread should complete");
+        child_thread.join().expect("Child thread should complete");
+        let total_elapsed = start.elapsed();
+
+        // Verify the test completed quickly (no livelock)
+        assert!(
+            total_elapsed < Duration::from_secs(1),
+            "Test should complete quickly, took {:?}",
+            total_elapsed
+        );
+
+        // Verify both operations completed successfully
+        assert!(
+            cancel_started.load(Ordering::Acquire),
+            "Cancel should have started"
+        );
+        assert!(
+            child_created.load(Ordering::Acquire),
+            "Child should have been created without livelock"
+        );
+
+        // Verify final state is consistent
+        assert!(token.is_cancelled(), "Token should be cancelled");
+        assert!(token.cancelled_at().is_some(), "Cancelled timestamp should be available");
+    }
 }
