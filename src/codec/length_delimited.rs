@@ -18,7 +18,7 @@ pub struct LengthDelimitedCodecBuilder {
     length_field_offset: usize,
     length_field_length: usize,
     length_adjustment: isize,
-    num_skip: usize,
+    num_skip: Option<usize>,
     max_frame_length: usize,
     big_endian: bool,
 }
@@ -76,7 +76,7 @@ impl LengthDelimitedCodec {
             length_field_offset: 0,
             length_field_length: 4,
             length_adjustment: 0,
-            num_skip: 4,
+            num_skip: None,
             max_frame_length: 8 * 1024 * 1024,
             big_endian: true,
         }
@@ -117,11 +117,19 @@ impl LengthDelimitedCodecBuilder {
         /// Adjusts the reported length by this amount.
         length_adjustment: isize;
 
-        /// Number of bytes to skip before frame data when decoding.
-        num_skip: usize;
-
         /// Sets the maximum frame length.
         max_frame_length: usize;
+    }
+
+    /// Number of bytes to skip before frame data when decoding.
+    ///
+    /// When unset, matches `tokio-util` by defaulting to
+    /// `length_field_offset + length_field_length`.
+    #[inline]
+    #[must_use]
+    pub fn num_skip(mut self, val: usize) -> Self {
+        self.num_skip = Some(val);
+        self
     }
 
     /// Configures the codec to read lengths in big-endian order.
@@ -214,6 +222,10 @@ impl LengthDelimitedCodec {
 
         Ok(len_usize)
     }
+
+    fn num_skip(&self, header_len: usize) -> usize {
+        self.builder.num_skip.unwrap_or(header_len)
+    }
 }
 
 impl Decoder for LengthDelimitedCodec {
@@ -283,21 +295,20 @@ impl Decoder for LengthDelimitedCodec {
                     let total_frame_len = header_len.checked_add(frame_len).ok_or_else(|| {
                         io::Error::new(io::ErrorKind::InvalidData, "frame length overflow")
                     })?;
-                    let retained_len = total_frame_len
-                        .checked_sub(self.builder.num_skip)
-                        .ok_or_else(|| {
-                            io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                "num_skip exceeds total frame length",
-                            )
-                        })?;
+                    let num_skip = self.num_skip(header_len);
+                    let retained_len = total_frame_len.checked_sub(num_skip).ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "num_skip exceeds total frame length",
+                        )
+                    })?;
 
-                    if src.len() < self.builder.num_skip {
+                    if src.len() < num_skip {
                         return Ok(None);
                     }
 
-                    if self.builder.num_skip > 0 {
-                        let _ = src.split_to(self.builder.num_skip);
+                    if num_skip > 0 {
+                        let _ = src.split_to(num_skip);
                     }
 
                     // The decoder must wait for the bytes still visible after
@@ -767,6 +778,37 @@ mod tests {
 
         let frame = codec.decode(&mut buf).unwrap().unwrap();
         assert_eq!(&frame[..], b"data");
+    }
+
+    #[test]
+    fn builder_length_field_length_2_round_trips_with_tokio_compatible_default_skip() {
+        let builder = LengthDelimitedCodec::builder().length_field_length(2);
+
+        let mut encoder = builder.clone().new_codec();
+        let mut encoded = BytesMut::new();
+        encoder
+            .encode(BytesMut::from(&b"data"[..]), &mut encoded)
+            .expect("encode must succeed");
+        assert_eq!(
+            encoded.as_ref(),
+            b"\x00\x04data",
+            "tokio-util framed write emits a 2-byte length header followed by the payload",
+        );
+
+        let mut decoder = builder.new_codec();
+        let frame = decoder
+            .decode(&mut encoded)
+            .expect("decode must succeed")
+            .expect("frame must be ready");
+        assert_eq!(
+            frame.as_ref(),
+            b"data",
+            "tokio-util defaults num_skip to offset + length_field_length, so framed read must yield the full payload",
+        );
+        assert!(
+            encoded.is_empty(),
+            "round-trip should consume the full frame buffer"
+        );
     }
 
     #[test]
