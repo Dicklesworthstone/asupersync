@@ -971,15 +971,15 @@ error messages. See `docs/macro-dsl.md` for the full pattern catalog.
 Current reality: the Cargo-compiled conformance registry for this repository is
 the integration-test entrypoint at `tests/conformance.rs`, which includes the
 live module list from `tests/conformance/mod.rs`. That registry currently wires
-55 suites, with a few additional entries gated by `mysql`, `quic`, or
-platform-specific cfgs.
+59 `pub mod` suites, with some entries or result lanes gated by `mysql`,
+`quic`, `tls`, or platform-specific cfgs.
 
 The active registry covers:
 
 - **Channel, codec, and capability semantics**: channel cleanup, framing properties, round trips, and `Cx` capability contracts
-- **HTTP and compression surfaces**: active HTTP/1.1, HTTP/2, HTTP/3, HPACK, and request-target/protocol suites built against current APIs
-- **gRPC and transport protocol checks**: max-message framing, status mapping, trailer forwarding, gRPC-Web framing, TCP accept/listener, and timeout harnesses
-- **Security and wire-level protocol lanes**: TLS handshake / key-share / SNI / 0-RTT replay, QUIC retry (plus QUIC migration when enabled), DNS message parsing, Kafka offsets / record batches, and MySQL / PostgreSQL protocol coverage
+- **HTTP and compression surfaces**: active HTTP/1.1, HTTP/2, HTTP/3, HPACK, request-target/protocol, and HTTP/3 control-stream / DATAGRAM / Extended CONNECT suites built against current APIs
+- **gRPC and transport protocol checks**: max-message framing, max-message-size, status mapping, trailer forwarding, gRPC-Web framing, TCP accept/listener, and timeout harnesses
+- **Security and wire-level protocol lanes**: TLS handshake / key-share / SNI / 0-RTT replay (including HelloRetryRequest coverage), QUIC retry (plus QUIC migration when enabled), DNS message parsing, Kafka offsets / record batches, and explicit MySQL AuthSwitch plus PostgreSQL extended-query / COPY / logical-replication coverage
 - **Deterministic invariant suites**: cancel DAG determinism, obligation lifecycle, race loser-drain, trace replay idempotency, broadcast, and consistent-hash regression coverage
 
 Important limitation: the repository also preserves many conformance files on
