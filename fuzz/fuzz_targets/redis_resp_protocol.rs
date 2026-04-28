@@ -1,5 +1,6 @@
 #![no_main]
 
+use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 
 /// Redis RESP protocol fuzz testing for parser robustness.
@@ -22,7 +23,165 @@ use libfuzzer_sys::fuzz_target;
 /// - Integer overflow edge cases, invalid UTF-8
 /// - Memory exhaustion protection verification
 // Import the Redis module to test
-use asupersync::messaging::redis::{RedisProtocolLimits, RespValue};
+use asupersync::messaging::redis::{
+    PubSubEvent, PubSubMessage, PubSubSubscriptionKind, RedisProtocolLimits, RespValue,
+    parse_pubsub_event_for_fuzz,
+};
+
+const MAX_STRUCTURED_FIELD_BYTES: usize = 96;
+
+#[derive(Arbitrary, Debug, Clone, Copy)]
+enum StructuredPushKind {
+    Message,
+    PatternMessage,
+    Subscribe,
+    Unsubscribe,
+    PatternSubscribe,
+    PatternUnsubscribe,
+    Pong,
+}
+
+#[derive(Arbitrary, Debug, Clone)]
+struct StructuredPushCase {
+    kind: StructuredPushKind,
+    channel: String,
+    pattern: String,
+    payload: Vec<u8>,
+    pong_payload: Option<Vec<u8>>,
+    remaining: u16,
+}
+
+impl StructuredPushCase {
+    fn normalized(mut self) -> Self {
+        truncate_text_field(&mut self.channel);
+        truncate_text_field(&mut self.pattern);
+        truncate_binary_field(&mut self.payload);
+        if let Some(payload) = &mut self.pong_payload {
+            truncate_binary_field(payload);
+        }
+        self
+    }
+
+    fn into_resp_value(self) -> RespValue {
+        let mut items = vec![RespValue::BulkString(Some(
+            self.kind_name().as_bytes().to_vec(),
+        ))];
+        match self.kind {
+            StructuredPushKind::Message => {
+                items.push(RespValue::BulkString(Some(self.channel.into_bytes())));
+                items.push(RespValue::BulkString(Some(self.payload)));
+            }
+            StructuredPushKind::PatternMessage => {
+                items.push(RespValue::BulkString(Some(self.pattern.into_bytes())));
+                items.push(RespValue::BulkString(Some(self.channel.into_bytes())));
+                items.push(RespValue::BulkString(Some(self.payload)));
+            }
+            StructuredPushKind::Subscribe
+            | StructuredPushKind::Unsubscribe
+            | StructuredPushKind::PatternSubscribe
+            | StructuredPushKind::PatternUnsubscribe => {
+                items.push(RespValue::BulkString(Some(self.channel.into_bytes())));
+                items.push(RespValue::Integer(i64::from(self.remaining)));
+            }
+            StructuredPushKind::Pong => {
+                if let Some(payload) = self.pong_payload {
+                    items.push(RespValue::BulkString(Some(payload)));
+                }
+            }
+        }
+        RespValue::Push(items)
+    }
+
+    fn expected_event(&self) -> PubSubEvent {
+        match self.kind {
+            StructuredPushKind::Message => PubSubEvent::Message(PubSubMessage {
+                channel: self.channel.clone(),
+                pattern: None,
+                payload: self.payload.clone(),
+            }),
+            StructuredPushKind::PatternMessage => PubSubEvent::Message(PubSubMessage {
+                channel: self.channel.clone(),
+                pattern: Some(self.pattern.clone()),
+                payload: self.payload.clone(),
+            }),
+            StructuredPushKind::Subscribe => PubSubEvent::Subscription {
+                kind: PubSubSubscriptionKind::Subscribe,
+                channel: self.channel.clone(),
+                remaining: i64::from(self.remaining),
+            },
+            StructuredPushKind::Unsubscribe => PubSubEvent::Subscription {
+                kind: PubSubSubscriptionKind::Unsubscribe,
+                channel: self.channel.clone(),
+                remaining: i64::from(self.remaining),
+            },
+            StructuredPushKind::PatternSubscribe => PubSubEvent::Subscription {
+                kind: PubSubSubscriptionKind::PatternSubscribe,
+                channel: self.channel.clone(),
+                remaining: i64::from(self.remaining),
+            },
+            StructuredPushKind::PatternUnsubscribe => PubSubEvent::Subscription {
+                kind: PubSubSubscriptionKind::PatternUnsubscribe,
+                channel: self.channel.clone(),
+                remaining: i64::from(self.remaining),
+            },
+            StructuredPushKind::Pong => PubSubEvent::Pong(self.pong_payload.clone()),
+        }
+    }
+
+    fn invalid_resp_value(&self) -> RespValue {
+        let RespValue::Push(mut items) = self.clone().into_resp_value() else {
+            unreachable!("structured push generator must emit RESP3 push frames");
+        };
+
+        match self.kind {
+            StructuredPushKind::Message | StructuredPushKind::PatternMessage => {
+                let _ = items.pop();
+            }
+            StructuredPushKind::Subscribe
+            | StructuredPushKind::Unsubscribe
+            | StructuredPushKind::PatternSubscribe
+            | StructuredPushKind::PatternUnsubscribe => {
+                if let Some(last) = items.last_mut() {
+                    *last = RespValue::BulkString(Some(b"not-an-integer".to_vec()));
+                }
+            }
+            StructuredPushKind::Pong => {
+                items.push(RespValue::BulkString(Some(b"extra-pong".to_vec())));
+                items.push(RespValue::BulkString(Some(b"trailing".to_vec())));
+            }
+        }
+
+        RespValue::Push(items)
+    }
+
+    fn kind_name(&self) -> &'static str {
+        match self.kind {
+            StructuredPushKind::Message => "message",
+            StructuredPushKind::PatternMessage => "pmessage",
+            StructuredPushKind::Subscribe => "subscribe",
+            StructuredPushKind::Unsubscribe => "unsubscribe",
+            StructuredPushKind::PatternSubscribe => "psubscribe",
+            StructuredPushKind::PatternUnsubscribe => "punsubscribe",
+            StructuredPushKind::Pong => "pong",
+        }
+    }
+}
+
+fn truncate_text_field(field: &mut String) {
+    if field.len() > MAX_STRUCTURED_FIELD_BYTES {
+        let mut end = MAX_STRUCTURED_FIELD_BYTES;
+        while !field.is_char_boundary(end) {
+            end -= 1;
+        }
+        field.truncate(end);
+    }
+}
+
+fn truncate_binary_field(field: &mut Vec<u8>) {
+    if field.len() > MAX_STRUCTURED_FIELD_BYTES {
+        field.truncate(MAX_STRUCTURED_FIELD_BYTES);
+    }
+}
 
 /// Generate valid RESP test cases for baseline testing
 fn generate_valid_resp_samples(data: &[u8]) -> Vec<Vec<u8>> {
@@ -158,10 +317,98 @@ fn generate_large_array_data(count: usize) -> Vec<u8> {
     data
 }
 
+fn longest_bulk_string_len(value: &RespValue) -> usize {
+    match value {
+        RespValue::BulkString(Some(bytes)) => bytes.len(),
+        RespValue::Array(Some(items)) | RespValue::Set(items) | RespValue::Push(items) => {
+            items.iter().map(longest_bulk_string_len).max().unwrap_or(0)
+        }
+        RespValue::Map(pairs) | RespValue::Attribute(pairs) => pairs
+            .iter()
+            .flat_map(|(key, value)| [longest_bulk_string_len(key), longest_bulk_string_len(value)])
+            .max()
+            .unwrap_or(0),
+        _ => 0,
+    }
+}
+
+fn exercise_structured_resp3_pushes(data: &[u8]) {
+    let mut unstructured = Unstructured::new(data);
+    for _ in 0..4 {
+        let Ok(case) = StructuredPushCase::arbitrary(&mut unstructured) else {
+            break;
+        };
+        let case = case.normalized();
+
+        let expected_event = case.expected_event();
+        let malformed_push = case.invalid_resp_value();
+        let push = case.clone().into_resp_value();
+        let item_count = match &push {
+            RespValue::Push(items) => items.len(),
+            _ => unreachable!("structured push generator must emit RESP3 push frames"),
+        };
+        let max_bulk_len = longest_bulk_string_len(&push);
+        let encoded = push.encode();
+
+        assert_eq!(encoded.first(), Some(&b'>'));
+
+        let decoded = RespValue::try_decode(&encoded)
+            .expect("structured RESP3 push should decode")
+            .expect("encoded RESP3 push should be complete");
+        assert_eq!(decoded.0, push);
+        assert_eq!(decoded.1, encoded.len());
+
+        let event = parse_pubsub_event_for_fuzz(decoded.0.clone())
+            .expect("structured RESP3 push event should parse");
+        assert_eq!(event, expected_event);
+
+        assert!(
+            parse_pubsub_event_for_fuzz(malformed_push).is_err(),
+            "malformed structured RESP3 push should be rejected"
+        );
+
+        for split in [1, encoded.len() / 2, encoded.len().saturating_sub(1)] {
+            if split < encoded.len() {
+                assert!(
+                    RespValue::try_decode(&encoded[..split])
+                        .expect("partial structured RESP3 push should not error")
+                        .is_none()
+                );
+            }
+        }
+
+        if item_count > 0 {
+            let tight_array_limits = RedisProtocolLimits {
+                max_frame_size: encoded.len().saturating_add(1),
+                max_nesting_depth: 8,
+                max_array_len: item_count.saturating_sub(1),
+                max_bulk_string_len: max_bulk_len.max(1),
+            };
+            assert!(
+                RespValue::try_decode_with_limits(&encoded, &tight_array_limits).is_err(),
+                "structured RESP3 push should respect max_array_len"
+            );
+        }
+
+        if max_bulk_len > 0 {
+            let tight_bulk_limits = RedisProtocolLimits {
+                max_frame_size: encoded.len().saturating_add(1),
+                max_nesting_depth: 8,
+                max_array_len: item_count.max(1),
+                max_bulk_string_len: max_bulk_len.saturating_sub(1),
+            };
+            assert!(
+                RespValue::try_decode_with_limits(&encoded, &tight_bulk_limits).is_err(),
+                "structured RESP3 push should respect max_bulk_string_len"
+            );
+        }
+    }
+}
+
 /// Test helper functions in isolation
 fn test_helper_functions(data: &[u8]) {
     // Test find_crlf with various scenarios
-    for start_pos in [0, 1, data.len().saturating_sub(1)] {
+    for _start_pos in [0, 1, data.len().saturating_sub(1)] {
         // Call through RespValue to access find_crlf indirectly
         let _ = RespValue::try_decode(data);
     }
@@ -301,7 +548,10 @@ fuzz_target!(|data: &[u8]| {
     // Test 8: Round-trip property verification
     test_round_trip_properties(data);
 
-    // Test 9: Fragmented parsing simulation (partial buffer scenarios)
+    // Test 9: Structured RESP3 pubsub push notifications
+    exercise_structured_resp3_pushes(data);
+
+    // Test 10: Fragmented parsing simulation (partial buffer scenarios)
     if data.len() > 10 {
         for split_point in [1, data.len() / 4, data.len() / 2, data.len() - 1]
             .iter()
@@ -322,7 +572,7 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    // Test 10: Boundary value testing for limits
+    // Test 11: Boundary value testing for limits
     let boundary_limits = [
         RedisProtocolLimits {
             max_frame_size: data.len().saturating_sub(1).max(1),

@@ -2758,6 +2758,16 @@ impl RedisPubSub {
     }
 }
 
+#[cfg(any(test, feature = "test-internals"))]
+#[allow(dead_code)]
+/// Test-internals hook exposing RESP pub/sub event parsing.
+///
+/// Intended for structure-aware fuzz targets that need to drive the real
+/// Redis push/array event parser without widening the production API.
+pub fn parse_pubsub_event_for_fuzz(value: RespValue) -> Result<PubSubEvent, RedisError> {
+    RedisPubSub::parse_event(value)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
