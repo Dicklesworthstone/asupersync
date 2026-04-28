@@ -279,8 +279,7 @@ impl AmbientAuthorityOracle {
             // If the parent is unknown, grant nothing: missing lineage must
             // never escalate into ambient authority.
             let parent_caps = self
-                .capabilities
-                .get(&parent_id)
+                .capabilities_at(parent_id, time, event_sequence)
                 .cloned()
                 .unwrap_or_default();
             self.capabilities.insert(task, parent_caps);
@@ -701,6 +700,53 @@ mod tests {
         let ok = oracle.check().is_ok();
         crate::assert_with_log!(ok, "oracle ok", true, ok);
         crate::test_complete!("capability_lookup_uses_latest_timestamp_not_insertion_order");
+    }
+
+    #[test]
+    fn child_inheritance_uses_parent_capabilities_at_child_creation_time() {
+        init_test("child_inheritance_uses_parent_capabilities_at_child_creation_time");
+        let mut oracle = AmbientAuthorityOracle::new();
+
+        oracle.on_task_created(task(1), region(0), None, t(0));
+        oracle.on_capability_revoked(task(1), CapabilityKind::Spawn, t(20));
+        oracle.on_task_created(task(2), region(0), Some(task(1)), t(10));
+        oracle.on_spawn_effect(task(2), task(3), t(15));
+
+        let ok = oracle.check().is_ok();
+        crate::assert_with_log!(ok, "oracle ok", true, ok);
+        crate::test_complete!("child_inheritance_uses_parent_capabilities_at_child_creation_time");
+    }
+
+    #[test]
+    fn later_parent_grant_does_not_retroactively_authorize_child_inheritance() {
+        init_test("later_parent_grant_does_not_retroactively_authorize_child_inheritance");
+        let mut oracle = AmbientAuthorityOracle::new();
+
+        oracle.on_task_created(task(1), region(0), None, t(0));
+        oracle.on_capability_revoked(task(1), CapabilityKind::Spawn, t(5));
+        oracle.on_capability_granted(task(1), CapabilityKind::Spawn, t(20));
+        oracle.on_task_created(task(2), region(0), Some(task(1)), t(10));
+        oracle.on_spawn_effect(task(2), task(3), t(15));
+
+        let result = oracle.check();
+        let err = result.is_err();
+        crate::assert_with_log!(err, "result err", true, err);
+        let violation = result.unwrap_err();
+        crate::assert_with_log!(
+            violation.task == task(2),
+            "violation task",
+            task(2),
+            violation.task
+        );
+        crate::assert_with_log!(
+            violation.required_capability == CapabilityKind::Spawn,
+            "required capability",
+            CapabilityKind::Spawn,
+            violation.required_capability
+        );
+        crate::test_complete!(
+            "later_parent_grant_does_not_retroactively_authorize_child_inheritance"
+        );
     }
 
     #[test]
