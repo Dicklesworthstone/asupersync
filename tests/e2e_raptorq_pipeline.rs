@@ -50,6 +50,8 @@ fn make_realistic_snapshot(task_count: usize, child_count: usize) -> RegionSnaps
         state: RegionState::Open,
         timestamp: Time::from_secs(1_710_600_000),
         sequence: 42,
+        origin_id: 1,
+        epoch: 1,
         tasks,
         children,
         finalizer_count: (child_count as u32).min(5),

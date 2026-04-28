@@ -23,6 +23,8 @@ fn test_apply_snapshot_updates_local_state() {
         state: RegionState::Closing,
         timestamp: Time::from_secs(100),
         sequence: 1,
+        origin_id: 1,
+        epoch: 1,
         tasks: vec![
             TaskSnapshot {
                 task_id: TaskId::new_for_test(1, 0),

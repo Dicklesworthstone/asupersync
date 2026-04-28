@@ -116,6 +116,8 @@ fn snapshot_simple_open_region() {
         state: RegionState::Open,
         timestamp: Time::from_secs(1000),
         sequence: 5,
+        origin_id: 1,
+        epoch: 1,
         tasks: vec![TaskSnapshot {
             task_id: TaskId::new_for_test(10, 1),
             state: TaskState::Running,
@@ -154,6 +156,8 @@ fn snapshot_complex_closing_region() {
         state: RegionState::Closing,
         timestamp: Time::from_millis(1_500_000), // 25 minutes
         sequence: 42,
+        origin_id: 1,
+        epoch: 1,
         tasks: vec![
             TaskSnapshot {
                 task_id: TaskId::new_for_test(20, 2),
@@ -207,6 +211,8 @@ fn snapshot_finalized_region() {
         state: RegionState::Closed,
         timestamp: Time::from_nanos(9_876_543_210_123), // Large timestamp
         sequence: 999,
+        origin_id: 1,
+        epoch: 1,
         tasks: vec![],    // No tasks in finalized region
         children: vec![], // No children in finalized region
         finalizer_count: 0,
@@ -241,6 +247,8 @@ fn snapshot_draining_region() {
         state: RegionState::Draining,
         timestamp: Time::from_secs(7200), // 2 hours
         sequence: 128,
+        origin_id: 1,
+        epoch: 1,
         tasks: vec![TaskSnapshot {
             task_id: TaskId::new_for_test(1000, 10),
             state: TaskState::Pending,
@@ -283,6 +291,8 @@ fn snapshot_all_task_states() {
         state: RegionState::Open,
         timestamp: Time::from_millis(12345),
         sequence: 77,
+        origin_id: 1,
+        epoch: 1,
         tasks: vec![
             TaskSnapshot {
                 task_id: TaskId::new_for_test(1, 0),
@@ -368,6 +378,8 @@ fn snapshot_maximum_complexity() {
         state: RegionState::Finalizing,
         timestamp: Time::from_nanos(18_446_744_073_709_551_615), // Near u64::MAX
         sequence: u64::MAX,
+        origin_id: 1,
+        epoch: 1,
         tasks,
         children,
         finalizer_count: 100,

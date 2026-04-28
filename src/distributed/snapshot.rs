@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 const SNAP_MAGIC: &[u8; 4] = b"SNAP";
 
 /// Current binary format version.
-const SNAP_VERSION: u8 = 1;
+const SNAP_VERSION: u8 = 2;
 
 /// FNV-1a offset basis (64-bit).
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -110,6 +110,10 @@ pub struct RegionSnapshot {
     pub timestamp: Time,
     /// Snapshot sequence number (monotonic within region).
     pub sequence: u64,
+    /// Originating snapshot authority / bridge incarnation.
+    pub origin_id: u64,
+    /// Monotonic epoch for the originating authority branch.
+    pub epoch: u64,
     /// Task state summaries.
     pub tasks: Vec<TaskSnapshot>,
     /// Child region references.
@@ -135,6 +139,8 @@ impl RegionSnapshot {
             state: RegionState::Open,
             timestamp: Time::ZERO,
             sequence: 0,
+            origin_id: 0,
+            epoch: 0,
             tasks: Vec::new(),
             children: Vec::new(),
             finalizer_count: 0,
@@ -158,6 +164,8 @@ impl RegionSnapshot {
     /// - 1 byte state
     /// - 8 bytes timestamp (nanos u64)
     /// - 8 bytes sequence (u64)
+    /// - 8 bytes origin_id (u64)
+    /// - 8 bytes epoch (u64)
     /// - 4 bytes task count, then per task: 8+1+1 bytes
     /// - 4 bytes children count, then per child: 8 bytes
     /// - 4 bytes finalizer_count
@@ -184,6 +192,10 @@ impl RegionSnapshot {
 
         // Sequence
         buf.extend_from_slice(&self.sequence.to_le_bytes());
+
+        // Provenance
+        buf.extend_from_slice(&self.origin_id.to_le_bytes());
+        buf.extend_from_slice(&self.epoch.to_le_bytes());
 
         // Tasks
         write_u32(
@@ -269,6 +281,10 @@ impl RegionSnapshot {
         // Sequence
         let sequence = cursor.read_u64()?;
 
+        // Provenance
+        let origin_id = cursor.read_u64()?;
+        let epoch = cursor.read_u64()?;
+
         // Tasks
         let task_count = cursor.read_u32()?;
         // Each task reads at least 10 bytes (8 id + 1 state + 1 priority).
@@ -344,6 +360,8 @@ impl RegionSnapshot {
             state,
             timestamp,
             sequence,
+            origin_id,
+            epoch,
             tasks,
             children,
             finalizer_count,
@@ -366,6 +384,7 @@ impl RegionSnapshot {
         let state = 1;
         let timestamp = 8;
         let sequence = 8;
+        let provenance = 16;
         let tasks = 4 + self.tasks.len() * 10; // count + per-task (8+1+1)
         let children = 4 + self.children.len() * 8;
         let finalizer = 4;
@@ -384,6 +403,7 @@ impl RegionSnapshot {
             + state
             + timestamp
             + sequence
+            + provenance
             + tasks
             + children
             + finalizer
@@ -463,11 +483,21 @@ impl RegionSnapshot {
             (&other.cancel_reason, &self.cancel_reason)
         };
 
+        let (origin_id, epoch) = if (self.epoch, self.origin_id, self.sequence)
+            >= (other.epoch, other.origin_id, other.sequence)
+        {
+            (self.origin_id, self.epoch)
+        } else {
+            (other.origin_id, other.epoch)
+        };
+
         Ok(Self {
             region_id: self.region_id,
             state: max_region_state(self.state, other.state),
             timestamp: self.timestamp.max(other.timestamp),
             sequence: self.sequence.max(other.sequence),
+            origin_id,
+            epoch,
             tasks: tasks.into_values().collect(),
             children: children.into_values().collect(),
             finalizer_count: self.finalizer_count.max(other.finalizer_count),
@@ -805,6 +835,8 @@ mod tests {
             state: RegionState::Open,
             timestamp: Time::from_secs(100),
             sequence: 1,
+            origin_id: 11,
+            epoch: 3,
             tasks: vec![TaskSnapshot {
                 task_id: TaskId::new_for_test(1, 0),
                 state: TaskState::Running,
@@ -829,6 +861,8 @@ mod tests {
             state: RegionState::Closing,
             timestamp: Time::from_secs(999),
             sequence: 42,
+            origin_id: 77,
+            epoch: 9,
             tasks: vec![
                 TaskSnapshot {
                     task_id: TaskId::new_for_test(1, 0),
@@ -1031,6 +1065,8 @@ mod tests {
             state,
             timestamp: Time::from_secs(timestamp_secs),
             sequence,
+            origin_id: 1,
+            epoch: 1,
             tasks: tasks
                 .iter()
                 .map(|(index, generation, state, priority)| TaskSnapshot {
@@ -1061,6 +1097,8 @@ mod tests {
         assert_eq!(snapshot.state, restored.state);
         assert_eq!(snapshot.timestamp, restored.timestamp);
         assert_eq!(snapshot.sequence, restored.sequence);
+        assert_eq!(snapshot.origin_id, restored.origin_id);
+        assert_eq!(snapshot.epoch, restored.epoch);
         assert_eq!(snapshot.tasks.len(), restored.tasks.len());
         assert_eq!(snapshot.tasks[0].state, restored.tasks[0].state);
         assert_eq!(snapshot.tasks[0].priority, restored.tasks[0].priority);
@@ -1129,6 +1167,8 @@ mod tests {
 
         assert_eq!(snapshot.region_id, restored.region_id);
         assert_eq!(snapshot.sequence, restored.sequence);
+        assert_eq!(snapshot.origin_id, restored.origin_id);
+        assert_eq!(snapshot.epoch, restored.epoch);
         assert_eq!(restored.tasks.len(), 0);
         assert_eq!(restored.children.len(), 0);
         assert_eq!(restored.metadata.len(), 0);
@@ -1333,6 +1373,8 @@ mod tests {
             state: RegionState::Closing,
             timestamp: Time::from_secs(timestamp_secs),
             sequence: u64::from(sequence),
+            origin_id: 1,
+            epoch: 1,
             tasks: vec![],
             children: vec![],
             finalizer_count: 0,

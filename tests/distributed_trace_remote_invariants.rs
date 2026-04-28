@@ -77,6 +77,8 @@ fn make_snapshot(region_id: RegionId) -> RegionSnapshot {
         state: RegionState::Open,
         timestamp: Time::from_nanos(1_000_000),
         sequence: 42,
+        origin_id: 1,
+        epoch: 1,
         tasks: vec![
             TaskSnapshot {
                 task_id: tid(1),

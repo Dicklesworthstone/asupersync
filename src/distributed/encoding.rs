@@ -568,6 +568,8 @@ mod tests {
             state: RegionState::Open,
             timestamp: Time::from_secs(100),
             sequence: 1,
+            origin_id: 1,
+            epoch: 1,
             tasks: vec![TaskSnapshot {
                 task_id: crate::types::TaskId::new_for_test(1, 0),
                 state: TaskState::Running,
@@ -592,6 +594,8 @@ mod tests {
             state: RegionState::Closing,
             timestamp: Time::from_secs(321),
             sequence: 9,
+            origin_id: 7,
+            epoch: 2,
             tasks: vec![
                 TaskSnapshot {
                     task_id: crate::types::TaskId::new_for_test(3, 0),

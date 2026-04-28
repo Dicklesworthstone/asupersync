@@ -12,6 +12,7 @@
 
 #![allow(clippy::result_large_err)]
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use super::snapshot::{BudgetSnapshot, RegionSnapshot, TaskSnapshot, TaskState};
@@ -223,6 +224,10 @@ pub struct SyncState {
     /// outbound snapshots than the inbound carried — see
     /// br-asupersync-nyp2ts.
     pub last_applied_inbound_sequence: u64,
+    /// Origin ID of the last applied inbound snapshot authority.
+    pub last_applied_inbound_origin_id: u64,
+    /// Epoch of the last applied inbound snapshot authority branch.
+    pub last_applied_inbound_epoch: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -469,9 +474,18 @@ pub struct RegionBridge {
     pub config: BridgeConfig,
     /// Monotonic sequence counter for snapshots.
     sequence: u64,
+    /// Stable origin ID for snapshots emitted by this bridge incarnation.
+    snapshot_origin_id: u64,
+    /// Monotonic epoch for snapshots emitted by this bridge branch.
+    snapshot_epoch: u64,
 }
 
 impl RegionBridge {
+    fn next_snapshot_origin_id() -> u64 {
+        static SNAPSHOT_ORIGIN_COUNTER: AtomicU64 = AtomicU64::new(1);
+        SNAPSHOT_ORIGIN_COUNTER.fetch_add(1, Ordering::Relaxed)
+    }
+
     fn mark_sync_pending(&mut self) {
         self.sync_state.sync_pending = true;
         self.sync_state.pending_ops = self.sync_state.pending_ops.saturating_add(1);
@@ -487,6 +501,8 @@ impl RegionBridge {
             sync_state: SyncState::default(),
             config: BridgeConfig::default(),
             sequence: 0,
+            snapshot_origin_id: Self::next_snapshot_origin_id(),
+            snapshot_epoch: 1,
         }
     }
 
@@ -511,6 +527,8 @@ impl RegionBridge {
             sync_state: SyncState::default(),
             config: BridgeConfig::default(),
             sequence: 0,
+            snapshot_origin_id: Self::next_snapshot_origin_id(),
+            snapshot_epoch: 1,
         }
     }
 
@@ -531,6 +549,8 @@ impl RegionBridge {
                 sync_state: SyncState::default(),
                 config: BridgeConfig::default(),
                 sequence: 0,
+                snapshot_origin_id: Self::next_snapshot_origin_id(),
+                snapshot_epoch: 1,
             },
             RegionMode::Hybrid {
                 replication_factor,
@@ -560,6 +580,8 @@ impl RegionBridge {
                     sync_state: SyncState::default(),
                     config: bridge_config,
                     sequence: 0,
+                    snapshot_origin_id: Self::next_snapshot_origin_id(),
+                    snapshot_epoch: 1,
                 }
             }
             RegionMode::Distributed {
@@ -837,6 +859,8 @@ impl RegionBridge {
             state: self.local.state(),
             timestamp: now,
             sequence: self.sequence,
+            origin_id: self.snapshot_origin_id,
+            epoch: self.snapshot_epoch,
             tasks,
             children: self.local.child_ids(),
             finalizer_count: u32::try_from(self.local.finalizer_count()).unwrap_or(u32::MAX),
@@ -857,17 +881,51 @@ impl RegionBridge {
                 .with_message("snapshot region ID does not match bridge"));
         }
 
-        // br-asupersync-nyp2ts: the inbound dedup gate uses ONLY the
-        // inbound counter. Cross-cluster delivery can reorder or
-        // duplicate inbound snapshots, and the gate must drop those —
-        // but it must NOT also drop perfectly valid inbound snapshots
-        // just because the local node has generated more outbound
-        // snapshots in the meantime (`self.sequence`) or already
-        // pushed a higher sequence outbound via `sync()`
+        let last_provenance = (
+            self.sync_state.last_applied_inbound_epoch,
+            self.sync_state.last_applied_inbound_origin_id,
+        );
+        let incoming_provenance = (snapshot.epoch, snapshot.origin_id);
+
+        match incoming_provenance.cmp(&last_provenance) {
+            std::cmp::Ordering::Less => {
+                return Err(
+                    Error::new(ErrorKind::CoordinationFailed).with_message(format!(
+                        "stale snapshot provenance replay rejected: incoming origin={} epoch={} \
+                         is older than last applied origin={} epoch={}",
+                        snapshot.origin_id,
+                        snapshot.epoch,
+                        self.sync_state.last_applied_inbound_origin_id,
+                        self.sync_state.last_applied_inbound_epoch
+                    )),
+                );
+            }
+            std::cmp::Ordering::Greater if snapshot.sequence != 1 => {
+                return Err(
+                    Error::new(ErrorKind::CoordinationFailed).with_message(format!(
+                        "snapshot provenance advanced to origin={} epoch={} but sequence={} \
+                         did not restart at 1",
+                        snapshot.origin_id, snapshot.epoch, snapshot.sequence
+                    )),
+                );
+            }
+            std::cmp::Ordering::Greater | std::cmp::Ordering::Equal => {}
+        }
+
+        // br-asupersync-nyp2ts + br-asupersync-oepbl8: inbound dedup
+        // uses the inbound counter ONLY within a single provenance
+        // branch. Cross-cluster delivery can reorder or duplicate
+        // inbound snapshots, and the gate must drop those — but it
+        // must NOT also drop perfectly valid inbound snapshots just
+        // because the local node has generated more outbound snapshots
+        // in the meantime (`self.sequence`) or already pushed a
+        // higher sequence outbound via `sync()`
         // (`last_synced_sequence`). Outbound and inbound live in
-        // independent namespaces. Compare against
-        // `last_applied_inbound_sequence` only.
-        if snapshot.sequence <= self.sync_state.last_applied_inbound_sequence {
+        // independent namespaces, and branch replay protection is
+        // handled by the origin/epoch check above.
+        if incoming_provenance == last_provenance
+            && snapshot.sequence <= self.sync_state.last_applied_inbound_sequence
+        {
             return Ok(());
         }
 
@@ -891,10 +949,13 @@ impl RegionBridge {
         // accepted with a gap. Callers that observe this error
         // should re-sync from a known-good ancestor (or from
         // sequence 0 for a fresh peer).
-        let expected_sequence = self
-            .sync_state
-            .last_applied_inbound_sequence
-            .saturating_add(1);
+        let expected_sequence = if incoming_provenance > last_provenance {
+            1
+        } else {
+            self.sync_state
+                .last_applied_inbound_sequence
+                .saturating_add(1)
+        };
         if snapshot.sequence > expected_sequence {
             return Err(
                 Error::new(ErrorKind::CoordinationFailed).with_message(format!(
@@ -978,6 +1039,8 @@ impl RegionBridge {
         // Keep future locally created snapshots monotonic after recovery/apply.
         self.sequence = self.sequence.max(snapshot.sequence);
         self.sync_state.last_synced_sequence = snapshot.sequence;
+        self.sync_state.last_applied_inbound_origin_id = snapshot.origin_id;
+        self.sync_state.last_applied_inbound_epoch = snapshot.epoch;
         // br-asupersync-nyp2ts: track the inbound high-water mark
         // separately so the dedup gate above can compare against it
         // without conflating with outbound generation.
@@ -1489,6 +1552,8 @@ mod tests {
             state: RegionState::Open,
             timestamp: Time::from_secs(100),
             sequence: 42,
+            origin_id: 1,
+            epoch: 1,
             tasks: vec![],
             children: vec![],
             finalizer_count: 0,
@@ -1518,6 +1583,8 @@ mod tests {
             state: RegionState::Open,
             timestamp: Time::from_secs(100),
             sequence: 42,
+            origin_id: 1,
+            epoch: 1,
             tasks: vec![],
             children: vec![],
             finalizer_count: 0,
@@ -1546,6 +1613,8 @@ mod tests {
             state: RegionState::Open,
             timestamp: Time::ZERO,
             sequence: 1,
+            origin_id: 1,
+            epoch: 1,
             tasks: vec![],
             children: vec![],
             finalizer_count: 0,
@@ -2429,6 +2498,8 @@ mod tests {
             state: RegionState::Open,
             timestamp: Time::from_secs(sequence),
             sequence,
+            origin_id: 1,
+            epoch: 1,
             tasks: vec![],
             children: vec![],
             finalizer_count: 0,
@@ -2441,6 +2512,18 @@ mod tests {
             parent: None,
             metadata: vec![],
         }
+    }
+
+    fn oepbl8_snapshot_at(
+        bridge: &RegionBridge,
+        origin_id: u64,
+        epoch: u64,
+        sequence: u64,
+    ) -> RegionSnapshot {
+        let mut snapshot = nyp2ts_snapshot_at(bridge, sequence);
+        snapshot.origin_id = origin_id;
+        snapshot.epoch = epoch;
+        snapshot
     }
 
     #[test]
@@ -2535,6 +2618,30 @@ mod tests {
         let newer = nyp2ts_snapshot_at(&bridge, 11);
         bridge.apply_snapshot(&newer).unwrap();
         assert_eq!(bridge.sync_state.last_applied_inbound_sequence, 11);
+    }
+
+    #[test]
+    fn oepbl8_rejects_stale_epoch_replay_after_newer_branch_applied() {
+        let mut bridge = create_local_bridge();
+
+        let current = oepbl8_snapshot_at(&bridge, 41, 7, 1);
+        bridge.apply_snapshot(&current).unwrap();
+        assert_eq!(bridge.sync_state.last_applied_inbound_origin_id, 41);
+        assert_eq!(bridge.sync_state.last_applied_inbound_epoch, 7);
+        assert_eq!(bridge.sync_state.last_applied_inbound_sequence, 1);
+
+        let replay = oepbl8_snapshot_at(&bridge, 41, 6, 1);
+        let err = bridge.apply_snapshot(&replay).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("stale snapshot provenance replay rejected"),
+            "expected stale provenance rejection, got {msg}"
+        );
+
+        let next = oepbl8_snapshot_at(&bridge, 41, 7, 2);
+        bridge.apply_snapshot(&next).unwrap();
+        assert_eq!(bridge.sync_state.last_applied_inbound_epoch, 7);
+        assert_eq!(bridge.sync_state.last_applied_inbound_sequence, 2);
     }
 
     // =====================================================================

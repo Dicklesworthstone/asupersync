@@ -304,6 +304,8 @@ fn snapshot_roundtrip_preserves_all_fields() {
         state: RegionState::Open,
         timestamp: Time::from_secs(12345),
         sequence: 42,
+        origin_id: 1,
+        epoch: 1,
         tasks: vec![
             TaskSnapshot {
                 task_id: TaskId::new_for_test(1, 0),
@@ -1028,6 +1030,8 @@ fn make_rich_snapshot() -> RegionSnapshot {
         state: RegionState::Open,
         timestamp: Time::from_secs(100),
         sequence: 7,
+        origin_id: 1,
+        epoch: 1,
         tasks: vec![
             TaskSnapshot {
                 task_id: TaskId::new_for_test(1, 0),
