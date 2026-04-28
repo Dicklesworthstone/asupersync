@@ -4622,4 +4622,107 @@ mod tests {
         conn.process_frame(Frame::Ping(PingFrame::new([0xBB; 8])))
             .expect("PING after handshake must be accepted");
     }
+
+    #[test]
+    fn rfc9113_section6_8_goaway_frame_ordering_conformance() {
+        // RFC 9113 Section 6.8 conformance test - GOAWAY frame ordering and semantics
+        // Tests the MUST/SHOULD clauses for connection termination
+
+        let mut conn = Connection::server(Settings::default());
+
+        // Test Requirement 1: GOAWAY should include last successfully processed stream ID
+        // Open multiple streams to establish last_stream_id baseline
+
+        // Process stream 1 (successfully)
+        let headers1 = HeadersFrame::new(1, vec![
+            Header::new(b":method", b"GET"),
+            Header::new(b":path", b"/"),
+        ]);
+        conn.process_frame(Frame::Headers(headers1)).unwrap();
+
+        // Process stream 3 (successfully)
+        let headers3 = HeadersFrame::new(3, vec![
+            Header::new(b":method", b"POST"),
+            Header::new(b":path", b"/api"),
+        ]);
+        conn.process_frame(Frame::Headers(headers3)).unwrap();
+
+        // RFC 9113 §6.8: "the stream identifier of the last stream that it successfully received"
+        conn.goaway(ErrorCode::NoError, Bytes::from("graceful shutdown"));
+
+        let frame = conn.next_frame().expect("GOAWAY frame should be generated");
+        match frame {
+            Frame::GoAway(goaway) => {
+                assert_eq!(
+                    goaway.last_stream_id, 3,
+                    "RFC 9113 §6.8: GOAWAY must include last successfully processed stream ID"
+                );
+                assert_eq!(goaway.error_code, ErrorCode::NoError);
+                assert_eq!(goaway.debug_data, Bytes::from("graceful shutdown"));
+            },
+            _ => panic!("Expected GOAWAY frame, got {:?}", frame),
+        }
+
+        // Test Requirement 2: Connection state transition
+        // RFC 9113 §6.8: After sending GOAWAY, connection should be in closing state
+        assert_eq!(conn.state, ConnectionState::Closing);
+        assert!(conn.goaway_sent);
+
+        // Test Requirement 3: Multiple GOAWAY frames (narrowing semantics)
+        // Receive GOAWAY from peer with higher last_stream_id - should narrow down
+        let mut conn2 = Connection::client(Settings::default());
+
+        // Receive first GOAWAY with last_stream_id = 5
+        let goaway1 = Frame::GoAway(GoAwayFrame::new(5, ErrorCode::NoError));
+        let result1 = conn2.process_frame(goaway1).unwrap().unwrap();
+        match result1 {
+            ReceivedFrame::GoAway { last_stream_id, .. } => {
+                assert_eq!(last_stream_id, 5);
+            },
+            _ => panic!("Expected GoAway received frame"),
+        }
+
+        // Receive second GOAWAY with lower last_stream_id = 1 (should narrow)
+        let goaway2 = Frame::GoAway(GoAwayFrame::new(1, ErrorCode::InternalError));
+        let result2 = conn2.process_frame(goaway2).unwrap().unwrap();
+        match result2 {
+            ReceivedFrame::GoAway { last_stream_id, .. } => {
+                assert_eq!(
+                    last_stream_id, 1,
+                    "RFC 9113 §6.8: Multiple GOAWAY frames should narrow last_stream_id"
+                );
+            },
+            _ => panic!("Expected GoAway received frame"),
+        }
+
+        // Test Requirement 4: GOAWAY only sent once per endpoint
+        // RFC 9113 §6.8: Multiple GOAWAY calls should not generate multiple frames
+        let mut conn3 = Connection::server(Settings::default());
+        conn3.goaway(ErrorCode::NoError, Bytes::new());
+        conn3.goaway(ErrorCode::InternalError, Bytes::new()); // Second call should be ignored
+
+        // Should only have one GOAWAY frame in queue
+        let frame1 = conn3.next_frame();
+        let frame2 = conn3.next_frame();
+
+        assert!(frame1.is_some());
+        assert!(matches!(frame1.unwrap(), Frame::GoAway(_)));
+        assert!(frame2.is_none(), "Second GOAWAY call should not generate additional frame");
+
+        // Test Requirement 5: Frame ordering preservation in pending operations
+        // GOAWAY should be processed in order relative to other pending frames
+        let mut conn4 = Connection::server(Settings::default());
+
+        // Queue a PING frame first
+        conn4.send_ping(b"testping");
+        // Then queue GOAWAY
+        conn4.goaway(ErrorCode::NoError, Bytes::new());
+
+        // Frames should come out in FIFO order: PING then GOAWAY
+        let frame1 = conn4.next_frame().expect("PING frame expected first");
+        let frame2 = conn4.next_frame().expect("GOAWAY frame expected second");
+
+        assert!(matches!(frame1, Frame::Ping(_)), "PING should come before GOAWAY");
+        assert!(matches!(frame2, Frame::GoAway(_)), "GOAWAY should preserve ordering");
+    }
 }
