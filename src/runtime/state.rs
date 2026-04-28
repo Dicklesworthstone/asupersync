@@ -977,6 +977,33 @@ impl RuntimeState {
         validator.validate_obligation_transition(obligation_id, event, context)
     }
 
+    fn track_new_region_in_cancel_protocol_validator(
+        &self,
+        region_id: RegionId,
+        parent_region: Option<RegionId>,
+        created_at: Time,
+    ) {
+        {
+            let mut validator = self.cancel_protocol_validator.lock();
+            validator.register_region(region_id);
+        }
+
+        let context = RegionContext {
+            region_id,
+            parent_region,
+            created_at,
+            validation_level: CancelValidationLevel::Basic,
+        };
+        let validation_result =
+            self.validate_region_protocol_transition(region_id, RegionEvent::Activate, &context);
+        if matches!(
+            validation_result,
+            TransitionResult::Invalid { .. } | TransitionResult::InvariantViolation { .. }
+        ) {
+            log_cancel_protocol_violation("region creation", &validation_result);
+        }
+    }
+
     /// Sets the blocking pool handle for this runtime.
     pub fn set_blocking_pool(&mut self, handle: BlockingPoolHandle) {
         self.blocking_pool = Some(handle);
@@ -1367,12 +1394,7 @@ impl RuntimeState {
         );
         let now = self.current_runtime_time();
         let id = self.regions.create_root(budget, now);
-
-        // Register region with cancel protocol validator
-        {
-            let mut validator = self.cancel_protocol_validator.lock();
-            validator.register_region(id);
-        }
+        self.track_new_region_in_cancel_protocol_validator(id, None, now);
 
         self.root_region = Some(id);
         self.record_trace_event(|seq| TraceEvent::region_created(seq, now, id, None));
@@ -1402,6 +1424,7 @@ impl RuntimeState {
 
         let now = self.current_runtime_time();
         let id = self.regions.create_child(parent, budget, now)?;
+        self.track_new_region_in_cancel_protocol_validator(id, Some(parent), now);
 
         self.record_trace_event(|seq| TraceEvent::region_created(seq, now, id, Some(parent)));
         self.metrics.region_created(id, Some(parent));
@@ -7160,14 +7183,16 @@ mod tests {
         };
 
         {
-            let mut validator = runtime.state.cancel_protocol_validator().lock();
-            let activate =
-                validator.validate_region_transition(region, RegionEvent::Activate, &context);
+            let validator = runtime.state.cancel_protocol_validator().lock();
             crate::assert_with_log!(
-                matches!(activate, TransitionResult::Valid),
-                "activate",
-                "valid",
-                format!("{activate:?}")
+                validator.region_state(region).cloned()
+                    == Some(ValidatorRegionState::Active {
+                        active_tasks: 0,
+                        pending_finalizers: 0,
+                    }),
+                "region auto-activated",
+                "Active{pending_finalizers:0}",
+                format!("{:?}", validator.region_state(region))
             );
         }
 
@@ -7276,6 +7301,70 @@ mod tests {
         crate::test_complete!(
             "lab_runtime_validator_tracks_async_finalizer_registration_start_and_completion"
         );
+    }
+
+    #[test]
+    fn child_region_close_is_tracked_by_cancel_protocol_validator() {
+        use crate::cancel::protocol_state_machines::RegionState as ValidatorRegionState;
+
+        init_test("child_region_close_is_tracked_by_cancel_protocol_validator");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+        let child = state
+            .create_child_region(root, Budget::INFINITE)
+            .expect("create child region");
+
+        {
+            let validator = state.cancel_protocol_validator().lock();
+            crate::assert_with_log!(
+                validator.region_state(child).cloned()
+                    == Some(ValidatorRegionState::Active {
+                        active_tasks: 0,
+                        pending_finalizers: 0,
+                    }),
+                "child region auto-activated",
+                "Active{pending_finalizers:0}",
+                format!("{:?}", validator.region_state(child))
+            );
+            crate::assert_with_log!(
+                validator.violation_count() == 0,
+                "no validator violations before child close",
+                0u64,
+                validator.violation_count()
+            );
+        }
+
+        {
+            let child_record = state.region(child).expect("child region missing");
+            let began_close = child_record.begin_close(None);
+            crate::assert_with_log!(began_close, "child begin close", true, began_close);
+        }
+        state.advance_region_state(child);
+
+        {
+            let validator = state.cancel_protocol_validator().lock();
+            crate::assert_with_log!(
+                validator.region_state(child).cloned() == Some(ValidatorRegionState::Finalized),
+                "child region finalized in validator",
+                "Finalized",
+                format!("{:?}", validator.region_state(child))
+            );
+            crate::assert_with_log!(
+                validator.violation_count() == 0,
+                "no validator violations during child close",
+                0u64,
+                validator.violation_count()
+            );
+        }
+
+        crate::assert_with_log!(
+            state.region_was_closed(child),
+            "child region closed",
+            true,
+            state.region_was_closed(child)
+        );
+
+        crate::test_complete!("child_region_close_is_tracked_by_cancel_protocol_validator");
     }
 
     #[test]
