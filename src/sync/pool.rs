@@ -4985,6 +4985,62 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_broken_drop_matches_explicit_discard() {
+        init_test("metamorphic_broken_drop_matches_explicit_discard");
+
+        // MR: explicit_discard(resource) == mark_broken_then_drop(resource)
+        // Both broken-resource paths must emit the same discard-class effect and
+        // preserve identical hold-duration accounting.
+        let release_hold_duration = |release_via_drop: bool| -> Duration {
+            let (tx, rx) = mpsc::channel();
+
+            if release_via_drop {
+                let mut pooled = PooledResource::new_with_time_getter(17u8, tx, test_pool_time_now);
+                pooled.mark_broken();
+                advance_test_pool_time(Duration::from_millis(12));
+                drop(pooled);
+            } else {
+                let pooled = PooledResource::new_with_time_getter(17u8, tx, test_pool_time_now);
+                advance_test_pool_time(Duration::from_millis(12));
+                pooled.discard();
+            }
+
+            let msg = rx.recv().expect("broken release message");
+            let hold_duration = match msg {
+                PoolReturn::Discard { hold_duration } => hold_duration,
+                PoolReturn::Return { .. } => {
+                    panic!("broken-resource release must emit Discard in both variants")
+                }
+            };
+            crate::assert_with_log!(
+                rx.try_recv().is_err(),
+                "broken release variants emit exactly one message",
+                true,
+                rx.try_recv().is_err()
+            );
+            hold_duration
+        };
+
+        let explicit_discard_duration = release_hold_duration(false);
+        let broken_drop_duration = release_hold_duration(true);
+
+        crate::assert_with_log!(
+            broken_drop_duration == explicit_discard_duration,
+            "broken drop matches explicit discard hold-duration accounting",
+            explicit_discard_duration,
+            broken_drop_duration
+        );
+        crate::assert_with_log!(
+            broken_drop_duration == Duration::from_millis(12),
+            "broken release variants preserve the injected time delta",
+            Duration::from_millis(12),
+            broken_drop_duration
+        );
+
+        crate::test_complete!("metamorphic_broken_drop_matches_explicit_discard");
+    }
+
+    #[test]
     fn metamorphic_pool_bounds_invariant() {
         init_test("metamorphic_pool_bounds_invariant");
 
