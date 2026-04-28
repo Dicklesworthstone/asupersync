@@ -7877,10 +7877,15 @@ mod tests {
     #[test]
     fn build_parse_msg_with_oids() {
         let msg = build_parse_msg("stmt1", "SELECT $1", &[oid::INT4]).unwrap();
-        assert_eq!(msg[0], b'P');
-        // Statement name "stmt1" should be in body
-        let body = &msg[5..];
-        assert!(body.starts_with(b"stmt1\0"));
+        assert_eq!(
+            msg,
+            vec![
+                b'P', 0, 0, 0, 26, b's', b't', b'm', b't', b'1', 0, b'S', b'E', b'L', b'E',
+                b'C', b'T', b' ', b'$', b'1', 0, 0, 1, 0, 0, 0, 23,
+            ],
+            "Parse wire format must match PostgreSQL frontend protocol: \
+             type byte, length, statement cstring, SQL cstring, i16 param count, i32 OIDs",
+        );
     }
 
     #[test]
