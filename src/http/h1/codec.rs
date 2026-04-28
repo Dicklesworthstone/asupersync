@@ -305,9 +305,6 @@ fn parse_request_line_bytes(line: &[u8]) -> Result<(Method, String, Version), Ht
 
 fn parse_request_line_bytes_slow(line: &[u8]) -> Result<(Method, String, Version), HttpError> {
     fn next_token_bounds(bytes: &[u8], cursor: &mut usize) -> Option<(usize, usize)> {
-        while *cursor < bytes.len() && bytes[*cursor] == b' ' {
-            *cursor += 1;
-        }
         let start = *cursor;
         while *cursor < bytes.len() && bytes[*cursor] != b' ' {
             *cursor += 1;
@@ -315,11 +312,24 @@ fn parse_request_line_bytes_slow(line: &[u8]) -> Result<(Method, String, Version
         (start < *cursor).then_some((start, *cursor))
     }
 
+    fn consume_single_space(bytes: &[u8], cursor: &mut usize) -> Result<(), HttpError> {
+        if *cursor >= bytes.len() || bytes[*cursor] != b' ' {
+            return Err(HttpError::BadRequestLine);
+        }
+        *cursor += 1;
+        if *cursor >= bytes.len() || bytes[*cursor] == b' ' {
+            return Err(HttpError::BadRequestLine);
+        }
+        Ok(())
+    }
+
     let mut cursor = 0usize;
     let method_bounds = next_token_bounds(line, &mut cursor).ok_or(HttpError::BadRequestLine)?;
+    consume_single_space(line, &mut cursor)?;
     let uri_bounds = next_token_bounds(line, &mut cursor).ok_or(HttpError::BadRequestLine)?;
+    consume_single_space(line, &mut cursor)?;
     let version_bounds = next_token_bounds(line, &mut cursor).ok_or(HttpError::BadRequestLine)?;
-    if next_token_bounds(line, &mut cursor).is_some() {
+    if cursor != line.len() {
         return Err(HttpError::BadRequestLine);
     }
 
@@ -1674,13 +1684,19 @@ mod tests {
         }
     }
 
+    /// Differential vs `httparse` 1.10.x default request parsing: repeated
+    /// SP delimiters are rejected unless the caller explicitly enables the
+    /// lenient `allow_multiple_spaces_in_request_line_delimiters(true)` mode.
     #[test]
-    fn parse_request_line_fallback_with_extra_spaces() {
-        // Extra spacing forces the tolerant parser fallback.
-        let (method, uri, version) = parse_request_line_bytes(b"GET   /slow   HTTP/1.1").unwrap();
-        assert_eq!(method, Method::Get);
-        assert_eq!(uri, "/slow");
-        assert_eq!(version, Version::Http11);
+    fn parse_request_line_rejects_multiple_spaces_like_httparse_default() {
+        let line = b"GET   /slow   HTTP/1.1";
+        assert!(
+            matches!(
+                parse_request_line_bytes(line),
+                Err(HttpError::BadRequestLine)
+            ),
+            "default parser should reject repeated request-line delimiters",
+        );
     }
 
     #[test]
