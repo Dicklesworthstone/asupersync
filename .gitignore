@@ -286,6 +286,13 @@ franken_kernel/false/
 # Agent Mail project ID (per-machine ephemeral)
 .agent-mail-project-id
 
+# NTM (multi-agent tmux harness) per-machine runtime state — rate-limit
+# cooldowns, swarm pane bookkeeping, and other ephemeral coordination
+# bytes that change on every tick of every agent. Previously tracked,
+# but the per-second churn produces no signal in git history.
+.ntm/rate_limits.json
+.ntm/gemini_swarm_state.json
+
 # Beads bad-import backups
 **/.beads/*.bad_*
 
