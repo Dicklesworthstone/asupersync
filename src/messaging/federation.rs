@@ -20,6 +20,7 @@ use thiserror::Error;
 
 /// Constraints applied to export/import morphisms on leaf fabrics.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "fuzz", derive(arbitrary::Arbitrary))]
 pub struct MorphismConstraints {
     /// Morphism classes allowed to cross the leaf boundary.
     pub allowed_classes: BTreeSet<MorphismClass>,
@@ -79,6 +80,7 @@ impl MorphismConstraints {
 
 /// Configuration for a constrained leaf fabric.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "fuzz", derive(arbitrary::Arbitrary))]
 pub struct LeafConfig {
     /// Maximum reconnect backoff tolerated for intermittent links.
     pub max_reconnect_backoff: Duration,

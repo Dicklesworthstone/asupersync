@@ -113,6 +113,8 @@ loom-tests = ["dep:loom"]
 cancel-correctness-oracle = []
 # Enable stack trace capture for lab oracle violations.
 lab-stack-traces = ["dep:backtrace", "dep:rustc-demangle"]
+# Enable fuzzing support with arbitrary derive macros.
+fuzz = ["dep:arbitrary"]
 
 [lib]
 path = "src/lib.rs"
@@ -165,6 +167,8 @@ conformance = { package = "asupersync-conformance", version = "0.3.1", path = "c
 lz4_flex = { version = "0.13", optional = true }
 # Optional visibility macro for test-internals feature
 visibility = { version = "0.1", optional = true }
+# Optional arbitrary derive support for fuzzing
+arbitrary = { version = "1", features = ["derive"], optional = true }
 # Tempfile helper for test-internals and test logging utilities.
 tempfile = "3.25"
 # TLS support via rustls
@@ -288,6 +292,7 @@ tempfile = "3.25"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 opentelemetry_sdk = { version = "0.31", default-features = false, features = ["metrics", "testing"] }
+opentelemetry-proto = { version = "0.31", default-features = false, features = ["gen-tonic-messages", "trace", "metrics", "logs"] }
 lz4_flex = "0.13"
 toml = "1.0"
 chrono = { version = "0.4", features = ["serde"] }

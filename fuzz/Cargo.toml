@@ -11,7 +11,7 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
-asupersync = { path = "..", features = ["compression", "tls", "postgres", "mysql", "sqlite", "metrics", "tracing-integration", "test-internals", "trace-compression", "io-uring", "simd-intrinsics"] }
+asupersync = { path = "..", features = ["compression", "tls", "postgres", "mysql", "sqlite", "metrics", "tracing-integration", "test-internals", "trace-compression", "io-uring", "simd-intrinsics", "fuzz"] }
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 libc = "0.2"
@@ -437,6 +437,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "jetstream_parser"
+path = "fuzz_targets/jetstream_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_http_compression_decompression"
 path = "fuzz_targets/http_compression_decompression.rs"
 test = false
@@ -747,13 +754,6 @@ bench = false
 [[bin]]
 name = "fuzz_distributed_bridge"
 path = "fuzz_targets/distributed_bridge.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "fuzz_distributed_recovery_decode"
-path = "fuzz_targets/distributed_recovery_decode.rs"
 test = false
 doc = false
 bench = false

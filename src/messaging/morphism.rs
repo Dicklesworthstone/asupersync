@@ -18,6 +18,7 @@ use thiserror::Error;
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
 )]
+#[cfg_attr(feature = "fuzz", derive(arbitrary::Arbitrary))]
 #[serde(rename_all = "snake_case")]
 pub enum MorphismClass {
     /// Reversible, reply-authoritative, capability-bearing rewrites.
