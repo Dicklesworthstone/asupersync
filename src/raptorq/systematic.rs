@@ -1047,8 +1047,6 @@ impl SystematicEncoder {
         let start_esi = self.next_repair_esi;
         let symbol_size = self.params.symbol_size;
         let mut result = Vec::with_capacity(count);
-
-        // Reuse buffer across iterations to avoid per-symbol allocation.
         let mut buf = vec![0u8; symbol_size];
 
         for i in 0..count {

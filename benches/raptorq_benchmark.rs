@@ -1893,19 +1893,51 @@ fn bench_decoder_dense_state(c: &mut Criterion) {
     group.finish();
 }
 
-fn legacy_repair_symbol_allocating_columns(encoder: &SystematicEncoder, esi: u32) -> Vec<u8> {
+fn legacy_emit_repair_allocating_copy_batch(
+    encoder: &SystematicEncoder,
+    start_esi: u32,
+    count: usize,
+) -> Vec<Vec<u8>> {
     let params = encoder.params();
     let mut buf = vec![0u8; params.symbol_size];
     let padding_delta = u32::try_from(params.k_prime - params.k)
         .expect("RFC systematic padding delta must fit in u32");
-    let repair_isi = esi
-        .checked_add(padding_delta)
-        .expect("repair ESI overflow in benchmark");
-    let columns = repair_indices_for_esi(params.j, params.w, params.p, repair_isi);
-    for column in columns {
-        gf256_add_slice(&mut buf, encoder.intermediate_symbol(column));
+
+    let mut result = Vec::with_capacity(count);
+    for i in 0..count {
+        let esi = start_esi
+            .checked_add(u32::try_from(i).expect("repair count exceeds u32"))
+            .expect("repair ESI overflow in benchmark");
+        let repair_isi = esi
+            .checked_add(padding_delta)
+            .expect("repair ISI overflow in benchmark");
+        buf.fill(0);
+        let columns = repair_indices_for_esi(params.j, params.w, params.p, repair_isi);
+        for column in columns {
+            gf256_add_slice(&mut buf, encoder.intermediate_symbol(column));
+        }
+        result.push(buf.clone());
     }
-    buf
+
+    result
+}
+
+fn direct_emit_repair_batch(
+    encoder: &SystematicEncoder,
+    start_esi: u32,
+    count: usize,
+) -> Vec<Vec<u8>> {
+    let symbol_size = encoder.params().symbol_size;
+    let mut result = Vec::with_capacity(count);
+    let mut buf = vec![0u8; symbol_size];
+    for i in 0..count {
+        let esi = start_esi
+            .checked_add(u32::try_from(i).expect("repair count exceeds u32"))
+            .expect("repair ESI overflow in benchmark");
+        encoder.repair_symbol_into(esi, &mut buf);
+        result.push(buf.clone());
+    }
+    result
 }
 
 fn bench_systematic_encoder_hot_paths(c: &mut Criterion) {
@@ -1919,26 +1951,34 @@ fn bench_systematic_encoder_hot_paths(c: &mut Criterion) {
     let seed = 0x51A7_E001u64;
     let source = build_decode_source(k, symbol_size, seed);
     let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
-    let repair_esi = k as u32 + 17;
+    let repair_esi = k as u32;
+    let repair_count = 32usize;
 
-    let legacy = legacy_repair_symbol_allocating_columns(&encoder, repair_esi);
-    let direct = encoder.repair_symbol(repair_esi);
+    let legacy = legacy_emit_repair_allocating_copy_batch(&encoder, repair_esi, repair_count);
+    let direct = direct_emit_repair_batch(&encoder, repair_esi, repair_count);
     assert_eq!(
         legacy, direct,
         "benchmark baseline must match optimized path"
     );
 
-    group.throughput(Throughput::Bytes(symbol_size as u64));
-    group.bench_function("repair_symbol_allocating_columns", |b| {
+    group.throughput(Throughput::Bytes((repair_count * symbol_size) as u64));
+    group.bench_function("emit_repair_allocating_columns_batch32", |b| {
         b.iter(|| {
-            std::hint::black_box(legacy_repair_symbol_allocating_columns(
+            std::hint::black_box(legacy_emit_repair_allocating_copy_batch(
                 &encoder,
                 std::hint::black_box(repair_esi),
+                std::hint::black_box(repair_count),
             ))
         });
     });
-    group.bench_function("repair_symbol_direct_tuple", |b| {
-        b.iter(|| std::hint::black_box(encoder.repair_symbol(std::hint::black_box(repair_esi))));
+    group.bench_function("emit_repair_direct_tuple_batch32", |b| {
+        b.iter(|| {
+            std::hint::black_box(direct_emit_repair_batch(
+                &encoder,
+                std::hint::black_box(repair_esi),
+                std::hint::black_box(repair_count),
+            ))
+        });
     });
 
     group.finish();
