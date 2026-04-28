@@ -2045,4 +2045,176 @@ mod tests {
         out.extend(decoder.finish().unwrap());
         assert_eq!(out, payload);
     }
+
+    /// GRPC-WEB-TRAILER-PADDING: Differential test for trailer framing vs gRPC-Web spec
+    ///
+    /// This test verifies our trailer framing behavior exactly matches the gRPC-Web
+    /// specification regarding padding bytes in trailer frames. Per the gRPC-Web spec
+    /// (https://github.com/grpc/grpc/blob/main/doc/PROTOCOL-WEB.md):
+    ///
+    /// "Trailer frames use the gRPC framing protocol with bit 7 (0x80) set to indicate
+    /// trailers. The frame body contains HTTP/1.1 headers as key: value\\r\\n pairs."
+    ///
+    /// Importantly, the spec requires:
+    /// 1. No padding bytes between the 5-byte header and trailer content
+    /// 2. Trailer content must be exactly the header block with CRLF line endings
+    /// 3. Frame length must exactly match the trailer block byte length
+    /// 4. Reserved flag bits (1-6) must be zero per br-asupersync-ood365
+    #[test]
+    fn differential_trailer_framing_padding_vs_grpc_web_spec() {
+        init_test("differential_trailer_framing_padding_vs_grpc_web_spec");
+
+        // Build a representative trailer with various metadata types per spec
+        let status = Status::invalid_argument("request validation failed");
+        let mut metadata = Metadata::new();
+        metadata.insert("x-request-id", "test-12345");
+        metadata.insert("retry-after", "300");
+        metadata.insert_bin("trace-context", Bytes::from_static(b"\x01\x02\x03\x04"));
+
+        // Encode trailers using our implementation
+        let mut encoded_buf = BytesMut::new();
+        encode_trailers(&status, &metadata, &mut encoded_buf);
+
+        // Parse the wire format manually to verify spec compliance
+        assert!(
+            encoded_buf.len() >= 5,
+            "gRPC-Web spec: trailer frame must have 5-byte header minimum"
+        );
+
+        let flag = encoded_buf[0];
+        let length = u32::from_be_bytes([encoded_buf[1], encoded_buf[2], encoded_buf[3], encoded_buf[4]]);
+        let header_block = &encoded_buf[5..];
+
+        // Verify flag byte compliance with gRPC-Web spec
+        assert_eq!(
+            flag & TRAILER_FLAG, TRAILER_FLAG,
+            "gRPC-Web spec: trailer frames must have bit 7 set (0x80)"
+        );
+        assert_eq!(
+            flag & RESERVED_FLAG_MASK, 0,
+            "gRPC-Web spec: reserved flag bits 1-6 must be zero"
+        );
+        assert_eq!(
+            flag & 0x01, 0,
+            "gRPC-Web spec: compressed trailers (0x81) not supported, bit 0 must be zero"
+        );
+
+        // Verify no padding between header and content per spec
+        let expected_content_length = header_block.len();
+        assert_eq!(
+            length as usize, expected_content_length,
+            "gRPC-Web spec: frame length must exactly match trailer content with no padding"
+        );
+
+        // Verify header block format compliance with HTTP/1.1 spec
+        let block_str = std::str::from_utf8(header_block).expect("trailer block must be UTF-8");
+
+        // gRPC-Web spec: trailers must include grpc-status
+        assert!(
+            block_str.contains("grpc-status: "),
+            "gRPC-Web spec: trailers must include grpc-status header"
+        );
+
+        // gRPC-Web spec: status must match the encoded status
+        let status_line = block_str
+            .lines()
+            .find(|line| line.starts_with("grpc-status: "))
+            .expect("grpc-status line must exist");
+        assert!(
+            status_line.contains(&status.code().as_i32().to_string()),
+            "gRPC-Web spec: grpc-status must encode the correct status code"
+        );
+
+        // Verify percent-encoding compliance for grpc-message per spec
+        if !status.message().is_empty() {
+            let message_line = block_str
+                .lines()
+                .find(|line| line.starts_with("grpc-message: "))
+                .expect("grpc-message line must exist for non-empty messages");
+
+            // gRPC-Web spec: CR/LF must be percent-encoded in grpc-message
+            let message_value = &message_line["grpc-message: ".len()..];
+            if status.message().contains('\r') || status.message().contains('\n') {
+                assert!(
+                    message_value.contains("%0D") || message_value.contains("%0A"),
+                    "gRPC-Web spec: CR/LF must be percent-encoded in grpc-message"
+                );
+            }
+        }
+
+        // Verify CRLF line endings per HTTP/1.1 spec
+        assert!(
+            block_str.ends_with("\r\n") || block_str.is_empty(),
+            "gRPC-Web spec: trailer block must use CRLF line endings"
+        );
+
+        // Verify binary metadata base64 encoding per spec
+        let binary_header_lines: Vec<_> = block_str
+            .lines()
+            .filter(|line| line.contains("-bin: "))
+            .collect();
+
+        for line in binary_header_lines {
+            let value_start = line.find(": ").expect("header line must have colon") + 2;
+            let base64_value = &line[value_start..];
+
+            // gRPC-Web spec: binary metadata must be valid base64
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD
+                .decode(base64_value)
+                .unwrap_or_else(|_| panic!("gRPC-Web spec: binary metadata must be valid base64: {}", base64_value));
+        }
+
+        // Test round-trip decoding to verify our encoder/decoder consistency
+        let codec = WebFrameCodec::new();
+        let mut decode_buf = BytesMut::from(encoded_buf.as_ref());
+        let frame = codec
+            .decode(&mut decode_buf)
+            .expect("our encoded frame must decode successfully")
+            .expect("frame must be complete");
+
+        let WebFrame::Trailers(decoded_trailer) = frame else {
+            panic!("decoded frame must be a trailer frame");
+        };
+
+        // Verify status round-trip
+        assert_eq!(
+            decoded_trailer.status.code(),
+            status.code(),
+            "gRPC-Web spec: status code must round-trip exactly"
+        );
+        assert_eq!(
+            decoded_trailer.status.message(),
+            status.message(),
+            "gRPC-Web spec: status message must round-trip exactly including percent-encoding"
+        );
+
+        // Verify metadata round-trip
+        assert_eq!(
+            decoded_trailer.metadata.get("x-request-id"),
+            metadata.get("x-request-id"),
+            "gRPC-Web spec: ASCII metadata must round-trip exactly"
+        );
+        assert_eq!(
+            decoded_trailer.metadata.get("trace-context-bin"),
+            metadata.get("trace-context-bin"),
+            "gRPC-Web spec: binary metadata must round-trip exactly with -bin suffix normalization"
+        );
+
+        // Verify no extra padding or content remains
+        assert!(
+            decode_buf.is_empty(),
+            "gRPC-Web spec: trailer frame must consume exactly the specified length with no trailing padding"
+        );
+
+        // Verify frame size efficiency per spec (no unnecessary padding)
+        let minimal_expected_size = 5 + block_str.len(); // header + content only
+        assert_eq!(
+            encoded_buf.len(),
+            minimal_expected_size,
+            "gRPC-Web spec: trailer frame must be minimal size with no padding bytes"
+        );
+
+        crate::test_complete!("differential_trailer_framing_padding_vs_grpc_web_spec");
+    }
 }

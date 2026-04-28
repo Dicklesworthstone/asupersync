@@ -748,6 +748,27 @@ fn validate_topic(topic: &str) -> Result<(), KafkaError> {
     Ok(())
 }
 
+#[cfg(any(feature = "kafka", test))]
+fn kafka_client_consumer_group_id(
+    config: &ProducerConfig,
+    topic: &str,
+) -> Result<String, KafkaError> {
+    validate_topic(topic)?;
+
+    let client_id = config
+        .client_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|client_id| !client_id.is_empty())
+        .ok_or_else(|| {
+            KafkaError::Config(
+                "KafkaClient::consumer requires ProducerConfig::client_id(...) so each caller joins an explicit consumer realm instead of the shared default group".to_string(),
+            )
+        })?;
+
+    Ok(format!("asupersync-consumer-{client_id}-{topic}"))
+}
+
 #[cfg(not(feature = "kafka"))]
 /// Check if a topic contains critical production data that should never use StubBroker.
 fn is_critical_production_topic(topic: &str) -> bool {
@@ -1824,6 +1845,8 @@ impl KafkaClient {
 
     /// Initialize consumer for the given topic.
     pub async fn consumer(&mut self, topic: &str) -> Result<&dyn KafkaConsumerTrait, KafkaError> {
+        let group_id = kafka_client_consumer_group_id(&self.config, topic)?;
+
         if let Some(ref consumer) = self.consumer {
             let _ = &consumer.consumer;
             // Validate existing consumer is for the requested topic
@@ -1840,7 +1863,10 @@ impl KafkaClient {
         // Create consumer config based on producer config
         let mut consumer_config = ClientConfig::new();
         consumer_config.set("bootstrap.servers", self.config.bootstrap_servers.join(","));
-        consumer_config.set("group.id", "asupersync-consumer");
+        consumer_config.set("group.id", &group_id);
+        if let Some(client_id) = &self.config.client_id {
+            consumer_config.set("client.id", client_id);
+        }
         consumer_config.set("enable.partition.eof", "false");
         consumer_config.set("session.timeout.ms", "6000");
         // br-asupersync-2i2e21: default is manual-commit / at-least-once.
@@ -2619,6 +2645,33 @@ mod tests {
 
         let ipv6 = ProducerConfig::new(vec!["[::1]:9092".into()]);
         assert!(ipv6.validate().is_ok());
+    }
+
+    #[test]
+    fn kafka_client_consumer_group_id_requires_nonempty_client_id() {
+        let err = kafka_client_consumer_group_id(&ProducerConfig::default(), "orders").expect_err(
+            "KafkaClient consumer wrapper must fail closed without a caller-scoped identity",
+        );
+        assert!(
+            matches!(err, KafkaError::Config(msg) if msg.contains("ProducerConfig::client_id"))
+        );
+
+        let blank = ProducerConfig::default().client_id("   ");
+        let err = kafka_client_consumer_group_id(&blank, "orders")
+            .expect_err("blank client ids must not reopen the shared consumer realm");
+        assert!(
+            matches!(err, KafkaError::Config(msg) if msg.contains("ProducerConfig::client_id"))
+        );
+    }
+
+    #[test]
+    fn kafka_client_consumer_group_id_scopes_by_client_and_topic() {
+        let config = ProducerConfig::default().client_id("payments-worker");
+        let group_id = kafka_client_consumer_group_id(&config, "billing-events").unwrap();
+        assert_eq!(
+            group_id,
+            "asupersync-consumer-payments-worker-billing-events"
+        );
     }
 
     #[test]

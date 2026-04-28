@@ -22,6 +22,7 @@ mod golden_tests {
     use super::*;
     use crate::types::ObjectId;
     use crate::types::resource::{PoolConfig, SymbolPool};
+    use crate::util::DetRng;
     use std::fmt::Write as _;
 
     /// Build a deterministic pipeline for goldens. Parallelism counts are
@@ -78,6 +79,35 @@ mod golden_tests {
             write!(&mut s, "{b:02x}").expect("string formatting cannot fail");
         }
         s
+    }
+
+    fn seeded_payload(seed: u64, len: usize) -> Vec<u8> {
+        let mut rng = DetRng::new(seed);
+        let mut payload = Vec::with_capacity(len);
+        for _ in 0..len {
+            payload.push((rng.next_u64() & 0xFF) as u8);
+        }
+        payload
+    }
+
+    fn render_seeded_fec_payload_trace(
+        pipeline: &mut EncodingPipeline,
+        seed: u64,
+        object_id: ObjectId,
+        payload_len: usize,
+    ) -> String {
+        let payload = seeded_payload(seed, payload_len);
+        let mut out = String::new();
+        writeln!(
+            &mut out,
+            "seed={seed:#018x} object_id={:032x} payload_len={} payload_hex={}",
+            object_id.as_u128(),
+            payload.len(),
+            hex_lower(&payload),
+        )
+        .expect("string formatting cannot fail");
+        out.push_str(&render_encoding_trace(pipeline, object_id, &payload));
+        out
     }
 
     /// Generator: writes the goldens to disk. Normally `#[ignore]`'d so
@@ -137,6 +167,19 @@ mod golden_tests {
             format!("{err}\n"),
         )
         .expect("write golden");
+
+        let mut seeded_pipeline = pinned_pipeline(8, 64);
+        let seeded_trace = render_seeded_fec_payload_trace(
+            &mut seeded_pipeline,
+            0x1357_9BDF_2468_ACE0,
+            ObjectId::new_for_test(0x1357_9BDF_2468_ACE0),
+            24,
+        );
+        std::fs::write(
+            "tests/goldens/codec_raptorq/encode_seeded_fec_payload_format.txt",
+            &seeded_trace,
+        )
+        .expect("write golden");
     }
 
     #[test]
@@ -194,6 +237,23 @@ mod golden_tests {
         assert_eq!(
             actual, expected,
             "EncodingError::DataTooLarge message drift"
+        );
+    }
+
+    #[test]
+    fn encode_seeded_fec_payload_format_matches_golden() {
+        let mut pipeline = pinned_pipeline(8, 64);
+        let actual = render_seeded_fec_payload_trace(
+            &mut pipeline,
+            0x1357_9BDF_2468_ACE0,
+            ObjectId::new_for_test(0x1357_9BDF_2468_ACE0),
+            24,
+        );
+        let expected =
+            include_str!("../../tests/goldens/codec_raptorq/encode_seeded_fec_payload_format.txt");
+        assert_eq!(
+            actual, expected,
+            "RaptorQ codec canonical seeded FEC payload format drift"
         );
     }
 }
