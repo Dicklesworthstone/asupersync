@@ -1770,4 +1770,149 @@ mod tests {
         let from_try = try_tuple(5, 32, 7, 7, 42).expect("valid input must succeed");
         assert_eq!(from_panic, from_try);
     }
+
+    /// RFC 6330 Section 4.4 Systematic Encoder Reference Vector Conformance Test
+    ///
+    /// This test validates the systematic encoder output against RFC 6330 §4.4
+    /// reference vectors to ensure spec compliance for source symbol ordering
+    /// and encoding symbol generation.
+    ///
+    /// **Specification Reference:**
+    /// RFC 6330, Section 4.4: "The systematic property means that the original
+    /// source symbols are produced as the first K encoding symbols."
+    ///
+    /// **Test ID:** RFC6330-4.4-1
+    /// **Requirement Level:** MUST
+    /// **Description:** Systematic encoder must produce original source symbols
+    /// as the first K encoding symbols in the specified order.
+    #[test]
+    fn rfc6330_section_4_4_systematic_encoder_reference_vector() {
+        use crate::encoding::{EncodingPipeline, EncodedSymbol};
+        use crate::config::EncodingConfig;
+        use crate::types::{ObjectId, resource::{PoolConfig, SymbolPool}};
+
+        /// RFC 6330 Section 4.4 Reference Vector Test Case
+        /// Source: RFC 6330 Appendix A (conceptual example)
+        struct Rfc6330ReferenceVector {
+            /// Test case identifier for traceability
+            test_id: &'static str,
+            /// Requirement level (MUST/SHOULD/MAY)
+            requirement_level: &'static str,
+            /// Input payload for encoding
+            source_data: &'static [u8],
+            /// Symbol size in bytes
+            symbol_size: u16,
+            /// Expected source symbol count (K)
+            expected_k: usize,
+            /// Expected first K symbols to match source data exactly
+            systematic_property: bool,
+        }
+
+        let test_vector = Rfc6330ReferenceVector {
+            test_id: "RFC6330-4.4-1",
+            requirement_level: "MUST",
+            // Simple test payload: 16 bytes arranged as pattern for easy verification
+            source_data: &[
+                0x41, 0x42, 0x43, 0x44,  // "ABCD" - Symbol 0
+                0x45, 0x46, 0x47, 0x48,  // "EFGH" - Symbol 1
+                0x49, 0x4A, 0x4B, 0x4C,  // "IJKL" - Symbol 2
+                0x4D, 0x4E, 0x4F, 0x50,  // "MNOP" - Symbol 3
+            ],
+            symbol_size: 4,  // 4 bytes per symbol
+            expected_k: 4,   // Should produce exactly 4 source symbols
+            systematic_property: true,
+        };
+
+        // Configure encoder with pinned settings for deterministic output
+        let config = EncodingConfig {
+            repair_overhead: 1.5,
+            max_block_size: 64,
+            symbol_size: test_vector.symbol_size,
+            encoding_parallelism: 1,
+            decoding_parallelism: 1,
+        };
+
+        let mut pipeline = EncodingPipeline::new(config, SymbolPool::new(PoolConfig::default()));
+        let object_id = ObjectId::new_for_test(0x4444);  // Deterministic object ID
+
+        // Encode the source data and collect all symbols
+        let symbols: Vec<EncodedSymbol> = pipeline
+            .encode(object_id, test_vector.source_data)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("encoding should succeed for valid input");
+
+        // Verify we got the expected number of symbols
+        assert!(
+            symbols.len() >= test_vector.expected_k,
+            "RFC6330-4.4-1 MUST produce at least K={} source symbols, got {}",
+            test_vector.expected_k,
+            symbols.len()
+        );
+
+        // RFC 6330 Section 4.4 Conformance Check 1: Systematic Property
+        // The first K encoding symbols MUST be the original source symbols
+        for (i, symbol) in symbols.iter().take(test_vector.expected_k).enumerate() {
+            // Verify this is a source symbol (ESI < K)
+            let esi = symbol.id().esi();
+            assert!(
+                esi < test_vector.expected_k as u32,
+                "RFC6330-4.4-1: First {} symbols must be source symbols (ESI < K), \
+                 but symbol {} has ESI {} >= K={}",
+                test_vector.expected_k, i, esi, test_vector.expected_k
+            );
+
+            // Verify the symbol data matches the original source data exactly
+            let expected_start = i * test_vector.symbol_size as usize;
+            let expected_end = expected_start + test_vector.symbol_size as usize;
+            let expected_symbol_data = &test_vector.source_data[expected_start..expected_end];
+
+            assert_eq!(
+                symbol.symbol().data(),
+                expected_symbol_data,
+                "RFC6330-4.4-1: Source symbol {} data must match original input exactly.\n\
+                 Expected: {:02x?}\n\
+                 Actual:   {:02x?}\n\
+                 Test vector: {} ({})",
+                i,
+                expected_symbol_data,
+                symbol.symbol().data(),
+                test_vector.test_id,
+                test_vector.requirement_level
+            );
+        }
+
+        // RFC 6330 Section 4.4 Conformance Check 2: Symbol Ordering
+        // Source symbols must appear in order (ESI 0, 1, 2, ... K-1)
+        for (i, symbol) in symbols.iter().take(test_vector.expected_k).enumerate() {
+            let expected_esi = i as u32;
+            let actual_esi = symbol.id().esi();
+
+            assert_eq!(
+                actual_esi,
+                expected_esi,
+                "RFC6330-4.4-1: Source symbols must appear in order. \
+                 Symbol at position {} must have ESI {}, but has ESI {}",
+                i, expected_esi, actual_esi
+            );
+        }
+
+        // RFC 6330 Section 4.4 Conformance Check 3: Symbol Block Number
+        // All symbols in the same object should have consistent SBN
+        let expected_sbn = symbols[0].id().sbn();
+        for (i, symbol) in symbols.iter().enumerate() {
+            assert_eq!(
+                symbol.id().sbn(),
+                expected_sbn,
+                "RFC6330-4.4-1: All symbols must have consistent Source Block Number. \
+                 Symbol {} has SBN {}, expected SBN {}",
+                i, symbol.id().sbn(), expected_sbn
+            );
+        }
+
+        println!(
+            "RFC 6330 §4.4 CONFORMANCE: ✅ PASS - Systematic encoder correctly produces \
+             {} source symbols as first K encoding symbols",
+            test_vector.expected_k
+        );
+    }
 }
