@@ -225,6 +225,18 @@ test = false
 doc = false
 bench = false
 
+# Structure-aware MySQL ResultSet parsing fuzzer targeting the complete
+# result set protocol: column count header, column definition packets,
+# optional EOF separator, row data packets, and result set terminator.
+# Tests corruption scenarios, truncation, length mismatches, and packet
+# ordering to find protocol state machine vulnerabilities.
+[[bin]]
+name = "mysql_result_set_structure"
+path = "fuzz_targets/mysql_result_set_structure.rs"
+test = false
+doc = false
+bench = false
+
 [[bin]]
 name = "mysql_row_decoder"
 path = "fuzz_targets/mysql_row_decoder.rs"
