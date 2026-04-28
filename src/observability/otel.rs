@@ -3715,6 +3715,330 @@ pub mod span_semantics {
 #[path = "otel_span_golden_tests.rs"]
 mod otel_span_golden_tests;
 
+#[cfg(all(
+    any(test, feature = "fuzz"),
+    feature = "metrics",
+    feature = "tracing-integration"
+))]
+pub mod otlp_request_builder {
+    use super::span_semantics::TestSpan;
+    use super::{MetricLabels, MetricsSnapshot};
+    use opentelemetry::trace::{SpanKind as ApiSpanKind, Status as ApiStatus};
+    use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
+    use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
+    use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+    use opentelemetry_proto::tonic::common::v1::any_value::Value as ProtoValue;
+    use opentelemetry_proto::tonic::common::v1::{AnyValue, InstrumentationScope, KeyValue};
+    use opentelemetry_proto::tonic::logs::v1::{
+        LogRecord, ResourceLogs, ScopeLogs, SeverityNumber,
+    };
+    use opentelemetry_proto::tonic::metrics::v1::{
+        AggregationTemporality, Gauge, Histogram, HistogramDataPoint, Metric, NumberDataPoint,
+        ResourceMetrics, ScopeMetrics, Sum, metric, number_data_point,
+    };
+    use opentelemetry_proto::tonic::resource::v1::Resource;
+    use opentelemetry_proto::tonic::trace::v1::span::SpanKind as ProtoSpanKind;
+    use opentelemetry_proto::tonic::trace::v1::status::StatusCode as ProtoStatusCode;
+    use opentelemetry_proto::tonic::trace::v1::{
+        ResourceSpans, ScopeSpans, Span as ProtoSpan, Status as ProtoStatus, span,
+    };
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    pub const OTEL_SCHEMA_URL: &str = "https://opentelemetry.io/schemas/1.37.0";
+    pub const OTEL_SCOPE_NAME: &str = "asupersync.observability.otel";
+    pub const OTEL_SCOPE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct OtlpLogRecordInput {
+        pub time_unix_nano: u64,
+        pub observed_time_unix_nano: u64,
+        pub severity_number: i32,
+        pub severity_text: String,
+        pub body: String,
+        pub attributes: Vec<(String, String)>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct OtlpLogScopeInput {
+        pub service_name: String,
+        pub batch_sequence: u64,
+        pub scope_name: String,
+        pub log_records: Vec<OtlpLogRecordInput>,
+    }
+
+    pub fn severity_number_from_bucket(raw: u8) -> i32 {
+        match raw % 6 {
+            0 => SeverityNumber::Trace as i32,
+            1 => SeverityNumber::Debug as i32,
+            2 => SeverityNumber::Info as i32,
+            3 => SeverityNumber::Warn as i32,
+            4 => SeverityNumber::Error as i32,
+            _ => SeverityNumber::Fatal as i32,
+        }
+    }
+
+    pub fn severity_text_from_bucket(raw: u8) -> String {
+        match raw % 6 {
+            0 => "TRACE",
+            1 => "DEBUG",
+            2 => "INFO",
+            3 => "WARN",
+            4 => "ERROR",
+            _ => "FATAL",
+        }
+        .to_string()
+    }
+
+    fn string_value(value: &str) -> AnyValue {
+        AnyValue {
+            value: Some(ProtoValue::StringValue(value.to_string())),
+        }
+    }
+
+    fn key_value(key: impl Into<String>, value: impl Into<String>) -> KeyValue {
+        KeyValue {
+            key: key.into(),
+            value: Some(string_value(&value.into())),
+        }
+    }
+
+    fn ordered_proto_attributes(
+        attributes: &std::collections::HashMap<String, String>,
+    ) -> Vec<KeyValue> {
+        let mut ordered: Vec<_> = attributes.iter().collect();
+        ordered.sort_unstable_by(|(left_key, left_value), (right_key, right_value)| {
+            left_key
+                .cmp(right_key)
+                .then_with(|| left_value.cmp(right_value))
+        });
+        ordered
+            .into_iter()
+            .map(|(key, value)| key_value(key.clone(), value.clone()))
+            .collect()
+    }
+
+    fn proto_labels(labels: &MetricLabels) -> Vec<KeyValue> {
+        let mut ordered = labels.clone();
+        ordered.sort_unstable_by(|(left_key, left_value), (right_key, right_value)| {
+            left_key
+                .cmp(right_key)
+                .then_with(|| left_value.cmp(right_value))
+        });
+        ordered
+            .into_iter()
+            .map(|(key, value)| key_value(key, value))
+            .collect()
+    }
+
+    fn instrumentation_scope(name: &str) -> InstrumentationScope {
+        InstrumentationScope {
+            name: name.to_string(),
+            version: OTEL_SCOPE_VERSION.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn resource_with_batch(service_name: &str, batch_sequence: u64) -> Resource {
+        Resource {
+            attributes: vec![
+                key_value("service.name", service_name),
+                key_value("batch.sequence", batch_sequence.to_string()),
+                key_value("telemetry.sdk.name", "asupersync"),
+            ],
+            ..Default::default()
+        }
+    }
+
+    fn unix_nanos(time: SystemTime) -> u64 {
+        time.duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO)
+            .as_nanos() as u64
+    }
+
+    pub fn metrics_request_from_snapshot(
+        snapshot: &MetricsSnapshot,
+        service_name: &str,
+        batch_sequence: u64,
+        scope_name: &str,
+    ) -> ExportMetricsServiceRequest {
+        let mut metrics = Vec::new();
+
+        for (name, labels, value) in &snapshot.counters {
+            metrics.push(Metric {
+                name: name.clone(),
+                data: Some(metric::Data::Sum(Sum {
+                    aggregation_temporality: AggregationTemporality::Cumulative as i32,
+                    is_monotonic: true,
+                    data_points: vec![NumberDataPoint {
+                        attributes: proto_labels(labels),
+                        start_time_unix_nano: batch_sequence * 1_000 + 1,
+                        time_unix_nano: batch_sequence * 1_000 + 2,
+                        value: Some(number_data_point::Value::AsInt(*value as i64)),
+                        ..Default::default()
+                    }],
+                })),
+                ..Default::default()
+            });
+        }
+
+        for (name, labels, value) in &snapshot.gauges {
+            metrics.push(Metric {
+                name: name.clone(),
+                data: Some(metric::Data::Gauge(Gauge {
+                    data_points: vec![NumberDataPoint {
+                        attributes: proto_labels(labels),
+                        time_unix_nano: batch_sequence * 1_000 + 3,
+                        value: Some(number_data_point::Value::AsInt(*value)),
+                        ..Default::default()
+                    }],
+                })),
+                ..Default::default()
+            });
+        }
+
+        for (name, labels, count, sum) in &snapshot.histograms {
+            metrics.push(Metric {
+                name: name.clone(),
+                data: Some(metric::Data::Histogram(Histogram {
+                    aggregation_temporality: AggregationTemporality::Cumulative as i32,
+                    data_points: vec![HistogramDataPoint {
+                        attributes: proto_labels(labels),
+                        start_time_unix_nano: batch_sequence * 1_000 + 4,
+                        time_unix_nano: batch_sequence * 1_000 + 5,
+                        count: *count,
+                        sum: Some(*sum),
+                        bucket_counts: vec![*count],
+                        ..Default::default()
+                    }],
+                })),
+                ..Default::default()
+            });
+        }
+
+        ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                resource: Some(resource_with_batch(service_name, batch_sequence)),
+                scope_metrics: vec![ScopeMetrics {
+                    scope: Some(instrumentation_scope(scope_name)),
+                    metrics,
+                    schema_url: OTEL_SCHEMA_URL.to_string(),
+                }],
+                schema_url: OTEL_SCHEMA_URL.to_string(),
+            }],
+        }
+    }
+
+    fn proto_span_kind(kind: ApiSpanKind) -> i32 {
+        match kind {
+            ApiSpanKind::Internal => ProtoSpanKind::Internal as i32,
+            ApiSpanKind::Server => ProtoSpanKind::Server as i32,
+            ApiSpanKind::Client => ProtoSpanKind::Client as i32,
+            ApiSpanKind::Producer => ProtoSpanKind::Producer as i32,
+            ApiSpanKind::Consumer => ProtoSpanKind::Consumer as i32,
+        }
+    }
+
+    fn proto_status(status: &ApiStatus) -> ProtoStatus {
+        match status {
+            ApiStatus::Unset => ProtoStatus {
+                code: ProtoStatusCode::Unset as i32,
+                message: String::new(),
+            },
+            ApiStatus::Ok => ProtoStatus {
+                code: ProtoStatusCode::Ok as i32,
+                message: String::new(),
+            },
+            ApiStatus::Error { description } => ProtoStatus {
+                code: ProtoStatusCode::Error as i32,
+                message: description.clone().into_owned(),
+            },
+        }
+    }
+
+    fn proto_span(span: &TestSpan) -> ProtoSpan {
+        ProtoSpan {
+            trace_id: span.context.trace_id().to_bytes().to_vec(),
+            span_id: span.context.span_id().to_bytes().to_vec(),
+            parent_span_id: span
+                .parent_context
+                .as_ref()
+                .map_or_else(Vec::new, |parent| parent.span_id().to_bytes().to_vec()),
+            name: span.name.clone(),
+            kind: proto_span_kind(span.kind.clone()),
+            start_time_unix_nano: unix_nanos(span.start_time),
+            end_time_unix_nano: unix_nanos(span.end_time.expect("ended span")),
+            attributes: ordered_proto_attributes(&span.attributes),
+            events: span
+                .events
+                .iter()
+                .map(|event| span::Event {
+                    time_unix_nano: unix_nanos(event.timestamp),
+                    name: event.name.clone(),
+                    attributes: ordered_proto_attributes(&event.attributes),
+                    ..Default::default()
+                })
+                .collect(),
+            status: Some(proto_status(&span.status)),
+            ..Default::default()
+        }
+    }
+
+    pub fn traces_request(
+        service_name: &str,
+        batch_sequence: u64,
+        scope_name: &str,
+        spans: &[TestSpan],
+    ) -> ExportTraceServiceRequest {
+        ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                resource: Some(resource_with_batch(service_name, batch_sequence)),
+                scope_spans: vec![ScopeSpans {
+                    scope: Some(instrumentation_scope(scope_name)),
+                    spans: spans.iter().map(proto_span).collect(),
+                    schema_url: OTEL_SCHEMA_URL.to_string(),
+                }],
+                schema_url: OTEL_SCHEMA_URL.to_string(),
+            }],
+        }
+    }
+
+    fn log_record(record: &OtlpLogRecordInput) -> LogRecord {
+        LogRecord {
+            time_unix_nano: record.time_unix_nano,
+            observed_time_unix_nano: record.observed_time_unix_nano,
+            severity_number: record.severity_number,
+            severity_text: record.severity_text.clone(),
+            body: Some(string_value(&record.body)),
+            attributes: record
+                .attributes
+                .iter()
+                .map(|(key, value)| key_value(key.clone(), value.clone()))
+                .collect(),
+            ..Default::default()
+        }
+    }
+
+    pub fn logs_request(scopes: &[OtlpLogScopeInput]) -> ExportLogsServiceRequest {
+        ExportLogsServiceRequest {
+            resource_logs: scopes
+                .iter()
+                .map(|scope| ResourceLogs {
+                    resource: Some(resource_with_batch(
+                        &scope.service_name,
+                        scope.batch_sequence,
+                    )),
+                    scope_logs: vec![ScopeLogs {
+                        scope: Some(instrumentation_scope(&scope.scope_name)),
+                        log_records: scope.log_records.iter().map(log_record).collect(),
+                        schema_url: OTEL_SCHEMA_URL.to_string(),
+                    }],
+                    schema_url: OTEL_SCHEMA_URL.to_string(),
+                })
+                .collect(),
+        }
+    }
+}
+
 #[cfg(all(test, feature = "metrics", feature = "tracing-integration"))]
 mod otlp_wire_format_tests {
     use super::span_semantics::{SpanConformanceConfig, TestSpan};

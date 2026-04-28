@@ -113,8 +113,8 @@ loom-tests = ["dep:loom"]
 cancel-correctness-oracle = []
 # Enable stack trace capture for lab oracle violations.
 lab-stack-traces = ["dep:backtrace", "dep:rustc-demangle"]
-# Enable fuzzing support with arbitrary derive macros.
-fuzz = ["dep:arbitrary"]
+# Enable fuzzing support with arbitrary derive macros and OTLP request helpers.
+fuzz = ["dep:arbitrary", "dep:opentelemetry-proto"]
 
 [lib]
 path = "src/lib.rs"
@@ -153,6 +153,8 @@ tracing-subscriber = { version = "0.3", optional = true }
 # Optional OpenTelemetry metrics provider
 opentelemetry = { version = "0.31", default-features = false, features = ["metrics", "trace"], optional = true }
 opentelemetry_sdk = { version = "0.31", default-features = false, features = ["metrics", "trace"], optional = true }
+# OTLP protobuf builders used by fuzz/test-only wire-format helpers.
+opentelemetry-proto = { version = "0.31", default-features = false, features = ["gen-tonic-messages", "trace", "metrics", "logs"], optional = true }
 # Optional Tower trait integration
 tower = { version = "0.5.3", optional = true }
 # Optional proc macros for structured concurrency

@@ -2,6 +2,11 @@
 
 use arbitrary::Arbitrary;
 use asupersync::observability::MetricsSnapshot;
+use asupersync::observability::otel::otlp_request_builder::{
+    OTEL_SCHEMA_URL, OtlpLogRecordInput, OtlpLogScopeInput, logs_request,
+    metrics_request_from_snapshot, severity_number_from_bucket, severity_text_from_bucket,
+    traces_request,
+};
 use asupersync::observability::otel::span_semantics::{SpanConformanceConfig, TestSpan};
 use libfuzzer_sys::fuzz_target;
 use opentelemetry::trace::{SpanKind, Status};
@@ -9,22 +14,12 @@ use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::metrics::v1::ExportMetricsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::common::v1::any_value::Value as ProtoValue;
-use opentelemetry_proto::tonic::common::v1::{AnyValue, InstrumentationScope, KeyValue};
-use opentelemetry_proto::tonic::logs::v1::{LogRecord, ResourceLogs, ScopeLogs, SeverityNumber};
+use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
+use opentelemetry_proto::tonic::logs::v1::LogRecord;
 use opentelemetry_proto::tonic::metrics::v1::metric::Data as MetricData;
-use opentelemetry_proto::tonic::metrics::v1::{
-    AggregationTemporality, Gauge, Histogram, HistogramDataPoint, Metric, NumberDataPoint,
-    ResourceMetrics, ScopeMetrics, Sum, metric, number_data_point,
-};
 use opentelemetry_proto::tonic::resource::v1::Resource;
-use opentelemetry_proto::tonic::trace::v1::span::SpanKind as ProtoSpanKind;
-use opentelemetry_proto::tonic::trace::v1::status::StatusCode as ProtoStatusCode;
-use opentelemetry_proto::tonic::trace::v1::{
-    ResourceSpans, ScopeSpans, Span as ProtoSpan, Status as ProtoStatus, span,
-};
 use prost::Message;
 use std::collections::HashMap;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const MAX_COUNTERS: usize = 8;
 const MAX_GAUGES: usize = 8;
@@ -37,26 +32,6 @@ const MAX_EVENT_ATTRIBUTES: usize = 4;
 const MAX_LOG_SCOPES: usize = 4;
 const MAX_LOG_RECORDS: usize = 6;
 const MAX_TEXT_CHARS: usize = 48;
-const OTEL_SCHEMA_URL: &str = "https://opentelemetry.io/schemas/1.37.0";
-const OTEL_SCOPE_VERSION: &str = env!("CARGO_PKG_VERSION");
-
-#[derive(Debug, Clone)]
-struct LogRecordSpec {
-    time_unix_nano: u64,
-    observed_time_unix_nano: u64,
-    severity_number: i32,
-    severity_text: String,
-    body: String,
-    attributes: Vec<(String, String)>,
-}
-
-#[derive(Debug, Clone)]
-struct ResourceLogsSpec {
-    service_name: String,
-    batch_sequence: u64,
-    scope_name: String,
-    log_records: Vec<LogRecordSpec>,
-}
 
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
@@ -149,253 +124,6 @@ struct LogRecordInput {
     attributes: Vec<LabelInput>,
 }
 
-fn string_value(value: &str) -> AnyValue {
-    AnyValue {
-        value: Some(ProtoValue::StringValue(value.to_string())),
-    }
-}
-
-fn key_value(key: impl Into<String>, value: impl Into<String>) -> KeyValue {
-    KeyValue {
-        key: key.into(),
-        value: Some(string_value(&value.into())),
-    }
-}
-
-fn ordered_proto_attributes(attributes: &HashMap<String, String>) -> Vec<KeyValue> {
-    let mut ordered: Vec<_> = attributes.iter().collect();
-    ordered.sort_unstable_by(|(left_key, left_value), (right_key, right_value)| {
-        left_key
-            .cmp(right_key)
-            .then_with(|| left_value.cmp(right_value))
-    });
-    ordered
-        .into_iter()
-        .map(|(key, value)| key_value(key.clone(), value.clone()))
-        .collect()
-}
-
-fn proto_labels(labels: &[(String, String)]) -> Vec<KeyValue> {
-    let mut ordered = labels.to_vec();
-    ordered.sort_unstable_by(|(left_key, left_value), (right_key, right_value)| {
-        left_key
-            .cmp(right_key)
-            .then_with(|| left_value.cmp(right_value))
-    });
-    ordered
-        .into_iter()
-        .map(|(key, value)| key_value(key, value))
-        .collect()
-}
-
-fn instrumentation_scope(name: &str) -> InstrumentationScope {
-    InstrumentationScope {
-        name: name.to_string(),
-        version: OTEL_SCOPE_VERSION.to_string(),
-        ..Default::default()
-    }
-}
-
-fn resource_with_batch(service_name: &str, batch_sequence: u64) -> Resource {
-    Resource {
-        attributes: vec![
-            key_value("service.name", service_name),
-            key_value("batch.sequence", batch_sequence.to_string()),
-            key_value("telemetry.sdk.name", "asupersync"),
-        ],
-        ..Default::default()
-    }
-}
-
-fn unix_nanos(time: SystemTime) -> u64 {
-    time.duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .as_nanos() as u64
-}
-
-fn metrics_request_from_snapshot(
-    snapshot: &MetricsSnapshot,
-    service_name: &str,
-    batch_sequence: u64,
-    scope_name: &str,
-) -> ExportMetricsServiceRequest {
-    let mut metrics = Vec::new();
-
-    for (name, labels, value) in &snapshot.counters {
-        metrics.push(Metric {
-            name: name.clone(),
-            data: Some(metric::Data::Sum(Sum {
-                aggregation_temporality: AggregationTemporality::Cumulative as i32,
-                is_monotonic: true,
-                data_points: vec![NumberDataPoint {
-                    attributes: proto_labels(labels),
-                    start_time_unix_nano: batch_sequence * 1_000 + 1,
-                    time_unix_nano: batch_sequence * 1_000 + 2,
-                    value: Some(number_data_point::Value::AsInt(*value as i64)),
-                    ..Default::default()
-                }],
-            })),
-            ..Default::default()
-        });
-    }
-
-    for (name, labels, value) in &snapshot.gauges {
-        metrics.push(Metric {
-            name: name.clone(),
-            data: Some(metric::Data::Gauge(Gauge {
-                data_points: vec![NumberDataPoint {
-                    attributes: proto_labels(labels),
-                    time_unix_nano: batch_sequence * 1_000 + 3,
-                    value: Some(number_data_point::Value::AsInt(*value)),
-                    ..Default::default()
-                }],
-            })),
-            ..Default::default()
-        });
-    }
-
-    for (name, labels, count, sum) in &snapshot.histograms {
-        metrics.push(Metric {
-            name: name.clone(),
-            data: Some(metric::Data::Histogram(Histogram {
-                aggregation_temporality: AggregationTemporality::Cumulative as i32,
-                data_points: vec![HistogramDataPoint {
-                    attributes: proto_labels(labels),
-                    start_time_unix_nano: batch_sequence * 1_000 + 4,
-                    time_unix_nano: batch_sequence * 1_000 + 5,
-                    count: *count,
-                    sum: Some(*sum),
-                    bucket_counts: vec![*count],
-                    ..Default::default()
-                }],
-            })),
-            ..Default::default()
-        });
-    }
-
-    ExportMetricsServiceRequest {
-        resource_metrics: vec![ResourceMetrics {
-            resource: Some(resource_with_batch(service_name, batch_sequence)),
-            scope_metrics: vec![ScopeMetrics {
-                scope: Some(instrumentation_scope(scope_name)),
-                metrics,
-                schema_url: OTEL_SCHEMA_URL.to_string(),
-            }],
-            schema_url: OTEL_SCHEMA_URL.to_string(),
-        }],
-    }
-}
-
-fn proto_span_kind(kind: SpanKind) -> i32 {
-    match kind {
-        SpanKind::Internal => ProtoSpanKind::Internal as i32,
-        SpanKind::Server => ProtoSpanKind::Server as i32,
-        SpanKind::Client => ProtoSpanKind::Client as i32,
-        SpanKind::Producer => ProtoSpanKind::Producer as i32,
-        SpanKind::Consumer => ProtoSpanKind::Consumer as i32,
-    }
-}
-
-fn proto_status(status: &Status) -> ProtoStatus {
-    match status {
-        Status::Unset => ProtoStatus {
-            code: ProtoStatusCode::Unset as i32,
-            message: String::new(),
-        },
-        Status::Ok => ProtoStatus {
-            code: ProtoStatusCode::Ok as i32,
-            message: String::new(),
-        },
-        Status::Error { description } => ProtoStatus {
-            code: ProtoStatusCode::Error as i32,
-            message: description.clone().into_owned(),
-        },
-    }
-}
-
-fn proto_span(span: &TestSpan) -> ProtoSpan {
-    ProtoSpan {
-        trace_id: span.context.trace_id().to_bytes().to_vec(),
-        span_id: span.context.span_id().to_bytes().to_vec(),
-        parent_span_id: span
-            .parent_context
-            .as_ref()
-            .map_or_else(Vec::new, |parent| parent.span_id().to_bytes().to_vec()),
-        name: span.name.clone(),
-        kind: proto_span_kind(span.kind.clone()),
-        start_time_unix_nano: unix_nanos(span.start_time),
-        end_time_unix_nano: unix_nanos(span.end_time.expect("ended span")),
-        attributes: ordered_proto_attributes(&span.attributes),
-        events: span
-            .events
-            .iter()
-            .map(|event| span::Event {
-                time_unix_nano: unix_nanos(event.timestamp),
-                name: event.name.clone(),
-                attributes: ordered_proto_attributes(&event.attributes),
-                ..Default::default()
-            })
-            .collect(),
-        status: Some(proto_status(&span.status)),
-        ..Default::default()
-    }
-}
-
-fn traces_request(
-    service_name: &str,
-    batch_sequence: u64,
-    scope_name: &str,
-    spans: Vec<ProtoSpan>,
-) -> ExportTraceServiceRequest {
-    ExportTraceServiceRequest {
-        resource_spans: vec![ResourceSpans {
-            resource: Some(resource_with_batch(service_name, batch_sequence)),
-            scope_spans: vec![ScopeSpans {
-                scope: Some(instrumentation_scope(scope_name)),
-                spans,
-                schema_url: OTEL_SCHEMA_URL.to_string(),
-            }],
-            schema_url: OTEL_SCHEMA_URL.to_string(),
-        }],
-    }
-}
-
-fn log_record(spec: &LogRecordSpec) -> LogRecord {
-    LogRecord {
-        time_unix_nano: spec.time_unix_nano,
-        observed_time_unix_nano: spec.observed_time_unix_nano,
-        severity_number: spec.severity_number,
-        severity_text: spec.severity_text.clone(),
-        body: Some(string_value(&spec.body)),
-        attributes: spec
-            .attributes
-            .iter()
-            .map(|(key, value)| key_value(key.clone(), value.clone()))
-            .collect(),
-        ..Default::default()
-    }
-}
-
-fn logs_request(resource_logs: Vec<ResourceLogsSpec>) -> ExportLogsServiceRequest {
-    ExportLogsServiceRequest {
-        resource_logs: resource_logs
-            .into_iter()
-            .map(|resource_logs| ResourceLogs {
-                resource: Some(resource_with_batch(
-                    &resource_logs.service_name,
-                    resource_logs.batch_sequence,
-                )),
-                scope_logs: vec![ScopeLogs {
-                    scope: Some(instrumentation_scope(&resource_logs.scope_name)),
-                    log_records: resource_logs.log_records.iter().map(log_record).collect(),
-                    schema_url: OTEL_SCHEMA_URL.to_string(),
-                }],
-                schema_url: OTEL_SCHEMA_URL.to_string(),
-            })
-            .collect(),
-    }
-}
-
 fuzz_target!(|input: FuzzInput| {
     if input.metrics.counters.len() > MAX_COUNTERS
         || input.metrics.gauges.len() > MAX_GAUGES
@@ -444,12 +172,12 @@ fuzz_target!(|input: FuzzInput| {
         config.max_attribute_length,
     );
 
-    let log_specs = build_log_specs(input.logs);
-    let logs_request = logs_request(log_specs);
+    let log_scopes = build_log_scopes(input.logs);
+    let logs_request = logs_request(&log_scopes);
     let decoded_logs = ExportLogsServiceRequest::decode(logs_request.encode_to_vec().as_slice())
         .expect("logs request should decode after encode");
     assert_eq!(decoded_logs, logs_request);
-    assert_logs_request_invariants(&decoded_logs);
+    assert_logs_request_invariants(&decoded_logs, &log_scopes);
 });
 
 fn build_metrics_snapshot(input: MetricsInput) -> MetricsSnapshot {
@@ -515,14 +243,14 @@ fn build_trace_request(
         );
         apply_span_input(&mut child, child_input, config.max_attribute_length);
         child.end();
-        spans.push(proto_span(&child));
+        spans.push(child);
     }
 
     root.end();
-    spans.insert(0, proto_span(&root));
+    spans.insert(0, root);
 
     (
-        traces_request(service_name, batch_sequence, scope_name, spans),
+        traces_request(service_name, batch_sequence, scope_name, &spans),
         config,
     )
 }
@@ -541,11 +269,11 @@ fn apply_span_input(span: &mut TestSpan, input: SpanInput, max_attribute_length:
     span.set_status(span_status(input.status));
 }
 
-fn build_log_specs(input: Vec<LogScopeInput>) -> Vec<ResourceLogsSpec> {
+fn build_log_scopes(input: Vec<LogScopeInput>) -> Vec<OtlpLogScopeInput> {
     input
         .into_iter()
         .take(MAX_LOG_SCOPES)
-        .map(|scope| ResourceLogsSpec {
+        .map(|scope| OtlpLogScopeInput {
             service_name: bounded_text(&scope.service_name),
             batch_sequence: u64::from(scope.batch_sequence),
             scope_name: bounded_scope_name(&scope.scope_name),
@@ -554,11 +282,11 @@ fn build_log_specs(input: Vec<LogScopeInput>) -> Vec<ResourceLogsSpec> {
                 .into_iter()
                 .take(MAX_LOG_RECORDS)
                 .enumerate()
-                .map(|(idx, record)| LogRecordSpec {
+                .map(|(idx, record)| OtlpLogRecordInput {
                     time_unix_nano: idx as u64 * 10 + 1,
                     observed_time_unix_nano: idx as u64 * 10 + 2,
-                    severity_number: severity_number(record.severity),
-                    severity_text: severity_text(record.severity),
+                    severity_number: severity_number_from_bucket(record.severity),
+                    severity_text: severity_text_from_bucket(record.severity),
                     body: bounded_text(&record.body),
                     attributes: bounded_labels(record.attributes),
                 })
@@ -664,29 +392,6 @@ fn span_status(status: StatusInput) -> Status {
     }
 }
 
-fn severity_number(raw: u8) -> i32 {
-    match raw % 6 {
-        0 => SeverityNumber::Trace as i32,
-        1 => SeverityNumber::Debug as i32,
-        2 => SeverityNumber::Info as i32,
-        3 => SeverityNumber::Warn as i32,
-        4 => SeverityNumber::Error as i32,
-        _ => SeverityNumber::Fatal as i32,
-    }
-}
-
-fn severity_text(raw: u8) -> String {
-    match raw % 6 {
-        0 => "TRACE",
-        1 => "DEBUG",
-        2 => "INFO",
-        3 => "WARN",
-        4 => "ERROR",
-        _ => "FATAL",
-    }
-    .to_string()
-}
-
 fn assert_metrics_request_invariants(
     request: &ExportMetricsServiceRequest,
     scope_name: &str,
@@ -759,25 +464,58 @@ fn assert_trace_request_invariants(
     }
 }
 
-fn assert_logs_request_invariants(request: &ExportLogsServiceRequest) {
-    for resource_logs in &request.resource_logs {
+fn assert_logs_request_invariants(
+    request: &ExportLogsServiceRequest,
+    expected_scopes: &[OtlpLogScopeInput],
+) {
+    assert_eq!(request.resource_logs.len(), expected_scopes.len());
+    for (resource_logs, expected_scope) in request.resource_logs.iter().zip(expected_scopes) {
         assert_eq!(resource_logs.schema_url, OTEL_SCHEMA_URL);
+        assert_resource_attributes(
+            resource_logs.resource.as_ref().expect("resource"),
+            &expected_scope.service_name,
+            expected_scope.batch_sequence,
+        );
         let scope_logs = &resource_logs.scope_logs[0];
         assert_eq!(scope_logs.schema_url, OTEL_SCHEMA_URL);
-        for record in &scope_logs.log_records {
-            for attribute in &record.attributes {
-                let value = key_value_str(attribute);
-                assert!(value.chars().count() <= MAX_TEXT_CHARS);
-            }
+        assert_eq!(
+            scope_logs.scope.as_ref().expect("scope").name,
+            expected_scope.scope_name
+        );
+        assert_eq!(
+            scope_logs.log_records.len(),
+            expected_scope.log_records.len()
+        );
+        for (record, expected_record) in scope_logs
+            .log_records
+            .iter()
+            .zip(&expected_scope.log_records)
+        {
+            assert_log_record(record, expected_record);
         }
     }
 }
 
-fn assert_resource_attributes(
-    resource: &opentelemetry_proto::tonic::resource::v1::Resource,
-    service_name: &str,
-    batch_sequence: u64,
-) {
+fn assert_log_record(record: &LogRecord, expected: &OtlpLogRecordInput) {
+    assert_eq!(record.time_unix_nano, expected.time_unix_nano);
+    assert_eq!(
+        record.observed_time_unix_nano,
+        expected.observed_time_unix_nano
+    );
+    assert_eq!(record.severity_number, expected.severity_number);
+    assert_eq!(record.severity_text, expected.severity_text);
+    assert_eq!(log_record_body(record), expected.body);
+    assert_eq!(record.attributes.len(), expected.attributes.len());
+    for (attribute, (expected_key, expected_value)) in
+        record.attributes.iter().zip(&expected.attributes)
+    {
+        assert_eq!(attribute.key.as_str(), expected_key.as_str());
+        assert_eq!(key_value_str(attribute), expected_value.as_str());
+        assert!(expected_value.chars().count() <= MAX_TEXT_CHARS);
+    }
+}
+
+fn assert_resource_attributes(resource: &Resource, service_name: &str, batch_sequence: u64) {
     assert_eq!(resource.attributes.len(), 3);
     assert_eq!(resource.attributes[0].key, "service.name");
     assert_eq!(key_value_str(&resource.attributes[0]), service_name);
@@ -805,13 +543,17 @@ fn assert_any_value_within_limit(attribute: &KeyValue, max_attribute_length: Opt
     }
 }
 
-fn key_value_str(attribute: &KeyValue) -> &str {
-    match attribute
-        .value
-        .as_ref()
-        .and_then(|value| value.value.as_ref())
-    {
+fn any_value_as_str(value: &AnyValue) -> &str {
+    match value.value.as_ref() {
         Some(ProtoValue::StringValue(text)) => text.as_str(),
         other => panic!("expected string AnyValue, got {other:?}"),
     }
+}
+
+fn log_record_body(record: &LogRecord) -> &str {
+    any_value_as_str(record.body.as_ref().expect("log body"))
+}
+
+fn key_value_str(attribute: &KeyValue) -> &str {
+    any_value_as_str(attribute.value.as_ref().expect("attribute value"))
 }
