@@ -687,7 +687,7 @@ impl NatsReadBuffer {
 
 /// NATS protocol message types.
 #[derive(Debug)]
-enum NatsMessage {
+pub(crate) enum NatsMessage {
     /// Server INFO message.
     Info(ServerInfo),
     /// Server MSG message (subscription message).
@@ -950,7 +950,7 @@ impl NatsClient {
     }
 
     /// Read more data from the stream.
-    async fn read_more(&mut self) -> Result<(), NatsError> {
+    pub(crate) async fn read_more(&mut self) -> Result<(), NatsError> {
         let mut tmp = [0u8; 4096];
         let n = std::future::poll_fn(|task_cx| {
             if crate::cx::Cx::with_current(|c| c.checkpoint().is_err()).unwrap_or(false) {
@@ -976,7 +976,11 @@ impl NatsClient {
         Ok(())
     }
 
-    async fn read_more_until(&mut self, cx: &Cx, deadline: Time) -> Result<(), NatsError> {
+    pub(crate) async fn read_more_until(
+        &mut self,
+        cx: &Cx,
+        deadline: Time,
+    ) -> Result<(), NatsError> {
         let now = timeout_now(cx);
         let remaining = Duration::from_nanos(deadline.duration_since(now));
         crate::time::timeout(now, remaining, self.read_more())
@@ -994,7 +998,7 @@ impl NatsClient {
     ///
     /// If the client is currently considered connected, fail closed around
     /// the write so a partial `PONG` cannot leave the connection reusable.
-    async fn send_server_pong(&mut self) -> Result<(), NatsError> {
+    pub(crate) async fn send_server_pong(&mut self) -> Result<(), NatsError> {
         let restore_connected = self.connected;
         if restore_connected {
             self.connected = false;
@@ -1016,7 +1020,7 @@ impl NatsClient {
     }
 
     /// Try to parse a complete message from the buffer.
-    fn try_parse_message(&mut self) -> Result<Option<NatsMessage>, NatsError> {
+    pub(crate) fn try_parse_message(&mut self) -> Result<Option<NatsMessage>, NatsError> {
         let buf = self.read_buf.available();
         if buf.is_empty() {
             return Ok(None);
@@ -1779,7 +1783,7 @@ impl NatsClient {
     }
 
     /// Dispatch a message to the appropriate subscription.
-    fn dispatch_message(&self, msg: Message) {
+    pub(crate) fn dispatch_message(&self, msg: Message) {
         let subs = self.state.subscriptions.lock();
         if let Some(sub) = subs.get(&msg.sid) {
             // Try to send; warn if channel is full (backpressure)

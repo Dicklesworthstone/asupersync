@@ -892,7 +892,10 @@ fn main() {
     if let Err(err) = run(cli.command, &mut output) {
         // Write error to stderr; if that fails, fall back to eprintln!
         if write_cli_error(&err, format, color).is_err() {
-            eprintln!("Error: {} (failed to write structured error to stderr)", err.title);
+            eprintln!(
+                "Error: {} (failed to write structured error to stderr)",
+                err.title
+            );
         }
         std::process::exit(ExitCode::sanitize(err.exit_code));
     }
@@ -954,18 +957,24 @@ fn run_trace(args: TraceArgs, output: &mut Output) -> Result<(), CliError> {
     match args.command {
         TraceCommand::Info(args) => {
             let info = trace_info(&args.file)?;
-            output.write(&info).map_err(output_write_error("trace info"))?;
+            output
+                .write(&info)
+                .map_err(output_write_error("trace info"))?;
             Ok(())
         }
         TraceCommand::Events(args) => {
             let rows = trace_events(&args.file, args.offset, args.limit, &args.filters)?;
-            output.write_list(&rows).map_err(output_write_error("trace events"))?;
+            output
+                .write_list(&rows)
+                .map_err(output_write_error("trace events"))?;
             Ok(())
         }
         TraceCommand::Verify(args) => {
             let out = trace_verify(&args.file, args.quick, args.strict, args.monotonic)?;
             let valid = out.valid;
-            output.write(&out).map_err(output_write_error("verification results"))?;
+            output
+                .write(&out)
+                .map_err(output_write_error("verification results"))?;
             if !valid {
                 return Err(
                     CliError::new("verification_failed", "Trace verification failed")
@@ -977,7 +986,9 @@ fn run_trace(args: TraceArgs, output: &mut Output) -> Result<(), CliError> {
         TraceCommand::Diff(args) => {
             let out = trace_diff(&args.file_a, &args.file_b)?;
             let diverged = out.diverged;
-            output.write(&out).map_err(output_write_error("diff results"))?;
+            output
+                .write(&out)
+                .map_err(output_write_error("diff results"))?;
             if diverged {
                 return Err(CliError::new("trace_divergence", "Traces diverged")
                     .exit_code(ExitCode::TRACE_MISMATCH));
@@ -986,7 +997,9 @@ fn run_trace(args: TraceArgs, output: &mut Output) -> Result<(), CliError> {
         }
         TraceCommand::Compress(args) => {
             let out = trace_compress(&args.input, &args.output, args.level)?;
-            output.write(&out).map_err(output_write_error("compression results"))?;
+            output
+                .write(&out)
+                .map_err(output_write_error("compression results"))?;
             Ok(())
         }
         TraceCommand::Export(args) => {
@@ -1066,7 +1079,9 @@ fn doctor_scan_workspace(
             .exit_code(ExitCode::RUNTIME_ERROR)
     })?;
 
-    output.write(&report).map_err(output_write_error("workspace scan report"))?;
+    output
+        .write(&report)
+        .map_err(output_write_error("workspace scan report"))?;
     Ok(())
 }
 
@@ -1084,7 +1099,9 @@ fn doctor_analyze_invariants(
         .exit_code(ExitCode::RUNTIME_ERROR)
     })?;
     let analysis: InvariantAnalyzerReport = analyze_workspace_invariants(&report);
-    output.write(&analysis).map_err(output_write_error("invariant analysis report"))?;
+    output
+        .write(&analysis)
+        .map_err(output_write_error("invariant analysis report"))?;
     Ok(())
 }
 
