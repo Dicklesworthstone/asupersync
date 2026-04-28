@@ -1029,6 +1029,10 @@ pub struct CancelBroadcastMetrics {
     pub duplicates: u64,
     /// Cancellations that reached max hops.
     pub max_hops_reached: u64,
+    /// Failed broadcast messages pending retry.
+    /// br-asupersync-dm6ci4: Track count of messages queued for retry
+    /// after failed broadcast attempts.
+    pub pending_retries: u64,
 }
 
 // ============================================================================
@@ -1324,6 +1328,7 @@ impl<S: CancelSink> CancelBroadcaster<S> {
             forwarded: self.forwarded.load(Ordering::Relaxed),
             duplicates: self.duplicates.load(Ordering::Relaxed),
             max_hops_reached: self.max_hops_reached.load(Ordering::Relaxed),
+            pending_retries: self.pending_retries.read().len() as u64,
         }
     }
 
@@ -1632,7 +1637,7 @@ impl CleanupCoordinator {
             if let Some(buffered_symbols) = cleanup_buffer.remove(&object_id) {
                 if !buffered_symbols.is_empty() {
                     // Create a new pending set from buffered symbols
-                    let now = Time::now(); // Use current time since we don't have original
+                    let now = Time::from_nanos(0); // Use zero time for buffered symbols
                     let mut new_set = PendingSymbolSet {
                         symbols: Vec::new(),
                         total_bytes: 0,
@@ -4715,13 +4720,14 @@ mod tests {
         impl CleanupHandler for FailingHandler {
             fn name(&self) -> &str { "failing_test_handler" }
 
-            fn cleanup(&self, _object_id: ObjectId, symbols: Vec<Symbol>) -> Result<(), CleanupError> {
+            fn cleanup(&self, _object_id: ObjectId, symbols: Vec<Symbol>) -> crate::error::Result<usize> {
                 let mut attempts = self.attempts.lock().unwrap();
                 *attempts += 1;
 
                 if *attempts == 1 {
                     // First attempt fails, triggering retry logic
-                    Err(CleanupError::new("simulated failure"))
+                    Err(crate::error::Error::new(crate::error::ErrorKind::NetworkTimeout)
+                        .with_message("simulated failure"))
                 } else {
                     // Second attempt succeeds
                     assert_eq!(symbols.len(), 4, "Should have initial + buffered symbols");
@@ -4731,7 +4737,7 @@ mod tests {
                     assert!(data.contains(&b"initial2"[..]));
                     assert!(data.contains(&b"during_cleanup1"[..]));
                     assert!(data.contains(&b"during_cleanup2"[..]));
-                    Ok(())
+                    Ok(4) // Return count of cleaned symbols
                 }
             }
         }
@@ -4813,5 +4819,57 @@ mod tests {
 
         let final_stats = coordinator.stats();
         assert!(final_stats.pending_symbols >= 4, "All symbols including post-retry should be preserved");
+    }
+
+    /// Basic integration test for br-asupersync-dm6ci4: CancelBroadcaster retry mechanism.
+    ///
+    /// Verifies that the pending_retries field is properly tracked in metrics.
+    /// More complex retry scenarios are tested via integration tests.
+    #[test]
+    fn cancel_broadcaster_tracks_pending_retries_in_metrics() {
+        use std::sync::Arc;
+        use std::collections::VecDeque;
+
+        // Mock sink for testing - not used in this test
+        #[derive(Debug)]
+        struct TestSink;
+
+        impl CancelSink for TestSink {
+            async fn send(&self, _peer: &PeerId, _msg: &CancelMessage) -> crate::error::Result<()> {
+                Ok(())
+            }
+
+            async fn broadcast(&self, _msg: &CancelMessage) -> crate::error::Result<usize> {
+                Ok(1)
+            }
+        }
+
+        let broadcaster = CancelBroadcaster::new(TestSink);
+        let object_id = ObjectId::new_for_test(123);
+
+        // Initially no pending retries
+        let initial_metrics = broadcaster.metrics();
+        assert_eq!(initial_metrics.pending_retries, 0, "Should start with no pending retries");
+
+        // Manually add a message to retry queue (simulating failed broadcast)
+        let test_message = CancelMessage::new(
+            42,
+            object_id,
+            CancelKind::User,
+            Time::from_nanos(1000),
+            1,
+        );
+        broadcaster.pending_retries.write().push_back(test_message);
+
+        // Metrics should reflect the pending retry
+        let metrics_with_pending = broadcaster.metrics();
+        assert_eq!(metrics_with_pending.pending_retries, 1, "Should show 1 pending retry");
+
+        // Clear the retry queue
+        broadcaster.pending_retries.write().clear();
+
+        // Metrics should show no pending retries again
+        let final_metrics = broadcaster.metrics();
+        assert_eq!(final_metrics.pending_retries, 0, "Should show no pending retries after clear");
     }
 }
