@@ -4111,6 +4111,11 @@ pub fn fuzz_parse_ok_packet_fields(data: &[u8]) -> Result<(u64, u16), MySqlError
 }
 
 #[doc(hidden)]
+pub fn fuzz_parse_column_definition(data: &[u8]) -> Result<MySqlColumn, MySqlError> {
+    MySqlConnection::parse_column_definition(data)
+}
+
+#[doc(hidden)]
 pub fn fuzz_decode_packet_header(
     header: [u8; 4],
     expected_seq: u8,

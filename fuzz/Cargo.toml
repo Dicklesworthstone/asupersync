@@ -195,6 +195,17 @@ test = false
 doc = false
 bench = false
 
+# br-asupersync-m5tnuz — dedicated MySQL ColumnDefinition41 parser fuzz.
+# Drives src/database/mysql.rs::parse_column_definition through six
+# length-encoded string fields plus fixed-width metadata, truncation, and
+# malformed length-prefix cases.
+[[bin]]
+name = "mysql_column_definition"
+path = "fuzz_targets/mysql_column_definition.rs"
+test = false
+doc = false
+bench = false
+
 [[bin]]
 name = "fuzz_postgres_wire_protocol"
 path = "fuzz_targets/postgres_wire_protocol.rs"
