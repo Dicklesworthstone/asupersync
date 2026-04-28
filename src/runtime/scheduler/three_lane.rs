@@ -3229,15 +3229,20 @@ impl ThreeLaneWorker {
         // we want it to observe any concurrent producer that ran between phases.
         // Net: 2 fewer lock acquisitions per dispatch hitting fast_queue OR
         // global.pop_ready (the common Phase 3 hot path).
-        let blocked_local_task = self.local.lock().peek_ready_task();
+        //
+        // OPTIMIZATION: Defer blocked_local_task peek to Phase 3b to eliminate
+        // redundant lock acquisition (next_task hotpath optimization).
+        let mut blocked_local_task = None;
 
         if let Some(task) = self.fast_queue.pop() {
+            blocked_local_task = self.local.lock().peek_ready_task();
             let dispatched_priority = self.task_sched_priority(task);
             self.record_ready_priority_inversion(blocked_local_task, task, dispatched_priority);
             self.record_ready_dispatch();
             return Some(self.finish_dispatch(task));
         }
         if let Some(pt) = self.global.pop_ready() {
+            blocked_local_task = self.local.lock().peek_ready_task();
             self.record_ready_priority_inversion(blocked_local_task, pt.task, Some(pt.priority));
             self.record_ready_dispatch();
             return Some(self.finish_dispatch(pt.task));
@@ -3245,9 +3250,13 @@ impl ThreeLaneWorker {
 
         // ── PHASE 3b: Local Ready Lane ───────────────────────────────
         // All global/fast ready paths returned nothing. Check local ready.
+        // Combined lock acquisition for both peek (inversion check) and pop operations.
         let rng_hint = self.rng.next_u64();
         let local_task = {
             let mut local = self.local.lock();
+            if blocked_local_task.is_none() {
+                blocked_local_task = local.peek_ready_task(); // Only peek if not already done
+            }
             local.pop_ready_only_with_hint(rng_hint)
         };
         if let Some(task) = local_task {
