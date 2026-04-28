@@ -70,38 +70,62 @@ fn log_cancel_protocol_violation(operation: &'static str, validation_result: &Tr
     );
 }
 
+/// Auditable lifecycle events emitted by async finalizers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FinalizerHistoryEvent {
+    /// A finalizer was registered for a region.
     Registered {
+        /// Stable finalizer identifier inside the runtime state.
         id: u64,
+        /// Region that owns the finalizer.
         region: RegionId,
+        /// Logical runtime time when the finalizer was registered.
         time: Time,
     },
+    /// A registered finalizer was run.
     Ran {
+        /// Stable finalizer identifier inside the runtime state.
         id: u64,
+        /// Logical runtime time when the finalizer ran.
         time: Time,
     },
+    /// A region closed after its finalizers completed.
     RegionClosed {
+        /// Region that reached the closed state.
         region: RegionId,
+        /// Logical runtime time when the region closed.
         time: Time,
     },
 }
 
+/// Auditable events proving that losing race participants are drained.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LoserDrainHistoryEvent {
+    /// A race began and registered the participant tasks that must drain.
     RaceStarted {
+        /// Stable race identifier inside the runtime state.
         race_id: u64,
+        /// Region that owns the race.
         region: RegionId,
+        /// Participant tasks in the race.
         participants: Vec<TaskId>,
+        /// Logical runtime time when the race began.
         time: Time,
     },
+    /// A race participant completed.
     TaskCompleted {
+        /// Participant task that completed.
         task: TaskId,
+        /// Logical runtime time when the task completed.
         time: Time,
     },
+    /// A race completed with a selected winner after loser drain.
     RaceCompleted {
+        /// Stable race identifier inside the runtime state.
         race_id: u64,
+        /// Winning task for the completed race.
         winner: TaskId,
+        /// Logical runtime time when the race completed.
         time: Time,
     },
 }
