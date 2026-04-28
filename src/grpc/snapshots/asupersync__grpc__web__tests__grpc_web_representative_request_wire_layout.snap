@@ -1,0 +1,13 @@
+---
+source: src/grpc/web.rs
+expression: snapshot
+---
+content_type_binary: application/grpc-web+proto
+content_type_text: application/grpc-web-text+proto
+flag: 00
+message_length_be: 00 00 00 10
+message_length: 16
+payload_utf8_lossy: "\n\u{e}hello grpc-web"
+payload_hex: 0a 0e 68 65 6c 6c 6f 20 67 72 70 63 2d 77 65 62
+wire_hex: 00 00 00 00 10 0a 0e 68 65 6c 6c 6f 20 67 72 70 63 2d 77 65 62
+wire_base64: AAAAABAKDmhlbGxvIGdycGMtd2Vi

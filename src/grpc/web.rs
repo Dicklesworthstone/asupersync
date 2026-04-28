@@ -695,6 +695,14 @@ mod tests {
         format!("<{length} bytes>")
     }
 
+    fn render_bytes_as_hex(bytes: &[u8]) -> String {
+        bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     fn render_grpc_web_frames_for_snapshot_test(bytes: &[u8]) -> String {
         let codec = WebFrameCodec::new();
         let mut buf = BytesMut::from(bytes);
@@ -775,6 +783,52 @@ mod tests {
             index += 1;
         }
 
+        rendered
+    }
+
+    fn render_grpc_web_request_wire_layout_for_snapshot_test(bytes: &[u8]) -> String {
+        assert!(
+            bytes.len() >= 5,
+            "snapshot input must contain a full gRPC-Web request header"
+        );
+
+        let length = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
+        let payload = &bytes[5..];
+        assert!(
+            payload.len() == length,
+            "snapshot input payload length must match gRPC-Web frame header"
+        );
+
+        let mut rendered = String::new();
+        let _ = writeln!(
+            &mut rendered,
+            "content_type_binary: {}",
+            ContentType::GrpcWeb.as_header_value()
+        );
+        let _ = writeln!(
+            &mut rendered,
+            "content_type_text: {}",
+            ContentType::GrpcWebText.as_header_value()
+        );
+        let _ = writeln!(&mut rendered, "flag: {:02x}", bytes[0]);
+        let _ = writeln!(
+            &mut rendered,
+            "message_length_be: {}",
+            render_bytes_as_hex(&bytes[1..5])
+        );
+        let _ = writeln!(&mut rendered, "message_length: {length}");
+        let _ = writeln!(
+            &mut rendered,
+            "payload_utf8_lossy: {:?}",
+            String::from_utf8_lossy(payload)
+        );
+        let _ = writeln!(
+            &mut rendered,
+            "payload_hex: {}",
+            render_bytes_as_hex(payload)
+        );
+        let _ = writeln!(&mut rendered, "wire_hex: {}", render_bytes_as_hex(bytes));
+        let _ = writeln!(&mut rendered, "wire_base64: {}", base64_encode(bytes));
         rendered
     }
 
@@ -1249,6 +1303,48 @@ mod tests {
 
         assert_snapshot!("grpc_web_frame_layouts", snapshot);
         crate::test_complete!("grpc_web_frame_layouts_snapshot");
+    }
+
+    #[test]
+    fn grpc_web_representative_request_wire_layout_snapshot() {
+        init_test("grpc_web_representative_request_wire_layout_snapshot");
+        let codec = WebFrameCodec::new();
+        let request_payload = b"\x0a\x0ehello grpc-web";
+        let mut request = BytesMut::new();
+        codec
+            .encode_data(request_payload, false, &mut request)
+            .expect("representative request encodes");
+
+        let mut decode_buf = BytesMut::from(request.as_ref());
+        let frame = codec
+            .decode(&mut decode_buf)
+            .expect("representative request decodes")
+            .expect("representative request frame complete");
+        let WebFrame::Data { compressed, data } = frame else {
+            panic!("expected representative request data frame")
+        };
+        crate::assert_with_log!(
+            !compressed,
+            "representative request not compressed",
+            false,
+            compressed
+        );
+        crate::assert_with_log!(
+            data.as_ref() == request_payload,
+            "representative request payload round-trips",
+            request_payload,
+            data.as_ref()
+        );
+        crate::assert_with_log!(
+            decode_buf.is_empty(),
+            "representative request fully consumed",
+            true,
+            decode_buf.is_empty()
+        );
+
+        let snapshot = render_grpc_web_request_wire_layout_for_snapshot_test(request.as_ref());
+        assert_snapshot!("grpc_web_representative_request_wire_layout", snapshot);
+        crate::test_complete!("grpc_web_representative_request_wire_layout_snapshot");
     }
 
     // ── Base64 Text Mode Tests ───────────────────────────────────────
