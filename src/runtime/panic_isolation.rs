@@ -73,21 +73,21 @@ pub enum PanicLocation {
         /// The ID of the task that panicked
         task_id: TaskId,
         /// The region owning the task
-        _region_id: RegionId,
+        region_id: RegionId,
         /// Number of polling attempts before panic
         poll_attempt: u32,
     },
     /// Panic occurred during finalizer execution
     FinalizerExecution {
         /// The region being finalized
-        _region_id: RegionId,
+        region_id: RegionId,
         /// Type of finalizer that panicked
         finalizer_type: FinalizerType,
     },
     /// Panic occurred during region cleanup
     RegionCleanup {
         /// The region being cleaned up
-        _region_id: RegionId,
+        region_id: RegionId,
         /// Phase of cleanup when panic occurred
         cleanup_phase: CleanupPhase,
     },
@@ -96,7 +96,7 @@ pub enum PanicLocation {
         /// The obligation being processed
         obligation_id: ObligationId,
         /// The region owning the obligation
-        _region_id: RegionId,
+        region_id: RegionId,
     },
     /// Panic occurred in scheduler code
     SchedulerInternal {
@@ -213,7 +213,7 @@ impl PanicIsolator {
 
         let location = PanicLocation::TaskExecution {
             task_id,
-            _region_id: region_id,
+            region_id: region_id,
             poll_attempt,
         };
 
@@ -239,7 +239,7 @@ impl PanicIsolator {
         }
 
         let location = PanicLocation::FinalizerExecution {
-            _region_id: region_id,
+            region_id: region_id,
             finalizer_type,
         };
 
@@ -257,7 +257,7 @@ impl PanicIsolator {
         F: FnOnce() -> T,
     {
         let location = PanicLocation::RegionCleanup {
-            _region_id: region_id,
+            region_id: region_id,
             cleanup_phase: phase,
         };
 
@@ -276,7 +276,7 @@ impl PanicIsolator {
     {
         let location = PanicLocation::ObligationHandling {
             obligation_id,
-            _region_id: region_id,
+            region_id: region_id,
         };
 
         self.isolate_operation(location, operation)
@@ -411,14 +411,14 @@ impl PanicIsolator {
     ) -> (Option<RegionId>, Option<TaskId>, Option<ObligationId>) {
         match location {
             PanicLocation::TaskExecution {
-                task_id, _region_id, ..
-            } => (Some(*_region_id), Some(*task_id), None),
-            PanicLocation::FinalizerExecution { _region_id, .. } => (Some(*_region_id), None, None),
-            PanicLocation::RegionCleanup { _region_id, .. } => (Some(*_region_id), None, None),
+                task_id, region_id, ..
+            } => (Some(*region_id), Some(*task_id), None),
+            PanicLocation::FinalizerExecution { region_id, .. } => (Some(*region_id), None, None),
+            PanicLocation::RegionCleanup { region_id, .. } => (Some(*region_id), None, None),
             PanicLocation::ObligationHandling {
                 obligation_id,
-                _region_id,
-            } => (Some(*_region_id), None, Some(*obligation_id)),
+                region_id,
+            } => (Some(*region_id), None, Some(*obligation_id)),
             PanicLocation::SchedulerInternal { .. } => (None, None, None),
         }
     }
@@ -512,43 +512,43 @@ impl fmt::Display for PanicLocation {
         match self {
             PanicLocation::TaskExecution {
                 task_id,
-                _region_id,
+                region_id,
                 poll_attempt,
             } => {
                 write!(
                     f,
                     "TaskExecution(task={:?}, region={:?}, poll={})",
-                    task_id.0, _region_id.0, poll_attempt
+                    task_id.0, region_id.0, poll_attempt
                 )
             }
             PanicLocation::FinalizerExecution {
-                _region_id,
+                region_id,
                 finalizer_type,
             } => {
                 write!(
                     f,
                     "FinalizerExecution(region={:?}, type={:?})",
-                    _region_id.0, finalizer_type
+                    region_id.0, finalizer_type
                 )
             }
             PanicLocation::RegionCleanup {
-                _region_id,
+                region_id,
                 cleanup_phase,
             } => {
                 write!(
                     f,
                     "RegionCleanup(region={:?}, phase={:?})",
-                    _region_id.0, cleanup_phase
+                    region_id.0, cleanup_phase
                 )
             }
             PanicLocation::ObligationHandling {
                 obligation_id,
-                _region_id,
+                region_id,
             } => {
                 write!(
                     f,
                     "ObligationHandling(obligation={:?}, region={:?})",
-                    obligation_id.0, _region_id.0
+                    obligation_id.0, region_id.0
                 )
             }
             PanicLocation::SchedulerInternal {
@@ -837,7 +837,7 @@ mod tests {
             panic_id: 1,
             location: PanicLocation::TaskExecution {
                 task_id: TaskId::from_arena(ArenaIndex::new(1, 0)),
-                _region_id: RegionId::from_arena(ArenaIndex::new(1, 0)),
+                region_id: RegionId::from_arena(ArenaIndex::new(1, 0)),
                 poll_attempt: 1,
             },
             timestamp: Instant::now(),
