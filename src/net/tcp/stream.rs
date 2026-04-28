@@ -1689,7 +1689,8 @@ mod tests {
         drop(server);
 
         // Ensure client socket has proper flags to avoid SIGPIPE
-        let _client_fd = client.as_raw_fd();
+        #[cfg_attr(target_os = "linux", allow(unused_variables))]
+        let client_fd = client.as_raw_fd();
 
         #[cfg(target_os = "linux")]
         {

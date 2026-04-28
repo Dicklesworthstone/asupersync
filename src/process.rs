@@ -3054,9 +3054,10 @@ mod tests {
 
             // After wait(), the process should be reaped (not zombie)
             // Sending signal 0 should fail with ESRCH (No such process)
-            let process_gone = unsafe {
-                libc::kill(pid.cast_signed(), 0) == -1 && *libc::__errno_location() == libc::ESRCH
-            };
+            // SAFETY: signal 0 performs existence/permission probing only; it
+            // does not deliver a signal to the child process.
+            let process_gone = unsafe { libc::kill(pid.cast_signed(), 0) == -1 }
+                && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
 
             crate::assert_with_log!(
                 process_gone,
