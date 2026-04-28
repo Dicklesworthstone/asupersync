@@ -11137,6 +11137,62 @@ mod tests {
         );
     }
 
+    fn cancel_deadline_observation_trace(cancel_at: Time) -> Vec<TaskId> {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+
+        let deadline = Time::from_nanos(1_500);
+        let timed_task = TaskId::new_for_test(9100, 1);
+        let ready_task = TaskId::new_for_test(9101, 1);
+
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(1_000)));
+        {
+            let mut guard = state.lock().expect("lock state");
+            guard.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock.clone()));
+        }
+
+        let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 4);
+        let mut workers = scheduler.take_workers();
+        let worker = workers.first_mut().expect("worker");
+
+        worker.schedule_local_timed(timed_task, deadline);
+        worker.schedule_local(ready_task, 50);
+
+        clock.advance_to(cancel_at);
+        worker.schedule_local_cancel(timed_task, 100);
+        clock.advance_to(deadline);
+
+        let trace: Vec<_> = (0..3).filter_map(|_| worker.next_task()).collect();
+        assert_eq!(
+            trace,
+            vec![timed_task, ready_task],
+            "cancel promotion should collapse the timed task into one cancel observation"
+        );
+
+        let metrics = worker.preemption_metrics();
+        assert_eq!(metrics.cancel_dispatches, 1);
+        assert_eq!(metrics.timed_dispatches, 0);
+        assert_eq!(metrics.ready_dispatches, 1);
+        assert!(
+            worker.invariant_violations().is_empty(),
+            "cancel promotion must not leave scheduler invariant violations"
+        );
+
+        trace
+    }
+
+    #[test]
+    fn metamorphic_cancel_before_deadline_matches_cancel_at_deadline_observation_set() {
+        let deadline = Time::from_nanos(1_500);
+        let before_deadline = cancel_deadline_observation_trace(Time::from_nanos(1_499));
+        let at_deadline = cancel_deadline_observation_trace(deadline);
+
+        assert_eq!(
+            before_deadline, at_deadline,
+            "cancelling a timed task just before vs exactly at its deadline should preserve the observed dispatch set"
+        );
+    }
+
     #[test]
     fn metamorphic_lane_promotion_fairness() {
         use crate::time::{TimerDriverHandle, VirtualClock};
