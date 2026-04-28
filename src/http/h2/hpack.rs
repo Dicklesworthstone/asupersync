@@ -3788,4 +3788,45 @@ mod tests {
         assert_eq!(find_static_name(":path"), Some(4)); // First :path
         assert_eq!(find_static_name(":status"), Some(8)); // First :status
     }
+
+    #[test]
+    fn hpack_static_table_encoding_decoding_stability() {
+        use insta::assert_debug_snapshot;
+
+        let mut encoder = Encoder::new();
+        let mut decoder = Decoder::new();
+
+        // Test headers that exercise various static table entries
+        let test_headers = vec![
+            Header::new(":method", "GET"),        // Static table index 2
+            Header::new(":method", "POST"),       // Static table index 3
+            Header::new(":path", "/"),            // Static table index 4
+            Header::new(":path", "/index.html"),  // Static table index 5
+            Header::new(":scheme", "https"),      // Static table index 7
+            Header::new(":status", "200"),        // Static table index 8
+            Header::new(":status", "404"),        // Static table index 13
+            Header::new("accept-encoding", "gzip, deflate"), // Static table index 16
+            Header::new("cache-control", ""),     // Static table index 24
+            Header::new("content-type", ""),      // Static table index 31
+            Header::new("host", ""),              // Static table index 38
+            Header::new("user-agent", "custom"), // Not in static table - literal
+        ];
+
+        // Encode the headers
+        let mut encoded = BytesMut::new();
+        encoder.encode(&test_headers, &mut encoded);
+
+        // Golden snapshot of the encoding to detect changes in static table behavior
+        assert_debug_snapshot!("hpack_static_table_encoded", encoded.as_ref());
+
+        // Decode back to verify round-trip
+        let mut encoded_bytes = encoded.freeze();
+        let decoded_headers = decoder.decode(&mut encoded_bytes).expect("decode should succeed");
+
+        // Golden snapshot of decoded headers to verify structure stability
+        assert_debug_snapshot!("hpack_static_table_decoded", decoded_headers);
+
+        // Verify round-trip correctness
+        assert_eq!(test_headers, decoded_headers);
+    }
 }
