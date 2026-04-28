@@ -2197,6 +2197,63 @@ mod tests {
         assert_eq!(parsed.reason().unwrap().kind, CancelKind::Timeout);
     }
 
+    #[test]
+    fn test_cancel_token_transition_serialization_golden() {
+        let mut rng = DetRng::new(0x1337_beef_cafe_dead);
+
+        // Test different token states for golden snapshot stability
+        let scenarios = vec![
+            ("fresh_token", {
+                let obj = ObjectId::new(0x1111_2222_3333_4444, 0x5555_6666_7777_8888);
+                SymbolCancelToken::new(obj, &mut rng)
+            }),
+            ("cancelled_token", {
+                let obj = ObjectId::new(0xaaaa_bbbb_cccc_dddd, 0xeeee_ffff_0000_1111);
+                let token = SymbolCancelToken::new(obj, &mut rng);
+                token.cancel(&CancelReason::timeout(), crate::types::Time::from_millis(1000));
+                token
+            }),
+            ("test_token_minimal", {
+                SymbolCancelToken::new_for_test(0x1234_5678_9abc_def0, ObjectId::new(0x0, 0x1))
+            }),
+            ("test_token_max_values", {
+                let token = SymbolCancelToken::new_for_test(
+                    0xffff_ffff_ffff_ffff,
+                    ObjectId::new(0xdead_beef_cafe_babe, 0x1337_1337_1337_1337)
+                );
+                token.cancel(&CancelReason::user("test"), crate::types::Time::from_millis(9999));
+                token
+            }),
+        ];
+
+        // Capture wire format serialization as stable golden artifacts
+        for (name, token) in scenarios {
+            let bytes = token.to_bytes();
+
+            // Create deterministic hex representation for golden comparison
+            let hex_output = format!(
+                "Token: {}\n\
+                Token ID: 0x{:016x}\n\
+                Object ID: 0x{:016x}:{:016x}\n\
+                Cancelled: {}\n\
+                Wire bytes: [{}]\n\
+                Hex: {}",
+                name,
+                token.token_id(),
+                token.object_id().high(),
+                token.object_id().low(),
+                token.is_cancelled(),
+                bytes.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(", "),
+                bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+            );
+
+            insta::assert_snapshot!(
+                format!("cancel_token_serialization_{}", name),
+                hex_output
+            );
+        }
+    }
+
     /// br-asupersync-64ijds — Conformance: a panic inside a registered
     /// `CancelListener::on_cancel` MUST NOT propagate to the caller of
     /// `SymbolCancelToken::cancel`. The implementation wraps each
