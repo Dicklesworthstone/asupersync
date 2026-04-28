@@ -1512,6 +1512,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h3_frame_ordering"
+path = "fuzz_targets/h3_frame_ordering.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "bytes_mut_ops"
 path = "fuzz_targets/bytes_mut_ops.rs"
 test = false
