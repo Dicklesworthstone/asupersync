@@ -121,15 +121,7 @@ impl Decoder for GrpcCodec {
         }
 
         // Parse header.
-        let compressed = match src[0] {
-            0 => false,
-            1 => true,
-            flag => {
-                return Err(GrpcError::protocol(format!(
-                    "invalid gRPC compression flag: {flag}"
-                )));
-            }
-        };
+        let flag = src[0];
         let length = u32::from_be_bytes([src[1], src[2], src[3], src[4]]) as usize;
 
         // Validate ON-WIRE message size for ALL frames, including compressed.
@@ -148,6 +140,20 @@ impl Decoder for GrpcCodec {
         if src.len() < MESSAGE_HEADER_SIZE.saturating_add(length) {
             return Ok(None);
         }
+
+        let compressed = match flag {
+            0 => false,
+            1 => true,
+            invalid => {
+                // grpc-go validates payload format after it has read the
+                // complete declared frame. Consume the invalid frame so
+                // callers do not get stuck re-parsing the same bytes forever.
+                let _ = src.split_to(MESSAGE_HEADER_SIZE + length);
+                return Err(GrpcError::protocol(format!(
+                    "invalid gRPC compression flag: {invalid}"
+                )));
+            }
+        };
 
         // Consume header
         let _ = src.split_to(MESSAGE_HEADER_SIZE);
@@ -758,26 +764,25 @@ mod tests {
     }
 
     #[test]
-    fn test_grpc_codec_invalid_compression_flag_preserves_buffer() {
-        init_test("test_grpc_codec_invalid_compression_flag_preserves_buffer");
+    fn test_grpc_codec_invalid_compression_flag_consumes_complete_frame() {
+        init_test("test_grpc_codec_invalid_compression_flag_consumes_complete_frame");
         let mut codec = GrpcCodec::new();
         let mut buf = BytesMut::new();
 
         buf.put_u8(2);
         buf.put_u32(3);
         buf.extend_from_slice(b"abc");
-        let before = buf.as_ref().to_vec();
 
         let result = codec.decode(&mut buf);
         let ok = matches!(result, Err(GrpcError::Protocol(_)));
         crate::assert_with_log!(ok, "invalid compression flag rejected", true, ok);
         crate::assert_with_log!(
-            buf.as_ref() == before.as_slice(),
-            "invalid frame leaves buffer untouched",
-            before,
-            buf.as_ref().to_vec()
+            buf.is_empty(),
+            "invalid complete frame is consumed",
+            true,
+            buf.is_empty()
         );
-        crate::test_complete!("test_grpc_codec_invalid_compression_flag_preserves_buffer");
+        crate::test_complete!("test_grpc_codec_invalid_compression_flag_consumes_complete_frame");
     }
 
     #[test]

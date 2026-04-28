@@ -64,6 +64,40 @@ fn grpc_codec_rejects_invalid_compression_flag_values() {
 }
 
 #[test]
+fn grpc_codec_waits_for_full_invalid_flag_frame_like_grpc_go() {
+    let mut codec = GrpcCodec::new();
+    let mut wire = BytesMut::from(&b"\x02\x00\x00\x00\x03a"[..]);
+
+    let pending = codec
+        .decode(&mut wire)
+        .expect("grpc-go parity: invalid flag is checked after the full frame is read");
+    assert!(
+        pending.is_none(),
+        "partial invalid frames should stay pending until the declared body arrives"
+    );
+    assert_eq!(wire.as_ref(), b"\x02\x00\x00\x00\x03a");
+
+    wire.extend_from_slice(b"bc");
+    let err = codec
+        .decode(&mut wire)
+        .expect_err("full invalid frame must be rejected once the declared body is present");
+
+    match err {
+        GrpcError::Protocol(message) => {
+            assert!(
+                message.contains("invalid gRPC compression flag: 2"),
+                "unexpected protocol error: {message}"
+            );
+        }
+        other => panic!("expected protocol error, got {other:?}"),
+    }
+    assert!(
+        wire.is_empty(),
+        "grpc-go consumes the invalid frame before surfacing the payload-format error"
+    );
+}
+
+#[test]
 fn framed_codec_identity_compression_round_trips_when_enabled() {
     let payload = Bytes::from_static(b"identity-compressed");
     let mut encoder = FramedCodec::new(IdentityCodec).with_identity_frame_codec();
