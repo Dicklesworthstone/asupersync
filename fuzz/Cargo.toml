@@ -2251,6 +2251,14 @@ test = false
 doc = false
 bench = false
 
+# br-asupersync-dbp8lb — H3 QPACK size-limit decoder fuzz
+[[bin]]
+name = "h3_qpack_decode_with_limit"
+path = "fuzz_targets/h3_qpack_decode_with_limit.rs"
+test = false
+doc = false
+bench = false
+
 # Fuzz coverage gap: web/session.rs SessionData + MemoryStore lifecycle
 [[bin]]
 name = "web_session_data"
