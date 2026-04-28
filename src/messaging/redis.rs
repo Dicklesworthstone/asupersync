@@ -5,9 +5,10 @@
 //! command execution.
 
 use crate::cx::Cx;
-use crate::io::{AsyncRead, AsyncWriteExt, ReadBuf};
+use crate::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 use crate::net::TcpStream;
 use crate::sync::{GenericPool, Pool as _, PoolConfig, PoolError, PooledResource};
+#[cfg(feature = "tls")]
 use crate::tls::{TlsConnector, TlsConnectorBuilder, TlsStream};
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -1134,6 +1135,7 @@ pub struct RedisConfig {
     /// Enable TLS encryption.
     pub use_tls: bool,
     /// TLS connector configuration.
+    #[cfg(feature = "tls")]
     pub tls_connector: Option<TlsConnector>,
     /// Protocol-level limits for the RESP decoder.
     pub protocol_limits: RedisProtocolLimits,
@@ -1161,7 +1163,16 @@ impl std::fmt::Debug for RedisConfig {
             .field("database", &self.database)
             .field("username", &self.username.as_ref().map(|_| "[REDACTED]"))
             .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .field("use_tls", &self.use_tls)
+            .field(
+                "tls_connector",
+                #[cfg(feature = "tls")]
+                &self.tls_connector.as_ref().map(|_| "[REDACTED]"),
+                #[cfg(not(feature = "tls"))]
+                &"[TLS_DISABLED]"
+            )
             .field("protocol_limits", &self.protocol_limits)
+            .field("pubsub_max_backlog", &self.pubsub_max_backlog)
             .finish()
     }
 }
@@ -1175,6 +1186,7 @@ impl Default for RedisConfig {
             username: None,
             password: None,
             use_tls: false,
+            #[cfg(feature = "tls")]
             tls_connector: None,
             protocol_limits: RedisProtocolLimits::default(),
             // Default Pub/Sub backlog cap; overflow surfaces via
@@ -1240,13 +1252,80 @@ impl RedisConfig {
             }
         }
 
+        // Configure TLS if rediss:// URL was used
+        config.use_tls = use_tls;
+        #[cfg(feature = "tls")]
+        if use_tls {
+            let tls_connector = TlsConnectorBuilder::new()
+                .with_webpki_roots()
+                .build()
+                .map_err(|e| RedisError::InvalidUrl(format!("TLS setup failed: {e}")))?;
+            config.tls_connector = Some(tls_connector);
+        }
+        #[cfg(not(feature = "tls"))]
+        if use_tls {
+            return Err(RedisError::InvalidUrl("TLS support not enabled".to_string()));
+        }
+
         Ok(config)
     }
 }
 
 #[derive(Debug)]
+enum RedisStream {
+    Plain(TcpStream),
+    #[cfg(feature = "tls")]
+    Tls(TlsStream<TcpStream>),
+}
+
+impl AsyncRead for RedisStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_read(cx, buf),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => Pin::new(stream).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for RedisStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<Result<usize, io::Error>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_write(cx, buf),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => Pin::new(stream).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), io::Error>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_flush(cx),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => Pin::new(stream).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), io::Error>> {
+        match self.get_mut() {
+            Self::Plain(stream) => Pin::new(stream).poll_shutdown(cx),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => Pin::new(stream).poll_shutdown(cx),
+        }
+    }
+}
+
+
+#[derive(Debug)]
 struct RedisConnection {
-    stream: TcpStream,
+    stream: RedisStream,
     read_buf: RespReadBuffer,
     config: RedisConfig,
     initialized: bool,
@@ -1255,7 +1334,25 @@ struct RedisConnection {
 impl RedisConnection {
     async fn connect(config: RedisConfig) -> Result<Self, RedisError> {
         let addr = format!("{}:{}", config.host, config.port);
-        let stream = TcpStream::connect(addr).await?;
+        let tcp_stream = TcpStream::connect(addr).await?;
+
+        let stream = if config.use_tls {
+            #[cfg(feature = "tls")]
+            {
+                let tls_connector = config.tls_connector.as_ref()
+                    .ok_or_else(|| RedisError::InvalidUrl("TLS enabled but no connector configured".to_string()))?;
+                let tls_stream = tls_connector.connect(&config.host, tcp_stream).await
+                    .map_err(|e| RedisError::Io(io::Error::new(io::ErrorKind::ConnectionRefused, e)))?;
+                RedisStream::Tls(tls_stream)
+            }
+            #[cfg(not(feature = "tls"))]
+            {
+                return Err(RedisError::InvalidUrl("TLS support not enabled".to_string()));
+            }
+        } else {
+            RedisStream::Plain(tcp_stream)
+        };
+
         Ok(Self {
             stream,
             read_buf: RespReadBuffer::new(),
@@ -1637,7 +1734,7 @@ impl RedisClient {
             };
 
             // Drop the transient connection back to the OS.
-            let _ = redirect_conn.stream.shutdown(std::net::Shutdown::Both);
+            let _ = redirect_conn.stream.shutdown();
 
             match attempt {
                 Ok(resp) => return Ok(resp),
@@ -1907,11 +2004,11 @@ impl std::ops::DerefMut for DiscardOnDropGuard {
 
 impl Drop for DiscardOnDropGuard {
     fn drop(&mut self) {
-        if let Some(conn) = self.conn.take() {
+        if let Some(mut conn) = self.conn.take() {
             // Fail closed: once a protocol exchange is abandoned, force the
             // transport down before discarding so the peer promptly observes
             // EOF/RST instead of leaving a half-live socket around.
-            let _ = conn.stream.shutdown(std::net::Shutdown::Both);
+            let _ = conn.stream.shutdown();
             conn.discard();
         }
     }
@@ -2176,10 +2273,10 @@ impl Drop for Transaction {
         if self.finished {
             return;
         }
-        if let Some(conn) = self.conn.take() {
+        if let Some(mut conn) = self.conn.take() {
             // We cannot issue async DISCARD in Drop. Discarding the pooled
             // connection ensures transaction state does not leak to future users.
-            let _ = conn.stream.shutdown(std::net::Shutdown::Both);
+            let _ = conn.stream.shutdown();
             conn.discard();
         }
         self.finished = true;
@@ -2271,7 +2368,7 @@ impl Drop for PubSubControlGuard<'_> {
         self.pubsub.patterns = std::mem::take(&mut self.snapshot_patterns);
         self.pubsub.pending_events.clear();
         self.pubsub.poisoned = true;
-        let _ = self.pubsub.conn.stream.shutdown(std::net::Shutdown::Both);
+        let _ = self.pubsub.conn.stream.shutdown();
     }
 }
 
