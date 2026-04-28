@@ -103,6 +103,7 @@ pub mod websocket_extension_negotiation_rfc6455;
 pub mod hpack_rfc7541_appendix_c;
 pub mod macaroon_attenuation_vectors;
 pub mod raptorq_proof_correctness;
+pub mod raptorq_rfc6330_section6_systematic_repair_mix;
 pub mod tcp_listener;
 pub mod tls_key_share;
 pub mod tls_sni;
