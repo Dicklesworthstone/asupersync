@@ -10033,4 +10033,119 @@ mod tests {
             );
         });
     }
+
+    #[test]
+    fn row_description_field_format_differential_conformance() {
+        /// Differential conformance test for PostgreSQL RowDescription field-format flags.
+        ///
+        /// Tests RFC compliance for PostgreSQL wire protocol format codes:
+        /// - 0 = text format (human-readable strings)
+        /// - 1 = binary format (network byte order binary)
+        ///
+        /// Verifies that identical data produces equivalent results regardless
+        /// of format flag, and that format interpretation is correctly applied
+        /// during value parsing.
+        let conn = make_test_connection();
+
+        // Test data: integer column that can be represented in both formats
+        let column_name = "test_col";
+        let type_oid = oid::INT4;
+        let test_value = 42i32;
+
+        // Create RowDescription with text format (format_code = 0)
+        let mut text_row_desc = Vec::new();
+        text_row_desc.extend_from_slice(&1i16.to_be_bytes()); // field count
+        text_row_desc.extend_from_slice(column_name.as_bytes());
+        text_row_desc.push(0); // null terminator
+        text_row_desc.extend_from_slice(&0u32.to_be_bytes()); // table_oid
+        text_row_desc.extend_from_slice(&0i16.to_be_bytes()); // column_id
+        text_row_desc.extend_from_slice(&type_oid.to_be_bytes());
+        text_row_desc.extend_from_slice(&4i16.to_be_bytes()); // type_size
+        text_row_desc.extend_from_slice(&(-1i32).to_be_bytes()); // type_modifier
+        text_row_desc.extend_from_slice(&0i16.to_be_bytes()); // format_code = TEXT
+
+        // Create RowDescription with binary format (format_code = 1)
+        let mut binary_row_desc = Vec::new();
+        binary_row_desc.extend_from_slice(&1i16.to_be_bytes()); // field count
+        binary_row_desc.extend_from_slice(column_name.as_bytes());
+        binary_row_desc.push(0); // null terminator
+        binary_row_desc.extend_from_slice(&0u32.to_be_bytes()); // table_oid
+        binary_row_desc.extend_from_slice(&0i16.to_be_bytes()); // column_id
+        binary_row_desc.extend_from_slice(&type_oid.to_be_bytes());
+        binary_row_desc.extend_from_slice(&4i16.to_be_bytes()); // type_size
+        binary_row_desc.extend_from_slice(&(-1i32).to_be_bytes()); // type_modifier
+        binary_row_desc.extend_from_slice(&1i16.to_be_bytes()); // format_code = BINARY
+
+        // Parse both RowDescription messages
+        let (text_columns, text_indices) = conn
+            .parse_row_description(&text_row_desc)
+            .expect("text RowDescription should parse successfully");
+        let (binary_columns, binary_indices) = conn
+            .parse_row_description(&binary_row_desc)
+            .expect("binary RowDescription should parse successfully");
+
+        // CONFORMANCE CHECK 1: Format codes must be correctly interpreted
+        assert_eq!(text_columns[0].format_code, 0, "text format code must be 0");
+        assert_eq!(binary_columns[0].format_code, 1, "binary format code must be 1");
+
+        // CONFORMANCE CHECK 2: All other column metadata must be identical
+        assert_eq!(text_columns[0].name, binary_columns[0].name, "column names must match");
+        assert_eq!(text_columns[0].type_oid, binary_columns[0].type_oid, "type OIDs must match");
+        assert_eq!(text_columns[0].table_oid, binary_columns[0].table_oid, "table OIDs must match");
+        assert_eq!(text_columns[0].column_id, binary_columns[0].column_id, "column IDs must match");
+        assert_eq!(text_columns[0].type_size, binary_columns[0].type_size, "type sizes must match");
+        assert_eq!(text_columns[0].type_modifier, binary_columns[0].type_modifier, "type modifiers must match");
+
+        // Create corresponding DataRow messages for each format
+        // Text format: "42" as string
+        let mut text_data_row = Vec::new();
+        text_data_row.extend_from_slice(&1i16.to_be_bytes()); // field count
+        let text_value_bytes = b"42";
+        text_data_row.extend_from_slice(&(text_value_bytes.len() as i32).to_be_bytes());
+        text_data_row.extend_from_slice(text_value_bytes);
+
+        // Binary format: 42 as 4-byte big-endian integer
+        let mut binary_data_row = Vec::new();
+        binary_data_row.extend_from_slice(&1i16.to_be_bytes()); // field count
+        binary_data_row.extend_from_slice(&4i32.to_be_bytes()); // 4 bytes
+        binary_data_row.extend_from_slice(&test_value.to_be_bytes());
+
+        // Parse DataRow messages using respective column definitions
+        let text_values = conn
+            .parse_data_row(&text_data_row, &text_columns)
+            .expect("text DataRow should parse successfully");
+        let binary_values = conn
+            .parse_data_row(&binary_data_row, &binary_columns)
+            .expect("binary DataRow should parse successfully");
+
+        // CONFORMANCE CHECK 3: Different wire formats must produce equivalent logical values
+        assert_eq!(text_values.len(), 1, "text row must have one value");
+        assert_eq!(binary_values.len(), 1, "binary row must have one value");
+
+        // Both should parse to the same PgValue::Int4(42)
+        match (&text_values[0], &binary_values[0]) {
+            (PgValue::Int4(text_val), PgValue::Int4(binary_val)) => {
+                assert_eq!(text_val, binary_val,
+                    "text format value {text_val} must equal binary format value {binary_val}");
+                assert_eq!(*text_val, test_value,
+                    "text parsed value must equal expected {test_value}");
+                assert_eq!(*binary_val, test_value,
+                    "binary parsed value must equal expected {test_value}");
+            }
+            _ => panic!("both values should be PgValue::Int4, got text={:?} binary={:?}",
+                text_values[0], binary_values[0]),
+        }
+
+        // CONFORMANCE CHECK 4: Column indices must be consistent regardless of format
+        assert_eq!(text_indices, binary_indices, "column indices must be format-independent");
+        assert_eq!(text_indices.get(column_name), Some(&0), "column index must be 0");
+
+        // CONFORMANCE VERIFICATION: According to PostgreSQL wire protocol specification,
+        // the format code in RowDescription determines how subsequent DataRow values
+        // are interpreted, but the logical result must be equivalent.
+        println!("✓ PostgreSQL RowDescription field-format differential conformance verified");
+        println!("  - Text format (code=0): {:?} -> {:?}", "42", text_values[0]);
+        println!("  - Binary format (code=1): {:?} -> {:?}", test_value.to_be_bytes(), binary_values[0]);
+        println!("  - Both formats produced equivalent logical value: {}", test_value);
+    }
 }
