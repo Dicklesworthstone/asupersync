@@ -3071,6 +3071,62 @@ mod tests {
     }
 
     #[test]
+    fn resp3_nested_map_set_roundtrip_matches_redis_rs_value_model() {
+        // redis-rs models RESP3 maps as ordered Vec<(Value, Value)> pairs and
+        // RESP3 sets as Vec<Value>; lock the corresponding wire form here.
+        let value = RespValue::Map(vec![
+            (
+                RespValue::BulkString(Some(b"numbers".to_vec())),
+                RespValue::Set(vec![
+                    RespValue::Integer(1),
+                    RespValue::BulkString(Some(b"two".to_vec())),
+                ]),
+            ),
+            (
+                RespValue::BulkString(Some(b"meta".to_vec())),
+                RespValue::Map(vec![
+                    (
+                        RespValue::SimpleString("proto".to_string()),
+                        RespValue::Integer(3),
+                    ),
+                    (
+                        RespValue::SimpleString("mode".to_string()),
+                        RespValue::SimpleString("standalone".to_string()),
+                    ),
+                ]),
+            ),
+        ]);
+
+        let expected = concat!(
+            "%2\r\n",
+            "$7\r\nnumbers\r\n",
+            "~2\r\n",
+            ":1\r\n",
+            "$3\r\ntwo\r\n",
+            "$4\r\nmeta\r\n",
+            "%2\r\n",
+            "+proto\r\n",
+            ":3\r\n",
+            "+mode\r\n",
+            "+standalone\r\n",
+        )
+        .as_bytes();
+
+        assert_eq!(
+            value.encode(),
+            expected,
+            "RESP3 Map/Set encoding must stay byte-compatible with redis-rs's \
+             low-level value model"
+        );
+
+        let (decoded, consumed) = RespValue::try_decode(expected)
+            .unwrap()
+            .expect("nested RESP3 map/set should decode");
+        assert_eq!(decoded, value);
+        assert_eq!(consumed, expected.len());
+    }
+
+    #[test]
     fn test_resp_decode_partial_needs_more() {
         assert!(RespValue::try_decode(b"$3\r\nfo").unwrap().is_none());
     }
