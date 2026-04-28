@@ -10504,6 +10504,115 @@ mod tests {
         })
     }
 
+    fn evidence_entry_snapshot(entry: &franken_evidence::EvidenceLedger) -> Value {
+        json!({
+            "ts": entry.ts_unix_ms,
+            "component": entry.component,
+            "action": entry.action,
+            "posterior": entry.posterior,
+            "expected_loss_by_action": entry.expected_loss_by_action,
+            "chosen_expected_loss": entry.chosen_expected_loss,
+            "calibration_score": entry.calibration_score,
+            "fallback_active": entry.fallback_active,
+            "top_features": entry.top_features,
+        })
+    }
+
+    fn scheduler_decision_trace_fixed_seed_json(seed: u64) -> Value {
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(999_000_000)));
+        let mut state = RuntimeState::new();
+        state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
+        state.now = Time::from_nanos(999_000_000);
+        let root = state.create_root_region(Budget::unlimited());
+        let (_task_id, _handle) = state
+            .create_task(root, Budget::with_deadline_ns(1_000_000_000), async {})
+            .expect("create deadline-pressured task");
+        let state = Arc::new(ContendedMutex::new("runtime_state", state));
+
+        let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 2, true, 1);
+        let mut workers = scheduler.take_workers();
+        let worker = workers
+            .first_mut()
+            .expect("scheduler should create a worker");
+
+        let collector = Arc::new(crate::evidence_sink::CollectorSink::new());
+        let sink: Arc<dyn crate::evidence_sink::EvidenceSink> = collector.clone();
+        worker.set_evidence_sink(sink);
+        worker.rng = crate::util::DetRng::new(seed);
+        worker.decision_contract = None;
+        worker.decision_posterior = None;
+
+        let timed_tasks = [
+            TaskId::new_for_test(8800, 1),
+            TaskId::new_for_test(8800, 2),
+            TaskId::new_for_test(8800, 3),
+        ];
+        for task in timed_tasks {
+            worker.schedule_local_timed(task, Time::from_nanos(500_000_000));
+        }
+
+        let cancel_tasks = [TaskId::new_for_test(8801, 1), TaskId::new_for_test(8801, 2)];
+        for task in cancel_tasks {
+            worker.schedule_local_cancel(task, 100);
+        }
+
+        let ready_tasks = [TaskId::new_for_test(8802, 1), TaskId::new_for_test(8802, 2)];
+        for task in ready_tasks {
+            worker.fast_queue.push(task);
+        }
+
+        let total_dispatches = timed_tasks.len() + cancel_tasks.len() + ready_tasks.len();
+        let mut dispatch_trace = Vec::with_capacity(total_dispatches);
+        for _ in 0..total_dispatches {
+            let task = worker
+                .next_task()
+                .expect("replay should have scheduled work");
+            dispatch_trace.push(task);
+        }
+
+        let entries = collector.entries();
+        assert_eq!(
+            entries.len(),
+            dispatch_trace.len(),
+            "each governor decision should emit one scheduler evidence entry when the decision contract is disabled"
+        );
+
+        let steps = dispatch_trace
+            .iter()
+            .zip(entries.iter())
+            .enumerate()
+            .map(|(step, (task, evidence_entry))| {
+                json!({
+                    "step": step,
+                    "dispatch_task": format!("{task:?}"),
+                    "scheduler_evidence": evidence_entry_snapshot(evidence_entry),
+                })
+            })
+            .collect::<Vec<_>>();
+        json!({
+            "seed": format!("0x{:016X}", seed),
+            "dispatch_trace": dispatch_trace
+                .iter()
+                .map(|task| format!("{task:?}"))
+                .collect::<Vec<_>>(),
+            "dispatch_counts": {
+                "timed": dispatch_trace
+                    .iter()
+                    .filter(|task| timed_tasks.contains(task))
+                    .count(),
+                "cancel": dispatch_trace
+                    .iter()
+                    .filter(|task| cancel_tasks.contains(task))
+                    .count(),
+                "ready": dispatch_trace
+                    .iter()
+                    .filter(|task| ready_tasks.contains(task))
+                    .count(),
+            },
+            "steps": steps,
+        })
+    }
+
     #[test]
     fn golden_test_cancel_streak_adaptivity_same_seed_replays_limit_trace() {
         let trace_a = replay_adaptive_limit_trace(0xC0DE_CAFE_BEEF_0001, 24);
@@ -10536,6 +10645,14 @@ mod tests {
                 "limit_trace_seed_0002_epochs_24": adaptive_limit_replay_json(0xC0DE_CAFE_BEEF_0002, 24),
                 "limit_trace_seed_0011_epochs_32": adaptive_limit_replay_json(0xC0DE_CAFE_BEEF_0011, 32),
             })
+        );
+    }
+
+    #[test]
+    fn three_lane_scheduler_decision_trace_fixed_seed() {
+        insta::assert_json_snapshot!(
+            "three_lane_scheduler_decision_trace_fixed_seed",
+            scheduler_decision_trace_fixed_seed_json(0xC0DE_CAFE_BEEF_0191)
         );
     }
 
