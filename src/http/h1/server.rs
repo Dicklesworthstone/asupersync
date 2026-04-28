@@ -20,22 +20,16 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 /// Host header validation policy for security against Host header injection attacks.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum HostPolicy {
     /// Allow only hosts in the provided list (secure, recommended).
     AllowList(Vec<String>),
     /// Reject all requests - useful for services that don't need Host headers.
+    #[default]
     RejectUnknown,
     /// Accept any Host header (INSECURE - only for legacy compatibility).
     /// Use with extreme caution as this enables Host header injection attacks.
     AllowAll,
-}
-
-impl Default for HostPolicy {
-    fn default() -> Self {
-        // SECURITY: Secure by default - reject unknown hosts rather than fail-open
-        Self::RejectUnknown
-    }
 }
 
 impl HostPolicy {
@@ -168,11 +162,31 @@ fn parse_host_header_host(value: &str) -> Option<String> {
     if let Some(stripped) = value.strip_prefix('[') {
         let close = stripped.find(']')?;
         let host = &stripped[..close];
+        let remainder = &stripped[(close + 1)..];
+        if host.is_empty() {
+            return None;
+        }
+        if !remainder.is_empty() {
+            let port = remainder.strip_prefix(':')?;
+            if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+        }
         return Some(host.to_ascii_lowercase());
     }
-    // Plain host or `host:port` — split on the last ':'.
-    let host = value.rsplit_once(':').map_or(value, |(h, _)| h);
-    Some(host.to_ascii_lowercase())
+    // Plain host or `host:port` — split on the last ':' and reject
+    // malformed suffixes rather than silently truncating them.
+    if let Some((host, port)) = value.rsplit_once(':') {
+        if host.is_empty()
+            || host.contains(':')
+            || port.is_empty()
+            || !port.bytes().all(|b| b.is_ascii_digit())
+        {
+            return None;
+        }
+        return Some(host.to_ascii_lowercase());
+    }
+    Some(value.to_ascii_lowercase())
 }
 
 /// br-asupersync-scxixg: validate the request's `Host` header against
@@ -184,16 +198,14 @@ fn validate_host_header(
     host_policy: &HostPolicy,
 ) -> Result<(), String> {
     match host_policy {
-        HostPolicy::AllowAll => {
-            return Ok(()); // Validation disabled (insecure legacy mode).
-        }
+        HostPolicy::AllowAll => Ok(()), // Validation disabled (insecure legacy mode).
         HostPolicy::RejectUnknown => {
             // Reject all requests - most secure default
             let host_value = headers
                 .iter()
                 .find(|(name, _)| name.eq_ignore_ascii_case("host"))
                 .map(|(_, value)| value.as_str());
-            return Err(host_value.unwrap_or("").to_string());
+            Err(host_value.unwrap_or("").to_string())
         }
         HostPolicy::AllowList(allow_list) => {
             if allow_list.is_empty() {
@@ -214,7 +226,9 @@ fn validate_host_header(
                 // RFC 7230 §5.4: HTTP/1.1 requests MUST include Host. Reject.
                 return Err(String::new());
             };
-            let parsed = parse_host_header_host(host_value).unwrap_or_default();
+            let Some(parsed) = parse_host_header_host(host_value) else {
+                return Err(host_value.to_string());
+            };
             if allow_list
                 .iter()
                 .any(|allowed| allowed.eq_ignore_ascii_case(&parsed))
@@ -1253,7 +1267,10 @@ mod tests {
     /// case which is itself an HTTP/1.1 protocol violation.
     #[test]
     fn validate_host_header_accepts_listed_rejects_others() {
-        let policy = HostPolicy::allow_list(vec!["example.com".to_string(), "auth.example.com".to_string()]);
+        let policy = HostPolicy::allow_list(vec![
+            "example.com".to_string(),
+            "auth.example.com".to_string(),
+        ]);
 
         // Listed host — accepted.
         let headers = vec![("Host".to_string(), "example.com".to_string())];
@@ -1325,6 +1342,11 @@ mod tests {
         // Different IPv6 — REJECTED.
         let headers = vec![("Host".to_string(), "[fe80::1]:8080".to_string())];
         assert!(validate_host_header(&headers, &policy).is_err());
+
+        // Malformed IPv6 authority suffix must not bypass the allow-list.
+        let headers = vec![("Host".to_string(), "[::1]evil.test".to_string())];
+        let err = validate_host_header(&headers, &policy).unwrap_err();
+        assert_eq!(err, "[::1]evil.test");
     }
 
     /// br-asupersync-t9yqht: parse_host_header_host handles edge
@@ -1347,6 +1369,14 @@ mod tests {
             parse_host_header_host("[2001:db8::1]:443").as_deref(),
             Some("2001:db8::1")
         );
+        assert_eq!(parse_host_header_host("[2001:db8::1]evil").as_deref(), None);
+        assert_eq!(
+            parse_host_header_host("[2001:db8::1]:https").as_deref(),
+            None
+        );
+        assert_eq!(parse_host_header_host("example.com:https").as_deref(), None);
+        assert_eq!(parse_host_header_host("example.com:80:90").as_deref(), None);
+        assert_eq!(parse_host_header_host("2001:db8::1").as_deref(), None);
         assert_eq!(parse_host_header_host(""), None);
         assert_eq!(parse_host_header_host("   "), None);
     }
