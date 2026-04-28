@@ -2248,6 +2248,22 @@ impl PreparedStatementCache {
         evicted
     }
 
+    /// Clear the cache and return all server-side statement names that must
+    /// be closed later. Names are returned in LRU order for deterministic
+    /// cleanup and test assertions.
+    fn clear_returning_names(&mut self) -> Vec<String> {
+        let mut names = Vec::with_capacity(self.entries.len());
+        while let Some(sql) = self.lru.pop_front() {
+            if let Some(stmt) = self.entries.remove(&sql) {
+                names.push(stmt.name);
+            }
+        }
+        if !self.entries.is_empty() {
+            names.extend(self.entries.drain().map(|(_, stmt)| stmt.name));
+        }
+        names
+    }
+
     #[cfg(test)]
     fn len(&self) -> usize {
         self.entries.len()
@@ -3312,6 +3328,7 @@ impl PgConnection {
         let mut column_indices: Option<Arc<BTreeMap<String, usize>>> = None;
         let mut rows = Vec::with_capacity(16);
 
+        let mut invalidate_prepared_cache = false;
         loop {
             if cx.checkpoint().is_err() {
                 return self.cancel_in_flight(cx);
@@ -3361,7 +3378,10 @@ impl PgConnection {
                 }
                 b'C' => {
                     // CommandComplete
-                    // Continue to ReadyForQuery
+                    if let Some(tag) = Self::parse_command_tag(&data) {
+                        invalidate_prepared_cache |=
+                            Self::command_tag_requires_prepared_cache_invalidation(tag);
+                    }
                 }
                 b'I' => {
                     // EmptyQueryResponse
@@ -3371,6 +3391,9 @@ impl PgConnection {
                     self.inner.closed = false;
                     if !data.is_empty() {
                         self.inner.transaction_status = data[0];
+                    }
+                    if invalidate_prepared_cache {
+                        self.invalidate_prepared_cache_after_schema_or_session_change();
                     }
                     break;
                 }
@@ -3486,6 +3509,7 @@ impl PgConnection {
         // Process responses
         let mut affected_rows = 0u64;
         let mut saw_row_response = false;
+        let mut invalidate_prepared_cache = false;
 
         loop {
             if cx.checkpoint().is_err() {
@@ -3500,14 +3524,12 @@ impl PgConnection {
             match msg_type {
                 b'C' => {
                     // CommandComplete - parse affected rows
-                    if let Ok(tag) = std::str::from_utf8(&data) {
-                        let tag = tag.trim_end_matches('\0');
-                        // Tag format: "INSERT 0 5" or "UPDATE 10" or "DELETE 3"
-                        if let Some(num_str) = tag.rsplit(' ').next() {
-                            if let Ok(num) = num_str.parse::<u64>() {
-                                affected_rows = num;
-                            }
+                    if let Some(tag) = Self::parse_command_tag(&data) {
+                        if let Some(num) = Self::affected_rows_from_command_tag(tag) {
+                            affected_rows = num;
                         }
+                        invalidate_prepared_cache |=
+                            Self::command_tag_requires_prepared_cache_invalidation(tag);
                     }
                 }
                 b'T' | b'D' => {
@@ -3527,6 +3549,9 @@ impl PgConnection {
                     }
                     if saw_row_response {
                         return Outcome::Err(row_returning_execute_error("execute()", "query()"));
+                    }
+                    if invalidate_prepared_cache {
+                        self.invalidate_prepared_cache_after_schema_or_session_change();
                     }
                     break;
                 }
@@ -4149,15 +4174,21 @@ impl PgConnection {
         }
     }
 
+    /// Queue a statement name for later close when local state has already
+    /// invalidated the cache entry but no backend failure has occurred.
+    fn enqueue_local_deallocate(&mut self, name: String) {
+        if self.inner.deallocate_retry_queue.len() >= DEALLOCATE_RETRY_QUEUE_CAP {
+            let _ = self.inner.deallocate_retry_queue.pop_front();
+        }
+        self.inner.deallocate_retry_queue.push_back(name);
+    }
+
     /// Enqueue a statement name for later deallocate retry due to caller
     /// cancellation. Unlike `enqueue_failed_deallocate`, this does NOT
     /// increment the consecutive failure counter or mark the connection
     /// unhealthy, since caller cancellation is not a backend failure.
     fn enqueue_cancelled_deallocate(&mut self, name: String) {
-        if self.inner.deallocate_retry_queue.len() >= DEALLOCATE_RETRY_QUEUE_CAP {
-            let _ = self.inner.deallocate_retry_queue.pop_front();
-        }
-        self.inner.deallocate_retry_queue.push_back(name);
+        self.enqueue_local_deallocate(name);
         // Notably: do NOT increment consecutive_deallocate_failures
         // or set unhealthy=true for caller cancellation
     }
@@ -4273,6 +4304,33 @@ impl PgConnection {
     #[must_use]
     pub fn pending_deallocate_count(&self) -> usize {
         self.inner.deallocate_retry_queue.len()
+    }
+
+    fn parse_command_tag(data: &[u8]) -> Option<&str> {
+        std::str::from_utf8(data)
+            .ok()
+            .map(|tag| tag.trim_end_matches('\0'))
+    }
+
+    fn affected_rows_from_command_tag(tag: &str) -> Option<u64> {
+        tag.rsplit(' ').next()?.parse::<u64>().ok()
+    }
+
+    fn command_tag_requires_prepared_cache_invalidation(tag: &str) -> bool {
+        let Some(verb) = tag.split_ascii_whitespace().next() else {
+            return false;
+        };
+        matches!(
+            verb,
+            "ALTER" | "CREATE" | "DEALLOCATE" | "DISCARD" | "DROP" | "RESET" | "SET"
+        )
+    }
+
+    fn invalidate_prepared_cache_after_schema_or_session_change(&mut self) {
+        let stale_names = self.inner.prepared_cache.clear_returning_names();
+        for name in stale_names {
+            self.enqueue_local_deallocate(name);
+        }
     }
 
     fn validate_prepared_bind_arity(
@@ -5048,6 +5106,7 @@ impl PgConnection {
     async fn read_extended_execute_results(&mut self, cx: &Cx) -> Outcome<u64, PgError> {
         let mut affected_rows = 0u64;
         let mut saw_row_response = false;
+        let mut invalidate_prepared_cache = false;
 
         loop {
             if cx.checkpoint().is_err() {
@@ -5062,13 +5121,12 @@ impl PgConnection {
             match msg_type {
                 b'1' | b'2' => { /* ParseComplete / BindComplete */ }
                 b'C' => {
-                    if let Ok(tag) = std::str::from_utf8(&data) {
-                        let tag = tag.trim_end_matches('\0');
-                        if let Some(num_str) = tag.rsplit(' ').next() {
-                            if let Ok(num) = num_str.parse::<u64>() {
-                                affected_rows = num;
-                            }
+                    if let Some(tag) = Self::parse_command_tag(&data) {
+                        if let Some(num) = Self::affected_rows_from_command_tag(tag) {
+                            affected_rows = num;
                         }
+                        invalidate_prepared_cache |=
+                            Self::command_tag_requires_prepared_cache_invalidation(tag);
                     }
                 }
                 b'T' | b'D' => {
@@ -5088,6 +5146,9 @@ impl PgConnection {
                             "execute-style APIs",
                             "query-style APIs",
                         ));
+                    }
+                    if invalidate_prepared_cache {
+                        self.invalidate_prepared_cache_after_schema_or_session_change();
                     }
                     break;
                 }
@@ -6053,9 +6114,15 @@ mod tests {
     #[test]
     fn test_scram_constant_time_eq_expected_len_correctness() {
         let expected = [1u8, 2, 3, 4];
-        assert!(scram_constant_time_eq_expected_len(&expected, &[1, 2, 3, 4]));
+        assert!(scram_constant_time_eq_expected_len(
+            &expected,
+            &[1, 2, 3, 4]
+        ));
         assert!(!scram_constant_time_eq_expected_len(&expected, &[1, 2, 3]));
-        assert!(!scram_constant_time_eq_expected_len(&expected, &[1, 2, 3, 5]));
+        assert!(!scram_constant_time_eq_expected_len(
+            &expected,
+            &[1, 2, 3, 5]
+        ));
         assert!(!scram_constant_time_eq_expected_len(
             &expected,
             &[1, 2, 3, 4, 5]
@@ -6087,24 +6154,31 @@ mod tests {
 
         // Test 2: Process server first message from RFC
         let server_first = "r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096";
-        let client_final = auth.process_server_first(server_first)
+        let client_final = auth
+            .process_server_first(server_first)
             .expect("Should process RFC server first message");
 
         // Test 3: Client final message should match RFC proof value
-        let client_final_str = String::from_utf8(client_final)
-            .expect("Client final should be valid UTF-8");
+        let client_final_str =
+            String::from_utf8(client_final).expect("Client final should be valid UTF-8");
 
         // Verify channel binding (c=biws is base64 for "n,,")
-        assert!(client_final_str.contains("c=biws"),
-               "Client final should contain correct channel binding");
+        assert!(
+            client_final_str.contains("c=biws"),
+            "Client final should contain correct channel binding"
+        );
 
         // Verify nonce echoes full server nonce
-        assert!(client_final_str.contains("r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0"),
-               "Client final should echo full server nonce");
+        assert!(
+            client_final_str.contains("r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0"),
+            "Client final should echo full server nonce"
+        );
 
         // Verify proof value matches RFC (this is the critical cryptographic test)
-        assert!(client_final_str.contains("p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ="),
-               "Client final proof should match RFC 7677 §3 expected value");
+        assert!(
+            client_final_str.contains("p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ="),
+            "Client final proof should match RFC 7677 §3 expected value"
+        );
 
         // Test 4: Server final verification with RFC server signature
         let server_final = "v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=";
@@ -7998,8 +8072,8 @@ mod tests {
         assert_eq!(
             msg,
             vec![
-                b'P', 0, 0, 0, 26, b's', b't', b'm', b't', b'1', 0, b'S', b'E', b'L', b'E',
-                b'C', b'T', b' ', b'$', b'1', 0, 0, 1, 0, 0, 0, 23,
+                b'P', 0, 0, 0, 26, b's', b't', b'm', b't', b'1', 0, b'S', b'E', b'L', b'E', b'C',
+                b'T', b' ', b'$', b'1', 0, 0, 1, 0, 0, 0, 23,
             ],
             "Parse wire format must match PostgreSQL frontend protocol: \
              type byte, length, statement cstring, SQL cstring, i16 param count, i32 OIDs",
@@ -9454,8 +9528,8 @@ mod tests {
     /// with realistic PostgreSQL protocol responses.
     #[test]
     fn prepared_cache_eviction_with_real_statements() {
-        use std::io::Write;
         use std::collections::VecDeque;
+        use std::io::Write;
 
         run(async {
             let (mut conn, mut peer) = make_test_connection_with_peer();
@@ -9534,14 +9608,20 @@ mod tests {
                 move || {
                     // Expect DEALLOCATE for evicted statement first
                     let deallocate_msg = read_until_contains(&mut peer_clone, b"__asupersync_s0");
-                    assert!(deallocate_msg.windows(b"__asupersync_s0".len()).any(|w| w == b"__asupersync_s0"),
-                            "should send DEALLOCATE for evicted statement");
+                    assert!(
+                        deallocate_msg
+                            .windows(b"__asupersync_s0".len())
+                            .any(|w| w == b"__asupersync_s0"),
+                        "should send DEALLOCATE for evicted statement"
+                    );
 
                     // Send DEALLOCATE response: CloseComplete + ReadyForQuery
                     let mut dealloc_response = Vec::new();
                     dealloc_response.extend_from_slice(&[b'3', 0x00, 0x00, 0x00, 0x04]); // CloseComplete
                     dealloc_response.extend_from_slice(&[b'Z', 0x00, 0x00, 0x00, 0x05, b'I']); // ReadyForQuery
-                    peer_clone.write_all(&dealloc_response).expect("write dealloc response");
+                    peer_clone
+                        .write_all(&dealloc_response)
+                        .expect("write dealloc response");
 
                     // Then expect new PARSE for fourth statement
                     let _parse_msg = read_until_contains(&mut peer_clone, b"__asupersync_s3");
@@ -9553,7 +9633,10 @@ mod tests {
                     response.extend_from_slice(&[b'T', 0x00, 0x00, 0x00, 0x21]); // RowDescription
                     response.extend_from_slice(&[0x00, 0x01]); // 1 column
                     response.extend_from_slice(b"result\x00"); // column name
-                    response.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x17, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00]);
+                    response.extend_from_slice(&[
+                        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x17, 0xFF, 0xFF,
+                        0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x00,
+                    ]);
                     response.extend_from_slice(&[b'Z', 0x00, 0x00, 0x00, 0x05, b'I']); // ReadyForQuery
                     peer_clone.write_all(&response).expect("write response");
                 }
@@ -9564,17 +9647,41 @@ mod tests {
             assert!(matches!(stmt4, Outcome::Ok(_)));
 
             // Verify cache state after eviction
-            assert_eq!(conn.inner.prepared_cache.len(), 3, "cache should maintain capacity of 3");
+            assert_eq!(
+                conn.inner.prepared_cache.len(),
+                3,
+                "cache should maintain capacity of 3"
+            );
 
             // Verify that the first statement was evicted and subsequent statements remain
-            assert!(conn.inner.prepared_cache.get_and_touch("SELECT $1").is_none(),
-                    "first statement should have been evicted");
-            assert!(conn.inner.prepared_cache.get_and_touch("SELECT $1, $2").is_some(),
-                    "second statement should still be cached");
-            assert!(conn.inner.prepared_cache.get_and_touch("SELECT COUNT(*)").is_some(),
-                    "third statement should still be cached");
-            assert!(conn.inner.prepared_cache.get_and_touch("SELECT 'result'").is_some(),
-                    "fourth statement should be cached");
+            assert!(
+                conn.inner
+                    .prepared_cache
+                    .get_and_touch("SELECT $1")
+                    .is_none(),
+                "first statement should have been evicted"
+            );
+            assert!(
+                conn.inner
+                    .prepared_cache
+                    .get_and_touch("SELECT $1, $2")
+                    .is_some(),
+                "second statement should still be cached"
+            );
+            assert!(
+                conn.inner
+                    .prepared_cache
+                    .get_and_touch("SELECT COUNT(*)")
+                    .is_some(),
+                "third statement should still be cached"
+            );
+            assert!(
+                conn.inner
+                    .prepared_cache
+                    .get_and_touch("SELECT 'result'")
+                    .is_some(),
+                "fourth statement should be cached"
+            );
         });
     }
 
@@ -9632,6 +9739,19 @@ mod tests {
         assert_eq!(evicted, Some("__s0".to_string()));
         assert_eq!(cache.len(), 1);
         assert_eq!(cache.entries.get("sql").unwrap().name, "__s1");
+    }
+
+    #[test]
+    fn command_tag_invalidation_matches_schema_and_session_changes() {
+        assert!(PgConnection::command_tag_requires_prepared_cache_invalidation("ALTER TABLE"));
+        assert!(PgConnection::command_tag_requires_prepared_cache_invalidation("CREATE TABLE"));
+        assert!(PgConnection::command_tag_requires_prepared_cache_invalidation("DROP VIEW"));
+        assert!(PgConnection::command_tag_requires_prepared_cache_invalidation("SET"));
+        assert!(PgConnection::command_tag_requires_prepared_cache_invalidation("RESET"));
+        assert!(PgConnection::command_tag_requires_prepared_cache_invalidation("DEALLOCATE ALL"));
+        assert!(PgConnection::command_tag_requires_prepared_cache_invalidation("DISCARD ALL"));
+        assert!(!PgConnection::command_tag_requires_prepared_cache_invalidation("SELECT 1"));
+        assert!(!PgConnection::command_tag_requires_prepared_cache_invalidation("UPDATE 3"));
     }
 
     #[test]
@@ -9943,6 +10063,59 @@ mod tests {
         assert_eq!(cached_after.name, cached.name);
     }
 
+    #[test]
+    fn execute_unchecked_invalidates_prepared_cache_after_schema_change() {
+        use std::collections::VecDeque;
+
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let cx = crate::cx::Cx::for_testing();
+        let cached_sql = "SELECT * FROM widgets";
+        let cached_stmt = fake_pg_statement("__cached_stmt");
+        conn.inner
+            .prepared_cache
+            .insert_returning_evicted_name(cached_sql.to_string(), cached_stmt.clone());
+
+        let responder = std::thread::spawn(move || {
+            let request =
+                read_until_contains(&mut peer, b"ALTER TABLE widgets ADD COLUMN extra integer")
+                    .expect("execute should send schema-changing SQL");
+            assert!(
+                request
+                    .windows("ALTER TABLE widgets ADD COLUMN extra integer".len())
+                    .any(|window| window == b"ALTER TABLE widgets ADD COLUMN extra integer"),
+                "request should contain the schema-changing SQL"
+            );
+            std::io::Write::write_all(&mut peer, &backend_message(b'C', b"ALTER TABLE\0"))
+                .expect("command complete should be written");
+            std::io::Write::write_all(&mut peer, &ready_for_query(b'I'))
+                .expect("ready for query should be written");
+        });
+
+        match run(conn.execute_unchecked(&cx, "ALTER TABLE widgets ADD COLUMN extra integer")) {
+            Outcome::Ok(affected) => assert_eq!(affected, 0),
+            other => panic!("expected successful schema change, got {other:?}"),
+        }
+        responder
+            .join()
+            .expect("schema change responder should exit cleanly");
+
+        assert!(
+            conn.inner
+                .prepared_cache
+                .get_and_touch(cached_sql)
+                .is_none(),
+            "schema-changing command must clear cached prepared metadata"
+        );
+        assert_eq!(
+            conn.inner.deallocate_retry_queue,
+            VecDeque::from([cached_stmt.name]),
+            "stale prepared statement should be queued for best-effort DEALLOCATE"
+        );
+        assert_eq!(conn.inner.consecutive_deallocate_failures, 0);
+        assert!(!conn.inner.unhealthy);
+        assert!(!conn.inner.closed);
+    }
+
     /// br-asupersync-pqia0o: verify that real backend failures (as opposed
     /// to caller cancellation) still properly increment the failure counter
     /// and mark connection unhealthy after threshold.
@@ -10086,15 +10259,36 @@ mod tests {
 
         // CONFORMANCE CHECK 1: Format codes must be correctly interpreted
         assert_eq!(text_columns[0].format_code, 0, "text format code must be 0");
-        assert_eq!(binary_columns[0].format_code, 1, "binary format code must be 1");
+        assert_eq!(
+            binary_columns[0].format_code, 1,
+            "binary format code must be 1"
+        );
 
         // CONFORMANCE CHECK 2: All other column metadata must be identical
-        assert_eq!(text_columns[0].name, binary_columns[0].name, "column names must match");
-        assert_eq!(text_columns[0].type_oid, binary_columns[0].type_oid, "type OIDs must match");
-        assert_eq!(text_columns[0].table_oid, binary_columns[0].table_oid, "table OIDs must match");
-        assert_eq!(text_columns[0].column_id, binary_columns[0].column_id, "column IDs must match");
-        assert_eq!(text_columns[0].type_size, binary_columns[0].type_size, "type sizes must match");
-        assert_eq!(text_columns[0].type_modifier, binary_columns[0].type_modifier, "type modifiers must match");
+        assert_eq!(
+            text_columns[0].name, binary_columns[0].name,
+            "column names must match"
+        );
+        assert_eq!(
+            text_columns[0].type_oid, binary_columns[0].type_oid,
+            "type OIDs must match"
+        );
+        assert_eq!(
+            text_columns[0].table_oid, binary_columns[0].table_oid,
+            "table OIDs must match"
+        );
+        assert_eq!(
+            text_columns[0].column_id, binary_columns[0].column_id,
+            "column IDs must match"
+        );
+        assert_eq!(
+            text_columns[0].type_size, binary_columns[0].type_size,
+            "type sizes must match"
+        );
+        assert_eq!(
+            text_columns[0].type_modifier, binary_columns[0].type_modifier,
+            "type modifiers must match"
+        );
 
         // Create corresponding DataRow messages for each format
         // Text format: "42" as string
@@ -10125,27 +10319,52 @@ mod tests {
         // Both should parse to the same PgValue::Int4(42)
         match (&text_values[0], &binary_values[0]) {
             (PgValue::Int4(text_val), PgValue::Int4(binary_val)) => {
-                assert_eq!(text_val, binary_val,
-                    "text format value {text_val} must equal binary format value {binary_val}");
-                assert_eq!(*text_val, test_value,
-                    "text parsed value must equal expected {test_value}");
-                assert_eq!(*binary_val, test_value,
-                    "binary parsed value must equal expected {test_value}");
+                assert_eq!(
+                    text_val, binary_val,
+                    "text format value {text_val} must equal binary format value {binary_val}"
+                );
+                assert_eq!(
+                    *text_val, test_value,
+                    "text parsed value must equal expected {test_value}"
+                );
+                assert_eq!(
+                    *binary_val, test_value,
+                    "binary parsed value must equal expected {test_value}"
+                );
             }
-            _ => panic!("both values should be PgValue::Int4, got text={:?} binary={:?}",
-                text_values[0], binary_values[0]),
+            _ => panic!(
+                "both values should be PgValue::Int4, got text={:?} binary={:?}",
+                text_values[0], binary_values[0]
+            ),
         }
 
         // CONFORMANCE CHECK 4: Column indices must be consistent regardless of format
-        assert_eq!(text_indices, binary_indices, "column indices must be format-independent");
-        assert_eq!(text_indices.get(column_name), Some(&0), "column index must be 0");
+        assert_eq!(
+            text_indices, binary_indices,
+            "column indices must be format-independent"
+        );
+        assert_eq!(
+            text_indices.get(column_name),
+            Some(&0),
+            "column index must be 0"
+        );
 
         // CONFORMANCE VERIFICATION: According to PostgreSQL wire protocol specification,
         // the format code in RowDescription determines how subsequent DataRow values
         // are interpreted, but the logical result must be equivalent.
         println!("✓ PostgreSQL RowDescription field-format differential conformance verified");
-        println!("  - Text format (code=0): {:?} -> {:?}", "42", text_values[0]);
-        println!("  - Binary format (code=1): {:?} -> {:?}", test_value.to_be_bytes(), binary_values[0]);
-        println!("  - Both formats produced equivalent logical value: {}", test_value);
+        println!(
+            "  - Text format (code=0): {:?} -> {:?}",
+            "42", text_values[0]
+        );
+        println!(
+            "  - Binary format (code=1): {:?} -> {:?}",
+            test_value.to_be_bytes(),
+            binary_values[0]
+        );
+        println!(
+            "  - Both formats produced equivalent logical value: {}",
+            test_value
+        );
     }
 }
