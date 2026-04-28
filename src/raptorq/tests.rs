@@ -968,6 +968,7 @@ mod property_tests {
     use crate::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
     use crate::raptorq::systematic::SystematicEncoder;
     use crate::raptorq::test_log_schema::UnitLogEntry;
+    use crate::types::ObjectId;
     use crate::util::DetRng;
 
     /// Generate deterministic source data for testing.
@@ -1361,6 +1362,82 @@ mod property_tests {
                 decoded.source, source,
                 "{context} decoded payload must be invariant for ordering={ordering_name}"
             );
+        }
+    }
+
+    #[test]
+    fn symmetry_metamorphic_decode_with_proof_permutations_preserve_summary_and_outcome() {
+        let k = 12;
+        let symbol_size = 40;
+        let seed = 2030u64;
+        let replay_ref = "replay:rq-u-systematic-metamorphic-proof-permutation-v1";
+        let context = failure_context(
+            "RQ-U-METAMORPHIC-PROOF-PERMUTATION",
+            seed,
+            &format!("k={k},symbol_size={symbol_size},repair_overhead=10"),
+            replay_ref,
+        );
+
+        let (source, decoder, constraints, symbols) =
+            build_symbol_pool(k, symbol_size, seed, 10, &context);
+        let baseline = super::select_first_decodable_prefix(
+            &decoder,
+            &constraints,
+            &symbols,
+            decoder.params().l,
+            &context,
+        )
+        .unwrap_or_else(|err| panic!("{err}"));
+
+        let mut reversed = baseline.clone();
+        reversed.reverse();
+        let permutations = [
+            ("in_order", baseline.clone()),
+            ("reversed", reversed),
+            ("alternating_extremes", alternating_extremes(&baseline)),
+        ];
+
+        let object_id = ObjectId::new_for_test(8200);
+        let mut expected_received = None;
+        let mut expected_outcome = None;
+
+        for (ordering_name, ordering) in permutations {
+            let mut received = constraints.clone();
+            received.extend(ordering);
+            let decoded = decoder
+                .decode_with_proof(&received, object_id, 0)
+                .unwrap_or_else(|(err, _proof)| {
+                    panic!(
+                        "{context} decode_with_proof should succeed for ordering={ordering_name}; got {err:?}"
+                    )
+                });
+            assert_eq!(
+                decoded.result.source, source,
+                "{context} decoded payload must be invariant for ordering={ordering_name}"
+            );
+            decoded
+                .proof
+                .replay_and_verify(&received)
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "{context} replay verification should succeed for ordering={ordering_name}; got {err}"
+                    )
+                });
+
+            match &expected_received {
+                Some(expected_received) => assert_eq!(
+                    &decoded.proof.received, expected_received,
+                    "{context} received summary must be permutation-invariant for ordering={ordering_name}"
+                ),
+                None => expected_received = Some(decoded.proof.received.clone()),
+            }
+            match &expected_outcome {
+                Some(expected_outcome) => assert_eq!(
+                    &decoded.proof.outcome, expected_outcome,
+                    "{context} proof outcome must be permutation-invariant for ordering={ordering_name}"
+                ),
+                None => expected_outcome = Some(decoded.proof.outcome.clone()),
+            }
         }
     }
 
