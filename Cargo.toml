@@ -132,6 +132,7 @@ required-features = ["cli", "simd-intrinsics"]
 # Dependencies added here must preserve determinism in the lab runtime.
 thiserror = "2.0"
 crossbeam-queue = "0.3"
+faa_array_queue = "0.1.2"
 parking_lot = "0.12"
 slab = "0.4"
 smallvec = "1.15"

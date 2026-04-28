@@ -24,6 +24,7 @@ use asupersync::{
     types::{ObjectId, RegionId, Symbol, SymbolId, SymbolKind, Time},
 };
 use libfuzzer_sys::fuzz_target;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -64,6 +65,9 @@ enum TransportFuzzInput {
         has_default_route: bool,
         specific_routes: Vec<RouteConfig>,
     },
+
+    /// Hash-based HRW stability testing under repeated lookups and churn
+    HrwRouting(HrwRoutingScenario),
 
     /// Comprehensive edge case scenarios
     EdgeCase(EdgeCaseScenario),
@@ -117,7 +121,7 @@ impl From<DispatchStrategyWrapper> for DispatchStrategy {
     }
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Debug, Clone)]
 struct EndpointConfig {
     id: u64,
     address_suffix: u8, // 0-255 for "node-{suffix}:8080"
@@ -127,7 +131,7 @@ struct EndpointConfig {
     region: Option<u64>,    // Optional region ID
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Debug, Clone, Copy)]
 enum EndpointStateWrapper {
     Healthy,
     Degraded,
@@ -148,13 +152,38 @@ impl From<EndpointStateWrapper> for EndpointState {
     }
 }
 
-#[derive(Arbitrary, Debug)]
+#[derive(Arbitrary, Debug, Clone, Copy)]
 struct ObjectIdWrapper(u64, u64); // High and low parts
 
 impl From<ObjectIdWrapper> for ObjectId {
     fn from(wrapper: ObjectIdWrapper) -> Self {
         ObjectId::from_u128(((wrapper.0 as u128) << 64) | (wrapper.1 as u128))
     }
+}
+
+#[derive(Arbitrary, Debug)]
+struct HrwRoutingScenario {
+    hash_ring_salt: u64,
+    endpoints: Vec<EndpointConfig>,
+    keys: Vec<ObjectIdWrapper>,
+    selection_width: u8,
+    churn: Vec<HrwChurnOp>,
+}
+
+#[derive(Arbitrary, Debug, Clone)]
+enum HrwChurnOp {
+    Remove {
+        index: u8,
+    },
+    SetState {
+        index: u8,
+        state: EndpointStateWrapper,
+    },
+    SetWeight {
+        index: u8,
+        weight: u16,
+    },
+    Add(EndpointConfig),
 }
 
 #[derive(Arbitrary, Debug)]
@@ -234,6 +263,383 @@ fn fuzz_test_cx() -> Cx {
         TaskId::new_for_test(0, 0),
         Budget::INFINITE,
     )
+}
+
+fn endpoint_from_config(config: &EndpointConfig) -> Arc<Endpoint> {
+    let mut endpoint = Endpoint::new(
+        EndpointId::new(config.id),
+        format!("node-{}:8080", config.address_suffix),
+    )
+    .with_weight(config.weight.max(1) as u32)
+    .with_state(config.state.into());
+
+    if let Some(region_id) = config.region {
+        endpoint = endpoint.with_region(region_id_from_u64(region_id));
+    }
+
+    endpoint.active_connections.store(
+        config.active_connections as u32,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+
+    Arc::new(endpoint)
+}
+
+fn build_endpoints_from_configs(endpoint_configs: &[EndpointConfig]) -> Vec<Arc<Endpoint>> {
+    endpoint_configs
+        .iter()
+        .take(16)
+        .map(endpoint_from_config)
+        .collect()
+}
+
+fn next_hrw_seed(seed: &mut u64) -> u64 {
+    *seed = seed
+        .wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(1_442_695_040_888_963_407);
+    *seed
+}
+
+fn materialize_hrw_keys(hash_ring_salt: u64, keys: &[ObjectIdWrapper]) -> Vec<ObjectId> {
+    let mut out: Vec<ObjectId> = keys.iter().copied().take(96).map(Into::into).collect();
+    let target_len = out.len().max(48).min(96);
+    let mut seed = hash_ring_salt ^ 0xA5A5_A5A5_5A5A_5A5A;
+
+    while out.len() < target_len {
+        let hi = next_hrw_seed(&mut seed);
+        let lo = next_hrw_seed(&mut seed);
+        out.push(ObjectId::from_u128(((hi as u128) << 64) | (lo as u128)));
+    }
+
+    out
+}
+
+fn permute_endpoints(endpoints: &[Arc<Endpoint>], hash_ring_salt: u64) -> Vec<Arc<Endpoint>> {
+    let mut permuted = endpoints.to_vec();
+    if permuted.len() <= 1 {
+        return permuted;
+    }
+
+    let rotate = (hash_ring_salt as usize) % permuted.len();
+    permuted.rotate_left(rotate);
+    if hash_ring_salt & 1 == 1 {
+        permuted.reverse();
+    }
+
+    permuted
+}
+
+fn unique_healthy_ids(endpoints: &[Arc<Endpoint>]) -> Option<HashSet<EndpointId>> {
+    let mut ids = HashSet::new();
+    for endpoint in endpoints
+        .iter()
+        .filter(|endpoint| endpoint.state().can_receive())
+    {
+        if !ids.insert(endpoint.id) {
+            return None;
+        }
+    }
+    Some(ids)
+}
+
+fn single_hrw_mapping(
+    lb: &LoadBalancer,
+    endpoints: &[Arc<Endpoint>],
+    keys: &[ObjectId],
+) -> Vec<Option<EndpointId>> {
+    keys.iter()
+        .map(|key| lb.select(endpoints, Some(*key)).map(|endpoint| endpoint.id))
+        .collect()
+}
+
+fn assert_hrw_mapping_invariants(
+    lb: &LoadBalancer,
+    endpoints: &[Arc<Endpoint>],
+    keys: &[ObjectId],
+    requested_width: usize,
+) {
+    let healthy_count = endpoints
+        .iter()
+        .filter(|endpoint| endpoint.state().can_receive())
+        .count();
+    let unique_ids = unique_healthy_ids(endpoints);
+    let permuted = unique_ids
+        .as_ref()
+        .map(|_| permute_endpoints(endpoints, lb.hash_ring_salt()));
+
+    for key in keys {
+        let selected_once = lb.select(endpoints, Some(*key)).map(|endpoint| endpoint.id);
+        let selected_twice = lb.select(endpoints, Some(*key)).map(|endpoint| endpoint.id);
+        assert_eq!(
+            selected_once, selected_twice,
+            "hash-based single-select must be deterministic for identical inputs"
+        );
+
+        if healthy_count == 0 {
+            assert!(
+                selected_once.is_none(),
+                "hash-based select must return None when no endpoints can receive"
+            );
+            assert!(
+                lb.select_n(endpoints, requested_width.max(1), Some(*key))
+                    .is_empty(),
+                "hash-based select_n must return empty when no endpoints can receive"
+            );
+            continue;
+        }
+
+        let selected_id = selected_once.expect("healthy endpoints should produce a winner");
+        assert!(
+            endpoints
+                .iter()
+                .any(|endpoint| endpoint.id == selected_id && endpoint.state().can_receive()),
+            "hash-based winner must come from the healthy membership set"
+        );
+
+        let fanout_width = requested_width.clamp(1, healthy_count);
+        let selected_n_once: Vec<_> = lb
+            .select_n(endpoints, fanout_width, Some(*key))
+            .into_iter()
+            .map(|endpoint| endpoint.id)
+            .collect();
+        let selected_n_twice: Vec<_> = lb
+            .select_n(endpoints, fanout_width, Some(*key))
+            .into_iter()
+            .map(|endpoint| endpoint.id)
+            .collect();
+        assert_eq!(
+            selected_n_once, selected_n_twice,
+            "hash-based select_n must be deterministic for identical inputs"
+        );
+        assert_eq!(
+            selected_n_once.len(),
+            fanout_width,
+            "hash-based select_n should return the requested healthy fanout width"
+        );
+        if let Some(unique_ids) = unique_ids.as_ref() {
+            let unique_selected: HashSet<_> = selected_n_once.iter().copied().collect();
+            assert_eq!(
+                unique_selected.len(),
+                selected_n_once.len(),
+                "hash-based top-k selection must not contain duplicates"
+            );
+            assert!(
+                selected_n_once
+                    .iter()
+                    .all(|endpoint_id| unique_ids.contains(endpoint_id)),
+                "hash-based top-k selection must stay within the healthy membership set"
+            );
+        }
+
+        if let Some(permuted) = permuted.as_ref() {
+            let permuted_selected = lb.select(permuted, Some(*key)).map(|endpoint| endpoint.id);
+            assert_eq!(
+                selected_once, permuted_selected,
+                "hash-based single-select must be order-invariant over identical membership"
+            );
+
+            let permuted_selected_n: Vec<_> = lb
+                .select_n(permuted, fanout_width, Some(*key))
+                .into_iter()
+                .map(|endpoint| endpoint.id)
+                .collect();
+            assert_eq!(
+                selected_n_once, permuted_selected_n,
+                "hash-based top-k selection must be order-invariant over identical membership"
+            );
+        }
+    }
+}
+
+fn assert_hrw_load_balance(lb: &LoadBalancer, endpoints: &[Arc<Endpoint>], keys: &[ObjectId]) {
+    if unique_healthy_ids(endpoints).is_none() {
+        return;
+    }
+
+    let healthy: Vec<&Arc<Endpoint>> = endpoints
+        .iter()
+        .filter(|endpoint| endpoint.state().can_receive())
+        .collect();
+    if healthy.len() < 2 || keys.len() < 16 {
+        return;
+    }
+
+    let mut winner_counts: HashMap<EndpointId, usize> = HashMap::new();
+    for endpoint_id in single_hrw_mapping(lb, endpoints, keys)
+        .into_iter()
+        .flatten()
+    {
+        *winner_counts.entry(endpoint_id).or_insert(0) += 1;
+    }
+
+    let all_equal_weights = healthy
+        .iter()
+        .map(|endpoint| endpoint.weight)
+        .all(|weight| weight == healthy[0].weight);
+    if all_equal_weights {
+        let active_endpoints = winner_counts.values().filter(|&&count| count > 0).count();
+        assert!(
+            active_endpoints >= 2,
+            "equal-weight HRW routing should spread varied keys across multiple endpoints"
+        );
+        return;
+    }
+
+    let heaviest = healthy
+        .iter()
+        .max_by_key(|endpoint| (endpoint.weight, endpoint.id.0))
+        .copied()
+        .expect("healthy set is non-empty");
+    let lightest = healthy
+        .iter()
+        .min_by_key(|endpoint| (endpoint.weight, endpoint.id.0))
+        .copied()
+        .expect("healthy set is non-empty");
+    if heaviest.id == lightest.id || heaviest.weight < lightest.weight.saturating_mul(4) {
+        return;
+    }
+
+    let heavy_wins = winner_counts.get(&heaviest.id).copied().unwrap_or(0);
+    let light_wins = winner_counts.get(&lightest.id).copied().unwrap_or(0);
+    assert!(
+        heavy_wins + 4 >= light_wins,
+        "heavier HRW endpoint should not lose materially more keys than the lightest endpoint"
+    );
+}
+
+fn assert_hrw_removal_stability(
+    before_lb: &LoadBalancer,
+    before_endpoints: &[Arc<Endpoint>],
+    after_lb: &LoadBalancer,
+    after_endpoints: &[Arc<Endpoint>],
+    keys: &[ObjectId],
+) {
+    let before_healthy = before_endpoints
+        .iter()
+        .filter(|endpoint| endpoint.state().can_receive())
+        .map(|endpoint| endpoint.id)
+        .collect::<HashSet<_>>();
+    let after_healthy = after_endpoints
+        .iter()
+        .filter(|endpoint| endpoint.state().can_receive())
+        .map(|endpoint| endpoint.id)
+        .collect::<HashSet<_>>();
+    let removed = before_healthy
+        .difference(&after_healthy)
+        .copied()
+        .collect::<HashSet<_>>();
+    if removed.is_empty() {
+        return;
+    }
+
+    let survivors = before_healthy
+        .intersection(&after_healthy)
+        .copied()
+        .collect::<HashSet<_>>();
+    if survivors.is_empty() {
+        return;
+    }
+
+    let before_mapping = single_hrw_mapping(before_lb, before_endpoints, keys);
+    let after_mapping = single_hrw_mapping(after_lb, after_endpoints, keys);
+
+    let mut comparable = 0usize;
+    let mut remapped = 0usize;
+    for (before, after) in before_mapping.into_iter().zip(after_mapping) {
+        if let Some(before_id) = before {
+            if survivors.contains(&before_id) {
+                comparable += 1;
+                if after != Some(before_id) {
+                    remapped += 1;
+                }
+            }
+        }
+    }
+
+    if comparable == 0 {
+        return;
+    }
+
+    assert!(
+        remapped <= comparable / 4 + 2,
+        "removing or disabling one endpoint should preserve most unaffected HRW mappings"
+    );
+}
+
+fn apply_hrw_churn(configs: &mut Vec<EndpointConfig>, op: &HrwChurnOp) {
+    match op {
+        HrwChurnOp::Remove { index } => {
+            if !configs.is_empty() {
+                configs.remove(usize::from(*index) % configs.len());
+            }
+        }
+        HrwChurnOp::SetState { index, state } => {
+            let len = configs.len();
+            let slot = usize::from(*index) % len.max(1);
+            if let Some(config) = configs.get_mut(slot) {
+                config.state = *state;
+            }
+        }
+        HrwChurnOp::SetWeight { index, weight } => {
+            let len = configs.len();
+            let slot = usize::from(*index) % len.max(1);
+            if let Some(config) = configs.get_mut(slot) {
+                config.weight = (*weight).max(1);
+            }
+        }
+        HrwChurnOp::Add(config) => {
+            if configs.len() < 16 {
+                configs.push(config.clone());
+            }
+        }
+    }
+}
+
+fn fuzz_hrw_routing_stability(mut scenario: HrwRoutingScenario) {
+    scenario.endpoints.truncate(16);
+    if scenario.endpoints.is_empty() {
+        return;
+    }
+
+    let keys = materialize_hrw_keys(scenario.hash_ring_salt, &scenario.keys);
+    let requested_width = usize::from(scenario.selection_width).clamp(1, 8);
+
+    let baseline_endpoints = build_endpoints_from_configs(&scenario.endpoints);
+    let baseline_lb = LoadBalancer::with_seed(
+        asupersync::transport::router::LoadBalanceStrategy::HashBased,
+        scenario.hash_ring_salt,
+    );
+    assert_hrw_mapping_invariants(&baseline_lb, &baseline_endpoints, &keys, requested_width);
+    assert_hrw_load_balance(&baseline_lb, &baseline_endpoints, &keys);
+
+    for op in scenario.churn.iter().take(6) {
+        let before_configs = scenario.endpoints.clone();
+        let before_endpoints = build_endpoints_from_configs(&before_configs);
+        let before_lb = LoadBalancer::with_seed(
+            asupersync::transport::router::LoadBalanceStrategy::HashBased,
+            scenario.hash_ring_salt,
+        );
+
+        apply_hrw_churn(&mut scenario.endpoints, op);
+        if scenario.endpoints.is_empty() {
+            continue;
+        }
+
+        let after_endpoints = build_endpoints_from_configs(&scenario.endpoints);
+        let after_lb = LoadBalancer::with_seed(
+            asupersync::transport::router::LoadBalanceStrategy::HashBased,
+            scenario.hash_ring_salt,
+        );
+        assert_hrw_mapping_invariants(&after_lb, &after_endpoints, &keys, requested_width);
+        assert_hrw_load_balance(&after_lb, &after_endpoints, &keys);
+        assert_hrw_removal_stability(
+            &before_lb,
+            &before_endpoints,
+            &after_lb,
+            &after_endpoints,
+            &keys,
+        );
+    }
 }
 
 #[derive(Arbitrary, Debug)]
@@ -370,6 +776,10 @@ fn fuzz_transport_router(input: TransportFuzzInput) {
             specific_routes,
         } => {
             fuzz_fallback_routing(symbol_config, has_default_route, specific_routes);
+        }
+
+        TransportFuzzInput::HrwRouting(scenario) => {
+            fuzz_hrw_routing_stability(scenario);
         }
 
         TransportFuzzInput::EdgeCase(edge) => {
@@ -714,7 +1124,7 @@ fn fuzz_symbol_dispatcher(
     let object_id: ObjectId = symbol_config.object_id.into();
     let symbol_id = SymbolId::new(object_id, 0, symbol_config.esi);
     let symbol = Symbol::new(symbol_id, vec![42u8; 10], symbol_config.kind.into());
-    let auth_symbol = AuthenticatedSymbol::new_verified(symbol, AuthenticationTag::zero());
+    let auth_symbol = AuthenticatedSymbol::from_parts(symbol, AuthenticationTag::zero());
 
     // Create test context (we'll use a mock for fuzzing)
     let cx = fuzz_test_cx();
@@ -1426,6 +1836,51 @@ mod tests {
             reinsert_endpoint_count: 5,
             ttl_seconds: 2,
             expiration_slack_nanos: 7,
+        });
+    }
+
+    #[test]
+    fn test_hrw_routing_stability_smoke() {
+        fuzz_hrw_routing_stability(HrwRoutingScenario {
+            hash_ring_salt: 0x0057_AF1D,
+            endpoints: vec![
+                EndpointConfig {
+                    id: 1,
+                    address_suffix: 1,
+                    weight: 1,
+                    state: EndpointStateWrapper::Healthy,
+                    active_connections: 0,
+                    region: None,
+                },
+                EndpointConfig {
+                    id: 2,
+                    address_suffix: 2,
+                    weight: 4,
+                    state: EndpointStateWrapper::Healthy,
+                    active_connections: 0,
+                    region: None,
+                },
+                EndpointConfig {
+                    id: 3,
+                    address_suffix: 3,
+                    weight: 2,
+                    state: EndpointStateWrapper::Healthy,
+                    active_connections: 0,
+                    region: None,
+                },
+            ],
+            keys: vec![ObjectIdWrapper(1, 2), ObjectIdWrapper(3, 4)],
+            selection_width: 2,
+            churn: vec![
+                HrwChurnOp::SetWeight {
+                    index: 0,
+                    weight: 8,
+                },
+                HrwChurnOp::SetState {
+                    index: 2,
+                    state: EndpointStateWrapper::Unhealthy,
+                },
+            ],
         });
     }
 }

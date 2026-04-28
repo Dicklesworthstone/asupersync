@@ -308,6 +308,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "cancel_protocol_validator"
+path = "fuzz_targets/cancel_protocol_validator.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_websocket_frame_parsing"
 path = "fuzz_targets/websocket_frame_parsing.rs"
 test = false
@@ -2295,6 +2302,17 @@ bench = false
 [[bin]]
 name = "qpack_cross_component_integration"
 path = "fuzz_targets/qpack_cross_component_integration.rs"
+test = false
+doc = false
+bench = false
+
+# asupersync-7aa9fp: HRW (Highest Random Weight) routing stability fuzzer.
+# Tests src/transport/router.rs:581-607,828-843 HRW routing decisions with
+# random key sequences, varying weight assignments, node add/remove between calls,
+# and asserts routing stability invariants (same key → same node modulo weight changes).
+[[bin]]
+name = "hrw_routing_stability"
+path = "fuzz_targets/hrw_routing_stability.rs"
 test = false
 doc = false
 bench = false

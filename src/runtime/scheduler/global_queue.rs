@@ -4,12 +4,92 @@
 //! or are spawned from outside the runtime.
 
 use crate::types::TaskId;
-use crossbeam_queue::SegQueue;
+use crate::util::CachePadded;
+use faa_array_queue::FaaArrayQueue;
+use std::fmt;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Fetch-and-add FIFO queue with a best-effort count snapshot.
+///
+/// This wraps an unbounded FAA-based linked-array queue so the scheduler keeps
+/// FIFO semantics without taking the GPL/C-FFI path of `liblcrq-sys`.
+pub(crate) struct FaaFifoQueue<T: Send> {
+    inner: FaaArrayQueue<T>,
+    count: CachePadded<AtomicUsize>,
+}
+
+impl<T: Send> Default for FaaFifoQueue<T> {
+    fn default() -> Self {
+        Self {
+            inner: FaaArrayQueue::default(),
+            count: CachePadded::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+impl<T: Send> fmt::Debug for FaaFifoQueue<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FaaFifoQueue")
+            .field("count", &self.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T: Send> FaaFifoQueue<T> {
+    #[inline]
+    fn saturating_decrement(counter: &AtomicUsize) {
+        let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+            count.checked_sub(1)
+        });
+    }
+
+    #[inline]
+    pub(crate) fn push(&self, item: T) {
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.inner.enqueue(item);
+    }
+
+    #[inline]
+    pub(crate) fn push_uncounted(&self, item: T) {
+        self.inner.enqueue(item);
+    }
+
+    #[inline]
+    pub(crate) fn add_count(&self, count: usize) {
+        if count > 0 {
+            self.count.fetch_add(count, Ordering::Relaxed);
+        }
+    }
+
+    #[inline]
+    pub(crate) fn decrement_count(&self) {
+        Self::saturating_decrement(&self.count);
+    }
+
+    #[inline]
+    pub(crate) fn pop(&self) -> Option<T> {
+        let result = self.inner.dequeue();
+        if result.is_some() {
+            self.decrement_count();
+        }
+        result
+    }
+
+    #[inline]
+    pub(crate) fn len(&self) -> usize {
+        self.count.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
 
 /// A global task queue.
 #[derive(Debug, Default)]
 pub struct GlobalQueue {
-    inner: SegQueue<TaskId>,
+    inner: FaaFifoQueue<TaskId>,
 }
 
 impl GlobalQueue {
@@ -64,6 +144,7 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
     use std::collections::HashSet;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Barrier};
     use std::thread;
 
@@ -216,6 +297,101 @@ mod tests {
             assert!(seen.insert(t), "duplicate task found");
         }
         assert_eq!(seen.len(), producers * items_per_producer);
+    }
+
+    #[test]
+    fn test_global_queue_mpsc_preserves_per_producer_order() {
+        let queue = Arc::new(GlobalQueue::new());
+        let producers = 4usize;
+        let items_per_producer = 256usize;
+        let barrier = Arc::new(Barrier::new(producers));
+
+        let handles: Vec<_> = (0..producers)
+            .map(|producer| {
+                let q = Arc::clone(&queue);
+                let b = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    b.wait();
+                    for offset in 0..items_per_producer {
+                        q.push(task((producer * 10_000 + offset) as u32));
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().expect("producer should complete");
+        }
+
+        let drained = drain_all(&queue);
+        assert_eq!(drained.len(), producers * items_per_producer);
+
+        let mut next_expected = vec![0usize; producers];
+        for task_id in drained {
+            let raw = task_id.as_u64() as usize;
+            let producer = raw / 10_000;
+            let offset = raw % 10_000;
+            assert!(
+                producer < producers,
+                "task should decode to a known producer: {producer}"
+            );
+            assert_eq!(
+                offset, next_expected[producer],
+                "each producer's FIFO subsequence must stay ordered"
+            );
+            next_expected[producer] += 1;
+        }
+
+        assert!(
+            next_expected
+                .iter()
+                .all(|count| *count == items_per_producer),
+            "every producer subsequence should drain completely"
+        );
+    }
+
+    #[test]
+    fn test_global_queue_fifo_across_phased_producer_batches() {
+        let queue = Arc::new(GlobalQueue::new());
+        let producers = 4usize;
+        let batch_len = 32usize;
+        let start = Arc::new(Barrier::new(producers));
+        let phase = Arc::new(AtomicUsize::new(0));
+
+        let handles: Vec<_> = (0..producers)
+            .map(|producer| {
+                let q = Arc::clone(&queue);
+                let barrier = Arc::clone(&start);
+                let phase = Arc::clone(&phase);
+                thread::spawn(move || {
+                    barrier.wait();
+                    while phase.load(Ordering::Acquire) != producer {
+                        std::hint::spin_loop();
+                    }
+                    let base = producer * 1_000;
+                    for offset in 0..batch_len {
+                        q.push(task((base + offset) as u32));
+                    }
+                    phase.store(producer + 1, Ordering::Release);
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().expect("producer should complete");
+        }
+
+        let drained = drain_all(&queue);
+        let expected = (0..producers)
+            .flat_map(|producer| {
+                let base = producer * 1_000;
+                (0..batch_len).map(move |offset| task((base + offset) as u32))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            drained, expected,
+            "producer batches released in a known order must preserve cross-producer FIFO order"
+        );
     }
 
     #[test]

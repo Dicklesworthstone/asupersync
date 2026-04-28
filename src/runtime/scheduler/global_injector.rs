@@ -5,11 +5,12 @@
 
 use crate::types::{TaskId, Time};
 use crate::util::CachePadded;
-use crossbeam_queue::SegQueue;
 use parking_lot::Mutex;
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::BinaryHeap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+
+use super::global_queue::FaaFifoQueue;
 
 /// A scheduled task with its priority metadata.
 #[derive(Debug, Clone, Copy)]
@@ -75,13 +76,11 @@ impl PartialOrd for TimedTask {
 #[derive(Debug)]
 pub struct GlobalInjector {
     /// Cancel lane: tasks with pending cancellation (highest priority).
-    cancel_queue: SegQueue<PriorityTask>,
+    cancel_queue: FaaFifoQueue<PriorityTask>,
     /// Timed lane: tasks with deadlines (EDF ordering via min-heap).
     timed_queue: Mutex<TimedQueue>,
     /// Ready lane: general ready tasks.
-    ready_queue: SegQueue<PriorityTask>,
-    /// Approximate count of ready-lane tasks only.
-    ready_count: CachePadded<AtomicUsize>,
+    ready_queue: FaaFifoQueue<PriorityTask>,
     /// Approximate count of timed-lane tasks, allowing callers to skip
     /// acquiring the timed_queue mutex when the lane is empty.
     timed_count: CachePadded<AtomicUsize>,
@@ -109,10 +108,9 @@ struct TimedQueue {
 impl Default for GlobalInjector {
     fn default() -> Self {
         Self {
-            cancel_queue: SegQueue::new(),
+            cancel_queue: FaaFifoQueue::default(),
             timed_queue: Mutex::new(TimedQueue::default()),
-            ready_queue: SegQueue::new(),
-            ready_count: CachePadded::new(AtomicUsize::new(0)),
+            ready_queue: FaaFifoQueue::default(),
             timed_count: CachePadded::new(AtomicUsize::new(0)),
             cached_earliest_deadline: CachePadded::new(AtomicU64::new(u64::MAX)),
         }
@@ -132,12 +130,6 @@ impl GlobalInjector {
         let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
             count.checked_sub(1)
         });
-    }
-
-    /// Decrements the ready counter, saturating at zero.
-    #[inline]
-    fn decrement_ready_count(&self) {
-        Self::saturating_decrement(&self.ready_count);
     }
 
     /// Decrements the timed counter, saturating at zero.
@@ -192,7 +184,6 @@ impl GlobalInjector {
     /// ordering is applied by the local `PriorityScheduler` after stealing.
     #[inline]
     pub fn inject_ready(&self, task: TaskId, priority: u8) {
-        self.ready_count.fetch_add(1, Ordering::Relaxed);
         self.ready_queue.push(PriorityTask { task, priority });
     }
 
@@ -200,15 +191,14 @@ impl GlobalInjector {
     /// Must be paired with a subsequent call to `add_ready_count`.
     #[inline]
     pub(crate) fn inject_ready_uncounted(&self, task: TaskId, priority: u8) {
-        self.ready_queue.push(PriorityTask { task, priority });
+        self.ready_queue
+            .push_uncounted(PriorityTask { task, priority });
     }
 
     /// Bulk increments the atomic ready count.
     #[inline]
     pub(crate) fn add_ready_count(&self, count: usize) {
-        if count > 0 {
-            self.ready_count.fetch_add(count, Ordering::Relaxed);
-        }
+        self.ready_queue.add_count(count);
     }
 
     /// Pops a task from the cancel lane.
@@ -308,11 +298,7 @@ impl GlobalInjector {
     #[inline]
     #[must_use]
     pub fn pop_ready(&self) -> Option<PriorityTask> {
-        let result = self.ready_queue.pop();
-        if result.is_some() {
-            self.decrement_ready_count();
-        }
-        result
+        self.ready_queue.pop()
     }
 
     /// Returns true if all lanes are empty.
@@ -321,7 +307,7 @@ impl GlobalInjector {
     pub fn is_empty(&self) -> bool {
         self.cancel_queue.is_empty()
             && self.timed_count.load(Ordering::Relaxed) == 0
-            && self.ready_count.load(Ordering::Relaxed) == 0
+            && self.ready_queue.is_empty()
     }
 
     /// Returns true if there is work that can be executed immediately.
@@ -333,7 +319,7 @@ impl GlobalInjector {
     #[inline]
     #[must_use]
     pub fn has_runnable_work(&self, now: Time) -> bool {
-        if !self.cancel_queue.is_empty() || self.ready_count.load(Ordering::Relaxed) > 0 {
+        if !self.cancel_queue.is_empty() || !self.ready_queue.is_empty() {
             return true;
         }
         if self.timed_count.load(Ordering::Relaxed) == 0 {
@@ -350,9 +336,7 @@ impl GlobalInjector {
     #[inline]
     #[must_use]
     pub fn len(&self) -> usize {
-        self.cancel_queue.len()
-            + self.timed_count.load(Ordering::Relaxed)
-            + self.ready_count.load(Ordering::Relaxed)
+        self.cancel_queue.len() + self.timed_count.load(Ordering::Relaxed) + self.ready_queue.len()
     }
 
     /// Returns true if the cancel lane has pending work.
@@ -373,14 +357,14 @@ impl GlobalInjector {
     #[inline]
     #[must_use]
     pub fn has_ready_work(&self) -> bool {
-        self.ready_count.load(Ordering::Relaxed) > 0
+        !self.ready_queue.is_empty()
     }
 
     /// Returns the approximate number of tasks in the ready lane.
     #[inline]
     #[must_use]
     pub fn ready_count(&self) -> usize {
-        self.ready_count.load(Ordering::Relaxed)
+        self.ready_queue.len()
     }
 }
 
@@ -552,7 +536,7 @@ mod tests {
         let injector = GlobalInjector::new();
 
         // Simulate queue visibility preceding counter update due to interleaving.
-        injector.cancel_queue.push(PriorityTask {
+        injector.cancel_queue.push_uncounted(PriorityTask {
             task: task(10),
             priority: 1,
         });
@@ -560,15 +544,15 @@ mod tests {
         let popped_cancel = injector.pop_cancel().expect("cancel task should pop");
         assert_eq!(popped_cancel.task, task(10));
 
-        injector.ready_queue.push(PriorityTask {
+        injector.ready_queue.push_uncounted(PriorityTask {
             task: task(11),
             priority: 2,
         });
-        assert_eq!(injector.ready_count.load(Ordering::Relaxed), 0);
+        assert_eq!(injector.ready_queue.len(), 0);
 
         let popped_ready = injector.pop_ready().expect("ready task should pop");
         assert_eq!(popped_ready.task, task(11));
-        assert_eq!(injector.ready_count.load(Ordering::Relaxed), 0);
+        assert_eq!(injector.ready_queue.len(), 0);
     }
 
     #[test]
@@ -577,7 +561,7 @@ mod tests {
 
         // Simulate the inject_ready interleaving where the advisory counter is
         // visible before the queue push is visible cross-thread.
-        injector.ready_count.fetch_add(1, Ordering::Relaxed);
+        injector.ready_queue.add_count(1);
 
         assert!(
             !injector.is_empty(),
@@ -592,14 +576,14 @@ mod tests {
             "counter-visible ready work must report runnable work"
         );
 
-        injector.ready_queue.push(PriorityTask {
+        injector.ready_queue.push_uncounted(PriorityTask {
             task: task(14),
             priority: 9,
         });
 
         let popped_ready = injector.pop_ready().expect("ready task should pop");
         assert_eq!(popped_ready.task, task(14));
-        assert_eq!(injector.ready_count.load(Ordering::Relaxed), 0);
+        assert_eq!(injector.ready_queue.len(), 0);
         assert!(injector.is_empty(), "injector returns empty after pop");
     }
 
@@ -776,21 +760,21 @@ mod tests {
     fn concurrent_decrements_saturate_counters_at_zero() {
         for _ in 0..2_000 {
             let injector = Arc::new(GlobalInjector::new());
-            injector.ready_count.store(1, Ordering::Relaxed);
+            injector.ready_queue.add_count(1);
             let barrier = Arc::new(Barrier::new(3));
 
             let i1 = Arc::clone(&injector);
             let b1 = Arc::clone(&barrier);
             let h1 = thread::spawn(move || {
                 b1.wait();
-                i1.decrement_ready_count();
+                i1.ready_queue.decrement_count();
             });
 
             let i2 = Arc::clone(&injector);
             let b2 = Arc::clone(&barrier);
             let h2 = thread::spawn(move || {
                 b2.wait();
-                i2.decrement_ready_count();
+                i2.ready_queue.decrement_count();
             });
 
             barrier.wait();
@@ -798,7 +782,7 @@ mod tests {
             h2.join().expect("second decrement thread should complete");
 
             assert_eq!(
-                injector.ready_count.load(Ordering::Relaxed),
+                injector.ready_queue.len(),
                 0,
                 "ready counter must saturate at zero"
             );

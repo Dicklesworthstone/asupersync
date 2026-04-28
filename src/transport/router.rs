@@ -503,7 +503,7 @@ impl LoadBalancer {
                 for ep in endpoints {
                     if ep.state().can_receive() {
                         let count = ep.connection_count();
-                        if count < best_count {
+                        if best.is_none() || count < best_count {
                             best_count = count;
                             best = Some(ep);
                             if count == 0 {
@@ -639,7 +639,7 @@ impl LoadBalancer {
                     for ep in endpoints {
                         if ep.state().can_receive() {
                             let count = ep.connection_count();
-                            if count < best_count {
+                            if best.is_none() || count < best_count {
                                 best_count = count;
                                 best = Some(ep);
                                 if count == 0 {
@@ -2393,6 +2393,24 @@ mod tests {
 
         let selected = lb.select(&endpoints, None).unwrap();
         assert_eq!(selected.id, e2.id); // Least connections
+    }
+
+    #[test]
+    fn test_load_balancer_least_connections_selects_single_max_load_endpoint() {
+        let lb = LoadBalancer::new(LoadBalanceStrategy::LeastConnections);
+        let endpoint = Arc::new(test_endpoint(1));
+        endpoint
+            .active_connections
+            .store(u32::MAX, Ordering::Relaxed);
+
+        let selected = lb
+            .select(std::slice::from_ref(&endpoint), None)
+            .expect("single healthy endpoint must still be selectable at max load");
+        assert_eq!(selected.id, endpoint.id);
+
+        let selected_n = lb.select_n(std::slice::from_ref(&endpoint), 1, None);
+        assert_eq!(selected_n.len(), 1);
+        assert_eq!(selected_n[0].id, endpoint.id);
     }
 
     #[test]

@@ -18,6 +18,7 @@
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use asupersync::record::task::TaskRecord;
 use asupersync::runtime::RuntimeState;
@@ -29,6 +30,7 @@ use asupersync::types::{Budget, RegionId, TaskId, Time};
 use asupersync::util::Arena;
 use std::collections::{BinaryHeap, VecDeque};
 use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
 
 const BURST_TASKS: usize = 10_000;
@@ -207,6 +209,64 @@ fn bench_global_queue(c: &mut Criterion) {
             },
         );
     }
+
+    group.throughput(Throughput::Elements((8 * 2_048) as u64));
+    group.bench_function("contention_mpmc_8x8", |b: &mut criterion::Bencher| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let queue = Arc::new(GlobalQueue::new());
+                let producers = 8usize;
+                let consumers = 8usize;
+                let items_per_producer = 2_048usize;
+                let total_items = producers * items_per_producer;
+                let consumed = Arc::new(AtomicUsize::new(0));
+                let barrier = Arc::new(std::sync::Barrier::new(producers + consumers));
+                let start = std::time::Instant::now();
+
+                thread::scope(|scope| {
+                    for producer in 0..producers {
+                        let queue = Arc::clone(&queue);
+                        let barrier = Arc::clone(&barrier);
+                        scope.spawn(move || {
+                            barrier.wait();
+                            let base = producer * items_per_producer;
+                            for offset in 0..items_per_producer {
+                                queue.push(task((base + offset) as u32));
+                            }
+                        });
+                    }
+
+                    for _ in 0..consumers {
+                        let queue = Arc::clone(&queue);
+                        let barrier = Arc::clone(&barrier);
+                        let consumed = Arc::clone(&consumed);
+                        scope.spawn(move || {
+                            barrier.wait();
+                            loop {
+                                let already = consumed.load(Ordering::Acquire);
+                                if already >= total_items {
+                                    break;
+                                }
+                                if queue.pop().is_some() {
+                                    let previous = consumed.fetch_add(1, Ordering::AcqRel);
+                                    if previous + 1 >= total_items {
+                                        break;
+                                    }
+                                } else {
+                                    std::hint::spin_loop();
+                                }
+                            }
+                        });
+                    }
+                });
+
+                total += start.elapsed();
+                black_box(consumed.load(Ordering::Relaxed));
+            }
+            total
+        })
+    });
 
     group.finish();
 }
