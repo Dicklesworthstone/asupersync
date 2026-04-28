@@ -167,8 +167,8 @@ visibility = { version = "0.1", optional = true }
 # Tempfile helper for test-internals and test logging utilities.
 tempfile = "3.25"
 # TLS support via rustls
-rustls = { version = "0.23", default-features = false, features = ["std", "tls12"], optional = true }
-rustls-pki-types = { version = "1.14", optional = true }
+rustls = { version = "0.23.39", default-features = false, features = ["std", "tls12"], optional = true }
+rustls-pki-types = { version = "1.14.1", optional = true }
 # Optional native root certificates
 rustls-native-certs = { version = "0.8", optional = true }
 # Optional webpki root certificates
@@ -233,7 +233,7 @@ io-uring = { version = "0.7", optional = true }
 # `asupersync-signal-poll-win` with sub-ms latency on signal delivery
 # and proper kernel-event-driven wakeup on runtime drop.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = [
+windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
 ] }
