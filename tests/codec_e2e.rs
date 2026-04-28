@@ -110,21 +110,20 @@ fn e2e_codec_003_lines_max_length() {
 
     let mut codec = LinesCodec::new_with_max_length(10);
 
-    test_section!("short line ok");
-    let mut buf = BytesMut::from("short\n");
-    let short = codec
-        .decode(&mut buf)
-        .expect("decode short")
-        .expect("short");
-    assert_with_log!(short == "short", "short line ok", "short", short);
-
-    test_section!("exact limit ok");
-    let mut buf = BytesMut::from("exactly10!\n");
-    let exact = codec
-        .decode(&mut buf)
-        .expect("decode exact")
-        .expect("exact");
-    assert_with_log!(exact == "exactly10!", "exact limit ok", "exactly10!", exact);
+    for (section, input, decode_label, expected) in [
+        ("short line ok", "short\n", "decode short", "short"),
+        (
+            "exact limit ok",
+            "exactly10!\n",
+            "decode exact",
+            "exactly10!",
+        ),
+    ] {
+        test_section!(section);
+        let mut buf = BytesMut::from(input);
+        let actual = codec.decode(&mut buf).expect(decode_label).expect(expected);
+        assert_with_log!(actual == expected, section, expected, actual);
+    }
 
     test_section!("over limit rejected");
     let mut codec2 = LinesCodec::new_with_max_length(10);
