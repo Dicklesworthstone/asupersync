@@ -1,20 +1,18 @@
-//! Regression test for slow multipart upload attack mitigation.
+//! Regression tests for multipart parse-time limits.
 //!
 //! Bead: br-asupersync-iosl6f
 //!
-//! This test simulates the slow-loris style multipart upload attack where an
-//! attacker sends multipart boundaries and headers quickly, then transmits
-//! part bodies at extremely slow rates to hold server resources.
-//!
-//! The fix implements per-request timeout and idle timeout enforcement during
-//! multipart parsing to prevent resource exhaustion attacks.
+//! These tests exercise request and idle timeout checks in the synchronous
+//! multipart parser. Slow upload protection must still be enforced by the
+//! streaming request-body layer before a complete `Request` reaches this
+//! extractor.
 
 #![cfg(test)]
 
 use asupersync::bytes::Bytes;
+use asupersync::web::extract::FromRequest;
 use asupersync::web::extract::Request;
 use asupersync::web::multipart::{Multipart, MultipartLimits};
-use asupersync::web::extract::FromRequest;
 use asupersync::web::response::StatusCode;
 
 /// Create a large multipart request that would normally parse successfully
@@ -113,35 +111,24 @@ fn multipart_default_timeouts_allow_normal_requests() {
     assert_eq!(multipart.len(), 100);
 }
 
-/// Test that demonstrates the attack scenario:
-/// A malicious multipart request that would consume server resources
-/// but is blocked by timeout enforcement.
+/// The parser-level budget should not reject a reasonable complete request.
+/// Slow upload attacks must be rejected before body buffering.
 #[test]
-fn slow_multipart_attack_mitigation() {
-    // This test simulates what would happen with a slow multipart upload:
-    // 1. Valid Content-Type and boundary
-    // 2. Large multipart structure that would take time to process
-    // 3. Aggressive timeout limits that mitigate the attack
-
+fn parser_timeout_limits_allow_reasonable_complete_request() {
     let mut req = create_large_multipart_request();
 
-    // Simulate production-like timeout settings that would protect
-    // against slow multipart attacks while allowing legitimate uploads
+    // Production-like parser settings should allow legitimate uploads after
+    // the request-body layer has already accepted and buffered the body.
     let limits = MultipartLimits::new()
-        .request_timeout_secs(30) // 30 seconds max for entire request
-        .idle_timeout_secs(5)     // 5 seconds max idle between progress
+        .request_timeout_secs(30) // 30 seconds max for parser work
+        .idle_timeout_secs(5) // 5 seconds max idle between parser steps
         .max_total_size(16 * 1024 * 1024) // 16MB max
-        .max_parts(1024)          // 1024 parts max
+        .max_parts(1024) // 1024 parts max
         .max_part_headers(8 * 1024) // 8KB headers per part
         .max_part_body_size(8 * 1024 * 1024); // 8MB per part
 
     req.extensions.insert_typed(limits);
 
-    // This should succeed because the test request is reasonable,
-    // but a real slow-loris attack would trigger the timeouts
     let result = Multipart::from_request(req);
     assert!(result.is_ok());
-
-    // The test should succeed because a real slow-loris attack would
-    // trigger the timeouts during parsing, but our test multipart is reasonable
 }

@@ -406,27 +406,27 @@ fn check_timeout(
     last_progress: Time,
     limits: &MultipartLimits,
 ) -> Result<(), ExtractionError> {
-    let now = wall_now();
-    let total_elapsed = now.duration_since(parse_start) / 1_000_000_000; // Convert to seconds
-    let idle_elapsed = now.duration_since(last_progress) / 1_000_000_000;
+    const NANOS_PER_SECOND: u64 = 1_000_000_000;
 
-    if total_elapsed > limits.request_timeout_secs {
+    let now = wall_now();
+    let total_elapsed = now.duration_since(parse_start);
+    let idle_elapsed = now.duration_since(last_progress);
+    let request_timeout = limits.request_timeout_secs.saturating_mul(NANOS_PER_SECOND);
+    let idle_timeout = limits.idle_timeout_secs.saturating_mul(NANOS_PER_SECOND);
+
+    if request_timeout == 0 || total_elapsed > request_timeout {
         return Err(ExtractionError::new(
             StatusCode::REQUEST_TIMEOUT,
             format!(
-                "multipart parsing timed out after {total_elapsed}s (max {}s)",
-                limits.request_timeout_secs
+                "multipart parsing timed out after {total_elapsed}ns (max {request_timeout}ns)"
             ),
         ));
     }
 
-    if idle_elapsed > limits.idle_timeout_secs {
+    if idle_timeout == 0 || idle_elapsed > idle_timeout {
         return Err(ExtractionError::new(
             StatusCode::REQUEST_TIMEOUT,
-            format!(
-                "multipart parsing idle for {idle_elapsed}s (max {}s)",
-                limits.idle_timeout_secs
-            ),
+            format!("multipart parsing idle for {idle_elapsed}ns (max {idle_timeout}ns)"),
         ));
     }
 
@@ -956,7 +956,8 @@ mod tests {
                 b"alice",
             )],
         );
-        let fields = parse_multipart(&body, "BOUNDARY", &MultipartLimits::default(), wall_now()).unwrap();
+        let fields =
+            parse_multipart(&body, "BOUNDARY", &MultipartLimits::default(), wall_now()).unwrap();
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].name(), "username");
         assert_eq!(fields[0].text().unwrap(), "alice");
@@ -977,7 +978,8 @@ mod tests {
             .position(|w| w == b"alice")
             .unwrap();
 
-        let fields = parse_multipart(&body, "BOUNDARY", &MultipartLimits::default(), wall_now()).unwrap();
+        let fields =
+            parse_multipart(&body, "BOUNDARY", &MultipartLimits::default(), wall_now()).unwrap();
 
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].body().as_ref(), b"alice");
@@ -1027,7 +1029,8 @@ mod tests {
             )],
         );
 
-        let fields = parse_multipart(&body, "BOUNDARY", &MultipartLimits::default(), wall_now()).unwrap();
+        let fields =
+            parse_multipart(&body, "BOUNDARY", &MultipartLimits::default(), wall_now()).unwrap();
 
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].name(), "payload");
@@ -1078,7 +1081,8 @@ mod tests {
                 &binary,
             )],
         );
-        let fields = parse_multipart(&body, "BIN", &MultipartLimits::default(), wall_now()).unwrap();
+        let fields =
+            parse_multipart(&body, "BIN", &MultipartLimits::default(), wall_now()).unwrap();
         assert_eq!(fields[0].body().as_ref(), &binary[..]);
         assert!(fields[0].text().is_err()); // Not valid UTF-8.
     }
@@ -1337,7 +1341,8 @@ mod tests {
         body.extend_from_slice(b"val");
         body.extend_from_slice(b"\r\n--BOUND--\r\n");
         let body = Bytes::from(body);
-        let fields = parse_multipart(&body, "BOUND", &MultipartLimits::default(), wall_now()).unwrap();
+        let fields =
+            parse_multipart(&body, "BOUND", &MultipartLimits::default(), wall_now()).unwrap();
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].text().unwrap(), "val");
     }
