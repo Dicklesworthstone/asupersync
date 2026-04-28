@@ -712,6 +712,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_hpack_dynamic_table_eviction_edge_cases"
+path = "fuzz_targets/hpack_dynamic_table_eviction_edge_cases.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_websocket_deflate"
 path = "fuzz_targets/websocket_deflate.rs"
 test = false
@@ -2601,6 +2608,18 @@ bench = false
 [[bin]]
 name = "cors_preflight_negotiation"
 path = "fuzz_targets/cors_preflight_negotiation.rs"
+test = false
+doc = false
+bench = false
+
+# br-asupersync-0b13b0: Layout-aware distributed snapshot boundary harness
+# Tests src/distributed/snapshot.rs deserialization boundaries with structure-aware
+# input generation for state recovery edge cases, partial snapshots, and corruption
+# detection. Exercises binary format parsing, boundary condition handling, OOM
+# resistance, optional field validation, and invariant checking across all parsing paths.
+[[bin]]
+name = "distributed_snapshot_boundary"
+path = "fuzz_targets/distributed_snapshot_boundary.rs"
 test = false
 doc = false
 bench = false
