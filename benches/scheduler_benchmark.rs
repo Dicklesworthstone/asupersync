@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use asupersync::record::task::TaskRecord;
 use asupersync::runtime::RuntimeState;
+use asupersync::runtime::scheduler::local_queue::Stealer;
 use asupersync::runtime::scheduler::{
     GlobalQueue, IntrusiveRing, IntrusiveStack, LocalQueue, Parker, QUEUE_TAG_READY, Scheduler,
 };
@@ -79,6 +80,29 @@ fn setup_runtime_state(max_task_id: u32) -> Arc<ContendedMutex<RuntimeState>> {
 
 fn local_queue(max_task_id: u32) -> LocalQueue {
     LocalQueue::new(setup_runtime_state(max_task_id))
+}
+
+fn skipped_local_steal_case(victim_size: u32, local_prefix: u32) -> (LocalQueue, Stealer) {
+    let max_id = victim_size.saturating_sub(1);
+    let state = LocalQueue::test_state(max_id);
+    {
+        let mut guard = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for id in 0..local_prefix.min(victim_size) {
+            guard
+                .task_mut(task(id))
+                .expect("task record missing")
+                .mark_local();
+        }
+    }
+
+    let victim = LocalQueue::new(Arc::clone(&state));
+    for id in 0..victim_size {
+        victim.push(task(id));
+    }
+    let stealer = victim.stealer();
+    (victim, stealer)
 }
 
 // =============================================================================
@@ -579,6 +603,24 @@ fn bench_work_stealing(c: &mut Criterion) {
             BatchSize::SmallInput,
         )
     });
+
+    group.bench_function(
+        "steal_single_skipped_local_frontier_256",
+        |b: &mut criterion::Bencher| {
+            b.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    let (victim, stealer) = skipped_local_steal_case(256, 7);
+                    let start = std::time::Instant::now();
+                    let result = stealer.steal();
+                    total += start.elapsed();
+                    black_box(result);
+                    black_box(victim);
+                }
+                total
+            });
+        },
+    );
 
     group.finish();
 }

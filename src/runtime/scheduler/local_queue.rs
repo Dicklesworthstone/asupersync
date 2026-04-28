@@ -341,10 +341,11 @@ impl Stealer {
         }
 
         let removed = scanned_len - kept_prefix_len;
-        for idx in scanned_len..queue.len() {
-            queue[idx - removed] = queue[idx];
-        }
-        queue.truncate(queue.len() - removed);
+        let len = queue.len();
+        queue
+            .as_mut_slice()
+            .copy_within(scanned_len..len, kept_prefix_len);
+        queue.truncate(len - removed);
     }
 
     /// Returns the exact length of the queue.
