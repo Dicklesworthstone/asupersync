@@ -1462,7 +1462,7 @@ and known limitations.
 | DPOR schedule exploration | ✅ Implemented |
 | Distributed runtime (remote tasks, sagas, leases, recovery) | Protocol/state-machine, lease, idempotency, and saga surfaces implemented; transport-backed remote lifecycle still in progress |
 | RaptorQ fountain coding for snapshot distribution | ✅ Implemented |
-| Formal methods (Lean coverage artifacts + TLA+ export) | ✅ Implemented |
+| Formal methods (TLA+ export + Lean coverage planning artifacts) | ⚠️ Partial implementation (coverage artifacts exist; Lean mechanization remains scaffold/in progress) |
 | Browser Edition (WASM, JS/TS consumers) | ✅ Implemented for browser main-thread and dedicated-worker consumers (single-threaded, event-loop-driven) |
 | Service worker / shared worker direct runtime | Deferred; not yet shipped |
 | Rust-to-WASM compilation path | Preview public lane exists via `RuntimeBuilder::browser()`, but current Rust support is still narrower than the shipped JS/TS packages and remains anchored by fixture/evidence validation |
@@ -1493,7 +1493,7 @@ and known limitations.
 | **Phase 2** | I/O integration (Linux epoll, optional io_uring, TCP, HTTP/1.1-2, TLS, HTTP/3 static-only; BSD/Windows reactors currently expose narrower interest support) | ✅ Complete |
 | **Phase 3** | Actors + supervision (GenServer, links, monitors) | ✅ Complete |
 | **Phase 4** | Distributed structured concurrency | ✅ Complete |
-| **Phase 5** | DPOR + TLA+ tooling | ✅ Complete |
+| **Phase 5** | DPOR + formal tooling | ⚠️ Partial (DPOR landed; TLA+ export and Lean coverage artifacts exist, but mechanization is still in progress) |
 | **Phase 6** | Hardening, policy gates, and adapter surface expansion | ✅ Continuous (see [Policy Gates](#phase-6-policy-gates)) |
 
 ---
