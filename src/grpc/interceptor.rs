@@ -680,14 +680,45 @@ pub fn metadata_propagator(
 ///
 /// This limiter caps how many requests may be active at the same time. A slot
 /// is acquired during request interception and released once the response path
-/// runs. Without that release step, the counter would monotonically increase
-/// and permanently exhaust after enough successful calls.
+/// or error path runs. Without that release step, the counter would
+/// monotonically increase and permanently exhaust after enough failing or
+/// successful calls.
 #[derive(Debug)]
 pub struct RateLimitInterceptor {
     /// Maximum concurrent requests allowed.
     max_requests: u32,
     /// Current in-flight request count.
-    current: std::sync::atomic::AtomicU32,
+    current: std::sync::Arc<std::sync::atomic::AtomicU32>,
+}
+
+#[derive(Debug)]
+struct RateLimitLease {
+    current: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    released: std::sync::atomic::AtomicBool,
+}
+
+impl RateLimitLease {
+    fn new(current: std::sync::Arc<std::sync::atomic::AtomicU32>) -> Self {
+        Self {
+            current,
+            released: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn release(&self) {
+        if self
+            .released
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return;
+        }
+
+        let _ = self.current.fetch_update(
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Relaxed,
+            |current| current.checked_sub(1),
+        );
+    }
 }
 
 impl RateLimitInterceptor {
@@ -696,7 +727,7 @@ impl RateLimitInterceptor {
     pub fn new(max_requests: u32) -> Self {
         Self {
             max_requests,
-            current: std::sync::atomic::AtomicU32::new(0),
+            current: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 
@@ -718,12 +749,10 @@ impl RateLimitInterceptor {
         }
     }
 
-    fn release_slot(&self) {
-        let _ = self.current.fetch_update(
-            std::sync::atomic::Ordering::AcqRel,
-            std::sync::atomic::Ordering::Relaxed,
-            |current| current.checked_sub(1),
-        );
+    fn release_slot_from_request(&self, request: &Request<Bytes>) {
+        if let Some(lease) = request.extensions().get_typed::<RateLimitLease>() {
+            lease.release();
+        }
     }
 
     /// Reset the request counter.
@@ -739,8 +768,11 @@ impl RateLimitInterceptor {
 }
 
 impl Interceptor for RateLimitInterceptor {
-    fn intercept_request(&self, _request: &mut Request<Bytes>) -> Result<(), Status> {
+    fn intercept_request(&self, request: &mut Request<Bytes>) -> Result<(), Status> {
         if self.try_acquire_slot() {
+            request
+                .extensions_mut()
+                .insert_typed(RateLimitLease::new(std::sync::Arc::clone(&self.current)));
             Ok(())
         } else {
             Err(Status::resource_exhausted("rate limit exceeded"))
@@ -748,16 +780,24 @@ impl Interceptor for RateLimitInterceptor {
     }
 
     fn intercept_response(&self, _response: &mut Response<Bytes>) -> Result<(), Status> {
-        self.release_slot();
         Ok(())
     }
 
     fn intercept_response_with_request(
         &self,
-        _request: &Request<Bytes>,
+        request: &Request<Bytes>,
         _response: &mut Response<Bytes>,
     ) -> Result<(), Status> {
-        self.release_slot();
+        self.release_slot_from_request(request);
+        Ok(())
+    }
+
+    fn intercept_error_with_request(
+        &self,
+        request: &Request<Bytes>,
+        _status: &mut Status,
+    ) -> Result<(), Status> {
+        self.release_slot_from_request(request);
         Ok(())
     }
 }

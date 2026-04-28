@@ -671,21 +671,25 @@ impl Server {
     /// 1. Run every interceptor's `intercept_request` in registration
     ///    order. The first error short-circuits the chain — neither
     ///    the remaining request-side interceptors nor the user
-    ///    handler run, and `intercept_response` is NOT invoked
-    ///    (mirrors the canonical middleware contract: a request
-    ///    rejected before reaching the handler has no response to
-    ///    transform).
+    ///    handler run. Request-aware `intercept_error_with_request`
+    ///    hooks then unwind in REVERSE order across the interceptors
+    ///    that already saw the request so they can inspect
+    ///    `AuthContext` and release request-scoped resources before
+    ///    the error returns.
     /// 2. Invoke the user handler with the (possibly mutated)
     ///    request.
     /// 3. If the handler succeeds, run every interceptor's
     ///    `intercept_response_with_request` in REVERSE order so
     ///    later layers see the response before earlier ones —
     ///    standard onion semantics. The first response-side error
-    ///    aborts further unwinding and surfaces as the call's
-    ///    final status.
+    ///    aborts further response unwinding, then the
+    ///    `intercept_error_with_request` hooks run in REVERSE order
+    ///    before the final status is returned.
     /// 4. If the handler errors, the response interceptors do NOT
-    ///    run — there is no response to transform; the handler
-    ///    error becomes the call's final status.
+    ///    run — there is no response to transform. Instead the
+    ///    `intercept_error_with_request` hooks run in REVERSE order
+    ///    so error-side interceptors still receive the originating
+    ///    request context.
     ///
     /// # Errors
     ///
@@ -717,8 +721,17 @@ impl Server {
         // ── Phase 1: request-side chain (registration order). ────────
         // The first error short-circuits without invoking the
         // handler or the response-side chain.
-        for interceptor in &self.interceptors {
-            interceptor.intercept_request(&mut request)?;
+        for (index, interceptor) in self.interceptors.iter().enumerate() {
+            if let Err(mut status) = interceptor.intercept_request(&mut request) {
+                for cleanup in self.interceptors[..=index].iter().rev() {
+                    if let Err(replacement) =
+                        cleanup.intercept_error_with_request(&request, &mut status)
+                    {
+                        status = replacement;
+                    }
+                }
+                return Err(status);
+            }
         }
 
         // ── Phase 2: invoke the user handler. ────────────────────────
@@ -739,9 +752,32 @@ impl Server {
         // On handler error, the response-side chain is NOT invoked
         // (no response object to transform). The handler error
         // becomes the call's final status.
-        let mut response = response_result?;
+        let mut response = match response_result {
+            Ok(response) => response,
+            Err(mut status) => {
+                for interceptor in self.interceptors.iter().rev() {
+                    if let Err(replacement) =
+                        interceptor.intercept_error_with_request(&request_snapshot, &mut status)
+                    {
+                        status = replacement;
+                    }
+                }
+                return Err(status);
+            }
+        };
         for interceptor in self.interceptors.iter().rev() {
-            interceptor.intercept_response_with_request(&request_snapshot, &mut response)?;
+            if let Err(mut status) =
+                interceptor.intercept_response_with_request(&request_snapshot, &mut response)
+            {
+                for cleanup in self.interceptors.iter().rev() {
+                    if let Err(replacement) =
+                        cleanup.intercept_error_with_request(&request_snapshot, &mut status)
+                    {
+                        status = replacement;
+                    }
+                }
+                return Err(status);
+            }
         }
         Ok(response)
     }
@@ -1311,6 +1347,26 @@ pub trait Interceptor: Send + Sync {
     ) -> Result<(), Status> {
         let _ = request;
         self.intercept_response(response)
+    }
+
+    /// Observe or rewrite an error status when the originating request
+    /// is available.
+    ///
+    /// This runs on request-rejection, handler-error, and response-hook
+    /// error paths after the request-side chain has already populated any
+    /// typed extensions such as `AuthContext`. Interceptors that need to
+    /// release request-scoped resources or inspect auth context on failures
+    /// override this hook.
+    ///
+    /// Returning `Err(new_status)` replaces the current status and
+    /// continues unwinding through the remaining interceptors.
+    fn intercept_error_with_request(
+        &self,
+        request: &Request<Bytes>,
+        status: &mut Status,
+    ) -> Result<(), Status> {
+        let _ = (request, status);
+        Ok(())
     }
 }
 
@@ -2551,6 +2607,59 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct AuthContextErrorEchoInterceptor {
+        seen_principal: Arc<parking_lot::Mutex<Option<String>>>,
+    }
+
+    impl Interceptor for AuthContextErrorEchoInterceptor {
+        fn intercept_request(&self, request: &mut Request<Bytes>) -> Result<(), Status> {
+            request.extensions_mut().insert_typed(
+                crate::grpc::interceptor::AuthContext::with_principal("svc-a")
+                    .with_scopes(["read:rpc"]),
+            );
+            Ok(())
+        }
+
+        fn intercept_response(&self, _response: &mut Response<Bytes>) -> Result<(), Status> {
+            Ok(())
+        }
+
+        fn intercept_error_with_request(
+            &self,
+            request: &Request<Bytes>,
+            _status: &mut Status,
+        ) -> Result<(), Status> {
+            let seen = request
+                .extensions()
+                .get_typed::<crate::grpc::interceptor::AuthContext>()
+                .map(|auth| auth.principal.clone());
+            *self.seen_principal.lock() = seen;
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct ResponseErrorInterceptor;
+
+    impl Interceptor for ResponseErrorInterceptor {
+        fn intercept_request(&self, _request: &mut Request<Bytes>) -> Result<(), Status> {
+            Ok(())
+        }
+
+        fn intercept_response(&self, _response: &mut Response<Bytes>) -> Result<(), Status> {
+            Ok(())
+        }
+
+        fn intercept_response_with_request(
+            &self,
+            _request: &Request<Bytes>,
+            _response: &mut Response<Bytes>,
+        ) -> Result<(), Status> {
+            Err(Status::internal("response interceptor exploded"))
+        }
+    }
+
     fn block_on<F: Future>(fut: F) -> F::Output {
         use std::task::{Context, Waker};
         let waker = Waker::noop();
@@ -2685,6 +2794,87 @@ mod tests {
             actual,
             vec!["req:A".to_string()],
             "response-side chain must NOT fire on handler error; got {actual:?}"
+        );
+    }
+
+    #[test]
+    fn dispatch_unary_preserves_auth_context_for_error_interceptors() {
+        init_test("dispatch_unary_preserves_auth_context_for_error_interceptors");
+
+        let seen_principal = Arc::new(parking_lot::Mutex::new(None));
+        let server = Server::builder()
+            .add_service(TestService)
+            .interceptor(AuthContextErrorEchoInterceptor {
+                seen_principal: Arc::clone(&seen_principal),
+            })
+            .build();
+
+        let request = Request::with_metadata(Bytes::new(), Metadata::new());
+        let result = block_on(server.dispatch_unary(request, |_req| async move {
+            Err::<Response<Bytes>, _>(Status::permission_denied("denied by handler"))
+        }));
+
+        assert!(result.is_err(), "handler error must surface");
+        let seen = seen_principal.lock().clone();
+        assert_eq!(
+            seen.as_deref(),
+            Some("svc-a"),
+            "error-side interceptors must still observe request AuthContext"
+        );
+    }
+
+    #[test]
+    fn dispatch_unary_releases_rate_limit_slot_on_handler_error() {
+        init_test("dispatch_unary_releases_rate_limit_slot_on_handler_error");
+
+        let server = Server::builder()
+            .add_service(TestService)
+            .interceptor(crate::grpc::interceptor::rate_limiter(1))
+            .build();
+
+        let first = Request::with_metadata(Bytes::new(), Metadata::new());
+        let first_result = block_on(server.dispatch_unary(first, |_req| async move {
+            Err::<Response<Bytes>, _>(Status::internal("handler exploded"))
+        }));
+        assert!(
+            matches!(first_result, Err(ref status) if status.code() == super::super::Code::Internal),
+            "first call must surface the handler error, not resource exhaustion"
+        );
+
+        let second = Request::with_metadata(Bytes::from_static(b"ok"), Metadata::new());
+        let second_result = block_on(server.dispatch_unary(second, |req| async move {
+            Ok::<Response<Bytes>, Status>(Response::new(req.into_inner()))
+        }));
+        let response = second_result.expect("slot must be released after handler error");
+        assert_eq!(response.get_ref().as_ref(), b"ok");
+    }
+
+    #[test]
+    fn dispatch_unary_releases_rate_limit_slot_on_response_hook_error() {
+        init_test("dispatch_unary_releases_rate_limit_slot_on_response_hook_error");
+
+        let server = Server::builder()
+            .add_service(TestService)
+            .interceptor(crate::grpc::interceptor::rate_limiter(1))
+            .interceptor(ResponseErrorInterceptor)
+            .build();
+
+        let first = Request::with_metadata(Bytes::new(), Metadata::new());
+        let first_result = block_on(server.dispatch_unary(first, |_req| async move {
+            Ok::<Response<Bytes>, Status>(Response::new(Bytes::from_static(b"ignored")))
+        }));
+        assert!(
+            matches!(first_result, Err(ref status) if status.code() == super::super::Code::Internal),
+            "first call must surface the response-hook error"
+        );
+
+        let second = Request::with_metadata(Bytes::new(), Metadata::new());
+        let second_result = block_on(server.dispatch_unary(second, |_req| async move {
+            Ok::<Response<Bytes>, Status>(Response::new(Bytes::from_static(b"ignored")))
+        }));
+        assert!(
+            matches!(second_result, Err(ref status) if status.code() == super::super::Code::Internal),
+            "second call must not be blocked by a leaked rate-limit slot"
         );
     }
 
