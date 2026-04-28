@@ -6,23 +6,25 @@ use asupersync::security::{
 };
 use asupersync::types::{Symbol, SymbolId, SymbolKind};
 use asupersync::util::DetRng;
-use hmac::{Hmac, Mac};
-use libfuzzer_sys::fuzz_target;
+use hmac::{Hmac, KeyInit, Mac};
+use libfuzzer_sys::{Corpus, fuzz_target};
 use sha2::Sha256;
 
-const MAX_PAYLOAD_LEN: usize = 1024;
-const MAX_PURPOSES: usize = 8;
-const MAX_PURPOSE_LEN: usize = 128;
+const MAX_PAYLOAD_LEN: usize = 512;
+const MAX_CHAIN_LEN: usize = 6;
+const MAX_LABEL_LEN: usize = 32;
+const MAX_CONTEXT_SEGMENTS: usize = 6;
+const MAX_CONTEXT_SEGMENT_LEN: usize = 32;
 
 type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
     key_source: KeySource,
-    primary_chain: Vec<Vec<u8>>,
-    alternate_chain: Vec<Vec<u8>>,
+    primary_chain: Vec<KdfInfoInput>,
+    alternate_chain: Vec<KdfInfoInput>,
     symbol: SymbolInput,
-    mutation: Mutation,
+    mutation: ContextMutation,
 }
 
 #[derive(Arbitrary, Debug, Clone, Copy)]
@@ -30,6 +32,25 @@ enum KeySource {
     Seed(u64),
     Raw([u8; AUTH_KEY_SIZE]),
     DeterministicRng(u64),
+}
+
+#[derive(Arbitrary, Debug, Clone)]
+struct KdfInfoInput {
+    namespace: Namespace,
+    label: Vec<u8>,
+    context_segments: Vec<Vec<u8>>,
+    counter: u16,
+    version: u8,
+}
+
+#[derive(Arbitrary, Debug, Clone, Copy, PartialEq, Eq)]
+enum Namespace {
+    Transport,
+    Storage,
+    Session,
+    Handshake,
+    User,
+    Empty,
 }
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -48,48 +69,76 @@ enum SymbolKindInput {
 }
 
 #[derive(Arbitrary, Debug, Clone)]
-enum Mutation {
+enum ContextMutation {
     None,
-    FlipTagByte { byte_index: u8, xor_mask: u8 },
-    MutatePayload { byte_index: u16, new_value: u8 },
-    MutateObjectId { xor_mask: u64 },
-    MutateEsi { delta: u32 },
-    ToggleKind,
+    BumpCounter { step: u8, delta: u16 },
+    ChangeNamespace { step: u8, namespace: Namespace },
+    AppendLabelByte { step: u8, byte: u8 },
+    ReorderContextSegments { step: u8 },
+    DropContextSegment { step: u8, segment: u8 },
+}
+
+impl Namespace {
+    const fn as_byte(self) -> u8 {
+        match self {
+            Self::Transport => b'T',
+            Self::Storage => b'S',
+            Self::Session => b'X',
+            Self::Handshake => b'H',
+            Self::User => b'U',
+            Self::Empty => b'0',
+        }
+    }
+
+    fn distinct_from(self, candidate: Self) -> Self {
+        if self != candidate {
+            candidate
+        } else {
+            match self {
+                Self::Transport => Self::Storage,
+                Self::Storage => Self::Session,
+                Self::Session => Self::Handshake,
+                Self::Handshake => Self::User,
+                Self::User => Self::Empty,
+                Self::Empty => Self::Transport,
+            }
+        }
+    }
 }
 
 impl From<SymbolKindInput> for SymbolKind {
     fn from(kind: SymbolKindInput) -> Self {
         match kind {
-            SymbolKindInput::Source => SymbolKind::Source,
-            SymbolKindInput::Repair => SymbolKind::Repair,
+            SymbolKindInput::Source => Self::Source,
+            SymbolKindInput::Repair => Self::Repair,
         }
     }
 }
 
-fuzz_target!(|input: FuzzInput| {
-    fuzz_key_derivation_context(input);
-});
+fuzz_target!(|input: FuzzInput| -> Corpus { fuzz_key_derivation_context(input) });
 
-fn fuzz_key_derivation_context(input: FuzzInput) {
-    let base_key = build_base_key(input.key_source);
+fn fuzz_key_derivation_context(input: FuzzInput) -> Corpus {
+    let Some(base_key) = build_base_key(input.key_source) else {
+        return Corpus::Reject;
+    };
+
     let primary_chain = normalize_chain(input.primary_chain);
     let alternate_chain = normalize_chain(input.alternate_chain);
+    let primary_purposes = encode_chain(&primary_chain);
+    let alternate_purposes = encode_chain(&alternate_chain);
     let symbol = build_symbol(input.symbol);
 
-    assert_eq!(
-        base_key.derive_subkey(&[]),
-        reference_derive_subkey(base_key, &[]),
-        "empty-purpose derivation must match direct HMAC-SHA256"
-    );
+    assert_eq!(derive_key(base_key.clone(), &[]), base_key);
+    assert_eq!(encode_chain(&primary_chain), primary_purposes);
+    assert_eq!(encode_chain(&alternate_chain), alternate_purposes);
+    assert_chain_matches_reference(&base_key, &primary_purposes);
+    assert_chain_matches_reference(&base_key, &alternate_purposes);
 
-    assert_chain_matches_reference(base_key, &primary_chain);
-    assert_chain_matches_reference(base_key, &alternate_chain);
-
-    let primary_key = derive_key(base_key, &primary_chain);
-    let repeated_primary_key = derive_key(base_key, &primary_chain);
+    let primary_key = derive_key(base_key.clone(), &primary_purposes);
+    let repeated_primary_key = derive_key(base_key.clone(), &primary_purposes);
     assert_eq!(
         primary_key, repeated_primary_key,
-        "derive_subkey must be deterministic for the same purpose chain"
+        "key derivation must be deterministic for the same encoded info chain"
     );
 
     let primary_tag = AuthenticationTag::compute(&primary_key, &symbol);
@@ -98,12 +147,13 @@ fn fuzz_key_derivation_context(input: FuzzInput) {
         "freshly derived key must verify its own tag"
     );
 
-    let primary_ctx = derive_context_chain(SecurityContext::new(base_key), &primary_chain);
+    let primary_ctx =
+        derive_context_chain(SecurityContext::new(base_key.clone()), &primary_purposes);
     let signed = primary_ctx.sign_symbol(&symbol);
     assert_eq!(
         signed.tag(),
         &primary_tag,
-        "SecurityContext::derive_context must match AuthKey::derive_subkey"
+        "SecurityContext::derive_context must match AuthKey::derive_subkey for encoded KDF info"
     );
 
     let mut received = AuthenticatedSymbol::from_parts(signed.clone().into_symbol(), *signed.tag());
@@ -112,43 +162,70 @@ fn fuzz_key_derivation_context(input: FuzzInput) {
         .expect("same derived context must verify its own signature");
     assert!(received.is_verified());
 
-    let alternate_key = derive_key(base_key, &alternate_chain);
-    let alternate_ctx = derive_context_chain(SecurityContext::new(base_key), &alternate_chain);
+    let alternate_key = derive_key(base_key.clone(), &alternate_purposes);
+    let alternate_ctx =
+        derive_context_chain(SecurityContext::new(base_key.clone()), &alternate_purposes);
     let alternate_tag = AuthenticationTag::compute(&alternate_key, &symbol);
     let alternate_signed = alternate_ctx.sign_symbol(&symbol);
     assert_eq!(
         alternate_signed.tag(),
         &alternate_tag,
-        "derived context signing must be deterministic"
+        "alternate context signing must be deterministic"
     );
 
-    if primary_key != alternate_key && primary_tag != alternate_tag {
+    if primary_purposes == alternate_purposes {
+        assert_eq!(primary_key, alternate_key);
+        assert_eq!(primary_tag, alternate_tag);
+    } else if primary_key != alternate_key {
         assert!(
             !primary_tag.verify(&alternate_key, &symbol),
-            "a tag from one derived key must not verify under a different derived key"
+            "a tag from one encoded KDF chain must not verify under a distinct derived key"
         );
 
-        let mut wrong_context_auth = AuthenticatedSymbol::from_parts(symbol.clone(), primary_tag);
+        let mut wrong_context_auth =
+            AuthenticatedSymbol::from_parts(signed.clone().into_symbol(), *signed.tag());
         let wrong_context_result =
             alternate_ctx.verify_authenticated_symbol(&mut wrong_context_auth);
         assert!(wrong_context_result.is_err());
         assert!(!wrong_context_auth.is_verified());
     }
 
-    apply_mutation(&symbol, primary_key, primary_tag, input.mutation);
+    let mutated_chain = apply_mutation(primary_chain, input.mutation);
+    let mutated_purposes = encode_chain(&mutated_chain);
+    if mutated_purposes != primary_purposes {
+        assert_chain_matches_reference(&base_key, &mutated_purposes);
+        let mutated_key = derive_key(base_key.clone(), &mutated_purposes);
+        let mutated_ctx =
+            derive_context_chain(SecurityContext::new(base_key.clone()), &mutated_purposes);
+
+        if mutated_key != primary_key {
+            assert!(
+                !primary_tag.verify(&mutated_key, &symbol),
+                "rewriting encoded KDF info/context bytes must produce an incompatible key"
+            );
+
+            let mut mutated_auth =
+                AuthenticatedSymbol::from_parts(signed.into_symbol(), primary_tag);
+            let mutated_result = mutated_ctx.verify_authenticated_symbol(&mut mutated_auth);
+            assert!(mutated_result.is_err());
+            assert!(!mutated_auth.is_verified());
+        }
+    }
+
+    Corpus::Keep
 }
 
-fn build_base_key(source: KeySource) -> AuthKey {
+fn build_base_key(source: KeySource) -> Option<AuthKey> {
     match source {
         KeySource::Seed(seed) => {
             let key = AuthKey::from_seed(seed);
             assert_eq!(key, AuthKey::from_seed(seed));
-            key
+            Some(key)
         }
         KeySource::Raw(bytes) => {
-            let key = AuthKey::from_bytes(bytes);
+            let key = AuthKey::from_bytes(bytes).ok()?;
             assert_eq!(key.as_bytes(), &bytes);
-            key
+            Some(key)
         }
         KeySource::DeterministicRng(seed) => {
             let mut rng_a = DetRng::new(seed);
@@ -156,57 +233,88 @@ fn build_base_key(source: KeySource) -> AuthKey {
             let mut rng_b = DetRng::new(seed);
             let key_b = AuthKey::from_rng(&mut rng_b);
             assert_eq!(key_a, key_b, "from_rng must be reproducible for DetRng");
-            key_a
+            Some(key_a)
         }
     }
 }
 
-fn normalize_chain(chain: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+fn normalize_chain(chain: Vec<KdfInfoInput>) -> Vec<KdfInfoInput> {
     chain
         .into_iter()
-        .take(MAX_PURPOSES)
-        .map(|mut purpose| {
-            purpose.truncate(MAX_PURPOSE_LEN);
-            purpose
-        })
+        .take(MAX_CHAIN_LEN)
+        .map(normalize_info)
         .collect()
 }
 
-fn derive_key(mut key: AuthKey, chain: &[Vec<u8>]) -> AuthKey {
-    for purpose in chain {
+fn normalize_info(mut info: KdfInfoInput) -> KdfInfoInput {
+    info.label.truncate(MAX_LABEL_LEN);
+    info.context_segments.truncate(MAX_CONTEXT_SEGMENTS);
+    for segment in &mut info.context_segments {
+        segment.truncate(MAX_CONTEXT_SEGMENT_LEN);
+    }
+    info
+}
+
+fn encode_chain(chain: &[KdfInfoInput]) -> Vec<Vec<u8>> {
+    chain.iter().map(encode_kdf_info).collect()
+}
+
+fn encode_kdf_info(info: &KdfInfoInput) -> Vec<u8> {
+    let mut encoded = Vec::new();
+    encoded.extend_from_slice(b"asupersync.kdf.v1");
+    encoded.push(info.version);
+    encoded.push(info.namespace.as_byte());
+    push_len_prefixed(&mut encoded, &info.label);
+    encoded.extend_from_slice(&info.counter.to_be_bytes());
+    encoded.push(info.context_segments.len() as u8);
+    for segment in &info.context_segments {
+        push_len_prefixed(&mut encoded, segment);
+    }
+    encoded
+}
+
+fn push_len_prefixed(out: &mut Vec<u8>, bytes: &[u8]) {
+    let len = u16::try_from(bytes.len()).expect("segment truncation keeps len in u16 range");
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(bytes);
+}
+
+fn derive_key(mut key: AuthKey, purposes: &[Vec<u8>]) -> AuthKey {
+    for purpose in purposes {
         key = key.derive_subkey(purpose);
     }
     key
 }
 
-fn reference_derive_subkey(key: AuthKey, purpose: &[u8]) -> AuthKey {
+fn reference_derive_subkey(key: &AuthKey, purpose: &[u8]) -> AuthKey {
     let mut mac = HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC accepts any key length");
     mac.update(purpose);
-    AuthKey::from_bytes(mac.finalize().into_bytes().into())
+    AuthKey::from_hmac_derived(mac.finalize().into_bytes().into())
+        .expect("HMAC-derived bytes should satisfy AuthKey validators")
 }
 
-fn assert_chain_matches_reference(base_key: AuthKey, chain: &[Vec<u8>]) {
-    let mut derived = base_key;
-    let mut reference = base_key;
+fn assert_chain_matches_reference(base_key: &AuthKey, purposes: &[Vec<u8>]) {
+    let mut derived = base_key.clone();
+    let mut reference = base_key.clone();
 
-    for purpose in chain {
+    for purpose in purposes {
         derived = derived.derive_subkey(purpose);
-        reference = reference_derive_subkey(reference, purpose);
+        reference = reference_derive_subkey(&reference, purpose);
         assert_eq!(
             derived, reference,
-            "derive_subkey step must match direct HMAC-SHA256 reference"
+            "derive_subkey step must match direct HMAC-SHA256 reference for encoded KDF info"
         );
     }
 
     assert_eq!(
-        derive_key(base_key, chain),
+        derive_key(base_key.clone(), purposes),
         reference,
-        "whole-chain derivation must match stepwise reference"
+        "whole-chain derivation must match the stepwise reference"
     );
 }
 
-fn derive_context_chain(mut context: SecurityContext, chain: &[Vec<u8>]) -> SecurityContext {
-    for purpose in chain {
+fn derive_context_chain(mut context: SecurityContext, purposes: &[Vec<u8>]) -> SecurityContext {
+    for purpose in purposes {
         context = context.derive_context(purpose);
     }
     context
@@ -219,65 +327,48 @@ fn build_symbol(input: SymbolInput) -> Symbol {
     Symbol::new(id, payload, input.kind.into())
 }
 
-fn apply_mutation(symbol: &Symbol, key: AuthKey, tag: AuthenticationTag, mutation: Mutation) {
+fn apply_mutation(mut chain: Vec<KdfInfoInput>, mutation: ContextMutation) -> Vec<KdfInfoInput> {
+    if chain.is_empty() {
+        return chain;
+    }
+
     match mutation {
-        Mutation::None => {}
-        Mutation::FlipTagByte {
-            byte_index,
-            xor_mask,
-        } => {
-            let mut bytes = *tag.as_bytes();
-            let index = usize::from(byte_index) % bytes.len();
-            let mask = if xor_mask == 0 { 1 } else { xor_mask };
-            bytes[index] ^= mask;
-            let mutated_tag = AuthenticationTag::from_bytes(bytes);
-            if mutated_tag != tag {
-                assert!(!mutated_tag.verify(&key, symbol));
+        ContextMutation::None => {}
+        ContextMutation::BumpCounter { step, delta } => {
+            let idx = usize::from(step) % chain.len();
+            let bump = if delta == 0 { 1 } else { delta };
+            chain[idx].counter = chain[idx].counter.wrapping_add(bump);
+        }
+        ContextMutation::ChangeNamespace { step, namespace } => {
+            let idx = usize::from(step) % chain.len();
+            chain[idx].namespace = chain[idx].namespace.distinct_from(namespace);
+        }
+        ContextMutation::AppendLabelByte { step, byte } => {
+            let idx = usize::from(step) % chain.len();
+            if chain[idx].label.len() < MAX_LABEL_LEN {
+                chain[idx].label.push(byte);
+            } else if let Some(first) = chain[idx].label.first_mut() {
+                *first ^= if byte == 0 { 1 } else { byte };
             }
         }
-        Mutation::MutatePayload {
-            byte_index,
-            new_value,
-        } => {
-            let mut payload = symbol.data().to_vec();
-            if payload.is_empty() {
-                payload.push(new_value);
+        ContextMutation::ReorderContextSegments { step } => {
+            let idx = usize::from(step) % chain.len();
+            if chain[idx].context_segments.len() > 1 {
+                chain[idx].context_segments.rotate_left(1);
             } else {
-                let index = usize::from(byte_index) % payload.len();
-                payload[index] = new_value;
-            }
-            let mutated = Symbol::new(symbol.id(), payload, symbol.kind());
-            if mutated != *symbol {
-                assert!(!tag.verify(&key, &mutated));
+                chain[idx].context_segments.push(vec![0xFF]);
             }
         }
-        Mutation::MutateObjectId { xor_mask } => {
-            let mask = if xor_mask == 0 { 1 } else { xor_mask };
-            let mutated_id = SymbolId::new_for_test(
-                symbol.id().object_id().as_u128() as u64 ^ mask,
-                symbol.sbn(),
-                symbol.esi(),
-            );
-            let mutated = Symbol::new(mutated_id, symbol.data().to_vec(), symbol.kind());
-            assert!(!tag.verify(&key, &mutated));
-        }
-        Mutation::MutateEsi { delta } => {
-            let delta = if delta == 0 { 1 } else { delta };
-            let mutated_id = SymbolId::new_for_test(
-                symbol.id().object_id().as_u128() as u64,
-                symbol.sbn(),
-                symbol.esi().wrapping_add(delta),
-            );
-            let mutated = Symbol::new(mutated_id, symbol.data().to_vec(), symbol.kind());
-            assert!(!tag.verify(&key, &mutated));
-        }
-        Mutation::ToggleKind => {
-            let toggled_kind = match symbol.kind() {
-                SymbolKind::Source => SymbolKind::Repair,
-                SymbolKind::Repair => SymbolKind::Source,
-            };
-            let mutated = Symbol::new(symbol.id(), symbol.data().to_vec(), toggled_kind);
-            assert!(!tag.verify(&key, &mutated));
+        ContextMutation::DropContextSegment { step, segment } => {
+            let idx = usize::from(step) % chain.len();
+            if chain[idx].context_segments.is_empty() {
+                chain[idx].context_segments.push(vec![0x01]);
+            } else {
+                let remove = usize::from(segment) % chain[idx].context_segments.len();
+                chain[idx].context_segments.remove(remove);
+            }
         }
     }
+
+    chain.into_iter().map(normalize_info).collect()
 }

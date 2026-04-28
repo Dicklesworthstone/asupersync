@@ -57,7 +57,7 @@ use crate::types::Time;
 
 use super::extract::Request;
 use super::handler::Handler;
-use super::response::{Response, StatusCode};
+use super::response::{IntoResponse, Redirect, Response, StatusCode};
 
 // ─── CorsMiddleware ─────────────────────────────────────────────────────────
 
@@ -1457,19 +1457,24 @@ impl<H: Handler> NormalizePathMiddleware<H> {
     }
 }
 
-/// Sanitize a redirect path to prevent open redirect vulnerabilities.
-///
-/// Protocol-relative URLs (starting with //) can redirect to external hosts,
-/// enabling open redirect attacks. This function URL-encodes leading slashes
-/// to ensure redirects stay within the same origin.
-///
-/// Security: br-asupersync-aqdic1 - prevents //evil.com → //evil.com redirects
-fn sanitize_redirect_path(path: &str) -> String {
-    if let Some(stripped) = path.strip_prefix("//") {
-        // URL-encode the leading slashes to prevent protocol-relative redirect
-        format!("%2F%2F{}", stripped)
-    } else {
-        path.to_string()
+/// Build a permanent normalization redirect, rejecting any candidate that the
+/// central redirect validator classifies as unsafe.
+fn normalization_redirect_response(path: &str) -> Response {
+    let candidate = path.replace(['\r', '\n'], "");
+    match Redirect::permanent(candidate.clone()) {
+        Ok(redirect) => redirect.into_response(),
+        Err(err) => {
+            let _ = &err;
+            warn!(
+                path = %candidate,
+                error = %err,
+                "NormalizePathMiddleware: refusing unsafe redirect candidate"
+            );
+            Response::new(
+                StatusCode::BAD_REQUEST,
+                b"Bad Request: invalid normalized redirect target".to_vec(),
+            )
+        }
     }
 }
 
@@ -1499,24 +1504,14 @@ impl<H: Handler> Handler for NormalizePathMiddleware<H> {
                     if trimmed.is_empty() {
                         trimmed = "/".to_string();
                     }
-                    // Sanitize CRLF to prevent HTTP response header injection.
-                    let trimmed = trimmed.replace(['\r', '\n'], "");
-                    // Sanitize protocol-relative URLs to prevent open redirect.
-                    let trimmed = sanitize_redirect_path(&trimmed);
-                    return Response::empty(StatusCode::MOVED_PERMANENTLY)
-                        .header("location", trimmed);
+                    return normalization_redirect_response(&trimmed);
                 }
                 self.inner.call(req)
             }
             TrailingSlash::RedirectAlways => {
                 if !path.ends_with('/') && !path.contains('.') {
                     let with_slash = format!("{path}/");
-                    // Sanitize CRLF to prevent HTTP response header injection.
-                    let with_slash = with_slash.replace(['\r', '\n'], "");
-                    // Sanitize protocol-relative URLs to prevent open redirect.
-                    let with_slash = sanitize_redirect_path(&with_slash);
-                    return Response::empty(StatusCode::MOVED_PERMANENTLY)
-                        .header("location", with_slash);
+                    return normalization_redirect_response(&with_slash);
                 }
                 self.inner.call(req)
             }
@@ -3448,10 +3443,8 @@ mod tests {
         // Regression test for br-asupersync-gwezkv: DoS via giant x-request-id
         // header that gets amplified into logs and response headers.
         let giant_id = "A".repeat(4 * 1024 * 1024); // 4MB header
-        let mw = RequestTraceMiddleware::new(
-            FnHandler::new(ok_handler),
-            RequestTracePolicy::default(),
-        );
+        let mw =
+            RequestTraceMiddleware::new(FnHandler::new(ok_handler), RequestTracePolicy::default());
         let req = make_request().with_header("x-request-id", &giant_id);
         let resp = mw.call(req);
 
@@ -3474,10 +3467,8 @@ mod tests {
     fn request_trace_sanitizes_crlf_in_x_request_id_header() {
         // Verify CRLF injection protection in trace ID extraction
         let malicious_id = "trace\r\nX-Injected: malicious\r\n";
-        let mw = RequestTraceMiddleware::new(
-            FnHandler::new(ok_handler),
-            RequestTracePolicy::default(),
-        );
+        let mw =
+            RequestTraceMiddleware::new(FnHandler::new(ok_handler), RequestTracePolicy::default());
         let req = make_request().with_header("x-request-id", malicious_id);
         let resp = mw.call(req);
 
@@ -3589,93 +3580,64 @@ mod tests {
 
     #[test]
     fn normalize_path_redirect_trim_prevents_protocol_relative_open_redirect() {
-        // br-asupersync-aqdic1: Regression test for open redirect vulnerability.
-        // Protocol-relative URLs like //evil.com/ must not redirect to external hosts.
+        // Protocol-relative URLs like //evil.com/ must fail closed rather than
+        // emitting a Location header that a browser could treat as off-origin.
         let mw =
             NormalizePathMiddleware::new(FnHandler::new(ok_handler), TrailingSlash::RedirectTrim);
         let resp = mw.call(Request::new("GET", "//evil.com/"));
-        assert_eq!(resp.status, StatusCode::MOVED_PERMANENTLY);
-        // Location should be URL-encoded to prevent redirect to external host
-        assert_eq!(
-            resp.headers.get("location"),
-            Some(&"%2F%2Fevil.com".to_string()),
-            "Protocol-relative URL must be sanitized to prevent open redirect"
-        );
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+        assert!(!resp.headers.contains_key("location"));
     }
 
     #[test]
     fn normalize_path_redirect_always_prevents_protocol_relative_open_redirect() {
-        // br-asupersync-aqdic1: Regression test for open redirect vulnerability.
-        // Protocol-relative URLs like //evil must not redirect to external hosts.
+        // Protocol-relative URLs like //evil must fail closed rather than
+        // emitting a redirect gadget.
         let mw =
             NormalizePathMiddleware::new(FnHandler::new(ok_handler), TrailingSlash::RedirectAlways);
 
-        // RedirectAlways triggers when path doesn't end with '/' and has no '.'
-        // Use //evil (no dot) to trigger redirect condition
         let resp = mw.call(Request::new("GET", "//evil"));
-        assert_eq!(resp.status, StatusCode::MOVED_PERMANENTLY);
-        // Location should be URL-encoded to prevent redirect to external host
-        assert_eq!(
-            resp.headers.get("location"),
-            Some(&"%2F%2Fevil/".to_string()),
-            "Protocol-relative URL must be sanitized to prevent open redirect"
-        );
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+        assert!(!resp.headers.contains_key("location"));
     }
 
     #[test]
     fn normalize_path_redirect_handles_complex_protocol_relative_attacks() {
-        // br-asupersync-aqdic1: Additional security regression tests.
-
-        // Test RedirectTrim with trailing slash (triggers redirect)
+        // Additional regression coverage for hostile normalization inputs.
         let mw =
             NormalizePathMiddleware::new(FnHandler::new(ok_handler), TrailingSlash::RedirectTrim);
 
-        // Path with trailing slash will trigger RedirectTrim (use path without dots)
         let resp = mw.call(Request::new("GET", "//attacker-host/path/"));
-        assert_eq!(resp.status, StatusCode::MOVED_PERMANENTLY);
-        assert_eq!(
-            resp.headers.get("location"),
-            Some(&"%2F%2Fattacker-host/path".to_string())
-        );
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+        assert!(!resp.headers.contains_key("location"));
 
-        // Test with multiple slashes and trailing slash
         let resp = mw.call(Request::new("GET", "///triple-slash.example/"));
-        assert_eq!(resp.status, StatusCode::MOVED_PERMANENTLY);
-        assert_eq!(
-            resp.headers.get("location"),
-            Some(&"%2F%2F/triple-slash.example".to_string())
-        );
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+        assert!(!resp.headers.contains_key("location"));
 
-        // Test RedirectAlways variant - no trailing slash, no dot (use path without dots)
         let mw_always =
             NormalizePathMiddleware::new(FnHandler::new(ok_handler), TrailingSlash::RedirectAlways);
         let resp = mw_always.call(Request::new("GET", "//evilhost"));
-        assert_eq!(resp.status, StatusCode::MOVED_PERMANENTLY);
-        assert_eq!(
-            resp.headers.get("location"),
-            Some(&"%2F%2Fevilhost/".to_string())
-        );
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+        assert!(!resp.headers.contains_key("location"));
     }
 
     #[test]
-    fn sanitize_redirect_path_unit_tests() {
-        // Unit tests for the sanitize_redirect_path helper function.
+    fn normalize_path_redirect_rejects_backslash_host_pivot() {
+        let mw =
+            NormalizePathMiddleware::new(FnHandler::new(ok_handler), TrailingSlash::RedirectAlways);
+        let resp = mw.call(Request::new("GET", "/\\\\attacker.com"));
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+        assert!(!resp.headers.contains_key("location"));
+    }
 
-        // Normal paths should be unchanged
-        assert_eq!(sanitize_redirect_path("/normal/path"), "/normal/path");
-        assert_eq!(sanitize_redirect_path("/"), "/");
-        assert_eq!(sanitize_redirect_path(""), "");
-
-        // Protocol-relative URLs should be sanitized
-        assert_eq!(sanitize_redirect_path("//evil.com"), "%2F%2Fevil.com");
-        assert_eq!(sanitize_redirect_path("//evil.com/path"), "%2F%2Fevil.com/path");
-        assert_eq!(sanitize_redirect_path("//"), "%2F%2F");
-
-        // Paths with single slash should be unchanged
-        assert_eq!(sanitize_redirect_path("/single"), "/single");
-
-        // Mixed cases
-        assert_eq!(sanitize_redirect_path("//host/normal/path"), "%2F%2Fhost/normal/path");
+    #[test]
+    fn normalize_path_redirect_rejects_percent_encoded_slash_host_pivot() {
+        let mw =
+            NormalizePathMiddleware::new(FnHandler::new(ok_handler), TrailingSlash::RedirectTrim);
+        let resp = mw.call(Request::new("GET", "/%2fevil.example/"));
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+        assert!(!resp.headers.contains_key("location"));
     }
 
     // --- SetResponseHeaderMiddleware ---
