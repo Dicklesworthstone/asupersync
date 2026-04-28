@@ -73,21 +73,21 @@ pub enum PanicLocation {
         /// The ID of the task that panicked
         task_id: TaskId,
         /// The region owning the task
-        region_id: RegionId,
+        _region_id: RegionId,
         /// Number of polling attempts before panic
         poll_attempt: u32,
     },
     /// Panic occurred during finalizer execution
     FinalizerExecution {
         /// The region being finalized
-        region_id: RegionId,
+        _region_id: RegionId,
         /// Type of finalizer that panicked
         finalizer_type: FinalizerType,
     },
     /// Panic occurred during region cleanup
     RegionCleanup {
         /// The region being cleaned up
-        region_id: RegionId,
+        _region_id: RegionId,
         /// Phase of cleanup when panic occurred
         cleanup_phase: CleanupPhase,
     },
@@ -96,7 +96,7 @@ pub enum PanicLocation {
         /// The obligation being processed
         obligation_id: ObligationId,
         /// The region owning the obligation
-        region_id: RegionId,
+        _region_id: RegionId,
     },
     /// Panic occurred in scheduler code
     SchedulerInternal {
@@ -213,7 +213,7 @@ impl PanicIsolator {
 
         let location = PanicLocation::TaskExecution {
             task_id,
-            region_id,
+            _region_id: region_id,
             poll_attempt,
         };
 
@@ -239,7 +239,7 @@ impl PanicIsolator {
         }
 
         let location = PanicLocation::FinalizerExecution {
-            region_id,
+            _region_id: region_id,
             finalizer_type,
         };
 
@@ -257,7 +257,7 @@ impl PanicIsolator {
         F: FnOnce() -> T,
     {
         let location = PanicLocation::RegionCleanup {
-            region_id,
+            _region_id: region_id,
             cleanup_phase: phase,
         };
 
@@ -276,7 +276,7 @@ impl PanicIsolator {
     {
         let location = PanicLocation::ObligationHandling {
             obligation_id,
-            region_id,
+            _region_id: region_id,
         };
 
         self.isolate_operation(location, operation)
@@ -411,14 +411,14 @@ impl PanicIsolator {
     ) -> (Option<RegionId>, Option<TaskId>, Option<ObligationId>) {
         match location {
             PanicLocation::TaskExecution {
-                task_id, region_id, ..
-            } => (Some(*region_id), Some(*task_id), None),
-            PanicLocation::FinalizerExecution { region_id, .. } => (Some(*region_id), None, None),
-            PanicLocation::RegionCleanup { region_id, .. } => (Some(*region_id), None, None),
+                task_id, _region_id, ..
+            } => (Some(*_region_id), Some(*task_id), None),
+            PanicLocation::FinalizerExecution { _region_id, .. } => (Some(*_region_id), None, None),
+            PanicLocation::RegionCleanup { _region_id, .. } => (Some(*_region_id), None, None),
             PanicLocation::ObligationHandling {
                 obligation_id,
-                region_id,
-            } => (Some(*region_id), None, Some(*obligation_id)),
+                _region_id,
+            } => (Some(*_region_id), None, Some(*obligation_id)),
             PanicLocation::SchedulerInternal { .. } => (None, None, None),
         }
     }
@@ -512,43 +512,43 @@ impl fmt::Display for PanicLocation {
         match self {
             PanicLocation::TaskExecution {
                 task_id,
-                region_id,
+                _region_id,
                 poll_attempt,
             } => {
                 write!(
                     f,
                     "TaskExecution(task={:?}, region={:?}, poll={})",
-                    task_id.0, region_id.0, poll_attempt
+                    task_id.0, _region_id.0, poll_attempt
                 )
             }
             PanicLocation::FinalizerExecution {
-                region_id,
+                _region_id,
                 finalizer_type,
             } => {
                 write!(
                     f,
                     "FinalizerExecution(region={:?}, type={:?})",
-                    region_id.0, finalizer_type
+                    _region_id.0, finalizer_type
                 )
             }
             PanicLocation::RegionCleanup {
-                region_id,
+                _region_id,
                 cleanup_phase,
             } => {
                 write!(
                     f,
                     "RegionCleanup(region={:?}, phase={:?})",
-                    region_id.0, cleanup_phase
+                    _region_id.0, cleanup_phase
                 )
             }
             PanicLocation::ObligationHandling {
                 obligation_id,
-                region_id,
+                _region_id,
             } => {
                 write!(
                     f,
                     "ObligationHandling(obligation={:?}, region={:?})",
-                    obligation_id.0, region_id.0
+                    obligation_id.0, _region_id.0
                 )
             }
             PanicLocation::SchedulerInternal {
@@ -652,7 +652,7 @@ mod tests {
     }
 
     impl crate::observability::metrics::MetricsProvider for CapturingMetrics {
-        fn task_spawned(&self, region_id: RegionId, task_id: TaskId) {
+        fn task_spawned(&self, _region_id: RegionId, task_id: TaskId) {
             self.tasks_spawned
                 .lock()
                 .unwrap()
@@ -663,7 +663,7 @@ mod tests {
             &self,
             task_id: TaskId,
             outcome: crate::observability::metrics::OutcomeKind,
-            duration: std::time::Duration,
+            _duration: std::time::Duration,
         ) {
             self.tasks_completed
                 .lock()
@@ -671,14 +671,14 @@ mod tests {
                 .push((task_id, outcome, duration));
         }
 
-        fn region_created(&self, region_id: RegionId, parent_id: Option<RegionId>) {
+        fn region_created(&self, _region_id: RegionId, parent_id: Option<RegionId>) {
             self.regions_created
                 .lock()
                 .unwrap()
                 .push((region_id, parent_id));
         }
 
-        fn region_closed(&self, region_id: RegionId, duration: std::time::Duration) {
+        fn region_closed(&self, _region_id: RegionId, _duration: std::time::Duration) {
             self.regions_closed
                 .lock()
                 .unwrap()
@@ -696,18 +696,18 @@ mod tests {
                 .push((region_id, cancel_kind));
         }
 
-        fn drain_completed(&self, region_id: RegionId, duration: std::time::Duration) {
+        fn drain_completed(&self, _region_id: RegionId, _duration: std::time::Duration) {
             self.drain_completions
                 .lock()
                 .unwrap()
                 .push((region_id, duration));
         }
 
-        fn deadline_set(&self, _region_id: RegionId, _duration: std::time::Duration) {
+        fn deadline_set(&self, __region_id: RegionId, __duration: std::time::Duration) {
             // Simple implementation - could extend if needed for testing
         }
 
-        fn deadline_exceeded(&self, _region_id: RegionId) {
+        fn deadline_exceeded(&self, __region_id: RegionId) {
             // Simple implementation - could extend if needed for testing
         }
 
@@ -736,19 +736,19 @@ mod tests {
             // Simple implementation - could extend if needed for testing
         }
 
-        fn obligation_created(&self, region_id: RegionId) {
+        fn obligation_created(&self, _region_id: RegionId) {
             self.obligations_created.lock().unwrap().push(region_id);
         }
 
-        fn obligation_discharged(&self, region_id: RegionId) {
+        fn obligation_discharged(&self, _region_id: RegionId) {
             self.obligations_discharged.lock().unwrap().push(region_id);
         }
 
-        fn obligation_leaked(&self, region_id: RegionId) {
+        fn obligation_leaked(&self, _region_id: RegionId) {
             self.obligations_leaked.lock().unwrap().push(region_id);
         }
 
-        fn scheduler_tick(&self, _ready_count: usize, _tick_duration: std::time::Duration) {
+        fn scheduler_tick(&self, _ready_count: usize, _tick__duration: std::time::Duration) {
             // Simple implementation - could extend if needed for testing
         }
 
@@ -837,7 +837,7 @@ mod tests {
             panic_id: 1,
             location: PanicLocation::TaskExecution {
                 task_id: TaskId::from_arena(ArenaIndex::new(1, 0)),
-                region_id: RegionId::from_arena(ArenaIndex::new(1, 0)),
+                _region_id: RegionId::from_arena(ArenaIndex::new(1, 0)),
                 poll_attempt: 1,
             },
             timestamp: Instant::now(),
@@ -978,7 +978,7 @@ mod tests {
         }
 
         impl crate::observability::metrics::MetricsProvider for CapturingMetrics {
-            fn task_spawned(&self, region_id: RegionId, task_id: TaskId) {
+            fn task_spawned(&self, _region_id: RegionId, task_id: TaskId) {
                 self.tasks_spawned
                     .lock()
                     .unwrap()
@@ -989,7 +989,7 @@ mod tests {
                 &self,
                 task_id: TaskId,
                 outcome_kind: crate::observability::metrics::OutcomeKind,
-                duration: std::time::Duration,
+                _duration: std::time::Duration,
             ) {
                 self.tasks_completed
                     .lock()
@@ -997,14 +997,14 @@ mod tests {
                     .push((task_id, outcome_kind, duration));
             }
 
-            fn region_created(&self, region_id: RegionId, parent_id: Option<RegionId>) {
+            fn region_created(&self, _region_id: RegionId, parent_id: Option<RegionId>) {
                 self.regions_created
                     .lock()
                     .unwrap()
                     .push((region_id, parent_id));
             }
 
-            fn region_closed(&self, region_id: RegionId, duration: std::time::Duration) {
+            fn region_closed(&self, _region_id: RegionId, _duration: std::time::Duration) {
                 self.regions_closed
                     .lock()
                     .unwrap()
@@ -1022,18 +1022,18 @@ mod tests {
                     .push((region_id, cancel_kind));
             }
 
-            fn drain_completed(&self, region_id: RegionId, duration: std::time::Duration) {
+            fn drain_completed(&self, _region_id: RegionId, _duration: std::time::Duration) {
                 self.drain_completions
                     .lock()
                     .unwrap()
                     .push((region_id, duration));
             }
 
-            fn deadline_set(&self, region_id: RegionId, duration: std::time::Duration) {
+            fn deadline_set(&self, _region_id: RegionId, _duration: std::time::Duration) {
                 // Simple implementation - could extend if needed for testing
             }
 
-            fn deadline_exceeded(&self, region_id: RegionId) {
+            fn deadline_exceeded(&self, _region_id: RegionId) {
                 // Simple implementation - could extend if needed for testing
             }
 
@@ -1062,19 +1062,19 @@ mod tests {
                 // Simple implementation - could extend if needed for testing
             }
 
-            fn obligation_created(&self, region_id: RegionId) {
+            fn obligation_created(&self, _region_id: RegionId) {
                 self.obligations_created.lock().unwrap().push(region_id);
             }
 
-            fn obligation_discharged(&self, region_id: RegionId) {
+            fn obligation_discharged(&self, _region_id: RegionId) {
                 self.obligations_discharged.lock().unwrap().push(region_id);
             }
 
-            fn obligation_leaked(&self, region_id: RegionId) {
+            fn obligation_leaked(&self, _region_id: RegionId) {
                 self.obligations_leaked.lock().unwrap().push(region_id);
             }
 
-            fn scheduler_tick(&self, _ready_count: usize, _tick_duration: std::time::Duration) {
+            fn scheduler_tick(&self, _ready_count: usize, _tick__duration: std::time::Duration) {
                 // Simple implementation - could extend if needed for testing
             }
 
