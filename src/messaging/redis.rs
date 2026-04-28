@@ -1280,6 +1280,21 @@ enum RedisStream {
     Tls(TlsStream<TcpStream>),
 }
 
+impl RedisStream {
+    /// Best-effort drop-safe transport shutdown.
+    ///
+    /// Drop paths cannot poll async `AsyncWriteExt::shutdown()`, so use the
+    /// underlying socket's synchronous shutdown API to fail closed
+    /// immediately.
+    fn shutdown_transport(&self) -> io::Result<()> {
+        match self {
+            Self::Plain(stream) => stream.shutdown(std::net::Shutdown::Both),
+            #[cfg(feature = "tls")]
+            Self::Tls(stream) => stream.get_ref().shutdown(std::net::Shutdown::Both),
+        }
+    }
+}
+
 impl AsyncRead for RedisStream {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -1754,7 +1769,7 @@ impl RedisClient {
             };
 
             // Drop the transient connection back to the OS.
-            let _ = redirect_conn.stream.shutdown();
+            let _ = redirect_conn.stream.shutdown_transport();
 
             match attempt {
                 Ok(resp) => return Ok(resp),
@@ -2024,11 +2039,11 @@ impl std::ops::DerefMut for DiscardOnDropGuard {
 
 impl Drop for DiscardOnDropGuard {
     fn drop(&mut self) {
-        if let Some(mut conn) = self.conn.take() {
+        if let Some(conn) = self.conn.take() {
             // Fail closed: once a protocol exchange is abandoned, force the
             // transport down before discarding so the peer promptly observes
             // EOF/RST instead of leaving a half-live socket around.
-            let _ = conn.stream.shutdown();
+            let _ = conn.stream.shutdown_transport();
             conn.discard();
         }
     }
@@ -2293,10 +2308,10 @@ impl Drop for Transaction {
         if self.finished {
             return;
         }
-        if let Some(mut conn) = self.conn.take() {
+        if let Some(conn) = self.conn.take() {
             // We cannot issue async DISCARD in Drop. Discarding the pooled
             // connection ensures transaction state does not leak to future users.
-            let _ = conn.stream.shutdown();
+            let _ = conn.stream.shutdown_transport();
             conn.discard();
         }
         self.finished = true;
@@ -2388,7 +2403,7 @@ impl Drop for PubSubControlGuard<'_> {
         self.pubsub.patterns = std::mem::take(&mut self.snapshot_patterns);
         self.pubsub.pending_events.clear();
         self.pubsub.poisoned = true;
-        let _ = self.pubsub.conn.stream.shutdown();
+        let _ = self.pubsub.conn.stream.shutdown_transport();
     }
 }
 
@@ -2911,6 +2926,7 @@ mod tests {
     )]
     use super::*;
     use crate::test_utils::{assert_completes_within, run_test_with_cx};
+    use futures_lite::future;
     use std::future::Future;
     use std::io::{Read, Write};
     use std::net::TcpListener as StdTcpListener;
@@ -3003,6 +3019,56 @@ mod tests {
             .collect();
         let expected: Vec<Vec<u8>> = expected.iter().map(|arg| arg.to_vec()).collect();
         assert_eq!(actual, expected, "unexpected RESP command");
+    }
+
+    #[test]
+    fn shutdown_transport_closes_plain_socket_without_waiting_for_drop() {
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let (accepted_tx, accepted_rx) = mpsc::channel();
+        let (closed_tx, closed_rx) = mpsc::channel();
+
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+            accepted_tx.send(()).expect("signal accepted");
+
+            let mut probe = [0u8; 1];
+            match stream.read(&mut probe) {
+                Ok(0) => closed_tx.send(()).expect("signal transport closed"),
+                Ok(n) => panic!(
+                    "expected shutdown_transport to close the socket, read {n} extra byte(s)"
+                ),
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    panic!("shutdown_transport left the socket open until drop")
+                }
+                Err(e) => panic!("probe connection after shutdown_transport: {e}"),
+            }
+        });
+
+        let stream = future::block_on(TcpStream::connect(addr)).expect("connect tcp stream");
+        accepted_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("server accepted client");
+
+        let stream = RedisStream::Plain(stream);
+        stream
+            .shutdown_transport()
+            .expect("shutdown transport should succeed");
+
+        closed_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("server should observe transport close before drop");
+
+        drop(stream);
+        server.join().expect("server join");
     }
 
     fn pooled_client_without_acquire() -> RedisClient {
