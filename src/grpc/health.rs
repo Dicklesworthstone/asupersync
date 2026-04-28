@@ -432,7 +432,7 @@ impl HealthService {
         // by an authentication interceptor that validates the token and populates extensions,
         // but for now we implement a minimal check here as a security baseline.
         return Err(Status::unauthenticated(
-            "health check endpoint requires authentication"
+            "health check endpoint requires authentication",
         ));
 
         #[allow(unreachable_code)]
@@ -482,9 +482,7 @@ impl HealthService {
         // health check requests. We check for the presence of an authorization header
         // in the request metadata.
         if request.metadata().get("authorization").is_none() {
-            let error = Status::unauthenticated(
-                "health check endpoint requires authentication"
-            );
+            let error = Status::unauthenticated("health check endpoint requires authentication");
             return Box::pin(async move { Err(error) });
         }
 
@@ -505,9 +503,7 @@ impl HealthService {
         // This completes the auth hardening by applying the same check to server-streaming
         // endpoints that was previously only applied to unary check_async().
         if request.metadata().get("authorization").is_none() {
-            let error = Status::unauthenticated(
-                "health check endpoint requires authentication"
-            );
+            let error = Status::unauthenticated("health check endpoint requires authentication");
             return Box::pin(async move { Err(error) });
         }
 
@@ -1421,6 +1417,48 @@ mod tests {
             next_ok
         );
         crate::test_complete!("health_watch_async_emits_initial_status_and_wakes_on_change");
+    }
+
+    #[test]
+    fn health_watch_async_missing_auth_matches_check_async_and_registers_no_waiter() {
+        init_test("health_watch_async_missing_auth_matches_check_async_and_registers_no_waiter");
+        let service = HealthService::new();
+        service.set_status("svc", ServingStatus::Serving);
+
+        let request = Request::new(HealthCheckRequest::new("svc"));
+
+        let check_err = futures_lite::future::block_on(service.check_async(&request))
+            .expect_err("grpc-health-probe style Check must fail closed without auth");
+        let watch_err = futures_lite::future::block_on(service.watch_async(&request))
+            .expect_err("Watch must enforce the same auth gate before constructing a stream");
+
+        crate::assert_with_log!(
+            watch_err.code() == check_err.code(),
+            "watch auth code matches check auth code",
+            check_err.code(),
+            watch_err.code()
+        );
+        crate::assert_with_log!(
+            watch_err.message() == check_err.message(),
+            "watch auth message matches check auth message",
+            check_err.message(),
+            watch_err.message()
+        );
+
+        let waiter_count = service
+            .watch_waiters
+            .lock()
+            .get("svc")
+            .map_or(0, std::collections::HashMap::len);
+        crate::assert_with_log!(
+            waiter_count == 0,
+            "unauthenticated watch must not register any streaming waiter state",
+            0,
+            waiter_count
+        );
+        crate::test_complete!(
+            "health_watch_async_missing_auth_matches_check_async_and_registers_no_waiter"
+        );
     }
 
     #[test]
