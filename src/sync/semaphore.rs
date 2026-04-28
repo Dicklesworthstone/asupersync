@@ -1903,6 +1903,61 @@ mod tests {
         crate::test_complete!("drop_front_waiter_wakes_next");
     }
 
+    #[derive(Clone, Copy)]
+    enum FrontWaiterExit {
+        Cancel,
+        Drop,
+    }
+
+    fn observe_front_waiter_exit_equivalence(
+        exit: FrontWaiterExit,
+        base_slot: u32,
+    ) -> (bool, usize, usize, usize, usize) {
+        let sem = Semaphore::new(2);
+        let cx1 = waiter_cx(base_slot);
+        let cx2 = waiter_cx(base_slot.checked_add(1).expect("test slot range"));
+        let held = sem.try_acquire(1).expect("initial acquire");
+
+        let mut fut1 = sem.acquire(&cx1, 2);
+        let w2 = CountingWaker::new();
+        let waker2 = Waker::from(Arc::clone(&w2));
+        let mut fut2 = sem.acquire(&cx2, 1);
+
+        assert!(poll_once(&mut fut1).is_none(), "front waiter should queue");
+        assert!(
+            poll_once_with_waker(&mut fut2, &waker2).is_none(),
+            "second waiter should queue behind the front waiter"
+        );
+
+        match exit {
+            FrontWaiterExit::Cancel => {
+                cx1.set_cancel_requested(true);
+                let cancelled = matches!(poll_once(&mut fut1), Some(Err(AcquireError::Cancelled)));
+                assert!(cancelled, "front waiter cancellation should complete");
+            }
+            FrontWaiterExit::Drop => drop(fut1),
+        }
+
+        let woke_second = w2.count() > 0;
+        let after_front_exit = sem.available_permits();
+        let permit2 = poll_once_with_waker(&mut fut2, &waker2)
+            .expect("second waiter should wake once front waiter leaves")
+            .expect("second waiter should acquire available permit");
+        let while_second_held = sem.available_permits();
+        drop(permit2);
+        let after_second_drop = sem.available_permits();
+        drop(held);
+        let final_available = sem.available_permits();
+
+        (
+            woke_second,
+            after_front_exit,
+            while_second_held,
+            after_second_drop,
+            final_available,
+        )
+    }
+
     #[test]
     fn waker_update_on_repoll() {
         init_test("waker_update_on_repoll");
@@ -2306,6 +2361,82 @@ mod tests {
         );
 
         crate::test_complete!("metamorphic_cancel_preserves_permit_count");
+    }
+
+    /// MR: a blocked front waiter leaving by cancellation is equivalent to
+    /// that waiter being dropped, provided enough permits already exist for
+    /// the next queued waiter to run.
+    #[test]
+    fn metamorphic_front_waiter_cancel_matches_drop_for_release_and_wakeup() {
+        init_test("metamorphic_front_waiter_cancel_matches_drop_for_release_and_wakeup");
+
+        let cancelled = observe_front_waiter_exit_equivalence(FrontWaiterExit::Cancel, 90);
+        let dropped = observe_front_waiter_exit_equivalence(FrontWaiterExit::Drop, 100);
+
+        crate::assert_with_log!(
+            cancelled.0 == dropped.0,
+            "front waiter exit mode preserves second waiter wakeup",
+            cancelled.0,
+            dropped.0
+        );
+        crate::assert_with_log!(
+            cancelled.0,
+            "second waiter is woken when front waiter leaves",
+            true,
+            cancelled.0
+        );
+        crate::assert_with_log!(
+            cancelled.1 == dropped.1,
+            "front waiter exit mode preserves pre-acquire capacity",
+            cancelled.1,
+            dropped.1
+        );
+        crate::assert_with_log!(
+            cancelled.1 == 1,
+            "front waiter exit does not consume the already-available permit",
+            1usize,
+            cancelled.1
+        );
+        crate::assert_with_log!(
+            cancelled.2 == dropped.2,
+            "second waiter held-capacity matches across cancel vs drop",
+            cancelled.2,
+            dropped.2
+        );
+        crate::assert_with_log!(
+            cancelled.2 == 0,
+            "second waiter consumes the single available permit",
+            0usize,
+            cancelled.2
+        );
+        crate::assert_with_log!(
+            cancelled.3 == dropped.3,
+            "dropping the second waiter restores the same capacity",
+            cancelled.3,
+            dropped.3
+        );
+        crate::assert_with_log!(
+            cancelled.3 == 1,
+            "second waiter release restores one permit before the original holder drops",
+            1usize,
+            cancelled.3
+        );
+        crate::assert_with_log!(
+            cancelled.4 == dropped.4,
+            "final capacity matches across cancel vs drop",
+            cancelled.4,
+            dropped.4
+        );
+        crate::assert_with_log!(
+            cancelled.4 == 2,
+            "cancel and drop both preserve full semaphore capacity after releases",
+            2usize,
+            cancelled.4
+        );
+
+        crate::test_complete!(
+            "metamorphic_front_waiter_cancel_matches_drop_for_release_and_wakeup"
+        );
     }
 
     /// MR3: FIFO order with concurrent cancellation - when some waiters are
