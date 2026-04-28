@@ -223,7 +223,7 @@ impl fmt::Display for PgError {
                 }
                 Ok(())
             }
-            Self::Cancelled(reason) => write!(f, "PostgreSQL operation cancelled: {reason:?}"),
+            Self::Cancelled(reason) => write!(f, "PostgreSQL operation cancelled: {reason}"),
             Self::ConnectionClosed => write!(f, "PostgreSQL connection is closed"),
             Self::ColumnNotFound(name) => write!(f, "Column not found: {name}"),
             Self::TypeConversion {
@@ -7152,6 +7152,11 @@ mod tests {
 
         let url = PgError::InvalidUrl("bad".to_string());
         assert!(format!("{url}").contains("bad"));
+
+        let cancelled = PgError::Cancelled(CancelReason::user("draining losers"));
+        let cancelled_text = format!("{cancelled}");
+        assert!(cancelled_text.contains("draining losers"));
+        assert!(!cancelled_text.contains("CancelReason"));
 
         let tls = PgError::TlsRequired;
         assert!(format!("{tls}").contains("TLS"));

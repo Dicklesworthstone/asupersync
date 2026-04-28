@@ -208,7 +208,7 @@ impl fmt::Display for MySqlError {
                 sql_state,
                 message,
             } => write!(f, "MySQL error [{code}] ({sql_state}): {message}"),
-            Self::Cancelled(reason) => write!(f, "MySQL operation cancelled: {reason:?}"),
+            Self::Cancelled(reason) => write!(f, "MySQL operation cancelled: {reason}"),
             Self::ConnectionClosed => write!(f, "MySQL connection is closed"),
             Self::ColumnNotFound(name) => write!(f, "Column not found: {name}"),
             Self::TypeConversion {
@@ -4806,6 +4806,11 @@ mod tests {
 
         let err = MySqlError::ColumnNotFound("missing_col".to_string());
         assert!(format!("{err}").contains("missing_col"));
+
+        let err = MySqlError::Cancelled(CancelReason::user("waiting for commit"));
+        let text = format!("{err}");
+        assert!(text.contains("waiting for commit"));
+        assert!(!text.contains("CancelReason"));
     }
 
     #[test]
