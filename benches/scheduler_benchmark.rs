@@ -1179,6 +1179,189 @@ fn bench_cancel_preemption(c: &mut Criterion) {
 }
 
 // =============================================================================
+// ADAPTIVE CANCEL-STREAK POLICY BENCHMARKS (UCB1 vs EXP3)
+// =============================================================================
+
+fn bench_adaptive_cancel_streak_policy(c: &mut Criterion) {
+    use asupersync::runtime::scheduler::three_lane::{AdaptiveCancelStreakPolicy, AdaptiveEpochSnapshot};
+    use asupersync::util::DetRng;
+
+    let mut group = c.benchmark_group("scheduler/adaptive_cancel_streak");
+    group.sample_size(50);
+
+    // Helper function to create test epoch snapshots
+    fn test_snapshot(potential: f64, deadline_pressure: f64, base_exceed: u64, eff_exceed: u64, fallback: u64) -> AdaptiveEpochSnapshot {
+        AdaptiveEpochSnapshot {
+            potential,
+            deadline_pressure,
+            base_limit_exceedances: base_exceed,
+            effective_limit_exceedances: eff_exceed,
+            fallback_cancel_dispatches: fallback,
+        }
+    }
+
+    // UCB1 arm selection performance
+    group.bench_function("ucb1_arm_selection", |b: &mut criterion::Bencher| {
+        b.iter_batched(
+            || {
+                let mut policy = AdaptiveCancelStreakPolicy::new(10);
+                // Pre-train with some data
+                let start = test_snapshot(100.0, 0.25, 0, 0, 0);
+                let mut rng = DetRng::new(0x2024_UCB1);
+                for i in 0..20 {
+                    policy.selected_arm = i % policy.mean_rewards.len();
+                    policy.begin_epoch(start);
+                    let sample = rng.next_u64();
+                    let end = if i % 3 == 0 {
+                        test_snapshot(120.0, 0.6, 2, 3, 1)
+                    } else {
+                        test_snapshot(80.0, 0.2, 0, 0, 0)
+                    };
+                    let _reward = policy.complete_epoch(end, sample);
+                }
+                policy
+            },
+            |policy| {
+                // Benchmark arm selection
+                let selected_arm = policy.select_arm_ucb();
+                black_box(selected_arm)
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    // UCB1 epoch completion performance
+    group.bench_function("ucb1_epoch_completion", |b: &mut criterion::Bencher| {
+        b.iter_batched(
+            || {
+                let mut policy = AdaptiveCancelStreakPolicy::new(10);
+                let start = test_snapshot(100.0, 0.25, 0, 0, 0);
+                policy.begin_epoch(start);
+                (policy, DetRng::new(0x2024_EPOCH))
+            },
+            |(mut policy, mut rng)| {
+                let sample = rng.next_u64();
+                let end = test_snapshot(110.0, 0.4, 1, 1, 0);
+                let reward = policy.complete_epoch(end, sample);
+                black_box(reward)
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    // UCB1 convergence simulation (measures how quickly it converges to optimal arm)
+    for &epochs in &[50, 100, 200] {
+        group.throughput(Throughput::Elements(epochs));
+        group.bench_with_input(
+            BenchmarkId::new("ucb1_convergence_simulation", epochs),
+            &epochs,
+            |b, &epochs| {
+                b.iter_batched(
+                    || {
+                        let policy = AdaptiveCancelStreakPolicy::new(10);
+                        let rng = DetRng::new(0x2024_CONV);
+                        (policy, rng)
+                    },
+                    |(mut policy, mut rng)| {
+                        let start = test_snapshot(100.0, 0.25, 0, 0, 0);
+
+                        // Simulate epochs with arm 2 being optimal (gets best rewards)
+                        let mut total_reward = 0.0;
+                        for epoch in 0..epochs as usize {
+                            let selected_arm = policy.select_arm_ucb();
+                            policy.selected_arm = selected_arm;
+                            policy.begin_epoch(start);
+
+                            let sample = rng.next_u64();
+                            // Arm 2 gets better rewards, others get worse
+                            let end = if selected_arm == 2 {
+                                test_snapshot(90.0, 0.15, 0, 0, 0)  // Good performance
+                            } else {
+                                test_snapshot(130.0, 0.7, 3, 4, 2)  // Poor performance
+                            };
+
+                            if let Some(reward) = policy.complete_epoch(end, sample) {
+                                total_reward += reward;
+                            }
+                        }
+                        black_box(total_reward)
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+    }
+
+    // Compare arm update overhead for different numbers of arms
+    for &num_arms in &[5, 10, 20] {
+        group.bench_with_input(
+            BenchmarkId::new("ucb1_arm_update_overhead", num_arms),
+            &num_arms,
+            |b, &num_arms| {
+                b.iter_batched(
+                    || {
+                        let mut policy = AdaptiveCancelStreakPolicy::new(10);
+                        // Resize to test different arm counts
+                        policy.mean_rewards = vec![0.5; num_arms].try_into().unwrap_or(policy.mean_rewards);
+                        policy.discounted_pulls = vec![1.0; num_arms].try_into().unwrap_or(policy.discounted_pulls);
+
+                        let start = test_snapshot(100.0, 0.25, 0, 0, 0);
+                        policy.begin_epoch(start);
+                        (policy, DetRng::new(0x2024_ARMS))
+                    },
+                    |(mut policy, mut rng)| {
+                        let sample = rng.next_u64();
+                        let end = test_snapshot(120.0, 0.5, 2, 2, 1);
+                        let reward = policy.complete_epoch(end, sample);
+                        black_box(reward)
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+    }
+
+    // Benchmark adaptation under different pressure patterns
+    group.bench_function("ucb1_pressure_adaptation", |b: &mut criterion::Bencher| {
+        b.iter_batched(
+            || {
+                let policy = AdaptiveCancelStreakPolicy::new(10);
+                let rng = DetRng::new(0x2024_PRESS);
+                (policy, rng)
+            },
+            |(mut policy, mut rng)| {
+                let start = test_snapshot(100.0, 0.25, 0, 0, 0);
+                let pressure_patterns = [
+                    (70.0, 0.1, 0, 0, 0),     // Very relaxed
+                    (110.0, 0.5, 2, 3, 1),    // Moderate pressure
+                    (150.0, 0.9, 5, 7, 3),    // High pressure
+                ];
+
+                let mut total_rewards = 0.0;
+                for &(potential, deadline_pressure, base_exceed, eff_exceed, fallback) in &pressure_patterns {
+                    for _ in 0..10 {
+                        let arm = policy.select_arm_ucb();
+                        policy.selected_arm = arm;
+                        policy.begin_epoch(start);
+
+                        let sample = rng.next_u64();
+                        let end = test_snapshot(potential, deadline_pressure, base_exceed, eff_exceed, fallback);
+
+                        if let Some(reward) = policy.complete_epoch(end, sample) {
+                            total_rewards += reward;
+                        }
+                    }
+                }
+                black_box(total_rewards)
+            },
+            BatchSize::SmallInput,
+        )
+    });
+
+    group.finish();
+}
+
+// =============================================================================
 // MAIN
 // =============================================================================
 
@@ -1198,6 +1381,7 @@ criterion_group!(
     bench_intrusive_vs_vecdeque,
     bench_intrusive_vs_binaryheap,
     bench_cancel_preemption,
+    bench_adaptive_cancel_streak_policy,
 );
 
 criterion_main!(benches);
