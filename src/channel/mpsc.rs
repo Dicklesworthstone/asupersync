@@ -2616,13 +2616,21 @@ pub mod backpressure_metamorphic {
         (transcript, post_step_states, abort_count, final_state)
     }
 
+    #[derive(Debug, PartialEq, Eq)]
+    struct SingleSenderDrainBoundaryTranscript {
+        transcript: Vec<u32>,
+        final_state: (usize, usize, usize, usize),
+        remaining_senders: usize,
+    }
+
     async fn run_single_sender_drain_boundary_case(
         cx: &crate::cx::Cx,
         messages: &[u32],
         split_index: usize,
         drain_midstream: bool,
-    ) -> Vec<u32> {
+    ) -> SingleSenderDrainBoundaryTranscript {
         let (sender, mut receiver) = channel::<u32>(messages.len().max(1));
+        let shared = Arc::clone(&sender.shared);
         let split = split_index.min(messages.len());
         let mut transcript = Vec::with_capacity(messages.len());
 
@@ -2665,7 +2673,22 @@ pub mod backpressure_metamorphic {
             "sender drop should disconnect the drained receiver"
         );
 
-        transcript
+        let final_state = {
+            let inner = shared.inner.lock();
+            (
+                inner.queue.len(),
+                inner.reserved,
+                0usize,
+                inner.send_wakers.len(),
+            )
+        };
+        let remaining_senders = shared.sender_count.load(Ordering::Acquire);
+
+        SingleSenderDrainBoundaryTranscript {
+            transcript,
+            final_state,
+            remaining_senders,
+        }
     }
 
     /// MR1: Capacity Conservation
@@ -3030,17 +3053,33 @@ pub mod backpressure_metamorphic {
                             )
                             .await;
 
+                            assert_eq!(batched.transcript, messages, "batched single-sender transcript drifted");
                             assert_eq!(
-                                batched, messages,
-                                "batched single-sender transcript drifted"
-                            );
-                            assert_eq!(
-                                transformed, messages,
+                                transformed.transcript, messages,
                                 "midstream drain boundary changed the receive transcript at split {split_index}"
                             );
                             assert_eq!(
-                                batched, transformed,
+                                batched.transcript, transformed.transcript,
                                 "single-sender receive trace changed after inserting a midstream drain boundary"
+                            );
+                            assert_eq!(
+                                batched.final_state,
+                                (0, 0, 0, 0),
+                                "batched single-sender run leaked queue/reservations/waiters"
+                            );
+                            assert_eq!(
+                                transformed.final_state,
+                                batched.final_state,
+                                "midstream drain boundary changed the final channel state"
+                            );
+                            assert_eq!(
+                                batched.remaining_senders, 0,
+                                "batched single-sender run left live senders"
+                            );
+                            assert_eq!(
+                                transformed.remaining_senders,
+                                batched.remaining_senders,
+                                "midstream drain boundary changed sender teardown"
                             );
 
                             Ok(())
