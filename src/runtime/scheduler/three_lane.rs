@@ -388,6 +388,92 @@ impl AdaptiveCancelStreakPolicy {
     }
 }
 
+/// Bench-only wrapper for constructing adaptive epoch snapshots from the
+/// external `benches/` crate without exposing the internal scheduler type.
+#[cfg(feature = "test-internals")]
+#[derive(Debug, Clone, Copy)]
+pub struct AdaptivePolicyBenchSnapshot(AdaptiveEpochSnapshot);
+
+#[cfg(feature = "test-internals")]
+impl AdaptivePolicyBenchSnapshot {
+    /// Create a bench snapshot with the same fields used by the adaptive
+    /// cancel-streak reward function.
+    #[must_use]
+    pub fn new(
+        potential: f64,
+        deadline_pressure: f64,
+        base_limit_exceedances: u64,
+        effective_limit_exceedances: u64,
+        fallback_cancel_dispatches: u64,
+    ) -> Self {
+        Self(AdaptiveEpochSnapshot {
+            potential,
+            deadline_pressure,
+            base_limit_exceedances,
+            effective_limit_exceedances,
+            fallback_cancel_dispatches,
+        })
+    }
+}
+
+/// Bench-only adapter for exercising the adaptive cancel-streak policy from the
+/// external Criterion target without making the policy internals part of the
+/// public runtime API.
+#[cfg(feature = "test-internals")]
+#[derive(Debug, Clone)]
+pub struct AdaptiveCancelStreakPolicyBench {
+    policy: AdaptiveCancelStreakPolicy,
+}
+
+#[cfg(feature = "test-internals")]
+impl AdaptiveCancelStreakPolicyBench {
+    /// Create a new adaptive-policy bench harness.
+    #[must_use]
+    pub fn new(epoch_steps: u32) -> Self {
+        Self {
+            policy: AdaptiveCancelStreakPolicy::new(epoch_steps),
+        }
+    }
+
+    /// Return the fixed number of adaptive cancel-streak arms.
+    #[must_use]
+    pub fn arm_count(&self) -> usize {
+        self.policy.arms.len()
+    }
+
+    /// Force the selected arm for the next epoch.
+    pub fn force_selected_arm(&mut self, arm_index: usize) {
+        assert!(arm_index < self.policy.arms.len(), "arm index out of range");
+        self.policy.selected_arm = arm_index;
+    }
+
+    /// Seed the policy with synthetic reward and pull history.
+    pub fn seed_history(
+        &mut self,
+        mean_rewards: [f64; ADAPTIVE_STREAK_ARMS.len()],
+        discounted_pulls: [f64; ADAPTIVE_STREAK_ARMS.len()],
+    ) {
+        self.policy.mean_rewards = mean_rewards;
+        self.policy.discounted_pulls = discounted_pulls;
+    }
+
+    /// Begin an adaptive epoch from a bench snapshot.
+    pub fn begin_epoch(&mut self, snapshot: AdaptivePolicyBenchSnapshot) {
+        self.policy.begin_epoch(snapshot.0);
+    }
+
+    /// Complete an adaptive epoch from a bench snapshot.
+    pub fn complete_epoch(&mut self, end: AdaptivePolicyBenchSnapshot, sample: u64) -> Option<f64> {
+        self.policy.complete_epoch(end.0, sample)
+    }
+
+    /// Select the next arm using the current UCB state.
+    #[must_use]
+    pub fn select_arm_ucb(&self) -> usize {
+        self.policy.select_arm_ucb()
+    }
+}
+
 /// Coordination for waking workers.
 #[derive(Debug)]
 pub(crate) struct WorkerCoordinator {

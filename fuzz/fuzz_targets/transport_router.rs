@@ -186,6 +186,9 @@ enum HrwChurnOp {
     Add(EndpointConfig),
 }
 
+const HRW_REMOVAL_SEED_CASE: &[u8] = b"hrw-removal-seed";
+const HRW_WEIGHT_TIE_SEED_CASE: &[u8] = b"hrw-weight-tie-seed";
+
 #[derive(Arbitrary, Debug)]
 struct RouteConfig {
     key: RouteKeyWrapper,
@@ -731,7 +734,139 @@ impl SymbolSink for MockSymbolSink {
     }
 }
 
+fn hrw_removal_seed_scenario() -> HrwRoutingScenario {
+    HrwRoutingScenario {
+        hash_ring_salt: 0x00A1_1CE5,
+        endpoints: vec![
+            EndpointConfig {
+                id: 11,
+                address_suffix: 11,
+                weight: 3,
+                state: EndpointStateWrapper::Healthy,
+                active_connections: 0,
+                region: None,
+            },
+            EndpointConfig {
+                id: 22,
+                address_suffix: 22,
+                weight: 6,
+                state: EndpointStateWrapper::Healthy,
+                active_connections: 0,
+                region: None,
+            },
+            EndpointConfig {
+                id: 33,
+                address_suffix: 33,
+                weight: 4,
+                state: EndpointStateWrapper::Healthy,
+                active_connections: 0,
+                region: None,
+            },
+            EndpointConfig {
+                id: 44,
+                address_suffix: 44,
+                weight: 2,
+                state: EndpointStateWrapper::Healthy,
+                active_connections: 0,
+                region: None,
+            },
+        ],
+        keys: vec![
+            ObjectIdWrapper(0x10, 0x11),
+            ObjectIdWrapper(0x20, 0x21),
+            ObjectIdWrapper(0x30, 0x31),
+            ObjectIdWrapper(0x40, 0x41),
+        ],
+        selection_width: 3,
+        churn: vec![
+            HrwChurnOp::Remove { index: 1 },
+            HrwChurnOp::SetState {
+                index: 2,
+                state: EndpointStateWrapper::Unhealthy,
+            },
+        ],
+    }
+}
+
+fn hrw_weight_tie_seed_scenario() -> HrwRoutingScenario {
+    HrwRoutingScenario {
+        hash_ring_salt: 0x0057_AF1D,
+        endpoints: vec![
+            EndpointConfig {
+                id: 101,
+                address_suffix: 101,
+                weight: 5,
+                state: EndpointStateWrapper::Healthy,
+                active_connections: 0,
+                region: None,
+            },
+            EndpointConfig {
+                id: 202,
+                address_suffix: 102,
+                weight: 5,
+                state: EndpointStateWrapper::Healthy,
+                active_connections: 0,
+                region: None,
+            },
+            EndpointConfig {
+                id: 303,
+                address_suffix: 103,
+                weight: 5,
+                state: EndpointStateWrapper::Healthy,
+                active_connections: 0,
+                region: None,
+            },
+            EndpointConfig {
+                id: 404,
+                address_suffix: 104,
+                weight: 2,
+                state: EndpointStateWrapper::Healthy,
+                active_connections: 0,
+                region: None,
+            },
+        ],
+        keys: vec![
+            ObjectIdWrapper(0xAA, 0x10),
+            ObjectIdWrapper(0xBB, 0x20),
+            ObjectIdWrapper(0xCC, 0x30),
+            ObjectIdWrapper(0xDD, 0x40),
+        ],
+        selection_width: 2,
+        churn: vec![
+            HrwChurnOp::SetWeight {
+                index: 3,
+                weight: 5,
+            },
+            HrwChurnOp::Add(EndpointConfig {
+                id: 505,
+                address_suffix: 105,
+                weight: 5,
+                state: EndpointStateWrapper::Healthy,
+                active_connections: 0,
+                region: None,
+            }),
+        ],
+    }
+}
+
+fn seeded_transport_fuzz_input(data: &[u8]) -> Option<TransportFuzzInput> {
+    if data.starts_with(HRW_REMOVAL_SEED_CASE) {
+        return Some(TransportFuzzInput::HrwRouting(hrw_removal_seed_scenario()));
+    }
+    if data.starts_with(HRW_WEIGHT_TIE_SEED_CASE) {
+        return Some(TransportFuzzInput::HrwRouting(
+            hrw_weight_tie_seed_scenario(),
+        ));
+    }
+    None
+}
+
 fuzz_target!(|data: &[u8]| {
+    if let Some(input) = seeded_transport_fuzz_input(data) {
+        fuzz_transport_router(input);
+        return;
+    }
+
     let mut u = Unstructured::new(data);
     if let Ok(input) = TransportFuzzInput::arbitrary(&mut u) {
         fuzz_transport_router(input);

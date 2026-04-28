@@ -57,6 +57,8 @@ impl StatusCode {
     pub const NOT_FOUND: Self = Self(404);
     /// 405 Method Not Allowed
     pub const METHOD_NOT_ALLOWED: Self = Self(405);
+    /// 408 Request Timeout
+    pub const REQUEST_TIMEOUT: Self = Self(408);
     /// 409 Conflict
     pub const CONFLICT: Self = Self(409);
     /// 413 Payload Too Large

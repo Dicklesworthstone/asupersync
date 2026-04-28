@@ -52,11 +52,12 @@ impl RealMySqlConfig {
         } else if node_env == "production" {
             Some("BLOCKED: NODE_ENV=production".to_string())
         } else if looks_prod {
-            Some(format!("BLOCKED: MYSQL_URL looks like production: {url}"))
+            Some("BLOCKED: MYSQL_URL looks like production (redacted)".to_string())
         } else if !host_looks_local && !allow_remote {
-            Some(format!(
-                "BLOCKED: non-localhost MYSQL_URL without ALLOW_NON_LOCALHOST_MYSQL=true: {url}"
-            ))
+            Some(
+                "BLOCKED: non-localhost MYSQL_URL without ALLOW_NON_LOCALHOST_MYSQL=true (redacted)"
+                    .to_string(),
+            )
         } else {
             None
         };
@@ -190,11 +191,18 @@ fn real_mysql_transaction_rollback_behavior() {
     if skip_if_disabled(&cfg, "real_mysql_transaction_rollback_behavior") {
         return;
     }
-    let log = MySqlMigrationTestLogger::new("mysql_migration", "real_mysql_transaction_rollback_behavior");
+    let log = MySqlMigrationTestLogger::new(
+        "mysql_migration",
+        "real_mysql_transaction_rollback_behavior",
+    );
 
     run_test_with_cx(|cx| async move {
         log.phase("connect");
-        let mut conn = unwrap_mysql(MySqlConnection::connect(&cx, &cfg.url).await, &log, "connect");
+        let mut conn = unwrap_mysql(
+            MySqlConnection::connect(&cx, &cfg.url).await,
+            &log,
+            "connect",
+        );
 
         log.phase("begin_transaction");
         let _ = unwrap_mysql(conn.execute_unchecked(&cx, "BEGIN").await, &log, "BEGIN");
@@ -202,22 +210,25 @@ fn real_mysql_transaction_rollback_behavior() {
         // Insert some test data that we'll rollback
         log.phase("insert_test_data");
         let _ = unwrap_mysql(
-            conn.execute_unchecked(&cx, "CREATE TEMPORARY TABLE test_rollback (id int)").await,
+            conn.execute_unchecked(&cx, "CREATE TEMPORARY TABLE test_rollback (id int)")
+                .await,
             &log,
-            "create_temp_table"
+            "create_temp_table",
         );
         let _ = unwrap_mysql(
-            conn.execute_unchecked(&cx, "INSERT INTO test_rollback VALUES (42)").await,
+            conn.execute_unchecked(&cx, "INSERT INTO test_rollback VALUES (42)")
+                .await,
             &log,
-            "insert_data"
+            "insert_data",
         );
 
         // REAL DATABASE VERIFICATION: Data should be visible within transaction
         log.phase("verify_data_in_transaction");
         let rows = unwrap_mysql(
-            conn.query_unchecked(&cx, "SELECT id FROM test_rollback").await,
+            conn.query_unchecked(&cx, "SELECT id FROM test_rollback")
+                .await,
             &log,
-            "select_in_txn"
+            "select_in_txn",
         );
         assert_eq!(rows.len(), 1);
         let val = rows[0].get_i32("id").expect("get_i32");
@@ -229,7 +240,7 @@ fn real_mysql_transaction_rollback_behavior() {
         let _ = unwrap_mysql(
             conn.execute_unchecked(&cx, "ROLLBACK").await,
             &log,
-            "ROLLBACK"
+            "ROLLBACK",
         );
 
         // REAL DATABASE VERIFICATION: Connection should be usable after rollback
@@ -243,8 +254,14 @@ fn real_mysql_transaction_rollback_behavior() {
                 assert_eq!(val, 1);
             }
             other => {
-                log.line("post_rollback_query_failed", &[("outcome", &format!("{:?}", other))]);
-                panic!("connection should be usable after rollback, got: {:?}", other);
+                log.line(
+                    "post_rollback_query_failed",
+                    &[("outcome", &format!("{:?}", other))],
+                );
+                panic!(
+                    "connection should be usable after rollback, got: {:?}",
+                    other
+                );
             }
         }
 
@@ -262,15 +279,24 @@ fn real_mysql_query_execution_error_handling() {
     if skip_if_disabled(&cfg, "real_mysql_query_execution_error_handling") {
         return;
     }
-    let log = MySqlMigrationTestLogger::new("mysql_migration", "real_mysql_query_execution_error_handling");
+    let log = MySqlMigrationTestLogger::new(
+        "mysql_migration",
+        "real_mysql_query_execution_error_handling",
+    );
 
     run_test_with_cx(|cx| async move {
         log.phase("connect");
-        let mut conn = unwrap_mysql(MySqlConnection::connect(&cx, &cfg.url).await, &log, "connect");
+        let mut conn = unwrap_mysql(
+            MySqlConnection::connect(&cx, &cfg.url).await,
+            &log,
+            "connect",
+        );
 
         // Test 1: Syntax error should preserve session but return error
         log.phase("test_syntax_error");
-        let syntax_error = conn.query_unchecked(&cx, "SELECT invalid syntax here").await;
+        let syntax_error = conn
+            .query_unchecked(&cx, "SELECT invalid syntax here")
+            .await;
         match syntax_error {
             Outcome::Err(e) => {
                 log.line("syntax_error_received", &[("error", &e.to_string())]);
@@ -282,7 +308,10 @@ fn real_mysql_query_execution_error_handling() {
                 }
             }
             other => {
-                log.line("unexpected_syntax_outcome", &[("outcome", &format!("{:?}", other))]);
+                log.line(
+                    "unexpected_syntax_outcome",
+                    &[("outcome", &format!("{:?}", other))],
+                );
                 panic!("expected syntax error, got: {:?}", other);
             }
         }
@@ -292,14 +321,23 @@ fn real_mysql_query_execution_error_handling() {
         let recovery_query = conn.query_unchecked(&cx, "SELECT 42").await;
         match recovery_query {
             Outcome::Ok(rows) => {
-                log.line("session_recovery", &[("success", "true"), ("rows", &rows.len().to_string())]);
+                log.line(
+                    "session_recovery",
+                    &[("success", "true"), ("rows", &rows.len().to_string())],
+                );
                 assert_eq!(rows.len(), 1);
                 let val = rows[0].get_i32("42").expect("get_i32");
                 assert_eq!(val, 42);
             }
             other => {
-                log.line("session_recovery_failed", &[("outcome", &format!("{:?}", other))]);
-                panic!("session should be recoverable after syntax error, got: {:?}", other);
+                log.line(
+                    "session_recovery_failed",
+                    &[("outcome", &format!("{:?}", other))],
+                );
+                panic!(
+                    "session should be recoverable after syntax error, got: {:?}",
+                    other
+                );
             }
         }
 
@@ -318,7 +356,10 @@ fn real_mysql_query_execution_error_handling() {
                 log.line("division_error_received", &[("error", &e.to_string())]);
             }
             other => {
-                log.line("unexpected_division_outcome", &[("outcome", &format!("{:?}", other))]);
+                log.line(
+                    "unexpected_division_outcome",
+                    &[("outcome", &format!("{:?}", other))],
+                );
                 panic!("unexpected division by zero result: {:?}", other);
             }
         }
@@ -332,7 +373,10 @@ fn real_mysql_query_execution_error_handling() {
                 assert_eq!(rows.len(), 1);
             }
             other => {
-                log.line("final_recovery_failed", &[("outcome", &format!("{:?}", other))]);
+                log.line(
+                    "final_recovery_failed",
+                    &[("outcome", &format!("{:?}", other))],
+                );
                 panic!("session should still be usable, got: {:?}", other);
             }
         }

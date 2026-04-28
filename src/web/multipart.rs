@@ -24,6 +24,8 @@ use std::collections::HashMap;
 use super::extract::{ExtractionError, FromRequest, Request};
 use super::response::StatusCode;
 use crate::bytes::Bytes;
+use crate::time::wall_now;
+use crate::types::Time;
 
 /// Default maximum multipart body size (16 MiB).
 const DEFAULT_MAX_MULTIPART_SIZE: usize = 16 * 1024 * 1024;
@@ -36,6 +38,12 @@ const DEFAULT_MAX_PART_HEADERS: usize = 8 * 1024;
 
 /// Default maximum part body size (8 MiB).
 const DEFAULT_MAX_PART_BODY_SIZE: usize = 8 * 1024 * 1024;
+
+/// Default request parsing timeout (30 seconds).
+const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 30;
+
+/// Default idle timeout between parsing steps (5 seconds).
+const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 5;
 
 /// Configurable limits for multipart request parsing.
 ///
@@ -61,6 +69,10 @@ pub struct MultipartLimits {
     pub max_part_headers: usize,
     /// Maximum body size per part in bytes.
     pub max_part_body_size: usize,
+    /// Maximum time to spend parsing the entire request in seconds.
+    pub request_timeout_secs: u64,
+    /// Maximum idle time between parsing operations in seconds.
+    pub idle_timeout_secs: u64,
 }
 
 impl Default for MultipartLimits {
@@ -70,6 +82,8 @@ impl Default for MultipartLimits {
             max_parts: DEFAULT_MAX_PARTS,
             max_part_headers: DEFAULT_MAX_PART_HEADERS,
             max_part_body_size: DEFAULT_MAX_PART_BODY_SIZE,
+            request_timeout_secs: DEFAULT_REQUEST_TIMEOUT_SECS,
+            idle_timeout_secs: DEFAULT_IDLE_TIMEOUT_SECS,
         }
     }
 }
@@ -106,6 +120,20 @@ impl MultipartLimits {
     #[must_use]
     pub fn max_part_body_size(mut self, bytes: usize) -> Self {
         self.max_part_body_size = bytes;
+        self
+    }
+
+    /// Set the request parsing timeout in seconds.
+    #[must_use]
+    pub fn request_timeout_secs(mut self, secs: u64) -> Self {
+        self.request_timeout_secs = secs;
+        self
+    }
+
+    /// Set the idle timeout between parsing operations in seconds.
+    #[must_use]
+    pub fn idle_timeout_secs(mut self, secs: u64) -> Self {
+        self.idle_timeout_secs = secs;
         self
     }
 }
@@ -258,7 +286,8 @@ impl FromRequest for Multipart {
             ExtractionError::bad_request("missing or invalid boundary in Content-Type")
         })?;
 
-        let fields = parse_multipart(&req.body, &boundary, &limits)?;
+        let parse_start = wall_now();
+        let fields = parse_multipart(&req.body, &boundary, &limits, parse_start)?;
 
         Ok(Self { fields })
     }
@@ -371,11 +400,45 @@ fn parse_quoted_mime_value(stripped: &str) -> Option<String> {
     None
 }
 
+/// Check if parsing should timeout due to elapsed time.
+fn check_timeout(
+    parse_start: Time,
+    last_progress: Time,
+    limits: &MultipartLimits,
+) -> Result<(), ExtractionError> {
+    let now = wall_now();
+    let total_elapsed = now.duration_since(parse_start) / 1_000_000_000; // Convert to seconds
+    let idle_elapsed = now.duration_since(last_progress) / 1_000_000_000;
+
+    if total_elapsed > limits.request_timeout_secs {
+        return Err(ExtractionError::new(
+            StatusCode::REQUEST_TIMEOUT,
+            format!(
+                "multipart parsing timed out after {total_elapsed}s (max {}s)",
+                limits.request_timeout_secs
+            ),
+        ));
+    }
+
+    if idle_elapsed > limits.idle_timeout_secs {
+        return Err(ExtractionError::new(
+            StatusCode::REQUEST_TIMEOUT,
+            format!(
+                "multipart parsing idle for {idle_elapsed}s (max {}s)",
+                limits.idle_timeout_secs
+            ),
+        ));
+    }
+
+    Ok(())
+}
+
 /// Parse multipart body given a boundary string.
 fn parse_multipart(
     body: &Bytes,
     boundary: &str,
     limits: &MultipartLimits,
+    parse_start: Time,
 ) -> Result<Vec<MultipartField>, ExtractionError> {
     let delimiter = format!("--{boundary}");
     let delimiter_bytes = delimiter.as_bytes();
@@ -384,8 +447,10 @@ fn parse_multipart(
 
     let mut fields = Vec::new();
     let mut pos = 0;
+    let mut last_progress = parse_start;
 
     // Skip preamble: advance to first delimiter.
+    check_timeout(parse_start, last_progress, limits)?;
     pos = match find_multipart_delimiter(body, delimiter_bytes, pos) {
         Some(idx) => idx + delimiter_bytes.len(),
         None => {
@@ -404,6 +469,9 @@ fn parse_multipart(
     pos = skip_line_ending(body, pos);
 
     loop {
+        // Check timeout at start of each iteration
+        check_timeout(parse_start, last_progress, limits)?;
+
         if fields.len() >= limits.max_parts {
             return Err(ExtractionError::bad_request(format!(
                 "too many multipart parts (max {})",
@@ -417,6 +485,7 @@ fn parse_multipart(
         let headers_end = find_blank_line(body, pos).ok_or_else(|| {
             ExtractionError::bad_request("multipart part missing header terminator")
         })?;
+        last_progress = wall_now(); // Mark progress after finding headers
 
         let headers_section = &body[pos..headers_end.0];
         if headers_section.len() > limits.max_part_headers {
@@ -431,10 +500,12 @@ fn parse_multipart(
         let body_start = headers_end.1;
 
         // Find next delimiter.
+        check_timeout(parse_start, last_progress, limits)?;
         let next_delim =
             find_multipart_delimiter(body, delimiter_bytes, body_start).ok_or_else(|| {
                 ExtractionError::bad_request("multipart part missing closing boundary")
             })?;
+        last_progress = wall_now(); // Mark progress after finding boundary
 
         // Part body ends before the CRLF preceding the delimiter.
         // If the client sent a malformed request where the boundary immediately follows
@@ -885,7 +956,7 @@ mod tests {
                 b"alice",
             )],
         );
-        let fields = parse_multipart(&body, "BOUNDARY", &MultipartLimits::default()).unwrap();
+        let fields = parse_multipart(&body, "BOUNDARY", &MultipartLimits::default(), wall_now()).unwrap();
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].name(), "username");
         assert_eq!(fields[0].text().unwrap(), "alice");
@@ -906,7 +977,7 @@ mod tests {
             .position(|w| w == b"alice")
             .unwrap();
 
-        let fields = parse_multipart(&body, "BOUNDARY", &MultipartLimits::default()).unwrap();
+        let fields = parse_multipart(&body, "BOUNDARY", &MultipartLimits::default(), wall_now()).unwrap();
 
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].body().as_ref(), b"alice");
@@ -923,7 +994,7 @@ mod tests {
                 ("Content-Disposition: form-data; name=\"c\"", b"3"),
             ],
         );
-        let fields = parse_multipart(&body, "B", &MultipartLimits::default()).unwrap();
+        let fields = parse_multipart(&body, "B", &MultipartLimits::default(), wall_now()).unwrap();
         assert_eq!(fields.len(), 3);
         assert_eq!(fields[0].name(), "a");
         assert_eq!(fields[1].name(), "b");
@@ -956,7 +1027,7 @@ mod tests {
             )],
         );
 
-        let fields = parse_multipart(&body, "BOUNDARY", &MultipartLimits::default()).unwrap();
+        let fields = parse_multipart(&body, "BOUNDARY", &MultipartLimits::default(), wall_now()).unwrap();
 
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].name(), "payload");
@@ -972,7 +1043,7 @@ mod tests {
                 b"Hello, world!",
             )],
         );
-        let fields = parse_multipart(&body, "X", &MultipartLimits::default()).unwrap();
+        let fields = parse_multipart(&body, "X", &MultipartLimits::default(), wall_now()).unwrap();
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].name(), "doc");
         assert_eq!(fields[0].filename().unwrap(), "readme.txt");
@@ -989,7 +1060,7 @@ mod tests {
                 b"Hello, world!",
             )],
         );
-        let fields = parse_multipart(&body, "X", &MultipartLimits::default()).unwrap();
+        let fields = parse_multipart(&body, "X", &MultipartLimits::default(), wall_now()).unwrap();
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].name(), "doc");
         assert_eq!(fields[0].filename().unwrap(), "€ exchange rates");
@@ -1007,7 +1078,7 @@ mod tests {
                 &binary,
             )],
         );
-        let fields = parse_multipart(&body, "BIN", &MultipartLimits::default()).unwrap();
+        let fields = parse_multipart(&body, "BIN", &MultipartLimits::default(), wall_now()).unwrap();
         assert_eq!(fields[0].body().as_ref(), &binary[..]);
         assert!(fields[0].text().is_err()); // Not valid UTF-8.
     }
@@ -1018,7 +1089,7 @@ mod tests {
             "E",
             &[("Content-Disposition: form-data; name=\"empty\"", b"")],
         );
-        let fields = parse_multipart(&body, "E", &MultipartLimits::default()).unwrap();
+        let fields = parse_multipart(&body, "E", &MultipartLimits::default(), wall_now()).unwrap();
         assert_eq!(fields.len(), 1);
         assert!(fields[0].body().is_empty());
     }
@@ -1029,6 +1100,7 @@ mod tests {
             &Bytes::from_static(b"no boundary here"),
             "MISSING",
             &MultipartLimits::default(),
+            wall_now(),
         );
         assert!(result.is_err());
     }
@@ -1196,7 +1268,7 @@ mod tests {
                 ("Content-Disposition: form-data; name=\"y\"", b"2"),
             ],
         );
-        let fields = parse_multipart(&body, "F", &MultipartLimits::default()).unwrap();
+        let fields = parse_multipart(&body, "F", &MultipartLimits::default(), wall_now()).unwrap();
         let mp = Multipart { fields };
 
         assert_eq!(mp.field("x").unwrap().text().unwrap(), "1");
@@ -1213,7 +1285,7 @@ mod tests {
                 ("Content-Disposition: form-data; name=\"tag\"", b"b"),
             ],
         );
-        let fields = parse_multipart(&body, "R", &MultipartLimits::default()).unwrap();
+        let fields = parse_multipart(&body, "R", &MultipartLimits::default(), wall_now()).unwrap();
         let mp = Multipart { fields };
 
         let tags = mp.fields_by_name("tag");
@@ -1231,7 +1303,7 @@ mod tests {
     fn multipart_into_fields() {
         let body =
             make_multipart_body("I", &[("Content-Disposition: form-data; name=\"k\"", b"v")]);
-        let fields = parse_multipart(&body, "I", &MultipartLimits::default()).unwrap();
+        let fields = parse_multipart(&body, "I", &MultipartLimits::default(), wall_now()).unwrap();
         let mp = Multipart { fields };
         let mut owned = mp.into_fields();
         assert_eq!(owned.len(), 1);
@@ -1251,7 +1323,7 @@ mod tests {
         body.extend_from_slice(b"data");
         body.extend_from_slice(b"\n--B--\n");
         let body = Bytes::from(body);
-        let fields = parse_multipart(&body, "B", &MultipartLimits::default()).unwrap();
+        let fields = parse_multipart(&body, "B", &MultipartLimits::default(), wall_now()).unwrap();
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].text().unwrap(), "data");
     }
@@ -1265,7 +1337,7 @@ mod tests {
         body.extend_from_slice(b"val");
         body.extend_from_slice(b"\r\n--BOUND--\r\n");
         let body = Bytes::from(body);
-        let fields = parse_multipart(&body, "BOUND", &MultipartLimits::default()).unwrap();
+        let fields = parse_multipart(&body, "BOUND", &MultipartLimits::default(), wall_now()).unwrap();
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].text().unwrap(), "val");
     }
@@ -1288,5 +1360,59 @@ mod tests {
         let mp = Multipart { fields: vec![] };
         let dbg = format!("{mp:?}");
         assert!(dbg.contains("Multipart"));
+    }
+
+    // ================================================================
+    // Timeout tests
+    // ================================================================
+
+    #[test]
+    fn timeout_limits_configuration() {
+        let limits = MultipartLimits::new()
+            .request_timeout_secs(60)
+            .idle_timeout_secs(10);
+
+        assert_eq!(limits.request_timeout_secs, 60);
+        assert_eq!(limits.idle_timeout_secs, 10);
+    }
+
+    #[test]
+    fn timeout_check_succeeds_within_limits() {
+        let limits = MultipartLimits::new()
+            .request_timeout_secs(60)
+            .idle_timeout_secs(10);
+
+        let start = wall_now();
+        let result = check_timeout(start, start, &limits);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn timeout_check_fails_when_request_timeout_exceeded() {
+        let limits = MultipartLimits::new()
+            .request_timeout_secs(0) // Set to 0 to trigger immediately
+            .idle_timeout_secs(10);
+
+        let start = Time::ZERO; // Very old timestamp
+        let result = check_timeout(start, start, &limits);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.status, StatusCode::REQUEST_TIMEOUT);
+        assert!(err.message.contains("multipart parsing timed out"));
+    }
+
+    #[test]
+    fn timeout_check_fails_when_idle_timeout_exceeded() {
+        let limits = MultipartLimits::new()
+            .request_timeout_secs(60)
+            .idle_timeout_secs(0); // Set to 0 to trigger immediately
+
+        let start = wall_now();
+        let old_progress = Time::ZERO; // Very old timestamp
+        let result = check_timeout(start, old_progress, &limits);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.status, StatusCode::REQUEST_TIMEOUT);
+        assert!(err.message.contains("multipart parsing idle"));
     }
 }

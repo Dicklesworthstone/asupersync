@@ -68,6 +68,7 @@ Both test suites include hard production guards:
 - **Production URLs** - URLs containing "prod" or "production" are rejected
 - **Remote hosts** - Non-localhost URLs require explicit `ALLOW_NON_LOCALHOST_POSTGRES=true` / `ALLOW_NON_LOCALHOST_MYSQL=true`
 - **Environment gates** - Tests only run when `REAL_PG_TESTS=true` / `REAL_MYSQL_TESTS=true`
+- **Redacted skip logs** - Blocked `POSTGRES_URL` / `MYSQL_URL` values are never printed to CI logs
 
 ## Test Structure and Logging
 

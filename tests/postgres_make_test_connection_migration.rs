@@ -24,10 +24,10 @@
 #![cfg(all(test, feature = "postgres"))]
 #![allow(clippy::pedantic, clippy::nursery, clippy::print_stderr)]
 
+use asupersync::Cx;
 use asupersync::database::postgres::{PgConnectOptions, PgConnection, PgError};
 use asupersync::test_utils::run_test_with_cx;
-use asupersync::types::{Outcome, CancelKind};
-use asupersync::Cx;
+use asupersync::types::{CancelKind, Outcome};
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -58,13 +58,12 @@ impl RealPgConfig {
         } else if node_env == "production" {
             Some("BLOCKED: NODE_ENV=production".into())
         } else if looks_prod {
-            Some(format!(
-                "BLOCKED: POSTGRES_URL looks like production: {url}"
-            ))
+            Some("BLOCKED: POSTGRES_URL looks like production (redacted)".into())
         } else if !host_looks_local && !allow_remote {
-            Some(format!(
-                "BLOCKED: non-localhost POSTGRES_URL without ALLOW_NON_LOCALHOST_POSTGRES=true: {url}"
-            ))
+            Some(
+                "BLOCKED: non-localhost POSTGRES_URL without ALLOW_NON_LOCALHOST_POSTGRES=true (redacted)"
+                    .into(),
+            )
         } else {
             None
         };
@@ -211,7 +210,10 @@ fn real_pg_transaction_rollback_behavior() {
     if skip_if_disabled(&cfg, "real_pg_transaction_rollback_behavior") {
         return;
     }
-    let log = PgMigrationTestLogger::new("postgres_migration", "real_pg_transaction_rollback_behavior");
+    let log = PgMigrationTestLogger::new(
+        "postgres_migration",
+        "real_pg_transaction_rollback_behavior",
+    );
 
     run_test_with_cx(|cx| async move {
         log.phase("connect");
@@ -223,22 +225,25 @@ fn real_pg_transaction_rollback_behavior() {
         // Insert some test data that we'll rollback
         log.phase("insert_test_data");
         let _ = unwrap_pg(
-            conn.execute_unchecked(&cx, "CREATE TEMPORARY TABLE test_rollback (id int)").await,
+            conn.execute_unchecked(&cx, "CREATE TEMPORARY TABLE test_rollback (id int)")
+                .await,
             &log,
-            "create_temp_table"
+            "create_temp_table",
         );
         let _ = unwrap_pg(
-            conn.execute_unchecked(&cx, "INSERT INTO test_rollback VALUES (42)").await,
+            conn.execute_unchecked(&cx, "INSERT INTO test_rollback VALUES (42)")
+                .await,
             &log,
-            "insert_data"
+            "insert_data",
         );
 
         // REAL DATABASE VERIFICATION: Data should be visible within transaction
         log.phase("verify_data_in_transaction");
         let rows = unwrap_pg(
-            conn.query_unchecked(&cx, "SELECT id FROM test_rollback").await,
+            conn.query_unchecked(&cx, "SELECT id FROM test_rollback")
+                .await,
             &log,
-            "select_in_txn"
+            "select_in_txn",
         );
         assert_eq!(rows.len(), 1);
         let val = rows[0].get_i32("id").expect("get_i32");
@@ -250,7 +255,7 @@ fn real_pg_transaction_rollback_behavior() {
         let _ = unwrap_pg(
             conn.execute_unchecked(&cx, "ROLLBACK").await,
             &log,
-            "ROLLBACK"
+            "ROLLBACK",
         );
 
         // REAL DATABASE VERIFICATION: Connection should be usable after rollback
@@ -264,22 +269,39 @@ fn real_pg_transaction_rollback_behavior() {
                 assert_eq!(val, 1);
             }
             other => {
-                log.line("post_rollback_query_failed", &[("outcome", &format!("{:?}", other))]);
-                panic!("connection should be usable after rollback, got: {:?}", other);
+                log.line(
+                    "post_rollback_query_failed",
+                    &[("outcome", &format!("{:?}", other))],
+                );
+                panic!(
+                    "connection should be usable after rollback, got: {:?}",
+                    other
+                );
             }
         }
 
         // Verify temp table was cleaned up by rollback
         log.phase("verify_rollback_cleaned_up");
-        let cleanup_check = conn.query_unchecked(&cx, "SELECT COUNT(*) FROM pg_tables WHERE tablename LIKE 'test_rollback%'").await;
+        let cleanup_check = conn
+            .query_unchecked(
+                &cx,
+                "SELECT COUNT(*) FROM pg_tables WHERE tablename LIKE 'test_rollback%'",
+            )
+            .await;
         match cleanup_check {
             Outcome::Ok(rows) => {
                 let count = rows[0].get_i64("count").expect("get_i64");
-                log.line("table_cleanup_check", &[("remaining_tables", &count.to_string())]);
+                log.line(
+                    "table_cleanup_check",
+                    &[("remaining_tables", &count.to_string())],
+                );
                 assert_eq!(count, 0, "temp table should be cleaned up by rollback");
             }
             other => {
-                log.line("cleanup_check_failed", &[("outcome", &format!("{:?}", other))]);
+                log.line(
+                    "cleanup_check_failed",
+                    &[("outcome", &format!("{:?}", other))],
+                );
                 // Non-critical - just log the failure
             }
         }
@@ -299,7 +321,8 @@ fn real_pg_prepared_statement_lifecycle() {
     if skip_if_disabled(&cfg, "real_pg_prepared_statement_lifecycle") {
         return;
     }
-    let log = PgMigrationTestLogger::new("postgres_migration", "real_pg_prepared_statement_lifecycle");
+    let log =
+        PgMigrationTestLogger::new("postgres_migration", "real_pg_prepared_statement_lifecycle");
 
     run_test_with_cx(|cx| async move {
         log.phase("connect");
@@ -308,15 +331,16 @@ fn real_pg_prepared_statement_lifecycle() {
         // Test 1: Prepare and execute a statement
         log.phase("prepare_and_execute_statement");
         let _ = unwrap_pg(
-            conn.execute_unchecked(&cx, "PREPARE test_stmt AS SELECT $1::int4 as value").await,
+            conn.execute_unchecked(&cx, "PREPARE test_stmt AS SELECT $1::int4 as value")
+                .await,
             &log,
-            "prepare_statement"
+            "prepare_statement",
         );
 
         let rows = unwrap_pg(
             conn.query_unchecked(&cx, "EXECUTE test_stmt(123)").await,
             &log,
-            "execute_statement"
+            "execute_statement",
         );
         assert_eq!(rows.len(), 1);
         let val = rows[0].get_i32("value").expect("get_i32");
@@ -331,7 +355,10 @@ fn real_pg_prepared_statement_lifecycle() {
                 log.line("deallocate_success", &[("success", "true")]);
             }
             other => {
-                log.line("unexpected_dealloc_outcome", &[("outcome", &format!("{:?}", other))]);
+                log.line(
+                    "unexpected_dealloc_outcome",
+                    &[("outcome", &format!("{:?}", other))],
+                );
                 panic!("deallocate should succeed, got: {:?}", other);
             }
         }
@@ -349,14 +376,22 @@ fn real_pg_prepared_statement_lifecycle() {
                 }
             }
             other => {
-                log.line("unexpected_execute_outcome", &[("outcome", &format!("{:?}", other))]);
-                panic!("execute on deallocated statement should error, got: {:?}", other);
+                log.line(
+                    "unexpected_execute_outcome",
+                    &[("outcome", &format!("{:?}", other))],
+                );
+                panic!(
+                    "execute on deallocated statement should error, got: {:?}",
+                    other
+                );
             }
         }
 
         // Test 4: Connection should still be usable after statement error
         log.phase("verify_connection_usable_after_error");
-        let recovery_query = conn.query_unchecked(&cx, "SELECT 'recovered' as status").await;
+        let recovery_query = conn
+            .query_unchecked(&cx, "SELECT 'recovered' as status")
+            .await;
         match recovery_query {
             Outcome::Ok(rows) => {
                 assert_eq!(rows.len(), 1);
@@ -366,7 +401,10 @@ fn real_pg_prepared_statement_lifecycle() {
             }
             other => {
                 log.line("recovery_failed", &[("outcome", &format!("{:?}", other))]);
-                panic!("connection should recover after statement error, got: {:?}", other);
+                panic!(
+                    "connection should recover after statement error, got: {:?}",
+                    other
+                );
             }
         }
 
@@ -385,7 +423,10 @@ fn real_pg_query_execution_error_handling() {
     if skip_if_disabled(&cfg, "real_pg_query_execution_error_handling") {
         return;
     }
-    let log = PgMigrationTestLogger::new("postgres_migration", "real_pg_query_execution_error_handling");
+    let log = PgMigrationTestLogger::new(
+        "postgres_migration",
+        "real_pg_query_execution_error_handling",
+    );
 
     run_test_with_cx(|cx| async move {
         log.phase("connect");
@@ -393,7 +434,9 @@ fn real_pg_query_execution_error_handling() {
 
         // Test 1: Syntax error should preserve session but return error
         log.phase("test_syntax_error");
-        let syntax_error = conn.query_unchecked(&cx, "SELECT invalid syntax here").await;
+        let syntax_error = conn
+            .query_unchecked(&cx, "SELECT invalid syntax here")
+            .await;
         match syntax_error {
             Outcome::Err(e) => {
                 log.line("syntax_error_received", &[("error", &e.to_string())]);
@@ -404,7 +447,10 @@ fn real_pg_query_execution_error_handling() {
                 }
             }
             other => {
-                log.line("unexpected_syntax_outcome", &[("outcome", &format!("{:?}", other))]);
+                log.line(
+                    "unexpected_syntax_outcome",
+                    &[("outcome", &format!("{:?}", other))],
+                );
                 panic!("expected syntax error, got: {:?}", other);
             }
         }
@@ -414,14 +460,23 @@ fn real_pg_query_execution_error_handling() {
         let recovery_query = conn.query_unchecked(&cx, "SELECT 42").await;
         match recovery_query {
             Outcome::Ok(rows) => {
-                log.line("session_recovery", &[("success", "true"), ("rows", &rows.len().to_string())]);
+                log.line(
+                    "session_recovery",
+                    &[("success", "true"), ("rows", &rows.len().to_string())],
+                );
                 assert_eq!(rows.len(), 1);
                 let val = rows[0].get_i32("?column?").expect("get_i32");
                 assert_eq!(val, 42);
             }
             other => {
-                log.line("session_recovery_failed", &[("outcome", &format!("{:?}", other))]);
-                panic!("session should be recoverable after syntax error, got: {:?}", other);
+                log.line(
+                    "session_recovery_failed",
+                    &[("outcome", &format!("{:?}", other))],
+                );
+                panic!(
+                    "session should be recoverable after syntax error, got: {:?}",
+                    other
+                );
             }
         }
 
@@ -438,7 +493,10 @@ fn real_pg_query_execution_error_handling() {
                 }
             }
             other => {
-                log.line("unexpected_division_outcome", &[("outcome", &format!("{:?}", other))]);
+                log.line(
+                    "unexpected_division_outcome",
+                    &[("outcome", &format!("{:?}", other))],
+                );
                 panic!("expected division by zero error, got: {:?}", other);
             }
         }
@@ -452,7 +510,10 @@ fn real_pg_query_execution_error_handling() {
                 assert_eq!(rows.len(), 1);
             }
             other => {
-                log.line("final_recovery_failed", &[("outcome", &format!("{:?}", other))]);
+                log.line(
+                    "final_recovery_failed",
+                    &[("outcome", &format!("{:?}", other))],
+                );
                 panic!("session should still be usable, got: {:?}", other);
             }
         }

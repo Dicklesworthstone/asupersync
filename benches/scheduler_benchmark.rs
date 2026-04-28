@@ -1244,7 +1244,7 @@ fn bench_cancel_preemption(c: &mut Criterion) {
 
 fn bench_adaptive_cancel_streak_policy(c: &mut Criterion) {
     use asupersync::runtime::scheduler::three_lane::{
-        AdaptiveCancelStreakPolicy, AdaptiveEpochSnapshot,
+        AdaptiveCancelStreakPolicyBench, AdaptivePolicyBenchSnapshot,
     };
     use asupersync::util::DetRng;
 
@@ -1258,26 +1258,26 @@ fn bench_adaptive_cancel_streak_policy(c: &mut Criterion) {
         base_exceed: u64,
         eff_exceed: u64,
         fallback: u64,
-    ) -> AdaptiveEpochSnapshot {
-        AdaptiveEpochSnapshot {
+    ) -> AdaptivePolicyBenchSnapshot {
+        AdaptivePolicyBenchSnapshot::new(
             potential,
             deadline_pressure,
-            base_limit_exceedances: base_exceed,
-            effective_limit_exceedances: eff_exceed,
-            fallback_cancel_dispatches: fallback,
-        }
+            base_exceed,
+            eff_exceed,
+            fallback,
+        )
     }
 
     // UCB1 arm selection performance
     group.bench_function("ucb1_arm_selection", |b: &mut criterion::Bencher| {
         b.iter_batched(
             || {
-                let mut policy = AdaptiveCancelStreakPolicy::new(10);
+                let mut policy = AdaptiveCancelStreakPolicyBench::new(10);
                 // Pre-train with some data
                 let start = test_snapshot(100.0, 0.25, 0, 0, 0);
                 let mut rng = DetRng::new(0x2024_0001);
                 for i in 0..20 {
-                    policy.selected_arm = i % policy.mean_rewards.len();
+                    policy.force_selected_arm(i % policy.arm_count());
                     policy.begin_epoch(start);
                     let sample = rng.next_u64();
                     let end = if i % 3 == 0 {
@@ -1302,7 +1302,7 @@ fn bench_adaptive_cancel_streak_policy(c: &mut Criterion) {
     group.bench_function("ucb1_epoch_completion", |b: &mut criterion::Bencher| {
         b.iter_batched(
             || {
-                let mut policy = AdaptiveCancelStreakPolicy::new(10);
+                let mut policy = AdaptiveCancelStreakPolicyBench::new(10);
                 let start = test_snapshot(100.0, 0.25, 0, 0, 0);
                 policy.begin_epoch(start);
                 (policy, DetRng::new(0x2024_0002))
@@ -1326,7 +1326,7 @@ fn bench_adaptive_cancel_streak_policy(c: &mut Criterion) {
             |b, &epochs| {
                 b.iter_batched(
                     || {
-                        let policy = AdaptiveCancelStreakPolicy::new(10);
+                        let policy = AdaptiveCancelStreakPolicyBench::new(10);
                         let rng = DetRng::new(0x2024_0003);
                         (policy, rng)
                     },
@@ -1335,9 +1335,9 @@ fn bench_adaptive_cancel_streak_policy(c: &mut Criterion) {
 
                         // Simulate epochs with arm 2 being optimal (gets best rewards)
                         let mut total_reward = 0.0;
-                        for epoch in 0..epochs as usize {
+                        for _epoch in 0..epochs as usize {
                             let selected_arm = policy.select_arm_ucb();
-                            policy.selected_arm = selected_arm;
+                            policy.force_selected_arm(selected_arm);
                             policy.begin_epoch(start);
 
                             let sample = rng.next_u64();
@@ -1360,23 +1360,18 @@ fn bench_adaptive_cancel_streak_policy(c: &mut Criterion) {
         );
     }
 
-    // Compare arm update overhead for different numbers of arms
-    for &num_arms in &[5, 10, 20] {
+    // Compare update overhead for different prior-history masses. The policy
+    // has a fixed arm table, so varying synthetic pull mass is the honest
+    // state dimension to benchmark here.
+    for &history_mass in &[1u64, 10, 100] {
         group.bench_with_input(
-            BenchmarkId::new("ucb1_arm_update_overhead", num_arms),
-            &num_arms,
-            |b, &num_arms| {
+            BenchmarkId::new("ucb1_arm_update_overhead", history_mass),
+            &history_mass,
+            |b, &history_mass| {
                 b.iter_batched(
                     || {
-                        let mut policy = AdaptiveCancelStreakPolicy::new(10);
-                        // Resize to test different arm counts
-                        policy.mean_rewards = vec![0.5; num_arms]
-                            .try_into()
-                            .unwrap_or(policy.mean_rewards);
-                        policy.discounted_pulls = vec![1.0; num_arms]
-                            .try_into()
-                            .unwrap_or(policy.discounted_pulls);
-
+                        let mut policy = AdaptiveCancelStreakPolicyBench::new(10);
+                        policy.seed_history([0.5; 5], [history_mass as f64; 5]);
                         let start = test_snapshot(100.0, 0.25, 0, 0, 0);
                         policy.begin_epoch(start);
                         (policy, DetRng::new(0x2024_0004))
@@ -1397,7 +1392,7 @@ fn bench_adaptive_cancel_streak_policy(c: &mut Criterion) {
     group.bench_function("ucb1_pressure_adaptation", |b: &mut criterion::Bencher| {
         b.iter_batched(
             || {
-                let policy = AdaptiveCancelStreakPolicy::new(10);
+                let policy = AdaptiveCancelStreakPolicyBench::new(10);
                 let rng = DetRng::new(0x2024_0005);
                 (policy, rng)
             },
@@ -1415,7 +1410,7 @@ fn bench_adaptive_cancel_streak_policy(c: &mut Criterion) {
                 {
                     for _ in 0..10 {
                         let arm = policy.select_arm_ucb();
-                        policy.selected_arm = arm;
+                        policy.force_selected_arm(arm);
                         policy.begin_epoch(start);
 
                         let sample = rng.next_u64();
