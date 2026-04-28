@@ -1,5 +1,6 @@
 #![allow(warnings)]
 #![allow(clippy::all)]
+#![allow(unsafe_code)]
 //! BSD Kqueue Event Conformance Tests
 //!
 //! Tests compliance with BSD kqueue event semantics for macOS/FreeBSD systems.
@@ -17,15 +18,24 @@
 
 #![cfg(any(target_os = "macos", target_os = "freebsd"))]
 
-use asupersync::runtime::reactor::{Event, Interest, KqueueReactor, Token};
+use asupersync::runtime::reactor::{Interest, KqueueReactor, Reactor, Token};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::os::unix::io::RawFd;
+use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
+
+#[derive(Clone, Copy)]
+struct RawFdSource(RawFd);
+
+impl AsRawFd for RawFdSource {
+    fn as_raw_fd(&self) -> RawFd {
+        self.0
+    }
+}
 
 /// Environment variable to enable golden file updates
 const UPDATE_GOLDENS_ENV: &str = "UPDATE_GOLDENS";
@@ -186,7 +196,7 @@ fn capture_events(reactor: &mut KqueueReactor, timeout: Duration) -> Vec<Capture
             Ok(_count) => {
                 for event in events_buffer.iter() {
                     let captured = CapturedEvent {
-                        token: event.token.0,
+                        token: u64::try_from(event.token.0).expect("reactor token fits in u64"),
                         ready_flags: event.ready.bits(),
                         sequence: sequence_counter,
                         timestamp_ns: start.elapsed().as_nanos() as u64,
@@ -220,12 +230,13 @@ fn kqueue_ev_oneshot_fire_and_silence() {
     let mut reactor = KqueueReactor::new().expect("Failed to create kqueue reactor");
 
     let (read_fd, write_fd) = create_test_pipe();
-    let token = Token::from(0x1234);
+    let token = Token::new(0x1234);
+    let read_source = RawFdSource(read_fd);
 
-    // Register with EV_ONESHOT flag (ONESHOT is already included in Interest::oneshot())
-    let interest = Interest::oneshot();
+    // Register with EV_ONESHOT flag.
+    let interest = Interest::READABLE | Interest::ONESHOT;
     reactor
-        .register(read_fd, token, interest)
+        .register(&read_source, token, interest)
         .expect("Failed to register pipe read fd");
 
     // Write data to trigger the event
@@ -278,12 +289,13 @@ fn kqueue_ev_clear_edge_trigger() {
     let mut reactor = KqueueReactor::new().expect("Failed to create kqueue reactor");
 
     let (read_fd, write_fd) = create_test_pipe();
-    let token = Token::from(0x5678);
+    let token = Token::new(0x5678);
+    let read_source = RawFdSource(read_fd);
 
     // Register with EV_CLEAR (edge-triggered) - this is the default for kqueue
-    let interest = Interest::clear();
+    let interest = Interest::READABLE | Interest::EDGE_TRIGGERED;
     reactor
-        .register(read_fd, token, interest)
+        .register(&read_source, token, interest)
         .expect("Failed to register pipe read fd");
 
     // Write data to trigger the event
@@ -339,12 +351,13 @@ fn kqueue_ev_dispatch_oneshot_disable() {
     let mut reactor = KqueueReactor::new().expect("Failed to create kqueue reactor");
 
     let (read_fd, write_fd) = create_test_pipe();
-    let token = Token::from(0x9ABC);
+    let token = Token::new(0x9ABC);
+    let read_source = RawFdSource(read_fd);
 
     // Register with EV_DISPATCH (one-shot but leaves event disabled)
-    let interest = Interest::dispatch();
+    let interest = Interest::READABLE | Interest::DISPATCH;
     reactor
-        .register(read_fd, token, interest)
+        .register(&read_source, token, interest)
         .expect("Failed to register pipe read fd");
 
     // Write data to trigger the event
@@ -364,7 +377,7 @@ fn kqueue_ev_dispatch_oneshot_disable() {
 
     // Re-enable the event by modifying it
     reactor
-        .modify(read_fd, token, Interest::dispatch())
+        .modify(token, Interest::READABLE | Interest::DISPATCH)
         .expect("Failed to re-enable event");
 
     // Should now fire again
@@ -409,15 +422,17 @@ fn kqueue_token_preservation() {
     let (read_fd2, write_fd2) = create_test_pipe();
 
     // Register multiple fds with different token values
-    let token1 = Token::from(0xDEADBEEF);
-    let token2 = Token::from(0xCAFEBABE);
+    let token1 = Token::new(0xDEADBEEF);
+    let token2 = Token::new(0xCAFEBABE);
+    let read_source1 = RawFdSource(read_fd1);
+    let read_source2 = RawFdSource(read_fd2);
 
     reactor
-        .register(read_fd1, token1, Interest::readable())
+        .register(&read_source1, token1, Interest::readable())
         .expect("Failed to register first pipe");
 
     reactor
-        .register(read_fd2, token2, Interest::readable())
+        .register(&read_source2, token2, Interest::readable())
         .expect("Failed to register second pipe");
 
     // Write to both pipes
@@ -466,12 +481,13 @@ fn kqueue_concurrent_kevent_calls() {
     ));
 
     let (read_fd, write_fd) = create_test_pipe();
-    let token = Token::from(0xCCCC);
+    let token = Token::new(0xCCCC);
+    let read_source = RawFdSource(read_fd);
 
     // Register the pipe for reading
     {
         let mut r = reactor.lock().unwrap();
-        r.register(read_fd, token, Interest::readable())
+        r.register(&read_source, token, Interest::readable())
             .expect("Failed to register pipe");
     }
 
@@ -503,7 +519,8 @@ fn kqueue_concurrent_kevent_calls() {
                         let mut events_guard = events_clone.lock().unwrap();
                         for event in thread_events_buffer.iter() {
                             let captured = CapturedEvent {
-                                token: event.token.0,
+                                token: u64::try_from(event.token.0)
+                                    .expect("reactor token fits in u64"),
                                 ready_flags: event.ready.bits(),
                                 sequence: sequence_counter,
                                 timestamp_ns: start.elapsed().as_nanos() as u64,

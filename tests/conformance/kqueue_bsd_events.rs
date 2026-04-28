@@ -26,4 +26,8 @@ fn kqueue_conformance_requires_bsd_platform() {
 }
 
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]
-pub use super::super::conformance_kqueue_bsd_events::*;
+mod bsd_standalone {
+    // Cargo integration tests are separate crate roots, so this conformance
+    // wrapper cannot re-export sibling `tests/conformance_kqueue_bsd_events.rs`.
+    // The standalone BSD test crate owns those kqueue semantics checks.
+}
