@@ -2316,3 +2316,14 @@ path = "fuzz_targets/hrw_routing_stability.rs"
 test = false
 doc = false
 bench = false
+
+# br-asupersync-srbpo7: Structure-aware PostgreSQL backend frame decoder fuzzer.
+# Tests src/database/postgres.rs::parse_message with random message types,
+# malformed length prefixes, oversized payloads, truncated Authentication/
+# RowDescription/DataRow frames, and backend protocol edge cases.
+[[bin]]
+name = "postgres_frame_decoder"
+path = "fuzz_targets/postgres_frame_decoder.rs"
+test = false
+doc = false
+bench = false
