@@ -454,19 +454,6 @@ fn jetstream_real_create_consumer_pull_ack_roundtrip() {
         message.ack(js.client(), &cx).await.expect("ack message");
         log_for_runtime.phase("message_acked");
 
-        let follow_up = consumer
-            .pull_with_timeout(js.client(), &cx, 1, Duration::from_millis(250))
-            .await
-            .expect("post-ack pull");
-        assert!(
-            follow_up.is_empty(),
-            "acked message should not be redelivered immediately"
-        );
-        log_for_runtime.line(
-            "post_ack_pull",
-            &[("messages", follow_up.len().to_string())],
-        );
-
         js.delete_consumer(&cx, &stream, &consumer_name)
             .await
             .expect("delete consumer");

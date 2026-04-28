@@ -33,14 +33,13 @@
 //! }
 //! ```
 
-use super::nats::{Message, NatsClient, NatsError, NatsMessage};
+use super::nats::{Message, NatsClient, NatsError};
 use crate::cx::Cx;
-use crate::time::wall_now;
+use crate::time::{timeout_at, wall_now};
 use crate::tracing_compat::warn;
 use crate::types::Time;
 use std::fmt;
 use std::fmt::Write as _;
-use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -996,10 +995,10 @@ impl Consumer {
         // A live JetStream broker only delivers pull responses once the
         // underlying NATS socket is actively pumped; awaiting `sub.next()`
         // alone is insufficient because nothing reads frames off the wire.
-        // Keep driving the client and only break on subscription close,
-        // timeout, or a real protocol/server error.
+        // Keep driving the client via `process()` and only break on timeout,
+        // connection close, or a real protocol/server error.
         let mut received = 0usize;
-        'pull: loop {
+        loop {
             if received >= batch {
                 break;
             }
@@ -1018,69 +1017,19 @@ impl Consumer {
                 break;
             }
 
-            let mut processed_any = false;
-            loop {
-                let message = match client.try_parse_message() {
-                    Ok(message) => message,
-                    Err(err) => {
-                        result = Err(err.into());
-                        break 'pull;
-                    }
-                };
+            let process_result = if let Some(deadline) = client_deadline {
+                let next = std::pin::pin!(client.process(cx));
+                timeout_at(deadline, next).await
+            } else {
+                Ok(client.process(cx).await)
+            };
 
-                match message {
-                    Some(NatsMessage::Ping) => {
-                        if let Err(err) = client.send_server_pong().await {
-                            result = Err(err.into());
-                            break 'pull;
-                        }
-                        processed_any = true;
-                    }
-                    Some(NatsMessage::Msg(msg)) => {
-                        if msg.sid == sid {
-                            if let Some(js_msg) = Self::parse_js_message(msg) {
-                                messages.push(js_msg);
-                                received += 1;
-                            }
-                        } else {
-                            client.dispatch_message(msg);
-                        }
-                        processed_any = true;
-                        if received >= batch {
-                            break;
-                        }
-                    }
-                    Some(NatsMessage::Err(err)) => {
-                        result = Err(NatsError::Server(err).into());
-                        break 'pull;
-                    }
-                    Some(_) => {
-                        processed_any = true;
-                    }
-                    None => {
-                        if processed_any {
-                            break;
-                        }
-
-                        let read_result = if let Some(deadline) = client_deadline {
-                            client.read_more_until(cx, deadline).await
-                        } else {
-                            client.read_more().await
-                        };
-
-                        match read_result {
-                            Ok(()) => {
-                                processed_any = true;
-                            }
-                            Err(NatsError::Io(err)) if err.kind() == io::ErrorKind::TimedOut => {
-                                break 'pull;
-                            }
-                            Err(err) => {
-                                result = Err(err.into());
-                                break 'pull;
-                            }
-                        }
-                    }
+            match process_result {
+                Ok(Ok(())) => {}
+                Ok(Err(NatsError::Closed)) | Err(_) => break,
+                Ok(Err(err)) => {
+                    result = Err(err.into());
+                    break;
                 }
             }
         }
