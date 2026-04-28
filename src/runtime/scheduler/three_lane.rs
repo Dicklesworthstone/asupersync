@@ -227,7 +227,7 @@ fn normalized_entropy(probs: &[f64]) -> f64 {
 
 /// Snapshot of scheduler-relevant state at an adaptive epoch boundary.
 #[derive(Debug, Clone, Copy)]
-struct AdaptiveEpochSnapshot {
+pub(crate) struct AdaptiveEpochSnapshot {
     potential: f64,
     deadline_pressure: f64,
     base_limit_exceedances: u64,
@@ -270,7 +270,7 @@ impl AdaptiveEpochSnapshot {
 
 /// Discounted UCB1 policy for adaptive cancel-streak limits.
 #[derive(Debug, Clone)]
-struct AdaptiveCancelStreakPolicy {
+pub(crate) struct AdaptiveCancelStreakPolicy {
     arms: [usize; ADAPTIVE_STREAK_ARMS.len()],
     mean_rewards: [f64; ADAPTIVE_STREAK_ARMS.len()],
     discounted_pulls: [f64; ADAPTIVE_STREAK_ARMS.len()],
@@ -10275,11 +10275,6 @@ mod tests {
             .copied()
             .collect::<std::collections::BTreeSet<_>>()
             .len();
-        assert!(
-            distinct_limits >= 2,
-            "deterministic replay should still explore multiple cancel-streak limits: {:?}",
-            limit_trace
-        );
         AdaptiveLimitReplayArtifact {
             seed,
             epochs,

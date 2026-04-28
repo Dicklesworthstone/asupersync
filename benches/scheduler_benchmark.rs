@@ -1183,14 +1183,22 @@ fn bench_cancel_preemption(c: &mut Criterion) {
 // =============================================================================
 
 fn bench_adaptive_cancel_streak_policy(c: &mut Criterion) {
-    use asupersync::runtime::scheduler::three_lane::{AdaptiveCancelStreakPolicy, AdaptiveEpochSnapshot};
+    use asupersync::runtime::scheduler::three_lane::{
+        AdaptiveCancelStreakPolicy, AdaptiveEpochSnapshot,
+    };
     use asupersync::util::DetRng;
 
     let mut group = c.benchmark_group("scheduler/adaptive_cancel_streak");
     group.sample_size(50);
 
     // Helper function to create test epoch snapshots
-    fn test_snapshot(potential: f64, deadline_pressure: f64, base_exceed: u64, eff_exceed: u64, fallback: u64) -> AdaptiveEpochSnapshot {
+    fn test_snapshot(
+        potential: f64,
+        deadline_pressure: f64,
+        base_exceed: u64,
+        eff_exceed: u64,
+        fallback: u64,
+    ) -> AdaptiveEpochSnapshot {
         AdaptiveEpochSnapshot {
             potential,
             deadline_pressure,
@@ -1207,7 +1215,7 @@ fn bench_adaptive_cancel_streak_policy(c: &mut Criterion) {
                 let mut policy = AdaptiveCancelStreakPolicy::new(10);
                 // Pre-train with some data
                 let start = test_snapshot(100.0, 0.25, 0, 0, 0);
-                let mut rng = DetRng::new(0x2024_UCB1);
+                let mut rng = DetRng::new(0x2024_0001);
                 for i in 0..20 {
                     policy.selected_arm = i % policy.mean_rewards.len();
                     policy.begin_epoch(start);
@@ -1237,7 +1245,7 @@ fn bench_adaptive_cancel_streak_policy(c: &mut Criterion) {
                 let mut policy = AdaptiveCancelStreakPolicy::new(10);
                 let start = test_snapshot(100.0, 0.25, 0, 0, 0);
                 policy.begin_epoch(start);
-                (policy, DetRng::new(0x2024_EPOCH))
+                (policy, DetRng::new(0x2024_0002))
             },
             |(mut policy, mut rng)| {
                 let sample = rng.next_u64();
@@ -1259,7 +1267,7 @@ fn bench_adaptive_cancel_streak_policy(c: &mut Criterion) {
                 b.iter_batched(
                     || {
                         let policy = AdaptiveCancelStreakPolicy::new(10);
-                        let rng = DetRng::new(0x2024_CONV);
+                        let rng = DetRng::new(0x2024_0003);
                         (policy, rng)
                     },
                     |(mut policy, mut rng)| {
@@ -1275,9 +1283,9 @@ fn bench_adaptive_cancel_streak_policy(c: &mut Criterion) {
                             let sample = rng.next_u64();
                             // Arm 2 gets better rewards, others get worse
                             let end = if selected_arm == 2 {
-                                test_snapshot(90.0, 0.15, 0, 0, 0)  // Good performance
+                                test_snapshot(90.0, 0.15, 0, 0, 0) // Good performance
                             } else {
-                                test_snapshot(130.0, 0.7, 3, 4, 2)  // Poor performance
+                                test_snapshot(130.0, 0.7, 3, 4, 2) // Poor performance
                             };
 
                             if let Some(reward) = policy.complete_epoch(end, sample) {
@@ -1302,12 +1310,16 @@ fn bench_adaptive_cancel_streak_policy(c: &mut Criterion) {
                     || {
                         let mut policy = AdaptiveCancelStreakPolicy::new(10);
                         // Resize to test different arm counts
-                        policy.mean_rewards = vec![0.5; num_arms].try_into().unwrap_or(policy.mean_rewards);
-                        policy.discounted_pulls = vec![1.0; num_arms].try_into().unwrap_or(policy.discounted_pulls);
+                        policy.mean_rewards = vec![0.5; num_arms]
+                            .try_into()
+                            .unwrap_or(policy.mean_rewards);
+                        policy.discounted_pulls = vec![1.0; num_arms]
+                            .try_into()
+                            .unwrap_or(policy.discounted_pulls);
 
                         let start = test_snapshot(100.0, 0.25, 0, 0, 0);
                         policy.begin_epoch(start);
-                        (policy, DetRng::new(0x2024_ARMS))
+                        (policy, DetRng::new(0x2024_0004))
                     },
                     |(mut policy, mut rng)| {
                         let sample = rng.next_u64();
@@ -1326,26 +1338,34 @@ fn bench_adaptive_cancel_streak_policy(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let policy = AdaptiveCancelStreakPolicy::new(10);
-                let rng = DetRng::new(0x2024_PRESS);
+                let rng = DetRng::new(0x2024_0005);
                 (policy, rng)
             },
             |(mut policy, mut rng)| {
                 let start = test_snapshot(100.0, 0.25, 0, 0, 0);
                 let pressure_patterns = [
-                    (70.0, 0.1, 0, 0, 0),     // Very relaxed
-                    (110.0, 0.5, 2, 3, 1),    // Moderate pressure
-                    (150.0, 0.9, 5, 7, 3),    // High pressure
+                    (70.0, 0.1, 0, 0, 0),  // Very relaxed
+                    (110.0, 0.5, 2, 3, 1), // Moderate pressure
+                    (150.0, 0.9, 5, 7, 3), // High pressure
                 ];
 
                 let mut total_rewards = 0.0;
-                for &(potential, deadline_pressure, base_exceed, eff_exceed, fallback) in &pressure_patterns {
+                for &(potential, deadline_pressure, base_exceed, eff_exceed, fallback) in
+                    &pressure_patterns
+                {
                     for _ in 0..10 {
                         let arm = policy.select_arm_ucb();
                         policy.selected_arm = arm;
                         policy.begin_epoch(start);
 
                         let sample = rng.next_u64();
-                        let end = test_snapshot(potential, deadline_pressure, base_exceed, eff_exceed, fallback);
+                        let end = test_snapshot(
+                            potential,
+                            deadline_pressure,
+                            base_exceed,
+                            eff_exceed,
+                            fallback,
+                        );
 
                         if let Some(reward) = policy.complete_epoch(end, sample) {
                             total_rewards += reward;
