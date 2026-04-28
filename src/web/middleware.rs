@@ -975,6 +975,11 @@ impl<H: Handler> Handler for RequestBodyLimitMiddleware<H> {
 /// (br-asupersync-pol3ps.)
 pub const DEFAULT_REQUEST_ID_MAX_LENGTH: usize = 128;
 
+/// Default maximum length for trace IDs extracted from headers.
+/// Same as request ID length to maintain consistency and prevent
+/// amplification attacks. (br-asupersync-gwezkv)
+pub const DEFAULT_TRACE_ID_MAX_LENGTH: usize = 128;
+
 /// Middleware that generates or propagates a request ID.
 ///
 /// If the request contains a header matching `header_name`, its value is
@@ -1068,19 +1073,28 @@ fn truncate_request_id(id: &str, max: usize) -> String {
     id[..cutoff].to_string()
 }
 
+/// Sanitize and truncate a request/trace ID to prevent security issues.
+///
+/// This function performs two security-critical operations:
+/// 1. Remove CRLF characters to prevent response header injection
+/// 2. Truncate to max length to prevent log/memory amplification attacks
+///
+/// Order matters: sanitize CRLF first, then truncate, so we don't truncate
+/// inside a control sequence.
+fn sanitize_and_truncate_id(id: &str, max_length: usize) -> String {
+    let sanitized = id.replace(['\r', '\n'], "");
+    truncate_request_id(&sanitized, max_length)
+}
+
 impl<H: Handler> Handler for RequestIdMiddleware<H> {
     fn call(&self, mut req: Request) -> Response {
         let request_id = header_value(&req, &self.header_name).unwrap_or_else(|| {
             let id = self.counter.fetch_add(1, Ordering::Relaxed);
             format!("req-{id}")
         });
-        // Sanitize CRLF from client-supplied header to prevent response
-        // header injection AND truncate at max_id_length to prevent log
-        // amplification (br-asupersync-pol3ps). Order matters: strip
-        // CRLF first so we don't truncate inside a control sequence,
-        // then bound the final stored length.
-        let request_id = request_id.replace(['\r', '\n'], "");
-        let request_id = truncate_request_id(&request_id, self.max_id_length);
+        // Sanitize CRLF and truncate to prevent response header injection
+        // and log amplification attacks (br-asupersync-pol3ps).
+        let request_id = sanitize_and_truncate_id(&request_id, self.max_id_length);
 
         req.extensions.insert("request_id", request_id.clone());
         req.extensions.insert("trace_id", request_id.clone());
@@ -1155,7 +1169,11 @@ impl<H: Handler> RequestTraceMiddleware<H> {
         if let Some(id) = req.extensions.get("request_id") {
             return Some(id.to_string());
         }
+        // Sanitize and truncate raw x-request-id header to prevent DoS
+        // via giant headers that get amplified into logs and response headers.
+        // (br-asupersync-gwezkv)
         header_value(req, "x-request-id")
+            .map(|id| sanitize_and_truncate_id(&id, DEFAULT_TRACE_ID_MAX_LENGTH))
     }
 }
 
@@ -1183,10 +1201,9 @@ impl<H: Handler> Handler for RequestTraceMiddleware<H> {
         }
 
         if let (Some(header_name), Some(id)) = (&self.policy.trace_header, trace_id.as_ref()) {
-            // Sanitize CRLF from trace ID to prevent response header injection.
-            let sanitized = id.replace(['\r', '\n'], "");
+            // Trace ID is already sanitized and truncated by resolve_trace_id
             if !resp.has_header(header_name) {
-                resp.set_header(header_name, sanitized);
+                resp.set_header(header_name, id.clone());
             }
         }
 
@@ -1434,6 +1451,22 @@ impl<H: Handler> NormalizePathMiddleware<H> {
     }
 }
 
+/// Sanitize a redirect path to prevent open redirect vulnerabilities.
+///
+/// Protocol-relative URLs (starting with //) can redirect to external hosts,
+/// enabling open redirect attacks. This function URL-encodes leading slashes
+/// to ensure redirects stay within the same origin.
+///
+/// Security: br-asupersync-aqdic1 - prevents //evil.com → //evil.com redirects
+fn sanitize_redirect_path(path: &str) -> String {
+    if path.starts_with("//") {
+        // URL-encode the leading slashes to prevent protocol-relative redirect
+        format!("%2F%2F{}", &path[2..])
+    } else {
+        path.to_string()
+    }
+}
+
 impl<H: Handler> Handler for NormalizePathMiddleware<H> {
     fn call(&self, mut req: Request) -> Response {
         let path = &req.path;
@@ -1462,6 +1495,8 @@ impl<H: Handler> Handler for NormalizePathMiddleware<H> {
                     }
                     // Sanitize CRLF to prevent HTTP response header injection.
                     let trimmed = trimmed.replace(['\r', '\n'], "");
+                    // Sanitize protocol-relative URLs to prevent open redirect.
+                    let trimmed = sanitize_redirect_path(&trimmed);
                     return Response::empty(StatusCode::MOVED_PERMANENTLY)
                         .header("location", trimmed);
                 }
@@ -1472,6 +1507,8 @@ impl<H: Handler> Handler for NormalizePathMiddleware<H> {
                     let with_slash = format!("{path}/");
                     // Sanitize CRLF to prevent HTTP response header injection.
                     let with_slash = with_slash.replace(['\r', '\n'], "");
+                    // Sanitize protocol-relative URLs to prevent open redirect.
+                    let with_slash = sanitize_redirect_path(&with_slash);
                     return Response::empty(StatusCode::MOVED_PERMANENTLY)
                         .header("location", with_slash);
                 }
@@ -3388,6 +3425,53 @@ mod tests {
         assert!(!resp.headers.contains_key("X-Trace-Id"));
     }
 
+    #[test]
+    fn request_trace_truncates_giant_x_request_id_header_dos_attack() {
+        // Regression test for br-asupersync-gwezkv: DoS via giant x-request-id
+        // header that gets amplified into logs and response headers.
+        let giant_id = "A".repeat(4 * 1024 * 1024); // 4MB header
+        let mw = RequestTraceMiddleware::new(
+            FnHandler::new(ok_handler),
+            RequestTracePolicy::default(),
+        );
+        let req = make_request().with_header("x-request-id", &giant_id);
+        let resp = mw.call(req);
+
+        assert_eq!(resp.status, StatusCode::OK);
+
+        // Trace ID should be truncated to DEFAULT_TRACE_ID_MAX_LENGTH (128 chars)
+        let trace_id = resp.headers.get("x-trace-id").unwrap();
+        assert_eq!(
+            trace_id.chars().count(),
+            DEFAULT_TRACE_ID_MAX_LENGTH,
+            "giant x-request-id must be truncated to prevent DoS amplification"
+        );
+        assert_eq!(trace_id, &"A".repeat(DEFAULT_TRACE_ID_MAX_LENGTH));
+
+        // Verify the truncated value is all 'A's (no injection)
+        assert!(trace_id.chars().all(|c| c == 'A'));
+    }
+
+    #[test]
+    fn request_trace_sanitizes_crlf_in_x_request_id_header() {
+        // Verify CRLF injection protection in trace ID extraction
+        let malicious_id = "trace\r\nX-Injected: malicious\r\n";
+        let mw = RequestTraceMiddleware::new(
+            FnHandler::new(ok_handler),
+            RequestTracePolicy::default(),
+        );
+        let req = make_request().with_header("x-request-id", malicious_id);
+        let resp = mw.call(req);
+
+        assert_eq!(resp.status, StatusCode::OK);
+
+        // CRLF should be stripped to prevent header injection
+        let trace_id = resp.headers.get("x-trace-id").unwrap();
+        assert_eq!(trace_id, "traceX-Injected: malicious");
+        assert!(!trace_id.contains('\r'));
+        assert!(!trace_id.contains('\n'));
+    }
+
     // --- CatchPanicMiddleware ---
 
     #[test]
@@ -3481,6 +3565,84 @@ mod tests {
             resp.headers.get("location"),
             Some(&"/api/users/".to_string())
         );
+    }
+
+    // ─── Open Redirect Security Tests ───────────────────────────────────
+
+    #[test]
+    fn normalize_path_redirect_trim_prevents_protocol_relative_open_redirect() {
+        // br-asupersync-aqdic1: Regression test for open redirect vulnerability.
+        // Protocol-relative URLs like //evil.com/ must not redirect to external hosts.
+        let mw =
+            NormalizePathMiddleware::new(FnHandler::new(ok_handler), TrailingSlash::RedirectTrim);
+        let resp = mw.call(Request::new("GET", "//evil.com/"));
+        assert_eq!(resp.status, StatusCode::MOVED_PERMANENTLY);
+        // Location should be URL-encoded to prevent redirect to external host
+        assert_eq!(
+            resp.headers.get("location"),
+            Some(&"%2F%2Fevil.com".to_string()),
+            "Protocol-relative URL must be sanitized to prevent open redirect"
+        );
+    }
+
+    #[test]
+    fn normalize_path_redirect_always_prevents_protocol_relative_open_redirect() {
+        // br-asupersync-aqdic1: Regression test for open redirect vulnerability.
+        // Protocol-relative URLs like //evil.com must not redirect to external hosts.
+        let mw =
+            NormalizePathMiddleware::new(FnHandler::new(ok_handler), TrailingSlash::RedirectAlways);
+        let resp = mw.call(Request::new("GET", "//evil.com"));
+        assert_eq!(resp.status, StatusCode::MOVED_PERMANENTLY);
+        // Location should be URL-encoded to prevent redirect to external host
+        assert_eq!(
+            resp.headers.get("location"),
+            Some(&"%2F%2Fevil.com/".to_string()),
+            "Protocol-relative URL must be sanitized to prevent open redirect"
+        );
+    }
+
+    #[test]
+    fn normalize_path_redirect_handles_complex_protocol_relative_attacks() {
+        // br-asupersync-aqdic1: Additional security regression tests.
+        let mw =
+            NormalizePathMiddleware::new(FnHandler::new(ok_handler), TrailingSlash::RedirectTrim);
+
+        // Test with path and query parameters
+        let resp = mw.call(Request::new("GET", "//attacker.example.com/path?redirect=victim"));
+        assert_eq!(resp.status, StatusCode::MOVED_PERMANENTLY);
+        assert_eq!(
+            resp.headers.get("location"),
+            Some(&"%2F%2Fattacker.example.com/path?redirect=victim".to_string())
+        );
+
+        // Test with multiple slashes
+        let resp = mw.call(Request::new("GET", "///triple-slash.example/"));
+        assert_eq!(resp.status, StatusCode::MOVED_PERMANENTLY);
+        assert_eq!(
+            resp.headers.get("location"),
+            Some(&"%2F%2F/triple-slash.example".to_string())
+        );
+    }
+
+    #[test]
+    fn sanitize_redirect_path_unit_tests() {
+        // Unit tests for the sanitize_redirect_path helper function.
+
+        // Normal paths should be unchanged
+        assert_eq!(sanitize_redirect_path("/normal/path"), "/normal/path");
+        assert_eq!(sanitize_redirect_path("/"), "/");
+        assert_eq!(sanitize_redirect_path(""), "");
+
+        // Protocol-relative URLs should be sanitized
+        assert_eq!(sanitize_redirect_path("//evil.com"), "%2F%2Fevil.com");
+        assert_eq!(sanitize_redirect_path("//evil.com/path"), "%2F%2Fevil.com/path");
+        assert_eq!(sanitize_redirect_path("//"), "%2F%2F");
+
+        // Paths with single slash should be unchanged
+        assert_eq!(sanitize_redirect_path("/single"), "/single");
+
+        // Mixed cases
+        assert_eq!(sanitize_redirect_path("//host/normal/path"), "%2F%2Fhost/normal/path");
     }
 
     // --- SetResponseHeaderMiddleware ---
