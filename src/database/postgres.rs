@@ -5582,7 +5582,7 @@ pub fn fuzz_parse_parameter_description(data: &[u8]) -> Result<Vec<u32>, PgError
 )]
 mod tests {
     use super::*;
-    use crate::Cx;
+    use crate::{Budget, Cx, RegionId, TaskId};
     use crate::types::CancelKind;
 
     fn run<F: std::future::Future>(future: F) -> F::Output {
@@ -6090,6 +6090,101 @@ mod tests {
         }
         assert!(!conn.inner.closed);
         assert!(!conn.inner.needs_rollback);
+    }
+
+    #[test]
+    fn begin_with_isolation_cancelled_before_verify_query_rolls_back_to_idle() {
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let cx = Cx::for_testing();
+        let cancel_cx = cx.clone();
+
+        let io_thread = std::thread::spawn(move || {
+            let mut client_bytes = read_until_contains(
+                &mut peer,
+                b"BEGIN ISOLATION LEVEL SERIALIZABLE READ WRITE",
+            );
+            cancel_cx.cancel_fast(CancelKind::User);
+
+            std::io::Write::write_all(&mut peer, &backend_message(b'C', b"BEGIN\0"))
+                .expect("write BEGIN CommandComplete");
+            std::io::Write::write_all(&mut peer, &ready_for_query(b'T'))
+                .expect("write BEGIN ReadyForQuery");
+            std::io::Write::write_all(&mut peer, &backend_message(b'C', b"ROLLBACK\0"))
+                .expect("write ROLLBACK CommandComplete");
+            std::io::Write::write_all(&mut peer, &ready_for_query(b'I'))
+                .expect("write ROLLBACK ReadyForQuery");
+
+            if !client_bytes
+                .windows(b"ROLLBACK".len())
+                .any(|window| window == b"ROLLBACK")
+            {
+                client_bytes.extend(read_until_contains(&mut peer, b"ROLLBACK"));
+            }
+            client_bytes
+        });
+
+        let outcome = run(conn.begin_with_isolation(&cx, IsolationLevel::Serializable, false));
+        assert_user_cancelled(outcome);
+        assert!(
+            !conn.inner.closed,
+            "successful compensating rollback should return the connection to idle"
+        );
+        assert_eq!(conn.inner.transaction_status, b'I');
+        assert!(
+            !conn.inner.needs_rollback,
+            "successful compensating rollback should not leave orphan cleanup markers behind"
+        );
+        assert!(
+            !conn.inner.needs_discard,
+            "successful compensating rollback should keep the connection reusable"
+        );
+
+        let client_bytes = io_thread.join().expect("postgres peer thread should exit");
+        assert!(
+            client_bytes
+                .windows(b"ROLLBACK".len())
+                .any(|window| window == b"ROLLBACK"),
+            "client should issue a compensating ROLLBACK before surfacing cancellation"
+        );
+    }
+
+    #[test]
+    fn begin_with_isolation_cancelled_during_verify_marks_orphan_cleanup() {
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let cx = Cx::for_testing();
+        let cancel_cx = cx.clone();
+
+        let io_thread = std::thread::spawn(move || {
+            let _ = read_until_contains(
+                &mut peer,
+                b"BEGIN ISOLATION LEVEL REPEATABLE READ READ WRITE",
+            );
+            std::io::Write::write_all(&mut peer, &backend_message(b'C', b"BEGIN\0"))
+                .expect("write BEGIN CommandComplete");
+            std::io::Write::write_all(&mut peer, &ready_for_query(b'T'))
+                .expect("write BEGIN ReadyForQuery");
+
+            let _ = read_until_contains(&mut peer, b"SHOW transaction_isolation");
+            cancel_cx.cancel_fast(CancelKind::User);
+            std::io::Write::write_all(&mut peer, b"x").expect("wake pending verify read");
+        });
+
+        let outcome = run(conn.begin_with_isolation(&cx, IsolationLevel::RepeatableRead, false));
+        assert_user_cancelled(outcome);
+        assert!(
+            conn.inner.closed,
+            "mid-verify cancellation should preserve the closed in-flight state"
+        );
+        assert!(
+            conn.inner.needs_rollback,
+            "failed compensating rollback must leave an orphan-cleanup marker"
+        );
+        assert!(
+            conn.inner.needs_discard,
+            "failed compensating rollback must mark the connection discard-only"
+        );
+
+        io_thread.join().expect("postgres peer thread should exit");
     }
 
     #[test]

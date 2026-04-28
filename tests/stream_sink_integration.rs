@@ -161,7 +161,7 @@ fn forward_enumerate_filter_map() {
 
     let output = ReceiverStream::new(cx, rx);
     let collected = collect_sync(output);
-    let expected = vec!["1:b".to_string(), "3:d".to_string()];
+    let expected = ["1:b", "3:d"];
     let ok = collected == expected;
     assert_with_log!(ok, "enumerate+filter+map→forward", expected, collected);
     test_complete!("forward_enumerate_filter_map");
@@ -460,7 +460,7 @@ fn sink_stream_send_all_scan_pipeline() {
 
     let output = ReceiverStream::new(cx, rx);
     let collected = collect_sync(output);
-    let expected = vec!["a".to_string(), "a,b".to_string(), "a,b,c".to_string()];
+    let expected = ["a", "a,b", "a,b,c"];
     let ok = collected == expected;
     assert_with_log!(ok, "send_all+scan", expected, collected);
     test_complete!("sink_stream_send_all_scan_pipeline");
@@ -704,11 +704,7 @@ fn three_stage_scan_filter_map_pipeline() {
 
     let output = ReceiverStream::new(cx, rx3);
     let collected = collect_sync(output);
-    let expected = vec![
-        "sum=6".to_string(),
-        "sum=10".to_string(),
-        "sum=15".to_string(),
-    ];
+    let expected = ["sum=6", "sum=10", "sum=15"];
     let ok = collected == expected;
     assert_with_log!(ok, "three-stage pipeline", expected, collected);
     test_complete!("three_stage_scan_filter_map_pipeline");
