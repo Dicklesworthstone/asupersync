@@ -1686,6 +1686,13 @@ impl CleanupCoordinator {
                     result.completed = false; // Can't complete without symbols to clean
                 }
             }
+            if result.completed && handler.is_some() {
+                // A registered handler with no pending or buffered symbols still
+                // represents a fully completed cleanup lifecycle. Record that
+                // completion so late register_pending() calls cannot silently
+                // reopen the object after its handler has been dropped.
+                self.completed.write().insert(object_id);
+            }
         }
 
         result
@@ -3049,6 +3056,43 @@ mod tests {
         assert_eq!(result.handlers_run, vec!["test"]);
         assert!(result.completed);
         assert!(result.handler_errors.is_empty());
+    }
+
+    #[test]
+    fn test_cleanup_with_handler_and_no_symbols_marks_completed() {
+        let coordinator = CleanupCoordinator::new();
+        let object_id = ObjectId::new_for_test(10);
+
+        coordinator.register_handler(object_id, CountingCleanupHandler);
+
+        let result = coordinator.cleanup(object_id, None);
+        assert!(result.completed, "empty cleanup should complete");
+        assert!(
+            coordinator.completed.read().contains(&object_id),
+            "successful empty cleanup must mark object completed"
+        );
+        assert_eq!(
+            coordinator
+                .handlers
+                .read()
+                .get(&object_id)
+                .map(|handler| handler.name()),
+            None,
+            "cleanup should drop the registered handler"
+        );
+
+        coordinator.register_pending(
+            object_id,
+            Symbol::new_for_test(10, 0, 0, &[1, 2, 3]),
+            Time::from_millis(101),
+        );
+
+        let stats = coordinator.stats();
+        assert_eq!(
+            stats.pending_objects, 0,
+            "late pending symbols must be rejected after completed empty cleanup"
+        );
+        assert_eq!(stats.pending_symbols, 0);
     }
 
     #[test]
