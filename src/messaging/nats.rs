@@ -527,7 +527,6 @@ fn validate_nats_token(value: &str, field: &str) -> Result<(), NatsError> {
     Ok(())
 }
 
-#[cfg(any(test, feature = "test-internals"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SubscriptionPatternToken<'a> {
     Literal(&'a str),
@@ -535,7 +534,6 @@ enum SubscriptionPatternToken<'a> {
     TailWildcard,
 }
 
-#[cfg(any(test, feature = "test-internals"))]
 fn is_valid_nats_segment(token: &str) -> bool {
     !token.is_empty()
         && !token
@@ -543,7 +541,6 @@ fn is_valid_nats_segment(token: &str) -> bool {
             .any(|ch| ch.is_ascii_control() || ch.is_whitespace())
 }
 
-#[cfg(any(test, feature = "test-internals"))]
 fn parse_subscription_pattern(pattern: &str) -> Option<Vec<SubscriptionPatternToken<'_>>> {
     if pattern.is_empty() {
         return None;
@@ -571,7 +568,6 @@ fn parse_subscription_pattern(pattern: &str) -> Option<Vec<SubscriptionPatternTo
     Some(parsed)
 }
 
-#[cfg(any(test, feature = "test-internals"))]
 fn parse_publish_subject(subject: &str) -> Option<Vec<&str>> {
     if subject.is_empty() {
         return None;
@@ -586,6 +582,26 @@ fn parse_publish_subject(subject: &str) -> Option<Vec<&str>> {
     }
 
     Some(tokens)
+}
+
+fn validate_nats_publish_subject(subject: &str, field: &str) -> Result<(), NatsError> {
+    validate_nats_token(subject, field)?;
+    if parse_publish_subject(subject).is_none() {
+        return Err(NatsError::Protocol(format!(
+            "{field} must be a fully specified NATS subject without wildcards or empty tokens"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_nats_subscription_pattern(pattern: &str, field: &str) -> Result<(), NatsError> {
+    validate_nats_token(pattern, field)?;
+    if parse_subscription_pattern(pattern).is_none() {
+        return Err(NatsError::Protocol(format!(
+            "{field} contains an invalid NATS wildcard placement or empty token"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(any(test, feature = "test-internals"))]
@@ -1226,7 +1242,7 @@ impl NatsClient {
         if !self.connected {
             return Err(NatsError::NotConnected);
         }
-        validate_nats_token(subject, "subject")?;
+        validate_nats_publish_subject(subject, "subject")?;
 
         if payload.len() > self.config.max_payload {
             return Err(NatsError::Protocol(format!(
@@ -1273,8 +1289,8 @@ impl NatsClient {
         if !self.connected {
             return Err(NatsError::NotConnected);
         }
-        validate_nats_token(subject, "subject")?;
-        validate_nats_token(reply_to, "reply-to subject")?;
+        validate_nats_publish_subject(subject, "subject")?;
+        validate_nats_publish_subject(reply_to, "reply-to subject")?;
 
         if payload.len() > self.config.max_payload {
             return Err(NatsError::Protocol(format!(
@@ -1331,8 +1347,8 @@ impl NatsClient {
         if !self.connected {
             return Err(NatsError::NotConnected);
         }
-        validate_nats_token(subject, "subject")?;
-        validate_nats_token(reply_to, "reply-to subject")?;
+        validate_nats_publish_subject(subject, "subject")?;
+        validate_nats_publish_subject(reply_to, "reply-to subject")?;
         let server_supports_headers = self
             .state
             .server_info
@@ -1390,7 +1406,7 @@ impl NatsClient {
         if !self.connected {
             return Err(NatsError::NotConnected);
         }
-        validate_nats_token(subject, "subject")?;
+        validate_nats_publish_subject(subject, "subject")?;
 
         let inbox = format!(
             "_INBOX.{}.{}",
@@ -1498,7 +1514,7 @@ impl NatsClient {
         if !self.connected {
             return Err(NatsError::NotConnected);
         }
-        validate_nats_token(subject, "subject")?;
+        validate_nats_publish_subject(subject, "subject")?;
 
         // Generate unique inbox subject
         let inbox = format!(
@@ -1602,7 +1618,7 @@ impl NatsClient {
         if !self.connected {
             return Err(NatsError::NotConnected);
         }
-        validate_nats_token(subject, "subject")?;
+        validate_nats_subscription_pattern(subject, "subject")?;
 
         let sid = self.next_sid.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel(256); // Bounded for backpressure
@@ -1660,7 +1676,7 @@ impl NatsClient {
         if !self.connected {
             return Err(NatsError::NotConnected);
         }
-        validate_nats_token(subject, "subject")?;
+        validate_nats_subscription_pattern(subject, "subject")?;
         validate_nats_token(queue_group, "queue group")?;
 
         let sid = self.next_sid.fetch_add(1, Ordering::Relaxed);
@@ -2367,6 +2383,28 @@ mod tests {
         assert!(validate_nats_token("foo bar", "subject").is_err());
         assert!(validate_nats_token("foo\r\nPUB x 1\r\nx", "subject").is_err());
         assert!(validate_nats_token("queue\tgroup", "queue group").is_err());
+    }
+
+    #[test]
+    fn test_validate_nats_publish_subject_rejects_wildcards_and_empty_tokens() {
+        assert!(validate_nats_publish_subject("foo.bar", "subject").is_ok());
+        assert!(validate_nats_publish_subject("_INBOX.123.abc", "subject").is_ok());
+        assert!(validate_nats_publish_subject("foo.bar.>", "subject").is_err());
+        assert!(validate_nats_publish_subject("*", "subject").is_err());
+        assert!(validate_nats_publish_subject("foo.*", "subject").is_err());
+        assert!(validate_nats_publish_subject("foo..bar", "subject").is_err());
+    }
+
+    #[test]
+    fn test_validate_nats_subscription_pattern_enforces_wildcard_grammar() {
+        assert!(validate_nats_subscription_pattern("foo.bar", "subject").is_ok());
+        assert!(validate_nats_subscription_pattern("foo.*", "subject").is_ok());
+        assert!(validate_nats_subscription_pattern("foo.>", "subject").is_ok());
+        assert!(validate_nats_subscription_pattern(">", "subject").is_ok());
+        assert!(validate_nats_subscription_pattern("foo.>.bar", "subject").is_err());
+        assert!(validate_nats_subscription_pattern("foo*>", "subject").is_err());
+        assert!(validate_nats_subscription_pattern("foo..bar", "subject").is_err());
+        assert!(validate_nats_subscription_pattern("foo.*.>.bar", "subject").is_err());
     }
 
     #[test]
@@ -3093,10 +3131,8 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_nats_token_accepts_valid() {
-        assert!(validate_nats_token("foo.bar.>", "subject").is_ok());
-        assert!(validate_nats_token("*", "subject").is_ok());
-        assert!(validate_nats_token("_INBOX.123.abc", "subject").is_ok());
+    fn test_validate_nats_token_accepts_valid_queue_group_token() {
+        assert!(validate_nats_token("workers.v1", "queue group").is_ok());
     }
 
     #[test]
