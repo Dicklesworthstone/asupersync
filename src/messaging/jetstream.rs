@@ -33,13 +33,14 @@
 //! }
 //! ```
 
-use super::nats::{Message, NatsClient, NatsError};
+use super::nats::{Message, NatsClient, NatsError, NatsMessage};
 use crate::cx::Cx;
-use crate::time::{timeout_at, wall_now};
+use crate::time::wall_now;
 use crate::tracing_compat::warn;
 use crate::types::Time;
 use std::fmt;
 use std::fmt::Write as _;
+use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -992,34 +993,94 @@ impl Consumer {
         let mut result: Result<(), JsError> = Ok(());
 
         // Collect messages until we get batch or timeout.
-        // The server may interleave status/control messages (heartbeats,
-        // flow-control, 408/409 advisories) that do not carry a $JS.ACK
-        // reply subject.  We skip those and only break on subscription
-        // close (None), timeout, or error.
+        // A live JetStream broker only delivers pull responses once the
+        // underlying NATS socket is actively pumped; awaiting `sub.next()`
+        // alone is insufficient because nothing reads frames off the wire.
+        // Keep driving the client and only break on subscription close,
+        // timeout, or a real protocol/server error.
         let mut received = 0usize;
-        loop {
+        'pull: loop {
             if received >= batch {
                 break;
             }
-            let item = if let Some(deadline) = client_deadline {
-                let next = std::pin::pin!(sub.next(cx));
-                timeout_at(deadline, next).await
-            } else {
-                Ok(sub.next(cx).await)
-            };
-            match item {
-                Ok(Ok(Some(msg))) => {
-                    if let Some(js_msg) = Self::parse_js_message(msg) {
-                        messages.push(js_msg);
-                        received += 1;
-                    }
-                    // Non-JetStream messages (status/control) are silently
-                    // skipped — the loop continues waiting for real messages.
-                }
-                Ok(Ok(None)) | Err(_) => break, // Subscription closed or timeout
-                Ok(Err(e)) => {
-                    result = Err(e.into());
+
+            while received < batch {
+                let Some(msg) = sub.try_next() else {
                     break;
+                };
+                if let Some(js_msg) = Self::parse_js_message(msg) {
+                    messages.push(js_msg);
+                    received += 1;
+                }
+            }
+
+            if received >= batch {
+                break;
+            }
+
+            let mut processed_any = false;
+            loop {
+                let message = match client.try_parse_message() {
+                    Ok(message) => message,
+                    Err(err) => {
+                        result = Err(err.into());
+                        break 'pull;
+                    }
+                };
+
+                match message {
+                    Some(NatsMessage::Ping) => {
+                        if let Err(err) = client.send_server_pong().await {
+                            result = Err(err.into());
+                            break 'pull;
+                        }
+                        processed_any = true;
+                    }
+                    Some(NatsMessage::Msg(msg)) => {
+                        if msg.sid == sid {
+                            if let Some(js_msg) = Self::parse_js_message(msg) {
+                                messages.push(js_msg);
+                                received += 1;
+                            }
+                        } else {
+                            client.dispatch_message(msg);
+                        }
+                        processed_any = true;
+                        if received >= batch {
+                            break;
+                        }
+                    }
+                    Some(NatsMessage::Err(err)) => {
+                        result = Err(NatsError::Server(err).into());
+                        break 'pull;
+                    }
+                    Some(_) => {
+                        processed_any = true;
+                    }
+                    None => {
+                        if processed_any {
+                            break;
+                        }
+
+                        let read_result = if let Some(deadline) = client_deadline {
+                            client.read_more_until(cx, deadline).await
+                        } else {
+                            client.read_more().await
+                        };
+
+                        match read_result {
+                            Ok(()) => {
+                                processed_any = true;
+                            }
+                            Err(NatsError::Io(err)) if err.kind() == io::ErrorKind::TimedOut => {
+                                break 'pull;
+                            }
+                            Err(err) => {
+                                result = Err(err.into());
+                                break 'pull;
+                            }
+                        }
+                    }
                 }
             }
         }
