@@ -1436,6 +1436,56 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use insta::{assert_json_snapshot, assert_snapshot};
+    use serde_json::{Value, json};
+
+    fn render_transition_result(result: &TransitionResult) -> Value {
+        match result {
+            TransitionResult::Valid => json!({
+                "kind": "valid",
+            }),
+            TransitionResult::Invalid {
+                reason,
+                current_state,
+                attempted_transition,
+            } => json!({
+                "kind": "invalid",
+                "reason": reason,
+                "current_state": current_state,
+                "attempted_transition": attempted_transition,
+            }),
+            TransitionResult::InvariantViolation { invariant, context } => json!({
+                "kind": "invariant_violation",
+                "invariant": invariant,
+                "context": context,
+            }),
+        }
+    }
+
+    fn render_validator_stats(validator: &CancelProtocolValidator) -> Value {
+        let (regions, tasks, obligations, channels, io_ops, timers, violations) = validator.stats();
+        json!({
+            "regions": regions,
+            "tasks": tasks,
+            "obligations": obligations,
+            "channels": channels,
+            "io_operations": io_ops,
+            "timers": timers,
+            "violations": violations,
+        })
+    }
+
+    fn render_transition_step<E: std::fmt::Debug>(
+        step: usize,
+        event: &E,
+        result: &TransitionResult,
+    ) -> Value {
+        json!({
+            "step": step,
+            "event": format!("{event:?}"),
+            "result": render_transition_result(result),
+        })
+    }
 
     #[test]
     fn test_bug_injector_creation() {
@@ -1504,6 +1554,255 @@ mod tests {
 
         // Test configuration validation
         assert!(harness.test_validation_level_config().is_ok());
+    }
+
+    #[test]
+    fn golden_task_clean_cancel_sequence() {
+        let task_id = TaskId::new_for_test(401, 0);
+        let region_id = RegionId::new_for_test(401, 0);
+        let context = TaskContext {
+            task_id,
+            region_id,
+            spawned_at: Time::ZERO,
+            validation_level: ValidationLevel::Full,
+        };
+        let mut machine = TaskStateMachine::new(task_id, region_id, ValidationLevel::Full);
+        let events = vec![
+            TaskEvent::Start,
+            TaskEvent::RequestCancel,
+            TaskEvent::DrainComplete,
+        ];
+
+        let steps: Vec<_> = events
+            .into_iter()
+            .enumerate()
+            .map(|(step, event)| {
+                let result = machine.transition(event.clone(), &context);
+                render_transition_step(step, &event, &result)
+            })
+            .collect();
+
+        assert_json_snapshot!(
+            "cancel_protocol_task_clean_cancel_sequence",
+            json!({
+                "scenario": "task_clean_cancel_sequence",
+                "steps": steps,
+                "final_state": format!("{:?}", machine.current_state()),
+                "state_description": machine.state_description(),
+                "is_terminal": machine.is_terminal(),
+            })
+        );
+    }
+
+    #[test]
+    fn golden_task_panic_after_cancel_request() {
+        let task_id = TaskId::new_for_test(402, 0);
+        let region_id = RegionId::new_for_test(402, 0);
+        let context = TaskContext {
+            task_id,
+            region_id,
+            spawned_at: Time::ZERO,
+            validation_level: ValidationLevel::Full,
+        };
+        let mut machine = TaskStateMachine::new(task_id, region_id, ValidationLevel::Full);
+        let events = vec![
+            TaskEvent::Start,
+            TaskEvent::RequestCancel,
+            TaskEvent::Panic {
+                message: "panic during finalize".to_string(),
+            },
+        ];
+
+        let steps: Vec<_> = events
+            .into_iter()
+            .enumerate()
+            .map(|(step, event)| {
+                let result = machine.transition(event.clone(), &context);
+                render_transition_step(step, &event, &result)
+            })
+            .collect();
+
+        assert_json_snapshot!(
+            "cancel_protocol_task_panic_after_cancel_request",
+            json!({
+                "scenario": "task_panic_after_cancel_request",
+                "steps": steps,
+                "final_state": format!("{:?}", machine.current_state()),
+                "state_description": machine.state_description(),
+                "is_terminal": machine.is_terminal(),
+            })
+        );
+    }
+
+    #[test]
+    fn golden_obligation_abort_sequence() {
+        let obligation_id = ObligationId::new_for_test(403, 0);
+        let context = ObligationContext {
+            obligation_id,
+            region_id: RegionId::new_for_test(403, 0),
+            created_at: Time::ZERO,
+            validation_level: ValidationLevel::Full,
+        };
+        let mut machine = ObligationStateMachine::new(obligation_id, ValidationLevel::Full);
+        let events = vec![
+            ObligationEvent::Reserve { token: 7 },
+            ObligationEvent::Abort {
+                reason: "race loser aborted".to_string(),
+            },
+        ];
+
+        let steps: Vec<_> = events
+            .into_iter()
+            .enumerate()
+            .map(|(step, event)| {
+                let result = machine.transition(event.clone(), &context);
+                render_transition_step(step, &event, &result)
+            })
+            .collect();
+
+        assert_json_snapshot!(
+            "cancel_protocol_obligation_abort_sequence",
+            json!({
+                "scenario": "obligation_abort_sequence",
+                "steps": steps,
+                "final_state": format!("{:?}", machine.current_state()),
+                "state_description": machine.state_description(),
+                "is_terminal": machine.is_terminal(),
+            })
+        );
+    }
+
+    #[test]
+    fn golden_obligation_duplicate_commit_violation() {
+        let obligation_id = ObligationId::new_for_test(404, 0);
+        let context = ObligationContext {
+            obligation_id,
+            region_id: RegionId::new_for_test(404, 0),
+            created_at: Time::ZERO,
+            validation_level: ValidationLevel::Full,
+        };
+        let mut machine = ObligationStateMachine::new(obligation_id, ValidationLevel::Full);
+        let events = vec![
+            ObligationEvent::Reserve { token: 7 },
+            ObligationEvent::Commit,
+            ObligationEvent::Commit,
+        ];
+
+        let steps: Vec<_> = events
+            .into_iter()
+            .enumerate()
+            .map(|(step, event)| {
+                let result = machine.transition(event.clone(), &context);
+                render_transition_step(step, &event, &result)
+            })
+            .collect();
+
+        assert_json_snapshot!(
+            "cancel_protocol_obligation_duplicate_commit_violation",
+            json!({
+                "scenario": "obligation_duplicate_commit_violation",
+                "steps": steps,
+                "final_state": format!("{:?}", machine.current_state()),
+                "state_description": machine.state_description(),
+                "is_terminal": machine.is_terminal(),
+            })
+        );
+    }
+
+    #[test]
+    fn golden_validator_diagnostic_matrix() {
+        let mut validator = CancelProtocolValidator::new(ValidationLevel::Full);
+        let region_id = RegionId::new_for_test(405, 0);
+        let registered_obligation_id = ObligationId::new_for_test(405, 0);
+        let unregistered_task_id = TaskId::new_for_test(406, 0);
+        let unregistered_obligation_id = ObligationId::new_for_test(406, 0);
+
+        let region_context = RegionContext {
+            region_id,
+            parent_region: None,
+            created_at: Time::ZERO,
+            validation_level: ValidationLevel::Full,
+        };
+        let task_context = TaskContext {
+            task_id: unregistered_task_id,
+            region_id,
+            spawned_at: Time::ZERO,
+            validation_level: ValidationLevel::Full,
+        };
+        let registered_obligation_context = ObligationContext {
+            obligation_id: registered_obligation_id,
+            region_id,
+            created_at: Time::ZERO,
+            validation_level: ValidationLevel::Full,
+        };
+        let unregistered_obligation_context = ObligationContext {
+            obligation_id: unregistered_obligation_id,
+            region_id,
+            created_at: Time::ZERO,
+            validation_level: ValidationLevel::Full,
+        };
+
+        validator.register_region(region_id);
+        validator.register_obligation(registered_obligation_id);
+
+        let activate =
+            validator.validate_region_transition(region_id, RegionEvent::Activate, &region_context);
+        let region_invalid = validator.validate_region_transition(
+            region_id,
+            RegionEvent::TaskCompleted,
+            &region_context,
+        );
+        let zero_token_invariant = validator.validate_obligation_transition(
+            registered_obligation_id,
+            ObligationEvent::Reserve { token: 0 },
+            &registered_obligation_context,
+        );
+        let unregistered_task = validator.validate_task_transition(
+            unregistered_task_id,
+            TaskEvent::Complete,
+            &task_context,
+        );
+        let unregistered_obligation = validator.validate_obligation_transition(
+            unregistered_obligation_id,
+            ObligationEvent::Commit,
+            &unregistered_obligation_context,
+        );
+
+        assert_json_snapshot!(
+            "cancel_protocol_validator_diagnostic_matrix",
+            json!({
+                "scenario": "validator_diagnostic_matrix",
+                "activate": render_transition_result(&activate),
+                "region_invalid_complete_without_tasks": render_transition_result(&region_invalid),
+                "zero_token_invariant_violation": render_transition_result(&zero_token_invariant),
+                "unregistered_task": render_transition_result(&unregistered_task),
+                "unregistered_obligation": render_transition_result(&unregistered_obligation),
+                "validator_stats": render_validator_stats(&validator),
+                "violation_count": validator.violation_count(),
+            })
+        );
+    }
+
+    #[test]
+    fn golden_cancel_protocol_test_suite_report() {
+        let suite = CancelProtocolTestSuite {
+            bug_injection: BugInjectionStats {
+                bugs_injected: 4,
+                bugs_detected: 3,
+                detection_rate: 0.75,
+            },
+            performance: PerformanceMeasurement {
+                validation_overhead_pct: 6.25,
+                memory_overhead_bytes: 2_048,
+                avg_latency_ns: 128,
+                p99_latency_ns: 512,
+                throughput_ops_per_sec: 4_096.0,
+            },
+            false_positive_count: 1,
+            total_tests_run: 16,
+        };
+
+        assert_snapshot!("cancel_protocol_test_suite_report", suite.generate_report());
     }
 
     proptest! {
