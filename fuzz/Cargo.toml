@@ -2475,3 +2475,13 @@ path = "fuzz_targets/jetstream_ack_control.rs"
 test = false
 doc = false
 bench = false
+
+# Focused fuzz target for JetStream PubAck duplicate detection logic.
+# Tests edge cases in extract_json_bool parsing of "duplicate" field:
+# boolean variants, numeric values, case variations, whitespace, JSON structure corruption.
+[[bin]]
+name = "jetstream_pub_ack_duplicate_detection"
+path = "fuzz_targets/jetstream_pub_ack_duplicate_detection.rs"
+test = false
+doc = false
+bench = false
