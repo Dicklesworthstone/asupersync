@@ -974,6 +974,16 @@ mod tests {
         ]
     }
 
+    fn race_cancel_storm_loser_strategy() -> impl Strategy<Value = Outcome<i32, &'static str>> {
+        prop_oneof![
+            Just(Outcome::Cancelled(CancelReason::race_loser())),
+            Just(Outcome::Cancelled(CancelReason::new(
+                crate::types::cancel::CancelKind::ParentCancelled,
+            ))),
+            Just(Outcome::Cancelled(CancelReason::shutdown())),
+        ]
+    }
+
     fn race_outcome_signature(
         outcome: &Outcome<i32, &'static str>,
     ) -> (&'static str, Option<i32>, Option<u8>) {
@@ -1752,6 +1762,101 @@ mod tests {
                 race_all_result_signature(&substituted_result),
                 "non-panicking drained loser substitution must not perturb the race_all result"
             );
+        }
+
+        #[test]
+        fn metamorphic_race_all_cancel_storm_permutation_preserves_first_success(
+            branch_count in 2usize..12,
+            raw_winner_index in 0usize..24,
+            permutation_seed in any::<u64>(),
+            winner_value in any::<i16>(),
+            cancel_storm_losers in prop::collection::vec(
+                race_cancel_storm_loser_strategy(),
+                1usize..11,
+            ),
+        ) {
+            let winner_index = raw_winner_index % branch_count;
+            let winner_value = i32::from(winner_value);
+
+            let mut base_outcomes = vec![Outcome::Cancelled(CancelReason::race_loser()); branch_count];
+            let mut loser_slot = 0usize;
+            for (index, outcome) in base_outcomes.iter_mut().enumerate() {
+                if index == winner_index {
+                    *outcome = Outcome::Ok(winner_value);
+                } else {
+                    *outcome = cancel_storm_losers
+                        .get(loser_slot)
+                        .cloned()
+                        .unwrap_or_else(|| Outcome::Cancelled(CancelReason::race_loser()));
+                    loser_slot += 1;
+                }
+            }
+
+            let base_result = race_all_outcomes(winner_index, base_outcomes.clone());
+            prop_assert_eq!(base_result.winner_index, winner_index);
+            prop_assert_eq!(
+                race_outcome_signature(&base_result.winner_outcome),
+                race_outcome_signature(&Outcome::Ok(winner_value)),
+            );
+            let base_final = make_race_all_result(winner_index, base_outcomes.clone());
+            match &base_final {
+                Ok(value) => prop_assert_eq!(*value, winner_value),
+                Err(_) => prop_assert!(false, "cancel storm changed the first-success winner"),
+            }
+
+            let mut permutation = (0..branch_count).collect::<Vec<_>>();
+            let mut state = permutation_seed;
+            for i in (1..branch_count).rev() {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                let j = (state as usize) % (i + 1);
+                permutation.swap(i, j);
+            }
+
+            let permuted_outcomes = permutation
+                .iter()
+                .map(|&old_index| base_outcomes[old_index].clone())
+                .collect::<Vec<_>>();
+            let permuted_winner_index = permutation
+                .iter()
+                .position(|&old_index| old_index == winner_index)
+                .expect("winner must remain present after permutation");
+
+            let permuted_result =
+                race_all_outcomes(permuted_winner_index, permuted_outcomes.clone());
+            prop_assert_eq!(permuted_result.winner_index, permuted_winner_index);
+            prop_assert_eq!(
+                race_outcome_signature(&permuted_result.winner_outcome),
+                race_outcome_signature(&Outcome::Ok(winner_value)),
+                "permuting a cancel storm must preserve the first-success winner"
+            );
+
+            let mut base_loser_projection = base_result
+                .loser_outcomes
+                .iter()
+                .map(|(index, outcome)| (*index, race_outcome_signature(outcome)))
+                .collect::<Vec<_>>();
+            let mut permuted_loser_projection = permuted_result
+                .loser_outcomes
+                .iter()
+                .map(|(index, outcome)| (permutation[*index], race_outcome_signature(outcome)))
+                .collect::<Vec<_>>();
+            base_loser_projection.sort_unstable_by_key(|(index, _)| *index);
+            permuted_loser_projection.sort_unstable_by_key(|(index, _)| *index);
+            prop_assert_eq!(
+                base_loser_projection,
+                permuted_loser_projection,
+                "inverse-permuting cancel-storm loser indices must recover the original projection"
+            );
+
+            let permuted_final = make_race_all_result(permuted_winner_index, permuted_outcomes);
+            match (&base_final, &permuted_final) {
+                (Ok(base_value), Ok(permuted_value)) => {
+                    prop_assert_eq!(base_value, permuted_value);
+                }
+                _ => prop_assert!(false, "branch permutation changed the first-success result"),
+            }
         }
     }
 
