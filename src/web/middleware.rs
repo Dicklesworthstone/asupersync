@@ -1237,13 +1237,19 @@ impl<H: Handler> Handler for RequestTraceMiddleware<H> {
 // ─── AuthMiddleware ────────────────────────────────────────────────────────
 
 /// Authorization policy for bearer-token middleware.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthPolicy {
     /// Any well-formed bearer token is accepted.
-    #[default]
     AnyBearer,
-    /// Only the listed bearer tokens are accepted.
+    /// Only the listed bearer tokens are accepted. An empty allowlist fails
+    /// closed, which is also the default policy.
     ExactBearer(Vec<String>),
+}
+
+impl Default for AuthPolicy {
+    fn default() -> Self {
+        Self::ExactBearer(Vec::new())
+    }
 }
 
 impl AuthPolicy {
@@ -2486,6 +2492,18 @@ mod tests {
         let req = Request::new("GET", "/auth").with_header("authorization", "Bearer token-123");
         let resp = mw.call(req);
         assert_eq!(resp.status, StatusCode::OK);
+    }
+
+    #[test]
+    fn auth_default_policy_fails_closed_on_presence_only_bearer() {
+        let mw = AuthMiddleware::new(FnHandler::new(ok_handler), AuthPolicy::default());
+        let req = Request::new("GET", "/auth").with_header("authorization", "Bearer token-123");
+        let resp = mw.call(req);
+        assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            resp.headers.get("www-authenticate"),
+            Some(&"Bearer".to_string())
+        );
     }
 
     #[test]
