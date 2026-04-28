@@ -454,6 +454,12 @@ pub struct ProgressCertificate {
     ///
     /// Uses smoothing factor `alpha = 2 / (window + 1)` with `window = 8`.
     ema_credit: f64,
+    /// Number of non-finite potential samples dropped since the last reset.
+    ///
+    /// Invalid telemetry must not be coerced into synthetic progress because
+    /// that can fabricate quiescence from `NaN`/`inf`. We record the anomaly
+    /// for audit and ignore the sample entirely.
+    invalid_observation_count: usize,
 }
 
 impl ProgressCertificate {
@@ -483,6 +489,7 @@ impl ProgressCertificate {
             increase_count: 0,
             stall_run: 0,
             ema_credit: 0.0,
+            invalid_observation_count: 0,
         }
     }
 
@@ -495,14 +502,14 @@ impl ProgressCertificate {
     /// Records a potential observation.
     ///
     /// `potential` must be non-negative (Lyapunov functions are ≥ 0).
-    /// If `potential` is negative, it is clamped to zero and an internal
-    /// note is recorded.
+    /// Negative values are clamped to zero. Non-finite samples are dropped
+    /// entirely and surfaced later through [`CertificateVerdict::evidence`].
     pub fn observe(&mut self, potential: f64) {
-        let potential = if potential.is_finite() {
-            potential.max(0.0)
-        } else {
-            0.0
-        };
+        if !potential.is_finite() {
+            self.invalid_observation_count += 1;
+            return;
+        }
+        let potential = potential.max(0.0);
         let step = self.total_observations;
 
         let delta = self.last_potential.map_or(0.0, |prev| potential - prev);
@@ -716,6 +723,7 @@ impl ProgressCertificate {
     pub fn verdict(&self) -> CertificateVerdict {
         const MAX_CONVERGENCE_VIOLATION_RATE: f64 = 0.25;
         let n = self.total_observations;
+        let current_potential = self.last_potential.unwrap_or(0.0);
 
         // --- Insufficient data: provisional verdict ---
         if n < self.config.min_observations {
@@ -726,14 +734,17 @@ impl ProgressCertificate {
                 stall_detected: false,
                 azuma_bound: 1.0,
                 total_steps: n,
-                current_potential: self.last_potential.unwrap_or(0.0),
+                current_potential,
                 initial_potential: self.initial_potential.unwrap_or(0.0),
                 mean_credit: 0.0,
                 max_observed_step: self.max_abs_delta,
                 freedman_bound: 1.0,
                 drain_phase: DrainPhase::Warmup,
                 empirical_variance: None,
-                evidence: Vec::new(),
+                evidence: self
+                    .invalid_sample_evidence(n.saturating_sub(1), current_potential)
+                    .into_iter()
+                    .collect(),
             };
         }
 
@@ -839,6 +850,10 @@ impl ProgressCertificate {
     ) -> Vec<EvidenceEntry> {
         let mut evidence = Vec::new();
         let last_step = n - 1;
+
+        if let Some(entry) = self.invalid_sample_evidence(last_step, v_current) {
+            evidence.push(entry);
+        }
 
         // Step bound exceeded.
         if self.max_abs_delta > self.config.max_step_bound {
@@ -1026,6 +1041,7 @@ impl ProgressCertificate {
         self.increase_count = 0;
         self.stall_run = 0;
         self.ema_credit = 0.0;
+        self.invalid_observation_count = 0;
     }
 
     /// Returns the empirical variance of the per-step deltas.
@@ -1071,6 +1087,28 @@ impl ProgressCertificate {
             return 1.0;
         }
         self.martingale_value() / v0
+    }
+
+    fn invalid_sample_evidence(
+        &self,
+        step: usize,
+        current_potential: f64,
+    ) -> Option<EvidenceEntry> {
+        (self.invalid_observation_count > 0).then(|| EvidenceEntry {
+            step,
+            potential: current_potential,
+            bound: 1.0,
+            description: format!(
+                "dropped {} non-finite potential sample(s); certificate ignored them instead of treating them as progress",
+                self.invalid_observation_count
+            ),
+        })
+    }
+
+    /// Returns the number of dropped non-finite potential samples.
+    #[must_use]
+    pub fn invalid_observation_count(&self) -> usize {
+        self.invalid_observation_count
     }
 }
 
@@ -1392,6 +1430,65 @@ mod tests {
         let mut cert = ProgressCertificate::with_defaults();
         cert.observe(-5.0);
         assert!((cert.observations()[0].potential).abs() < 1e-10);
+    }
+
+    #[test]
+    fn invalid_first_observation_is_dropped_without_faking_quiescence() {
+        let mut cert = ProgressCertificate::with_defaults();
+        cert.observe(f64::NAN);
+
+        assert!(
+            cert.is_empty(),
+            "invalid sample must not create an observation"
+        );
+        assert_eq!(cert.total_observations(), 0);
+        assert_eq!(cert.invalid_observation_count(), 1);
+
+        let verdict = cert.verdict();
+        assert!(!verdict.converging);
+        assert_eq!(verdict.drain_phase, DrainPhase::Warmup);
+        assert!(
+            verdict
+                .evidence
+                .iter()
+                .any(|entry| entry.description.contains("dropped 1 non-finite")),
+            "provisional verdict should surface dropped invalid samples"
+        );
+    }
+
+    #[test]
+    fn non_finite_samples_are_ignored_between_valid_observations() {
+        let config = ProgressConfig {
+            min_observations: 2,
+            ..ProgressConfig::default()
+        };
+        let mut cert = ProgressCertificate::new(config);
+
+        cert.observe(100.0);
+        cert.observe(f64::INFINITY);
+        cert.observe(f64::NAN);
+        cert.observe(80.0);
+
+        assert_eq!(cert.invalid_observation_count(), 2);
+        assert_eq!(cert.len(), 2, "only finite samples should be retained");
+        assert_eq!(cert.total_observations(), 2);
+        assert!(
+            (cert.observations()[1].delta + 20.0).abs() < 1e-10,
+            "delta should be computed from the last valid sample, not from a synthetic zero"
+        );
+
+        let verdict = cert.verdict();
+        assert!(
+            verdict.current_potential > cert.config().epsilon,
+            "ignored invalid samples must not fabricate quiescence"
+        );
+        assert!(
+            verdict
+                .evidence
+                .iter()
+                .any(|entry| entry.description.contains("dropped 2 non-finite")),
+            "verdict should record dropped invalid samples for audit"
+        );
     }
 
     // -- Stall detection --
