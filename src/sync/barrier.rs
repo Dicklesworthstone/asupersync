@@ -376,6 +376,7 @@ mod tests {
                 "every metamorphic generation must keep the same party count"
             );
         }
+        let generation_plan = staggered_generations.to_vec();
 
         let config = TestConfig::new()
             .with_seed(0xBA22_1E42)
@@ -388,7 +389,7 @@ mod tests {
             let cx = Cx::current().expect("lab runtime should install a current Cx");
             let mut summaries = Vec::new();
 
-            for staggers in staggered_generations {
+            for staggers in &generation_plan {
                 let releases = Arc::new(StdMutex::new(Vec::<(usize, bool)>::new()));
                 let mut tasks = Vec::new();
 
