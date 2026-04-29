@@ -3148,3 +3148,9 @@ path = "fuzz_targets/global_queue_mpmc_injector.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "ndjson_diagnostics"
+path = "fuzz_targets/ndjson_diagnostics.rs"
+test = false
+doc = false
