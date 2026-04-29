@@ -918,10 +918,10 @@ impl Interceptor for TimeoutInterceptor {
                 match parse_grpc_timeout(value) {
                     Some(_parsed_duration) => {
                         // Sanitize the original value by removing CRLF characters
-                        let sanitized = value.chars()
+                        value
+                            .chars()
                             .filter(|&c| c != '\r' && c != '\n')
-                            .collect::<String>();
-                        sanitized
+                            .collect::<String>()
                     }
                     None => format_grpc_timeout(Duration::from_millis(self.timeout_ms)),
                 }
