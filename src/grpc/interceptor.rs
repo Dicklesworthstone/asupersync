@@ -247,8 +247,28 @@ impl Default for InterceptorLayer {
 
 impl Interceptor for InterceptorLayer {
     fn intercept_request(&self, request: &mut Request<Bytes>) -> Result<(), Status> {
-        for interceptor in &self.interceptors {
-            interceptor.intercept_request(request)?;
+        // Mirror the Server::dispatch_unary cleanup contract: when an
+        // inner interceptor at index `i` returns Err, walk back
+        // through the interceptors[..=i] in REVERSE order calling
+        // intercept_error_with_request so any side effects acquired by
+        // the earlier inner interceptors get cleaned up. Without this,
+        // a RateLimitInterceptor wrapped in an InterceptorLayer that
+        // also contains an auth interceptor that rejects the request
+        // would PERMANENTLY leak its slot — every auth failure burns
+        // a slot, and after max_requests of them the rate limiter is
+        // wedged rejecting legitimate traffic forever
+        // (br-asupersync-9oxmqv).
+        for (index, interceptor) in self.interceptors.iter().enumerate() {
+            if let Err(mut status) = interceptor.intercept_request(request) {
+                for cleanup in self.interceptors[..=index].iter().rev() {
+                    if let Err(replacement) =
+                        cleanup.intercept_error_with_request(request, &mut status)
+                    {
+                        status = replacement;
+                    }
+                }
+                return Err(status);
+            }
         }
         Ok(())
     }
@@ -268,6 +288,26 @@ impl Interceptor for InterceptorLayer {
     ) -> Result<(), Status> {
         for interceptor in self.interceptors.iter().rev() {
             interceptor.intercept_response_with_request(request, response)?;
+        }
+        Ok(())
+    }
+
+    fn intercept_error_with_request(
+        &self,
+        request: &Request<Bytes>,
+        status: &mut Status,
+    ) -> Result<(), Status> {
+        // br-asupersync-9oxmqv: when the OUTER dispatcher (Server::
+        // dispatch_unary) error-walks past this aggregate, propagate
+        // to every inner interceptor in reverse order so each one
+        // has a chance to release its acquired resources (rate-limit
+        // slots, auth-context drops, metric-decrement counters, …).
+        // The trait default is a no-op that would otherwise sink the
+        // cleanup signal here and leak the inner side effects.
+        for inner in self.interceptors.iter().rev() {
+            if let Err(replacement) = inner.intercept_error_with_request(request, status) {
+                *status = replacement;
+            }
         }
         Ok(())
     }
