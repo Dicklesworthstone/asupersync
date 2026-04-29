@@ -8,10 +8,14 @@ use raptorq::{
     PayloadId as RaptorqRsPayloadId,
 };
 
-fn make_source_data(symbol_size: usize) -> Vec<Vec<u8>> {
-    vec![(0..symbol_size)
-        .map(|idx| ((idx * 73 + 11) % 256) as u8)
-        .collect()]
+fn make_source_data(k: usize, symbol_size: usize) -> Vec<Vec<u8>> {
+    (0..k)
+        .map(|symbol_idx| {
+            (0..symbol_size)
+                .map(|byte_idx| (((symbol_idx + 1) * 73 + byte_idx * 29 + 11) % 256) as u8)
+                .collect()
+        })
+        .collect()
 }
 
 fn build_received_symbols(
@@ -90,36 +94,57 @@ fn reference_decode_with_raptorq_rs(
         }
     }
 
-    panic!("raptorq-rs reference decode must succeed for the K=1 single-repair case");
+    panic!("raptorq-rs reference decode must succeed for this degenerate repair case");
 }
 
-#[test]
-fn k1_single_repair_matches_raptorq_rs() {
-    let k = 1usize;
-    let symbol_size = 32usize;
-    let seed = 0x6330_0001_u64;
-    let drop_indices = [0usize];
-    let repair_count = 1usize;
-
-    let source = make_source_data(symbol_size);
+fn assert_case_matches_raptorq_rs(
+    k: usize,
+    symbol_size: usize,
+    seed: u64,
+    drop_indices: &[usize],
+    repair_count: usize,
+    case_name: &str,
+) {
+    let source = make_source_data(k, symbol_size);
     let encoder =
         SystematicEncoder::new(&source, symbol_size, seed).expect("encoder setup must succeed");
     let decoder = InactivationDecoder::new(k, symbol_size, seed);
-    let received = build_received_symbols(&decoder, &encoder, &source, &drop_indices, repair_count);
+    let received = build_received_symbols(&decoder, &encoder, &source, drop_indices, repair_count);
 
-    let ours = decoder.decode(&received).unwrap_or_else(|err| {
-        panic!("K=1 single-repair differential decode must succeed: {err:?}")
-    });
-    let reference =
-        reference_decode_with_raptorq_rs(&source, &encoder, &drop_indices, repair_count);
+    let ours = decoder
+        .decode(&received)
+        .unwrap_or_else(|err| panic!("{case_name} differential decode must succeed: {err:?}"));
+    let reference = reference_decode_with_raptorq_rs(&source, &encoder, drop_indices, repair_count);
 
     assert_eq!(
         ours.source.concat(),
         reference,
-        "our decoder must match raptorq-rs for the degenerate K=1 single-repair case"
+        "our decoder must match raptorq-rs for {case_name}"
     );
     assert_eq!(
         ours.source, source,
-        "a single repair packet must recover the original K=1 source symbol"
+        "{case_name} must recover the original source symbols"
     );
+}
+
+#[test]
+fn k1_single_repair_matches_raptorq_rs() {
+    assert_case_matches_raptorq_rs(
+        1,
+        32,
+        0x6330_0001_u64,
+        &[0usize],
+        1,
+        "the degenerate K=1 single-repair case",
+    );
+}
+
+#[test]
+fn k2_single_erasure_single_repair_matches_raptorq_rs() {
+    for missing_symbol in 0..2 {
+        let case_name = format!(
+            "the degenerate K=2 single-erasure single-repair case with source ESI {missing_symbol} dropped"
+        );
+        assert_case_matches_raptorq_rs(2, 32, 0x6330_0002_u64, &[missing_symbol], 1, &case_name);
+    }
 }
