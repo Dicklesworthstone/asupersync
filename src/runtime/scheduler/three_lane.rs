@@ -9578,9 +9578,9 @@ mod tests {
         }
 
         let mut scheduler = ThreeLaneScheduler::new(2, &state);
-        let worker_pool = scheduler.take_workers();
-        let primary_worker = &mut worker_pool[0];
+        let mut worker_pool = scheduler.take_workers();
         let worker1_local_ready = Arc::clone(&worker_pool[1].local_ready);
+        let primary_worker = &mut worker_pool[0];
 
         primary_worker.execute(task_id);
 
