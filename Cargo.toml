@@ -353,6 +353,10 @@ name = "raptorq_benchmark"
 harness = false
 
 [[bench]]
+name = "gf256_multiply"
+harness = false
+
+[[bench]]
 name = "raptorq_emission_bench"
 harness = false
 

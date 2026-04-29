@@ -36,7 +36,7 @@ use crate::security::SecretString;
 use crate::types::{CancelReason, Outcome};
 use std::collections::BTreeMap;
 use std::fmt;
-use std::io::{self, Write};
+use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Poll;
@@ -1496,7 +1496,7 @@ impl MySqlConnection {
         conn.inner.status_flags = handshake.status_flags;
         conn.inner.server_version = handshake.server_version.clone();
 
-        if options.ssl_mode == SslMode::Required {
+        if Self::should_fail_closed_without_tls(options.ssl_mode, handshake.capabilities) {
             return Outcome::Err(MySqlError::TlsRequired);
         }
 
@@ -1617,7 +1617,8 @@ impl MySqlConnection {
         if data.len() < MIN_HANDSHAKE_SIZE {
             return Err(MySqlError::InvalidPacket(format!(
                 "handshake packet too short: {} bytes, minimum required: {}",
-                data.len(), MIN_HANDSHAKE_SIZE
+                data.len(),
+                MIN_HANDSHAKE_SIZE
             )));
         }
 
@@ -1780,6 +1781,17 @@ impl MySqlConnection {
     #[inline]
     const fn negotiated_capabilities(server_caps: u32, client_caps: u32) -> u32 {
         server_caps & client_caps
+    }
+
+    #[inline]
+    const fn should_fail_closed_without_tls(ssl_mode: SslMode, server_caps: u32) -> bool {
+        match ssl_mode {
+            SslMode::Disabled => false,
+            SslMode::Required => true,
+            // Until the TLS upgrade path exists, `Preferred` must not silently
+            // downgrade to cleartext when the server already advertises TLS.
+            SslMode::Preferred => server_caps & capability::CLIENT_SSL != 0,
+        }
     }
 
     /// Handle authentication response from server.
@@ -4153,12 +4165,18 @@ pub fn fuzz_parse_error_packet(data: &[u8]) -> MySqlError {
 }
 
 #[doc(hidden)]
-pub fn fuzz_parse_text_row(data: &[u8], columns: &[MySqlColumn]) -> Result<Vec<MySqlValue>, MySqlError> {
+pub fn fuzz_parse_text_row(
+    data: &[u8],
+    columns: &[MySqlColumn],
+) -> Result<Vec<MySqlValue>, MySqlError> {
     MySqlConnection::parse_text_row(data, columns)
 }
 
 #[doc(hidden)]
-pub fn fuzz_parse_binary_row(data: &[u8], columns: &[MySqlColumn]) -> Result<Vec<MySqlValue>, MySqlError> {
+pub fn fuzz_parse_binary_row(
+    data: &[u8],
+    columns: &[MySqlColumn],
+) -> Result<Vec<MySqlValue>, MySqlError> {
     MySqlConnection::parse_binary_row(data, columns)
 }
 
@@ -4166,7 +4184,7 @@ pub fn fuzz_parse_binary_row(data: &[u8], columns: &[MySqlColumn]) -> Result<Vec
 pub fn fuzz_parse_data_row_or_terminator(
     data: &[u8],
     columns: &[MySqlColumn],
-    deprecate_eof: bool
+    deprecate_eof: bool,
 ) -> Result<Option<Vec<MySqlValue>>, MySqlError> {
     MySqlConnection::parse_data_row_or_terminator(data, columns, deprecate_eof)
 }
@@ -5102,6 +5120,30 @@ mod tests {
             capability::CLIENT_PROTOCOL_41
         );
         assert_eq!(negotiated & capability::CLIENT_DEPRECATE_EOF, 0);
+    }
+
+    #[test]
+    fn test_should_fail_closed_without_tls_required_always_rejects() {
+        assert!(MySqlConnection::should_fail_closed_without_tls(
+            SslMode::Required,
+            0
+        ));
+        assert!(MySqlConnection::should_fail_closed_without_tls(
+            SslMode::Required,
+            capability::CLIENT_SSL
+        ));
+    }
+
+    #[test]
+    fn test_should_fail_closed_without_tls_preferred_only_rejects_tls_capable_servers() {
+        assert!(!MySqlConnection::should_fail_closed_without_tls(
+            SslMode::Preferred,
+            0
+        ));
+        assert!(MySqlConnection::should_fail_closed_without_tls(
+            SslMode::Preferred,
+            capability::CLIENT_SSL
+        ));
     }
 
     #[test]
@@ -6310,7 +6352,9 @@ mod tests {
             // Send malformed 0-length handshake packet
             // MySQL packet header: 3 bytes length (0x00 0x00 0x00) + 1 byte sequence (0x00)
             let malformed_packet = [0x00, 0x00, 0x00, 0x00]; // length=0, seq=0
-            stream.write_all(&malformed_packet).expect("write malformed packet");
+            stream
+                .write_all(&malformed_packet)
+                .expect("write malformed packet");
         });
 
         let std_stream = std::net::TcpStream::connect(addr).expect("connect");
@@ -6337,9 +6381,15 @@ mod tests {
         // Should reject malformed packet with specific error
         match result {
             Outcome::Err(MySqlError::InvalidPacket(msg)) => {
-                assert!(msg.contains("handshake packet too short"), "Expected handshake size error, got: {msg}");
-            },
-            other => panic!("Expected InvalidPacket error for 0-length handshake, got: {:?}", other),
+                assert!(
+                    msg.contains("handshake packet too short"),
+                    "Expected handshake size error, got: {msg}"
+                );
+            }
+            other => panic!(
+                "Expected InvalidPacket error for 0-length handshake, got: {:?}",
+                other
+            ),
         }
     }
 
@@ -6388,9 +6438,10 @@ mod tests {
             // Skip OK packet header (0x00)
             let header = reader.read_byte()?;
             if header != 0x00 {
-                return Err(MySqlError::Protocol(
-                    format!("Expected OK packet header 0x{:02x}, got 0x{:02x}", 0x00, header)
-                ));
+                return Err(MySqlError::Protocol(format!(
+                    "Expected OK packet header 0x{:02x}, got 0x{:02x}",
+                    0x00, header
+                )));
             }
 
             // Skip affected rows (length-encoded int)
@@ -6457,13 +6508,15 @@ mod tests {
 
         for (test_name, expected_flags) in all_test_cases {
             let packet = create_ok_packet_bytes(0, expected_flags, 0);
-            let parsed_flags = parse_ok_packet_status_flags(&packet)
-                .unwrap_or_else(|_| panic!("Differential test '{}' packet parsing failed", test_name));
+            let parsed_flags = parse_ok_packet_status_flags(&packet).unwrap_or_else(|_| {
+                panic!("Differential test '{}' packet parsing failed", test_name)
+            });
 
             assert_eq!(
                 parsed_flags, expected_flags,
                 "Differential conformance failed for '{}': our MySQL client must handle \
-                 both MySQL and MariaDB OK_Packet status flag patterns correctly", test_name
+                 both MySQL and MariaDB OK_Packet status flag patterns correctly",
+                test_name
             );
         }
 

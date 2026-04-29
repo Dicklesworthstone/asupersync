@@ -1264,10 +1264,51 @@ mod tests {
 
         interceptor.intercept_request(&mut request).unwrap();
 
-        // Check that propagation keys are marked
-        let has_keys = request.metadata().get("x-propagate-keys").is_some();
-        crate::assert_with_log!(has_keys, "propagate keys", true, has_keys);
+        match request.metadata().get("x-propagate-keys") {
+            Some(MetadataValue::Ascii(keys)) => {
+                crate::assert_with_log!(
+                    keys == "x-request-id x-trace-id",
+                    "space-delimited propagate keys",
+                    "x-request-id x-trace-id",
+                    keys
+                );
+                let has_comma_separator = keys.contains(",x-trace-id")
+                    || keys.contains("x-request-id,")
+                    || keys.contains(',');
+                crate::assert_with_log!(
+                    !has_comma_separator,
+                    "comma separator removed",
+                    false,
+                    has_comma_separator
+                );
+            }
+            other => panic!("expected x-propagate-keys metadata, got: {other:?}"),
+        }
         crate::test_complete!("metadata_propagator_marks_keys");
+    }
+
+    #[test]
+    fn metadata_propagator_rejects_comma_keys() {
+        init_test("metadata_propagator_rejects_comma_keys");
+        let interceptor = metadata_propagator(["x-request-id", "x,trace,id"]);
+
+        let mut request = Request::new(Bytes::new());
+        request.metadata_mut().insert("x-request-id", "req-123");
+
+        interceptor.intercept_request(&mut request).unwrap();
+
+        match request.metadata().get("x-propagate-keys") {
+            Some(MetadataValue::Ascii(keys)) => {
+                crate::assert_with_log!(
+                    keys == "x-request-id",
+                    "invalid comma key dropped",
+                    "x-request-id",
+                    keys
+                );
+            }
+            other => panic!("expected x-propagate-keys metadata, got: {other:?}"),
+        }
+        crate::test_complete!("metadata_propagator_rejects_comma_keys");
     }
 
     #[test]

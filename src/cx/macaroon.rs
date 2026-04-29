@@ -3073,6 +3073,196 @@ mod tests {
         }
     }
 
+    // --- Metamorphic Testing: Attenuation Associativity (a∘b)(token) ≡ b(a(token)) ---
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(1_000))]
+
+        /// Metamorphic Relation: Attenuation Associativity
+        ///
+        /// Property: (a∘b)(token) ≡ b(a(token))
+        /// Where a and b are caveat attenuations, ∘ is function composition.
+        ///
+        /// This tests that the order of applying two caveats doesn't matter
+        /// for the final token properties - both orderings should produce
+        /// tokens with equivalent verification behavior.
+        #[test]
+        fn mr_attenuation_associativity(
+            seed in 1u64..u64::MAX,
+            identifier in "\\PC{1,20}",
+            location in "\\PC{1,20}",
+            caveat_a in arb_predicate(),
+            caveat_b in arb_predicate(),
+        ) {
+            let key = AuthKey::from_seed(seed);
+            let base_token = MacaroonToken::mint(&key, &identifier, &location);
+
+            // Apply caveats in order: a then b
+            let token_ab = base_token
+                .clone()
+                .add_caveat(caveat_a.clone())
+                .add_caveat(caveat_b.clone());
+
+            // Apply caveats in order: b then a
+            let token_ba = base_token
+                .clone()
+                .add_caveat(caveat_b.clone())
+                .add_caveat(caveat_a.clone());
+
+            // MR1: Both tokens should verify with the same key
+            let sig_ab_valid = token_ab.verify_signature(&key);
+            let sig_ba_valid = token_ba.verify_signature(&key);
+            prop_assert_eq!(sig_ab_valid, sig_ba_valid,
+                "Signature verification differs between attenuation orders");
+
+            // MR2: Both tokens should have the same caveat count
+            prop_assert_eq!(token_ab.caveat_count(), token_ba.caveat_count(),
+                "Caveat counts differ between attenuation orders");
+
+            // MR3: Both tokens should accept/reject the same verification contexts
+            // Test with a variety of contexts that might trigger different caveats
+            let test_contexts = vec![
+                VerificationContext::new()
+                    .with_time(1000)
+                    .with_use_count(5),
+                VerificationContext::new()
+                    .with_time(10000)
+                    .with_resource("api/test")
+                    .with_region(42),
+                VerificationContext::new()
+                    .with_use_count(100)
+                    .with_task(123),
+            ];
+
+            for ctx in &test_contexts {
+                let verify_ab = token_ab.verify(&key, ctx).is_ok();
+                let verify_ba = token_ba.verify(&key, ctx).is_ok();
+                prop_assert_eq!(verify_ab, verify_ba,
+                    "Verification results differ for context: a→b={}, b→a={}, ctx={:?}",
+                    verify_ab, verify_ba, ctx);
+            }
+        }
+
+        /// Metamorphic Relation: N-ary Attenuation Commutativity
+        ///
+        /// Property: All permutations of N caveats should produce equivalent tokens
+        /// for verification purposes (though signatures may differ).
+        #[test]
+        fn mr_multi_caveat_commutativity(
+            seed in 1u64..u64::MAX,
+            identifier in "\\PC{1,15}",
+            location in "\\PC{1,15}",
+            caveats in proptest::collection::vec(arb_predicate(), 2..4),
+        ) {
+            let key = AuthKey::from_seed(seed);
+            let base_token = MacaroonToken::mint(&key, &identifier, &location);
+
+            // Generate all permutations of the caveats
+            let mut permutations = Vec::new();
+            generate_permutations(&caveats, &mut Vec::new(), &mut permutations);
+
+            // Apply each permutation to create different tokens
+            let mut tokens = Vec::new();
+            for perm in &permutations {
+                let mut token = base_token.clone();
+                for caveat in perm {
+                    token = token.add_caveat(caveat.clone());
+                }
+                tokens.push(token);
+            }
+
+            // All tokens should have the same verification behavior
+            let test_contexts = vec![
+                VerificationContext::new().with_time(5000).with_use_count(10),
+                VerificationContext::new().with_region(42).with_task(100),
+                VerificationContext::new().with_resource("data/test"),
+            ];
+
+            let reference_token = &tokens[0];
+            for (i, token) in tokens.iter().enumerate().skip(1) {
+                // All signatures should be valid
+                prop_assert!(token.verify_signature(&key),
+                    "Token {} signature invalid", i);
+
+                // Caveat counts should be equal
+                prop_assert_eq!(token.caveat_count(), reference_token.caveat_count(),
+                    "Token {} has different caveat count", i);
+
+                // Verification behavior should be identical
+                for ctx in &test_contexts {
+                    let ref_result = reference_token.verify(&key, ctx).is_ok();
+                    let token_result = token.verify(&key, ctx).is_ok();
+                    prop_assert_eq!(ref_result, token_result,
+                        "Token {} verification differs from reference for context {:?}", i, ctx);
+                }
+            }
+        }
+
+        /// Metamorphic Relation: Idempotent Attenuation
+        ///
+        /// Property: Adding the same caveat twice should be equivalent to adding it once
+        /// (though the signature will differ due to HMAC chaining).
+        #[test]
+        fn mr_idempotent_attenuation(
+            seed in 1u64..u64::MAX,
+            identifier in "\\PC{1,15}",
+            location in "\\PC{1,15}",
+            caveat in arb_predicate(),
+        ) {
+            let key = AuthKey::from_seed(seed);
+            let base_token = MacaroonToken::mint(&key, &identifier, &location);
+
+            let token_single = base_token.clone().add_caveat(caveat.clone());
+            let token_double = base_token
+                .clone()
+                .add_caveat(caveat.clone())
+                .add_caveat(caveat.clone());
+
+            // Both should have valid signatures
+            prop_assert!(token_single.verify_signature(&key));
+            prop_assert!(token_double.verify_signature(&key));
+
+            // Verification behavior should be equivalent for restrictive contexts
+            let test_contexts = vec![
+                VerificationContext::new().with_time(5000),
+                VerificationContext::new().with_use_count(10),
+                VerificationContext::new().with_region(42),
+            ];
+
+            for ctx in &test_contexts {
+                let single_result = token_single.verify(&key, ctx).is_ok();
+                let double_result = token_double.verify(&key, ctx).is_ok();
+
+                // If single caveat rejects, double should also reject
+                // If single caveat accepts, double should also accept
+                // (idempotency: restriction doesn't compound)
+                prop_assert_eq!(single_result, double_result,
+                    "Idempotent caveat verification differs: single={}, double={}, caveat={:?}",
+                    single_result, double_result, caveat);
+            }
+        }
+    }
+
+    /// Helper function to generate all permutations of caveats
+    fn generate_permutations<T: Clone + PartialEq>(
+        items: &[T],
+        current: &mut Vec<T>,
+        result: &mut Vec<Vec<T>>,
+    ) {
+        if current.len() == items.len() {
+            result.push(current.clone());
+            return;
+        }
+
+        for item in items {
+            if !current.contains(item) {
+                current.push(item.clone());
+                generate_permutations(items, current, result);
+                current.pop();
+            }
+        }
+    }
+
     // --- Tampered token rejection ---
 
     #[test]

@@ -3219,6 +3219,82 @@ mod tests {
     }
 
     #[test]
+    fn resp3_reference_vectors_match_redis_rs_value_model_for_composite_types() {
+        // Keep a single differential matrix over the RESP3 composite/value
+        // variants we care about here. redis-rs preserves map/set ordering on
+        // the wire, exposes verbatim strings as (format, text), and treats big
+        // numbers as exact arbitrary-precision decimal payloads.
+        let cases: Vec<(&str, RespValue, &'static [u8])> = vec![
+            (
+                "map",
+                RespValue::Map(vec![
+                    (
+                        RespValue::SimpleString("proto".to_string()),
+                        RespValue::Integer(3),
+                    ),
+                    (
+                        RespValue::BulkString(Some(b"mode".to_vec())),
+                        RespValue::SimpleString("standalone".to_string()),
+                    ),
+                ]),
+                concat!(
+                    "%2\r\n",
+                    "+proto\r\n",
+                    ":3\r\n",
+                    "$4\r\nmode\r\n",
+                    "+standalone\r\n",
+                )
+                .as_bytes(),
+            ),
+            (
+                "set",
+                RespValue::Set(vec![
+                    RespValue::Integer(1),
+                    RespValue::BulkString(Some(b"two".to_vec())),
+                    RespValue::Boolean(true),
+                ]),
+                concat!("~3\r\n", ":1\r\n", "$3\r\ntwo\r\n", "#t\r\n").as_bytes(),
+            ),
+            (
+                "verbatim",
+                RespValue::Verbatim {
+                    format: "txt".to_string(),
+                    payload: b"hello\r\nworld".to_vec(),
+                },
+                b"=16\r\ntxt:hello\r\nworld\r\n",
+            ),
+            (
+                "big_number",
+                RespValue::BigNumber("3492890328409238509324850943850943825024385".to_string()),
+                b"(3492890328409238509324850943850943825024385\r\n",
+            ),
+        ];
+
+        for (name, value, expected) in cases {
+            assert_eq!(
+                value.encode(),
+                expected,
+                "RESP3 {name} encoding must stay byte-compatible with redis-rs's \
+                 low-level value model"
+            );
+
+            let (decoded, consumed) = RespValue::try_decode(expected)
+                .unwrap()
+                .unwrap_or_else(|| panic!("RESP3 {name} vector should decode"));
+            assert_eq!(
+                decoded, value,
+                "RESP3 {name} decoding must preserve the redis-rs-compatible \
+                 low-level value model"
+            );
+            assert_eq!(
+                consumed,
+                expected.len(),
+                "RESP3 {name} decoder must consume the full reference vector"
+            );
+        }
+    }
+
+    #[test]
     fn test_resp_decode_partial_needs_more() {
         assert!(RespValue::try_decode(b"$3\r\nfo").unwrap().is_none());
     }

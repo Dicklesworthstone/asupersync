@@ -2335,14 +2335,12 @@ fn gf256_mul_slice_x86_avx2(dst: &mut [u8], c: Gf256) {
         gf256_mul_slice_scalar(dst, c);
         return;
     }
-    if std::is_x86_feature_detected!("avx2") {
-        // SAFETY: CPU feature is checked at runtime above, and the function
-        // only reads/writes within `dst` bounds.
-        unsafe {
-            gf256_mul_slice_x86_avx2_impl(dst, c);
-        }
-    } else {
-        gf256_mul_slice_scalar(dst, c);
+    debug_assert!(std::is_x86_feature_detected!("avx2"));
+    // SAFETY: `dispatch()` only installs this wrapper after the one-time AVX2
+    // probe succeeds, so the hot path does not need to re-run feature
+    // detection on every multiply call.
+    unsafe {
+        gf256_mul_slice_x86_avx2_impl(dst, c);
     }
 }
 
@@ -2359,14 +2357,11 @@ fn gf256_mul_slice_aarch64_neon(dst: &mut [u8], c: Gf256) {
         gf256_mul_slice_scalar(dst, c);
         return;
     }
-    if std::arch::is_aarch64_feature_detected!("neon") {
-        // SAFETY: CPU feature is checked at runtime above, and the function
-        // only reads/writes within `dst` bounds.
-        unsafe {
-            gf256_mul_slice_aarch64_neon_impl(dst, c);
-        }
-    } else {
-        gf256_mul_slice_scalar(dst, c);
+    debug_assert!(std::arch::is_aarch64_feature_detected!("neon"));
+    // SAFETY: `dispatch()` only installs this wrapper after the one-time NEON
+    // probe succeeds, so the hot path avoids redundant feature re-detection.
+    unsafe {
+        gf256_mul_slice_aarch64_neon_impl(dst, c);
     }
 }
 

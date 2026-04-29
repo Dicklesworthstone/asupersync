@@ -70,6 +70,21 @@ enum SymbolType {
         columns: Vec<u16>,
         coefficients: Vec<u8>,
     },
+    /// Start from a valid repair equation, then mutate it into a malformed repair packet.
+    MalformedRepairPacket {
+        esi_offset: u8,
+        mutation: RepairPacketMutation,
+    },
+}
+
+#[derive(Debug, Arbitrary)]
+enum RepairPacketMutation {
+    /// Drop one coefficient so columns.len() != coefficients.len().
+    DropLastCoefficient,
+    /// Append a column index outside the decoder's valid intermediate-symbol range.
+    AppendOutOfRangeColumn { extra: u8 },
+    /// Duplicate a valid column while keeping arity matched.
+    DuplicateFirstColumn,
 }
 
 #[derive(Debug, Arbitrary)]
@@ -111,18 +126,32 @@ fuzz_target!(|data: &[u8]| {
 /// Test decoder with adversarial symbol set configurations
 fn test_adversarial_symbol_set(input: &AdversarialSymbolSet, k: usize, symbol_size: usize) {
     let decoder = InactivationDecoder::new(k, symbol_size, input.seed);
+    let required = decoder
+        .params()
+        .l
+        .saturating_sub(decoder.params().k_prime.saturating_sub(k));
 
     // Limit symbols to prevent memory exhaustion
     let symbols: Vec<_> = input
         .symbols
         .iter()
         .take(MAX_SYMBOLS)
-        .filter_map(|adv_symbol| build_received_symbol(adv_symbol, k, symbol_size))
+        .filter_map(|adv_symbol| build_received_symbol(&decoder, adv_symbol, k, symbol_size))
         .collect();
 
     if symbols.is_empty() {
         return;
     }
+
+    let has_validation_malformed_repair = symbols.iter().any(|symbol| {
+        !symbol.is_source
+            && (symbol.data.len() != symbol_size
+                || symbol.columns.len() != symbol.coefficients.len()
+                || symbol
+                    .columns
+                    .iter()
+                    .any(|&column| column >= decoder.params().l))
+    });
 
     // Test basic decode - should never panic
     let result =
@@ -161,6 +190,37 @@ fn test_adversarial_symbol_set(input: &AdversarialSymbolSet, k: usize, symbol_si
         }
     }
 
+    if has_validation_malformed_repair && symbols.len() >= required {
+        let direct_kind = decoder
+            .decode(&symbols)
+            .err()
+            .and_then(validation_error_kind)
+            .expect("malformed repair packets must be rejected at validation time");
+
+        let wavefront_kind = decoder
+            .decode_wavefront(&symbols, 4)
+            .err()
+            .and_then(validation_error_kind)
+            .expect("wavefront decode must reject the same malformed repair packets");
+        assert_eq!(
+            wavefront_kind, direct_kind,
+            "decode and decode_wavefront must agree on malformed repair packet rejection"
+        );
+
+        if symbols.len() <= 64 {
+            let object_id = ObjectId::new_for_test(input.seed);
+            let proof_kind = decoder
+                .decode_with_proof(&symbols, object_id, 0)
+                .err()
+                .and_then(validation_error_kind)
+                .expect("decode_with_proof must reject the same malformed repair packets");
+            assert_eq!(
+                proof_kind, direct_kind,
+                "decode_with_proof must agree with decode on malformed repair packet rejection"
+            );
+        }
+    }
+
     // Test decode_wavefront with different batch sizes if enough symbols
     if symbols.len() > 10 {
         for batch_size in [0, 1, 4, 16] {
@@ -193,12 +253,13 @@ fn test_adversarial_symbol_set(input: &AdversarialSymbolSet, k: usize, symbol_si
 
 /// Build a ReceivedSymbol from adversarial configuration
 fn build_received_symbol(
+    decoder: &InactivationDecoder,
     adv_symbol: &AdversarialSymbol,
     k: usize,
     symbol_size: usize,
 ) -> Option<ReceivedSymbol> {
-    let esi = adv_symbol.esi;
-    let is_source = adv_symbol.is_source;
+    let mut esi = adv_symbol.esi;
+    let mut is_source = adv_symbol.is_source;
 
     // Generate columns and coefficients based on symbol type
     let (columns, coefficients) = match &adv_symbol.symbol_type {
@@ -302,6 +363,35 @@ fn build_received_symbol(
             // Intentionally different lengths for arity mismatch
             (cols, coeffs)
         }
+
+        SymbolType::MalformedRepairPacket {
+            esi_offset,
+            mutation,
+        } => {
+            is_source = false;
+            esi = k as u32 + u32::from(*esi_offset % 24);
+            let (mut cols, mut coeffs) = decoder
+                .repair_equation(esi)
+                .unwrap_or_else(|_| (vec![0usize], vec![Gf256::new(1)]));
+
+            match mutation {
+                RepairPacketMutation::DropLastCoefficient => {
+                    let _ = coeffs.pop();
+                }
+                RepairPacketMutation::AppendOutOfRangeColumn { extra } => {
+                    cols.push(decoder.params().l + usize::from(*extra) + 1);
+                    coeffs.push(Gf256::new(extra.saturating_add(1)));
+                }
+                RepairPacketMutation::DuplicateFirstColumn => {
+                    if let Some(&first) = cols.first() {
+                        cols.push(first);
+                        coeffs.push(Gf256::new(2));
+                    }
+                }
+            }
+
+            (cols, coeffs)
+        }
     };
 
     // Generate symbol data based on mutation type
@@ -337,6 +427,26 @@ fn build_received_symbol(
         coefficients,
         data,
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ValidationErrorKind {
+    SymbolSizeMismatch,
+    SymbolEquationArityMismatch,
+    ColumnIndexOutOfRange,
+}
+
+fn validation_error_kind(error: DecodeError) -> Option<ValidationErrorKind> {
+    match error {
+        DecodeError::SymbolSizeMismatch { .. } => Some(ValidationErrorKind::SymbolSizeMismatch),
+        DecodeError::SymbolEquationArityMismatch { .. } => {
+            Some(ValidationErrorKind::SymbolEquationArityMismatch)
+        }
+        DecodeError::ColumnIndexOutOfRange { .. } => {
+            Some(ValidationErrorKind::ColumnIndexOutOfRange)
+        }
+        _ => None,
+    }
 }
 
 /// Validate that decode errors are appropriate for the input

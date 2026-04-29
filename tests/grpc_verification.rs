@@ -1441,8 +1441,8 @@ fn grpc_verify_045_metadata_propagator() {
     // Only present keys should be recorded
     match req.metadata().get("x-propagate-keys") {
         Some(MetadataValue::Ascii(s)) => {
-            assert!(s.contains("x-request-id"));
-            assert!(s.contains("x-trace-id"));
+            assert_eq!(s, "x-request-id x-trace-id");
+            assert!(!s.contains(','));
             assert!(!s.contains("x-missing"));
         }
         other => panic!("expected propagate keys, got: {other:?}"),
