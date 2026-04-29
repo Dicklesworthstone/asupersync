@@ -1,0 +1,1 @@
+{"method":"Get","path":"/api","origin_scenario":{"SingleOrigin":{"origin":"https://example.com"}},"extra_headers":[],"cors_policy_type":"AllowAny"}

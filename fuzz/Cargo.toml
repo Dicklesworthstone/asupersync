@@ -2646,3 +2646,15 @@ path = "fuzz_targets/raptorq_gauss_elimination_boundaries.rs"
 test = false
 doc = false
 bench = false
+
+# br-asupersync-i7gcpg: Structure-aware CORS Origin parsing fuzzer for RFC 6454 multi-Origin header handling.
+# Tests src/web/middleware.rs Origin header parsing with intelligent input generation for multi-Origin
+# scenarios, malformed origins, case variations, and edge cases. Exercises RFC 6454 compliance for
+# multiple Origin headers, origin validation, policy enforcement, and ensures robust handling of
+# Origin header parsing edge cases under various CORS policy configurations.
+[[bin]]
+name = "cors_origin_parsing"
+path = "fuzz_targets/cors_origin_parsing.rs"
+test = false
+doc = false
+bench = false
