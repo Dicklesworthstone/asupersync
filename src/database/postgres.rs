@@ -9030,6 +9030,87 @@ mod tests {
     }
 
     #[test]
+    fn query_preserves_per_statement_row_metadata_in_simple_query_batch_psql_parity() {
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let cx = crate::cx::Cx::for_testing();
+
+        let responder = std::thread::spawn(move || {
+            let query_request =
+                read_until_contains(&mut peer, b"SELECT 1 AS n; SELECT 'two' AS s");
+            assert!(
+                query_request
+                    .windows("SELECT 1 AS n; SELECT 'two' AS s".len())
+                    .any(|window| window == b"SELECT 1 AS n; SELECT 'two' AS s"),
+                "simple query should contain the full batched SQL"
+            );
+
+            // Captured from psql-driven simple-query behavior: each statement in
+            // the batch gets its own RowDescription/DataRow/CommandComplete
+            // segment before the final ReadyForQuery.
+            let mut first_row_description = Vec::new();
+            first_row_description.extend_from_slice(&1i16.to_be_bytes());
+            first_row_description.extend_from_slice(b"n\0");
+            first_row_description.extend_from_slice(&0i32.to_be_bytes());
+            first_row_description.extend_from_slice(&0i16.to_be_bytes());
+            first_row_description.extend_from_slice(&(oid::INT4 as i32).to_be_bytes());
+            first_row_description.extend_from_slice(&4i16.to_be_bytes());
+            first_row_description.extend_from_slice(&(-1i32).to_be_bytes());
+            first_row_description.extend_from_slice(&0i16.to_be_bytes());
+
+            let mut first_data_row = Vec::new();
+            first_data_row.extend_from_slice(&1i16.to_be_bytes());
+            first_data_row.extend_from_slice(&1i32.to_be_bytes());
+            first_data_row.extend_from_slice(b"1");
+
+            let mut second_row_description = Vec::new();
+            second_row_description.extend_from_slice(&1i16.to_be_bytes());
+            second_row_description.extend_from_slice(b"s\0");
+            second_row_description.extend_from_slice(&0i32.to_be_bytes());
+            second_row_description.extend_from_slice(&0i16.to_be_bytes());
+            second_row_description.extend_from_slice(&(oid::TEXT as i32).to_be_bytes());
+            second_row_description.extend_from_slice(&(-1i16).to_be_bytes());
+            second_row_description.extend_from_slice(&(-1i32).to_be_bytes());
+            second_row_description.extend_from_slice(&0i16.to_be_bytes());
+
+            let mut second_data_row = Vec::new();
+            second_data_row.extend_from_slice(&1i16.to_be_bytes());
+            second_data_row.extend_from_slice(&3i32.to_be_bytes());
+            second_data_row.extend_from_slice(b"two");
+
+            std::io::Write::write_all(&mut peer, &backend_message(b'T', &first_row_description))
+                .expect("first row description should be written");
+            std::io::Write::write_all(&mut peer, &backend_message(b'D', &first_data_row))
+                .expect("first data row should be written");
+            std::io::Write::write_all(&mut peer, &backend_message(b'C', b"SELECT 1\0"))
+                .expect("first command complete should be written");
+            std::io::Write::write_all(&mut peer, &backend_message(b'T', &second_row_description))
+                .expect("second row description should be written");
+            std::io::Write::write_all(&mut peer, &backend_message(b'D', &second_data_row))
+                .expect("second data row should be written");
+            std::io::Write::write_all(&mut peer, &backend_message(b'C', b"SELECT 1\0"))
+                .expect("second command complete should be written");
+            std::io::Write::write_all(&mut peer, &ready_for_query(b'I'))
+                .expect("ready for query should be written");
+        });
+
+        match run(conn.query_unchecked(&cx, "SELECT 1 AS n; SELECT 'two' AS s")) {
+            Outcome::Ok(rows) => {
+                assert_eq!(rows.len(), 2, "expected one row per simple-query statement");
+                assert_eq!(rows[0].columns()[0].name, "n");
+                assert_eq!(rows[0].get_i32("n").expect("first row int4"), 1);
+                assert_eq!(rows[1].columns()[0].name, "s");
+                assert_eq!(rows[1].get_str("s").expect("second row text"), "two");
+            }
+            other => panic!("expected successful simple-query batch, got {other:?}"),
+        }
+        responder
+            .join()
+            .expect("simple-query batch responder should exit cleanly");
+        assert!(!conn.inner.closed);
+        assert_eq!(conn.inner.transaction_status, b'I');
+    }
+
+    #[test]
     fn execute_updates_parameter_status_from_async_message() {
         let (mut conn, mut peer) = make_test_connection_with_peer();
         let parameter_status = parameter_status_message("application_name", "asupersync-test");
