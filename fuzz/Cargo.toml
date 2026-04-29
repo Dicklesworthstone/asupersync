@@ -2693,3 +2693,15 @@ path = "fuzz_targets/jetstream_consumer_info_error_response.rs"
 test = false
 doc = false
 bench = false
+
+# Structure-aware fuzzer for gRPC-Web trailers framing under chunked transfer encoding.
+# Tests src/grpc/web.rs Base64StreamDecoder with intelligent input generation for chunked
+# base64 decoding scenarios: partial quartet buffering across chunk boundaries, padding
+# handling, state transitions, and error propagation across HTTP chunk splits. Exercises
+# the complete pipeline from chunked base64 decoding through gRPC-Web trailer frame validation.
+[[bin]]
+name = "grpc_web_chunked_trailers"
+path = "fuzz_targets/grpc_web_chunked_trailers.rs"
+test = false
+doc = false
+bench = false
