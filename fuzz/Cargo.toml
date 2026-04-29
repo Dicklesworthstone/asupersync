@@ -1239,6 +1239,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "grpc_protobuf_decode_malformed_varint_overflow"
+path = "fuzz_targets/grpc_protobuf_decode_malformed_varint_overflow.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "grpc_gzip_message_decode"
 path = "fuzz_targets/grpc_gzip_message_decode.rs"
 test = false
@@ -2911,6 +2918,19 @@ bench = false
 [[bin]]
 name = "mac_constant_time_verification"
 path = "fuzz_targets/mac_constant_time_verification.rs"
+test = false
+doc = false
+bench = false
+
+# HTTP/2 frame codec fuzzer for src/http/h2/connection.rs FrameCodec::decode.
+# Tests arbitrary byte input sequences against the frame decoder to ensure:
+# - No panics on malformed or adversarial input
+# - Proper error handling for protocol violations
+# - State consistency across partial decode operations
+# - Frame size validation and buffer management safety
+[[bin]]
+name = "h2_frame_codec_arbitrary_bytes"
+path = "fuzz_targets/h2_frame_codec_arbitrary_bytes.rs"
 test = false
 doc = false
 bench = false
