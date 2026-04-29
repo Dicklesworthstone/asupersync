@@ -385,6 +385,7 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use crate::record::finalizer::Finalizer;
     use crate::record::region::RegionState;
     use crate::types::{CancelReason, TaskId};
 
@@ -771,6 +772,81 @@ mod tests {
             assert!(table.task_ids(root).unwrap().is_empty());
             assert_eq!(table.pending_obligations(root), Some(0));
         }
+    }
+
+    fn run_close_reentry_scenario(
+        pre_child_drain_close_calls: usize,
+        post_child_drain_close_calls: usize,
+    ) -> (usize, usize, RegionState, usize, bool) {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let mut table = RegionTable::new();
+        let root = table.create_root(Budget::default(), Time::ZERO);
+        let child = table
+            .create_child(root, Budget::default(), Time::ZERO)
+            .unwrap();
+        let root_record = table.get(root.arena_index()).unwrap();
+        let finalize_count = Arc::new(AtomicUsize::new(0));
+        let finalize_count_clone = Arc::clone(&finalize_count);
+        root_record.add_finalizer(Finalizer::Sync(Box::new(move || {
+            finalize_count_clone.fetch_add(1, Ordering::SeqCst);
+        })));
+
+        assert!(root_record.begin_close(None));
+        assert!(root_record.begin_finalize());
+
+        let mut successful_complete_close_calls = 0;
+        for _ in 0..pre_child_drain_close_calls {
+            successful_complete_close_calls += usize::from(root_record.complete_close());
+        }
+
+        assert_eq!(root_record.state(), RegionState::Finalizing);
+        assert_eq!(root_record.finalizer_count(), 1);
+        assert_eq!(finalize_count.load(Ordering::SeqCst), 0);
+
+        root_record.remove_child(child);
+        for _ in 0..post_child_drain_close_calls {
+            successful_complete_close_calls += usize::from(root_record.complete_close());
+        }
+
+        assert_eq!(root_record.state(), RegionState::Finalizing);
+        assert_eq!(root_record.finalizer_count(), 1);
+        assert_eq!(finalize_count.load(Ordering::SeqCst), 0);
+
+        let finalizer = root_record.pop_finalizer().expect("pending finalizer");
+        match finalizer {
+            Finalizer::Sync(f) => f(),
+            Finalizer::Async(_) => panic!("expected sync finalizer"),
+        }
+
+        successful_complete_close_calls += usize::from(root_record.complete_close());
+        let repeated_after_closed = root_record.complete_close();
+        (
+            successful_complete_close_calls,
+            finalize_count.load(Ordering::SeqCst),
+            table.state(root).unwrap(),
+            root_record.finalizer_count(),
+            repeated_after_closed,
+        )
+    }
+
+    #[test]
+    fn close_reentry_during_quiesce_preserves_single_finalize_and_close_transition() {
+        let baseline = run_close_reentry_scenario(1, 1);
+        let reentered = run_close_reentry_scenario(3, 2);
+
+        for (successful_closes, finalize_count, state, finalizers_left, repeated_after_closed) in
+            [baseline, reentered]
+        {
+            assert_eq!(successful_closes, 1);
+            assert_eq!(finalize_count, 1);
+            assert_eq!(state, RegionState::Closed);
+            assert_eq!(finalizers_left, 0);
+            assert!(!repeated_after_closed);
+        }
+
+        assert_eq!(baseline, reentered);
     }
 
     // =========================================================================
