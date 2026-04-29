@@ -2513,9 +2513,9 @@ mod tests {
         let waker = Waker::from(StdArc::new(CountWaker(wake_state.clone())));
         let mut task_cx = Context::from_waker(&waker);
 
-        // Acquire and release N+2 writers in succession while a reader is
-        // queued. The reader must eventually be granted (woken) within N
-        // writer cycles by the forced reader-turn path.
+        // Queue N+2 writers ahead of one reader. The reader must eventually
+        // be granted by the forced reader-turn path instead of waiting for
+        // the entire writer queue to drain first.
         const N: usize = MAX_CONSECUTIVE_WRITERS_BEFORE_READER_BATCH;
 
         // First take a writer so the reader is forced to queue.
@@ -2526,17 +2526,8 @@ mod tests {
             panic!("expected Ready on uncontended write")
         };
 
-        // Queue a reader that will be starved.
-        let mut fut_starved_reader = lock.read(&cx);
-        assert!(
-            std::pin::Pin::new(&mut fut_starved_reader)
-                .poll(&mut task_cx)
-                .is_pending(),
-            "reader must initially queue behind active writer"
-        );
-
-        // Queue N+2 successor writers so each release_writer hands the lock
-        // to the next queued writer rather than the reader.
+        // Queue successor writers first so the reader is genuinely behind
+        // continuous writer pressure.
         let mut writer_futs: Vec<_> = (0..(N + 2)).map(|_| Box::pin(lock.write(&cx))).collect();
         for f in &mut writer_futs {
             assert!(
@@ -2544,6 +2535,15 @@ mod tests {
                 "successor writers must queue"
             );
         }
+
+        // Queue a reader that would be starved without the forced reader turn.
+        let mut fut_starved_reader = lock.read(&cx);
+        assert!(
+            std::pin::Pin::new(&mut fut_starved_reader)
+                .poll(&mut task_cx)
+                .is_pending(),
+            "reader must initially queue behind active writer"
+        );
 
         // Release the initial writer; the chain begins. After at most N
         // writer hand-offs, the forced reader-turn path must fire and

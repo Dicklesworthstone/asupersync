@@ -53,7 +53,7 @@ struct WaiterSlab {
     entries: SmallVec<[WaiterEntry; 4]>,
     /// Free-slot indices for reuse. SmallVec<4> avoids heap allocation for
     /// the common case of few concurrent waiters.
-    free_slots: SmallVec<[usize; 4]>,
+    free_slots: SmallVec<[FreeSlot; 4]>,
     /// Number of active waiters (those with a waker set). Maintained
     /// incrementally so `active_count()` is O(1) instead of a linear scan.
     active: usize,
@@ -61,6 +61,13 @@ struct WaiterSlab {
     /// entry. `notify_one` starts scanning from here instead of index 0,
     /// making sequential notifications O(1) amortized instead of O(n).
     scan_start: usize,
+}
+
+/// A reusable waiter slot and the epoch the next occupant must receive.
+#[derive(Debug, Clone, Copy)]
+struct FreeSlot {
+    index: usize,
+    next_epoch: u64,
 }
 
 /// Entry in the waiter queue.
@@ -72,6 +79,9 @@ struct WaiterEntry {
     notified: bool,
     /// Generation at which this waiter was registered.
     generation: u64,
+    /// True when a later broadcast woke another waiter from this same
+    /// pre-broadcast set while this entry was already notify_one-ready.
+    broadcast_covered_peer: bool,
     /// br-asupersync-bu4r7l: per-slot epoch incremented on every reuse
     /// of this slot's index by `insert()`. A `Notified` future records
     /// the epoch at registration time and re-verifies it on `Drop` so
@@ -105,21 +115,21 @@ impl WaiterSlab {
     fn insert(&mut self, mut entry: WaiterEntry) -> (usize, u64) {
         let is_active = entry.waker.is_some();
         let (index, slot_epoch) = loop {
-            if let Some(idx) = self.free_slots.pop() {
-                if idx < self.entries.len() {
-                    // br-asupersync-bu4r7l: bump the slot's epoch BEFORE
-                    // overwriting so any prior `Notified` that still
-                    // holds the old (idx, prev_epoch) tuple sees a
-                    // mismatch on its Drop and skips the now-foreign
-                    // entry. wrapping_add tolerates the (astronomically
-                    // unlikely) wrap-around without panic.
-                    let prev_epoch = self.entries[idx].slot_epoch;
-                    let new_epoch = prev_epoch.wrapping_add(1);
-                    entry.slot_epoch = new_epoch;
-                    self.entries[idx] = entry;
-                    break (idx, new_epoch);
+            if let Some(free) = self.free_slots.pop() {
+                if free.index < self.entries.len() {
+                    entry.slot_epoch = free.next_epoch;
+                    self.entries[free.index] = entry;
+                    break (free.index, free.next_epoch);
                 }
-                // idx >= len means this slot was truncated away during a previous shrink.
+                if free.index == self.entries.len() {
+                    // Tail shrink removed the entry body, but the free-slot
+                    // record preserves its next epoch so recreating the same
+                    // index is still distinguishable from the prior occupant.
+                    entry.slot_epoch = free.next_epoch;
+                    self.entries.push(entry);
+                    break (free.index, free.next_epoch);
+                }
+                // Higher stale indices were truncated away during a previous shrink.
                 // Ignore it and keep popping.
             } else {
                 let idx = self.entries.len();
@@ -144,12 +154,13 @@ impl WaiterSlab {
     #[inline]
     fn remove(&mut self, index: usize) {
         if index < self.entries.len() {
+            let next_epoch = self.entries[index].slot_epoch.wrapping_add(1);
             if self.entries[index].waker.is_some() {
                 self.active -= 1;
             }
             self.entries[index].waker = None;
             self.entries[index].notified = false;
-            self.free_slots.push(index);
+            self.free_slots.push(FreeSlot { index, next_epoch });
         }
 
         // Shrink from the end: pop entries that are free and at the tail.
@@ -269,7 +280,7 @@ impl Notify {
                 .entries
                 .iter_mut()
                 .filter_map(|entry| {
-                    // Only process active, unnotified waiters. Free slots are ignored.
+                    // Only active waiters have wakers. Free slots are ignored.
                     if entry.generation < new_generation && entry.waker.is_some() {
                         entry.generation = new_generation;
                         entry.notified = true;
@@ -278,6 +289,14 @@ impl Notify {
                     None
                 })
                 .collect();
+            if !wakers.is_empty() {
+                for entry in &mut waiters.entries {
+                    if entry.generation < new_generation && entry.notified && entry.waker.is_none()
+                    {
+                        entry.broadcast_covered_peer = true;
+                    }
+                }
+            }
             waiters.active -= wakers.len();
             wakers
         };
@@ -317,23 +336,22 @@ impl Notify {
         self.stored_notifications.fetch_add(1, Ordering::Release);
     }
 
-    /// Passes a `notify_one` baton to a post-broadcast waiter, falling back
-    /// to a stored notification when none exists yet.
+    /// Passes a `notify_one` baton to a post-broadcast waiter, optionally
+    /// falling back to a stored notification when none exists yet.
     ///
     /// Used when a later broadcast already covered the original waiter set
     /// but a post-broadcast waiter (existing OR about-to-register) may still
     /// need the in-flight `notify_one` baton.
     ///
-    /// br-asupersync-z5dxrw: previously this dropped the baton when no
-    /// post-broadcast waiter was present at scan time. That created a lost-
-    /// wakeup race — a waiter registering microseconds after the scan would
-    /// wait indefinitely for an event that already fired. We now always
-    /// fall back to `stored_notifications.fetch_add(1)` so a slightly-late
-    /// waiter still picks up the baton on next poll. The cost is at most
-    /// one spurious wake on a future unrelated waiter, which is preferable
-    /// to a deadlock.
+    /// `store_if_absent` is true only when no other pre-broadcast waiter was
+    /// covered by the broadcast. If the broadcast already woke a peer waiter,
+    /// a late future waiter must not receive a ghost notify_one token.
     #[inline]
-    fn pass_baton_if_waiter_exists(&self, mut waiters: parking_lot::MutexGuard<'_, WaiterSlab>) {
+    fn pass_baton_after_broadcast(
+        &self,
+        mut waiters: parking_lot::MutexGuard<'_, WaiterSlab>,
+        store_if_absent: bool,
+    ) {
         let start = waiters.scan_start;
         for i in start..waiters.entries.len() {
             let entry = &mut waiters.entries[i];
@@ -349,7 +367,9 @@ impl Notify {
             }
         }
         waiters.scan_start = waiters.entries.len();
-        self.stored_notifications.fetch_add(1, Ordering::Release);
+        if store_if_absent {
+            self.stored_notifications.fetch_add(1, Ordering::Release);
+        }
     }
 }
 
@@ -465,6 +485,7 @@ impl Notified<'_> {
             waker: Some(cx.waker().clone()),
             notified: false,
             generation: observed_generation,
+            broadcast_covered_peer: false,
             slot_epoch: 0, // overwritten by insert()
         });
         self.waiter_index = Some((index, slot_epoch));
@@ -586,6 +607,7 @@ impl Drop for Notified<'_> {
                 let entry = &waiters.entries[index];
                 let was_notified = entry.notified;
                 let notified_generation = entry.generation;
+                let broadcast_covered_peer = entry.broadcast_covered_peer;
 
                 waiters.remove(index);
 
@@ -604,7 +626,8 @@ impl Drop for Notified<'_> {
                     // the normal baton semantics, which store the notification when
                     // no waiter exists.
                     if generation_advanced {
-                        self.notify.pass_baton_if_waiter_exists(waiters);
+                        self.notify
+                            .pass_baton_after_broadcast(waiters, !broadcast_covered_peer);
                     } else {
                         self.notify.pass_baton(waiters);
                     }
