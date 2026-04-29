@@ -9660,6 +9660,48 @@ mod tests {
     }
 
     #[test]
+    fn execute_set_statement_timeout_marks_connection_discard_for_pool_return() {
+        use crate::database::pool::AsyncConnectionManager;
+
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let cx = crate::cx::Cx::for_testing();
+        let mgr = PgConnectionManager::new(
+            PgConnectOptions::parse("postgres://localhost/testdb").unwrap(),
+        );
+
+        let responder = std::thread::spawn(move || {
+            let request = read_until_contains(&mut peer, b"SET statement_timeout = '5s'");
+            assert!(
+                request
+                    .windows("SET statement_timeout = '5s'".len())
+                    .any(|window| window == b"SET statement_timeout = '5s'"),
+                "request should contain SET statement_timeout"
+            );
+            std::io::Write::write_all(&mut peer, &backend_message(b'C', b"SET\0"))
+                .expect("command complete should be written");
+            std::io::Write::write_all(&mut peer, &ready_for_query(b'I'))
+                .expect("ready for query should be written");
+        });
+
+        match run(conn.execute_unchecked(&cx, "SET statement_timeout = '5s'")) {
+            Outcome::Ok(affected) => assert_eq!(affected, 0),
+            other => panic!("expected successful SET statement_timeout, got {other:?}"),
+        }
+        responder
+            .join()
+            .expect("SET statement_timeout responder should exit cleanly");
+
+        assert!(
+            conn.inner.needs_discard,
+            "successful SET statement_timeout must poison pooled reuse"
+        );
+        assert!(
+            !mgr.release_check(&mut conn),
+            "pool return must drop connections with prior session statement_timeout state"
+        );
+    }
+
+    #[test]
     fn set_local_transaction_marks_connection_discard_before_pool_reuse() {
         use crate::database::pool::AsyncConnectionManager;
 
