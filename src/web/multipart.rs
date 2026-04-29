@@ -533,6 +533,7 @@ fn parse_multipart(
         }
 
         let part_body = body.slice(body_start..body_end);
+        validate_part_content_length(&part_headers, part_body.len())?;
 
         // Parse Content-Disposition for name and filename.
         let disposition = part_headers
@@ -665,9 +666,7 @@ fn strip_trailing_crlf(data: &[u8], end: usize) -> usize {
 fn parse_part_headers(data: &[u8]) -> Result<HashMap<String, String>, ExtractionError> {
     let mut headers = HashMap::new();
     let text = std::str::from_utf8(data).map_err(|_| {
-        ExtractionError::bad_request(
-            "multipart part headers contain invalid UTF-8"
-        )
+        ExtractionError::bad_request("multipart part headers contain invalid UTF-8")
     })?;
     for line in text.split('\n') {
         let line = line.trim_end_matches('\r');
@@ -679,6 +678,27 @@ fn parse_part_headers(data: &[u8]) -> Result<HashMap<String, String>, Extraction
         }
     }
     Ok(headers)
+}
+
+fn validate_part_content_length(
+    headers: &HashMap<String, String>,
+    actual_len: usize,
+) -> Result<(), ExtractionError> {
+    let Some(value) = headers.get("content-length") else {
+        return Ok(());
+    };
+
+    let declared_len = value
+        .parse::<usize>()
+        .map_err(|_| ExtractionError::bad_request("multipart part content-length is invalid"))?;
+
+    if declared_len != actual_len {
+        return Err(ExtractionError::bad_request(format!(
+            "multipart part content-length mismatch: declared {declared_len} bytes but parsed {actual_len} bytes"
+        )));
+    }
+
+    Ok(())
 }
 
 /// Sanitize a filename to prevent path traversal attacks.
@@ -1027,6 +1047,15 @@ mod tests {
         assert!(err.message.contains("invalid UTF-8"));
     }
 
+    #[test]
+    fn validate_part_content_length_rejects_mismatch() {
+        let mut headers = HashMap::new();
+        headers.insert("content-length".to_string(), "5".to_string());
+        let err = validate_part_content_length(&headers, 3).unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(err.message.contains("content-length mismatch"));
+    }
+
     // ================================================================
     // Full multipart parsing
     // ================================================================
@@ -1081,6 +1110,43 @@ mod tests {
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].body().as_ref(), b"alice");
         assert_eq!(fields[0].body().as_ptr(), body[expected_offset..].as_ptr());
+    }
+
+    #[test]
+    fn parse_rejects_spoofed_part_content_length() {
+        let body = make_multipart_body(
+            "BOUNDARY",
+            &[(
+                "Content-Disposition: form-data; name=\"username\"\r\nContent-Length: 999",
+                b"alice",
+            )],
+        );
+        let err = parse_multipart(&body, "BOUNDARY", &MultipartLimits::default(), wall_now())
+            .unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(err.message.contains("content-length mismatch"));
+    }
+
+    #[test]
+    fn parse_accepts_matching_part_content_length() {
+        let body = make_multipart_body(
+            "BOUNDARY",
+            &[(
+                "Content-Disposition: form-data; name=\"username\"\r\nContent-Length: 5",
+                b"alice",
+            )],
+        );
+        let fields =
+            parse_multipart(&body, "BOUNDARY", &MultipartLimits::default(), wall_now()).unwrap();
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields[0].text().unwrap(), "alice");
+        assert_eq!(
+            fields[0]
+                .headers()
+                .get("content-length")
+                .map(String::as_str),
+            Some("5")
+        );
     }
 
     #[test]
@@ -1170,7 +1236,8 @@ mod tests {
         let body = Bytes::from(buf);
 
         // This should fail due to non-UTF8 headers, not due to nested multipart detection
-        let err = parse_multipart(&body, "OUTER", &MultipartLimits::default(), wall_now()).unwrap_err();
+        let err =
+            parse_multipart(&body, "OUTER", &MultipartLimits::default(), wall_now()).unwrap_err();
 
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
         assert!(err.message.contains("invalid UTF-8"));
