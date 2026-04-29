@@ -143,7 +143,12 @@ impl SchedulerDecisionContract {
     #[allow(clippy::suboptimal_flops)] // readability: keep formulas in natural math form
     pub fn snapshot_likelihoods(snapshot: &StateSnapshot) -> [f64; 4] {
         let cancel_load = f64::from(snapshot.total_cancelling_tasks());
-        let obligation_load = f64::from(snapshot.pending_obligations);
+        // Age matters as much as count here: a single obligation that has
+        // stayed pending across multiple governor snapshots is stronger
+        // evidence of congestion than a freshly reserved permit.
+        let obligation_age_load =
+            (snapshot.obligation_age_sum_ns as f64 / 100_000_000.0).ln_1p();
+        let obligation_load = f64::from(snapshot.pending_obligations) + obligation_age_load;
         let ready_load = f64::from(snapshot.ready_queue_depth);
         let drain_load = f64::from(snapshot.draining_regions);
         let deadline_signal = snapshot.deadline_pressure.clamp(0.0, 1.0);
@@ -462,6 +467,21 @@ mod tests {
         let likelihoods = SchedulerDecisionContract::snapshot_likelihoods(&snapshot);
         // High queue should push congested higher.
         assert!(likelihoods[state::CONGESTED] > likelihoods[state::HEALTHY]);
+    }
+
+    #[test]
+    fn snapshot_likelihoods_stale_obligation_age_increases_congestion() {
+        let mut fresh = zero_snapshot();
+        fresh.pending_obligations = 1;
+
+        let mut stale = fresh.clone();
+        stale.obligation_age_sum_ns = 5_000_000_000;
+
+        let fresh_likelihoods = SchedulerDecisionContract::snapshot_likelihoods(&fresh);
+        let stale_likelihoods = SchedulerDecisionContract::snapshot_likelihoods(&stale);
+
+        assert!(stale_likelihoods[state::CONGESTED] > fresh_likelihoods[state::CONGESTED]);
+        assert!(stale_likelihoods[state::HEALTHY] < fresh_likelihoods[state::HEALTHY]);
     }
 
     #[test]
