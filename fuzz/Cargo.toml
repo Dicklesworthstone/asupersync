@@ -2778,3 +2778,15 @@ path = "fuzz_targets/raptorq_decoder_schedule_edge_cases.rs"
 test = false
 doc = false
 bench = false
+
+# Structure-aware fuzzer for JetStream API response parsing and classification.
+# Exercises StreamInfo, PubAck, and API error parsers directly, while also
+# generating broader ServerInfo / AccountInfo JSON shapes to stress shared
+# classification and malformed-input handling without self-crashing in the
+# harness on intentional control-byte cases.
+[[bin]]
+name = "jetstream_api_responses"
+path = "fuzz_targets/jetstream_api_responses.rs"
+test = false
+doc = false
+bench = false

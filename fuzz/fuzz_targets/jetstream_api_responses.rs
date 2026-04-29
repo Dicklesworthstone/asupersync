@@ -2,18 +2,16 @@
 
 //! Structure-aware fuzz target for NATS JetStream API response parsing.
 //!
-//! Targets edge cases in JetStream ServerInfo and API_Account_Info response parsing:
-//! - JSON structure variations and malformed responses
-//! - Field type mismatches and unexpected values
-//! - Error response vs success response disambiguation
-//! - Server info field parsing (version, cluster, limits)
-//! - Account info field parsing (limits, usage, streams, consumers)
+//! Direct parser coverage currently targets StreamInfo, PubAck, and API error
+//! responses, while the broader ServerInfo / AccountInfo shapes exercise shared
+//! JSON-generation and error-classification paths without claiming dedicated
+//! parsers that do not exist in the current tree.
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use asupersync::messaging::jetstream::{
-    fuzz_parse_api_error, fuzz_parse_pub_ack, fuzz_parse_stream_info, JsError,
+    JsError, fuzz_parse_api_error, fuzz_parse_pub_ack, fuzz_parse_stream_info,
 };
 
 /// API response types commonly returned by JetStream
@@ -45,9 +43,7 @@ enum ApiResponseType {
         formatting: JsonFormatting,
     },
     /// Malformed/invalid JSON
-    Malformed {
-        corruption: JsonCorruption,
-    },
+    Malformed { corruption: JsonCorruption },
 }
 
 /// ServerInfo response fields that can vary or be malformed
@@ -221,39 +217,39 @@ struct JsonFormatting {
 
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum WhitespaceFormat {
-    Minimal,        // No extra whitespace
-    Spaces,         // Extra spaces
-    Tabs,           // Tab characters
-    Newlines,       // Multi-line
-    Mixed,          // Combination
-    Excessive,      // Lots of whitespace
+    Minimal,   // No extra whitespace
+    Spaces,    // Extra spaces
+    Tabs,      // Tab characters
+    Newlines,  // Multi-line
+    Mixed,     // Combination
+    Excessive, // Lots of whitespace
 }
 
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum QuoteFormat {
-    Normal,         // Standard quotes
-    Escaped,        // Escaped quotes in strings
-    Unicode,        // Unicode escape sequences
-    InvalidEscape,  // Invalid escape sequences
+    Normal,        // Standard quotes
+    Escaped,       // Escaped quotes in strings
+    Unicode,       // Unicode escape sequences
+    InvalidEscape, // Invalid escape sequences
 }
 
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum UnicodeFormat {
-    Ascii,          // ASCII only
-    ValidUnicode,   // Valid unicode characters
-    EscapeSeq,      // \uXXXX sequences
-    InvalidSeq,     // Invalid unicode sequences
-    Surrogate,      // Surrogate pairs
+    Ascii,        // ASCII only
+    ValidUnicode, // Valid unicode characters
+    EscapeSeq,    // \uXXXX sequences
+    InvalidSeq,   // Invalid unicode sequences
+    Surrogate,    // Surrogate pairs
 }
 
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum NumberFormat {
-    Integer,        // Simple integers
-    Float,          // Floating point
-    Scientific,     // Scientific notation
-    Leading,        // Leading zeros
-    Overflow,       // Values that overflow
-    Negative,       // Negative when positive expected
+    Integer,    // Simple integers
+    Float,      // Floating point
+    Scientific, // Scientific notation
+    Leading,    // Leading zeros
+    Overflow,   // Values that overflow
+    Negative,   // Negative when positive expected
 }
 
 /// JSON corruption types for malformed responses
@@ -278,10 +274,14 @@ fuzz_target!(|response: ApiResponseType| {
     match &response {
         ApiResponseType::Malformed { corruption } => {
             if let JsonCorruption::DeepNesting { depth } = corruption {
-                if *depth > 50 { return; }
+                if *depth > 50 {
+                    return;
+                }
             }
             if let JsonCorruption::NonJson { content } = corruption {
-                if content.len() > 1024 { return; }
+                if content.len() > 1024 {
+                    return;
+                }
             }
         }
         _ => {}
@@ -307,44 +307,104 @@ fn build_api_response(response: &ApiResponseType) -> String {
         ApiResponseType::ServerInfo { server, formatting } => {
             build_server_info_json(server, formatting)
         }
-        ApiResponseType::AccountInfo { account, formatting } => {
-            build_account_info_json(account, formatting)
-        }
+        ApiResponseType::AccountInfo {
+            account,
+            formatting,
+        } => build_account_info_json(account, formatting),
         ApiResponseType::StreamInfo { stream, formatting } => {
             build_stream_info_json(stream, formatting)
         }
-        ApiResponseType::PubAck { ack, formatting } => {
-            build_pub_ack_json(ack, formatting)
-        }
-        ApiResponseType::ApiError { error, formatting } => {
-            build_api_error_json(error, formatting)
-        }
-        ApiResponseType::Malformed { corruption } => {
-            build_malformed_json(corruption)
-        }
+        ApiResponseType::PubAck { ack, formatting } => build_pub_ack_json(ack, formatting),
+        ApiResponseType::ApiError { error, formatting } => build_api_error_json(error, formatting),
+        ApiResponseType::Malformed { corruption } => build_malformed_json(corruption),
     }
 }
 
 fn build_server_info_json(server: &ServerInfoFields, formatting: &JsonFormatting) -> String {
     let mut json = String::from("{");
+    let mut needs_comma = false;
 
-    add_field(&mut json, "server_id", &server.server_id, formatting, false);
-    add_field(&mut json, "server_name", &server.server_name, formatting, true);
-    add_field(&mut json, "version", &server.version, formatting, true);
-    add_field(&mut json, "git_commit", &server.git_commit, formatting, true);
-    add_field(&mut json, "go", &server.go, formatting, true);
-    add_field(&mut json, "host", &server.host, formatting, true);
-    add_field_i64(&mut json, "port", &server.port, formatting, true);
-    add_field_i64(&mut json, "max_connections", &server.max_connections, formatting, true);
-    add_field_i64(&mut json, "max_payload", &server.max_payload, formatting, true);
-    add_field_bool(&mut json, "tls_required", &server.tls_required, formatting, true);
+    needs_comma = add_field(
+        &mut json,
+        "server_id",
+        &server.server_id,
+        formatting,
+        needs_comma,
+    );
+    needs_comma = add_field(
+        &mut json,
+        "server_name",
+        &server.server_name,
+        formatting,
+        needs_comma,
+    );
+    needs_comma = add_field(
+        &mut json,
+        "version",
+        &server.version,
+        formatting,
+        needs_comma,
+    );
+    needs_comma = add_field(
+        &mut json,
+        "git_commit",
+        &server.git_commit,
+        formatting,
+        needs_comma,
+    );
+    needs_comma = add_field(&mut json, "go", &server.go, formatting, needs_comma);
+    needs_comma = add_field(&mut json, "host", &server.host, formatting, needs_comma);
+    needs_comma = add_field_i64(&mut json, "port", &server.port, formatting, needs_comma);
+    needs_comma = add_field_i64(
+        &mut json,
+        "max_connections",
+        &server.max_connections,
+        formatting,
+        needs_comma,
+    );
+    needs_comma = add_field_i64(
+        &mut json,
+        "max_payload",
+        &server.max_payload,
+        formatting,
+        needs_comma,
+    );
+    needs_comma = add_field_bool(
+        &mut json,
+        "tls_required",
+        &server.tls_required,
+        formatting,
+        needs_comma,
+    );
 
     if let Some(cluster) = &server.cluster {
+        if needs_comma {
+            json.push(',');
+        }
         add_whitespace(&mut json, formatting);
-        json.push_str(",\"cluster\":{");
-        add_field(&mut json, "name", &cluster.name, formatting, false);
-        add_field(&mut json, "leader", &cluster.leader, formatting, true);
-        add_field_i64(&mut json, "replicas", &cluster.replicas, formatting, true);
+        json.push_str("\"cluster\":{");
+        let mut cluster_needs_comma = false;
+        cluster_needs_comma = add_field(
+            &mut json,
+            "name",
+            &cluster.name,
+            formatting,
+            cluster_needs_comma,
+        );
+        cluster_needs_comma = add_field(
+            &mut json,
+            "leader",
+            &cluster.leader,
+            formatting,
+            cluster_needs_comma,
+        );
+        add_field_i64(
+            &mut json,
+            "replicas",
+            &cluster.replicas,
+            formatting,
+            cluster_needs_comma,
+        );
         json.push('}');
     }
 
@@ -354,35 +414,130 @@ fn build_server_info_json(server: &ServerInfoFields, formatting: &JsonFormatting
 
 fn build_account_info_json(account: &AccountInfoFields, formatting: &JsonFormatting) -> String {
     let mut json = String::from("{");
+    let mut needs_comma = false;
 
-    add_field(&mut json, "account_name", &account.account_name, formatting, false);
-    add_field(&mut json, "account_id", &account.account_id, formatting, true);
+    needs_comma = add_field(
+        &mut json,
+        "account_name",
+        &account.account_name,
+        formatting,
+        needs_comma,
+    );
+    needs_comma = add_field(
+        &mut json,
+        "account_id",
+        &account.account_id,
+        formatting,
+        needs_comma,
+    );
 
     // Add limits object
+    if needs_comma {
+        json.push(',');
+    }
     add_whitespace(&mut json, formatting);
-    json.push_str(",\"limits\":{");
-    add_field_i64(&mut json, "max_streams", &account.limits.max_streams, formatting, false);
-    add_field_i64(&mut json, "max_consumers", &account.limits.max_consumers, formatting, true);
-    add_field_i64(&mut json, "max_memory", &account.limits.max_memory, formatting, true);
-    add_field_i64(&mut json, "max_storage", &account.limits.max_storage, formatting, true);
-    add_field_i64(&mut json, "max_connections", &account.limits.max_connections, formatting, true);
-    add_field_i64(&mut json, "max_msgs_per_stream", &account.limits.max_msgs_per_stream, formatting, true);
+    json.push_str("\"limits\":{");
+    let mut limits_needs_comma = false;
+    limits_needs_comma = add_field_i64(
+        &mut json,
+        "max_streams",
+        &account.limits.max_streams,
+        formatting,
+        limits_needs_comma,
+    );
+    limits_needs_comma = add_field_i64(
+        &mut json,
+        "max_consumers",
+        &account.limits.max_consumers,
+        formatting,
+        limits_needs_comma,
+    );
+    limits_needs_comma = add_field_i64(
+        &mut json,
+        "max_memory",
+        &account.limits.max_memory,
+        formatting,
+        limits_needs_comma,
+    );
+    limits_needs_comma = add_field_i64(
+        &mut json,
+        "max_storage",
+        &account.limits.max_storage,
+        formatting,
+        limits_needs_comma,
+    );
+    limits_needs_comma = add_field_i64(
+        &mut json,
+        "max_connections",
+        &account.limits.max_connections,
+        formatting,
+        limits_needs_comma,
+    );
+    add_field_i64(
+        &mut json,
+        "max_msgs_per_stream",
+        &account.limits.max_msgs_per_stream,
+        formatting,
+        limits_needs_comma,
+    );
     json.push('}');
+    needs_comma = true;
 
     // Add usage object
+    if needs_comma {
+        json.push(',');
+    }
     add_whitespace(&mut json, formatting);
-    json.push_str(",\"usage\":{");
-    add_field_i64(&mut json, "memory", &account.usage.memory, formatting, false);
-    add_field_i64(&mut json, "storage", &account.usage.storage, formatting, true);
-    add_field_i64(&mut json, "streams", &account.usage.streams, formatting, true);
-    add_field_i64(&mut json, "consumers", &account.usage.consumers, formatting, true);
+    json.push_str("\"usage\":{");
+    let mut usage_needs_comma = false;
+    usage_needs_comma = add_field_i64(
+        &mut json,
+        "memory",
+        &account.usage.memory,
+        formatting,
+        usage_needs_comma,
+    );
+    usage_needs_comma = add_field_i64(
+        &mut json,
+        "storage",
+        &account.usage.storage,
+        formatting,
+        usage_needs_comma,
+    );
+    usage_needs_comma = add_field_i64(
+        &mut json,
+        "streams",
+        &account.usage.streams,
+        formatting,
+        usage_needs_comma,
+    );
+    add_field_i64(
+        &mut json,
+        "consumers",
+        &account.usage.consumers,
+        formatting,
+        usage_needs_comma,
+    );
     json.push('}');
+    needs_comma = true;
 
-    add_field_i64(&mut json, "streams", &account.streams, formatting, true);
-    add_field_i64(&mut json, "consumers", &account.consumers, formatting, true);
+    needs_comma = add_field_i64(
+        &mut json,
+        "streams",
+        &account.streams,
+        formatting,
+        needs_comma,
+    );
+    needs_comma = add_field_i64(
+        &mut json,
+        "consumers",
+        &account.consumers,
+        formatting,
+        needs_comma,
+    );
 
     if let Some(domain) = &account.domain {
-        add_field(&mut json, "domain", domain, formatting, true);
+        add_field(&mut json, "domain", domain, formatting, needs_comma);
     }
 
     json.push('}');
@@ -391,23 +546,54 @@ fn build_account_info_json(account: &AccountInfoFields, formatting: &JsonFormatt
 
 fn build_stream_info_json(stream: &StreamInfoFields, formatting: &JsonFormatting) -> String {
     let mut json = String::from("{");
+    let mut needs_comma = false;
 
-    add_field(&mut json, "name", &stream.name, formatting, false);
+    needs_comma = add_field(&mut json, "name", &stream.name, formatting, needs_comma);
 
     // Add subjects array
+    if needs_comma {
+        json.push(',');
+    }
     add_whitespace(&mut json, formatting);
-    json.push_str(",\"subjects\":[");
+    json.push_str("\"subjects\":[");
     for (i, subject) in stream.subjects.iter().enumerate() {
-        if i > 0 { json.push(','); }
+        if i > 0 {
+            json.push(',');
+        }
         add_string_value(&mut json, subject, formatting);
     }
     json.push(']');
+    needs_comma = true;
 
-    add_field_u64(&mut json, "messages", &stream.messages, formatting, true);
-    add_field_u64(&mut json, "bytes", &stream.bytes, formatting, true);
-    add_field_u64(&mut json, "first_seq", &stream.first_seq, formatting, true);
-    add_field_u64(&mut json, "last_seq", &stream.last_seq, formatting, true);
-    add_field_u32(&mut json, "consumer_count", &stream.consumer_count, formatting, true);
+    needs_comma = add_field_u64(
+        &mut json,
+        "messages",
+        &stream.messages,
+        formatting,
+        needs_comma,
+    );
+    needs_comma = add_field_u64(&mut json, "bytes", &stream.bytes, formatting, needs_comma);
+    needs_comma = add_field_u64(
+        &mut json,
+        "first_seq",
+        &stream.first_seq,
+        formatting,
+        needs_comma,
+    );
+    needs_comma = add_field_u64(
+        &mut json,
+        "last_seq",
+        &stream.last_seq,
+        formatting,
+        needs_comma,
+    );
+    add_field_u32(
+        &mut json,
+        "consumer_count",
+        &stream.consumer_count,
+        formatting,
+        needs_comma,
+    );
 
     json.push('}');
     json
@@ -415,10 +601,17 @@ fn build_stream_info_json(stream: &StreamInfoFields, formatting: &JsonFormatting
 
 fn build_pub_ack_json(ack: &PubAckFields, formatting: &JsonFormatting) -> String {
     let mut json = String::from("{");
+    let mut needs_comma = false;
 
-    add_field(&mut json, "stream", &ack.stream, formatting, false);
-    add_field_u64(&mut json, "seq", &ack.seq, formatting, true);
-    add_field_bool(&mut json, "duplicate", &ack.duplicate, formatting, true);
+    needs_comma = add_field(&mut json, "stream", &ack.stream, formatting, needs_comma);
+    needs_comma = add_field_u64(&mut json, "seq", &ack.seq, formatting, needs_comma);
+    add_field_bool(
+        &mut json,
+        "duplicate",
+        &ack.duplicate,
+        formatting,
+        needs_comma,
+    );
 
     json.push('}');
     json
@@ -426,10 +619,23 @@ fn build_pub_ack_json(ack: &PubAckFields, formatting: &JsonFormatting) -> String
 
 fn build_api_error_json(error: &ApiErrorFields, formatting: &JsonFormatting) -> String {
     let mut json = String::from("{\"error\":{");
+    let mut needs_comma = false;
 
-    add_field_u32(&mut json, "code", &error.code, formatting, false);
-    add_field_u32(&mut json, "err_code", &error.err_code, formatting, true);
-    add_field(&mut json, "description", &error.description, formatting, true);
+    needs_comma = add_field_u32(&mut json, "code", &error.code, formatting, needs_comma);
+    needs_comma = add_field_u32(
+        &mut json,
+        "err_code",
+        &error.err_code,
+        formatting,
+        needs_comma,
+    );
+    add_field(
+        &mut json,
+        "description",
+        &error.description,
+        formatting,
+        needs_comma,
+    );
 
     json.push_str("}}");
     json
@@ -464,127 +670,205 @@ fn build_malformed_json(corruption: &JsonCorruption) -> String {
             json
         }
         JsonCorruption::DuplicateKeys { key } => {
-            format!("{{\"{}\":\"first\",\"{}\":\"second\"}}",
-                   json_escape(key), json_escape(key))
+            format!(
+                "{{\"{}\":\"first\",\"{}\":\"second\"}}",
+                json_escape(key),
+                json_escape(key)
+            )
         }
         JsonCorruption::Empty => String::new(),
-        JsonCorruption::NonJson { content } => {
-            String::from_utf8_lossy(content).into_owned()
-        }
+        JsonCorruption::NonJson { content } => String::from_utf8_lossy(content).into_owned(),
     }
 }
 
-fn add_field(json: &mut String, name: &str, value: &FieldValue<String>, formatting: &JsonFormatting, comma: bool) {
+fn add_field(
+    json: &mut String,
+    name: &str,
+    value: &FieldValue<String>,
+    formatting: &JsonFormatting,
+    comma: bool,
+) -> bool {
     match value {
         FieldValue::Present(s) => {
-            if comma { json.push(','); }
+            if comma {
+                json.push(',');
+            }
             add_whitespace(json, formatting);
             json.push_str(&format!("\"{}\":", name));
             add_string_value(json, &FieldValue::Present(s.clone()), formatting);
+            true
         }
-        FieldValue::Missing => {
-            // Don't add field
-        }
+        FieldValue::Missing => false,
         FieldValue::WrongType(wrong) => {
-            if comma { json.push(','); }
+            if comma {
+                json.push(',');
+            }
             add_whitespace(json, formatting);
             json.push_str(&format!("\"{}\":", name));
             add_wrong_type_value(json, wrong, formatting);
+            true
         }
         FieldValue::Null => {
-            if comma { json.push(','); }
+            if comma {
+                json.push(',');
+            }
             add_whitespace(json, formatting);
             json.push_str(&format!("\"{}\":null", name));
+            true
         }
     }
 }
 
-fn add_field_i64(json: &mut String, name: &str, value: &FieldValue<i64>, formatting: &JsonFormatting, comma: bool) {
+fn add_field_i64(
+    json: &mut String,
+    name: &str,
+    value: &FieldValue<i64>,
+    formatting: &JsonFormatting,
+    comma: bool,
+) -> bool {
     match value {
         FieldValue::Present(n) => {
-            if comma { json.push(','); }
+            if comma {
+                json.push(',');
+            }
             add_whitespace(json, formatting);
             json.push_str(&format!("\"{}\":", name));
             add_number_value(json, *n, formatting);
+            true
         }
-        FieldValue::Missing => {}
+        FieldValue::Missing => false,
         FieldValue::WrongType(wrong) => {
-            if comma { json.push(','); }
+            if comma {
+                json.push(',');
+            }
             add_whitespace(json, formatting);
             json.push_str(&format!("\"{}\":", name));
             add_wrong_type_value(json, wrong, formatting);
+            true
         }
         FieldValue::Null => {
-            if comma { json.push(','); }
+            if comma {
+                json.push(',');
+            }
             add_whitespace(json, formatting);
             json.push_str(&format!("\"{}\":null", name));
+            true
         }
     }
 }
 
-fn add_field_u64(json: &mut String, name: &str, value: &FieldValue<u64>, formatting: &JsonFormatting, comma: bool) {
+fn add_field_u64(
+    json: &mut String,
+    name: &str,
+    value: &FieldValue<u64>,
+    formatting: &JsonFormatting,
+    comma: bool,
+) -> bool {
     match value {
         FieldValue::Present(n) => {
-            if comma { json.push(','); }
+            if comma {
+                json.push(',');
+            }
             add_whitespace(json, formatting);
             json.push_str(&format!("\"{}\":", name));
             json.push_str(&format_u64(*n, formatting));
+            true
         }
-        FieldValue::Missing => {}
+        FieldValue::Missing => false,
         FieldValue::WrongType(wrong) => {
-            if comma { json.push(','); }
+            if comma {
+                json.push(',');
+            }
             add_whitespace(json, formatting);
             json.push_str(&format!("\"{}\":", name));
             add_wrong_type_value(json, wrong, formatting);
+            true
         }
         FieldValue::Null => {
-            if comma { json.push(','); }
+            if comma {
+                json.push(',');
+            }
             add_whitespace(json, formatting);
             json.push_str(&format!("\"{}\":null", name));
+            true
         }
     }
 }
 
-fn add_field_u32(json: &mut String, name: &str, value: &FieldValue<u32>, formatting: &JsonFormatting, comma: bool) {
+fn add_field_u32(
+    json: &mut String,
+    name: &str,
+    value: &FieldValue<u32>,
+    formatting: &JsonFormatting,
+    comma: bool,
+) -> bool {
     match value {
         FieldValue::Present(n) => {
-            if comma { json.push(','); }
+            if comma {
+                json.push(',');
+            }
             add_whitespace(json, formatting);
-            json.push_str(&format!("\"{}\":{}:", name, *n));
+            json.push_str(&format!("\"{}\":{}", name, *n));
+            true
         }
-        FieldValue::Missing => {}
+        FieldValue::Missing => false,
         FieldValue::WrongType(wrong) => {
-            if comma { json.push(','); }
+            if comma {
+                json.push(',');
+            }
             add_whitespace(json, formatting);
             json.push_str(&format!("\"{}\":", name));
             add_wrong_type_value(json, wrong, formatting);
+            true
         }
         FieldValue::Null => {
-            if comma { json.push(','); }
+            if comma {
+                json.push(',');
+            }
             add_whitespace(json, formatting);
             json.push_str(&format!("\"{}\":null", name));
+            true
         }
     }
 }
 
-fn add_field_bool(json: &mut String, name: &str, value: &FieldValue<bool>, formatting: &JsonFormatting, comma: bool) {
+fn add_field_bool(
+    json: &mut String,
+    name: &str,
+    value: &FieldValue<bool>,
+    formatting: &JsonFormatting,
+    comma: bool,
+) -> bool {
     match value {
         FieldValue::Present(b) => {
-            if comma { json.push(','); }
+            if comma {
+                json.push(',');
+            }
             add_whitespace(json, formatting);
-            json.push_str(&format!("\"{}\":{}", name, if *b { "true" } else { "false" }));
+            json.push_str(&format!(
+                "\"{}\":{}",
+                name,
+                if *b { "true" } else { "false" }
+            ));
+            true
         }
-        FieldValue::Missing => {}
+        FieldValue::Missing => false,
         FieldValue::WrongType(wrong) => {
-            if comma { json.push(','); }
+            if comma {
+                json.push(',');
+            }
             add_whitespace(json, formatting);
             json.push_str(&format!("\"{}\":", name));
             add_wrong_type_value(json, wrong, formatting);
+            true
         }
         FieldValue::Null => {
-            if comma { json.push(','); }
+            if comma {
+                json.push(',');
+            }
             add_whitespace(json, formatting);
             json.push_str(&format!("\"{}\":null", name));
+            true
         }
     }
 }
@@ -621,7 +905,9 @@ fn add_wrong_type_value(json: &mut String, wrong: &WrongTypeVariant, formatting:
         WrongTypeVariant::ArrayForValue(arr) => {
             json.push('[');
             for (i, item) in arr.iter().enumerate() {
-                if i > 0 { json.push(','); }
+                if i > 0 {
+                    json.push(',');
+                }
                 json.push('"');
                 json.push_str(&json_escape(item));
                 json.push('"');
@@ -668,7 +954,8 @@ fn format_u64(n: u64, formatting: &JsonFormatting) -> String {
 
 fn format_string(s: &str, formatting: &JsonFormatting) -> String {
     let mut result = String::new();
-    for ch in s.chars().take(100) { // Limit string length
+    for ch in s.chars().take(100) {
+        // Limit string length
         match formatting.unicode {
             UnicodeFormat::Ascii => {
                 if ch.is_ascii() {
@@ -774,13 +1061,15 @@ fn test_jetstream_parsing(response: &ApiResponseType, json: &str) {
 }
 
 fn test_json_structure(json: &str) {
-    // Test basic JSON structure validation
-
-    // Check for null byte injection
-    assert!(!json.contains('\0'), "JSON should not contain null bytes");
+    // Keep the harness honest: malformed-input generators intentionally
+    // synthesize nulls and other control bytes, so the fuzzer must never crash
+    // on those before the JetStream parsers see them.
 
     // Check for reasonable length
-    assert!(json.len() <= 8192, "JSON response should not be excessively long");
+    assert!(
+        json.len() <= 8192,
+        "JSON response should not be excessively long"
+    );
 
     // Test basic brace/bracket matching (simplified check)
     let mut depth = 0i32;
@@ -796,7 +1085,9 @@ fn test_json_structure(json: &str) {
     }
 
     // Test for control character injection
-    let has_unescaped_controls = json.chars().any(|c| c.is_control() && c != '\n' && c != '\r' && c != '\t');
+    let has_unescaped_controls = json
+        .chars()
+        .any(|c| c.is_control() && c != '\n' && c != '\r' && c != '\t');
     if has_unescaped_controls {
         // This is expected for malformed input fuzzing
     }
