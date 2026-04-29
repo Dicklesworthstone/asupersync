@@ -2900,3 +2900,17 @@ path = "fuzz_targets/three_lane_decision_arbiter.rs"
 test = false
 doc = false
 bench = false
+
+# Constant-time MAC verification property fuzzer for src/security/authenticated.rs.
+# Tests timing side-channel resistance in MAC tag comparison to prevent timing attacks.
+# Validates that verify() and PartialEq timing is independent of:
+# - Position of first differing byte in MAC comparison
+# - Number of matching prefix bytes before first difference
+# - MAC validity (real vs zero/random tags)
+# Statistical timing analysis asserts coefficient of variation bounds for constant-time property.
+[[bin]]
+name = "mac_constant_time_verification"
+path = "fuzz_targets/mac_constant_time_verification.rs"
+test = false
+doc = false
+bench = false
