@@ -23,6 +23,8 @@ struct LocalQueueStealHalfFuzz {
     operations: Vec<QueueOperation>,
     /// Test configuration parameters
     config: TestConfig,
+    /// Deterministic single-steal sizing and FIFO scenario.
+    sizing: StealBatchSizingScenario,
 }
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -73,6 +75,14 @@ struct TestConfig {
     max_task_id: u32,
 }
 
+#[derive(Arbitrary, Debug)]
+struct StealBatchSizingScenario {
+    /// Source queue length before the steal attempt.
+    source_len: u16,
+    /// Boundary for splitting pushes into two chunks while preserving arrival order.
+    chunk_split: u16,
+}
+
 // Resource limits to prevent fuzzer timeouts
 const MAX_OPERATIONS: usize = 300;
 const MAX_WORKERS: usize = 8;
@@ -93,6 +103,8 @@ fuzz_target!(|input: LocalQueueStealHalfFuzz| {
     if operations.is_empty() {
         return; // Skip empty operation sequences
     }
+
+    assert_single_steal_batch_sizing_and_fifo(&input.sizing);
 
     // Create shared queues and tracking structures
     let mut queues = Vec::new();
@@ -115,6 +127,62 @@ fuzz_target!(|input: LocalQueueStealHalfFuzz| {
     // Execute operations and verify correctness
     execute_and_verify_steal_half_correctness(queues, tracker, operations_by_worker, max_workers);
 });
+
+fn expected_steal_batch_bound(available: usize) -> usize {
+    if available == 0 {
+        return 0;
+    }
+
+    let half_limit = (available / 2).clamp(1, 256);
+    half_limit.min(available.min(8))
+}
+
+fn assert_single_steal_batch_sizing_and_fifo(scenario: &StealBatchSizingScenario) {
+    let available = usize::from(scenario.source_len).min(512);
+    let max_task_id = u32::try_from(available.max(1)).expect("source_len bound fits u32");
+    let state = LocalQueue::test_state(max_task_id);
+    let src = LocalQueue::new(Arc::clone(&state));
+    let dest = LocalQueue::new(Arc::clone(&state));
+
+    let split = usize::from(scenario.chunk_split).min(available);
+    push_task_chunks(&src, split, available);
+
+    let expected_stolen = expected_steal_batch_bound(available);
+    let expected_stolen_tasks: Vec<_> = (0..expected_stolen).map(|id| task(id as u32)).collect();
+    let expected_remaining_tasks: Vec<_> = (expected_stolen..available)
+        .map(|id| task(id as u32))
+        .collect();
+
+    let stole = src.stealer().steal_batch(&dest);
+    let stolen_tasks = dest.snapshot_tasks().into_vec();
+    let remaining_tasks = src.snapshot_tasks().into_vec();
+
+    assert_eq!(
+        stole,
+        expected_stolen > 0,
+        "steal_batch success must match whether any tasks were available"
+    );
+    assert!(
+        stolen_tasks.len() <= expected_stolen,
+        "stolen {} tasks exceeds effective request bound {}",
+        stolen_tasks.len(),
+        expected_stolen
+    );
+    assert!(
+        stolen_tasks.len() <= available,
+        "stolen {} tasks exceeds available {}",
+        stolen_tasks.len(),
+        available
+    );
+    assert_eq!(
+        stolen_tasks, expected_stolen_tasks,
+        "stolen batch must preserve FIFO order of the oldest visible tasks"
+    );
+    assert_eq!(
+        remaining_tasks, expected_remaining_tasks,
+        "source queue must retain the unstolen suffix in arrival order"
+    );
+}
 
 /// Tracks steal-half correctness properties
 struct StealHalfTracker {
