@@ -3216,6 +3216,119 @@ mod metamorphic_tests {
         }
     }
 
+    #[derive(Debug)]
+    struct OlderReaderSuffixOutcome {
+        reader_ready_after_release: bool,
+        readers_while_guard_held: usize,
+        writer_waiters_while_reader_active: usize,
+        writer_wakes_before_reader: Vec<usize>,
+    }
+
+    fn older_reader_admission_with_younger_writer_suffix(
+        extra_writers: usize,
+    ) -> OlderReaderSuffixOutcome {
+        let _runtime = std::rc::Rc::new(LabRuntime::new(LabConfig::default()));
+        let harness = RwLockTestHarness::new(0u64);
+        let lock = harness.lock();
+        let cx = test_cx();
+
+        let blocking_writer = block_on(lock.write(&cx)).expect("initial writer should acquire");
+
+        let mut older_reader_fut = OwnedRwLockReadGuard::read(lock.clone(), &cx);
+        let (reader_waker, _reader_wake_count) = CountWaker::new();
+        let reader_waker_obj = Waker::from(Arc::new(reader_waker));
+        let mut reader_task_cx = Context::from_waker(&reader_waker_obj);
+        assert!(
+            Pin::new(&mut older_reader_fut)
+                .poll(&mut reader_task_cx)
+                .is_pending(),
+            "older reader should queue behind the active writer"
+        );
+
+        let mut writer_futs = Vec::new();
+        let mut writer_wake_counts = Vec::new();
+        let mut writer_wakers = Vec::new();
+        for _ in 0..extra_writers {
+            let mut writer_fut = OwnedRwLockWriteGuard::write(lock.clone(), &cx);
+            let (writer_waker, wake_count) = CountWaker::new();
+            let writer_waker_obj = Waker::from(Arc::new(writer_waker));
+            let mut writer_task_cx = Context::from_waker(&writer_waker_obj);
+            assert!(
+                Pin::new(&mut writer_fut)
+                    .poll(&mut writer_task_cx)
+                    .is_pending(),
+                "younger writer should queue behind the older reader"
+            );
+            writer_futs.push(writer_fut);
+            writer_wake_counts.push(wake_count);
+            writer_wakers.push(writer_waker_obj);
+        }
+
+        drop(blocking_writer);
+
+        let reader_guard = match Pin::new(&mut older_reader_fut).poll(&mut reader_task_cx) {
+            Poll::Ready(Ok(guard)) => Some(guard),
+            _ => None,
+        };
+        let state_while_reader_active = lock.debug_state();
+        drop(reader_guard);
+        drop(writer_futs);
+        drop(writer_wakers);
+
+        OlderReaderSuffixOutcome {
+            reader_ready_after_release: state_while_reader_active.readers > 0,
+            readers_while_guard_held: state_while_reader_active.readers,
+            writer_waiters_while_reader_active: state_while_reader_active.writer_waiters,
+            writer_wakes_before_reader: writer_wake_counts
+                .iter()
+                .map(|count| count.load(Ordering::SeqCst))
+                .collect(),
+        }
+    }
+
+    /// MR6: Older Reader Admission Is Invariant To Younger Writer Suffix
+    /// (Equivalence, Score: 8.0)
+    /// Property: Appending younger writers behind an already-queued reader
+    /// must not change that older reader's admission point.
+    /// Catches: Queue-order inversions, writer barging over older readers,
+    /// starvation-prevention regressions in the mixed reader/writer path.
+    proptest! {
+        #[test]
+        fn mr_older_reader_admission_invariant_to_younger_writer_suffix(
+            extra_writers in 1usize..6,
+        ) {
+            let baseline = older_reader_admission_with_younger_writer_suffix(0);
+            let transformed = older_reader_admission_with_younger_writer_suffix(extra_writers);
+
+            prop_assert!(
+                baseline.reader_ready_after_release,
+                "MR6 SETUP VIOLATION: baseline older reader did not acquire after writer release"
+            );
+            prop_assert!(
+                transformed.reader_ready_after_release,
+                "MR6 VIOLATION: older reader was delayed by appended younger writers"
+            );
+            prop_assert_eq!(
+                transformed.readers_while_guard_held,
+                baseline.readers_while_guard_held,
+                "MR6 VIOLATION: appended younger writers changed active reader cardinality"
+            );
+            prop_assert_eq!(
+                transformed.writer_waiters_while_reader_active,
+                extra_writers,
+                "MR6 VIOLATION: younger writers should still be queued while the older reader runs"
+            );
+            for (i, wake_count) in transformed.writer_wakes_before_reader.iter().enumerate() {
+                prop_assert_eq!(
+                    *wake_count,
+                    0,
+                    "MR6 VIOLATION: younger writer {} was woken before the older reader acquired",
+                    i,
+                );
+            }
+        }
+    }
+
     #[test]
     fn waiting_writer_blocks_late_readers_until_writer_turn_completes() {
         let harness = RwLockTestHarness::new(0u64);
