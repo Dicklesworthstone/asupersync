@@ -2960,6 +2960,17 @@ test = false
 doc = false
 bench = false
 
+# Structure-aware fuzzer for RESP3 client-tracking push parsing.
+# Drives `invalidate` and `tracking` push frames through RespValue::try_decode,
+# asserting valid frames preserve kind/payload shape byte-for-byte and malformed
+# frames fail closed without panicking.
+[[bin]]
+name = "redis_client_tracking_push"
+path = "fuzz_targets/redis_client_tracking_push.rs"
+test = false
+doc = false
+bench = false
+
 # Structure-aware fuzz target for codec/framed.rs decoder reset-and-reuse cycle testing.
 # Tests state consistency across Framed::into_parts() -> reconstruct cycles where decoders
 # must maintain parsing context across transport reconstruction. Exercises buffer migration,
