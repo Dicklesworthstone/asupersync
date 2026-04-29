@@ -38,6 +38,7 @@ use crate::cx::Cx;
 use crate::time::{timeout_at, wall_now};
 use crate::tracing_compat::warn;
 use crate::types::Time;
+use std::borrow::Cow;
 use std::fmt;
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1172,7 +1173,8 @@ impl JsMessage {
     /// publish failure the message is **not** marked acknowledged, so
     /// the caller can retry (br-asupersync-vl5agi).
     pub async fn ack(&self, client: &mut NatsClient, cx: &Cx) -> Result<(), JsError> {
-        self.publish_terminal_ack(client, cx, b"+ACK").await
+        self.publish_terminal_ack(client, cx, Cow::Borrowed(b"+ACK"))
+            .await
     }
 
     /// Negative acknowledge (request redelivery).
@@ -1182,7 +1184,23 @@ impl JsMessage {
     /// publish failure the message is **not** marked acknowledged.
     /// (br-asupersync-vl5agi)
     pub async fn nack(&self, client: &mut NatsClient, cx: &Cx) -> Result<(), JsError> {
-        self.publish_terminal_ack(client, cx, b"-NAK").await
+        self.publish_terminal_ack(client, cx, build_nak_payload(Duration::ZERO))
+            .await
+    }
+
+    /// Negative acknowledge with a delayed redelivery request.
+    ///
+    /// Matches the nats.go JetStream reference wire format:
+    /// `-NAK {"delay": <nanoseconds>}` for positive delays and bare
+    /// `-NAK` for zero delay.
+    pub async fn nack_with_delay(
+        &self,
+        client: &mut NatsClient,
+        cx: &Cx,
+        delay: Duration,
+    ) -> Result<(), JsError> {
+        self.publish_terminal_ack(client, cx, build_nak_payload(delay))
+            .await
     }
 
     /// Acknowledge in progress (extend ack deadline).
@@ -1203,7 +1221,8 @@ impl JsMessage {
     /// publish failure the message is **not** marked acknowledged.
     /// (br-asupersync-vl5agi)
     pub async fn term(&self, client: &mut NatsClient, cx: &Cx) -> Result<(), JsError> {
-        self.publish_terminal_ack(client, cx, b"+TERM").await
+        self.publish_terminal_ack(client, cx, Cow::Borrowed(b"+TERM"))
+            .await
     }
 
     /// Shared body for `ack` / `nack` / `term`.
@@ -1228,7 +1247,7 @@ impl JsMessage {
         &self,
         client: &mut NatsClient,
         cx: &Cx,
-        payload: &[u8],
+        payload: Cow<'_, [u8]>,
     ) -> Result<(), JsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
@@ -1243,7 +1262,10 @@ impl JsMessage {
             return Err(JsError::AlreadyAcknowledged);
         }
 
-        match client.publish(cx, &self.reply_subject, payload).await {
+        match client
+            .publish(cx, &self.reply_subject, payload.as_ref())
+            .await
+        {
             Ok(()) => Ok(()),
             Err(err) => {
                 // Roll back the optimistic claim so the caller can retry.
@@ -1253,6 +1275,14 @@ impl JsMessage {
                 Err(JsError::Nats(err))
             }
         }
+    }
+}
+
+fn build_nak_payload(delay: Duration) -> Cow<'static, [u8]> {
+    if delay.is_zero() {
+        Cow::Borrowed(b"-NAK")
+    } else {
+        Cow::Owned(format!("-NAK {{\"delay\": {}}}", delay.as_nanos()).into_bytes())
     }
 }
 
@@ -2100,6 +2130,15 @@ mod tests {
                     "+TERM",
                 ),
             })
+        );
+    }
+
+    #[test]
+    fn jetstream_nack_with_delay_wire_matches_nats_go_reference_j3z2nb() {
+        assert_eq!(build_nak_payload(Duration::ZERO).as_ref(), b"-NAK");
+        assert_eq!(
+            build_nak_payload(Duration::from_millis(1500)).as_ref(),
+            br#"-NAK {"delay": 1500000000}"#
         );
     }
 
