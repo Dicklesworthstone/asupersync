@@ -2857,3 +2857,14 @@ path = "fuzz_targets/length_delimited_adjust_saturating_boundary.rs"
 test = false
 doc = false
 bench = false
+
+# Structure-aware fuzzer for three-lane scheduler decision arbiter logic.
+# Tests lane choice decisions under various governor suggestions, queue depths, and cancel pressure.
+# Exercises Lyapunov governor weight configurations, fairness bounds, suggestion stability, and
+# deterministic decision-making properties of the scheduler's next_task() lane selection logic.
+[[bin]]
+name = "three_lane_decision_arbiter"
+path = "fuzz_targets/three_lane_decision_arbiter.rs"
+test = false
+doc = false
+bench = false
