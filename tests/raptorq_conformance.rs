@@ -11,6 +11,7 @@
 
 use asupersync::raptorq::decoder::{DecodeError, InactivationDecoder, ReceivedSymbol};
 use asupersync::raptorq::gf256::Gf256;
+use asupersync::raptorq::rfc6330::rand as rfc6330_rand;
 use asupersync::raptorq::systematic::{ConstraintMatrix, SystematicEncoder, SystematicParams};
 use asupersync::util::DetRng;
 
@@ -134,6 +135,98 @@ fn constraint_row_equation(constraints: &ConstraintMatrix, row: usize) -> (Vec<u
         }
     }
     (columns, coefficients)
+}
+
+fn reference_ldpc_hdpc_matrix(params: &SystematicParams) -> ConstraintMatrix {
+    let mut matrix = ConstraintMatrix::zeros(params.s + params.h, params.l);
+    reference_build_ldpc_rows(&mut matrix, params);
+    reference_build_hdpc_rows(&mut matrix, params);
+    matrix
+}
+
+fn reference_build_ldpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams) {
+    let s = params.s;
+    let k_prime = params.k_prime;
+
+    for symbol_idx in 0..k_prime {
+        let step = 1 + symbol_idx / s.max(1);
+        let first_row = symbol_idx % s;
+        let second_row = (first_row + step) % s;
+        let third_row = (second_row + step) % s;
+
+        matrix.add_assign(first_row, symbol_idx, Gf256::ONE);
+        matrix.add_assign(second_row, symbol_idx, Gf256::ONE);
+        matrix.add_assign(third_row, symbol_idx, Gf256::ONE);
+    }
+
+    for row in 0..s {
+        matrix.set(row, k_prime + row, Gf256::ONE);
+    }
+}
+
+fn reference_build_hdpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams) {
+    let s = params.s;
+    let h = params.h;
+    let k_prime = params.k_prime;
+    let ks = k_prime + s;
+
+    if h == 0 {
+        return;
+    }
+
+    let mut mt = ConstraintMatrix::zeros(h, ks);
+    for col in 0..ks.saturating_sub(1) {
+        let first_row = rfc6330_rand((col + 1) as u32, 6, h as u32) as usize;
+        let step = if h > 1 {
+            rfc6330_rand((col + 1) as u32, 7, (h - 1) as u32) as usize + 1
+        } else {
+            0
+        };
+        let second_row = (first_row + step) % h;
+
+        mt.add_assign(first_row, col, Gf256::ONE);
+        if second_row != first_row {
+            mt.add_assign(second_row, col, Gf256::ONE);
+        }
+    }
+
+    if ks > 0 {
+        let last_col = ks - 1;
+        for row in 0..h {
+            mt.set(row, last_col, Gf256::ALPHA.pow((row % 255) as u8));
+        }
+    }
+
+    for out_row in 0..h {
+        for col in 0..ks {
+            let mut accum = Gf256::ZERO;
+            for mt_row in 0..=out_row {
+                let coeff = mt.get(mt_row, col);
+                if coeff.is_zero() {
+                    continue;
+                }
+                let gamma = Gf256::ALPHA.pow(((out_row - mt_row) % 255) as u8);
+                accum += gamma * coeff;
+            }
+            if !accum.is_zero() {
+                matrix.set(s + out_row, col, accum);
+            }
+        }
+    }
+
+    for row in 0..h {
+        matrix.set(s + row, ks + row, Gf256::ONE);
+    }
+}
+
+fn matrix_band_bytes(matrix: &ConstraintMatrix, row_start: usize, row_end: usize) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity((row_end - row_start) * matrix.cols);
+    for row in row_start..row_end {
+        for col in 0..matrix.cols {
+            bytes.push(matrix.get(row, col).raw());
+        }
+    }
+    bytes
 }
 
 fn build_received_symbols(
@@ -4195,6 +4288,30 @@ mod golden_vectors {
             .filter(|&col| !constraints.get(9, col).is_zero())
             .count();
         assert_eq!(hdpc_row_9_nnz, 10, "HDPC row 9 nonzero count");
+    }
+
+    #[test]
+    fn differential_rfc6330_ldpc_hdpc_bands_match_reference() {
+        for &k in &[10usize, 42, 100] {
+            let params = SystematicParams::for_source_block(k, 4);
+            let actual = ConstraintMatrix::build(&params, 0xC0FFEE);
+            let reference = super::reference_ldpc_hdpc_matrix(&params);
+
+            let actual_ldpc = super::matrix_band_bytes(&actual, 0, params.s);
+            let reference_ldpc = super::matrix_band_bytes(&reference, 0, params.s);
+            assert_eq!(
+                actual_ldpc, reference_ldpc,
+                "K={k}: LDPC rows diverge from the RFC 6330 reference builder"
+            );
+
+            let actual_hdpc = super::matrix_band_bytes(&actual, params.s, params.s + params.h);
+            let reference_hdpc =
+                super::matrix_band_bytes(&reference, params.s, params.s + params.h);
+            assert_eq!(
+                actual_hdpc, reference_hdpc,
+                "K={k}: HDPC rows diverge from the RFC 6330 reference builder"
+            );
+        }
     }
 
     // ----------------------------------------------------------------
