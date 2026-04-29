@@ -684,6 +684,64 @@ mod tests {
         }
 
         #[test]
+        fn metamorphic_steal_then_inject_equivalence_preserves_fifo_stream(
+            total in 1usize..64,
+            split in 0usize..64,
+            stolen_prefix in 0usize..64,
+        ) {
+            let split = split.clamp(1, total);
+            let stolen_prefix = stolen_prefix.min(split);
+
+            let baseline = GlobalQueue::new();
+            for task_id in task_range(0..total) {
+                baseline.push(task_id);
+            }
+            let baseline_drained = drain_all(&baseline);
+
+            let variant = GlobalQueue::new();
+            for task_id in task_range(0..split) {
+                variant.push(task_id);
+            }
+
+            let mut observed = Vec::new();
+            for _ in 0..stolen_prefix {
+                observed.push(
+                    variant
+                        .pop()
+                        .expect("stolen prefix should not exceed injected prefix"),
+                );
+            }
+
+            for task_id in task_range(split..total) {
+                variant.push(task_id);
+            }
+            observed.extend(drain_all(&variant));
+
+            let expected = task_range(0..total).collect::<Vec<_>>();
+            let expected_stolen = task_range(0..stolen_prefix).collect::<Vec<_>>();
+
+            prop_assert_eq!(
+                baseline_drained,
+                expected.clone(),
+                "all-injected baseline should drain in FIFO order",
+            );
+            prop_assert_eq!(
+                observed[..stolen_prefix],
+                expected_stolen,
+                "stealing before later injections must still observe the FIFO head",
+            );
+            prop_assert_eq!(
+                observed,
+                expected,
+                "steal-then-inject must preserve the same FIFO stream as injecting everything up front",
+            );
+            prop_assert!(
+                variant.is_empty(),
+                "variant queue should be empty after draining the recomposed stream"
+            );
+        }
+
+        #[test]
         fn metamorphic_alternating_stealers_partition_queue_without_duplication(
             total in 1usize..64,
             first_stealer_is_a in any::<bool>(),
