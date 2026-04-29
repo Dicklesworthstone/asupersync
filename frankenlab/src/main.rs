@@ -158,14 +158,17 @@ fn runner_error_message(err: ScenarioRunnerError) -> String {
     }
 }
 
+fn pretty_json_or<T: serde::Serialize>(value: &T, fallback: &'static str) -> String {
+    serde_json::to_string_pretty(value).unwrap_or_else(|_| fallback.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Run
 // ---------------------------------------------------------------------------
 
 fn format_run_result(result: &ScenarioRunResult, json: bool) -> String {
     if json {
-        let json_val = result.to_json();
-        serde_json::to_string_pretty(&json_val).unwrap_or_else(|_| "{}".to_string())
+        pretty_json_or(&result.to_json(), "{}")
     } else {
         let status = if result.passed() { "PASS" } else { "FAIL" };
         let mut lines = vec![
@@ -225,8 +228,7 @@ fn cmd_validate(args: ValidateArgs, json: bool) -> Result<(), String> {
             "valid": errors.is_empty(),
             "errors": errors.iter().map(ToString::to_string).collect::<Vec<_>>(),
         });
-        let pretty = serde_json::to_string_pretty(&report).unwrap_or_default();
-        println!("{pretty}");
+        println!("{}", pretty_json_or(&report, ""));
     } else if errors.is_empty() {
         println!("Scenario '{}' is valid", scenario.id);
     } else {
@@ -262,8 +264,7 @@ fn cmd_replay(args: ReplayArgs, json: bool) -> Result<(), String> {
             "event_hash": result.certificate.event_hash,
             "schedule_hash": result.certificate.schedule_hash,
         });
-        let pretty = serde_json::to_string_pretty(&report).unwrap_or_default();
-        println!("{pretty}");
+        println!("{}", pretty_json_or(&report, ""));
     } else {
         println!(
             "Replay verified: {} (seed={}, event_hash={}, schedule_hash={})",
@@ -284,8 +285,7 @@ fn cmd_replay(args: ReplayArgs, json: bool) -> Result<(), String> {
 #[allow(clippy::cast_possible_truncation)]
 fn format_explore_result(result: &ScenarioExplorationResult, json: bool) -> String {
     if json {
-        let json_val = result.to_json();
-        serde_json::to_string_pretty(&json_val).unwrap_or_else(|_| "{}".to_string())
+        pretty_json_or(&result.to_json(), "{}")
     } else {
         let status = if result.all_passed() { "PASS" } else { "FAIL" };
         let mut lines = vec![
