@@ -2591,7 +2591,10 @@ impl PgConnection {
 
     fn handle_async_backend_message(&mut self, msg_type: u8, data: &[u8]) -> Result<bool, PgError> {
         match msg_type {
-            b'N' => Ok(true),
+            b'N' => {
+                self.parse_notice_response(data)?;
+                Ok(true)
+            }
             b'S' => {
                 self.handle_parameter_status(data)?;
                 Ok(true)
@@ -3236,7 +3239,7 @@ impl PgConnection {
                     return Err(self.parse_error_response(&data)?);
                 }
                 b'N' => {
-                    // NoticeResponse - log but continue
+                    self.parse_notice_response(&data)?;
                 }
                 _ => {
                     return Err(unexpected_backend_message("startup sequence", msg_type));
@@ -4980,6 +4983,40 @@ impl PgConnection {
         })
     }
 
+    /// Parse NoticeResponse message.
+    ///
+    /// Notice responses share the ErrorResponse wire shape, but they are
+    /// non-fatal metadata and can carry server-local detail or hint text.
+    /// Keep only the SQLSTATE and primary message so COPY-related notices
+    /// cannot accidentally disclose file-system paths or operational hints.
+    fn parse_notice_response(&self, data: &[u8]) -> Result<PgError, PgError> {
+        let mut reader = MessageReader::new(data);
+        let mut code = String::new();
+        let mut message = String::new();
+
+        loop {
+            let field_type = reader.read_byte()?;
+            if field_type == 0 {
+                break;
+            }
+            let value = reader.read_cstring()?.to_string();
+
+            match field_type {
+                b'C' => code = value,
+                b'M' => message = value,
+                _ => {}
+            }
+        }
+
+        reader.ensure_consumed("NoticeResponse")?;
+        Ok(PgError::Server {
+            code,
+            message,
+            detail: None,
+            hint: None,
+        })
+    }
+
     /// Parse an ErrorResponse and drain to ReadyForQuery.
     ///
     /// Returns the parsed server error when draining succeeds. If draining fails,
@@ -5806,8 +5843,7 @@ pub fn fuzz_parse_parameter_status(data: &[u8]) -> Result<(), PgError> {
 #[doc(hidden)]
 pub fn fuzz_parse_notice_response(data: &[u8]) -> Result<PgError, PgError> {
     let (conn, _peer) = fuzz_test_connection_with_peer();
-    // NoticeResponse uses the same structure as ErrorResponse
-    conn.parse_error_response(data)
+    conn.parse_notice_response(data)
 }
 
 #[cfg(test)]
@@ -7506,6 +7542,37 @@ mod tests {
                 assert!(hint.is_none());
             }
             other => panic!("expected Server error, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn parse_notice_response_redacts_detail_and_hint() {
+        let conn = make_test_connection();
+        let mut data = Vec::new();
+        data.push(b'C');
+        data.extend_from_slice(b"00000\0");
+        data.push(b'M');
+        data.extend_from_slice(b"COPY completed with warning\0");
+        data.push(b'D');
+        data.extend_from_slice(b"/var/lib/postgresql/imports/private.csv\0");
+        data.push(b'H');
+        data.extend_from_slice(b"Inspect /srv/postgres/tmp/copy-12345 for retries\0");
+        data.push(0);
+
+        let err = conn.parse_notice_response(&data).unwrap();
+        match err {
+            PgError::Server {
+                code,
+                message,
+                detail,
+                hint,
+            } => {
+                assert_eq!(code, "00000");
+                assert_eq!(message, "COPY completed with warning");
+                assert!(detail.is_none(), "notice detail should be redacted");
+                assert!(hint.is_none(), "notice hint should be redacted");
+            }
+            other => panic!("expected Server notice shape, got: {other}"),
         }
     }
 

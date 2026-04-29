@@ -1479,6 +1479,7 @@ mod tests {
         let msg = Message {
             subject: subject.to_string(),
             sid: 7,
+            headers: None,
             payload: payload.to_vec(),
             reply_to: Some(reply_subject.to_string()),
         };
@@ -1968,6 +1969,7 @@ mod tests {
         let msg = Message {
             subject: "test.subject".to_string(),
             sid: 1,
+            headers: None,
             payload: b"hello".to_vec(),
             reply_to: Some(reply.to_string()),
         };
@@ -1984,6 +1986,7 @@ mod tests {
         let msg = Message {
             subject: "test".to_string(),
             sid: 1,
+            headers: None,
             payload: vec![],
             reply_to: Some(reply.to_string()),
         };
