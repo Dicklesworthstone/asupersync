@@ -825,21 +825,16 @@ impl Scheduler {
 
         // Task is scheduled. Check where it is.
         // Check if already in cancel lane.
-        let mut existing_cancel_priority = None;
-        self.cancel_lane.retain(|entry| {
-            if entry.task == task {
-                existing_cancel_priority = Some(entry.priority);
-                // Same-or-lower priority re-promotion is a no-op.
-                // Keep the existing entry so we avoid a second heap scan.
-                priority <= entry.priority
-            } else {
-                true
-            }
-        });
-        if let Some(existing_priority) = existing_cancel_priority {
+        if let Some(existing_priority) = self
+            .cancel_lane
+            .iter()
+            .find(|entry| entry.task == task)
+            .map(|entry| entry.priority)
+        {
             if priority <= existing_priority {
                 return;
             }
+            self.cancel_lane.retain(|e| e.task != task);
             self.cancel_lane.push(SchedulerEntry {
                 task,
                 priority,
@@ -849,13 +844,9 @@ impl Scheduler {
         }
 
         // Check timed lane
-        let mut removed_from_timed = false;
-        self.timed_lane.retain(|entry| {
-            let keep = entry.task != task;
-            removed_from_timed |= !keep;
-            keep
-        });
-        if removed_from_timed {
+        let in_timed = self.timed_lane.iter().any(|e| e.task == task);
+        if in_timed {
+            self.timed_lane.retain(|e| e.task != task);
             self.cancel_lane.push(SchedulerEntry {
                 task,
                 priority,
@@ -865,13 +856,9 @@ impl Scheduler {
         }
 
         // Check ready lane
-        let mut removed_from_ready = false;
-        self.ready_lane.retain(|entry| {
-            let keep = entry.task != task;
-            removed_from_ready |= !keep;
-            keep
-        });
-        if removed_from_ready {
+        let in_ready = self.ready_lane.iter().any(|e| e.task == task);
+        if in_ready {
+            self.ready_lane.retain(|e| e.task != task);
             self.cancel_lane.push(SchedulerEntry {
                 task,
                 priority,
