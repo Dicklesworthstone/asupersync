@@ -440,11 +440,32 @@ pub fn fuzz_bearer_token(auth: &str) -> Option<&str> {
     bearer_token(auth)
 }
 
+/// Validates metadata key to prevent header injection attacks.
+///
+/// gRPC metadata keys must follow HTTP header naming rules:
+/// - ASCII letters, digits, hyphens, underscores only
+/// - Cannot start with hyphen (reserved)
+/// - Cannot contain colons, CRLF, or other control characters
+///
+/// br-asupersync-uydhdw: Prevents header injection via malicious key names.
+fn validate_metadata_key(key: &str) -> bool {
+    !key.is_empty()
+        && !key.starts_with('-')
+        && key.chars().all(|c| {
+            c.is_ascii_alphanumeric() || c == '-' || c == '_'
+        })
+}
+
 fn copy_metadata_value(
     metadata: &mut super::streaming::Metadata,
     key: &str,
     value: &MetadataValue,
 ) {
+    // br-asupersync-uydhdw: Validate metadata key to prevent header injection
+    if !validate_metadata_key(key) {
+        return;
+    }
+
     match value {
         MetadataValue::Ascii(ascii) => {
             let _ = metadata.insert(key, ascii.clone());
@@ -606,13 +627,19 @@ pub struct MetadataPropagator {
 
 impl MetadataPropagator {
     /// Create a new metadata propagator.
+    ///
+    /// br-asupersync-86jc5o: Only accept valid metadata keys to prevent header injection.
     #[must_use]
     pub fn new(keys: impl IntoIterator<Item = impl Into<String>>) -> Self {
         let keys = keys.into_iter();
         let (lower, upper) = keys.size_hint();
         let mut collected_keys = Vec::with_capacity(upper.unwrap_or(lower));
         for key in keys {
-            collected_keys.push(key.into());
+            let key_string = key.into();
+            // br-asupersync-86jc5o: Validate keys to prevent header injection
+            if validate_metadata_key(&key_string) {
+                collected_keys.push(key_string);
+            }
         }
 
         Self {
@@ -633,9 +660,12 @@ impl Interceptor for MetadataPropagator {
         }
 
         if !keys_to_propagate.is_empty() {
+            // br-asupersync-pcc2rq: Use space-separated format to prevent comma injection
+            // Since keys are validated to contain only alphanumeric, hyphen, underscore,
+            // spaces are safe delimiters that cannot appear in valid keys
             let _ = request
                 .metadata_mut()
-                .insert("x-propagate-keys", keys_to_propagate.join(","));
+                .insert("x-propagate-keys", keys_to_propagate.join(" "));
         }
         Ok(())
     }
