@@ -2813,3 +2813,14 @@ path = "fuzz_targets/raptorq_progressive_cancel_storm.rs"
 test = false
 doc = false
 bench = false
+
+# Tests gRPC Health Watch transitional state replay and streaming behavior under concurrent stress.
+# Exercises complex health status transition sequences, concurrent watch stream polling, race conditions
+# between status updates and stream notifications, waiter registration timing, and authentication
+# enforcement consistency between Check vs Watch methods.
+[[bin]]
+name = "grpc_health_watch_transitions"
+path = "fuzz_targets/grpc_health_watch_transitions.rs"
+test = false
+doc = false
+bench = false
