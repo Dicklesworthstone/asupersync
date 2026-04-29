@@ -868,11 +868,43 @@ fn sha256(data: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+const MIN_AUTH_NONCE_LEN: usize = 20;
+const MIN_AUTH_NONCE_DISTINCT_BYTES: usize = 4;
+
+fn validate_auth_nonce(plugin_name: &str, nonce: &[u8]) -> Result<(), MySqlError> {
+    if nonce.len() < MIN_AUTH_NONCE_LEN {
+        return Err(MySqlError::Protocol(format!(
+            "{plugin_name} server nonce too short: {} bytes; need at least {MIN_AUTH_NONCE_LEN}",
+            nonce.len()
+        )));
+    }
+
+    let mut seen = [false; 256];
+    let mut distinct = 0usize;
+    for &byte in nonce {
+        let slot = &mut seen[byte as usize];
+        if !*slot {
+            *slot = true;
+            distinct += 1;
+        }
+    }
+
+    if distinct < MIN_AUTH_NONCE_DISTINCT_BYTES {
+        return Err(MySqlError::Protocol(format!(
+            "{plugin_name} server nonce has insufficient entropy: {distinct} distinct byte values"
+        )));
+    }
+
+    Ok(())
+}
+
 /// mysql_native_password authentication.
 /// scramble = SHA1(password) XOR SHA1(nonce + SHA1(SHA1(password)))
-fn mysql_native_auth(password: &str, nonce: &[u8]) -> Vec<u8> {
+fn mysql_native_auth(password: &str, nonce: &[u8]) -> Result<Vec<u8>, MySqlError> {
+    validate_auth_nonce("mysql_native_password", nonce)?;
+
     if password.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let password_hash = sha1(password.as_bytes());
@@ -883,18 +915,20 @@ fn mysql_native_auth(password: &str, nonce: &[u8]) -> Vec<u8> {
     combined.extend_from_slice(&double_hash);
     let scramble_hash = sha1(&combined);
 
-    password_hash
+    Ok(password_hash
         .iter()
         .zip(scramble_hash.iter())
         .map(|(a, b)| a ^ b)
-        .collect()
+        .collect())
 }
 
 /// caching_sha2_password authentication (fast auth).
 /// scramble = SHA256(password) XOR SHA256(SHA256(SHA256(password)) + nonce)
-fn caching_sha2_auth(password: &str, nonce: &[u8]) -> Vec<u8> {
+fn caching_sha2_auth(password: &str, nonce: &[u8]) -> Result<Vec<u8>, MySqlError> {
+    validate_auth_nonce("caching_sha2_password", nonce)?;
+
     if password.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     let password_hash = sha256(password.as_bytes());
@@ -905,11 +939,11 @@ fn caching_sha2_auth(password: &str, nonce: &[u8]) -> Vec<u8> {
     combined.extend_from_slice(nonce);
     let scramble_hash = sha256(&combined);
 
-    password_hash
+    Ok(password_hash
         .iter()
         .zip(scramble_hash.iter())
         .map(|(a, b)| a ^ b)
-        .collect()
+        .collect())
 }
 
 // ============================================================================
@@ -1752,9 +1786,9 @@ impl MySqlConnection {
                             .to_string(),
                     ));
                 }
-                mysql_native_auth(password, &handshake.auth_plugin_data)
+                mysql_native_auth(password, &handshake.auth_plugin_data)?
             }
-            "caching_sha2_password" => caching_sha2_auth(password, &handshake.auth_plugin_data),
+            "caching_sha2_password" => caching_sha2_auth(password, &handshake.auth_plugin_data)?,
             plugin => {
                 return Err(MySqlError::UnsupportedAuthPlugin(plugin.to_string()));
             }
@@ -1872,9 +1906,9 @@ impl MySqlConnection {
                             .to_string(),
                     ));
                 }
-                mysql_native_auth(password, auth_data)
+                mysql_native_auth(password, auth_data)?
             }
-            "caching_sha2_password" => caching_sha2_auth(password, auth_data),
+            "caching_sha2_password" => caching_sha2_auth(password, auth_data)?,
             plugin => {
                 return Err(MySqlError::UnsupportedAuthPlugin(plugin.to_string()));
             }
@@ -4231,13 +4265,13 @@ mod tests {
     #[test]
     fn mysql_auth_functions_accept_secret_string_borrow() {
         let secret = SecretString::new("auth-pw");
-        let nonce = [0x42u8; 20];
-        let native_response = mysql_native_auth(secret.as_str(), &nonce);
+        let nonce = *b"0123456789abcdefghij";
+        let native_response = mysql_native_auth(secret.as_str(), &nonce).unwrap();
         assert_eq!(native_response.len(), 20);
         assert!(native_response.iter().any(|&b| b != 0));
 
-        let nonce_sha2 = [0x42u8; 20];
-        let sha2_response = caching_sha2_auth(secret.as_str(), &nonce_sha2);
+        let nonce_sha2 = *b"jihgfedcba9876543210";
+        let sha2_response = caching_sha2_auth(secret.as_str(), &nonce_sha2).unwrap();
         assert_eq!(sha2_response.len(), 32);
         assert!(sha2_response.iter().any(|&b| b != 0));
     }
@@ -4248,9 +4282,9 @@ mod tests {
     #[test]
     fn mysql_auth_functions_handle_empty_secret() {
         let empty = SecretString::new("");
-        let nonce = [0u8; 20];
-        assert!(mysql_native_auth(empty.as_str(), &nonce).is_empty());
-        assert!(caching_sha2_auth(empty.as_str(), &nonce).is_empty());
+        let nonce = *b"0123456789abcdefghij";
+        assert!(mysql_native_auth(empty.as_str(), &nonce).unwrap().is_empty());
+        assert!(caching_sha2_auth(empty.as_str(), &nonce).unwrap().is_empty());
     }
 
     /// Debug rendering of `MySqlConnectOptions` must not leak the
@@ -4706,14 +4740,14 @@ mod tests {
     fn test_mysql_native_auth() {
         // Test with known values
         let nonce = b"12345678901234567890";
-        let result = mysql_native_auth("password", nonce);
+        let result = mysql_native_auth("password", nonce).unwrap();
         assert_eq!(result.len(), 20);
     }
 
     #[test]
     fn test_caching_sha2_auth() {
         let nonce = b"12345678901234567890";
-        let result = caching_sha2_auth("password", nonce);
+        let result = caching_sha2_auth("password", nonce).unwrap();
         assert_eq!(result.len(), 32);
     }
 
@@ -6120,15 +6154,16 @@ mod tests {
 
     #[test]
     fn test_auth_empty_password_returns_empty() {
-        assert!(mysql_native_auth("", b"nonce").is_empty());
-        assert!(caching_sha2_auth("", b"nonce").is_empty());
+        let nonce = b"12345678901234567890";
+        assert!(mysql_native_auth("", nonce).unwrap().is_empty());
+        assert!(caching_sha2_auth("", nonce).unwrap().is_empty());
     }
 
     #[test]
     fn test_mysql_native_auth_deterministic() {
         let nonce = b"12345678901234567890";
-        let a = mysql_native_auth("secret", nonce);
-        let b = mysql_native_auth("secret", nonce);
+        let a = mysql_native_auth("secret", nonce).unwrap();
+        let b = mysql_native_auth("secret", nonce).unwrap();
         assert_eq!(a, b);
         assert_eq!(a.len(), 20);
     }
@@ -6136,8 +6171,8 @@ mod tests {
     #[test]
     fn test_caching_sha2_auth_deterministic() {
         let nonce = b"12345678901234567890";
-        let a = caching_sha2_auth("secret", nonce);
-        let b = caching_sha2_auth("secret", nonce);
+        let a = caching_sha2_auth("secret", nonce).unwrap();
+        let b = caching_sha2_auth("secret", nonce).unwrap();
         assert_eq!(a, b);
         assert_eq!(a.len(), 32);
     }
@@ -6145,9 +6180,41 @@ mod tests {
     #[test]
     fn test_mysql_native_auth_different_passwords_differ() {
         let nonce = b"12345678901234567890";
-        let a = mysql_native_auth("password1", nonce);
-        let b = mysql_native_auth("password2", nonce);
+        let a = mysql_native_auth("password1", nonce).unwrap();
+        let b = mysql_native_auth("password2", nonce).unwrap();
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn test_mysql_auth_rejects_short_nonce() {
+        let err = mysql_native_auth("secret", b"short").unwrap_err();
+        assert!(
+            matches!(err, MySqlError::Protocol(msg) if msg.contains("nonce too short")),
+            "unexpected short-nonce error: {err:?}"
+        );
+
+        let err = caching_sha2_auth("secret", b"short").unwrap_err();
+        assert!(
+            matches!(err, MySqlError::Protocol(msg) if msg.contains("nonce too short")),
+            "unexpected short-nonce error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_mysql_auth_rejects_low_entropy_nonce() {
+        let nonce = [0x42u8; 20];
+
+        let err = mysql_native_auth("secret", &nonce).unwrap_err();
+        assert!(
+            matches!(err, MySqlError::Protocol(msg) if msg.contains("insufficient entropy")),
+            "unexpected low-entropy error: {err:?}"
+        );
+
+        let err = caching_sha2_auth("secret", &nonce).unwrap_err();
+        assert!(
+            matches!(err, MySqlError::Protocol(msg) if msg.contains("insufficient entropy")),
+            "unexpected low-entropy error: {err:?}"
+        );
     }
 
     #[test]
