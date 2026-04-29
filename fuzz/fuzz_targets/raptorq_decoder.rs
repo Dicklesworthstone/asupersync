@@ -42,6 +42,7 @@ struct DecoderPacketInput {
     seed: u64,
     extra_repairs: u8,
     burst_repair_overhead: u8,
+    repair_distribution: RepairDistribution,
     missing_sources: Vec<u8>,
     loss_windows: Vec<LossWindow>,
     packet_bytes: Vec<u8>,
@@ -55,6 +56,12 @@ struct DecoderPacketInput {
 struct LossWindow {
     start: u16,
     len: u16,
+}
+
+#[derive(Debug, Clone, Copy, Arbitrary)]
+enum RepairDistribution {
+    Dense,
+    Sparse { gap_raw: u8 },
 }
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -179,6 +186,7 @@ fn build_valid_packets(
     source: &[Vec<u8>],
     missing_sources: &[u8],
     extra_repairs: usize,
+    repair_distribution: RepairDistribution,
 ) -> Option<Vec<ReceivedSymbol>> {
     let k = source.len();
     let mut missing = vec![false; k];
@@ -198,8 +206,7 @@ fn build_valid_packets(
         }
     }
 
-    for repair_offset in 0..repair_count {
-        let esi = k as u32 + repair_offset as u32;
+    for esi in build_repair_esi_sequence(k, repair_count, repair_distribution) {
         let Ok((columns, coefficients)) = decoder.repair_equation(esi) else {
             return None;
         };
@@ -208,6 +215,40 @@ fn build_valid_packets(
     }
 
     Some(packets)
+}
+
+fn sparse_repair_stride(k: usize, gap_raw: u8) -> u32 {
+    let base = (k / 64).clamp(2, 32) as u32;
+    base + u32::from(gap_raw % 29)
+}
+
+fn build_repair_esi_sequence(
+    k: usize,
+    repair_count: usize,
+    repair_distribution: RepairDistribution,
+) -> Vec<u32> {
+    match repair_distribution {
+        RepairDistribution::Dense => (0..repair_count)
+            .map(|repair_offset| k as u32 + repair_offset as u32)
+            .collect(),
+        RepairDistribution::Sparse { gap_raw } => {
+            let stride = sparse_repair_stride(k, gap_raw);
+            (0..repair_count)
+                .map(|repair_offset| k as u32 + repair_offset as u32 * stride)
+                .collect()
+        }
+    }
+}
+
+fn repair_stress_missing_sources(missing_sources: &[u8], seed: u64) -> Vec<u8> {
+    if !missing_sources.is_empty() {
+        return missing_sources.iter().copied().take(16).collect();
+    }
+
+    let start = seed as u8;
+    (0..16)
+        .map(|offset| start.wrapping_add(offset as u8))
+        .collect()
 }
 
 fn burst_repair_count(loss_windows: &[LossWindow], extra_repairs: usize, k: usize) -> usize {
@@ -408,6 +449,7 @@ fn assert_burst_loss_recovers_when_received_at_least_k(
         source,
         &[],
         repair_count.saturating_sub(1),
+        RepairDistribution::Dense,
     ) else {
         return;
     };
@@ -432,6 +474,56 @@ fn assert_burst_loss_recovers_when_received_at_least_k(
         decoded.source, source,
         "burst-loss payload with at least K surviving packets must recover original source"
     );
+}
+
+fn assert_k842_sparse_vs_dense_repairs_recover(
+    decoder: &InactivationDecoder,
+    encoder: &SystematicEncoder,
+    source: &[Vec<u8>],
+    seed: u64,
+    missing_sources: &[u8],
+    extra_repairs: usize,
+    wavefront_batch: usize,
+    object_id: ObjectId,
+) {
+    if source.len() != 842 {
+        return;
+    }
+
+    let effective_missing_sources = repair_stress_missing_sources(missing_sources, seed);
+    let sparse_gap_raw = seed as u8;
+    let distribution_extra_repairs = extra_repairs.saturating_add(4);
+    for repair_distribution in [
+        RepairDistribution::Dense,
+        RepairDistribution::Sparse {
+            gap_raw: sparse_gap_raw,
+        },
+    ] {
+        let Some(payload_packets) = build_valid_packets(
+            decoder,
+            encoder,
+            source,
+            &effective_missing_sources,
+            distribution_extra_repairs,
+            repair_distribution,
+        ) else {
+            return;
+        };
+        let received = combine_symbols(decoder, &payload_packets);
+        let batch = if received.is_empty() {
+            0
+        } else {
+            wavefront_batch % (received.len() + 1)
+        };
+        assert_decode_consensus(decoder, &received, source, batch, object_id);
+        let decoded = decoder
+            .decode(&received)
+            .expect("K=842 sparse/dense repair distributions must remain decodable");
+        assert_eq!(
+            decoded.source, source,
+            "K=842 sparse/dense repair distributions must recover original source"
+        );
+    }
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -459,6 +551,7 @@ fuzz_target!(|data: &[u8]| {
         &source,
         &input.missing_sources,
         input.extra_repairs as usize,
+        input.repair_distribution,
     ) else {
         return;
     };
@@ -481,6 +574,17 @@ fuzz_target!(|data: &[u8]| {
             object_id,
         );
     }
+
+    assert_k842_sparse_vs_dense_repairs_recover(
+        &decoder,
+        &encoder,
+        &source,
+        input.seed,
+        &input.missing_sources,
+        input.extra_repairs as usize,
+        input.wavefront_batch as usize,
+        object_id,
+    );
 
     assert_decode_consensus(
         &decoder,
@@ -557,9 +661,10 @@ fuzz_target!(|data: &[u8]| {
 mod tests {
     use super::{
         LARGE_K_CANDIDATES, LARGE_K_THRESHOLD, LARGE_SYMBOL_SIZE_CANDIDATES, LossWindow,
-        MutationKind, PacketMutation, SMALL_K_CANDIDATES, SMALL_SYMBOL_SIZE_CANDIDATES,
-        apply_contiguous_loss_windows, apply_mutations, burst_repair_count, select_k_candidate,
-        select_symbol_size_candidate,
+        MutationKind, PacketMutation, RepairDistribution, SMALL_K_CANDIDATES,
+        SMALL_SYMBOL_SIZE_CANDIDATES, apply_contiguous_loss_windows, apply_mutations,
+        build_repair_esi_sequence, burst_repair_count, repair_stress_missing_sources,
+        select_k_candidate, select_symbol_size_candidate, sparse_repair_stride,
     };
     use asupersync::raptorq::decoder::ReceivedSymbol;
 
@@ -628,6 +733,31 @@ mod tests {
             842,
         );
         assert_eq!(repair_count, 845);
+    }
+
+    #[test]
+    fn dense_repair_sequence_is_contiguous_at_k842() {
+        let sequence = build_repair_esi_sequence(842, 4, RepairDistribution::Dense);
+        assert_eq!(sequence, vec![842, 843, 844, 845]);
+    }
+
+    #[test]
+    fn sparse_repair_sequence_spreads_k842_symbols() {
+        let stride = sparse_repair_stride(842, 7);
+        let sequence = build_repair_esi_sequence(842, 4, RepairDistribution::Sparse { gap_raw: 7 });
+        assert!(stride > 1);
+        assert_eq!(sequence[0], 842);
+        assert_eq!(sequence[1], 842 + stride);
+        assert_eq!(sequence[2], 842 + stride * 2);
+        assert_eq!(sequence[3], 842 + stride * 3);
+    }
+
+    #[test]
+    fn repair_stress_missing_sources_falls_back_to_nonempty_k842_window() {
+        let fallback = repair_stress_missing_sources(&[], 2026);
+        assert_eq!(fallback.len(), 16);
+        assert_eq!(fallback[0], 2026u64 as u8);
+        assert_eq!(fallback[15], (2026u64 as u8).wrapping_add(15));
     }
 
     #[test]
