@@ -917,6 +917,32 @@ fn test_large_k_payload_generation_size(
     Ok(())
 }
 
+fn test_large_k_edge_byte_patterns(
+    symbol_size: usize,
+    seed: u64,
+    repair_count: usize,
+) -> Result<(), String> {
+    let bounded_symbol_size = symbol_size.clamp(1, LARGE_FEC_MAX_SYMBOL_SIZE);
+    let total_source_bytes = LARGE_FEC_K
+        .checked_mul(bounded_symbol_size)
+        .ok_or_else(|| "large-K edge-pattern source size overflowed usize".to_string())?;
+    let alternating: Vec<u8> = (0..total_source_bytes)
+        .map(|idx| if idx % 2 == 0 { 0xAA } else { 0x55 })
+        .collect();
+    let patterns = [
+        ("all_zero", vec![0u8; total_source_bytes]),
+        ("all_one", vec![0xFFu8; total_source_bytes]),
+        ("alternating_aa55", alternating),
+    ];
+
+    for (name, pattern) in patterns {
+        test_large_k_payload_generation_size(symbol_size, seed, repair_count, &pattern)
+            .map_err(|err| format!("edge pattern {name} failed: {err}"))?;
+    }
+
+    Ok(())
+}
+
 /// Main fuzzing function
 fn fuzz_systematic(mut config: FuzzConfig) -> Result<(), String> {
     let raw_k = config.k as usize;
@@ -964,6 +990,9 @@ fn fuzz_systematic(mut config: FuzzConfig) -> Result<(), String> {
 
     // Test 5c: bounded large-K FEC payload generation at K=842.
     test_large_k_payload_generation_size(symbol_size, seed, repair_count, &config.source_bytes)?;
+
+    // Test 5d: adversarial K=842 edge-byte source blocks.
+    test_large_k_edge_byte_patterns(symbol_size, seed, repair_count)?;
 
     // Test 6: Basic encode/decode round-trip
     let source = generate_source_data(k, symbol_size, seed);
