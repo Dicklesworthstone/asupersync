@@ -4377,6 +4377,7 @@ impl ThreeLaneWorker {
             stored.poll(&mut cx)
         }));
 
+        let mut credit_adaptive_epoch = true;
         match poll_result {
             Ok(Poll::Ready(outcome)) => {
                 // Map Outcome<(), ()> to Outcome<(), Error> for record.complete()
@@ -4557,6 +4558,12 @@ impl ThreeLaneWorker {
                 guard.completed = true;
             }
             Err(payload) => {
+                // Adaptive cancel-streak learning tracks scheduler pressure and
+                // cleanup behavior, not arbitrary user-task crashes. A panic can
+                // drop live-task potential abruptly and fabricate a "good"
+                // reward signal, biasing the policy toward a wider cancel
+                // streak for the wrong reason.
+                credit_adaptive_epoch = false;
                 let panic_payload = crate::types::outcome::PanicPayload::new(
                     crate::cx::scope::payload_to_string(&payload),
                 );
@@ -4591,7 +4598,9 @@ impl ThreeLaneWorker {
             }
         }
         drop(guard);
-        self.adaptive_on_dispatch();
+        if credit_adaptive_epoch {
+            self.adaptive_on_dispatch();
+        }
     }
 
     fn schedule_ready_finalizers(&self) -> bool {
@@ -11372,6 +11381,83 @@ mod tests {
             worker.preemption_metrics().adaptive_epochs,
             1,
             "metrics should publish the completed epoch after execution"
+        );
+    }
+
+    #[test]
+    fn panicking_dispatch_does_not_credit_adaptive_epoch() {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 4);
+        scheduler.set_adaptive_cancel_streak(true, 1);
+
+        let panicking_task = {
+            let mut runtime_state = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let root = runtime_state.create_root_region(Budget::INFINITE);
+            let (task_id, _handle) = runtime_state
+                .create_task(root, Budget::INFINITE, async {
+                    panic!("adaptive epoch should ignore panicking dispatches");
+                })
+                .expect("task create");
+            task_id
+        };
+        scheduler.inject_ready(panicking_task, 50);
+
+        {
+            let worker = scheduler.workers.first_mut().expect("worker");
+            assert_eq!(worker.next_task(), Some(panicking_task));
+            worker.execute(panicking_task);
+            let policy = worker
+                .adaptive_cancel_policy
+                .as_ref()
+                .expect("adaptive policy");
+            assert_eq!(
+                policy.epoch_count, 0,
+                "panic-only dispatches must not advance the adaptive epoch"
+            );
+            assert_eq!(
+                policy.steps_in_epoch, 0,
+                "panic-only dispatches must not leave stale epoch step progress behind"
+            );
+            assert!(
+                policy.epoch_start.is_none(),
+                "panic-only dispatches must not arm a snapshot window for the next reward"
+            );
+            assert_eq!(
+                worker.preemption_metrics().adaptive_epochs,
+                0,
+                "metrics must not publish an adaptive epoch for a crashing task"
+            );
+        }
+
+        let healthy_task = {
+            let mut runtime_state = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let root = runtime_state.create_root_region(Budget::INFINITE);
+            let (task_id, _handle) = runtime_state
+                .create_task(root, Budget::INFINITE, async {})
+                .expect("task create");
+            task_id
+        };
+        scheduler.inject_ready(healthy_task, 50);
+
+        let worker = scheduler.workers.first_mut().expect("worker");
+        assert_eq!(worker.next_task(), Some(healthy_task));
+        worker.execute(healthy_task);
+        let policy = worker
+            .adaptive_cancel_policy
+            .as_ref()
+            .expect("adaptive policy");
+        assert_eq!(
+            policy.epoch_count, 1,
+            "the first healthy dispatch after a panic should start and close a fresh epoch"
+        );
+        assert_eq!(
+            worker.preemption_metrics().adaptive_epochs,
+            1,
+            "metrics should resume on the first healthy dispatch after a panic"
         );
     }
 
