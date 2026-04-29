@@ -3146,6 +3146,17 @@ test = false
 doc = false
 bench = false
 
+# Intrusive scheduled-set dedup fuzzing for scheduler ring queues.
+# Tests arbitrary same-handle schedule/remove/dispatch cycles across ready and
+# cancel rings, asserting duplicate schedule attempts are idempotent, wrong-queue
+# removals fail closed, and each schedule epoch can dispatch at most once.
+[[bin]]
+name = "intrusive_scheduled_set_dedup"
+path = "fuzz_targets/intrusive_scheduled_set_dedup.rs"
+test = false
+doc = false
+bench = false
+
 # Notify state machine fuzzing for async synchronization primitives
 # Tests waiter starvation, double-wake prevention, and cancellation safety
 # through arbitrary sequences of notify_one/notify_waiters/notified operations.
