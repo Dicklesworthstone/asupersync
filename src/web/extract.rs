@@ -750,13 +750,6 @@ impl<T: DeserializeOwned> FromRequest for Form<T> {
 
         let parsed = parse_urlencoded(body_str, "form field")?;
 
-        if parsed.len() == 1
-            && let Some(first) = parsed.values().next()
-            && let Some(value) = deserialize_single_value::<T>(first)
-        {
-            return Ok(Self(value));
-        }
-
         deserialize_from_string_map(&parsed, "form data").map(Self)
     }
 }
@@ -1298,6 +1291,16 @@ mod tests {
         let err = Form::<HashMap<String, String>>::from_request(req).unwrap_err();
         assert_eq!(err.status, crate::web::response::StatusCode::BAD_REQUEST);
         assert_eq!(err.message, "duplicate form field `role`");
+    }
+
+    #[test]
+    fn form_scalar_extraction_does_not_ignore_field_names() {
+        let req = Request::new("POST", "/form")
+            .with_header("content-type", "application/x-www-form-urlencoded")
+            .with_body(Bytes::from_static(b"token=true"));
+        let err = Form::<bool>::from_request(req).unwrap_err();
+        assert_eq!(err.status, crate::web::response::StatusCode::BAD_REQUEST);
+        assert!(err.message.contains("invalid form data"));
     }
 
     #[test]
