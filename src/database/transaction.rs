@@ -17,6 +17,7 @@
 //! - [`with_sqlite_transaction_retry`]: SQLite retry on SQLITE_BUSY/SQLITE_LOCKED
 //! - [`PgSavepoint`] / [`SqliteSavepoint`] / [`MySqlSavepoint`]: Nested savepoints
 //! - [`RetryPolicy`]: Configurable retry with exponential backoff
+//! - [`TransactionReplaySafety`]: Explicit opt-in for replaying user closures
 //!
 //! All helpers integrate with [`Cx`] for cancellation. On `Outcome::Err` or
 //! `Outcome::Cancelled`, the transaction is rolled back. On `Outcome::Ok`,
@@ -107,6 +108,24 @@ impl Default for RetryPolicy {
     }
 }
 
+/// Whether replaying a transaction closure is safe after the closure has started.
+///
+/// Retry helpers may need to rerun the entire closure after a commit-time
+/// serialization conflict or deadlock. That replay is only safe when the
+/// closure performs no externally visible side effects beyond the database
+/// transaction itself, or when those effects are otherwise idempotent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TransactionReplaySafety {
+    /// Fail closed once the user closure has started.
+    ///
+    /// This still permits retries for transient begin-time failures, because
+    /// the closure body has not executed yet.
+    #[default]
+    ReplayUnsafe,
+    /// Caller has verified the closure is safe to replay after it starts.
+    ReplaySafe,
+}
+
 /// Validate that a savepoint name is safe for SQL identifier interpolation.
 /// Rejects anything that is not `[a-zA-Z0-9_]` to prevent SQL injection.
 fn validate_savepoint_name(name: &str) -> bool {
@@ -168,9 +187,12 @@ where
 
 #[cfg(feature = "postgres")]
 mod pg {
-    use super::{Cx, Future, Outcome, RetryPolicy, retry_with_policy, validate_savepoint_name};
+    use super::{
+        Cx, Future, Outcome, RetryPolicy, TransactionReplaySafety, retry_with_policy,
+        validate_savepoint_name,
+    };
     use crate::database::postgres::{PgConnection, PgError, PgTransaction};
-    use std::fmt;
+    use std::{cell::Cell, fmt};
 
     fn rollback_required_error() -> PgError {
         PgError::Protocol("transaction must roll back before commit".to_string())
@@ -237,22 +259,35 @@ mod pg {
     /// serialization failure.
     ///
     /// Serialization failures (SQLSTATE `40001`) are retried according to the
-    /// given [`RetryPolicy`]. Other errors are returned immediately.
+    /// given [`RetryPolicy`]. Pass [`TransactionReplaySafety::ReplaySafe`] only
+    /// when rerunning the closure cannot duplicate externally visible side
+    /// effects. Other errors are returned immediately.
     pub async fn with_pg_transaction_retry<T, F, MkFut>(
         conn: &mut PgConnection,
         cx: &Cx,
         policy: &RetryPolicy,
+        replay_safety: TransactionReplaySafety,
         mut f: F,
     ) -> Outcome<T, PgError>
     where
         F: FnMut(&mut PgTransaction<'_>, &Cx) -> MkFut,
         MkFut: Future<Output = Outcome<T, PgError>>,
     {
+        let body_started = Cell::new(false);
         retry_with_policy(
             cx,
             policy,
-            || with_pg_transaction(conn, cx, &mut f),
-            PgError::is_serialization_failure,
+            || {
+                body_started.set(false);
+                with_pg_transaction(conn, cx, |tx, tx_cx| {
+                    body_started.set(true);
+                    f(tx, tx_cx)
+                })
+            },
+            |err| {
+                err.is_serialization_failure()
+                    && (replay_safety == TransactionReplaySafety::ReplaySafe || !body_started.get())
+            },
         )
         .await
     }
@@ -369,9 +404,12 @@ pub use pg::{PgSavepoint, with_pg_transaction, with_pg_transaction_retry};
 
 #[cfg(feature = "sqlite")]
 mod sqlite {
-    use super::{Cx, Future, Outcome, RetryPolicy, retry_with_policy, validate_savepoint_name};
+    use super::{
+        Cx, Future, Outcome, RetryPolicy, TransactionReplaySafety, retry_with_policy,
+        validate_savepoint_name,
+    };
     use crate::database::sqlite::{SqliteConnection, SqliteError, SqliteTransaction};
-    use std::{fmt, pin::Pin};
+    use std::{cell::Cell, fmt, pin::Pin};
 
     type SqliteTxFuture<'a, T> = Pin<Box<dyn Future<Output = Outcome<T, SqliteError>> + Send + 'a>>;
 
@@ -477,7 +515,9 @@ mod sqlite {
     /// Run a closure inside a SQLite transaction with retry on busy/locked.
     ///
     /// `SQLITE_BUSY` and `SQLITE_LOCKED` errors are retried according to the
-    /// given [`RetryPolicy`]. Other errors are returned immediately.
+    /// given [`RetryPolicy`]. Pass [`TransactionReplaySafety::ReplaySafe`] only
+    /// when rerunning the closure cannot duplicate externally visible side
+    /// effects. Other errors are returned immediately.
     ///
     /// For write-heavy workloads, prefer [`with_sqlite_transaction_immediate`]
     /// which acquires the write lock upfront to reduce contention.
@@ -485,16 +525,27 @@ mod sqlite {
         conn: &SqliteConnection,
         cx: &Cx,
         policy: &RetryPolicy,
+        replay_safety: TransactionReplaySafety,
         mut f: F,
     ) -> Outcome<T, SqliteError>
     where
         F: for<'a> FnMut(&'a SqliteTransaction<'_>, &'a Cx) -> SqliteTxFuture<'a, T>,
     {
+        let body_started = Cell::new(false);
         retry_with_policy(
             cx,
             policy,
-            || with_sqlite_transaction(conn, cx, &mut f),
-            |e| e.is_busy() || e.is_locked(),
+            || {
+                body_started.set(false);
+                with_sqlite_transaction(conn, cx, |tx, tx_cx| {
+                    body_started.set(true);
+                    f(tx, tx_cx)
+                })
+            },
+            |e| {
+                (e.is_busy() || e.is_locked())
+                    && (replay_safety == TransactionReplaySafety::ReplaySafe || !body_started.get())
+            },
         )
         .await
     }
@@ -612,9 +663,12 @@ pub use sqlite::{
 
 #[cfg(feature = "mysql")]
 mod mysql {
-    use super::{Cx, Future, Outcome, RetryPolicy, retry_with_policy, validate_savepoint_name};
+    use super::{
+        Cx, Future, Outcome, RetryPolicy, TransactionReplaySafety, retry_with_policy,
+        validate_savepoint_name,
+    };
     use crate::database::mysql::{MySqlConnection, MySqlError, MySqlTransaction};
-    use std::fmt;
+    use std::{cell::Cell, fmt};
 
     fn rollback_required_error() -> MySqlError {
         MySqlError::Protocol("transaction must roll back before commit".to_string())
@@ -671,23 +725,36 @@ mod mysql {
     /// Run a closure inside a MySQL transaction with retry on deadlock.
     ///
     /// Deadlocks (error 1213) and lock wait timeouts (error 1205) are retried
-    /// according to the given [`RetryPolicy`]. Other errors are returned
-    /// immediately.
+    /// according to the given [`RetryPolicy`]. Pass
+    /// [`TransactionReplaySafety::ReplaySafe`] only when rerunning the closure
+    /// cannot duplicate externally visible side effects. Other errors are
+    /// returned immediately.
     pub async fn with_mysql_transaction_retry<T, F, MkFut>(
         conn: &mut MySqlConnection,
         cx: &Cx,
         policy: &RetryPolicy,
+        replay_safety: TransactionReplaySafety,
         mut f: F,
     ) -> Outcome<T, MySqlError>
     where
         F: FnMut(&mut MySqlTransaction<'_>, &Cx) -> MkFut,
         MkFut: Future<Output = Outcome<T, MySqlError>>,
     {
+        let body_started = Cell::new(false);
         retry_with_policy(
             cx,
             policy,
-            || with_mysql_transaction(conn, cx, &mut f),
-            MySqlError::is_deadlock,
+            || {
+                body_started.set(false);
+                with_mysql_transaction(conn, cx, |tx, tx_cx| {
+                    body_started.set(true);
+                    f(tx, tx_cx)
+                })
+            },
+            |err| {
+                err.is_deadlock()
+                    && (replay_safety == TransactionReplaySafety::ReplaySafe || !body_started.get())
+            },
         )
         .await
     }
@@ -998,6 +1065,75 @@ mod tests {
             "max_retries=3 must stop after 4 total attempts"
         );
         crate::test_complete!("retry_with_policy_stops_after_max_retries_on_persistent_error");
+    }
+
+    #[test]
+    fn retry_with_policy_replay_unsafe_still_retries_before_body_starts() {
+        init_test("retry_with_policy_replay_unsafe_still_retries_before_body_starts");
+        let cx = Cx::for_testing();
+        let policy = RetryPolicy {
+            max_retries: 3,
+            base_delay: Duration::ZERO,
+            max_delay: Duration::ZERO,
+        };
+        let replay_safety = TransactionReplaySafety::ReplayUnsafe;
+        let body_started = std::cell::Cell::new(false);
+        let mut attempts = 0u32;
+
+        let outcome = futures_lite::future::block_on(retry_with_policy(
+            &cx,
+            &policy,
+            || {
+                body_started.set(false);
+                attempts += 1;
+                std::future::ready(Outcome::<(), FakeRetryError>::Err(FakeRetryError(
+                    "retryable",
+                )))
+            },
+            |_| replay_safety == TransactionReplaySafety::ReplaySafe || !body_started.get(),
+        ));
+
+        match outcome {
+            Outcome::Err(err) => assert_eq!(err, FakeRetryError("retryable")),
+            other => panic!("expected persistent retryable error, got {other:?}"),
+        }
+        assert_eq!(attempts, 4, "begin-time retryables should remain retryable");
+        crate::test_complete!("retry_with_policy_replay_unsafe_still_retries_before_body_starts");
+    }
+
+    #[test]
+    fn retry_with_policy_replay_unsafe_fails_closed_after_body_starts() {
+        init_test("retry_with_policy_replay_unsafe_fails_closed_after_body_starts");
+        let cx = Cx::for_testing();
+        let policy = RetryPolicy {
+            max_retries: 3,
+            base_delay: Duration::ZERO,
+            max_delay: Duration::ZERO,
+        };
+        let replay_safety = TransactionReplaySafety::ReplayUnsafe;
+        let body_started = std::cell::Cell::new(false);
+        let mut attempts = 0u32;
+
+        let outcome = futures_lite::future::block_on(retry_with_policy(
+            &cx,
+            &policy,
+            || {
+                body_started.set(false);
+                attempts += 1;
+                body_started.set(true);
+                std::future::ready(Outcome::<(), FakeRetryError>::Err(FakeRetryError(
+                    "retryable",
+                )))
+            },
+            |_| replay_safety == TransactionReplaySafety::ReplaySafe || !body_started.get(),
+        ));
+
+        match outcome {
+            Outcome::Err(err) => assert_eq!(err, FakeRetryError("retryable")),
+            other => panic!("expected persistent retryable error, got {other:?}"),
+        }
+        assert_eq!(attempts, 1, "replay-unsafe closures must not be rerun");
+        crate::test_complete!("retry_with_policy_replay_unsafe_fails_closed_after_body_starts");
     }
 
     #[test]
