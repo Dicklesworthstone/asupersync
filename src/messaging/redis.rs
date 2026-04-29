@@ -1663,6 +1663,18 @@ impl RedisClient {
         self.pool.acquire(cx).await.map_err(Self::map_pool_error)
     }
 
+    fn validate_redirect_target(&self, host: &str, port: u16) -> Result<(), RedisError> {
+        let same_endpoint = host == self.config.host && port == self.config.port;
+        if !same_endpoint && self.config.password.is_some() && !self.config.use_tls {
+            return Err(RedisError::Protocol(format!(
+                "refusing plaintext redis cluster redirect from {}:{} to {host}:{port} \
+                 while AUTH credentials are configured; enable TLS for cluster redirects",
+                self.config.host, self.config.port
+            )));
+        }
+        Ok(())
+    }
+
     /// Open a transient connection to a redirect target. Inherits the
     /// configured auth/database/protocol limits but retargets host/port.
     /// IPv6 brackets are stripped at connect time. Not pooled — per-node
@@ -1683,6 +1695,7 @@ impl RedisClient {
                 "redis cluster redirect address has invalid port: {target_addr}"
             ))
         })?;
+        self.validate_redirect_target(host, port)?;
 
         let mut redirect_config = self.config.clone();
         redirect_config.host = host.to_string();
@@ -3082,6 +3095,31 @@ mod tests {
             pool: GenericPool::new(factory, PoolConfig::with_max_size(1)),
             slot_map: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         }
+    }
+
+    #[test]
+    fn cluster_redirect_rejects_plaintext_authenticated_cross_endpoint() {
+        let mut client = pooled_client_without_acquire();
+        client.config.host = "redis.internal".to_string();
+        client.config.port = 6379;
+        client.config.password = Some("secret".to_string());
+
+        client
+            .validate_redirect_target("redis.internal", 6379)
+            .expect("same-endpoint redirect should remain allowed");
+
+        let err = client
+            .validate_redirect_target("attacker.example", 6380)
+            .expect_err("plaintext authenticated redirect must fail closed");
+        assert!(
+            matches!(err, RedisError::Protocol(ref msg) if msg.contains("enable TLS for cluster redirects")),
+            "unexpected redirect error: {err:?}"
+        );
+
+        client.config.password = None;
+        client
+            .validate_redirect_target("attacker.example", 6380)
+            .expect("passwordless plaintext redirect should not trip auth guard");
     }
 
     #[test]
