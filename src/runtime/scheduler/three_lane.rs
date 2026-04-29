@@ -3911,18 +3911,40 @@ impl ThreeLaneWorker {
                         .lock()
                         .record_task_dispatch(first_task, Time::from_nanos(self.current_time_ns()));
 
-                    // Push remaining stolen tasks to our fast queue
-                    if stolen_count > 1 {
-                        for &(task, _priority) in self.steal_buffer[1..].iter().rev() {
-                            self.fast_queue.push(task);
+                    // If we already have local ready work pending, route the
+                    // batch remainder through our ready heap so lower-priority
+                    // stolen tasks cannot outrun higher-priority local work.
+                    let steal_back_into_local_ready =
+                        stolen_count > 1 && self.local.lock().peek_ready_priority().is_some();
 
-                            // Record enqueue to our fast queue for stolen tasks
-                            self.invariant_monitor.lock().record_task_requeue(
-                                task,
-                                "fast_queue_stolen",
-                                _priority,
-                                Time::from_nanos(self.current_time_ns()),
-                            );
+                    // Push remaining stolen tasks to our local ready heap or
+                    // fast queue, depending on whether we need priority-aware
+                    // steal-back.
+                    if stolen_count > 1 {
+                        if steal_back_into_local_ready {
+                            let mut local = self.local.lock();
+                            for &(task, priority) in &self.steal_buffer[1..stolen_count] {
+                                local.schedule(task, priority);
+                                self.invariant_monitor.lock().record_task_requeue(
+                                    task,
+                                    "local_ready_stolen",
+                                    priority,
+                                    Time::from_nanos(self.current_time_ns()),
+                                );
+                            }
+                        } else {
+                            for &(task, priority) in self.steal_buffer[1..stolen_count].iter().rev()
+                            {
+                                self.fast_queue.push(task);
+
+                                // Record enqueue to our fast queue for stolen tasks
+                                self.invariant_monitor.lock().record_task_requeue(
+                                    task,
+                                    "fast_queue_stolen",
+                                    priority,
+                                    Time::from_nanos(self.current_time_ns()),
+                                );
+                            }
                         }
                     }
 
@@ -9246,6 +9268,49 @@ mod tests {
         assert_eq!(
             fast_count, 1,
             "thief's fast_queue should have batch remainder, got {fast_count}"
+        );
+    }
+
+    #[test]
+    fn stolen_batch_remainder_yields_to_higher_priority_local_ready_work() {
+        let state = LocalQueue::test_state(16);
+        let mut scheduler = ThreeLaneScheduler::new(2, &state);
+        scheduler.set_steal_batch_size(2);
+
+        let victim_first = TaskId::new_for_test(1, 0);
+        let victim_second = TaskId::new_for_test(2, 0);
+        let local_high = TaskId::new_for_test(3, 0);
+
+        scheduler.workers[0].local.lock().schedule(victim_first, 90);
+        scheduler.workers[0]
+            .local
+            .lock()
+            .schedule(victim_second, 80);
+
+        let mut workers = scheduler.take_workers();
+        let thief = &mut workers[1];
+
+        thief.schedule_local(local_high, 200);
+
+        let first = thief.try_steal();
+        assert_eq!(
+            first,
+            Some(victim_first),
+            "steal should still return head task"
+        );
+
+        let next = thief.next_task();
+        assert_eq!(
+            next,
+            Some(local_high),
+            "higher-priority local ready work should dispatch before stolen remainder"
+        );
+
+        let after_local = thief.next_task();
+        assert_eq!(
+            after_local,
+            Some(victim_second),
+            "stolen remainder should stay runnable after the local priority handoff"
         );
     }
 
