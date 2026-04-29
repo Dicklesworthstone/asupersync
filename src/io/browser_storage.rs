@@ -821,19 +821,23 @@ impl BrowserStorageAdapter {
         )
     }
 
+    fn normalize_listed_keys(mut keys: Vec<String>) -> Vec<String> {
+        keys.sort();
+        keys.dedup();
+        keys
+    }
+
     fn host_backend_list_keys(
         &mut self,
         request: &StorageRequest,
         backend: &dyn StorageHostBackend,
         namespace: &str,
     ) -> Result<Vec<String>, BrowserStorageError> {
-        let mut keys = match backend.list_keys(namespace) {
+        let keys = match backend.list_keys(namespace) {
             Ok(keys) => keys,
             Err(message) => return self.host_backend_error(request, message),
         };
-        keys.sort();
-        keys.dedup();
-        Ok(keys)
+        Ok(Self::normalize_listed_keys(keys))
     }
 
     #[allow(clippy::future_not_send)]
@@ -843,13 +847,11 @@ impl BrowserStorageAdapter {
         backend: &dyn AsyncStorageHostBackend,
         namespace: &str,
     ) -> Result<Vec<String>, BrowserStorageError> {
-        let mut keys = match backend.list_keys(namespace).await {
+        let keys = match backend.list_keys(namespace).await {
             Ok(keys) => keys,
             Err(message) => return self.host_backend_error(request, message),
         };
-        keys.sort();
-        keys.dedup();
-        Ok(keys)
+        Ok(Self::normalize_listed_keys(keys))
     }
 
     fn project_set_quota(
