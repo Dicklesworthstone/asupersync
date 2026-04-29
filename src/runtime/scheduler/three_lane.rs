@@ -3261,54 +3261,8 @@ impl ThreeLaneWorker {
             return None;
         }
 
-        // ── PHASE 3: Fast ready paths (no PriorityScheduler lock) ────
-        // Check local_ready first (highest priority: non-stealable local tasks),
-        // then lock-free fast_queue (O(1) atomic pop).
-        let local_ready_task = self.local_ready.lock().pop_front();
-        if let Some(task) = local_ready_task {
-            self.record_ready_dispatch();
-            return Some(self.dispatch_with_adaptive_epoch(task));
-        }
-
-        // br-asupersync-fvixmw: pre-fix took self.local.lock() THREE additional
-        // times in Phase 3 / 3b (lines 2895, 2905, 2917) — twice for read-only
-        // peek_ready_task() inversion-check observability and once to pop. Snapshot
-        // the peek once here; both fast_queue and global.pop_ready inversion-check
-        // call sites reuse the snapshot. The Phase 3b pop_ready_only_with_hint
-        // call below stays in its own lock since it MUTATES the local queue and
-        // we want it to observe any concurrent producer that ran between phases.
-        // Net: 2 fewer lock acquisitions per dispatch hitting fast_queue OR
-        // global.pop_ready (the common Phase 3 hot path).
-        //
-        // OPTIMIZATION: Defer blocked_local_task peek to Phase 3b to eliminate
-        // redundant lock acquisition (next_task hotpath optimization).
-        if let Some(task) = self.fast_queue.pop() {
-            let blocked_local_task = self.local.lock().peek_ready_task();
-            let dispatched_priority = self.task_sched_priority(task);
-            self.record_ready_priority_inversion(blocked_local_task, task, dispatched_priority);
-            self.record_ready_dispatch();
-            return Some(self.dispatch_with_adaptive_epoch(task));
-        }
-        if let Some(pt) = self.global.pop_ready() {
-            let blocked_local_task = self.local.lock().peek_ready_task();
-            self.record_ready_priority_inversion(blocked_local_task, pt.task, Some(pt.priority));
-            self.record_ready_dispatch();
-            return Some(self.dispatch_with_adaptive_epoch(pt.task));
-        }
-
-        // ── PHASE 3b: Local Ready Lane ───────────────────────────────
-        // All global/fast ready paths returned nothing. Check local ready.
-        // The local ready path only needs the pop; inversion tracking is relevant
-        // only when a higher-priority fast/global dispatch jumps ahead of blocked
-        // local ready work.
-        let rng_hint = self.rng.next_u64();
-        let local_task = {
-            let mut local = self.local.lock();
-            local.pop_ready_only_with_hint(rng_hint)
-        };
-        if let Some(task) = local_task {
-            self.record_ready_dispatch();
-            return Some(self.dispatch_with_adaptive_epoch(task));
+        if let Some(task) = self.try_phase3_ready_work() {
+            return Some(task);
         }
 
         // ── PHASE 4: Steal from other workers ────────────────────────
@@ -3355,6 +3309,58 @@ impl ThreeLaneWorker {
             return true;
         }
         self.local.lock().has_ready_work()
+    }
+
+    #[inline]
+    fn peek_blocked_local_ready_for_inversion(&self) -> Option<(TaskId, u8)> {
+        // Inversion accounting is observability-only. If another path currently
+        // owns the local ready heap, do not block the hot fast/global ready
+        // dispatch branches just to snapshot the blocked task.
+        self.local
+            .try_lock()
+            .and_then(|mut local| local.peek_ready_task())
+    }
+
+    fn try_phase3_ready_work(&mut self) -> Option<TaskId> {
+        // ── PHASE 3: Fast ready paths (no PriorityScheduler lock) ────
+        // Check local_ready first (highest priority: non-stealable local tasks),
+        // then lock-free fast_queue (O(1) atomic pop).
+        let local_ready_task = self.local_ready.lock().pop_front();
+        if let Some(task) = local_ready_task {
+            self.record_ready_dispatch();
+            return Some(self.dispatch_with_adaptive_epoch(task));
+        }
+
+        if let Some(task) = self.fast_queue.pop() {
+            let blocked_local_task = self.peek_blocked_local_ready_for_inversion();
+            let dispatched_priority = self.task_sched_priority(task);
+            self.record_ready_priority_inversion(blocked_local_task, task, dispatched_priority);
+            self.record_ready_dispatch();
+            return Some(self.dispatch_with_adaptive_epoch(task));
+        }
+        if let Some(pt) = self.global.pop_ready() {
+            let blocked_local_task = self.peek_blocked_local_ready_for_inversion();
+            self.record_ready_priority_inversion(blocked_local_task, pt.task, Some(pt.priority));
+            self.record_ready_dispatch();
+            return Some(self.dispatch_with_adaptive_epoch(pt.task));
+        }
+
+        // ── PHASE 3b: Local Ready Lane ───────────────────────────────
+        // All global/fast ready paths returned nothing. Check local ready.
+        // The local ready path only needs the pop; inversion tracking is relevant
+        // only when a higher-priority fast/global dispatch jumps ahead of blocked
+        // local ready work.
+        let rng_hint = self.rng.next_u64();
+        let local_task = {
+            let mut local = self.local.lock();
+            local.pop_ready_only_with_hint(rng_hint)
+        };
+        if let Some(task) = local_task {
+            self.record_ready_dispatch();
+            return Some(self.dispatch_with_adaptive_epoch(task));
+        }
+
+        None
     }
 
     /// Record a cancel dispatch and update max streak metric.
@@ -3813,6 +3819,24 @@ impl ThreeLaneWorker {
         let fast = self.fast_queue.len();
         let global = self.global.ready_count();
         local_ready + fast + global
+    }
+
+    /// Bench-only accessor for the worker's fast ready queue.
+    #[cfg(any(test, feature = "test-internals"))]
+    pub fn bench_fast_ready_queue(&self) -> LocalQueue {
+        self.fast_queue.clone()
+    }
+
+    /// Bench-only accessor for the worker's local priority scheduler mutex.
+    #[cfg(any(test, feature = "test-internals"))]
+    pub fn bench_local_priority_scheduler(&self) -> Arc<Mutex<PriorityScheduler>> {
+        Arc::clone(&self.local)
+    }
+
+    /// Bench-only entrypoint for the isolated Phase 3 ready-decision path.
+    #[cfg(any(test, feature = "test-internals"))]
+    pub fn bench_try_phase3_ready_work(&mut self) -> Option<TaskId> {
+        self.try_phase3_ready_work()
     }
 
     /// Tries to get ready work from fast queue, global, or local queues.

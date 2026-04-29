@@ -1307,6 +1307,104 @@ fn bench_cancel_preemption(c: &mut Criterion) {
 }
 
 // =============================================================================
+// THREE-LANE DECISION MICROBENCHMARKS
+// =============================================================================
+
+fn bench_three_lane_decision(c: &mut Criterion) {
+    use asupersync::runtime::scheduler::ThreeLaneScheduler;
+
+    let mut group = c.benchmark_group("scheduler/three_lane_decision");
+    group.sample_size(30);
+
+    #[derive(Clone, Copy)]
+    enum LockCommand {
+        HoldForMicros(u64),
+        Stop,
+    }
+
+    group.bench_function("fast_ready_uncontended", |b: &mut criterion::Bencher| {
+        let state = setup_runtime_state(2);
+        let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 16);
+        let mut worker = scheduler
+            .take_workers()
+            .into_iter()
+            .next()
+            .expect("single worker");
+        worker.schedule_local(task(2), 200);
+        let fast_queue = worker.bench_fast_ready_queue();
+
+        b.iter_custom(|iters| {
+            let loops = iters.clamp(1, 1024);
+            let mut total = Duration::ZERO;
+            for _ in 0..loops {
+                fast_queue.push(task(1));
+                let start = std::time::Instant::now();
+                let dispatched = worker.bench_try_phase3_ready_work();
+                total += start.elapsed();
+                black_box(dispatched);
+            }
+            total.mul_f64(iters as f64 / loops as f64)
+        });
+    });
+
+    group.bench_function(
+        "fast_ready_local_peek_contended",
+        |b: &mut criterion::Bencher| {
+            let state = setup_runtime_state(2);
+            let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 16);
+            let mut worker = scheduler
+                .take_workers()
+                .into_iter()
+                .next()
+                .expect("single worker");
+            worker.schedule_local(task(2), 200);
+            let fast_queue = worker.bench_fast_ready_queue();
+            let local = worker.bench_local_priority_scheduler();
+            let (cmd_tx, cmd_rx) = std::sync::mpsc::sync_channel::<LockCommand>(0);
+            let (ack_tx, ack_rx) = std::sync::mpsc::sync_channel::<()>(0);
+            let holder = thread::spawn(move || {
+                while let Ok(cmd) = cmd_rx.recv() {
+                    match cmd {
+                        LockCommand::HoldForMicros(micros) => {
+                            let _guard = local.lock();
+                            ack_tx.send(()).expect("ack hold");
+                            let deadline =
+                                std::time::Instant::now() + Duration::from_micros(micros);
+                            while std::time::Instant::now() < deadline {
+                                std::hint::spin_loop();
+                            }
+                        }
+                        LockCommand::Stop => break,
+                    }
+                }
+            });
+
+            b.iter_custom(|iters| {
+                let loops = iters.clamp(1, 1024);
+                let mut total = Duration::ZERO;
+                for _ in 0..loops {
+                    fast_queue.push(task(1));
+                    cmd_tx
+                        .send(LockCommand::HoldForMicros(50))
+                        .expect("request held local lock");
+                    ack_rx.recv().expect("local lock held");
+                    let start = std::time::Instant::now();
+                    let dispatched = worker.bench_try_phase3_ready_work();
+                    total += start.elapsed();
+                    black_box(dispatched);
+                }
+                total.mul_f64(iters as f64 / loops as f64)
+            });
+
+            cmd_tx.send(LockCommand::Stop).expect("stop holder");
+            holder.join().expect("join holder");
+        },
+    );
+
+    group.finish();
+}
+
+// =============================================================================
 // ADAPTIVE CANCEL-STREAK POLICY BENCHMARKS (UCB1 vs EXP3)
 // =============================================================================
 
@@ -1515,6 +1613,7 @@ criterion_group!(
     bench_intrusive_vs_vecdeque,
     bench_intrusive_vs_binaryheap,
     bench_cancel_preemption,
+    bench_three_lane_decision,
     bench_adaptive_cancel_streak_policy,
 );
 
