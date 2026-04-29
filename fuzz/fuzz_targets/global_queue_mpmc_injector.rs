@@ -5,7 +5,7 @@ use asupersync::runtime::scheduler::GlobalQueue;
 use asupersync::types::TaskId;
 use asupersync::util::ArenaIndex;
 use libfuzzer_sys::fuzz_target;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -30,32 +30,32 @@ struct GlobalQueueMpmcFuzz {
 enum QueueOperation {
     /// Producer: push a task to the global queue
     Push {
-        worker_id: u8,     // Worker to execute on (0-15)
-        task_value: u32,   // Task identifier value
+        worker_id: u8,   // Worker to execute on (0-15)
+        task_value: u32, // Task identifier value
     },
     /// Consumer: steal (pop) a task from the global queue
     Steal {
-        worker_id: u8,     // Worker to execute on (0-15)
+        worker_id: u8, // Worker to execute on (0-15)
     },
     /// Observer: check queue length and emptiness
     Observe {
-        worker_id: u8,     // Worker to execute on (0-15)
+        worker_id: u8, // Worker to execute on (0-15)
     },
     /// Producer: burst push multiple tasks
     BurstPush {
-        worker_id: u8,     // Worker to execute on (0-15)
-        count: u8,         // Number of tasks to push (1-32)
-        base_value: u32,   // Starting task identifier
+        worker_id: u8,   // Worker to execute on (0-15)
+        count: u8,       // Number of tasks to push (1-32)
+        base_value: u32, // Starting task identifier
     },
     /// Consumer: burst steal multiple tasks
     BurstSteal {
-        worker_id: u8,     // Worker to execute on (0-15)
-        max_count: u8,     // Maximum tasks to steal (1-32)
+        worker_id: u8, // Worker to execute on (0-15)
+        max_count: u8, // Maximum tasks to steal (1-32)
     },
     /// Brief delay to allow scheduling variations
     Delay {
-        worker_id: u8,     // Worker to execute on (0-15)
-        milliseconds: u8,  // Delay duration (0-255ms)
+        worker_id: u8,    // Worker to execute on (0-15)
+        milliseconds: u8, // Delay duration (0-255ms)
     },
 }
 
@@ -78,7 +78,9 @@ const OPERATION_TIMEOUT: Duration = Duration::from_secs(15);
 
 fuzz_target!(|input: GlobalQueueMpmcFuzz| {
     // Apply resource limits
-    let max_ops = (input.config.max_operations as usize).min(MAX_OPERATIONS).max(1);
+    let max_ops = (input.config.max_operations as usize)
+        .min(MAX_OPERATIONS)
+        .max(1);
     let max_workers = (input.config.max_workers as usize).min(MAX_WORKERS).max(1);
     let operations: Vec<_> = input.operations.into_iter().take(max_ops).collect();
 
@@ -101,20 +103,15 @@ fuzz_target!(|input: GlobalQueueMpmcFuzz| {
     }
 
     // Execute operations and verify correctness
-    execute_and_verify_mpmc_correctness(
-        global_queue,
-        tracker,
-        operations_by_worker,
-        max_workers,
-    );
+    execute_and_verify_mpmc_correctness(global_queue, tracker, operations_by_worker, max_workers);
 });
 
 /// Tracks MPMC correctness properties
 struct MpmcTracker {
-    /// Tasks that have been pushed (producer side)
-    pushed_tasks: HashSet<u32>,
-    /// Tasks that have been popped (consumer side)
-    popped_tasks: HashSet<u32>,
+    /// Tasks that have been pushed (producer side), keyed by logical task value.
+    pushed_tasks: HashMap<u32, usize>,
+    /// Tasks that have been popped (consumer side), keyed by logical task value.
+    popped_tasks: HashMap<u32, usize>,
     /// Sequence of push events for ordering analysis
     push_sequence: Vec<PushEvent>,
     /// Sequence of pop events for ordering analysis
@@ -150,8 +147,8 @@ struct PopEvent {
 impl MpmcTracker {
     fn new() -> Self {
         Self {
-            pushed_tasks: HashSet::new(),
-            popped_tasks: HashSet::new(),
+            pushed_tasks: HashMap::new(),
+            popped_tasks: HashMap::new(),
             push_sequence: Vec::new(),
             pop_sequence: Vec::new(),
             length_observations: Vec::new(),
@@ -160,12 +157,7 @@ impl MpmcTracker {
 
     /// Record a task being pushed
     fn record_push(&mut self, task_id: u32, worker_id: usize) {
-        assert!(
-            !self.pushed_tasks.contains(&task_id),
-            "Task {} pushed multiple times", task_id
-        );
-
-        self.pushed_tasks.insert(task_id);
+        *self.pushed_tasks.entry(task_id).or_insert(0) += 1;
         let sequence = self.push_sequence.len() as u64;
         self.push_sequence.push(PushEvent {
             task_id,
@@ -177,16 +169,16 @@ impl MpmcTracker {
 
     /// Record a task being popped
     fn record_pop(&mut self, task_id: u32, worker_id: usize) {
+        let pushed_count = self.pushed_tasks.get(&task_id).copied().unwrap_or(0);
+        let popped_count = self.popped_tasks.entry(task_id).or_insert(0);
         assert!(
-            !self.popped_tasks.contains(&task_id),
-            "Task {} popped multiple times (duplicate)", task_id
+            *popped_count < pushed_count,
+            "Task {} popped without a matching push credit (pushed: {}, popped so far: {})",
+            task_id,
+            pushed_count,
+            popped_count
         );
-        assert!(
-            self.pushed_tasks.contains(&task_id),
-            "Task {} popped without being pushed (lost or phantom)", task_id
-        );
-
-        self.popped_tasks.insert(task_id);
+        *popped_count += 1;
         let sequence = self.pop_sequence.len() as u64;
         self.pop_sequence.push(PopEvent {
             task_id,
@@ -202,48 +194,77 @@ impl MpmcTracker {
     }
 
     /// Verify MPMC correctness properties
-    fn verify_correctness(&self) {
-        self.verify_no_task_lost();
+    fn verify_correctness(&self, remaining_tasks: &[u32], final_advisory_len: usize) {
+        self.verify_total_preserved(remaining_tasks);
         self.verify_no_task_duplicated();
         self.verify_fifo_ordering();
-        self.verify_count_consistency();
+        self.verify_count_consistency(remaining_tasks.len(), final_advisory_len);
     }
 
-    /// Verify no tasks are lost (every pushed task is popped)
-    fn verify_no_task_lost(&self) {
-        let lost_tasks: Vec<_> = self.pushed_tasks
-            .difference(&self.popped_tasks)
-            .collect();
+    /// Verify every push is accounted for as either a consumed item or post-race residue.
+    fn verify_total_preserved(&self, remaining_tasks: &[u32]) {
+        let mut remaining_counts = HashMap::new();
+        for &task_id in remaining_tasks {
+            *remaining_counts.entry(task_id).or_insert(0usize) += 1;
+        }
 
-        if !lost_tasks.is_empty() {
-            panic!(
-                "MPMC correctness violation: {} tasks lost (pushed but not popped): {:?}",
-                lost_tasks.len(),
-                lost_tasks
+        for (&task_id, &pushed_count) in &self.pushed_tasks {
+            let popped_count = self.popped_tasks.get(&task_id).copied().unwrap_or(0);
+            let remaining_count = remaining_counts.get(&task_id).copied().unwrap_or(0);
+            assert_eq!(
+                popped_count + remaining_count,
+                pushed_count,
+                "Task {} accounting drifted across inject/drain race (pushed: {}, popped: {}, remaining: {})",
+                task_id,
+                pushed_count,
+                popped_count,
+                remaining_count
+            );
+        }
+
+        for (&task_id, &popped_count) in &self.popped_tasks {
+            let pushed_count = self.pushed_tasks.get(&task_id).copied().unwrap_or(0);
+            assert!(
+                popped_count <= pushed_count,
+                "Task {} was popped too many times (pushed: {}, popped: {})",
+                task_id,
+                pushed_count,
+                popped_count
+            );
+        }
+
+        for (&task_id, &remaining_count) in &remaining_counts {
+            let pushed_count = self.pushed_tasks.get(&task_id).copied().unwrap_or(0);
+            assert!(
+                remaining_count <= pushed_count,
+                "Task {} remained in queue without enough push credit (pushed: {}, remaining: {})",
+                task_id,
+                pushed_count,
+                remaining_count
             );
         }
     }
 
     /// Verify no tasks are duplicated (no task is popped more than once)
     fn verify_no_task_duplicated(&self) {
-        // This is already enforced by record_pop assertions, but let's double-check
-        assert_eq!(
-            self.popped_tasks.len(),
-            self.pop_sequence.len(),
-            "Task duplication detected: popped set size != pop sequence length"
-        );
-
-        // Also verify all popped tasks exist in pushed set
-        for &popped_task in &self.popped_tasks {
+        for (&popped_task, &popped_count) in &self.popped_tasks {
+            let pushed_count = self.pushed_tasks.get(&popped_task).copied().unwrap_or(0);
             assert!(
-                self.pushed_tasks.contains(&popped_task),
-                "Phantom task {} was popped without being pushed", popped_task
+                popped_count <= pushed_count,
+                "Phantom or duplicated task {} was popped too many times (pushed: {}, popped: {})",
+                popped_task,
+                pushed_count,
+                popped_count
             );
         }
     }
 
     /// Verify FIFO ordering is generally maintained
     fn verify_fifo_ordering(&self) {
+        if self.pushed_tasks.values().any(|&count| count > 1) {
+            return;
+        }
+
         if self.push_sequence.len() < 2 || self.pop_sequence.len() < 2 {
             return; // Need at least 2 events for ordering analysis
         }
@@ -264,7 +285,8 @@ impl MpmcTracker {
                 let task_j = self.pop_sequence[j].task_id;
 
                 if let (Some(&push_i), Some(&push_j)) =
-                    (push_order.get(&task_i), push_order.get(&task_j)) {
+                    (push_order.get(&task_i), push_order.get(&task_j))
+                {
                     valid_comparisons += 1;
 
                     // If task_i was pushed before task_j, but popped after task_j,
@@ -284,29 +306,38 @@ impl MpmcTracker {
             assert!(
                 inversion_rate < 0.5,
                 "FIFO ordering severely violated: {}/{} inversions ({:.1}%)",
-                inversions, valid_comparisons, inversion_rate * 100.0
+                inversions,
+                valid_comparisons,
+                inversion_rate * 100.0
             );
         }
     }
 
     /// Verify count consistency (advisory count roughly matches reality)
-    fn verify_count_consistency(&self) {
-        // The count is advisory and may be momentarily inconsistent,
-        // but we can check some basic bounds
-
-        let total_pushed = self.pushed_tasks.len();
-        let total_popped = self.popped_tasks.len();
+    fn verify_count_consistency(&self, remaining_count: usize, final_advisory_len: usize) {
+        let total_pushed: usize = self.pushed_tasks.values().sum();
+        let total_popped: usize = self.popped_tasks.values().sum();
         let expected_remaining = total_pushed.saturating_sub(total_popped);
 
-        // Check that no length observation was drastically wrong
-        for &(timestamp, observed_length) in &self.length_observations {
-            // Allow significant slack since count is advisory
-            let max_reasonable_length = total_pushed + 50; // Some slack for concurrent operations
+        assert_eq!(
+            expected_remaining, remaining_count,
+            "Final residue count drifted after the inject/drain race (pushed: {}, popped: {}, remaining: {})",
+            total_pushed, total_popped, remaining_count
+        );
+        assert_eq!(
+            final_advisory_len, remaining_count,
+            "Advisory queue count drifted after all producers and consumers quiesced"
+        );
 
+        // Even though the count is advisory under concurrency, it must never wrap
+        // or exceed the total amount of work ever injected into the queue.
+        for &(timestamp, observed_length) in &self.length_observations {
             assert!(
-                observed_length <= max_reasonable_length,
-                "Length observation {} at {:?} exceeds reasonable bound {} (pushed: {}, popped: {})",
-                observed_length, timestamp, max_reasonable_length, total_pushed, total_popped
+                observed_length <= total_pushed,
+                "Length observation {} at {:?} exceeds total injected work {}",
+                observed_length,
+                timestamp,
+                total_pushed
             );
         }
     }
@@ -336,7 +367,10 @@ fn execute_and_verify_mpmc_correctness(
 
     // Spawn worker threads
     for worker_id in 0..max_workers {
-        let ops = operations_by_worker.get(&worker_id).cloned().unwrap_or_default();
+        let ops = operations_by_worker
+            .get(&worker_id)
+            .cloned()
+            .unwrap_or_default();
         if ops.is_empty() {
             continue;
         }
@@ -358,13 +392,17 @@ fn execute_and_verify_mpmc_correctness(
         let join_result = thread_join_with_timeout(handle, remaining_time);
         assert!(
             join_result.is_ok(),
-            "Worker {} timed out - possible deadlock or infinite loop", i
+            "Worker {} timed out - possible deadlock or infinite loop",
+            i
         );
     }
 
+    let final_advisory_len = global_queue.len();
+    let remaining_tasks = drain_remaining_tasks(&global_queue);
+
     // Verify MPMC correctness properties
     let tracker_guard = tracker.lock();
-    tracker_guard.verify_correctness();
+    tracker_guard.verify_correctness(&remaining_tasks, final_advisory_len);
 }
 
 /// Simple timeout wrapper for thread join
@@ -404,6 +442,7 @@ fn execute_worker_operations(
 
                 // Push to queue
                 queue.push(task_id);
+                tracker.lock().record_length_observation(queue.len());
             }
 
             QueueOperation::Steal { .. } => {
@@ -415,6 +454,7 @@ fn execute_worker_operations(
                     tracker.lock().record_pop(task_value, worker_id);
                 }
                 // If pop returns None, that's fine - queue was empty
+                tracker.lock().record_length_observation(queue.len());
             }
 
             QueueOperation::Observe { .. } => {
@@ -425,7 +465,9 @@ fn execute_worker_operations(
                 tracker.lock().record_length_observation(length);
             }
 
-            QueueOperation::BurstPush { count, base_value, .. } => {
+            QueueOperation::BurstPush {
+                count, base_value, ..
+            } => {
                 let burst_count = (count as usize).min(MAX_BURST_SIZE).max(1);
 
                 for i in 0..burst_count {
@@ -437,6 +479,7 @@ fn execute_worker_operations(
 
                     // Push to queue
                     queue.push(task_id);
+                    tracker.lock().record_length_observation(queue.len());
                 }
             }
 
@@ -453,7 +496,9 @@ fn execute_worker_operations(
                         // Queue is empty, stop burst stealing
                         break;
                     }
+                    tracker.lock().record_length_observation(queue.len());
                 }
+                tracker.lock().record_length_observation(queue.len());
             }
 
             QueueOperation::Delay { milliseconds, .. } => {
@@ -462,6 +507,18 @@ fn execute_worker_operations(
             }
         }
     }
+}
+
+fn drain_remaining_tasks(queue: &GlobalQueue) -> Vec<u32> {
+    let mut remaining = Vec::new();
+    while let Some(task_id) = queue.pop() {
+        remaining.push(extract_task_value(task_id));
+    }
+    assert!(
+        queue.is_empty(),
+        "queue should be empty after residue drain"
+    );
+    remaining
 }
 
 /// Create a TaskId from a u32 value for testing
