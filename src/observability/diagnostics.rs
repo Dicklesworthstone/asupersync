@@ -2048,8 +2048,8 @@ impl DirectionalDeadlockReport {
             lines.push(serde_json::json!({
                 "type": "deadlock_cycle",
                 "cycle_index": i,
-                "cycle_length": cycle.len(),
-                "task_ids": cycle.iter().map(|&id| format!("{:?}", id)).collect::<Vec<_>>()
+                "cycle_length": cycle.tasks.len(),
+                "task_ids": cycle.tasks.iter().map(|id| format!("{:?}", id)).collect::<Vec<_>>()
             }));
         }
 

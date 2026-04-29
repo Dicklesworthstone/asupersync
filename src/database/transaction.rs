@@ -290,10 +290,12 @@ mod pg {
             if self.released {
                 return Outcome::Err(PgError::TransactionFinished);
             }
-            self.released = true;
             let sql = format!("RELEASE SAVEPOINT {}", self.name);
             match self.tx.execute_unchecked(cx, &sql).await {
-                Outcome::Ok(_) => Outcome::Ok(()),
+                Outcome::Ok(_) => {
+                    self.released = true;
+                    Outcome::Ok(())
+                }
                 Outcome::Err(e) => Outcome::Err(e),
                 Outcome::Cancelled(r) => Outcome::Cancelled(r),
                 Outcome::Panicked(p) => Outcome::Panicked(p),
@@ -305,10 +307,20 @@ mod pg {
             if self.released {
                 return Outcome::Err(PgError::TransactionFinished);
             }
-            self.released = true;
-            let sql = format!("ROLLBACK TO SAVEPOINT {}", self.name);
-            match self.tx.execute_unchecked(cx, &sql).await {
-                Outcome::Ok(_) => Outcome::Ok(()),
+            let rollback_sql = format!("ROLLBACK TO SAVEPOINT {}", self.name);
+            match self.tx.execute_unchecked(cx, &rollback_sql).await {
+                Outcome::Ok(_) => {
+                    let release_sql = format!("RELEASE SAVEPOINT {}", self.name);
+                    match self.tx.execute_unchecked(cx, &release_sql).await {
+                        Outcome::Ok(_) => {
+                            self.released = true;
+                            Outcome::Ok(())
+                        }
+                        Outcome::Err(e) => Outcome::Err(e),
+                        Outcome::Cancelled(r) => Outcome::Cancelled(r),
+                        Outcome::Panicked(p) => Outcome::Panicked(p),
+                    }
+                }
                 Outcome::Err(e) => Outcome::Err(e),
                 Outcome::Cancelled(r) => Outcome::Cancelled(r),
                 Outcome::Panicked(p) => Outcome::Panicked(p),
@@ -509,7 +521,7 @@ mod sqlite {
                 )));
             }
             let sql = format!("SAVEPOINT {name}");
-            match tx.execute(cx, &sql, &[]).await {
+            match tx.execute_unchecked(cx, &sql, &[]).await {
                 Outcome::Ok(_) => Outcome::Ok(SqliteSavepoint {
                     tx,
                     name: name.to_owned(),
@@ -526,10 +538,12 @@ mod sqlite {
             if self.released {
                 return Outcome::Err(SqliteError::TransactionFinished);
             }
-            self.released = true;
             let sql = format!("RELEASE SAVEPOINT {}", self.name);
-            match self.tx.execute(cx, &sql, &[]).await {
-                Outcome::Ok(_) => Outcome::Ok(()),
+            match self.tx.execute_unchecked(cx, &sql, &[]).await {
+                Outcome::Ok(_) => {
+                    self.released = true;
+                    Outcome::Ok(())
+                }
                 Outcome::Err(e) => Outcome::Err(e),
                 Outcome::Cancelled(r) => Outcome::Cancelled(r),
                 Outcome::Panicked(p) => Outcome::Panicked(p),
@@ -541,10 +555,20 @@ mod sqlite {
             if self.released {
                 return Outcome::Err(SqliteError::TransactionFinished);
             }
-            self.released = true;
-            let sql = format!("ROLLBACK TO SAVEPOINT {}", self.name);
-            match self.tx.execute(cx, &sql, &[]).await {
-                Outcome::Ok(_) => Outcome::Ok(()),
+            let rollback_sql = format!("ROLLBACK TO SAVEPOINT {}", self.name);
+            match self.tx.execute_unchecked(cx, &rollback_sql, &[]).await {
+                Outcome::Ok(_) => {
+                    let release_sql = format!("RELEASE SAVEPOINT {}", self.name);
+                    match self.tx.execute_unchecked(cx, &release_sql, &[]).await {
+                        Outcome::Ok(_) => {
+                            self.released = true;
+                            Outcome::Ok(())
+                        }
+                        Outcome::Err(e) => Outcome::Err(e),
+                        Outcome::Cancelled(r) => Outcome::Cancelled(r),
+                        Outcome::Panicked(p) => Outcome::Panicked(p),
+                    }
+                }
                 Outcome::Err(e) => Outcome::Err(e),
                 Outcome::Cancelled(r) => Outcome::Cancelled(r),
                 Outcome::Panicked(p) => Outcome::Panicked(p),
@@ -714,10 +738,12 @@ mod mysql {
             if self.released {
                 return Outcome::Err(MySqlError::TransactionFinished);
             }
-            self.released = true;
             let sql = format!("RELEASE SAVEPOINT {}", self.name);
             match self.tx.execute_unchecked(cx, &sql).await {
-                Outcome::Ok(_) => Outcome::Ok(()),
+                Outcome::Ok(_) => {
+                    self.released = true;
+                    Outcome::Ok(())
+                }
                 Outcome::Err(e) => Outcome::Err(e),
                 Outcome::Cancelled(r) => Outcome::Cancelled(r),
                 Outcome::Panicked(p) => Outcome::Panicked(p),
@@ -729,10 +755,20 @@ mod mysql {
             if self.released {
                 return Outcome::Err(MySqlError::TransactionFinished);
             }
-            self.released = true;
-            let sql = format!("ROLLBACK TO SAVEPOINT {}", self.name);
-            match self.tx.execute_unchecked(cx, &sql).await {
-                Outcome::Ok(_) => Outcome::Ok(()),
+            let rollback_sql = format!("ROLLBACK TO SAVEPOINT {}", self.name);
+            match self.tx.execute_unchecked(cx, &rollback_sql).await {
+                Outcome::Ok(_) => {
+                    let release_sql = format!("RELEASE SAVEPOINT {}", self.name);
+                    match self.tx.execute_unchecked(cx, &release_sql).await {
+                        Outcome::Ok(_) => {
+                            self.released = true;
+                            Outcome::Ok(())
+                        }
+                        Outcome::Err(e) => Outcome::Err(e),
+                        Outcome::Cancelled(r) => Outcome::Cancelled(r),
+                        Outcome::Panicked(p) => Outcome::Panicked(p),
+                    }
+                }
                 Outcome::Err(e) => Outcome::Err(e),
                 Outcome::Cancelled(r) => Outcome::Cancelled(r),
                 Outcome::Panicked(p) => Outcome::Panicked(p),
@@ -1257,5 +1293,199 @@ mod tests {
             .expect("lab runtime test");
 
         crate::test_complete!("with_sqlite_transaction_dropped_savepoint_refuses_commit");
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn with_sqlite_transaction_savepoint_rollback_discards_inner_changes() {
+        init_test("with_sqlite_transaction_savepoint_rollback_discards_inner_changes");
+
+        let target = ConformanceTarget::lab_runtime();
+        target
+            .run_test(TestConfig::default(), |cx| async move {
+                let conn = match SqliteConnection::open_in_memory(&cx).await {
+                    Outcome::Ok(conn) => conn,
+                    other => panic!("open_in_memory failed: {other:?}"),
+                };
+
+                match conn
+                    .execute(
+                        &cx,
+                        "CREATE TABLE savepoint_rollback_items (id INTEGER PRIMARY KEY, name TEXT)",
+                        &[],
+                    )
+                    .await
+                {
+                    Outcome::Ok(_) => {}
+                    other => panic!("schema setup failed: {other:?}"),
+                }
+
+                let tx_outcome = with_sqlite_transaction(&conn, &cx, |tx, cx| {
+                    Box::pin(async move {
+                        match tx
+                            .execute(
+                                cx,
+                                "INSERT INTO savepoint_rollback_items(name) VALUES (?1)",
+                                &[SqliteValue::Text("outer_before".to_string())],
+                            )
+                            .await
+                        {
+                            Outcome::Ok(_) => {}
+                            other => panic!("outer_before insert failed: {other:?}"),
+                        }
+
+                        let savepoint = match SqliteSavepoint::new(tx, cx, "sp1").await {
+                            Outcome::Ok(savepoint) => savepoint,
+                            other => panic!("savepoint create failed: {other:?}"),
+                        };
+
+                        match savepoint
+                            .transaction()
+                            .execute(
+                                cx,
+                                "INSERT INTO savepoint_rollback_items(name) VALUES (?1)",
+                                &[SqliteValue::Text("inner".to_string())],
+                            )
+                            .await
+                        {
+                            Outcome::Ok(_) => {}
+                            other => panic!("inner insert failed: {other:?}"),
+                        }
+
+                        match savepoint.rollback(cx).await {
+                            Outcome::Ok(()) => {}
+                            other => panic!("savepoint rollback failed: {other:?}"),
+                        }
+
+                        match tx
+                            .execute(
+                                cx,
+                                "INSERT INTO savepoint_rollback_items(name) VALUES (?1)",
+                                &[SqliteValue::Text("outer_after".to_string())],
+                            )
+                            .await
+                        {
+                            Outcome::Ok(_) => {}
+                            other => panic!("outer_after insert failed: {other:?}"),
+                        }
+
+                        Outcome::Ok(())
+                    })
+                })
+                .await;
+
+                match tx_outcome {
+                    Outcome::Ok(()) => {}
+                    other => panic!("expected outer transaction commit, got {other:?}"),
+                }
+
+                let rows = match conn
+                    .query(
+                        &cx,
+                        "SELECT name FROM savepoint_rollback_items ORDER BY id",
+                        &[],
+                    )
+                    .await
+                {
+                    Outcome::Ok(rows) => rows,
+                    other => panic!("query after rollback failed: {other:?}"),
+                };
+
+                let names = rows
+                    .iter()
+                    .map(|row| row.get_str("name").expect("name column").to_string())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    names,
+                    vec!["outer_before".to_string(), "outer_after".to_string()]
+                );
+            })
+            .expect("lab runtime test");
+
+        crate::test_complete!("with_sqlite_transaction_savepoint_rollback_discards_inner_changes");
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn with_sqlite_transaction_cancelled_savepoint_release_poison_commit() {
+        init_test("with_sqlite_transaction_cancelled_savepoint_release_poison_commit");
+
+        let target = ConformanceTarget::lab_runtime();
+        target
+            .run_test(TestConfig::default(), |cx| async move {
+                let conn = match SqliteConnection::open_in_memory(&cx).await {
+                    Outcome::Ok(conn) => conn,
+                    other => panic!("open_in_memory failed: {other:?}"),
+                };
+
+                match conn
+                    .execute(
+                        &cx,
+                        "CREATE TABLE savepoint_release_cancel_items (id INTEGER PRIMARY KEY, name TEXT)",
+                        &[],
+                    )
+                    .await
+                {
+                    Outcome::Ok(_) => {}
+                    other => panic!("schema setup failed: {other:?}"),
+                }
+
+                let tx_outcome = with_sqlite_transaction(&conn, &cx, |tx, cx| {
+                    Box::pin(async move {
+                        match tx
+                            .execute(
+                                cx,
+                                "INSERT INTO savepoint_release_cancel_items(name) VALUES (?1)",
+                                &[SqliteValue::Text("outer".to_string())],
+                            )
+                            .await
+                        {
+                            Outcome::Ok(_) => {}
+                            other => panic!("outer insert failed: {other:?}"),
+                        }
+
+                        let savepoint = match SqliteSavepoint::new(tx, cx, "sp1").await {
+                            Outcome::Ok(savepoint) => savepoint,
+                            other => panic!("savepoint create failed: {other:?}"),
+                        };
+
+                        let cancelled = Cx::for_testing();
+                        let expected = CancelReason::user("cancel savepoint release");
+                        cancelled.set_cancel_reason(expected.clone());
+                        match savepoint.release(&cancelled).await {
+                            Outcome::Cancelled(reason) => assert_eq!(reason, expected),
+                            other => panic!("expected cancelled savepoint release, got {other:?}"),
+                        }
+
+                        Outcome::Ok(())
+                    })
+                })
+                .await;
+
+                match tx_outcome {
+                    Outcome::Err(SqliteError::Sqlite(msg)) => {
+                        assert!(msg.contains("must roll back before commit"), "got: {msg}");
+                    }
+                    other => panic!("expected rollback-required error, got {other:?}"),
+                }
+
+                let rows = match conn
+                    .query(
+                        &cx,
+                        "SELECT COUNT(*) AS count FROM savepoint_release_cancel_items",
+                        &[],
+                    )
+                    .await
+                {
+                    Outcome::Ok(rows) => rows,
+                    other => panic!("count query after cancelled release failed: {other:?}"),
+                };
+
+                let count = rows[0].get_i64(0).expect("count column");
+                assert_eq!(count, 0, "cancelled savepoint release must prevent commit");
+            })
+            .expect("lab runtime test");
+
+        crate::test_complete!("with_sqlite_transaction_cancelled_savepoint_release_poison_commit");
     }
 }

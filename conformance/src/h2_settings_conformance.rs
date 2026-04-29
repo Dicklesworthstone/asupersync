@@ -57,7 +57,10 @@ pub enum ExpectedOutcome {
     /// Both implementations should reject with connection error
     ConnectionError { error_type: String },
     /// Known divergence documented in DISCREPANCIES.md
-    Divergence { our_behavior: String, h2_behavior: String },
+    Divergence {
+        our_behavior: String,
+        h2_behavior: String,
+    },
 }
 
 /// Test execution result
@@ -120,28 +123,25 @@ impl SettingsConformanceTester {
             SettingsConformanceCase {
                 id: "RFC7540-6.5-basic-settings".to_string(),
                 description: "Basic SETTINGS frame with standard values".to_string(),
-                settings_sequence: vec![
-                    SettingsFrame {
-                        settings: vec![
-                            Setting::MaxConcurrentStreams(100),
-                            Setting::InitialWindowSize(32768),
-                            Setting::HeaderTableSize(8192),
-                        ],
-                        ack: false,
-                    },
-                ],
+                settings_sequence: vec![SettingsFrame {
+                    settings: vec![
+                        Setting::MaxConcurrentStreams(100),
+                        Setting::InitialWindowSize(32768),
+                        Setting::HeaderTableSize(8192),
+                    ],
+                    ack: false,
+                }],
                 expected_outcome: ExpectedOutcome::Success {
                     final_state: SettingsSnapshot {
                         max_concurrent_streams: 100,
                         initial_window_size: 32768,
                         header_table_size: 8192,
-                        max_frame_size: 16384, // Default
+                        max_frame_size: 16384,          // Default
                         max_header_list_size: u32::MAX, // Default unlimited
-                        enable_push: true, // Default for server
+                        enable_push: true,              // Default for server
                     },
                 },
             },
-
             // Multiple SETTINGS frames (RFC 7540 Section 6.5.3)
             SettingsConformanceCase {
                 id: "RFC7540-6.5.3-multiple-frames".to_string(),
@@ -159,31 +159,30 @@ impl SettingsConformanceTester {
                 expected_outcome: ExpectedOutcome::Success {
                     final_state: SettingsSnapshot {
                         max_concurrent_streams: u32::MAX, // Default unlimited
-                        initial_window_size: 65536, // Last value wins
-                        header_table_size: 4096, // Default
+                        initial_window_size: 65536,       // Last value wins
+                        header_table_size: 4096,          // Default
                         max_frame_size: 16384,
                         max_header_list_size: u32::MAX,
                         enable_push: true,
                     },
                 },
             },
-
             // Zero values (some valid, some invalid per RFC 7540)
             SettingsConformanceCase {
                 id: "RFC7540-6.5-zero-values".to_string(),
-                description: "Zero values for ENABLE_PUSH (valid) and MAX_CONCURRENT_STREAMS (valid)".to_string(),
-                settings_sequence: vec![
-                    SettingsFrame {
-                        settings: vec![
-                            Setting::EnablePush(false), // 0 = disabled, valid
-                            Setting::MaxConcurrentStreams(0), // 0 = unlimited, valid
-                        ],
-                        ack: false,
-                    },
-                ],
+                description:
+                    "Zero values for ENABLE_PUSH (valid) and MAX_CONCURRENT_STREAMS (valid)"
+                        .to_string(),
+                settings_sequence: vec![SettingsFrame {
+                    settings: vec![
+                        Setting::EnablePush(false),       // 0 = disabled, valid
+                        Setting::MaxConcurrentStreams(0), // 0 = unlimited, valid
+                    ],
+                    ack: false,
+                }],
                 expected_outcome: ExpectedOutcome::Success {
                     final_state: SettingsSnapshot {
-                        max_concurrent_streams: 0, // Unlimited
+                        max_concurrent_streams: 0,  // Unlimited
                         initial_window_size: 65535, // Default
                         header_table_size: 4096,
                         max_frame_size: 16384,
@@ -192,62 +191,51 @@ impl SettingsConformanceTester {
                     },
                 },
             },
-
             // Invalid INITIAL_WINDOW_SIZE (exceeds maximum)
             SettingsConformanceCase {
                 id: "RFC7540-6.5.2-invalid-window-size".to_string(),
-                description: "INITIAL_WINDOW_SIZE > 2^31-1 must cause FLOW_CONTROL_ERROR".to_string(),
-                settings_sequence: vec![
-                    SettingsFrame {
-                        settings: vec![Setting::InitialWindowSize(0x8000_0000)], // 2^31
-                        ack: false,
-                    },
-                ],
+                description: "INITIAL_WINDOW_SIZE > 2^31-1 must cause FLOW_CONTROL_ERROR"
+                    .to_string(),
+                settings_sequence: vec![SettingsFrame {
+                    settings: vec![Setting::InitialWindowSize(0x8000_0000)], // 2^31
+                    ack: false,
+                }],
                 expected_outcome: ExpectedOutcome::ConnectionError {
                     error_type: "FLOW_CONTROL_ERROR".to_string(),
                 },
             },
-
             // Invalid MAX_FRAME_SIZE (below minimum)
             SettingsConformanceCase {
                 id: "RFC7540-6.5.2-invalid-frame-size-low".to_string(),
                 description: "MAX_FRAME_SIZE < 2^14 must cause PROTOCOL_ERROR".to_string(),
-                settings_sequence: vec![
-                    SettingsFrame {
-                        settings: vec![Setting::MaxFrameSize(16383)], // Below 2^14 = 16384
-                        ack: false,
-                    },
-                ],
+                settings_sequence: vec![SettingsFrame {
+                    settings: vec![Setting::MaxFrameSize(16383)], // Below 2^14 = 16384
+                    ack: false,
+                }],
                 expected_outcome: ExpectedOutcome::ConnectionError {
                     error_type: "PROTOCOL_ERROR".to_string(),
                 },
             },
-
             // Invalid MAX_FRAME_SIZE (above maximum)
             SettingsConformanceCase {
                 id: "RFC7540-6.5.2-invalid-frame-size-high".to_string(),
                 description: "MAX_FRAME_SIZE > 2^24-1 must cause PROTOCOL_ERROR".to_string(),
-                settings_sequence: vec![
-                    SettingsFrame {
-                        settings: vec![Setting::MaxFrameSize(0x100_0000)], // 2^24
-                        ack: false,
-                    },
-                ],
+                settings_sequence: vec![SettingsFrame {
+                    settings: vec![Setting::MaxFrameSize(0x100_0000)], // 2^24
+                    ack: false,
+                }],
                 expected_outcome: ExpectedOutcome::ConnectionError {
                     error_type: "PROTOCOL_ERROR".to_string(),
                 },
             },
-
             // Empty SETTINGS frame (valid per RFC 7540 Section 6.5)
             SettingsConformanceCase {
                 id: "RFC7540-6.5-empty-settings".to_string(),
                 description: "Empty SETTINGS frame should be accepted".to_string(),
-                settings_sequence: vec![
-                    SettingsFrame {
-                        settings: vec![],
-                        ack: false,
-                    },
-                ],
+                settings_sequence: vec![SettingsFrame {
+                    settings: vec![],
+                    ack: false,
+                }],
                 expected_outcome: ExpectedOutcome::Success {
                     final_state: SettingsSnapshot {
                         max_concurrent_streams: u32::MAX, // Default
@@ -259,23 +247,20 @@ impl SettingsConformanceTester {
                     },
                 },
             },
-
             // Boundary values
             SettingsConformanceCase {
                 id: "RFC7540-6.5-boundary-values".to_string(),
                 description: "Maximum valid values for all settings".to_string(),
-                settings_sequence: vec![
-                    SettingsFrame {
-                        settings: vec![
-                            Setting::MaxConcurrentStreams(u32::MAX),
-                            Setting::InitialWindowSize(0x7FFF_FFFF), // 2^31-1
-                            Setting::HeaderTableSize(u32::MAX),
-                            Setting::MaxFrameSize(0xFF_FFFF), // 2^24-1
-                            Setting::MaxHeaderListSize(u32::MAX),
-                        ],
-                        ack: false,
-                    },
-                ],
+                settings_sequence: vec![SettingsFrame {
+                    settings: vec![
+                        Setting::MaxConcurrentStreams(u32::MAX),
+                        Setting::InitialWindowSize(0x7FFF_FFFF), // 2^31-1
+                        Setting::HeaderTableSize(u32::MAX),
+                        Setting::MaxFrameSize(0xFF_FFFF), // 2^24-1
+                        Setting::MaxHeaderListSize(u32::MAX),
+                    ],
+                    ack: false,
+                }],
                 expected_outcome: ExpectedOutcome::Success {
                     final_state: SettingsSnapshot {
                         max_concurrent_streams: u32::MAX,
@@ -328,16 +313,14 @@ impl SettingsConformanceTester {
                     error: None,
                 }
             }
-            Err(error) => {
-                ConformanceResult {
-                    case_id: test_case.id.clone(),
-                    verdict: TestVerdict::Fail,
-                    our_state: None,
-                    h2_state: None,
-                    execution_time_ms: start_time.elapsed().as_millis() as u64,
-                    error: Some(error),
-                }
-            }
+            Err(error) => ConformanceResult {
+                case_id: test_case.id.clone(),
+                verdict: TestVerdict::Fail,
+                our_state: None,
+                h2_state: None,
+                execution_time_ms: start_time.elapsed().as_millis() as u64,
+                error: Some(error),
+            },
         };
 
         result
@@ -349,11 +332,14 @@ impl SettingsConformanceTester {
         test_case: &SettingsConformanceCase,
     ) -> Result<(SettingsSnapshot, SettingsSnapshot), String> {
         // Test our implementation
-        let our_state = self.run_asupersync_settings(&test_case.settings_sequence)
+        let our_state = self
+            .run_asupersync_settings(&test_case.settings_sequence)
             .map_err(|e| format!("Asupersync error: {}", e))?;
 
         // Test h2 reference implementation
-        let h2_state = self.run_h2_reference_settings(&test_case.settings_sequence).await
+        let h2_state = self
+            .run_h2_reference_settings(&test_case.settings_sequence)
+            .await
             .map_err(|e| format!("H2 reference error: {}", e))?;
 
         Ok((our_state, h2_state))
@@ -383,31 +369,34 @@ impl SettingsConformanceTester {
                     match setting {
                         Setting::HeaderTableSize(size) => {
                             settings_state.header_table_size = *size;
-                        },
+                        }
                         Setting::EnablePush(enable) => {
                             settings_state.enable_push = *enable;
-                        },
+                        }
                         Setting::MaxConcurrentStreams(max) => {
                             let value = if *max == 0 { u32::MAX } else { *max };
                             settings_state.max_concurrent_streams = value;
-                        },
+                        }
                         Setting::InitialWindowSize(size) => {
                             // Validate against RFC 7540 constraints
                             if *size > 0x7FFF_FFFF {
-                                return Err("FLOW_CONTROL_ERROR: Initial window size exceeds maximum".into());
+                                return Err(
+                                    "FLOW_CONTROL_ERROR: Initial window size exceeds maximum"
+                                        .into(),
+                                );
                             }
                             settings_state.initial_window_size = *size;
-                        },
+                        }
                         Setting::MaxFrameSize(size) => {
                             // Validate against RFC 7540 constraints
                             if *size < 16384 || *size > 0xFF_FFFF {
                                 return Err("PROTOCOL_ERROR: Invalid frame size".into());
                             }
                             settings_state.max_frame_size = *size;
-                        },
+                        }
                         Setting::MaxHeaderListSize(size) => {
                             settings_state.max_header_list_size = *size;
-                        },
+                        }
                     }
                 }
             }
@@ -442,32 +431,35 @@ impl SettingsConformanceTester {
                     match setting {
                         Setting::HeaderTableSize(size) => {
                             settings_state.header_table_size = *size;
-                        },
+                        }
                         Setting::EnablePush(enable) => {
                             settings_state.enable_push = *enable;
-                        },
+                        }
                         Setting::MaxConcurrentStreams(max) => {
                             // h2 treats 0 as unlimited (u32::MAX)
                             let value = if *max == 0 { u32::MAX } else { *max };
                             settings_state.max_concurrent_streams = value;
-                        },
+                        }
                         Setting::InitialWindowSize(size) => {
                             // h2 validates against RFC 7540 constraints
                             if *size > 0x7FFF_FFFF {
-                                return Err("FLOW_CONTROL_ERROR: Initial window size exceeds maximum".into());
+                                return Err(
+                                    "FLOW_CONTROL_ERROR: Initial window size exceeds maximum"
+                                        .into(),
+                                );
                             }
                             settings_state.initial_window_size = *size;
-                        },
+                        }
                         Setting::MaxFrameSize(size) => {
                             // h2 validates against RFC 7540 constraints
                             if *size < 16384 || *size > 0xFF_FFFF {
                                 return Err("PROTOCOL_ERROR: Invalid frame size".into());
                             }
                             settings_state.max_frame_size = *size;
-                        },
+                        }
                         Setting::MaxHeaderListSize(size) => {
                             settings_state.max_header_list_size = *size;
-                        },
+                        }
                     }
                 }
             }
@@ -475,7 +467,6 @@ impl SettingsConformanceTester {
 
         Ok(settings_state)
     }
-
 
     /// Evaluate test result against expected outcome
     fn evaluate_test_result(
@@ -505,10 +496,22 @@ impl SettingsConformanceTester {
 
     /// Calculate summary statistics
     fn calculate_summary(results: &[ConformanceResult]) -> ComplianceSummary {
-        let passed = results.iter().filter(|r| r.verdict == TestVerdict::Pass).count();
-        let failed = results.iter().filter(|r| r.verdict == TestVerdict::Fail).count();
-        let expected_failures = results.iter().filter(|r| r.verdict == TestVerdict::ExpectedFailure).count();
-        let skipped = results.iter().filter(|r| r.verdict == TestVerdict::Skip).count();
+        let passed = results
+            .iter()
+            .filter(|r| r.verdict == TestVerdict::Pass)
+            .count();
+        let failed = results
+            .iter()
+            .filter(|r| r.verdict == TestVerdict::Fail)
+            .count();
+        let expected_failures = results
+            .iter()
+            .filter(|r| r.verdict == TestVerdict::ExpectedFailure)
+            .count();
+        let skipped = results
+            .iter()
+            .filter(|r| r.verdict == TestVerdict::Skip)
+            .count();
 
         let compliance_score = if passed + failed > 0 {
             passed as f64 / (passed + failed) as f64
@@ -537,9 +540,15 @@ impl SettingsConformanceTester {
         md.push_str("## Summary\n\n");
         md.push_str(&format!("- **Passed**: {}\n", report.summary.passed));
         md.push_str(&format!("- **Failed**: {}\n", report.summary.failed));
-        md.push_str(&format!("- **Expected Failures**: {}\n", report.summary.expected_failures));
+        md.push_str(&format!(
+            "- **Expected Failures**: {}\n",
+            report.summary.expected_failures
+        ));
         md.push_str(&format!("- **Skipped**: {}\n", report.summary.skipped));
-        md.push_str(&format!("- **Compliance Score**: {:.1}%\n\n", report.summary.compliance_score * 100.0));
+        md.push_str(&format!(
+            "- **Compliance Score**: {:.1}%\n\n",
+            report.summary.compliance_score * 100.0
+        ));
 
         md.push_str("## Detailed Results\n\n");
         md.push_str("| Test Case | Verdict | Execution Time | Notes |\n");
@@ -557,10 +566,7 @@ impl SettingsConformanceTester {
 
             md.push_str(&format!(
                 "| {} | {} | {}ms | {} |\n",
-                result.case_id,
-                verdict_str,
-                result.execution_time_ms,
-                notes
+                result.case_id, verdict_str, result.execution_time_ms, notes
             ));
         }
 
@@ -594,15 +600,13 @@ mod tests {
         let tester = SettingsConformanceTester::new();
 
         // Test basic settings processing
-        let settings_sequence = vec![
-            SettingsFrame {
-                settings: vec![
-                    Setting::MaxConcurrentStreams(100),
-                    Setting::InitialWindowSize(32768),
-                ],
-                ack: false,
-            },
-        ];
+        let settings_sequence = vec![SettingsFrame {
+            settings: vec![
+                Setting::MaxConcurrentStreams(100),
+                Setting::InitialWindowSize(32768),
+            ],
+            ack: false,
+        }];
 
         let result = tester.run_asupersync_settings(&settings_sequence);
         assert!(result.is_ok(), "Settings processing should succeed");

@@ -5572,6 +5572,12 @@ impl PgTransaction<'_> {
         self.conn.inner.needs_discard = true;
     }
 
+    fn mark_finished_if_server_closed_transaction(&mut self, err: &PgError) {
+        if matches!(err, PgError::Server { .. }) && self.conn.inner.transaction_status == b'I' {
+            self.finished = true;
+        }
+    }
+
     /// Commit the transaction.
     pub async fn commit(mut self, cx: &Cx) -> Outcome<(), PgError> {
         if self.finished {
@@ -5582,7 +5588,10 @@ impl PgTransaction<'_> {
                 self.finished = true;
                 Outcome::Ok(())
             }
-            Outcome::Err(e) => Outcome::Err(e),
+            Outcome::Err(e) => {
+                self.mark_finished_if_server_closed_transaction(&e);
+                Outcome::Err(e)
+            }
             Outcome::Cancelled(r) => Outcome::Cancelled(r),
             Outcome::Panicked(p) => Outcome::Panicked(p),
         }
@@ -5598,7 +5607,10 @@ impl PgTransaction<'_> {
                 self.finished = true;
                 Outcome::Ok(())
             }
-            Outcome::Err(e) => Outcome::Err(e),
+            Outcome::Err(e) => {
+                self.mark_finished_if_server_closed_transaction(&e);
+                Outcome::Err(e)
+            }
             Outcome::Cancelled(r) => Outcome::Cancelled(r),
             Outcome::Panicked(p) => Outcome::Panicked(p),
         }
@@ -6878,6 +6890,72 @@ mod tests {
         body.push(0);
         body.push(0);
         backend_message(b'E', &body)
+    }
+
+    #[test]
+    fn commit_serialization_failure_keeps_connection_reusable() {
+        use crate::database::pool::AsyncConnectionManager;
+
+        let mgr = PgConnectionManager::new(
+            PgConnectOptions::parse("postgres://localhost/testdb").unwrap(),
+        );
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        conn.inner.transaction_status = b'T';
+        let cx = Cx::for_testing();
+
+        let io_thread = std::thread::spawn(move || {
+            let _ = read_until_contains(&mut peer, b"COMMIT");
+            std::io::Write::write_all(
+                &mut peer,
+                &error_response_message(
+                    "40001",
+                    "could not serialize access due to read/write dependencies among transactions",
+                ),
+            )
+            .expect("write serialization failure");
+            std::io::Write::write_all(&mut peer, &ready_for_query(b'I'))
+                .expect("write COMMIT ReadyForQuery");
+        });
+
+        let outcome = run(async {
+            let tx = PgTransaction {
+                conn: &mut conn,
+                finished: false,
+                isolation_level: Some(IsolationLevel::Serializable),
+                read_only: false,
+            };
+            tx.commit(&cx).await
+        });
+
+        match outcome {
+            Outcome::Err(err) => {
+                assert!(
+                    err.is_serialization_failure(),
+                    "expected SQLSTATE 40001, got: {err:?}"
+                );
+            }
+            other => panic!("expected serialization failure, got {other:?}"),
+        }
+
+        io_thread
+            .join()
+            .expect("postgres peer thread should finish cleanly");
+        assert_eq!(
+            conn.inner.transaction_status, b'I',
+            "server-side serialization failure should leave the connection idle"
+        );
+        assert!(
+            !conn.inner.needs_rollback,
+            "commit-time serialization failure must not force an orphan rollback path"
+        );
+        assert!(
+            !conn.inner.needs_discard,
+            "commit-time serialization failure must not poison pool reuse"
+        );
+        assert!(
+            mgr.release_check(&mut conn),
+            "idle connection after commit-time serialization failure must remain reusable"
+        );
     }
 
     #[test]

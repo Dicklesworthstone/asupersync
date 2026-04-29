@@ -1,7 +1,6 @@
 //! HPACK Decoder Conformance Test Runner
 //!
-//! Runs differential conformance testing between asupersync HPACK decoder
-//! and h2 reference implementation for header compression.
+//! Runs vector-based conformance testing for the asupersync HPACK decoder.
 //!
 //! Usage:
 //!   cargo run --bin hpack_conformance
@@ -53,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("🔧 HPACK Decoder Conformance Tester");
-    println!("   Testing asupersync vs h2 reference implementation");
+    println!("   Testing asupersync against explicit HPACK wire vectors");
     println!();
 
     // Create and configure the tester
@@ -68,7 +67,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         println!("🔍 Running single test case: {}", test_id);
     } else {
-        println!("📋 Running {} conformance test cases", tester.test_cases.len());
+        println!(
+            "📋 Running {} conformance test cases",
+            tester.test_cases.len()
+        );
     }
 
     // Set up timeout
@@ -85,15 +87,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Generate output based on format
     let output = match args.format {
-        OutputFormat::Json => {
-            serde_json::to_string_pretty(&report)?
-        },
-        OutputFormat::Markdown => {
-            tester.generate_markdown_report(&report)
-        },
-        OutputFormat::Summary => {
-            generate_summary_output(&report)
-        },
+        OutputFormat::Json => serde_json::to_string_pretty(&report)?,
+        OutputFormat::Markdown => tester.generate_markdown_report(&report),
+        OutputFormat::Summary => generate_summary_output(&report),
     };
 
     // Write output
@@ -101,10 +97,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(path) => {
             std::fs::write(&path, &output)?;
             println!("📝 Report written to: {}", path.display());
-        },
+        }
         None => {
             println!("{}", output);
-        },
+        }
     }
 
     // Print final status
@@ -130,18 +126,26 @@ fn generate_summary_output(report: &asupersync_conformance::HpackComplianceRepor
     output.push_str("RESULTS:\n");
     output.push_str(&format!("  ✅ Passed: {}\n", report.summary.passed));
     output.push_str(&format!("  ❌ Failed: {}\n", report.summary.failed));
-    output.push_str(&format!("  ⚠️  Expected Failures: {}\n", report.summary.expected_failures));
+    output.push_str(&format!(
+        "  ⚠️  Expected Failures: {}\n",
+        report.summary.expected_failures
+    ));
     output.push_str(&format!("  ⏭️  Skipped: {}\n\n", report.summary.skipped));
 
-    output.push_str(&format!("Compliance Score: {:.1}%\n", report.summary.compliance_score * 100.0));
+    output.push_str(&format!(
+        "Compliance Score: {:.1}%\n",
+        report.summary.compliance_score * 100.0
+    ));
 
     if report.summary.failed > 0 {
         output.push_str("\nFAILURES:\n");
         for result in &report.results {
             if result.verdict == asupersync_conformance::HpackTestVerdict::Fail {
-                output.push_str(&format!("  ❌ {}: {}\n",
+                output.push_str(&format!(
+                    "  ❌ {}: {}\n",
                     result.case_id,
-                    result.error.as_deref().unwrap_or("Unknown error")));
+                    result.error.as_deref().unwrap_or("Unknown error")
+                ));
             }
         }
     }
@@ -156,18 +160,39 @@ fn print_test_summary(report: &asupersync_conformance::HpackComplianceReport) {
 
     if report.summary.failed == 0 {
         eprintln!("│  ✅ ALL TESTS PASSED              │");
-        eprintln!("│  🎯 Compliance: {:.1}%             │", report.summary.compliance_score * 100.0);
+        eprintln!(
+            "│  🎯 Compliance: {:.1}%             │",
+            report.summary.compliance_score * 100.0
+        );
     } else {
-        eprintln!("│  ❌ {} TESTS FAILED               │", report.summary.failed);
-        eprintln!("│  📊 Compliance: {:.1}%             │", report.summary.compliance_score * 100.0);
+        eprintln!(
+            "│  ❌ {} TESTS FAILED               │",
+            report.summary.failed
+        );
+        eprintln!(
+            "│  📊 Compliance: {:.1}%             │",
+            report.summary.compliance_score * 100.0
+        );
     }
 
     eprintln!("│                                   │");
     eprintln!("│  📋 Total: {}                    │", report.total_cases);
-    eprintln!("│  ✅ Passed: {}                   │", report.summary.passed);
-    eprintln!("│  ❌ Failed: {}                   │", report.summary.failed);
-    eprintln!("│  ⚠️  Expected: {}                 │", report.summary.expected_failures);
-    eprintln!("│  ⏭️  Skipped: {}                  │", report.summary.skipped);
+    eprintln!(
+        "│  ✅ Passed: {}                   │",
+        report.summary.passed
+    );
+    eprintln!(
+        "│  ❌ Failed: {}                   │",
+        report.summary.failed
+    );
+    eprintln!(
+        "│  ⚠️  Expected: {}                 │",
+        report.summary.expected_failures
+    );
+    eprintln!(
+        "│  ⏭️  Skipped: {}                  │",
+        report.summary.skipped
+    );
     eprintln!("│                                   │");
     eprintln!("╰───────────────────────────────────╯");
 }

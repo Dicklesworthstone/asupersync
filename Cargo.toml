@@ -297,7 +297,6 @@ opentelemetry_sdk = { version = "0.31", default-features = false, features = ["m
 opentelemetry-proto = { version = "0.31", default-features = false, features = ["gen-tonic-messages", "trace", "metrics", "logs"] }
 lz4_flex = "0.13"
 toml = "1.0"
-prometheus-client = "0.23"
 chrono = { version = "0.4", features = ["serde"] }
 # Certificate generation for TLS/QUIC tests
 rcgen = "0.14"

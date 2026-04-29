@@ -39,12 +39,14 @@ use asupersync::raptorq::decoder::{
     DecodeError, DecodeResult, InactivationDecoder, ReceivedSymbol,
 };
 use asupersync::raptorq::gf256::Gf256;
+use asupersync::raptorq::systematic::SystematicEncoder;
 use libfuzzer_sys::fuzz_target;
 
 const K_MAX: usize = 256;
 const T_MAX: usize = 128;
 const EQUATION_MAX: usize = 1024;
 const COLUMN_INDEX_MAX: usize = 4096;
+const STRUCTURED_K42: usize = 42;
 
 fuzz_target!(|data: &[u8]| {
     if data.len() < 8 {
@@ -55,6 +57,11 @@ fuzz_target!(|data: &[u8]| {
     let k = cursor.k();
     let symbol_size = cursor.symbol_size();
     let seed = cursor.next_u64();
+
+    if cursor.next_u8() % 5 == 0 {
+        structured_k42_adversarial_repair_order_case(&mut cursor, seed);
+        return;
+    }
 
     let decoder = InactivationDecoder::new(k, symbol_size, seed);
 
@@ -82,6 +89,93 @@ fuzz_target!(|data: &[u8]| {
         debug_assert_eq!(decoded.source.len(), k);
     }
 });
+
+fn structured_k42_adversarial_repair_order_case(cursor: &mut Cursor<'_>, seed: u64) {
+    let symbol_size = match cursor.next_u8() % 4 {
+        0 => 16,
+        1 => 32,
+        2 => 64,
+        _ => 128,
+    };
+    let source = make_structured_source(cursor, STRUCTURED_K42, symbol_size);
+    let encoder = SystematicEncoder::new(&source, symbol_size, seed)
+        .expect("K=42 structured encoder construction must succeed");
+    let decoder = InactivationDecoder::new(STRUCTURED_K42, symbol_size, seed);
+    let early_loss = ((cursor.next_u8() as usize) % 12) + 1;
+    let repair_count = decoder.params().l.saturating_sub(STRUCTURED_K42) + early_loss + 8;
+
+    let surviving_sources: Vec<ReceivedSymbol> = source
+        .iter()
+        .enumerate()
+        .skip(early_loss)
+        .map(|(esi, data)| ReceivedSymbol::source(esi as u32, data.clone()))
+        .collect();
+    let repairs = build_repair_symbols(&decoder, &encoder, repair_count);
+    let mut received = decoder.constraint_symbols();
+    received.extend(interleave_late_and_early_repairs(
+        surviving_sources,
+        repairs,
+    ));
+
+    let decoded = decoder
+        .decode(&received)
+        .expect("K=42 adversarial repair-order case must remain decodable");
+    assert_eq!(
+        decoded.source, source,
+        "K=42 adversarial repair order plus early loss must preserve recovered source"
+    );
+}
+
+fn make_structured_source(cursor: &mut Cursor<'_>, k: usize, symbol_size: usize) -> Vec<Vec<u8>> {
+    (0..k).map(|_| cursor.fill(symbol_size)).collect()
+}
+
+fn build_repair_symbols(
+    decoder: &InactivationDecoder,
+    encoder: &SystematicEncoder,
+    repair_count: usize,
+) -> Vec<ReceivedSymbol> {
+    let k = decoder.params().k as u32;
+    (0..repair_count)
+        .map(|offset| {
+            let esi = k + offset as u32;
+            let (columns, coefficients) = decoder
+                .repair_equation(esi)
+                .expect("repair equation must exist for structured K=42 case");
+            let data = encoder.repair_symbol(esi);
+            ReceivedSymbol::repair(esi, columns, coefficients, data)
+        })
+        .collect()
+}
+
+fn interleave_late_and_early_repairs(
+    sources: Vec<ReceivedSymbol>,
+    repairs: Vec<ReceivedSymbol>,
+) -> Vec<ReceivedSymbol> {
+    let mut ordered = Vec::with_capacity(sources.len() + repairs.len());
+    let mut source_iter = sources.into_iter();
+    let mut low = 0usize;
+    let mut high = repairs.len();
+
+    while low < high || !source_iter.as_slice().is_empty() {
+        if low < high {
+            high -= 1;
+            ordered.push(repairs[high].clone());
+        }
+        if let Some(symbol) = source_iter.next() {
+            ordered.push(symbol);
+        }
+        if low < high {
+            ordered.push(repairs[low].clone());
+            low += 1;
+        }
+        if let Some(symbol) = source_iter.next() {
+            ordered.push(symbol);
+        }
+    }
+
+    ordered
+}
 
 struct Cursor<'a> {
     data: &'a [u8],

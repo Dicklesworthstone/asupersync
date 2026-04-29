@@ -60,14 +60,16 @@ pub use bench::{
     run_benchmark_comparison,
 };
 pub use h2_settings_conformance::{
-    SettingsConformanceTester, SettingsSnapshot, SettingsConformanceCase, SettingsFrame,
-    Setting, ExpectedOutcome, ConformanceResult as SettingsConformanceResult, TestVerdict as SettingsTestVerdict, ComplianceReport as SettingsComplianceReport,
-    ComplianceSummary as SettingsComplianceSummary,
+    ComplianceReport as SettingsComplianceReport, ComplianceSummary as SettingsComplianceSummary,
+    ConformanceResult as SettingsConformanceResult, ExpectedOutcome, Setting,
+    SettingsConformanceCase, SettingsConformanceTester, SettingsFrame, SettingsSnapshot,
+    TestVerdict as SettingsTestVerdict,
 };
 pub use hpack_conformance::{
-    HpackConformanceTester, HpackConformanceCase, RequirementLevel,
-    ConformanceResult as HpackConformanceResult, TestVerdict as HpackTestVerdict,
     ComplianceReport as HpackComplianceReport, ComplianceSummary as HpackComplianceSummary,
+    ConformanceResult as HpackConformanceResult, ExpectedOutcome as HpackExpectedOutcome,
+    HpackConformanceCase, HpackConformanceTester, RequirementLevel,
+    TestVerdict as HpackTestVerdict,
 };
 pub use kafka_record_batch_v2::{
     ConformanceTestResult, Header, KafkaConformanceHarness, RecordAttribute, RecordBatchV2,

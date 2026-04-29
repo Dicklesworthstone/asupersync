@@ -41,7 +41,12 @@ path = "src/bin/h2_settings_conformance.rs"
 name = "hpack_conformance"
 path = "src/bin/hpack_conformance.rs"
 
+[[bin]]
+name = "prometheus_conformance"
+path = "src/bin/prometheus_conformance.rs"
+
 [dependencies]
+asupersync = { path = ".." }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
@@ -63,3 +68,4 @@ redis = "0.26"
 h2 = "0.4"
 tokio-util = { version = "0.7", features = ["codec"] }
 bytes = "1.11"
+prometheus-client = "0.23"
