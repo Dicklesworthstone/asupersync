@@ -2705,3 +2705,16 @@ path = "fuzz_targets/grpc_web_chunked_trailers.rs"
 test = false
 doc = false
 bench = false
+
+# Structure-aware RaptorQ encoder K=1 boundary case fuzzer.
+# Tests src/encoding.rs and src/raptorq/systematic.rs encoder K=1 boundary conditions
+# with intelligent input generation targeting systematic index table lookup edge cases,
+# parameter derivation for minimal source symbol counts, repair equation generation,
+# and degree distribution boundaries. Exercises critical path where K < 10 triggers
+# systematic table boundary bugs and validates fail-closed behavior on edge configurations.
+[[bin]]
+name = "raptorq_encoder_k1_boundary"
+path = "fuzz_targets/raptorq_encoder_k1_boundary.rs"
+test = false
+doc = false
+bench = false

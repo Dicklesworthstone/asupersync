@@ -969,7 +969,7 @@ impl Consumer {
             let clamped = if nanos > max { max } else { nanos };
             clamped as i64
         };
-        let request = format!("{{\"batch\":{batch},\"expires\":{expires}}}");
+        let request = build_pull_request_json(batch, expires, None);
 
         // Subscribe to get batch responses
         let mut sub = client
@@ -1434,6 +1434,15 @@ fn compute_client_deadline(now: Time, pull_timeout: Duration, slack: Duration) -
     }
 }
 
+fn build_pull_request_json(batch: usize, expires: i64, max_bytes: Option<usize>) -> String {
+    let mut request = format!("{{\"batch\":{batch},\"expires\":{expires}");
+    if let Some(max_bytes) = max_bytes {
+        write!(&mut request, ",\"max_bytes\":{max_bytes}").expect("write to String");
+    }
+    request.push('}');
+    request
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
@@ -1603,6 +1612,17 @@ mod tests {
         let now = Time::from_nanos(1);
         let deadline = compute_client_deadline(now, Duration::MAX, Consumer::CLIENT_TIMEOUT_SLACK);
         assert_eq!(deadline, Some(Time::MAX));
+    }
+
+    #[test]
+    fn pull_request_json_matches_nats_go_pull_max_messages_with_bytes_limit() {
+        // nats.go PullMaxMessagesWithBytesLimit emits a pull request carrying
+        // both the message count budget and the per-fetch byte ceiling.
+        let request = build_pull_request_json(2, 50_000_000, Some(1024));
+        assert_eq!(
+            request,
+            r#"{"batch":2,"expires":50000000,"max_bytes":1024}"#
+        );
     }
 
     // Pure data-type tests (wave 13 – CyanBarn)
