@@ -5227,6 +5227,60 @@ mod tests {
         worker_state_dump_scrubbed("deadline_ordering", worker, &dispatch_sequence)
     }
 
+    fn decision_trace_complex_scenario_dump() -> Value {
+        let mut state = RuntimeState::new();
+        state.now = Time::from_nanos(100_000); // Set current time to 100μs
+
+        // Create root region and tasks with deadlines for deadline miss scenario
+        let root = state.create_root_region(Budget::unlimited());
+
+        // Create a task with tight deadline that will miss
+        let (_deadline_task_id, _deadline_handle) = state
+            .create_task(root, Budget::with_deadline_ns(50_000), async {})
+            .expect("create deadline-miss task");
+
+        let state = Arc::new(ContendedMutex::new("runtime_state", state));
+        let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 2); // Low cancel streak limit
+        let worker = &mut scheduler.workers[0];
+
+        // Create 9-task scenario: 6 ready + 2 timed + 1 cancel (deadline task already created)
+        // Ready lane tasks - various priorities
+        worker.schedule_local(TaskId::new_for_test(400, 1), 80);  // High priority ready
+        worker.schedule_local(TaskId::new_for_test(401, 1), 60);  // Medium-high priority ready
+        worker.schedule_local(TaskId::new_for_test(402, 1), 40);  // Medium priority ready
+        worker.schedule_local(TaskId::new_for_test(403, 1), 30);  // Medium-low priority ready
+        worker.schedule_local(TaskId::new_for_test(404, 1), 20);  // Low priority ready
+        worker.schedule_local(TaskId::new_for_test(405, 1), 10);  // Lowest priority ready
+
+        // Timed lane tasks - one overdue (deadline miss), one future
+        worker.schedule_local_timed(TaskId::new_for_test(406, 1), Time::from_nanos(75_000));  // Past deadline (miss)
+        worker.schedule_local_timed(TaskId::new_for_test(407, 1), Time::from_nanos(200_000)); // Future deadline
+
+        // Cancel lane tasks - create multiple to establish cancel streak
+        worker.schedule_local_cancel(TaskId::new_for_test(408, 1), 95); // High priority cancel
+        worker.schedule_local_cancel(TaskId::new_for_test(409, 1), 85); // Medium priority cancel
+        worker.schedule_local_cancel(TaskId::new_for_test(410, 1), 75); // Lower priority cancel
+
+        // Execute dispatch cycles to capture decision trace showing:
+        // 1. Cancel streak (should dispatch 2 cancel tasks before fairness limit)
+        // 2. Deadline pressure from missed deadline
+        // 3. Priority ordering within lanes
+        let mut dispatch_sequence = Vec::new();
+
+        // Execute several dispatch cycles to capture the complex decision trace
+        for _cycle in 0..6 {
+            if let Some(task_id) = worker.next_task() {
+                dispatch_sequence.push(task_id);
+            } else {
+                break; // No more tasks to dispatch
+            }
+        }
+
+        worker.verify_scheduler_invariants();
+
+        worker_state_dump_scrubbed("decision_trace_complex_scenario", worker, &dispatch_sequence)
+    }
+
     #[test]
     fn test_three_lane_scheduler_creation() {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
@@ -11894,6 +11948,7 @@ mod tests {
                 "loaded": loaded_scheduler_state_dump(),
                 "cancel_streak": cancel_streak_scheduler_state_dump(),
                 "deadline_ordering": deadline_ordering_scheduler_state_dump(),
+                "decision_trace_complex_scenario": decision_trace_complex_scenario_dump(),
             })
         );
     }
