@@ -386,6 +386,7 @@ mod tests {
     )]
     use super::*;
     use serde_json::json;
+    use std::hash::{Hash, Hasher};
 
     fn build_ring(node_count: usize, vnodes_per_node: usize) -> HashRing {
         // br-asupersync-rnybb1: tests use a fixed seed (0) for
@@ -441,6 +442,70 @@ mod tests {
         })
     }
 
+    fn reference_vnode_hash(seed: u64, node_id: &str, vnode: u32) -> u64 {
+        let mut hasher = DetHasher::default();
+        seed.hash(&mut hasher);
+        node_id.hash(&mut hasher);
+        vnode.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn reference_key_hash<K: Hash>(seed: u64, key: &K) -> u64 {
+        let mut hasher = DetHasher::default();
+        seed.hash(&mut hasher);
+        key.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn reference_karger_mapping_bytes(
+        seed: u64,
+        vnodes_per_node: usize,
+        nodes: &[String],
+        keys: &[String],
+    ) -> Vec<u8> {
+        let mut ring = Vec::with_capacity(nodes.len() * vnodes_per_node);
+        for node_id in nodes {
+            for vnode in 0..vnodes_per_node {
+                ring.push((
+                    reference_vnode_hash(seed, node_id, vnode as u32),
+                    node_id.clone(),
+                    vnode as u32,
+                ));
+            }
+        }
+        ring.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then_with(|| a.1.cmp(&b.1))
+                .then_with(|| a.2.cmp(&b.2))
+        });
+
+        let assignments: Vec<(String, String)> = keys
+            .iter()
+            .map(|key| {
+                let key_hash = reference_key_hash(seed, key);
+                let idx = ring.partition_point(|(hash, _, _)| *hash < key_hash);
+                let idx = if idx == ring.len() { 0 } else { idx };
+                (key.clone(), ring[idx].1.clone())
+            })
+            .collect();
+        serde_json::to_vec(&assignments).expect("serialize reference assignments")
+    }
+
+    fn ring_mapping_bytes(ring: &HashRing, keys: &[String]) -> Vec<u8> {
+        let assignments: Vec<(String, String)> = keys
+            .iter()
+            .map(|key| {
+                (
+                    key.clone(),
+                    ring.node_for_key(key)
+                        .expect("ring should assign every key")
+                        .to_owned(),
+                )
+            })
+            .collect();
+        serde_json::to_vec(&assignments).expect("serialize ring assignments")
+    }
+
     #[test]
     fn ring_construction_orders_vnodes() {
         let ring = build_ring(4, 8);
@@ -481,6 +546,27 @@ mod tests {
         let second = ring.node_for_key(&"alpha");
         assert_eq!(first, second);
         assert!(matches!(first, Some("a" | "b" | "c")));
+    }
+
+    #[test]
+    fn karger_reference_mapping_matches_hash_ring_for_1000_keys_and_100_nodes() {
+        let seed = 0xC0DE_1000_u64;
+        let replica_count = 64usize;
+        let nodes: Vec<String> = (0..100).map(|idx| format!("node-{idx:03}")).collect();
+        let keys: Vec<String> = (0..1000).map(|idx| format!("key-{idx:04}")).collect();
+
+        let mut ring = HashRing::new(replica_count, seed);
+        for node in &nodes {
+            assert!(ring.add_node(node.clone()), "fixture node should be unique");
+        }
+
+        let actual = ring_mapping_bytes(&ring, &keys);
+        let reference = reference_karger_mapping_bytes(seed, replica_count, &nodes, &keys);
+
+        assert_eq!(
+            actual, reference,
+            "HashRing mapping must match the Karger-style reference implementation byte-for-byte"
+        );
     }
 
     #[test]
