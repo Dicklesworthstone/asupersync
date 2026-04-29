@@ -9811,6 +9811,238 @@ mod tests {
         crate::test_complete!("shardguard_locking_patterns_exercised");
     }
 
+    #[cfg(debug_assertions)]
+    #[test]
+    fn metamorphic_order_respecting_lock_sequences_remain_tarjan_scc_free() {
+        use crate::runtime::ShardGuard;
+        use crate::runtime::ShardedState;
+        use crate::runtime::sharded_state::ShardedConfig;
+        use crate::runtime::sharded_state::{LockShard, lock_order};
+        use std::panic::{AssertUnwindSafe, catch_unwind};
+
+        fn shard_index(shard: LockShard) -> usize {
+            match shard {
+                LockShard::Regions => 0,
+                LockShard::Tasks => 1,
+                LockShard::Obligations => 2,
+            }
+        }
+
+        fn label_index(label: &'static str) -> usize {
+            match label {
+                "B:Regions" => 0,
+                "A:Tasks" => 1,
+                "C:Obligations" => 2,
+                other => panic!("unexpected shard label: {other}"),
+            }
+        }
+
+        fn tarjan_scc(node_count: usize, edges: &[(usize, usize)]) -> Vec<Vec<usize>> {
+            struct Tarjan<'a> {
+                adjacency: Vec<Vec<usize>>,
+                index: usize,
+                indices: Vec<Option<usize>>,
+                lowlink: Vec<usize>,
+                stack: Vec<usize>,
+                on_stack: Vec<bool>,
+                components: Vec<Vec<usize>>,
+                _phantom: std::marker::PhantomData<&'a ()>,
+            }
+
+            impl<'a> Tarjan<'a> {
+                fn new(node_count: usize, edges: &[(usize, usize)]) -> Self {
+                    let mut adjacency = vec![Vec::new(); node_count];
+                    for &(from, to) in edges {
+                        adjacency[from].push(to);
+                    }
+                    Self {
+                        adjacency,
+                        index: 0,
+                        indices: vec![None; node_count],
+                        lowlink: vec![0; node_count],
+                        stack: Vec::new(),
+                        on_stack: vec![false; node_count],
+                        components: Vec::new(),
+                        _phantom: std::marker::PhantomData,
+                    }
+                }
+
+                fn strongconnect(&mut self, v: usize) {
+                    let v_index = self.index;
+                    self.indices[v] = Some(v_index);
+                    self.lowlink[v] = v_index;
+                    self.index += 1;
+                    self.stack.push(v);
+                    self.on_stack[v] = true;
+
+                    let neighbors = self.adjacency[v].clone();
+                    for w in neighbors {
+                        if self.indices[w].is_none() {
+                            self.strongconnect(w);
+                            self.lowlink[v] = self.lowlink[v].min(self.lowlink[w]);
+                        } else if self.on_stack[w] {
+                            self.lowlink[v] =
+                                self.lowlink[v].min(self.indices[w].expect("visited neighbor"));
+                        }
+                    }
+
+                    if self.lowlink[v] == v_index {
+                        let mut component = Vec::new();
+                        loop {
+                            let w = self.stack.pop().expect("stack underflow");
+                            self.on_stack[w] = false;
+                            component.push(w);
+                            if w == v {
+                                break;
+                            }
+                        }
+                        component.sort_unstable();
+                        self.components.push(component);
+                    }
+                }
+            }
+
+            let mut tarjan = Tarjan::new(node_count, edges);
+            for node in 0..node_count {
+                if tarjan.indices[node].is_none() {
+                    tarjan.strongconnect(node);
+                }
+            }
+            tarjan.components.sort();
+            tarjan.components
+        }
+
+        fn edges_from_sequences(sequences: &[Vec<usize>]) -> Vec<(usize, usize)> {
+            sequences
+                .iter()
+                .flat_map(|sequence| sequence.windows(2).map(|pair| (pair[0], pair[1])))
+                .collect()
+        }
+
+        fn acquire_sequence(sequence: &[LockShard]) -> Vec<usize> {
+            let result = catch_unwind(AssertUnwindSafe(|| {
+                for shard in sequence {
+                    lock_order::before_lock(*shard);
+                    lock_order::after_lock(*shard);
+                }
+                let labels = lock_order::held_labels()
+                    .into_iter()
+                    .map(label_index)
+                    .collect::<Vec<_>>();
+                lock_order::unlock_n(sequence.len());
+                labels
+            }));
+            let leaked = lock_order::held_count();
+            if leaked > 0 {
+                lock_order::unlock_n(leaked);
+            }
+            result.unwrap_or_else(|_| {
+                panic!(
+                    "order-respecting acquisition should not panic for {:?}",
+                    sequence
+                        .iter()
+                        .map(|shard| shard.label())
+                        .collect::<Vec<_>>()
+                )
+            })
+        }
+
+        fn capture_guard_labels(guard: ShardGuard<'_>) -> Vec<usize> {
+            let labels = lock_order::held_labels()
+                .into_iter()
+                .map(label_index)
+                .collect::<Vec<_>>();
+            drop(guard);
+            assert_eq!(lock_order::held_count(), 0);
+            labels
+        }
+
+        let valid_sequences = [
+            vec![LockShard::Regions],
+            vec![LockShard::Tasks],
+            vec![LockShard::Obligations],
+            vec![LockShard::Regions, LockShard::Tasks],
+            vec![LockShard::Regions, LockShard::Obligations],
+            vec![LockShard::Tasks, LockShard::Obligations],
+            vec![LockShard::Regions, LockShard::Tasks, LockShard::Obligations],
+        ];
+        let exhaustive_labels = valid_sequences
+            .iter()
+            .map(|sequence| acquire_sequence(sequence))
+            .collect::<Vec<_>>();
+        let exhaustive_sccs = tarjan_scc(3, &edges_from_sequences(&exhaustive_labels));
+        assert!(
+            exhaustive_sccs.iter().all(|component| component.len() == 1),
+            "valid lock-order sequences should remain acyclic: {exhaustive_sccs:?}"
+        );
+
+        let trace = TraceBufferHandle::new(1024);
+        let metrics: Arc<dyn MetricsProvider> = Arc::new(TestMetrics::default());
+        let config = ShardedConfig {
+            io_driver: None,
+            timer_driver: None,
+            logical_clock_mode: LogicalClockMode::Lamport,
+            cancel_attribution: CancelAttributionConfig::default(),
+            entropy_source: Arc::new(OsEntropy),
+            blocking_pool: None,
+            obligation_leak_response: ObligationLeakResponse::Panic,
+            leak_escalation: None,
+            observability: None,
+        };
+        let shards = ShardedState::new(trace, metrics, config);
+        let guard_labels = vec![
+            capture_guard_labels(ShardGuard::regions_only(&shards)),
+            capture_guard_labels(ShardGuard::tasks_only(&shards)),
+            capture_guard_labels(ShardGuard::obligations_only(&shards)),
+            capture_guard_labels(ShardGuard::for_spawn(&shards)),
+            capture_guard_labels(ShardGuard::for_obligation(&shards)),
+            capture_guard_labels(ShardGuard::for_task_completed(&shards)),
+            capture_guard_labels(ShardGuard::for_cancel(&shards)),
+            capture_guard_labels(ShardGuard::for_obligation_resolve(&shards)),
+            capture_guard_labels(ShardGuard::all(&shards)),
+        ];
+        let guard_sccs = tarjan_scc(3, &edges_from_sequences(&guard_labels));
+        assert!(
+            guard_sccs.iter().all(|component| component.len() == 1),
+            "real ShardGuard acquisitions should remain acyclic: {guard_sccs:?}"
+        );
+
+        assert_eq!(
+            exhaustive_sccs, guard_sccs,
+            "real guard constructors should induce the same SCC signature as the exhaustive valid order lattice"
+        );
+
+        let canonical_components = vec![vec![0], vec![1], vec![2]];
+        assert_eq!(
+            exhaustive_sccs, canonical_components,
+            "Tarjan should visit the order-respecting lattice as singleton components only"
+        );
+        assert_eq!(
+            guard_sccs,
+            vec![vec![0], vec![1], vec![2]],
+            "guard-derived lock graph should also stay singleton-only"
+        );
+
+        let covered = guard_labels
+            .into_iter()
+            .flatten()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            covered,
+            (0..=2).collect(),
+            "guard constructors should cover Regions, Tasks, and Obligations"
+        );
+
+        let exhaustive_order = valid_sequences
+            .iter()
+            .flat_map(|sequence| sequence.iter().copied().map(shard_index))
+            .collect::<Vec<_>>();
+        assert!(
+            exhaustive_order.windows(2).any(|pair| pair[0] <= pair[1]),
+            "sanity check: exhaustive metamorphic input should include forward lock-order edges"
+        );
+    }
+
     #[test]
     fn task_completed_ok_with_leaked_obligations_closes_region() {
         // Verifies: non-cancelled task completing with pending obligations
