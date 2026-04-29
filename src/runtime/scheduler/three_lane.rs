@@ -2737,6 +2737,41 @@ impl ThreeLaneWorker {
         self.cached_suggestion = suggestion;
     }
 
+    fn emit_scheduler_evidence_for_suggestion(&self, suggestion: SchedulingSuggestion) {
+        let Some(ref sink) = self.evidence_sink else {
+            return;
+        };
+
+        let snapshot = {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            StateSnapshot::from_runtime_state(&state)
+        };
+        let ready_queue_depth = self.ready_queue_depth_signal();
+        #[allow(clippy::cast_possible_truncation)]
+        let ready_queue_depth = ready_queue_depth as u32;
+        let suggestion_str = match suggestion {
+            SchedulingSuggestion::MeetDeadlines => "meet_deadlines",
+            SchedulingSuggestion::DrainObligations => "drain_obligations",
+            SchedulingSuggestion::DrainRegions => "drain_regions",
+            SchedulingSuggestion::NoPreference => "no_preference",
+        };
+        let cancel_depth =
+            snapshot.cancel_requested_tasks + snapshot.cancelling_tasks + snapshot.finalizing_tasks;
+        crate::evidence_sink::emit_scheduler_evidence(
+            sink.as_ref(),
+            suggestion_str,
+            cancel_depth,
+            snapshot.draining_regions,
+            ready_queue_depth,
+            self.decision_contract
+                .as_ref()
+                .is_some_and(|_| self.decision_posterior.is_some()),
+        );
+    }
+
     #[inline]
     fn current_base_cancel_limit(&self) -> usize {
         self.adaptive_cancel_policy
@@ -3434,6 +3469,7 @@ impl ThreeLaneWorker {
 
         self.steps_since_snapshot += 1;
         if self.steps_since_snapshot < self.governor_interval {
+            self.emit_scheduler_evidence_for_suggestion(self.cached_suggestion);
             return self.cached_suggestion;
         }
         self.steps_since_snapshot = 0;
@@ -3680,27 +3716,7 @@ impl ThreeLaneWorker {
         // prod-default (sink unconfigured) at zero cost, and `cached_suggestion`
         // is still consulted for the cache-hit fast-return at the top of
         // `governor_suggest` — only the change-detection guard is removed.
-        if let Some(ref sink) = self.evidence_sink {
-            let suggestion_str = match suggestion {
-                SchedulingSuggestion::MeetDeadlines => "meet_deadlines",
-                SchedulingSuggestion::DrainObligations => "drain_obligations",
-                SchedulingSuggestion::DrainRegions => "drain_regions",
-                SchedulingSuggestion::NoPreference => "no_preference",
-            };
-            let cancel_depth = snapshot.cancel_requested_tasks
-                + snapshot.cancelling_tasks
-                + snapshot.finalizing_tasks;
-            crate::evidence_sink::emit_scheduler_evidence(
-                sink.as_ref(),
-                suggestion_str,
-                cancel_depth,
-                snapshot.draining_regions,
-                snapshot.ready_queue_depth,
-                self.decision_contract
-                    .as_ref()
-                    .is_some_and(|_| self.decision_posterior.is_some()),
-            );
-        }
+        self.emit_scheduler_evidence_for_suggestion(suggestion);
 
         self.cached_suggestion = suggestion;
         suggestion
@@ -7311,6 +7327,45 @@ mod tests {
         let s = worker.governor_suggest();
         assert_eq!(s, SchedulingSuggestion::NoPreference); // quiescent
         assert_eq!(worker.steps_since_snapshot, 0);
+    }
+
+    #[test]
+    fn test_governor_cached_calls_emit_evidence_for_each_decision() {
+        let mut state = RuntimeState::new();
+        state.now = Time::from_nanos(999_000_000);
+        let root = state.create_root_region(Budget::unlimited());
+        let (_task_id, _handle) = state
+            .create_task(root, Budget::with_deadline_ns(1_000_000_000), async {})
+            .expect("create task");
+        let state = Arc::new(ContendedMutex::new("runtime_state", state));
+
+        let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 16, true, 4);
+        let mut workers = scheduler.take_workers();
+        let worker = workers.first_mut().expect("worker");
+
+        let collector = Arc::new(crate::evidence_sink::CollectorSink::new());
+        let sink: Arc<dyn crate::evidence_sink::EvidenceSink> = collector.clone();
+        worker.set_evidence_sink(sink);
+        worker.decision_contract = None;
+        worker.decision_posterior = None;
+
+        for _ in 0..5 {
+            assert_eq!(
+                worker.governor_suggest(),
+                SchedulingSuggestion::MeetDeadlines
+            );
+        }
+
+        let entries = collector.entries();
+        assert_eq!(
+            entries.len(),
+            5,
+            "cached governor decisions should still emit one scheduler evidence entry per call"
+        );
+        assert!(
+            entries.iter().all(|entry| entry.action == "meet_deadlines"),
+            "all cached decisions should preserve the cached suggestion in evidence"
+        );
     }
 
     #[test]
