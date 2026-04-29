@@ -816,6 +816,39 @@ mod tests {
         (ready, stored, late_pending)
     }
 
+    fn notify_one_front_cancel_shift_signature(
+        cancel_front: bool,
+        notify_calls: usize,
+    ) -> (Vec<bool>, usize, bool) {
+        let notify = Notify::new();
+
+        let mut waiters: Vec<_> = (0..4).map(|_| notify.notified()).collect();
+        for waiter in &mut waiters {
+            assert!(poll_once(waiter).is_pending());
+        }
+
+        if cancel_front {
+            drop(waiters.remove(0));
+        }
+
+        for _ in 0..notify_calls {
+            notify.notify_one();
+        }
+
+        let ready = waiters
+            .iter_mut()
+            .map(|waiter| poll_once(waiter).is_ready())
+            .collect::<Vec<_>>();
+        drop(waiters);
+
+        let stored = notify.stored_notifications.load(Ordering::Acquire);
+        let mut late = notify.notified();
+        let late_pending = poll_once(&mut late).is_pending();
+        drop(late);
+
+        (ready, stored, late_pending)
+    }
+
     #[test]
     fn notify_one_wakes_waiter() {
         init_test("notify_one_wakes_waiter");
@@ -1827,6 +1860,41 @@ mod tests {
         crate::test_complete!(
             "metamorphic_extra_tail_waiters_do_not_expand_notify_one_ready_prefix"
         );
+    }
+
+    #[test]
+    fn metamorphic_front_cancel_shifts_notify_one_ready_prefix_left() {
+        init_test("metamorphic_front_cancel_shifts_notify_one_ready_prefix_left");
+
+        let baseline = notify_one_front_cancel_shift_signature(false, 3);
+        let transformed = notify_one_front_cancel_shift_signature(true, 2);
+
+        crate::assert_with_log!(
+            transformed == (baseline.0[1..].to_vec(), baseline.1, baseline.2),
+            "dropping the oldest parked waiter before notify_one is equivalent to one extra notify_one on the original waiter set, modulo the removed slot",
+            format!("{:?}", (baseline.0[1..].to_vec(), baseline.1, baseline.2)),
+            format!("{transformed:?}")
+        );
+        crate::assert_with_log!(
+            baseline.0 == vec![true, true, true, false],
+            "three notify_one calls wake the first three FIFO waiters in the baseline run",
+            vec![true, true, true, false],
+            baseline.0.clone()
+        );
+        crate::assert_with_log!(
+            transformed.1 == 0,
+            "front-waiter cancellation must not mint or leak a stored notify token",
+            0usize,
+            transformed.1
+        );
+        crate::assert_with_log!(
+            transformed.2,
+            "a late waiter remains pending because the transformed run consumed exactly its shifted notify_one prefix",
+            true,
+            transformed.2
+        );
+
+        crate::test_complete!("metamorphic_front_cancel_shifts_notify_one_ready_prefix_left");
     }
 
     #[test]

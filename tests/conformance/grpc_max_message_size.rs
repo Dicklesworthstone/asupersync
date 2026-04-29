@@ -81,3 +81,60 @@ fn framed_codec_enforces_directional_caps_too() {
         .expect_err("framed codec must reject inbound payloads above max_recv_message_size");
     assert!(matches!(receive_err, GrpcError::MessageTooLarge));
 }
+
+#[test]
+fn grpc_go_max_decoded_len_boundary_accepts_exact_decompression_then_rejects_plus_one() {
+    fn passthrough_compress(input: Bytes) -> Result<Bytes, GrpcError> {
+        Ok(input)
+    }
+
+    fn grpc_go_style_boundary_decompress(
+        input: Bytes,
+        max_size: usize,
+    ) -> Result<Bytes, GrpcError> {
+        let expanded = match input.as_ref() {
+            b"eq" => vec![b'e'; max_size],
+            b"gt" => vec![b'g'; max_size.saturating_add(1)],
+            other => other.to_vec(),
+        };
+        if expanded.len() > max_size {
+            return Err(GrpcError::MessageTooLarge);
+        }
+        Ok(Bytes::from(expanded))
+    }
+
+    let max_decoded_len = 8usize;
+    let mut producer = GrpcCodec::with_message_size_limits(32, 32);
+    let mut wire = BytesMut::new();
+    producer
+        .encode(
+            GrpcMessage::compressed(Bytes::from_static(b"eq")),
+            &mut wire,
+        )
+        .expect("exact-limit compressed frame should encode");
+    producer
+        .encode(
+            GrpcMessage::compressed(Bytes::from_static(b"gt")),
+            &mut wire,
+        )
+        .expect("limit-plus-one compressed frame should encode");
+
+    let mut codec = FramedCodec::with_message_size_limits(IdentityCodec, 32, max_decoded_len)
+        .with_frame_codec(passthrough_compress, grpc_go_style_boundary_decompress);
+
+    let exact = codec
+        .decode_message(&mut wire)
+        .expect("grpc-go accepts decompressed payloads exactly at maxReceiveMessageSize")
+        .expect("first compressed frame should decode");
+    assert_eq!(
+        exact,
+        Bytes::from_static(b"eeeeeeee"),
+        "exact max_decoded_len decompression must succeed"
+    );
+
+    let over = codec
+        .decode_message(&mut wire)
+        .expect_err("grpc-go rejects decompressed payloads above maxReceiveMessageSize");
+    assert!(matches!(over, GrpcError::MessageTooLarge));
+    assert_eq!(over.into_status().code(), Code::ResourceExhausted);
+}
