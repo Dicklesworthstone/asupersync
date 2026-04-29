@@ -278,6 +278,19 @@ fn grpc_request_header_is_allowed(key: &str) -> bool {
         || key.eq_ignore_ascii_case("grpc-message-type")
 }
 
+fn matches_media_type_prefix(value: &str, prefix: &str) -> bool {
+    value.starts_with(prefix)
+        && matches!(value.as_bytes().get(prefix.len()), None | Some(b'+' | b';'))
+}
+
+fn grpc_content_type_is_allowed(value: &str) -> bool {
+    matches_media_type_prefix(value.trim(), "application/grpc")
+}
+
+fn grpc_te_header_is_allowed(value: &str) -> bool {
+    value.trim().eq_ignore_ascii_case("trailers")
+}
+
 fn validate_inbound_metadata(metadata: &super::streaming::Metadata) -> Result<(), Status> {
     for (key, value) in metadata.iter() {
         if metadata_key_uses_grpc_prefix(key) && !grpc_request_header_is_allowed(key) {
@@ -291,6 +304,40 @@ fn validate_inbound_metadata(metadata: &super::streaming::Metadata) -> Result<()
                 return Err(Status::invalid_argument(format!(
                     "metadata value for {key} contains disallowed control or non-ASCII bytes"
                 )));
+            }
+        }
+
+        if key.eq_ignore_ascii_case("content-type") {
+            match value {
+                super::streaming::MetadataValue::Ascii(text)
+                    if !grpc_content_type_is_allowed(text) =>
+                {
+                    return Err(Status::invalid_argument(format!(
+                        "content-type must be application/grpc(+proto|+json), got {text}"
+                    )));
+                }
+                super::streaming::MetadataValue::Binary(_) => {
+                    return Err(Status::invalid_argument(
+                        "content-type must be an ASCII gRPC media type",
+                    ));
+                }
+                _ => {}
+            }
+        } else if key.eq_ignore_ascii_case("te") {
+            match value {
+                super::streaming::MetadataValue::Ascii(text)
+                    if !grpc_te_header_is_allowed(text) =>
+                {
+                    return Err(Status::invalid_argument(format!(
+                        "te must be trailers for gRPC over HTTP/2, got {text}"
+                    )));
+                }
+                super::streaming::MetadataValue::Binary(_) => {
+                    return Err(Status::invalid_argument(
+                        "te must be an ASCII trailers header",
+                    ));
+                }
+                _ => {}
             }
         }
     }
@@ -2132,9 +2179,45 @@ mod tests {
     }
 
     #[test]
+    fn enforce_metadata_size_limit_rejects_non_grpc_content_type() {
+        init_test("enforce_metadata_size_limit_rejects_non_grpc_content_type");
+        let mut metadata = super::super::streaming::Metadata::new();
+        metadata.insert("content-type", "application/json");
+
+        let status = enforce_metadata_size_limit(&metadata, 8 * 1024)
+            .expect_err("non-gRPC content-type must be rejected");
+        assert_eq!(status.code(), super::super::status::Code::InvalidArgument);
+        let msg = format!("{status}");
+        assert!(
+            msg.contains("content-type") && msg.contains("application/grpc"),
+            "error message must mention the required gRPC media type, got: {msg}"
+        );
+        crate::test_complete!("enforce_metadata_size_limit_rejects_non_grpc_content_type");
+    }
+
+    #[test]
+    fn enforce_metadata_size_limit_rejects_non_trailers_te() {
+        init_test("enforce_metadata_size_limit_rejects_non_trailers_te");
+        let mut metadata = super::super::streaming::Metadata::new();
+        metadata.insert("te", "gzip");
+
+        let status = enforce_metadata_size_limit(&metadata, 8 * 1024)
+            .expect_err("non-trailers te must be rejected");
+        assert_eq!(status.code(), super::super::status::Code::InvalidArgument);
+        let msg = format!("{status}");
+        assert!(
+            msg.contains("te") && msg.contains("trailers"),
+            "error message must mention the trailers requirement, got: {msg}"
+        );
+        crate::test_complete!("enforce_metadata_size_limit_rejects_non_trailers_te");
+    }
+
+    #[test]
     fn enforce_metadata_size_limit_allows_grpc_request_protocol_headers() {
         init_test("enforce_metadata_size_limit_allows_grpc_request_protocol_headers");
         let mut metadata = super::super::streaming::Metadata::new();
+        metadata.insert("content-type", "application/grpc+proto");
+        metadata.insert("te", "trailers");
         metadata.insert("grpc-timeout", "5S");
         metadata.insert("grpc-encoding", "identity");
         metadata.insert("grpc-accept-encoding", "identity,gzip");
@@ -3043,6 +3126,41 @@ mod tests {
             "handler must NOT be invoked when inbound metadata is malformed"
         );
         crate::test_complete!("test_dispatch_unary_rejects_invalid_metadata_before_handler");
+    }
+
+    #[test]
+    fn test_dispatch_unary_rejects_invalid_protocol_headers_before_handler() {
+        use futures_lite::future::block_on;
+        init_test("test_dispatch_unary_rejects_invalid_protocol_headers_before_handler");
+        let server = Server::builder().max_metadata_size(8 * 1024).build();
+        let metadata = Metadata::from_raw_entries_for_tests(vec![
+            (
+                "content-type".to_string(),
+                crate::grpc::MetadataValue::Ascii("application/json".to_string()),
+            ),
+            (
+                "te".to_string(),
+                crate::grpc::MetadataValue::Ascii("chunked".to_string()),
+            ),
+        ]);
+        let request = Request::with_metadata(Bytes::new(), metadata);
+
+        let handler_invoked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handler_invoked_clone = std::sync::Arc::clone(&handler_invoked);
+        let result = block_on(server.dispatch_unary(request, move |_req| {
+            handler_invoked_clone.store(true, std::sync::atomic::Ordering::Relaxed);
+            async move { Ok(Response::new(Bytes::from_static(b"ok"))) }
+        }));
+
+        let err = result.expect_err("invalid protocol headers must reject");
+        assert_eq!(err.code(), crate::grpc::status::Code::InvalidArgument);
+        assert!(
+            !handler_invoked.load(std::sync::atomic::Ordering::Relaxed),
+            "handler must NOT be invoked when unary protocol headers are malformed"
+        );
+        crate::test_complete!(
+            "test_dispatch_unary_rejects_invalid_protocol_headers_before_handler"
+        );
     }
 
     // br-asupersync-8vn9iu: Regression tests for connection hoarding protection
