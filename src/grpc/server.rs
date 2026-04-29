@@ -321,7 +321,7 @@ fn validate_inbound_metadata(metadata: &super::streaming::Metadata) -> Result<()
                         "content-type must be an ASCII gRPC media type",
                     ));
                 }
-                _ => {}
+                super::streaming::MetadataValue::Ascii(_) => {}
             }
         } else if key.eq_ignore_ascii_case("te") {
             match value {
@@ -337,7 +337,7 @@ fn validate_inbound_metadata(metadata: &super::streaming::Metadata) -> Result<()
                         "te must be an ASCII trailers header",
                     ));
                 }
-                _ => {}
+                super::streaming::MetadataValue::Ascii(_) => {}
             }
         }
     }
