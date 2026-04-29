@@ -42,7 +42,7 @@ const MALFORMED_TOKEN_CASES: &[MalformedTokenCase] = &[
     MalformedTokenCase {
         id: "JETSTREAM-ACK-001",
         description: "Too few tokens: missing required fields",
-        ack_subject: "$JS.ACK.stream.consumer.1.42.3",  // Only 7 tokens, need >=9
+        ack_subject: "$JS.ACK.stream.consumer.1.42.3", // Only 7 tokens, need >=9
         expected_behavior: ExpectedBehavior::Reject,
         requirement_level: RequirementLevel::Must,
     },
@@ -56,7 +56,7 @@ const MALFORMED_TOKEN_CASES: &[MalformedTokenCase] = &[
     MalformedTokenCase {
         id: "JETSTREAM-ACK-003",
         description: "Wrong prefix: not a JetStream ACK",
-        ack_subject: "$JS.NAK.stream.consumer.1.42.3.1234567890.5",  // NAK instead of ACK
+        ack_subject: "$JS.NAK.stream.consumer.1.42.3.1234567890.5", // NAK instead of ACK
         expected_behavior: ExpectedBehavior::Reject,
         requirement_level: RequirementLevel::Must,
     },
@@ -67,12 +67,11 @@ const MALFORMED_TOKEN_CASES: &[MalformedTokenCase] = &[
         expected_behavior: ExpectedBehavior::Reject,
         requirement_level: RequirementLevel::Must,
     },
-
     // SHOULD cases: Edge cases that should be handled robustly
     MalformedTokenCase {
         id: "JETSTREAM-ACK-005",
         description: "Just enough tokens for minimal valid ACK",
-        ack_subject: "$JS.ACK.s.c.1.42.3.1234567890.5",  // 9 tokens exactly
+        ack_subject: "$JS.ACK.s.c.1.42.3.1234567890.5", // 9 tokens exactly
         expected_behavior: ExpectedBehavior::Accept {
             delivered: 1,
             sequence: 42,
@@ -89,7 +88,6 @@ const MALFORMED_TOKEN_CASES: &[MalformedTokenCase] = &[
         },
         requirement_level: RequirementLevel::Should,
     },
-
     // MAY cases: Implementation-defined behavior
     MalformedTokenCase {
         id: "JETSTREAM-ACK-007",
@@ -101,7 +99,7 @@ const MALFORMED_TOKEN_CASES: &[MalformedTokenCase] = &[
     MalformedTokenCase {
         id: "JETSTREAM-ACK-008",
         description: "Dotted stream name with too few total tokens",
-        ack_subject: "$JS.ACK.orders.v2.processor.1.42",  // 7 tokens but with dotted stream
+        ack_subject: "$JS.ACK.orders.v2.processor.1.42", // 7 tokens but with dotted stream
         expected_behavior: ExpectedBehavior::Reject,
         requirement_level: RequirementLevel::May,
     },
@@ -112,6 +110,7 @@ fn create_test_message(ack_subject: &str) -> Message {
     Message {
         subject: "test.subject".to_string(),
         sid: 1,
+        headers: None,
         payload: b"test payload".to_vec(),
         reply_to: Some(ack_subject.to_string()),
     }
@@ -133,7 +132,13 @@ fn jetstream_ack_malformed_token_conformance() {
                 // Correctly rejected malformed subject
                 true
             }
-            (Some(parsed), ExpectedBehavior::Accept { delivered, sequence }) => {
+            (
+                Some(parsed),
+                ExpectedBehavior::Accept {
+                    delivered,
+                    sequence,
+                },
+            ) => {
                 // Correctly accepted and parsed values match
                 parsed.delivered == *delivered && parsed.sequence == *sequence
             }
@@ -211,7 +216,10 @@ mod integration {
         let result = fuzz_parse_js_message(msg);
 
         // Should successfully parse a valid ACK subject
-        assert!(result.is_some(), "Valid ACK subject should parse successfully");
+        assert!(
+            result.is_some(),
+            "Valid ACK subject should parse successfully"
+        );
 
         let parsed = result.unwrap();
         assert_eq!(parsed.delivered, 1);
