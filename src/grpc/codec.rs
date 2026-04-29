@@ -472,6 +472,20 @@ impl<C: Codec> FramedCodec<C> {
         self.poisoned
     }
 
+    #[inline]
+    fn poison_decode_stream<T>(
+        &mut self,
+        src: &mut BytesMut,
+        error: GrpcError,
+    ) -> Result<T, GrpcError> {
+        self.poisoned = true;
+        // Fail closed at the buffer boundary as well as the codec boundary.
+        // Once one consumed frame proves the stream invalid, later buffered
+        // frames must not survive for a fresh codec instance to decode.
+        src.clear();
+        Err(error)
+    }
+
     /// Encode a message with framing.
     pub fn encode_message(
         &mut self,
@@ -504,6 +518,7 @@ impl<C: Codec> FramedCodec<C> {
     /// Decode a message with framing.
     pub fn decode_message(&mut self, src: &mut BytesMut) -> Result<Option<C::Decode>, GrpcError> {
         if self.poisoned {
+            src.clear();
             return Err(GrpcError::protocol(
                 "gRPC framed codec is poisoned after a previous decode error",
             ));
@@ -513,29 +528,25 @@ impl<C: Codec> FramedCodec<C> {
         let message = match self.framing.decode(src) {
             Ok(Some(message)) => message,
             Ok(None) => return Ok(None),
-            Err(error) => {
-                self.poisoned = true;
-                return Err(error);
-            }
+            Err(error) => return self.poison_decode_stream(src, error),
         };
 
         // Handle compression
         let data = if message.compressed {
             let Some(decompressor) = self.decompressor else {
-                self.poisoned = true;
-                return Err(GrpcError::compression(
-                    "compressed frame received but no frame decompressor configured",
-                ));
+                return self.poison_decode_stream(
+                    src,
+                    GrpcError::compression(
+                        "compressed frame received but no frame decompressor configured",
+                    ),
+                );
             };
             // br-asupersync-535iu9: pass Bytes by-value (move) — identity
             // decompressor is zero-copy; gzip pre-allocates output
             // with a sized hint (br-ky9o3j).
             match decompressor(message.data, self.max_decode_message_size()) {
                 Ok(data) => data,
-                Err(error) => {
-                    self.poisoned = true;
-                    return Err(error);
-                }
+                Err(error) => return self.poison_decode_stream(src, error),
             }
         } else {
             message.data
@@ -544,10 +555,7 @@ impl<C: Codec> FramedCodec<C> {
         // Deserialize the message
         let decoded = match self.inner.decode(&data).map_err(C::map_decode_error) {
             Ok(decoded) => decoded,
-            Err(error) => {
-                self.poisoned = true;
-                return Err(error);
-            }
+            Err(error) => return self.poison_decode_stream(src, error),
         };
 
         Ok(Some(decoded))
@@ -948,10 +956,10 @@ mod tests {
             codec.is_poisoned()
         );
         crate::assert_with_log!(
-            buf.len() == MESSAGE_HEADER_SIZE + 2,
-            "subsequent frame remains buffered after poison",
-            MESSAGE_HEADER_SIZE + 2,
-            buf.len()
+            buf.is_empty(),
+            "poison drains later buffered frames",
+            true,
+            buf.is_empty()
         );
 
         let second = codec.decode_message(&mut buf);
@@ -967,12 +975,69 @@ mod tests {
             poisoned
         );
         crate::assert_with_log!(
-            buf.len() == MESSAGE_HEADER_SIZE + 2,
-            "poisoned reject does not consume later frame",
-            MESSAGE_HEADER_SIZE + 2,
-            buf.len()
+            buf.is_empty(),
+            "poisoned reject keeps buffer empty",
+            true,
+            buf.is_empty()
+        );
+
+        let mut fresh_codec = FramedCodec::new(IdentityCodec);
+        let fresh = fresh_codec
+            .decode_message(&mut buf)
+            .expect("drained buffer");
+        crate::assert_with_log!(
+            fresh.is_none(),
+            "fresh codec sees no follow-on frame",
+            true,
+            fresh.is_none()
         );
         crate::test_complete!("test_framed_codec_poisoned_after_consumed_compressed_frame_error");
+    }
+
+    #[test]
+    fn test_framed_codec_inner_decode_error_drains_follow_on_frames() {
+        init_test("test_framed_codec_inner_decode_error_drains_follow_on_frames");
+        let mut codec = FramedCodec::new(LimitTrackingCodec {
+            max_encode_message_size: 32,
+            max_decode_message_size: 2,
+        });
+        let mut producer = GrpcCodec::new();
+        let mut buf = BytesMut::new();
+
+        producer
+            .encode(GrpcMessage::new(Bytes::from_static(b"bad")), &mut buf)
+            .expect("oversize inner-decode frame should be encodable on wire");
+        producer
+            .encode(GrpcMessage::new(Bytes::from_static(b"ok")), &mut buf)
+            .expect("follow-on valid frame should be encodable on wire");
+
+        let first = codec.decode_message(&mut buf);
+        let rejected = matches!(first, Err(GrpcError::MessageTooLarge));
+        crate::assert_with_log!(rejected, "inner decode error is surfaced", true, rejected);
+        crate::assert_with_log!(
+            codec.is_poisoned(),
+            "codec poisoned after inner decode error",
+            true,
+            codec.is_poisoned()
+        );
+        crate::assert_with_log!(
+            buf.is_empty(),
+            "inner decode poison drains buffered follow-on frames",
+            true,
+            buf.is_empty()
+        );
+
+        let mut fresh_codec = FramedCodec::new(IdentityCodec);
+        let fresh = fresh_codec
+            .decode_message(&mut buf)
+            .expect("drained buffer");
+        crate::assert_with_log!(
+            fresh.is_none(),
+            "fresh codec cannot recover a later buffered frame",
+            true,
+            fresh.is_none()
+        );
+        crate::test_complete!("test_framed_codec_inner_decode_error_drains_follow_on_frames");
     }
 
     #[test]
