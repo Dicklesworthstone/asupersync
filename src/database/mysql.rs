@@ -5167,7 +5167,7 @@ mod tests {
         assert_eq!(
             &buf.buf[2..8],
             &[
-                mysql_type::MYSQL_TYPE_NULL,
+                mysql_type::MYSQL_TYPE_LONG,
                 0,
                 mysql_type::MYSQL_TYPE_LONG,
                 0,
@@ -6835,14 +6835,18 @@ mod tests {
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
                 stream,
-                sequence: 0,
                 connection_id: 0,
+                capabilities: 0,
                 charset: 0,
                 status_flags: 0,
+                sequence: 0,
+                closed: false,
                 server_version: String::new(),
-                transaction_state: super::TransactionState::NotInTransaction,
-                client_capabilities: 0,
+                needs_rollback: false,
+                max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                query_in_flight: std::sync::atomic::AtomicBool::new(false),
             },
+            options: None,
         };
 
         let cx = Cx::for_testing();
