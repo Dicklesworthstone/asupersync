@@ -46,7 +46,7 @@ fuzz_target!(|data: &[u8]| {
     let mut cursor = Cursor::new(data);
     for _ in 0..MAX_OPS {
         let Some(op) = cursor.take(1) else { return };
-        match op[0] % 8 {
+        match op[0] % 10 {
             0 => run_add_slice(&mut cursor),
             1 => run_mul_slice(&mut cursor),
             2 => run_addmul_slice(&mut cursor),
@@ -55,6 +55,8 @@ fuzz_target!(|data: &[u8]| {
             5 => run_addmul_slices2(&mut cursor),
             6 => run_mr_mul_compose(&mut cursor),
             7 => run_mr_addmul_involution(&mut cursor),
+            8 => run_mul_slice_focus(&mut cursor),
+            9 => run_mul_slices2_focus(&mut cursor),
             _ => unreachable!(),
         }
     }
@@ -79,13 +81,7 @@ fn run_mul_slice(c: &mut Cursor) {
     let mut got = dst0.clone();
     gf256_mul_slice(&mut got, Gf256::new(scalar));
 
-    let expected = scalar_mul_ref(&dst0, scalar);
-    assert_eq!(
-        got,
-        expected,
-        "gf256_mul_slice diverged from scalar reference (c={scalar}, len={})",
-        dst0.len()
-    );
+    assert_mul_matches_scalar_per_byte(&dst0, scalar, &got, "gf256_mul_slice");
 }
 
 fn run_addmul_slice(c: &mut Cursor) {
@@ -146,16 +142,54 @@ fn run_mul_slices2(c: &mut Cursor) {
     let mut got_b = dst_b0.clone();
     gf256_mul_slices2(&mut got_a, &mut got_b, Gf256::new(scalar));
 
-    let expected_a = scalar_mul_ref(&dst_a0, scalar);
-    let expected_b = scalar_mul_ref(&dst_b0, scalar);
-    assert_eq!(
-        got_a, expected_a,
-        "gf256_mul_slices2 lane A diverged (c={scalar})"
-    );
-    assert_eq!(
-        got_b, expected_b,
-        "gf256_mul_slices2 lane B diverged (c={scalar})"
-    );
+    assert_mul_matches_scalar_per_byte(&dst_a0, scalar, &got_a, "gf256_mul_slices2 lane A");
+    assert_mul_matches_scalar_per_byte(&dst_b0, scalar, &got_b, "gf256_mul_slices2 lane B");
+}
+
+/// Multiply-focused differential oracle. Reuses one arbitrary byte buffer
+/// against several arbitrary scalars so the fuzzer spends more cycles on the
+/// SIMD multiply kernel than on the mixed add/addmul paths.
+fn run_mul_slice_focus(c: &mut Cursor) {
+    let Some(dst0) = c.take_aligned() else { return };
+    let scalar_trials = usize::from(c.next_u8() % 8) + 1;
+
+    for _ in 0..scalar_trials {
+        let Some(scalar) = c.scalar() else { return };
+        let mut got = dst0.clone();
+        gf256_mul_slice(&mut got, Gf256::new(scalar));
+        assert_mul_matches_scalar_per_byte(&dst0, scalar, &got, "gf256_mul_slice focus");
+    }
+}
+
+/// Dual-lane multiply focus. Exercises the fused SIMD multiply dispatch while
+/// keeping the oracle byte-exact for both arbitrary lanes.
+fn run_mul_slices2_focus(c: &mut Cursor) {
+    let Some(dst_a0) = c.take_aligned() else {
+        return;
+    };
+    let Some(dst_b0) = c.take_aligned() else {
+        return;
+    };
+    let scalar_trials = usize::from(c.next_u8() % 8) + 1;
+
+    for _ in 0..scalar_trials {
+        let Some(scalar) = c.scalar() else { return };
+        let mut got_a = dst_a0.clone();
+        let mut got_b = dst_b0.clone();
+        gf256_mul_slices2(&mut got_a, &mut got_b, Gf256::new(scalar));
+        assert_mul_matches_scalar_per_byte(
+            &dst_a0,
+            scalar,
+            &got_a,
+            "gf256_mul_slices2 focus lane A",
+        );
+        assert_mul_matches_scalar_per_byte(
+            &dst_b0,
+            scalar,
+            &got_b,
+            "gf256_mul_slices2 focus lane B",
+        );
+    }
 }
 
 fn run_addmul_slices2(c: &mut Cursor) {
@@ -232,19 +266,31 @@ fn run_mr_addmul_involution(c: &mut Cursor) {
     );
 }
 
-fn scalar_mul_ref(dst: &[u8], c: u8) -> Vec<u8> {
-    let cg = Gf256::new(c);
-    dst.iter()
-        .map(|&x| Gf256::new(x).mul_field(cg).raw())
-        .collect()
-}
-
 fn scalar_addmul_ref(dst: &[u8], src: &[u8], c: u8) -> Vec<u8> {
     let cg = Gf256::new(c);
     dst.iter()
         .zip(src.iter())
         .map(|(&d, &s)| d ^ Gf256::new(s).mul_field(cg).raw())
         .collect()
+}
+
+fn assert_mul_matches_scalar_per_byte(input: &[u8], scalar: u8, got: &[u8], context: &str) {
+    assert_eq!(
+        got.len(),
+        input.len(),
+        "{context} length mismatch for scalar={scalar}: got {} expected {}",
+        got.len(),
+        input.len()
+    );
+
+    let scalar_gf = Gf256::new(scalar);
+    for (idx, (&src, &actual)) in input.iter().zip(got.iter()).enumerate() {
+        let expected = Gf256::new(src).mul_field(scalar_gf).raw();
+        assert_eq!(
+            actual, expected,
+            "{context} byte mismatch at idx={idx} scalar={scalar} src={src:#04x}"
+        );
+    }
 }
 
 struct Cursor<'a> {

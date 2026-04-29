@@ -4211,34 +4211,52 @@ mod tests {
         }
     }
 
-    #[test]
-    fn differential_k42_random_drop_schedule_matches_raptorq_rs() {
-        let k = 42;
-        let symbol_size = 100;
-        let repair_count = 30;
-        let draw_count = 100;
-        let seed = 0x6330_042A_u64;
-
-        // Collapse 100 deterministic random draw attempts into a valid K=42 drop set.
+    fn assert_decoder_matches_raptorq_rs_at_thirty_percent_loss(
+        k: usize,
+        symbol_size: usize,
+        seed: u64,
+        drop_seed: u32,
+    ) {
+        let loss_count = (k * 30).div_ceil(100);
+        let repair_count = loss_count + 4;
+        let draw_count = k.saturating_mul(16).max(loss_count.saturating_mul(4));
         let drop_indices =
-            pick_unique_drop_indices_from_draws(k, draw_count, repair_count, 0xA1B2_C3D4);
+            pick_unique_drop_indices_from_draws(k, draw_count, loss_count, drop_seed);
         let source = make_source_data(k, symbol_size);
         let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
         let received =
             build_mixed_received_symbols(&decoder, &encoder, &source, &drop_indices, repair_count);
 
-        let ours = decoder
-            .decode(&received)
-            .expect("K=42 mixed source+repair differential decode must succeed");
+        let ours = decoder.decode(&received).unwrap_or_else(|err| {
+            panic!(
+                "K={k} mixed source+repair differential decode at 30% loss must succeed: {err:?}"
+            )
+        });
         let reference =
             reference_decode_with_raptorq_rs(&source, &encoder, &drop_indices, repair_count);
 
         assert_eq!(
             ours.source.concat(),
             reference,
-            "our decoder must match raptorq-rs for the pinned K=42 mixed source+repair schedule"
+            "our decoder must match raptorq-rs for K={k} at 30% packet loss"
         );
+    }
+
+    #[test]
+    fn differential_loss_matrix_matches_raptorq_rs() {
+        for &(k, symbol_size, seed, drop_seed) in &[
+            (10, 64, 0x6330_0010_u64, 0xA1B2_C310_u32),
+            (42, 64, 0x6330_042A_u64, 0xA1B2_C342_u32),
+            (842, 32, 0x6330_0842_u64, 0xA1B2_C842_u32),
+        ] {
+            assert_decoder_matches_raptorq_rs_at_thirty_percent_loss(
+                k,
+                symbol_size,
+                seed,
+                drop_seed,
+            );
+        }
     }
 
     #[test]
@@ -6872,8 +6890,8 @@ mod tests {
                 let value = match i % 4 {
                     0 => rng_state as usize % (max_valid * 2), // May be out of range
                     1 => max_valid + (rng_state as usize % 100), // Definitely out of range
-                    2 => usize::MAX, // Extreme out of range
-                    _ => rng_state as usize % max_valid, // Valid range
+                    2 => usize::MAX,                           // Extreme out of range
+                    _ => rng_state as usize % max_valid,       // Valid range
                 };
                 columns.push(value);
             }
@@ -6978,14 +6996,17 @@ mod tests {
                         let columns = malformed_columns(rng_state, column_count, l);
                         let coefficients = malformed_coefficients(rng_state, coeff_count);
 
-                        symbols.push(ReceivedSymbol::repair(esi, columns, coefficients, symbol_data));
+                        symbols.push(ReceivedSymbol::repair(
+                            esi,
+                            columns,
+                            coefficients,
+                            symbol_data,
+                        ));
                     }
                 }
 
                 // CRITICAL: Decoder must never panic, only return proper errors
-                let result = std::panic::catch_unwind(|| {
-                    decoder.decode(&symbols)
-                });
+                let result = std::panic::catch_unwind(|| decoder.decode(&symbols));
 
                 match result {
                     Ok(decode_result) => {
@@ -7002,7 +7023,8 @@ mod tests {
                                 assert!(
                                     matches!(
                                         error_class,
-                                        DecodeFailureClass::Recoverable | DecodeFailureClass::Unrecoverable
+                                        DecodeFailureClass::Recoverable
+                                            | DecodeFailureClass::Unrecoverable
                                     ),
                                     "Fuzzing case '{test_name}': decode error must have valid classification: {decode_error:?}"
                                 );
@@ -7060,7 +7082,8 @@ mod tests {
                     "all_ones" => {
                         // All symbol data is 0xFF
                         for i in 0..k {
-                            symbols.push(ReceivedSymbol::source(i as u32, vec![0xFFu8; symbol_size]));
+                            symbols
+                                .push(ReceivedSymbol::source(i as u32, vec![0xFFu8; symbol_size]));
                         }
                     }
                     "alternating_bytes" => {
@@ -7093,9 +7116,14 @@ mod tests {
                         let columns = vec![0, 1];
                         let coefficients = vec![Gf256::ONE, Gf256::ONE];
                         let data = arbitrary_symbol_data(0xBAD_C0DE, symbol_size);
-                        symbols.push(ReceivedSymbol::repair(huge_esi, columns, coefficients, data));
+                        symbols.push(ReceivedSymbol::repair(
+                            huge_esi,
+                            columns,
+                            coefficients,
+                            data,
+                        ));
 
-                        for i in 0..(k-1) {
+                        for i in 0..(k - 1) {
                             symbols.push(ReceivedSymbol::source(i as u32, vec![0u8; symbol_size]));
                         }
                     }
@@ -7104,7 +7132,12 @@ mod tests {
                         let columns = vec![0, 0, 0]; // Duplicate columns
                         let coefficients = vec![Gf256::ONE, Gf256::ONE, Gf256::ONE];
                         let data = arbitrary_symbol_data(0xC0DE_BEEF, symbol_size);
-                        symbols.push(ReceivedSymbol::repair(k as u32, columns, coefficients, data));
+                        symbols.push(ReceivedSymbol::repair(
+                            k as u32,
+                            columns,
+                            coefficients,
+                            data,
+                        ));
 
                         for i in 0..k {
                             symbols.push(ReceivedSymbol::source(i as u32, vec![0u8; symbol_size]));
@@ -7112,7 +7145,12 @@ mod tests {
                     }
                     "empty_equation" => {
                         // Repair symbol with empty equation vectors
-                        symbols.push(ReceivedSymbol::repair(k as u32, vec![], vec![], vec![0u8; symbol_size]));
+                        symbols.push(ReceivedSymbol::repair(
+                            k as u32,
+                            vec![],
+                            vec![],
+                            vec![0u8; symbol_size],
+                        ));
 
                         for i in 0..k {
                             symbols.push(ReceivedSymbol::source(i as u32, vec![0u8; symbol_size]));
@@ -7122,9 +7160,7 @@ mod tests {
                 }
 
                 // CRITICAL: Must not panic
-                let result = std::panic::catch_unwind(|| {
-                    decoder.decode(&symbols)
-                });
+                let result = std::panic::catch_unwind(|| decoder.decode(&symbols));
 
                 assert!(
                     result.is_ok(),
@@ -7186,9 +7222,7 @@ mod tests {
                 }
 
                 // CRITICAL: Must not panic even with extreme parameters
-                let result = std::panic::catch_unwind(|| {
-                    decoder.decode(&symbols)
-                });
+                let result = std::panic::catch_unwind(|| decoder.decode(&symbols));
 
                 assert!(
                     result.is_ok(),
@@ -7200,7 +7234,9 @@ mod tests {
                 match decode_result {
                     Ok(_) => println!("Extreme case '{case_name}' unexpectedly succeeded"),
                     Err(decode_error) => {
-                        println!("Extreme case '{case_name}' correctly failed with: {decode_error:?}");
+                        println!(
+                            "Extreme case '{case_name}' correctly failed with: {decode_error:?}"
+                        );
                     }
                 }
             }
@@ -7220,7 +7256,11 @@ mod tests {
 
             // Add source symbols with wrong sizes
             for i in 0..k {
-                let wrong_size = if i % 2 == 0 { symbol_size / 2 } else { symbol_size * 2 };
+                let wrong_size = if i % 2 == 0 {
+                    symbol_size / 2
+                } else {
+                    symbol_size * 2
+                };
                 let data = arbitrary_symbol_data(seed + i as u64, wrong_size);
                 symbols.push(ReceivedSymbol::source(i as u32, data));
             }
@@ -7229,16 +7269,18 @@ mod tests {
             let bad_columns = vec![999, 1000, 1001]; // Out of range
             let bad_coefficients = vec![Gf256::ONE]; // Wrong count
             let bad_data = vec![0x42; symbol_size * 3]; // Wrong size
-            symbols.push(ReceivedSymbol::repair(k as u32, bad_columns, bad_coefficients, bad_data));
+            symbols.push(ReceivedSymbol::repair(
+                k as u32,
+                bad_columns,
+                bad_coefficients,
+                bad_data,
+            ));
 
             // Test both sequential and wavefront decoders - neither must panic
-            let sequential_result = std::panic::catch_unwind(|| {
-                decoder.decode(&symbols)
-            });
+            let sequential_result = std::panic::catch_unwind(|| decoder.decode(&symbols));
 
-            let wavefront_result = std::panic::catch_unwind(|| {
-                decoder.decode_wavefront(&symbols, 2)
-            });
+            let wavefront_result =
+                std::panic::catch_unwind(|| decoder.decode_wavefront(&symbols, 2));
 
             assert!(
                 sequential_result.is_ok(),
@@ -7252,14 +7294,20 @@ mod tests {
 
             // Both should fail gracefully (or succeed if input happens to be valid)
             match (sequential_result.unwrap(), wavefront_result.unwrap()) {
-                (Ok(_), Ok(_)) => println!("Both decoders unexpectedly succeeded on malformed input"),
+                (Ok(_), Ok(_)) => {
+                    println!("Both decoders unexpectedly succeeded on malformed input")
+                }
                 (Err(seq_err), Err(wf_err)) => {
                     println!("Both decoders correctly failed:");
                     println!("  Sequential: {seq_err:?}");
                     println!("  Wavefront:  {wf_err:?}");
                 }
-                (Ok(_), Err(wf_err)) => println!("Sequential succeeded, wavefront failed: {wf_err:?}"),
-                (Err(seq_err), Ok(_)) => println!("Sequential failed: {seq_err:?}, wavefront succeeded"),
+                (Ok(_), Err(wf_err)) => {
+                    println!("Sequential succeeded, wavefront failed: {wf_err:?}")
+                }
+                (Err(seq_err), Ok(_)) => {
+                    println!("Sequential failed: {seq_err:?}, wavefront succeeded")
+                }
             }
         }
     }

@@ -2583,4 +2583,53 @@ mod tests {
             );
         }
     }
+
+    /// Golden artifacts test for Prometheus exposition with pinned 5-counter / 3-histogram / 1-gauge state.
+    ///
+    /// br-asupersync-t36ete: Pin a specific metrics state scenario and snapshot
+    /// the Prometheus text-format output via insta to catch format drift and
+    /// ensure consistent exposition format across changes. This creates a
+    /// complex scenario with multiple metric types and realistic values.
+    #[test]
+    fn prometheus_exposition_5_counter_3_histogram_1_gauge_golden() {
+        let mut metrics = Metrics::new();
+
+        // 5 Counters with various realistic values
+        metrics.counter("http_requests_total").add(1247);
+        metrics.counter("tcp_connections_opened_total").add(89);
+        metrics.counter("bytes_transmitted_total").add(524288);
+        metrics.counter("task_spawns_total").add(0); // Zero value edge case
+        metrics.counter("region_closures_total").add(u64::MAX); // Max value edge case
+
+        // 3 Histograms with different bucket configurations and observations
+        let request_latency = metrics.histogram("request_latency_seconds", vec![0.001, 0.01, 0.1, 1.0]);
+        request_latency.observe(0.0005); // Below first bucket
+        request_latency.observe(0.025);  // In second bucket
+        request_latency.observe(0.15);   // In third bucket
+        request_latency.observe(2.5);    // Above all buckets
+
+        let memory_alloc = metrics.histogram("memory_allocation_bytes", vec![1024.0, 4096.0, 16384.0, 65536.0]);
+        memory_alloc.observe(512.0);   // Below first bucket
+        memory_alloc.observe(2048.0);  // Second bucket
+        memory_alloc.observe(8192.0);  // Third bucket
+        memory_alloc.observe(32768.0); // Fourth bucket
+        memory_alloc.observe(131072.0); // Above all buckets
+
+        let task_duration = metrics.histogram("task_execution_duration_ms", vec![1.0, 5.0, 10.0, 50.0, 100.0]);
+        task_duration.observe(0.5);  // Below first bucket
+        task_duration.observe(3.0);  // Second bucket
+        task_duration.observe(7.5);  // Third bucket
+        task_duration.observe(25.0); // Fourth bucket
+        task_duration.observe(75.0); // Fifth bucket
+        task_duration.observe(250.0); // Above all buckets
+
+        // 1 Gauge with a realistic current value
+        metrics.gauge("active_worker_threads").set(8);
+
+        // Snapshot the Prometheus exposition format
+        insta::assert_snapshot!(
+            "prometheus_exposition_5_counter_3_histogram_1_gauge",
+            metrics.export_prometheus()
+        );
+    }
 }

@@ -4145,6 +4145,15 @@ impl MySqlTransaction<'_> {
         self.read_only
     }
 
+    #[must_use]
+    pub(crate) const fn requires_rollback_before_commit(&self) -> bool {
+        self.conn.inner.needs_rollback
+    }
+
+    pub(crate) fn poison_for_rollback(&mut self) {
+        self.conn.inner.needs_rollback = true;
+    }
+
     /// Commit the transaction.
     pub async fn commit(mut self, cx: &Cx) -> Outcome<(), MySqlError> {
         if self.finished {
@@ -4230,7 +4239,7 @@ impl Drop for MySqlTransaction<'_> {
             // Mark the connection so the next command will issue an implicit
             // ROLLBACK before proceeding. We cannot await inside Drop, so
             // the actual ROLLBACK is deferred to `drain_abandoned_transaction`.
-            self.conn.inner.needs_rollback = true;
+            self.poison_for_rollback();
         }
     }
 }

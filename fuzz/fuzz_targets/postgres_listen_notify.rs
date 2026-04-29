@@ -10,6 +10,9 @@
 //! 5. Error handling for malformed notification responses
 
 use arbitrary::Arbitrary;
+use asupersync::database::postgres::{
+    fuzz_build_listen_sql, fuzz_build_unlisten_sql, fuzz_parse_notification_response,
+};
 use libfuzzer_sys::fuzz_target;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -792,21 +795,149 @@ fn fuzz_listen_notify(mut input: ListenNotifyFuzzInput) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Arbitrary, Debug)]
+struct RealParserInput {
+    channel: String,
+    payload: String,
+    process_id: i32,
+    mutation: NotificationMutation,
+    trailing_bytes: Vec<u8>,
+}
+
+#[derive(Arbitrary, Debug)]
+enum NotificationMutation {
+    Exact,
+    Truncate(u8),
+    DropChannelTerminator,
+    DropPayloadTerminator,
+    AppendTrailingBytes,
+}
+
+fn strip_nuls_and_truncate(input: &str, max_len: usize) -> String {
+    let mut out = String::with_capacity(input.len().min(max_len));
+    for ch in input.chars() {
+        if ch == '\0' {
+            continue;
+        }
+        let char_len = ch.len_utf8();
+        if out.len() + char_len > max_len {
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn quote_identifier(identifier: &str) -> String {
+    let mut quoted = String::with_capacity(identifier.len() + 2);
+    quoted.push('"');
+    for ch in identifier.chars() {
+        if ch == '"' {
+            quoted.push('"');
+        }
+        quoted.push(ch);
+    }
+    quoted.push('"');
+    quoted
+}
+
+fn build_notification_body(process_id: i32, channel: &str, payload: &str) -> Vec<u8> {
+    let mut body = Vec::with_capacity(4 + channel.len() + payload.len() + 2);
+    body.extend_from_slice(&process_id.to_be_bytes());
+    body.extend_from_slice(channel.as_bytes());
+    body.push(0);
+    body.extend_from_slice(payload.as_bytes());
+    body.push(0);
+    body
+}
+
+fn apply_notification_mutation(
+    body: &mut Vec<u8>,
+    channel_len: usize,
+    mutation: &NotificationMutation,
+    trailing_bytes: &[u8],
+) -> bool {
+    match mutation {
+        NotificationMutation::Exact => true,
+        NotificationMutation::Truncate(drop_count) => {
+            if !body.is_empty() {
+                let amount = 1 + (*drop_count as usize % body.len());
+                body.truncate(body.len() - amount);
+            }
+            false
+        }
+        NotificationMutation::DropChannelTerminator => {
+            let terminator_index = 4 + channel_len;
+            if terminator_index < body.len() {
+                body.remove(terminator_index);
+            }
+            false
+        }
+        NotificationMutation::DropPayloadTerminator => {
+            body.pop();
+            false
+        }
+        NotificationMutation::AppendTrailingBytes => {
+            if trailing_bytes.is_empty() {
+                body.push(0xff);
+            } else {
+                body.extend(trailing_bytes.iter().copied().take(8));
+            }
+            false
+        }
+    }
+}
+
+fn fuzz_real_notification_parser(input: RealParserInput) {
+    let expected_valid_channel =
+        !input.channel.is_empty() && input.channel.len() <= 63 && !input.channel.contains('\0');
+
+    let listen_sql = fuzz_build_listen_sql(&input.channel);
+    let unlisten_sql = fuzz_build_unlisten_sql(&input.channel);
+    assert_eq!(listen_sql.is_ok(), expected_valid_channel);
+    assert_eq!(unlisten_sql.is_ok(), expected_valid_channel);
+
+    if let Ok(sql) = listen_sql {
+        assert_eq!(sql, format!("LISTEN {}", quote_identifier(&input.channel)));
+    }
+    if let Ok(sql) = unlisten_sql {
+        assert_eq!(
+            sql,
+            format!("UNLISTEN {}", quote_identifier(&input.channel))
+        );
+    }
+
+    let channel = strip_nuls_and_truncate(&input.channel, 80);
+    let payload = strip_nuls_and_truncate(&input.payload, 96);
+    let mut body = build_notification_body(input.process_id, &channel, &payload);
+    let should_succeed = apply_notification_mutation(
+        &mut body,
+        channel.len(),
+        &input.mutation,
+        &input.trailing_bytes,
+    );
+    let result = fuzz_parse_notification_response(&body);
+    assert_eq!(
+        result.is_ok(),
+        should_succeed,
+        "mutation={:?} body_len={} channel={:?} payload={:?} result={result:?}",
+        input.mutation,
+        body.len(),
+        channel,
+        payload
+    );
+}
+
 fuzz_target!(|data: &[u8]| {
-    // Limit input size for performance
-    if data.len() > 16384 {
+    if data.len() > 4096 {
         return;
     }
 
     let mut unstructured = arbitrary::Unstructured::new(data);
-
-    // Generate fuzz configuration
-    let input = if let Ok(input) = ListenNotifyFuzzInput::arbitrary(&mut unstructured) {
+    let input = if let Ok(input) = RealParserInput::arbitrary(&mut unstructured) {
         input
     } else {
         return;
     };
-
-    // Run LISTEN/NOTIFY fuzzing
-    let _ = fuzz_listen_notify(input);
+    fuzz_real_notification_parser(input);
 });

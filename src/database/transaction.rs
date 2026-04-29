@@ -145,6 +145,10 @@ mod pg {
     use crate::database::postgres::{PgConnection, PgError, PgTransaction};
     use std::fmt;
 
+    fn rollback_required_error() -> PgError {
+        PgError::Protocol("transaction must roll back before commit".to_string())
+    }
+
     /// Run a closure inside a PostgreSQL transaction.
     ///
     /// The closure receives a mutable reference to the active transaction and
@@ -175,12 +179,17 @@ mod pg {
         let result = f(&mut tx, cx).await;
 
         match result {
-            Outcome::Ok(value) => match tx.commit(cx).await {
-                Outcome::Ok(()) => Outcome::Ok(value),
-                Outcome::Err(e) => Outcome::Err(e),
-                Outcome::Cancelled(r) => Outcome::Cancelled(r),
-                Outcome::Panicked(p) => Outcome::Panicked(p),
-            },
+            Outcome::Ok(value) => {
+                if tx.requires_rollback_before_commit() {
+                    return Outcome::Err(rollback_required_error());
+                }
+                match tx.commit(cx).await {
+                    Outcome::Ok(()) => Outcome::Ok(value),
+                    Outcome::Err(e) => Outcome::Err(e),
+                    Outcome::Cancelled(r) => Outcome::Cancelled(r),
+                    Outcome::Panicked(p) => Outcome::Panicked(p),
+                }
+            }
             Outcome::Err(e) => {
                 // Best-effort rollback; drop will handle it if this fails.
                 let _ = tx.rollback(cx).await;
@@ -311,6 +320,14 @@ mod pg {
             self.tx
         }
     }
+
+    impl Drop for PgSavepoint<'_, '_> {
+        fn drop(&mut self) {
+            if !self.released {
+                self.tx.poison_for_rollback();
+            }
+        }
+    }
 }
 
 #[cfg(feature = "postgres")]
@@ -325,6 +342,10 @@ mod sqlite {
     use std::{fmt, pin::Pin};
 
     type SqliteTxFuture<'a, T> = Pin<Box<dyn Future<Output = Outcome<T, SqliteError>> + Send + 'a>>;
+
+    fn rollback_required_error() -> SqliteError {
+        SqliteError::Sqlite("transaction must roll back before commit".to_string())
+    }
 
     /// Run a closure inside a SQLite transaction.
     ///
@@ -347,12 +368,17 @@ mod sqlite {
         let result = f(&tx, cx).await;
 
         match result {
-            Outcome::Ok(value) => match tx.commit(cx).await {
-                Outcome::Ok(()) => Outcome::Ok(value),
-                Outcome::Err(e) => Outcome::Err(e),
-                Outcome::Cancelled(r) => Outcome::Cancelled(r),
-                Outcome::Panicked(p) => Outcome::Panicked(p),
-            },
+            Outcome::Ok(value) => {
+                if tx.requires_rollback_before_commit() {
+                    return Outcome::Err(rollback_required_error());
+                }
+                match tx.commit(cx).await {
+                    Outcome::Ok(()) => Outcome::Ok(value),
+                    Outcome::Err(e) => Outcome::Err(e),
+                    Outcome::Cancelled(r) => Outcome::Cancelled(r),
+                    Outcome::Panicked(p) => Outcome::Panicked(p),
+                }
+            }
             Outcome::Err(e) => {
                 let _ = tx.rollback(cx).await;
                 Outcome::Err(e)
@@ -390,12 +416,17 @@ mod sqlite {
         let result = f(&tx, cx).await;
 
         match result {
-            Outcome::Ok(value) => match tx.commit(cx).await {
-                Outcome::Ok(()) => Outcome::Ok(value),
-                Outcome::Err(e) => Outcome::Err(e),
-                Outcome::Cancelled(r) => Outcome::Cancelled(r),
-                Outcome::Panicked(p) => Outcome::Panicked(p),
-            },
+            Outcome::Ok(value) => {
+                if tx.requires_rollback_before_commit() {
+                    return Outcome::Err(rollback_required_error());
+                }
+                match tx.commit(cx).await {
+                    Outcome::Ok(()) => Outcome::Ok(value),
+                    Outcome::Err(e) => Outcome::Err(e),
+                    Outcome::Cancelled(r) => Outcome::Cancelled(r),
+                    Outcome::Panicked(p) => Outcome::Panicked(p),
+                }
+            }
             Outcome::Err(e) => {
                 let _ = tx.rollback(cx).await;
                 Outcome::Err(e)
@@ -526,6 +557,14 @@ mod sqlite {
             self.tx
         }
     }
+
+    impl Drop for SqliteSavepoint<'_, '_> {
+        fn drop(&mut self) {
+            if !self.released {
+                self.tx.poison_for_rollback();
+            }
+        }
+    }
 }
 
 #[cfg(feature = "sqlite")]
@@ -541,6 +580,10 @@ mod mysql {
     use super::{Cx, Future, Outcome, RetryPolicy, validate_savepoint_name, wait_retry_delay};
     use crate::database::mysql::{MySqlConnection, MySqlError, MySqlTransaction};
     use std::fmt;
+
+    fn rollback_required_error() -> MySqlError {
+        MySqlError::Protocol("transaction must roll back before commit".to_string())
+    }
 
     /// Run a closure inside a MySQL transaction.
     ///
@@ -564,12 +607,17 @@ mod mysql {
         let result = f(&mut tx, cx).await;
 
         match result {
-            Outcome::Ok(value) => match tx.commit(cx).await {
-                Outcome::Ok(()) => Outcome::Ok(value),
-                Outcome::Err(e) => Outcome::Err(e),
-                Outcome::Cancelled(r) => Outcome::Cancelled(r),
-                Outcome::Panicked(p) => Outcome::Panicked(p),
-            },
+            Outcome::Ok(value) => {
+                if tx.requires_rollback_before_commit() {
+                    return Outcome::Err(rollback_required_error());
+                }
+                match tx.commit(cx).await {
+                    Outcome::Ok(()) => Outcome::Ok(value),
+                    Outcome::Err(e) => Outcome::Err(e),
+                    Outcome::Cancelled(r) => Outcome::Cancelled(r),
+                    Outcome::Panicked(p) => Outcome::Panicked(p),
+                }
+            }
             Outcome::Err(e) => {
                 let _ = tx.rollback(cx).await;
                 Outcome::Err(e)
@@ -694,6 +742,14 @@ mod mysql {
         /// Access the underlying transaction.
         pub fn transaction(&mut self) -> &mut MySqlTransaction<'tx> {
             self.tx
+        }
+    }
+
+    impl Drop for MySqlSavepoint<'_, '_> {
+        fn drop(&mut self) {
+            if !self.released {
+                self.tx.poison_for_rollback();
+            }
         }
     }
 }
@@ -1111,5 +1167,95 @@ mod tests {
         assert_eq!(abort_then_commit, commit_then_abort);
 
         crate::test_complete!("metamorphic_sqlite_commit_abort_isolation");
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn with_sqlite_transaction_dropped_savepoint_refuses_commit() {
+        init_test("with_sqlite_transaction_dropped_savepoint_refuses_commit");
+
+        let target = ConformanceTarget::lab_runtime();
+        target
+            .run_test(TestConfig::default(), |cx| async move {
+                let conn = match SqliteConnection::open_in_memory(&cx).await {
+                    Outcome::Ok(conn) => conn,
+                    other => panic!("open_in_memory failed: {other:?}"),
+                };
+
+                match conn
+                    .execute(
+                        &cx,
+                        "CREATE TABLE savepoint_guard_items (id INTEGER PRIMARY KEY, name TEXT)",
+                        &[],
+                    )
+                    .await
+                {
+                    Outcome::Ok(_) => {}
+                    other => panic!("schema setup failed: {other:?}"),
+                }
+
+                let tx_outcome = with_sqlite_transaction(&conn, &cx, |tx, cx| {
+                    Box::pin(async move {
+                        match tx
+                            .execute(
+                                cx,
+                                "INSERT INTO savepoint_guard_items(name) VALUES (?1)",
+                                &[SqliteValue::Text("outer".to_string())],
+                            )
+                            .await
+                        {
+                            Outcome::Ok(_) => {}
+                            other => panic!("outer insert failed: {other:?}"),
+                        }
+
+                        let mut savepoint = match SqliteSavepoint::new(tx, cx, "sp1").await {
+                            Outcome::Ok(savepoint) => savepoint,
+                            other => panic!("savepoint create failed: {other:?}"),
+                        };
+
+                        match savepoint
+                            .transaction()
+                            .execute(
+                                cx,
+                                "INSERT INTO savepoint_guard_items(name) VALUES (?1)",
+                                &[SqliteValue::Text("inner".to_string())],
+                            )
+                            .await
+                        {
+                            Outcome::Ok(_) => {}
+                            other => panic!("inner insert failed: {other:?}"),
+                        }
+
+                        drop(savepoint);
+                        Outcome::Ok(())
+                    })
+                })
+                .await;
+
+                match tx_outcome {
+                    Outcome::Err(SqliteError::Sqlite(msg)) => {
+                        assert!(msg.contains("must roll back before commit"), "got: {msg}");
+                    }
+                    other => panic!("expected rollback-required error, got {other:?}"),
+                }
+
+                let rows = match conn
+                    .query(
+                        &cx,
+                        "SELECT COUNT(*) AS count FROM savepoint_guard_items",
+                        &[],
+                    )
+                    .await
+                {
+                    Outcome::Ok(rows) => rows,
+                    other => panic!("count query after dropped savepoint failed: {other:?}"),
+                };
+
+                let count = rows[0].get_i64(0).expect("count column");
+                assert_eq!(count, 0, "dropped savepoint must prevent commit");
+            })
+            .expect("lab runtime test");
+
+        crate::test_complete!("with_sqlite_transaction_dropped_savepoint_refuses_commit");
     }
 }

@@ -2802,6 +2802,17 @@ test = false
 doc = false
 bench = false
 
+# Structure-aware fuzzer for RESP3 verbatim strings with exact label preservation.
+# Targets src/messaging/redis.rs verbatim parsing for arbitrary payload bytes while
+# asserting that valid `txt`/`mkd` frames preserve the 3-byte label across
+# decode/encode round-trips and that malformed separator/trailer/length cases fail closed.
+[[bin]]
+name = "redis_resp3_verbatim_string"
+path = "fuzz_targets/redis_resp3_verbatim_string.rs"
+test = false
+doc = false
+bench = false
+
 # Structure-aware fuzz target for codec/framed.rs decoder reset-and-reuse cycle testing.
 # Tests state consistency across Framed::into_parts() -> reconstruct cycles where decoders
 # must maintain parsing context across transport reconstruction. Exercises buffer migration,
@@ -2973,6 +2984,16 @@ bench = false
 [[bin]]
 name = "intrusive_heap_invariants"
 path = "fuzz_targets/intrusive_heap_invariants.rs"
+test = false
+doc = false
+bench = false
+
+# Notify state machine fuzzing for async synchronization primitives
+# Tests waiter starvation, double-wake prevention, and cancellation safety
+# through arbitrary sequences of notify_one/notify_waiters/notified operations.
+[[bin]]
+name = "notify_state_machine"
+path = "fuzz_targets/notify_state_machine.rs"
 test = false
 doc = false
 bench = false

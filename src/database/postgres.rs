@@ -1522,9 +1522,7 @@ impl ScramAuth {
                     base64::Engine::decode(&base64::engine::general_purpose::STANDARD, value)
                         .map_err(|e| PgError::AuthenticationFailed(format!("invalid salt: {e}")))?;
                 if salt.replace(decoded).is_some() {
-                    return Err(PgError::AuthenticationFailed(
-                        "duplicate salt".to_string(),
-                    ));
+                    return Err(PgError::AuthenticationFailed("duplicate salt".to_string()));
                 }
             } else if let Some(value) = part.strip_prefix("i=") {
                 let parsed = value.parse().map_err(|e| {
@@ -2694,6 +2692,7 @@ impl PgConnection {
         let _process_id = reader.read_i32()?;
         let _channel = reader.read_cstring()?;
         let _payload = reader.read_cstring()?;
+        reader.ensure_consumed("NotificationResponse")?;
         Ok(())
     }
 
@@ -5561,6 +5560,18 @@ impl PgTransaction<'_> {
         self.read_only
     }
 
+    #[must_use]
+    pub(crate) fn requires_rollback_before_commit(&self) -> bool {
+        self.conn.inner.needs_rollback
+            || self.conn.inner.needs_discard
+            || self.conn.inner.transaction_status == b'E'
+    }
+
+    pub(crate) fn poison_for_rollback(&mut self) {
+        self.conn.inner.needs_rollback = true;
+        self.conn.inner.needs_discard = true;
+    }
+
     /// Commit the transaction.
     pub async fn commit(mut self, cx: &Cx) -> Outcome<(), PgError> {
         if self.finished {
@@ -5680,8 +5691,7 @@ impl Drop for PgTransaction<'_> {
     /// ROLLBACK fast path.
     fn drop(&mut self) {
         if !self.finished {
-            self.conn.inner.needs_rollback = true;
-            self.conn.inner.needs_discard = true;
+            self.poison_for_rollback();
         }
     }
 }
@@ -6011,6 +6021,28 @@ pub fn fuzz_parse_notice_response(data: &[u8]) -> Result<PgError, PgError> {
     conn.parse_notice_response(data)
 }
 
+/// Fuzz-target re-exporter for LISTEN SQL construction.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_build_listen_sql(channel: &str) -> Result<String, PgError> {
+    build_listen_sql(channel)
+}
+
+/// Fuzz-target re-exporter for UNLISTEN SQL construction.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_build_unlisten_sql(channel: &str) -> Result<String, PgError> {
+    build_unlisten_sql(channel)
+}
+
+/// Fuzz-target re-exporter for NotificationResponse parsing.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_parse_notification_response(data: &[u8]) -> Result<(), PgError> {
+    let (mut conn, _peer) = fuzz_test_connection_with_peer();
+    conn.handle_notification_response(data)
+}
+
 /// Fuzz-target summary for a frontend Parse message.
 #[cfg(feature = "test-internals")]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6036,9 +6068,7 @@ pub struct FuzzBindMessage {
 #[cfg(feature = "test-internals")]
 fn fuzz_frontend_message_body(frame: &[u8], expected_type: u8) -> Result<&[u8], PgError> {
     if frame.len() < 5 {
-        return Err(PgError::Protocol(
-            "frontend message too short".to_string(),
-        ));
+        return Err(PgError::Protocol("frontend message too short".to_string()));
     }
     if frame[0] != expected_type {
         return Err(PgError::Protocol(format!(
@@ -6128,6 +6158,11 @@ pub fn fuzz_parse_bind_message(frame: &[u8]) -> Result<FuzzBindMessage, PgError>
     if value_count < 0 {
         return Err(PgError::Protocol(format!(
             "invalid bind value count: {value_count}"
+        )));
+    }
+    if format_count != 0 && format_count != 1 && format_count != value_count {
+        return Err(PgError::Protocol(format!(
+            "bind format count {format_count} must be 0, 1, or match bind value count {value_count}"
         )));
     }
     let mut parameter_values = Vec::with_capacity(value_count as usize);
@@ -8668,6 +8703,47 @@ mod tests {
     }
 
     #[test]
+    fn fuzz_parse_bind_message_rejects_mismatched_format_count() {
+        let mut buf = MessageBuffer::new();
+        buf.write_cstring("");
+        buf.write_cstring("");
+        buf.write_i16(2);
+        buf.write_i16(0);
+        buf.write_i16(0);
+        buf.write_i16(1);
+
+        let frame = buf.build_message(FrontendMessage::Bind as u8).unwrap();
+        match fuzz_parse_bind_message(&frame) {
+            Err(PgError::Protocol(msg)) => {
+                assert!(
+                    msg.contains("bind format count 2 must be 0, 1, or match bind value count 1"),
+                    "got: {msg}"
+                );
+            }
+            other => panic!("expected bind format-count mismatch error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fuzz_parse_bind_message_rejects_truncated_parameter_payload() {
+        let mut buf = MessageBuffer::new();
+        buf.write_cstring("");
+        buf.write_cstring("");
+        buf.write_i16(0);
+        buf.write_i16(1);
+        buf.write_i32(2);
+        buf.write_bytes(b"4");
+
+        let frame = buf.build_message(FrontendMessage::Bind as u8).unwrap();
+        match fuzz_parse_bind_message(&frame) {
+            Err(PgError::Protocol(msg)) => {
+                assert!(msg.contains("unexpected end of message"), "got: {msg}");
+            }
+            other => panic!("expected truncated bind payload error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn build_describe_msg_portal() {
         let msg = build_describe_msg(b'P', "").unwrap();
         assert_eq!(msg[0], b'D');
@@ -9317,13 +9393,28 @@ mod tests {
     }
 
     #[test]
+    fn notification_response_rejects_trailing_bytes() {
+        let (mut conn, _peer) = make_test_connection_with_peer();
+        let mut data = Vec::new();
+        data.extend_from_slice(&42i32.to_be_bytes());
+        data.extend_from_slice(b"jobs\0done\0");
+        data.push(0xff);
+
+        match conn.handle_notification_response(&data) {
+            Err(PgError::Protocol(msg)) => {
+                assert!(msg.contains("NotificationResponse"), "got: {msg}");
+            }
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn query_preserves_per_statement_row_metadata_in_simple_query_batch_psql_parity() {
         let (mut conn, mut peer) = make_test_connection_with_peer();
         let cx = crate::cx::Cx::for_testing();
 
         let responder = std::thread::spawn(move || {
-            let query_request =
-                read_until_contains(&mut peer, b"SELECT 1 AS n; SELECT 'two' AS s");
+            let query_request = read_until_contains(&mut peer, b"SELECT 1 AS n; SELECT 'two' AS s");
             assert!(
                 query_request
                     .windows("SELECT 1 AS n; SELECT 'two' AS s".len())
@@ -10539,8 +10630,7 @@ mod tests {
                 "same SQL should reuse the cached server statement"
             );
             assert_eq!(
-                conn.inner.next_stmt_id,
-                stmt_id_after_cold_prepare,
+                conn.inner.next_stmt_id, stmt_id_after_cold_prepare,
                 "cache-hit prepare must not allocate a new statement id"
             );
 

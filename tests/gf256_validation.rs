@@ -14,9 +14,78 @@
 #[cfg(test)]
 mod tests {
     use asupersync::raptorq::gf256::{
-        Gf256, gf256_addmul_slice, gf256_mul_slice, gf256_mul_slices2,
+        Gf256, Gf256Kernel, active_kernel, gf256_addmul_slice, gf256_mul_slice, gf256_mul_slices2,
     };
     use std::time::Instant;
+
+    #[cfg(all(feature = "simd-intrinsics", any(target_arch = "x86", target_arch = "x86_64")))]
+    fn host_has_gf256_simd() -> bool {
+        std::is_x86_feature_detected!("avx2")
+    }
+
+    #[cfg(all(feature = "simd-intrinsics", target_arch = "aarch64"))]
+    fn host_has_gf256_simd() -> bool {
+        std::arch::is_aarch64_feature_detected!("neon")
+    }
+
+    #[cfg(all(
+        feature = "simd-intrinsics",
+        not(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64"))
+    ))]
+    fn host_has_gf256_simd() -> bool {
+        false
+    }
+
+    fn next_pinned_u8(state: &mut u64) -> u8 {
+        *state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (*state >> 56) as u8
+    }
+
+    #[cfg(feature = "simd-intrinsics")]
+    #[test]
+    fn test_mul_slice_pinned_random_pairs() {
+        const PAIR_COUNT: usize = 1024;
+        const SIMD_BLOCK_LEN: usize = 32;
+        const BLOCK_COUNT: usize = PAIR_COUNT / SIMD_BLOCK_LEN;
+
+        if !host_has_gf256_simd() {
+            return;
+        }
+
+        let kernel = active_kernel();
+        assert!(
+            !matches!(kernel, Gf256Kernel::Scalar),
+            "simd-intrinsics build did not select a SIMD kernel"
+        );
+
+        let seed = 0x5EED_F00D_CAFE_BABEu64;
+        let mut corpus_state = seed;
+
+        for block_idx in 0..BLOCK_COUNT {
+            let scalar = Gf256::new(next_pinned_u8(&mut corpus_state));
+            let mut simd_block = [0u8; SIMD_BLOCK_LEN];
+            for byte in &mut simd_block {
+                *byte = next_pinned_u8(&mut corpus_state);
+            }
+
+            let original_block = simd_block;
+            gf256_mul_slice(&mut simd_block, scalar);
+
+            let pair_start = block_idx * SIMD_BLOCK_LEN;
+            for (lane_idx, (&src, &actual)) in original_block.iter().zip(simd_block.iter()).enumerate() {
+                let expected = Gf256::new(src).mul_field(scalar).raw();
+                assert_eq!(
+                    actual, expected,
+                    "seed={seed:#x} kernel={kernel:?} pair={} lane={} src={src:#04x} scalar={:#04x}",
+                    pair_start + lane_idx,
+                    lane_idx,
+                    scalar.raw(),
+                );
+            }
+        }
+    }
 
     /// Test bit-exactness of single-slice multiplication across all GF(256) values
     #[test]

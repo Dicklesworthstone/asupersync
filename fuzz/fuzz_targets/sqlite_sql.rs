@@ -26,13 +26,19 @@
 use arbitrary::Arbitrary;
 use asupersync::{
     cx::Cx,
-    database::sqlite::{SqliteConnection, SqliteError, SqliteValue},
+    database::sqlite::{
+        fuzz_validate_sqlite_open_path, SqliteConnection, SqliteError, SqliteValue,
+    },
     types::{Outcome, RegionId, TaskId},
     util::ArenaIndex,
 };
 use futures_lite::future::block_on;
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashMap;
+use std::ffi::OsString;
+use std::path::PathBuf;
+
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
 
 /// Maximum fuzz input size to prevent timeouts
 const MAX_FUZZ_INPUT_SIZE: usize = 100_000;
@@ -146,6 +152,8 @@ struct SqliteFuzzInput {
     sql_strategy: SqlStrategy,
     /// Parameter binding strategy
     param_strategy: ParameterStrategy,
+    /// ATTACH/open-path probe for path validation policy
+    attach_path_probe: AttachPathProbe,
     /// Whether to use a transaction
     use_transaction: bool,
     /// Corruption strategy
@@ -175,6 +183,23 @@ enum CorruptionStrategy {
     Repeat {
         count: u8,
     },
+}
+
+#[derive(Arbitrary, Debug, Clone)]
+struct AttachPathProbe {
+    kind: AttachPathKind,
+    path_bytes: Vec<u8>,
+    use_database_keyword: bool,
+}
+
+#[derive(Arbitrary, Debug, Clone)]
+enum AttachPathKind {
+    RelativeFile,
+    RestrictedEtc,
+    TildeHome,
+    TildeUser,
+    ParentTraversal,
+    EtcTraversal,
 }
 
 impl SqliteFuzzInput {
@@ -380,6 +405,95 @@ impl SqliteFuzzInput {
     }
 }
 
+impl AttachPathProbe {
+    fn path_buf(&self) -> PathBuf {
+        let component = sanitized_component_bytes(&self.path_bytes);
+        match self.kind {
+            AttachPathKind::RelativeFile => path_buf_from_bytes(component),
+            AttachPathKind::RestrictedEtc => {
+                let mut bytes = b"/etc/".to_vec();
+                bytes.extend(component);
+                path_buf_from_bytes(bytes)
+            }
+            AttachPathKind::TildeHome => {
+                let mut bytes = b"~/".to_vec();
+                bytes.extend(component);
+                path_buf_from_bytes(bytes)
+            }
+            AttachPathKind::TildeUser => {
+                let mut bytes = b"~fuzzuser/".to_vec();
+                bytes.extend(component);
+                path_buf_from_bytes(bytes)
+            }
+            AttachPathKind::ParentTraversal => {
+                let mut bytes = b"../".to_vec();
+                bytes.extend(component);
+                path_buf_from_bytes(bytes)
+            }
+            AttachPathKind::EtcTraversal => {
+                let mut bytes = b"../../../../etc/".to_vec();
+                bytes.extend(component);
+                path_buf_from_bytes(bytes)
+            }
+        }
+    }
+
+    fn attach_sql(&self) -> String {
+        let keyword = if self.use_database_keyword {
+            "ATTACH DATABASE"
+        } else {
+            "ATTACH"
+        };
+        let path = self.path_buf();
+        let literal = escape_sql_literal(&path.to_string_lossy());
+        format!("{keyword} '{literal}' AS fuzz_attach")
+    }
+
+    fn expected_error_fragment(&self) -> Option<&'static str> {
+        match self.kind {
+            AttachPathKind::RelativeFile => None,
+            AttachPathKind::RestrictedEtc => Some("/etc"),
+            AttachPathKind::TildeHome | AttachPathKind::TildeUser => Some("tilde-prefixed"),
+            AttachPathKind::ParentTraversal | AttachPathKind::EtcTraversal => {
+                Some("parent-directory traversal")
+            }
+        }
+    }
+}
+
+fn sanitized_component_bytes(bytes: &[u8]) -> Vec<u8> {
+    let mut sanitized = bytes
+        .iter()
+        .copied()
+        .take(96)
+        .map(|byte| match byte {
+            b'/' | b'\\' | 0 => b'_',
+            _ => byte,
+        })
+        .collect::<Vec<_>>();
+    if sanitized.is_empty() {
+        sanitized.extend_from_slice(b"tenant");
+    }
+    if !sanitized.ends_with(b".sqlite") {
+        sanitized.extend_from_slice(b".sqlite");
+    }
+    sanitized
+}
+
+#[cfg(unix)]
+fn path_buf_from_bytes(bytes: Vec<u8>) -> PathBuf {
+    PathBuf::from(OsString::from_vec(bytes))
+}
+
+#[cfg(not(unix))]
+fn path_buf_from_bytes(bytes: Vec<u8>) -> PathBuf {
+    PathBuf::from(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn escape_sql_literal(raw: &str) -> String {
+    raw.replace('\'', "''")
+}
+
 /// Test wrapper for SQLite operations
 struct SqliteTestHarness {
     conn: SqliteConnection,
@@ -413,6 +527,8 @@ impl SqliteTestHarness {
     }
 
     async fn test_sql_execution(&mut self, input: &SqliteFuzzInput) -> Result<(), SqliteError> {
+        self.test_attach_path_probe(&input.attach_path_probe).await?;
+
         let sql = input.generate_sql();
         let params = input.generate_params();
         let expected_param_count = input.count_placeholders(&sql);
@@ -540,6 +656,47 @@ impl SqliteTestHarness {
                     SQLITE_MAX_LENGTH
                 );
             }
+        }
+
+        Ok(())
+    }
+
+    async fn test_attach_path_probe(
+        &mut self,
+        probe: &AttachPathProbe,
+    ) -> Result<(), SqliteError> {
+        match self
+            .conn
+            .execute_unchecked(&self.cx, &probe.attach_sql(), &[])
+            .await
+        {
+            Outcome::Err(SqliteError::UnsafeSql(msg)) => {
+                assert!(
+                    msg.contains("ATTACH and DETACH"),
+                    "expected ATTACH/DETACH rejection, got: {msg}"
+                );
+            }
+            Outcome::Cancelled(_) => {}
+            other => panic!("expected ATTACH rejection, got: {other:?}"),
+        }
+
+        let path = probe.path_buf();
+        let validation = fuzz_validate_sqlite_open_path(&path);
+        if let Some(expected) = probe.expected_error_fragment() {
+            match validation {
+                Err(SqliteError::UnsafePath(msg)) => {
+                    assert!(
+                        msg.contains(expected),
+                        "expected path rejection containing {expected:?}, got: {msg}"
+                    );
+                }
+                other => panic!(
+                    "expected unsafe path rejection for {:?}, got: {other:?}",
+                    path
+                ),
+            }
+        } else if let Err(SqliteError::UnsafePath(msg)) = validation {
+            panic!("relative file path should not be rejected: {msg}");
         }
 
         Ok(())

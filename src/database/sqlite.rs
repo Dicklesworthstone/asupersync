@@ -39,7 +39,7 @@ use crate::types::{CancelReason, Outcome};
 use parking_lot::Mutex;
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -311,6 +311,57 @@ fn ensure_unchecked_sql_surface(sql: &str) -> Result<(), SqliteError> {
     Ok(())
 }
 
+fn resolve_sqlite_open_path(path: &Path) -> Result<PathBuf, SqliteError> {
+    if path.exists() {
+        return std::fs::canonicalize(path).map_err(SqliteError::Io);
+    }
+
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let canonical_parent = std::fs::canonicalize(parent).map_err(SqliteError::Io)?;
+    let file_name = path.file_name().ok_or_else(|| {
+        SqliteError::UnsafePath("SQLite database path must resolve to a file name".to_string())
+    })?;
+    Ok(canonical_parent.join(file_name))
+}
+
+fn validate_sqlite_open_path(path: &Path) -> Result<(), SqliteError> {
+    let raw = path.as_os_str().to_string_lossy();
+    if raw.starts_with('~') {
+        return Err(SqliteError::UnsafePath(
+            "tilde-prefixed SQLite paths are rejected; pass an explicit validated path".to_string(),
+        ));
+    }
+
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(SqliteError::UnsafePath(
+            "parent-directory traversal in SQLite paths is rejected; pass a normalized validated path"
+                .to_string(),
+        ));
+    }
+
+    let resolved = resolve_sqlite_open_path(path)?;
+    if resolved.starts_with(Path::new("/etc")) {
+        return Err(SqliteError::UnsafePath(format!(
+            "SQLite database path resolves into restricted system directory: {}",
+            resolved.display()
+        )));
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_validate_sqlite_open_path(path: &Path) -> Result<(), SqliteError> {
+    validate_sqlite_open_path(path)
+}
+
 /// Error type for SQLite operations.
 #[derive(Debug)]
 pub enum SqliteError {
@@ -339,6 +390,8 @@ pub enum SqliteError {
     LockPoisoned,
     /// Raw engine-control SQL hit a restricted binding surface.
     UnsafeSql(String),
+    /// Database path was rejected by the validated open surface.
+    UnsafePath(String),
     /// TEXT value was not valid UTF-8.
     InvalidTextEncoding {
         /// Column name or index.
@@ -441,6 +494,7 @@ impl SqliteError {
             }
             Self::Io(_) => Some("SQLITE_IOERR"),
             Self::ConnectionClosed => Some("SQLITE_MISUSE"),
+            Self::UnsafePath(_) => Some("SQLITE_PERM"),
             _ => None,
         }
     }
@@ -470,6 +524,7 @@ impl fmt::Display for SqliteError {
                     "Unsafe SQLite control SQL on SQLite binding surface: {msg}"
                 )
             }
+            Self::UnsafePath(msg) => write!(f, "Unsafe SQLite database path: {msg}"),
             Self::InvalidTextEncoding { column, source } => {
                 write!(
                     f,
@@ -794,6 +849,7 @@ impl SqliteConnection {
 
         let handle = pool.spawn(move || {
             let result = (|| {
+                validate_sqlite_open_path(&path)?;
                 let conn = rusqlite::Connection::open(&path)
                     .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
                 configure_connection_defaults(&conn, true)?;
@@ -1297,6 +1353,29 @@ pub struct SqliteTransaction<'a> {
 }
 
 impl SqliteTransaction<'_> {
+    #[must_use]
+    pub(crate) fn requires_rollback_before_commit(&self) -> bool {
+        self.conn.needs_rollback.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn poison_for_rollback(&self) {
+        if self
+            .conn
+            .needs_rollback
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            let inner = Arc::clone(&self.conn.inner);
+            let needs_rollback = Arc::clone(&self.conn.needs_rollback);
+            self.conn.pool.spawn(move || {
+                let guard = inner.lock();
+                if let Ok(conn) = guard.get() {
+                    let _ = rollback_orphaned_transaction(conn, needs_rollback.as_ref());
+                }
+            });
+        }
+    }
+
     /// Commits the transaction.
     ///
     /// # Cancellation
@@ -1366,25 +1445,8 @@ impl SqliteTransaction<'_> {
 
 impl Drop for SqliteTransaction<'_> {
     fn drop(&mut self) {
-        if !self.finished
-            && self
-                .conn
-                .needs_rollback
-                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-        {
-            // Asynchronously enqueue a rollback via an atomic flag so we don't
-            // block the async executor thread waiting for the connection lock.
-            // We also explicitly spawn a task to drain the rollback immediately if
-            // the connection is otherwise idle, preventing lock starvation for the database.
-            let inner = Arc::clone(&self.conn.inner);
-            let needs_rollback = Arc::clone(&self.conn.needs_rollback);
-            self.conn.pool.spawn(move || {
-                let guard = inner.lock();
-                if let Ok(conn) = guard.get() {
-                    let _ = rollback_orphaned_transaction(conn, needs_rollback.as_ref());
-                }
-            });
+        if !self.finished {
+            self.poison_for_rollback();
         }
     }
 }
@@ -1590,6 +1652,15 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_error_display_unsafe_path() {
+        let err = SqliteError::UnsafePath("resolved into /etc".into());
+        assert_eq!(
+            err.to_string(),
+            "Unsafe SQLite database path: resolved into /etc"
+        );
+    }
+
+    #[test]
     fn sqlite_error_display_invalid_text_encoding() {
         let err = SqliteError::InvalidTextEncoding {
             column: "payload".into(),
@@ -1678,6 +1749,37 @@ mod tests {
         for sql in ["PRAGMA journal_mode", "BEGIN IMMEDIATE", "ROLLBACK"] {
             ensure_unchecked_sql_surface(sql)
                 .unwrap_or_else(|err| panic!("unchecked surface should allow {sql:?}: {err:?}"));
+        }
+    }
+
+    #[test]
+    fn validate_sqlite_open_path_rejects_tilde_prefixes() {
+        for raw in ["~/tenant.db", "~alice/tenant.db"] {
+            let err = validate_sqlite_open_path(Path::new(raw)).unwrap_err();
+            assert!(
+                matches!(err, SqliteError::UnsafePath(msg) if msg.contains("tilde-prefixed")),
+                "expected tilde rejection for {raw:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_sqlite_open_path_rejects_restricted_system_directory() {
+        let err = validate_sqlite_open_path(Path::new("/etc/asupersync-test.sqlite")).unwrap_err();
+        assert!(
+            matches!(err, SqliteError::UnsafePath(msg) if msg.contains("/etc")),
+            "expected /etc rejection, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_sqlite_open_path_rejects_parent_directory_traversal() {
+        for raw in ["../tenant.db", "nested/../../tenant.db"] {
+            let err = validate_sqlite_open_path(Path::new(raw)).unwrap_err();
+            assert!(
+                matches!(err, SqliteError::UnsafePath(msg) if msg.contains("parent-directory traversal")),
+                "expected traversal rejection for {raw:?}, got {err:?}"
+            );
         }
     }
 
@@ -2279,6 +2381,83 @@ mod tests {
                 }
                 other => panic!("expected ATTACH rejection, got: {other:?}"),
             }
+        });
+    }
+
+    #[test]
+    fn open_rejects_tilde_prefixed_paths_before_rusqlite() {
+        let cx = create_test_cx();
+
+        block_on(async {
+            match SqliteConnection::open(&cx, "~/tenant.sqlite").await {
+                Outcome::Err(SqliteError::UnsafePath(msg)) => {
+                    assert!(msg.contains("tilde-prefixed"));
+                }
+                other => panic!("expected unsafe path rejection, got: {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn open_rejects_parent_directory_traversal_before_rusqlite() {
+        let cx = create_test_cx();
+
+        block_on(async {
+            match SqliteConnection::open(&cx, "../tenant.sqlite").await {
+                Outcome::Err(SqliteError::UnsafePath(msg)) => {
+                    assert!(msg.contains("parent-directory traversal"));
+                }
+                other => panic!("expected unsafe traversal rejection, got: {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn separate_validated_connections_keep_schema_isolated_without_attach() {
+        let cx = create_test_cx();
+
+        block_on(async {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let first_path = dir.path().join("tenant_a.sqlite3");
+            let second_path = dir.path().join("tenant_b.sqlite3");
+
+            let first = match SqliteConnection::open(&cx, &first_path).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open first db failed: {other:?}"),
+            };
+            let second = match SqliteConnection::open(&cx, &second_path).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open second db failed: {other:?}"),
+            };
+
+            match first
+                .execute_batch(
+                    &cx,
+                    "CREATE TABLE tenant_only (id INTEGER PRIMARY KEY, value TEXT);
+                     INSERT INTO tenant_only(value) VALUES ('a');",
+                )
+                .await
+            {
+                Outcome::Ok(()) => {}
+                other => panic!("seed first db failed: {other:?}"),
+            }
+
+            let rows = match second
+                .query(
+                    &cx,
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='tenant_only'",
+                    &[],
+                )
+                .await
+            {
+                Outcome::Ok(rows) => rows,
+                other => panic!("query second db failed: {other:?}"),
+            };
+
+            assert!(
+                rows.is_empty(),
+                "separate validated sqlite connections must not share attached schema state"
+            );
         });
     }
 
