@@ -212,7 +212,7 @@ fn test_adversarial_symbol_set(input: &AdversarialSymbolSet, k: usize, symbol_si
             let proof_kind = decoder
                 .decode_with_proof(&symbols, object_id, 0)
                 .err()
-                .and_then(validation_error_kind)
+                .and_then(|(error, _proof)| validation_error_kind(error))
                 .expect("decode_with_proof must reject the same malformed repair packets");
             assert_eq!(
                 proof_kind, direct_kind,
