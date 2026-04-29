@@ -415,9 +415,13 @@ fn split_required_fields_csv(csv: &str) -> Vec<String> {
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
         .collect::<Vec<_>>();
-    fields.sort();
-    fields.dedup();
+    sort_and_dedup_strings(&mut fields);
     fields
+}
+
+fn sort_and_dedup_strings(values: &mut Vec<String>) {
+    values.sort();
+    values.dedup();
 }
 
 fn trace_event_kind_from_stable_name(name: &str) -> Option<TraceEventKind> {
@@ -451,8 +455,7 @@ pub fn browser_trace_schema_v1() -> BrowserTraceSchema {
         .iter()
         .map(|kind| {
             let mut redacted_fields = redacted_fields_for_kind(*kind);
-            redacted_fields.sort();
-            redacted_fields.dedup();
+            sort_and_dedup_strings(&mut redacted_fields);
             BrowserTraceEventSpec {
                 event_kind: kind.stable_name().to_string(),
                 category: browser_trace_category_for_kind(*kind),
@@ -668,14 +671,12 @@ fn upgrade_legacy_event_specs(
         let mut required_fields = legacy
             .required_fields
             .unwrap_or_else(|| split_required_fields_csv(kind.required_fields()));
-        required_fields.sort();
-        required_fields.dedup();
+        sort_and_dedup_strings(&mut required_fields);
 
         let mut redacted_fields = legacy
             .redacted_fields
             .unwrap_or_else(|| redacted_fields_for_kind(kind));
-        redacted_fields.sort();
-        redacted_fields.dedup();
+        sort_and_dedup_strings(&mut redacted_fields);
 
         event_specs.push(BrowserTraceEventSpec {
             event_kind: kind.stable_name().to_string(),
@@ -3996,7 +3997,12 @@ mod tests {
     #[test]
     fn trace_event_canonical_serialization_golden() {
         let events = vec![
-            TraceEvent::new(1, Time::from_nanos(0), TraceEventKind::UserTrace, TraceData::None),
+            TraceEvent::new(
+                1,
+                Time::from_nanos(0),
+                TraceEventKind::UserTrace,
+                TraceData::None,
+            ),
             TraceEvent::spawn(2, Time::from_nanos(100), task(1), region(1)),
             TraceEvent::region_created(3, Time::from_nanos(200), region(2), Some(region(1))),
             TraceEvent::obligation_commit(
@@ -4068,7 +4074,14 @@ mod tests {
                     held: vec![(obligation(3), ObligationKind::SendPermit)],
                 },
             ),
-            TraceEvent::monitor_created(20, Time::from_nanos(1_700), 50, task(1), region(1), task(2)),
+            TraceEvent::monitor_created(
+                20,
+                Time::from_nanos(1_700),
+                50,
+                task(1),
+                region(1),
+                task(2),
+            ),
             TraceEvent::down_delivered(
                 21,
                 Time::from_nanos(1_800),
@@ -4123,5 +4136,42 @@ mod tests {
         }
 
         insta::assert_json_snapshot!("trace_event_canonical_serialization", events);
+    }
+
+    /// Golden test for OpenTelemetry span-focused 5-event trace serialization.
+    ///
+    /// This test pins the canonical JSON serialization of a minimal 5-event
+    /// trace representing a typical span lifecycle: spawn → schedule → poll →
+    /// user trace → complete. The golden snapshot ensures that OpenTelemetry
+    /// bridge exporters receive consistent trace event structure across runtime
+    /// versions.
+    #[test]
+    fn otel_span_golden_tests() {
+        let span_events = vec![
+            // Span start: task spawned in a region
+            TraceEvent::spawn(1, Time::from_nanos(1000), task(10), region(5)),
+
+            // Task gets scheduled for execution
+            TraceEvent::schedule(2, Time::from_nanos(1100), task(10), region(5)),
+
+            // Task execution begins
+            TraceEvent::poll(3, Time::from_nanos(1200), task(10), region(5)),
+
+            // User trace event within the span
+            TraceEvent::user_trace(4, Time::from_nanos(1250), "otel-span-processing"),
+
+            // Span end: task completion
+            TraceEvent::complete(5, Time::from_nanos(1300), task(10), region(5)),
+        ];
+
+        // Verify round-trip serialization integrity for OTel exports
+        for event in &span_events {
+            let json = serde_json::to_value(event).expect("serialize otel span event");
+            let decoded: TraceEvent =
+                serde_json::from_value(json).expect("deserialize otel span event");
+            assert_eq!(*event, decoded, "otel span round-trip mismatch for {event:?}");
+        }
+
+        insta::assert_json_snapshot!("otel_span_golden_tests", span_events);
     }
 }
