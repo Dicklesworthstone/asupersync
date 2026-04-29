@@ -3014,3 +3014,13 @@ path = "fuzz_targets/contended_mutex_commutativity.rs"
 test = false
 doc = false
 bench = false
+
+# Cx scope nesting restriction monotonicity fuzzing for capability security
+# Tests that parent observation is never less restrictive than child through
+# arbitrary nested cancel/budget/macaroon mutations and scope hierarchies.
+[[bin]]
+name = "cx_scope_nesting"
+path = "fuzz_targets/cx_scope_nesting.rs"
+test = false
+doc = false
+bench = false
