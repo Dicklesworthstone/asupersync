@@ -68,13 +68,18 @@ impl Default for ReadyDispatchInvarianceConfig {
 /// A test task for ready dispatch invariance testing.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TestTask {
+    /// Stable task identifier used across enqueue-order permutations.
     pub id: TaskId,
+    /// Scheduling priority expected to dominate dispatch order when mixed.
     pub priority: Priority,
+    /// Optional deadline used when testing EDF-style invariance.
     pub deadline: Option<Time>,
+    /// Synthetic execution time estimate carried through the test model.
     pub estimated_duration_ms: u64,
 }
 
 impl TestTask {
+    /// Creates a new test task with the provided identifier and priority.
     pub fn new(id: TaskId, priority: Priority) -> Self {
         Self {
             id,
@@ -84,11 +89,13 @@ impl TestTask {
         }
     }
 
+    /// Attaches a deadline to the test task.
     pub fn with_deadline(mut self, deadline: Time) -> Self {
         self.deadline = Some(deadline);
         self
     }
 
+    /// Attaches a synthetic execution duration to the test task.
     pub fn with_duration(mut self, duration_ms: u64) -> Self {
         self.estimated_duration_ms = duration_ms;
         self
@@ -115,6 +122,7 @@ pub struct ReadyDispatchInvarianceTest {
 }
 
 impl ReadyDispatchInvarianceTest {
+    /// Creates a new ready-dispatch invariance harness with deterministic RNG state.
     pub fn new(config: ReadyDispatchInvarianceConfig) -> Self {
         Self {
             config,
