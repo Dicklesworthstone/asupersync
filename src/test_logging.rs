@@ -4394,6 +4394,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn test_harness_finish_auto_generates_manifest_on_failure() {
         init_test("test_harness_finish_auto_generates_manifest_on_failure");
         let _guard = crate::test_utils::env_lock();

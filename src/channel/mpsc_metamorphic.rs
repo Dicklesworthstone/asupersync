@@ -23,9 +23,7 @@
 //! - Channel invariants are preserved under permit abandonment
 //! - Waiting sender queues maintain FIFO fairness
 
-use crate::Cx;
 use crate::channel::mpsc::{self, SendError};
-use crate::types::outcome::Outcome;
 use proptest::prelude::*;
 
 /// Test data structure for channel operations
@@ -46,11 +44,6 @@ impl TestMessage {
     }
 }
 
-/// Create a capability context for deterministic channel tests.
-fn create_test_context(_region_id: u32, _task_id: u32) -> Cx {
-    Cx::for_testing()
-}
-
 /// **MR1: Permit Abort vs Drop Equivalence**
 ///
 /// A permit that is explicitly aborted should result in the same channel state
@@ -66,8 +59,6 @@ fn mr1_permit_abort_vs_drop_equivalence() {
         capacity in 1usize..10
     )| {
         let message = TestMessage::new(test_id, data, sequence);
-        let cx = create_test_context(1, 1);
-
         // Path 1: Reserve permit, then explicitly abort
         let (tx1, mut rx1) = mpsc::channel(capacity);
         let permit1 = tx1.try_reserve().expect("should reserve in empty channel");
@@ -105,12 +96,12 @@ fn mr1_permit_abort_vs_drop_equivalence() {
 
         let recv1_result = rx1.try_recv();
         let recv2_result = rx2.try_recv();
-        prop_assert_eq!(recv1_result, recv2_result,
+        prop_assert_eq!(recv1_result.as_ref(), recv2_result.as_ref(),
             "Receivers should behave identically after abort vs drop");
 
-        if let (Ok(msg1), Ok(msg2)) = (recv1_result, recv2_result) {
-            prop_assert_eq!(msg1, message, "Message should be preserved after abort path");
-            prop_assert_eq!(msg2, message, "Message should be preserved after drop path");
+        if let (Ok(msg1), Ok(msg2)) = (&recv1_result, &recv2_result) {
+            prop_assert_eq!(msg1, &message, "Message should be preserved after abort path");
+            prop_assert_eq!(msg2, &message, "Message should be preserved after drop path");
         }
     });
 }
@@ -124,18 +115,17 @@ fn mr1_permit_abort_vs_drop_equivalence() {
 #[test]
 fn mr2_reservation_count_consistency() {
     proptest!(|(
-        sequence in 0u32..100,
+        _sequence in 0u32..100,
         capacity in 1usize..5, // Small capacity to force waiting
         num_permits in 1usize..4
     )| {
         // Ensure num_permits >= capacity to test waiter behavior
         let num_permits = num_permits.min(capacity) + 1;
-        let cx = create_test_context(1, 1);
 
         // Path 1: Fill channel with permits, then abort the first one
         let (tx1, _rx1) = mpsc::channel::<TestMessage>(capacity);
         let mut permits1 = Vec::new();
-        for i in 0..num_permits {
+        for _ in 0..num_permits {
             match tx1.try_reserve() {
                 Ok(permit) => permits1.push(Some(permit)),
                 Err(SendError::Full(())) => permits1.push(None),
@@ -161,7 +151,7 @@ fn mr2_reservation_count_consistency() {
         // Path 2: Same setup, but drop the first permit instead
         let (tx2, _rx2) = mpsc::channel::<TestMessage>(capacity);
         let mut permits2 = Vec::new();
-        for i in 0..num_permits {
+        for _ in 0..num_permits {
             match tx2.try_reserve() {
                 Ok(permit) => permits2.push(Some(permit)),
                 Err(SendError::Full(())) => permits2.push(None),
@@ -261,8 +251,6 @@ fn mr4_receiver_state_independence() {
         capacity in 2usize..10
     )| {
         let message = TestMessage::new(test_id, data, sequence);
-        let cx = create_test_context(1, 1);
-
         // Path 1: Send message, abort a subsequent permit, then receive
         let (tx1, mut rx1) = mpsc::channel(capacity);
 
@@ -291,13 +279,13 @@ fn mr4_receiver_state_independence() {
         let recv_result1 = rx1.try_recv();
         let recv_result2 = rx2.try_recv();
 
-        prop_assert_eq!(recv_result1, recv_result2,
+        prop_assert_eq!(recv_result1.as_ref(), recv_result2.as_ref(),
             "Receivers should behave identically regardless of abort vs drop");
 
-        match (recv_result1, recv_result2) {
+        match (&recv_result1, &recv_result2) {
             (Ok(msg1), Ok(msg2)) => {
-                prop_assert_eq!(msg1, message, "Received message should match sent");
-                prop_assert_eq!(msg2, message, "Received message should match sent");
+                prop_assert_eq!(msg1, &message, "Received message should match sent");
+                prop_assert_eq!(msg2, &message, "Received message should match sent");
             },
             (Err(e1), Err(e2)) => {
                 prop_assert_eq!(e1, e2, "Receive errors should be identical");
@@ -314,8 +302,8 @@ fn mr4_receiver_state_independence() {
         let next_recv1 = rx1.try_recv().expect("subsequent receive should work");
         let next_recv2 = rx2.try_recv().expect("subsequent receive should work");
 
-        prop_assert_eq!(next_recv1, next_message, "Subsequent receive should work after abort");
-        prop_assert_eq!(next_recv2, next_message, "Subsequent receive should work after drop");
+        prop_assert_eq!(&next_recv1, &next_message, "Subsequent receive should work after abort");
+        prop_assert_eq!(&next_recv2, &next_message, "Subsequent receive should work after drop");
     });
 }
 
@@ -326,8 +314,6 @@ fn mr4_receiver_state_independence() {
 #[test]
 fn mr_composite_full_channel_abort_vs_drop() {
     let capacity = 2;
-    let cx = create_test_context(1, 1);
-
     // Path 1: Fill channel, abort permits
     let (tx1, mut rx1) = mpsc::channel::<u32>(capacity);
 
@@ -373,19 +359,29 @@ fn mr_composite_full_channel_abort_vs_drop() {
     let counts_after_drop = tx2.debug_counts();
 
     // Verify abort vs drop equivalence
-    assert_eq!(after_abort_result1.is_ok(), after_drop_result2.is_ok(),
-        "Send results should be equivalent after abort vs drop");
-    assert_eq!(counts_after_abort, counts_after_drop,
-        "Channel counts should be equivalent after abort vs drop");
+    assert_eq!(
+        after_abort_result1.is_ok(),
+        after_drop_result2.is_ok(),
+        "Send results should be equivalent after abort vs drop"
+    );
+    assert_eq!(
+        counts_after_abort, counts_after_drop,
+        "Channel counts should be equivalent after abort vs drop"
+    );
 
     // Verify receivers see the same data
     let recv_sequence1: Vec<u32> = (0..3).filter_map(|_| rx1.try_recv().ok()).collect();
     let recv_sequence2: Vec<u32> = (0..3).filter_map(|_| rx2.try_recv().ok()).collect();
 
-    assert_eq!(recv_sequence1, recv_sequence2,
-        "Receivers should see identical message sequences");
-    assert_eq!(recv_sequence1, vec![1, 2, 3],
-        "Should receive all successfully sent messages");
+    assert_eq!(
+        recv_sequence1, recv_sequence2,
+        "Receivers should see identical message sequences"
+    );
+    assert_eq!(
+        recv_sequence1,
+        vec![1, 2, 3],
+        "Should receive all successfully sent messages"
+    );
 }
 
 #[cfg(test)]
@@ -449,10 +445,16 @@ mod tests {
 
         // Both should decrement reserved count
         assert_eq!(counts_before.1, 1, "Should have 1 reserved before");
-        assert_eq!(counts_after_abort.1, 0, "Should have 0 reserved after abort");
+        assert_eq!(
+            counts_after_abort.1, 0,
+            "Should have 0 reserved after abort"
+        );
         assert_eq!(counts_after_drop.1, 0, "Should have 0 reserved after drop");
 
         // Final state should be identical
-        assert_eq!(counts_after_abort, counts_after_drop, "Final states should match");
+        assert_eq!(
+            counts_after_abort, counts_after_drop,
+            "Final states should match"
+        );
     }
 }

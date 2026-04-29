@@ -89,10 +89,9 @@ impl std::fmt::Display for LedgerError {
                 "obligation {obligation:?} cannot abort_by_id: already resolved \
                  (state={state:?})"
             ),
-            Self::NotFound { obligation } => write!(
-                f,
-                "obligation {obligation:?} not found in ledger"
-            ),
+            Self::NotFound { obligation } => {
+                write!(f, "obligation {obligation:?} not found in ledger")
+            }
         }
     }
 }
@@ -634,8 +633,7 @@ impl ObligationLedger {
         now: Time,
         reason: ObligationAbortReason,
     ) -> Result<u64, LedgerError> {
-        let Some(record_state_and_region) =
-            self.obligations.get(&id).map(|r| (r.state, r.region))
+        let Some(record_state_and_region) = self.obligations.get(&id).map(|r| (r.state, r.region))
         else {
             return Err(LedgerError::NotFound { obligation: id });
         };
@@ -2021,11 +2019,7 @@ mod tests {
         // (b) Happy path: reserve then race-tolerant abort succeeds.
         let token_b = ledger.acquire(ObligationKind::Lease, task, region, Time::ZERO);
         let id_b = token_b.id();
-        match ledger.try_abort_by_id(
-            id_b,
-            Time::from_nanos(10),
-            ObligationAbortReason::Cancel,
-        ) {
+        match ledger.try_abort_by_id(id_b, Time::from_nanos(10), ObligationAbortReason::Cancel) {
             Ok(duration) => assert_eq!(duration, 10),
             other => panic!("expected Ok(10), got {other:?}"),
         }
@@ -2036,11 +2030,7 @@ mod tests {
         // again must not panic and must not double-decrement pending.
         let pending_before = ledger.stats().pending;
         let aborted_before = ledger.stats().total_aborted;
-        match ledger.try_abort_by_id(
-            id_b,
-            Time::from_nanos(20),
-            ObligationAbortReason::Cancel,
-        ) {
+        match ledger.try_abort_by_id(id_b, Time::from_nanos(20), ObligationAbortReason::Cancel) {
             Err(LedgerError::AlreadyResolved { obligation, state }) => {
                 assert_eq!(obligation, id_b);
                 assert_eq!(state, ObligationState::Aborted);
@@ -2056,11 +2046,7 @@ mod tests {
         let token_d = ledger.acquire(ObligationKind::Lease, task, region, Time::ZERO);
         let id_d = token_d.id();
         let _ = ledger.commit(token_d, Time::from_nanos(40));
-        match ledger.try_abort_by_id(
-            id_d,
-            Time::from_nanos(50),
-            ObligationAbortReason::Cancel,
-        ) {
+        match ledger.try_abort_by_id(id_d, Time::from_nanos(50), ObligationAbortReason::Cancel) {
             Err(LedgerError::AlreadyResolved { obligation, state }) => {
                 assert_eq!(obligation, id_d);
                 assert_eq!(state, ObligationState::Committed);
@@ -2079,11 +2065,7 @@ mod tests {
         let token_e = ledger.acquire(ObligationKind::Lease, task, region, Time::ZERO);
         let id_e = token_e.id();
         ledger.mark_region_finalized(region);
-        match ledger.try_abort_by_id(
-            id_e,
-            Time::from_nanos(60),
-            ObligationAbortReason::Cancel,
-        ) {
+        match ledger.try_abort_by_id(id_e, Time::from_nanos(60), ObligationAbortReason::Cancel) {
             Ok(0) => {}
             other => panic!("expected Ok(0) after finalize, got {other:?}"),
         }
@@ -3073,6 +3055,7 @@ mod tests {
                 assert_eq!(r, region);
                 assert_eq!(o, obligation_id);
             }
+            other => panic!("expected RegionFinalized, got {other:?}"),
         }
 
         // The obligation record is still pending (we did not mutate it).
@@ -3100,6 +3083,7 @@ mod tests {
 
         match err {
             LedgerError::RegionFinalized { .. } => {}
+            other => panic!("expected RegionFinalized, got {other:?}"),
         }
         assert_eq!(ledger.stats().pending, 1);
         assert_eq!(ledger.stats().total_aborted, 0);
@@ -3154,6 +3138,7 @@ mod tests {
 
         match err {
             LedgerError::RegionFinalized { region: r, .. } => assert_eq!(r, region),
+            other => panic!("expected RegionFinalized, got {other:?}"),
         }
 
         // No mutation: stats unchanged.

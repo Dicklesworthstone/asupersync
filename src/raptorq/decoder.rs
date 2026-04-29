@@ -2829,6 +2829,11 @@ mod tests {
     use std::collections::BTreeSet;
 
     use insta::assert_json_snapshot;
+    use raptorq::{
+        Decoder as RaptorqRsDecoder, EncodingPacket as RaptorqRsEncodingPacket,
+        ObjectTransmissionInformation as RaptorqRsObjectTransmissionInformation,
+        PayloadId as RaptorqRsPayloadId,
+    };
     use serde_json::json;
 
     use crate::raptorq::rfc6330::rand as rfc_rand;
@@ -3219,6 +3224,144 @@ mod tests {
             .collect()
     }
 
+    fn permute_symbols_deterministically(symbols: &mut [ReceivedSymbol], seed: u32) {
+        for idx in 0..symbols.len() {
+            let remaining =
+                u32::try_from(symbols.len() - idx).expect("symbol tail length must fit in u32");
+            let swap_offset = usize::try_from(rfc_rand(
+                seed.wrapping_add(idx as u32),
+                (idx % 7) as u8,
+                remaining,
+            ))
+            .expect("RFC Rand[] output must fit in usize");
+            symbols.swap(idx, idx + swap_offset);
+        }
+    }
+
+    fn decode_repair_only_payload(
+        decoder: &InactivationDecoder,
+        repairs: &[ReceivedSymbol],
+    ) -> Result<DecodeResult, DecodeError> {
+        let mut received = decoder.constraint_symbols();
+        received.extend_from_slice(repairs);
+        decoder.decode(&received)
+    }
+
+    fn pick_unique_drop_indices_from_draws(
+        k: usize,
+        draw_count: usize,
+        unique_target: usize,
+        seed: u32,
+    ) -> Vec<usize> {
+        assert!(
+            unique_target <= k,
+            "drop target must fit inside the source block"
+        );
+        let limit = u32::try_from(k).expect("K must fit in u32");
+        let mut drops = BTreeSet::new();
+        for draw in 0..draw_count {
+            let draw_u32 = u32::try_from(draw).expect("draw index must fit in u32");
+            let idx = usize::try_from(rfc_rand(
+                seed.wrapping_add(draw_u32),
+                (draw % 251) as u8,
+                limit,
+            ))
+            .expect("drop draw must fit in usize");
+            drops.insert(idx);
+            if drops.len() == unique_target {
+                break;
+            }
+        }
+        assert_eq!(
+            drops.len(),
+            unique_target,
+            "draw schedule must produce the requested number of unique drops"
+        );
+        drops.into_iter().collect()
+    }
+
+    fn build_mixed_received_symbols(
+        decoder: &InactivationDecoder,
+        encoder: &SystematicEncoder,
+        source: &[Vec<u8>],
+        drop_indices: &[usize],
+        repair_count: usize,
+    ) -> Vec<ReceivedSymbol> {
+        let dropped: BTreeSet<_> = drop_indices.iter().copied().collect();
+        let mut received = decoder.constraint_symbols();
+
+        for (esi, data) in source.iter().enumerate() {
+            if !dropped.contains(&esi) {
+                received.push(ReceivedSymbol::source(
+                    u32::try_from(esi).expect("source ESI must fit in u32"),
+                    data.clone(),
+                ));
+            }
+        }
+
+        let k_u32 = u32::try_from(source.len()).expect("K must fit in u32");
+        for esi in k_u32..k_u32 + u32::try_from(repair_count).expect("repair count must fit in u32")
+        {
+            let (cols, coefs) = decoder.repair_equation(esi).unwrap();
+            received.push(ReceivedSymbol::repair(
+                esi,
+                cols,
+                coefs,
+                encoder.repair_symbol(esi),
+            ));
+        }
+
+        received
+    }
+
+    fn reference_decode_with_raptorq_rs(
+        source: &[Vec<u8>],
+        encoder: &SystematicEncoder,
+        drop_indices: &[usize],
+        repair_count: usize,
+    ) -> Vec<u8> {
+        let transfer_length = source
+            .len()
+            .checked_mul(source[0].len())
+            .expect("transfer length overflow");
+        let symbol_size =
+            u16::try_from(source[0].len()).expect("symbol size must fit in u16 for raptorq-rs");
+        let config = RaptorqRsObjectTransmissionInformation::new(
+            transfer_length as u64,
+            symbol_size,
+            1,
+            1,
+            1,
+        );
+        let mut decoder = RaptorqRsDecoder::new(config);
+        let dropped: BTreeSet<_> = drop_indices.iter().copied().collect();
+
+        for (esi, data) in source.iter().enumerate() {
+            if !dropped.contains(&esi) {
+                let esi_u32 = u32::try_from(esi).expect("source ESI must fit in u32");
+                let packet =
+                    RaptorqRsEncodingPacket::new(RaptorqRsPayloadId::new(0, esi_u32), data.clone());
+                if let Some(decoded) = decoder.decode(packet) {
+                    return decoded;
+                }
+            }
+        }
+
+        let k_u32 = u32::try_from(source.len()).expect("K must fit in u32");
+        for repair_offset in 0..repair_count {
+            let esi = k_u32 + u32::try_from(repair_offset).expect("repair index must fit in u32");
+            let packet = RaptorqRsEncodingPacket::new(
+                RaptorqRsPayloadId::new(0, esi),
+                encoder.repair_symbol(esi),
+            );
+            if let Some(decoded) = decoder.decode(packet) {
+                return decoded;
+            }
+        }
+
+        panic!("raptorq-rs reference decode must succeed");
+    }
+
     /// Build repair symbol bytes by XOR-folding encoder intermediate symbols.
     fn build_repair_from_intermediate(
         encoder: &SystematicEncoder,
@@ -3418,7 +3561,7 @@ mod tests {
 
         // RFC 6330 Section 6 reference source data (standardized test vector)
         let source_data: Vec<u8> = (0..k * symbol_size)
-            .map(|i| (i * 7 + 13) % 256)  // RFC 6330 test pattern
+            .map(|i| (i * 7 + 13) % 256) // RFC 6330 test pattern
             .map(|x| x as u8)
             .collect();
         let source: Vec<Vec<u8>> = source_data
@@ -3446,7 +3589,8 @@ mod tests {
                 received.push(ReceivedSymbol::source(esi, symbol_data));
             } else {
                 // Repair symbol
-                let (cols, coefs) = decoder.repair_equation(esi)
+                let (cols, coefs) = decoder
+                    .repair_equation(esi)
                     .expect("RFC Section 6 repair equation should be valid");
                 let repair_data = encoder.repair_symbol(esi);
                 received.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
@@ -3454,7 +3598,8 @@ mod tests {
         }
 
         // RFC 6330 Section 6 conformance check: decoder must succeed with this mix
-        let decoded = decoder.decode(&received)
+        let decoded = decoder
+            .decode(&received)
             .expect("RFC 6330 Section 6 reference vector must decode successfully");
 
         // Differential test: compare against reference implementation output
@@ -3466,7 +3611,8 @@ mod tests {
 
         // RFC 6330 Section 6 additional conformance checks
         assert_eq!(
-            decoded.source.len(), k,
+            decoded.source.len(),
+            k,
             "RFC 6330 Section 6: decoded block must have exactly K source symbols"
         );
 
@@ -3476,12 +3622,14 @@ mod tests {
             assert_eq!(
                 decoded_symbol, expected_symbol,
                 "RFC 6330 Section 6 symbol-level differential test failed: \
-                 symbol {} decoded incorrectly from random-ESI mix vector", i
+                 symbol {} decoded incorrectly from random-ESI mix vector",
+                i
             );
         }
 
         // RFC 6330 Section 6 requirement: test with alternative decoder method
-        let wavefront_decoded = decoder.decode_wavefront(&received, 3)
+        let wavefront_decoded = decoder
+            .decode_wavefront(&received, 3)
             .expect("RFC 6330 Section 6 wavefront decode must also succeed");
 
         assert_eq!(
@@ -3988,6 +4136,108 @@ mod tests {
         assert_eq!(
             wavefront_extra.source, baseline_decoded.source,
             "wavefront decode must recover the same output after extra repair symbols are added"
+        );
+    }
+
+    #[test]
+    fn metamorphic_repair_order_and_surplus_subset_preserve_recovered_source() {
+        let k = 10;
+        let symbol_size = 32;
+        let seed = 0x98_0001_u64;
+
+        let source = make_source_data(k, symbol_size);
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let l = decoder.params().l;
+
+        for extra_repairs in 0..=4usize {
+            let total_repairs = l + extra_repairs;
+            let mut repairs = Vec::with_capacity(total_repairs);
+            for esi in (k as u32)..(k as u32 + total_repairs as u32) {
+                let (cols, coefs) = decoder.repair_equation(esi).unwrap();
+                let repair_data = encoder.repair_symbol(esi);
+                repairs.push(ReceivedSymbol::repair(esi, cols, coefs, repair_data));
+            }
+
+            let canonical = decode_repair_only_payload(&decoder, &repairs)
+                .expect("canonical repair-only decode must succeed");
+            assert_eq!(
+                canonical.source, source,
+                "repair-only canonical decode must recover the original source for N={extra_repairs}"
+            );
+
+            let mut permuted = repairs.clone();
+            permute_symbols_deterministically(
+                &mut permuted,
+                0x6330_0400u32.wrapping_add(extra_repairs as u32),
+            );
+            let permuted_decoded = decode_repair_only_payload(&decoder, &permuted)
+                .expect("permuted repair-only decode must succeed");
+            assert_eq!(
+                permuted_decoded.source, canonical.source,
+                "repair order permutation must not change recovered source for N={extra_repairs}"
+            );
+
+            let mut decodable_prefix_len = None;
+            for prefix_len in 1..=permuted.len() {
+                if decode_repair_only_payload(&decoder, &permuted[..prefix_len]).is_ok() {
+                    decodable_prefix_len = Some(prefix_len);
+                    break;
+                }
+            }
+            let decodable_prefix_len =
+                decodable_prefix_len.expect("some repair prefix must be decodable");
+            let mut retained = permuted[..decodable_prefix_len].to_vec();
+
+            for (offset, repair) in permuted[decodable_prefix_len..].iter().enumerate() {
+                let keep = rfc_rand(
+                    0x6330_0600u32
+                        .wrapping_add(extra_repairs as u32)
+                        .wrapping_add(offset as u32),
+                    (offset % 11) as u8,
+                    2,
+                ) == 0;
+                if keep {
+                    retained.push(repair.clone());
+                }
+            }
+
+            let retained_decoded = decode_repair_only_payload(&decoder, &retained)
+                .expect("dropping a random subset of surplus repairs must preserve recovery");
+            assert_eq!(
+                retained_decoded.source, canonical.source,
+                "dropping a subset of surplus repairs must preserve recovered source for N={extra_repairs}"
+            );
+        }
+    }
+
+    #[test]
+    fn differential_k42_random_drop_schedule_matches_raptorq_rs() {
+        let k = 42;
+        let symbol_size = 100;
+        let repair_count = 30;
+        let draw_count = 100;
+        let seed = 0x6330_042A_u64;
+
+        // Collapse 100 deterministic random draw attempts into a valid K=42 drop set.
+        let drop_indices =
+            pick_unique_drop_indices_from_draws(k, draw_count, repair_count, 0xA1B2_C3D4);
+        let source = make_source_data(k, symbol_size);
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let received =
+            build_mixed_received_symbols(&decoder, &encoder, &source, &drop_indices, repair_count);
+
+        let ours = decoder
+            .decode(&received)
+            .expect("K=42 mixed source+repair differential decode must succeed");
+        let reference =
+            reference_decode_with_raptorq_rs(&source, &encoder, &drop_indices, repair_count);
+
+        assert_eq!(
+            ours.source.concat(),
+            reference,
+            "our decoder must match raptorq-rs for the pinned K=42 mixed source+repair schedule"
         );
     }
 

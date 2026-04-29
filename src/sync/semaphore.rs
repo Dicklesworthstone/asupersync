@@ -3541,39 +3541,32 @@ mod tests {
         for (initial_permits, acquire_count, description) in test_cases {
             // Baseline: semaphore state without acquire/release cycle
             let baseline = Semaphore::new(initial_permits);
-            let baseline_cx = test_cx();
 
             // Transform: semaphore with acquire/release cycle
             let transformed = Semaphore::new(initial_permits);
             let transformed_cx = test_cx();
 
-            // Capture baseline state before any operations
-            let baseline_initial_permits = baseline.available_permits();
-            let baseline_max_permits = baseline.max_permits();
-
             // Phase 1: Acquire permits on transformed semaphore
-            let acquired_permit = transformed
-                .try_acquire(acquire_count)
-                .expect(&format!("acquire {} permits from {}", acquire_count, initial_permits));
+            let acquired_permit = transformed.try_acquire(acquire_count).expect(&format!(
+                "acquire {} permits from {}",
+                acquire_count, initial_permits
+            ));
 
             // Apply cancellation mask between acquire and release
             // This simulates cancellation pressure during the hold period
-            transformed_cx.mask();
+            transformed_cx.masked(|| {
+                // Verify acquire correctly decremented permits
+                let mid_permits = transformed.available_permits();
+                crate::assert_with_log!(
+                    mid_permits == initial_permits - acquire_count,
+                    &format!("{}: acquire decremented permits correctly", description),
+                    initial_permits - acquire_count,
+                    mid_permits
+                );
 
-            // Verify acquire correctly decremented permits
-            let mid_permits = transformed.available_permits();
-            crate::assert_with_log!(
-                mid_permits == initial_permits - acquire_count,
-                &format!("{}: acquire decremented permits correctly", description),
-                initial_permits - acquire_count,
-                mid_permits
-            );
-
-            // Phase 2: Release permits (via drop) while cancel mask is active
-            drop(acquired_permit);
-
-            // Remove cancel mask after release
-            transformed_cx.unmask();
+                // Phase 2: Release permits (via drop) while cancel mask is active
+                drop(acquired_permit);
+            });
 
             // Phase 3: Verify identity property - states should be identical
             let baseline_final_permits = baseline.available_permits();
@@ -3611,7 +3604,10 @@ mod tests {
                     // Both failed - this is expected for edge cases
                 }
                 _ => {
-                    panic!("{}: behavioral divergence - baseline and transformed had different try_acquire results", description);
+                    panic!(
+                        "{}: behavioral divergence - baseline and transformed had different try_acquire results",
+                        description
+                    );
                 }
             }
         }
@@ -3631,7 +3627,6 @@ mod tests {
         let sem = Semaphore::new(3);
         let cx1 = test_cx();
         let cx2 = test_cx();
-        let cx3 = test_cx();
 
         // Phase 1: Create waiter pressure - multiple tasks waiting
         let _permit1 = sem.try_acquire(1).expect("acquire first permit");
@@ -3641,32 +3636,30 @@ mod tests {
         let mut waiter_future = sem.acquire(&cx2, 2);
 
         // Verify waiter is actually waiting
-        let poll_result = crate::test::poll_once(&mut waiter_future);
+        let poll_result = poll_once(&mut waiter_future);
         crate::assert_with_log!(
-            poll_result.is_pending(),
+            poll_result.is_none(),
             "waiter should be pending before release",
             true,
-            poll_result.is_pending()
+            poll_result.is_none()
         );
 
         // Phase 2: Acquire and release the remaining permit with cancel mask
         let acquired = sem.try_acquire(1).expect("acquire remaining permit");
 
         // Apply cancel mask during hold period
-        cx1.mask();
-
-        // Release permit - should not affect waiting behavior
-        drop(acquired);
-
-        cx1.unmask();
+        cx1.masked(|| {
+            // Release permit - should not affect waiting behavior
+            drop(acquired);
+        });
 
         // Phase 3: Verify waiter is still waiting (identity preserved)
-        let poll_after_identity = crate::test::poll_once(&mut waiter_future);
+        let poll_after_identity = poll_once(&mut waiter_future);
         crate::assert_with_log!(
-            poll_after_identity.is_pending(),
+            poll_after_identity.is_none(),
             "waiter should still be pending after identity cycle",
             true,
-            poll_after_identity.is_pending()
+            poll_after_identity.is_none()
         );
 
         // Phase 4: Release enough permits to satisfy waiter and verify FIFO order
@@ -3674,12 +3667,12 @@ mod tests {
         drop(_permit2);
 
         // Now waiter should be able to proceed
-        let poll_final = crate::test::poll_once(&mut waiter_future);
+        let poll_final = poll_once(&mut waiter_future);
         crate::assert_with_log!(
-            poll_final.is_ready(),
+            poll_final.is_some(),
             "waiter should be ready after sufficient releases",
             true,
-            poll_final.is_ready()
+            poll_final.is_some()
         );
 
         crate::test_complete!("metamorphic_acquire_release_identity_with_concurrent_waiters");

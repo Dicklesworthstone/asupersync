@@ -3326,7 +3326,6 @@ mod metamorphic_tests {
 
         let mut late_reader_futs = Vec::new();
         let mut late_reader_wake_counts = Vec::new();
-        let mut late_reader_wakers = Vec::new();
         for _ in 0..late_readers {
             let mut late_reader_fut = OwnedRwLockReadGuard::read(lock.clone(), &cx);
             let (late_reader_waker, late_reader_wake_count) = CountWaker::new();
@@ -3338,9 +3337,8 @@ mod metamorphic_tests {
                     .is_pending(),
                 "late reader should queue behind the waiting writer"
             );
-            late_reader_futs.push((late_reader_fut, late_reader_task_cx));
+            late_reader_futs.push((late_reader_fut, late_reader_waker_obj));
             late_reader_wake_counts.push(late_reader_wake_count);
-            late_reader_wakers.push(late_reader_waker_obj);
         }
 
         let queued_state = lock.debug_state();
@@ -3361,19 +3359,23 @@ mod metamorphic_tests {
             .collect::<Vec<_>>();
         let late_readers_pending_while_writer_held = late_reader_futs
             .iter_mut()
-            .filter(|(fut, task_cx)| std::pin::Pin::new(fut).poll(task_cx).is_pending())
+            .map(|(fut, waker)| {
+                let mut task_cx = Context::from_waker(waker);
+                std::pin::Pin::new(fut).poll(&mut task_cx)
+            })
+            .filter(|poll| poll.is_pending())
             .count();
 
         drop(writer_guard);
 
         let mut admitted_late_readers = Vec::new();
-        for (mut late_reader_fut, mut late_reader_task_cx) in late_reader_futs {
+        for (mut late_reader_fut, late_reader_waker) in late_reader_futs {
+            let mut late_reader_task_cx = Context::from_waker(&late_reader_waker);
             match std::pin::Pin::new(&mut late_reader_fut).poll(&mut late_reader_task_cx) {
                 Poll::Ready(Ok(guard)) => admitted_late_readers.push(guard),
                 other => panic!("late reader did not acquire after writer turn: {other:?}"),
             }
         }
-        drop(late_reader_wakers);
         let late_readers_ready_after_writer_release = admitted_late_readers.len();
         drop(admitted_late_readers);
 

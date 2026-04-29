@@ -1225,6 +1225,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn env_override_symbol_size() {
         let _guard = crate::test_utils::env_lock();
         // SAFETY: tests serialize env access with test_utils::env_lock.

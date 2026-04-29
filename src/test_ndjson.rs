@@ -639,6 +639,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(unsafe_code)]
     fn test_write_artifact_bundle_roundtrip() {
         init_test("test_write_artifact_bundle_roundtrip");
 

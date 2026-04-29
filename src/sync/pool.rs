@@ -4923,7 +4923,7 @@ mod tests {
         let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
 
         if explicit_drop {
-            let resource =
+            let resource: PooledResource<u32> =
                 futures_lite::future::block_on(pool.acquire(&cx)).expect("acquire should succeed");
             drop(resource);
         } else {

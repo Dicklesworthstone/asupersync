@@ -3830,7 +3830,7 @@ pub mod backpressure_metamorphic {
                 sender.try_send(u32::MAX),
                 Err(SendError::Disconnected(u32::MAX))
             ),
-            receiver_dropped: sender.receiver_dropped(),
+            receiver_dropped: sender.is_closed(),
         }
     }
 
@@ -3849,7 +3849,7 @@ pub mod backpressure_metamorphic {
                     let transformed = run_receiver_cancel_surface(capacity, buffered_prefix);
 
                     prop_assert_eq!(
-                        transformed, baseline,
+                        &transformed, &baseline,
                         "buffering messages before receiver cancellation must not leave a dangling post-cancel channel surface"
                     );
                     prop_assert_eq!(
