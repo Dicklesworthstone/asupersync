@@ -985,6 +985,14 @@ pub struct MySqlConnectOptions {
     /// flag, accept the documented risk, and ideally pair with
     /// `ssl_mode: Required` to neutralise the offline-crack surface.
     pub insecure_legacy_mysql_native_password: bool,
+    /// br-asupersync-63lpvq: explicit second opt-in for server-driven
+    /// authentication plugin downgrades during `AuthSwitchRequest`.
+    /// Default `false` — even clients that allow the legacy
+    /// `mysql_native_password` plugin on the initial handshake will
+    /// still reject a mid-auth downgrade from a stronger plugin such
+    /// as `caching_sha2_password` unless the operator confirms that
+    /// downgrade risk separately.
+    pub insecure_allow_auth_switch_downgrade: bool,
 }
 
 // br-asupersync-fldb34 — manual Debug impl that redacts the password field.
@@ -1001,6 +1009,14 @@ impl std::fmt::Debug for MySqlConnectOptions {
             .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
             .field("connect_timeout", &self.connect_timeout)
             .field("ssl_mode", &self.ssl_mode)
+            .field(
+                "insecure_legacy_mysql_native_password",
+                &self.insecure_legacy_mysql_native_password,
+            )
+            .field(
+                "insecure_allow_auth_switch_downgrade",
+                &self.insecure_allow_auth_switch_downgrade,
+            )
             .finish()
     }
 }
@@ -1241,6 +1257,7 @@ impl MySqlConnectOptions {
             // operators that need legacy plugin must construct via
             // struct-update syntax with the field set explicitly.
             insecure_legacy_mysql_native_password: false,
+            insecure_allow_auth_switch_downgrade: false,
         })
     }
 }
@@ -1872,7 +1889,7 @@ impl MySqlConnection {
         &mut self,
         data: &[u8],
         options: &MySqlConnectOptions,
-        _handshake: &Handshake,
+        handshake: &Handshake,
     ) -> Result<(), MySqlError> {
         let mut reader = PacketReader::new(data);
 
@@ -1896,6 +1913,7 @@ impl MySqlConnection {
             .as_ref()
             .map(SecretString::as_str)
             .unwrap_or_default();
+        validate_auth_plugin_switch(handshake.auth_plugin_name.as_str(), plugin_name, options)?;
         let auth_response = match plugin_name {
             "mysql_native_password" => {
                 if !options.insecure_legacy_mysql_native_password {
@@ -3246,6 +3264,7 @@ impl MySqlConnection {
 
         let stmt = MySqlStatement {
             statement_id,
+            owner_connection_id: self.inner.connection_id,
             param_count,
             column_count,
             params,
@@ -3271,6 +3290,13 @@ impl MySqlConnection {
 
         if self.inner.closed {
             return Outcome::Err(MySqlError::ConnectionClosed);
+        }
+
+        if stmt.owner_connection_id != self.inner.connection_id {
+            return Outcome::Err(MySqlError::InvalidParameter(format!(
+                "prepared statement belongs to connection {} but current connection is {}",
+                stmt.owner_connection_id, self.inner.connection_id
+            )));
         }
 
         if params.len() != stmt.param_count as usize {
@@ -3366,6 +3392,13 @@ impl MySqlConnection {
 
         if self.inner.closed {
             return Outcome::Err(MySqlError::ConnectionClosed);
+        }
+
+        if stmt.owner_connection_id != self.inner.connection_id {
+            return Outcome::Err(MySqlError::InvalidParameter(format!(
+                "prepared statement belongs to connection {} but current connection is {}",
+                stmt.owner_connection_id, self.inner.connection_id
+            )));
         }
 
         if params.len() != stmt.param_count as usize {
@@ -3654,6 +3687,26 @@ impl MySqlConnection {
             message,
         }
     }
+}
+
+fn validate_auth_plugin_switch(
+    initial_plugin: &str,
+    switch_plugin: &str,
+    options: &MySqlConnectOptions,
+) -> Result<(), MySqlError> {
+    let is_downgrade = matches!(
+        (initial_plugin, switch_plugin),
+        ("caching_sha2_password", "mysql_native_password")
+    );
+
+    if is_downgrade && !options.insecure_allow_auth_switch_downgrade {
+        return Err(MySqlError::UnsupportedAuthPlugin(format!(
+            "auth switch downgrade from {initial_plugin} to {switch_plugin} rejected by default \
+             — set MySqlConnectOptions::insecure_allow_auth_switch_downgrade = true to opt in"
+        )));
+    }
+
+    Ok(())
 }
 
 // ============================================================================
@@ -4015,6 +4068,8 @@ mod param_flag {
 pub struct MySqlStatement {
     /// Server-side statement ID.
     statement_id: u32,
+    /// Server connection/session that owns this statement.
+    owner_connection_id: u32,
     /// Number of parameters.
     param_count: u16,
     /// Number of columns.
@@ -4026,6 +4081,12 @@ pub struct MySqlStatement {
 }
 
 impl MySqlStatement {
+    /// Server-side connection/session that prepared this statement.
+    #[must_use]
+    pub fn owner_connection_id(&self) -> u32 {
+        self.owner_connection_id
+    }
+
     /// Number of parameters in this statement.
     #[must_use]
     pub fn param_count(&self) -> u16 {
@@ -6218,6 +6279,28 @@ mod tests {
     }
 
     #[test]
+    fn test_auth_switch_rejects_downgrade_without_explicit_opt_in() {
+        let opts = MySqlConnectOptions::parse("mysql://user:pass@localhost/db").unwrap();
+        let err =
+            validate_auth_plugin_switch("caching_sha2_password", "mysql_native_password", &opts)
+                .unwrap_err();
+        assert!(
+            matches!(err, MySqlError::UnsupportedAuthPlugin(msg) if msg.contains("auth switch downgrade")),
+            "unexpected downgrade error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_auth_switch_allows_explicit_downgrade_opt_in() {
+        let mut opts = MySqlConnectOptions::parse("mysql://user:pass@localhost/db").unwrap();
+        opts.insecure_legacy_mysql_native_password = true;
+        opts.insecure_allow_auth_switch_downgrade = true;
+
+        validate_auth_plugin_switch("caching_sha2_password", "mysql_native_password", &opts)
+            .unwrap();
+    }
+
+    #[test]
     fn test_is_eof_packet() {
         // Classic EOF: 0xFE + up to 4 bytes warning/status
         assert!(MySqlConnection::is_eof_packet(&[
@@ -6350,6 +6433,8 @@ mod tests {
         let opts = MySqlConnectOptions::parse("mysql://user@localhost/db").unwrap();
         assert_eq!(opts.ssl_mode, SslMode::Disabled);
         assert_eq!(opts.connect_timeout, None);
+        assert!(!opts.insecure_legacy_mysql_native_password);
+        assert!(!opts.insecure_allow_auth_switch_downgrade);
     }
 
     #[test]
