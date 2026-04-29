@@ -19,9 +19,12 @@
 
 use asupersync::Cx;
 use asupersync::sync::{Barrier, LockError, Mutex, Notify, OnceCell, RwLock, Semaphore};
+use asupersync::codec::{Decoder, Encoder, LengthDelimitedCodec as AsupersyncCodec};
+use asupersync::bytes::{BufMut, Bytes, BytesMut};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
+use std::io;
 #[macro_use]
 mod common;
 
@@ -925,4 +928,207 @@ fn run_tokio_semaphore_test(permit_count: usize, requests: &[(usize, usize)]) ->
         results.sort_by_key(|&(_, grant_order)| grant_order);
         results
     })
+}
+
+/// CODEC-001: LengthDelimitedCodec Frame Boundary Conformance
+///
+/// Verifies that our LengthDelimitedCodec produces byte-identical frame
+/// boundaries compared to tokio_util::codec::LengthDelimitedCodec when
+/// given the same byte sequence and framing configuration.
+#[test]
+fn codec_001_length_delimited_frame_boundary_conformance() {
+    init_test("codec_001_length_delimited_frame_boundary_conformance");
+
+    // Test case 1: Basic frames with default configuration
+    let test_data = create_basic_test_frames();
+    test_codec_differential(&test_data, "default");
+
+    // Test case 2: Custom configuration - 2-byte little-endian length
+    let test_data = create_2byte_little_endian_frames();
+    test_codec_differential(&test_data, "2byte_little_endian");
+
+    // Test case 3: Multiple frames in single buffer
+    let test_data = create_multiple_frames();
+    test_codec_differential(&test_data, "multiple_frames");
+
+    test_complete!("codec_001_length_delimited_frame_boundary_conformance");
+}
+
+/// Test our codec vs tokio's codec for differential conformance
+fn test_codec_differential(test_data: &[u8], config_name: &str) {
+    use tokio_util::codec::{Decoder as TokioDecoder, LengthDelimitedCodec as TokioCodec};
+
+    // Create codecs with same configuration
+    let mut asupersync_codec = AsupersyncCodec::new();
+    let mut tokio_codec = TokioCodec::new();
+
+    // For 2-byte little-endian test case
+    if config_name == "2byte_little_endian" {
+        asupersync_codec = AsupersyncCodec::builder()
+            .length_field_length(2)
+            .little_endian()
+            .new_codec();
+        tokio_codec = TokioCodec::builder()
+            .length_field_length(2)
+            .little_endian()
+            .new_codec();
+    }
+
+    // Decode all frames with both codecs
+    let asupersync_frames = decode_all_frames_asupersync(&mut asupersync_codec, test_data.to_vec());
+    let tokio_frames = decode_all_frames_tokio(&mut tokio_codec, test_data.to_vec());
+
+    // Compare frame count
+    assert_with_log!(
+        asupersync_frames.len() == tokio_frames.len(),
+        format!("[{}] frame count should match", config_name),
+        tokio_frames.len(),
+        asupersync_frames.len()
+    );
+
+    // Compare each frame byte-for-byte
+    for (i, (asup_result, tokio_result)) in asupersync_frames.iter().zip(tokio_frames.iter()).enumerate() {
+        match (asup_result, tokio_result) {
+            (Ok(asup_frame), Ok(tokio_frame)) => {
+                let asup_bytes = asup_frame.clone().freeze();
+                assert_with_log!(
+                    asup_bytes == *tokio_frame,
+                    format!("[{}] frame {} bytes should match", config_name, i),
+                    format!("{:?}", tokio_frame),
+                    format!("{:?}", asup_bytes)
+                );
+            }
+            (Err(asup_err), Err(tokio_err)) => {
+                // Both should error with same error kind
+                assert_with_log!(
+                    asup_err.kind() == tokio_err.kind(),
+                    format!("[{}] frame {} error kinds should match", config_name, i),
+                    format!("{:?}", tokio_err.kind()),
+                    format!("{:?}", asup_err.kind())
+                );
+            }
+            (Ok(_), Err(tokio_err)) => {
+                panic!("[{}] frame {}: asupersync succeeded but tokio failed with {:?}",
+                       config_name, i, tokio_err);
+            }
+            (Err(asup_err), Ok(_)) => {
+                panic!("[{}] frame {}: tokio succeeded but asupersync failed with {:?}",
+                       config_name, i, asup_err);
+            }
+        }
+    }
+}
+
+/// Decode all frames using asupersync codec
+fn decode_all_frames_asupersync(codec: &mut AsupersyncCodec, data: Vec<u8>) -> Vec<Result<BytesMut, io::Error>> {
+    let mut frames = Vec::new();
+    let mut buf = BytesMut::from(&data[..]);
+
+    while !buf.is_empty() {
+        let initial_len = buf.len();
+
+        match codec.decode(&mut buf) {
+            Ok(Some(frame)) => {
+                frames.push(Ok(frame));
+            }
+            Ok(None) => {
+                // Need more data, but we don't have any more
+                break;
+            }
+            Err(e) => {
+                frames.push(Err(e));
+                break;
+            }
+        }
+
+        // Prevent infinite loop
+        if buf.len() == initial_len {
+            break;
+        }
+    }
+
+    frames
+}
+
+/// Decode all frames using tokio codec
+fn decode_all_frames_tokio(codec: &mut tokio_util::codec::LengthDelimitedCodec, data: Vec<u8>) -> Vec<Result<Bytes, io::Error>> {
+    use tokio_util::codec::Decoder as TokioDecoder;
+
+    let mut frames = Vec::new();
+    // Use tokio's BytesMut for tokio codec
+    let mut buf = tokio_util::bytes::BytesMut::from(&data[..]);
+
+    while !buf.is_empty() {
+        let initial_len = buf.len();
+
+        match codec.decode(&mut buf) {
+            Ok(Some(frame)) => {
+                // Convert from tokio's Bytes to asupersync's Bytes
+                let asupersync_bytes = Bytes::copy_from_slice(&frame);
+                frames.push(Ok(asupersync_bytes));
+            }
+            Ok(None) => {
+                // Need more data, but we don't have any more
+                break;
+            }
+            Err(e) => {
+                frames.push(Err(e));
+                break;
+            }
+        }
+
+        // Prevent infinite loop
+        if buf.len() == initial_len {
+            break;
+        }
+    }
+
+    frames
+}
+
+/// Create basic test frames (default 4-byte big-endian length)
+fn create_basic_test_frames() -> Vec<u8> {
+    let mut buf = Vec::new();
+
+    // Frame 1: "hello" (5 bytes)
+    buf.extend_from_slice(&5u32.to_be_bytes());
+    buf.extend_from_slice(b"hello");
+
+    // Frame 2: "world" (5 bytes)
+    buf.extend_from_slice(&5u32.to_be_bytes());
+    buf.extend_from_slice(b"world");
+
+    // Frame 3: empty frame
+    buf.extend_from_slice(&0u32.to_be_bytes());
+
+    buf
+}
+
+/// Create test frames with 2-byte little-endian length
+fn create_2byte_little_endian_frames() -> Vec<u8> {
+    let mut buf = Vec::new();
+
+    // Frame 1: "hi" (2 bytes)
+    buf.extend_from_slice(&2u16.to_le_bytes());
+    buf.extend_from_slice(b"hi");
+
+    // Frame 2: "ok" (2 bytes)
+    buf.extend_from_slice(&2u16.to_le_bytes());
+    buf.extend_from_slice(b"ok");
+
+    buf
+}
+
+/// Create multiple frames in single buffer
+fn create_multiple_frames() -> Vec<u8> {
+    let mut buf = Vec::new();
+
+    // Create 5 small frames
+    for i in 0..5 {
+        let data = format!("frame{}", i);
+        buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        buf.extend_from_slice(data.as_bytes());
+    }
+
+    buf
 }
