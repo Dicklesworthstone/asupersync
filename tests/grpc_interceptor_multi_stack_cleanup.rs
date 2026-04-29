@@ -217,7 +217,7 @@ fn multistack_alternating_success_failure_does_not_drift_counter() {
         })
         .layer(AlwaysRejectInterceptor);
 
-    for cycle in 0..32 {
+    for cycle in 0_u32..32 {
         if cycle.is_multiple_of(2) {
             // Success path: acquire + release via response walk.
             let mut req = Request::new(Bytes::new());
