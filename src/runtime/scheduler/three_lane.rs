@@ -329,20 +329,23 @@ impl AdaptiveCancelStreakPolicy {
             return 2; // default arm == 16
         }
 
+        for (i, &n_i) in self.discounted_pulls.iter().enumerate() {
+            if n_i < f64::EPSILON {
+                return i;
+            }
+        }
+
+        // All arms have prior mass, so the exploration term shared across the
+        // scan can be hoisted out of the per-arm loop.
+        let exploration_scale = ADAPTIVE_UCB_CONFIDENCE * total_discounted_pulls.ln().sqrt();
+
         let mut best_arm = 0;
         let mut best_ucb = f64::NEG_INFINITY;
 
         for i in 0..self.arms.len() {
             let n_i = self.discounted_pulls[i];
-
-            // For unvisited arms, assign maximum UCB value
-            let ucb_value = if n_i < f64::EPSILON {
-                f64::INFINITY
-            } else {
-                let confidence_bound =
-                    ADAPTIVE_UCB_CONFIDENCE * (total_discounted_pulls.ln() / n_i).sqrt();
-                self.mean_rewards[i] + confidence_bound
-            };
+            let confidence_bound = exploration_scale / n_i.sqrt();
+            let ucb_value = self.mean_rewards[i] + confidence_bound;
 
             if ucb_value > best_ucb {
                 best_ucb = ucb_value;
