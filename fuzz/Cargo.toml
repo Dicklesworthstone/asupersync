@@ -2886,6 +2886,17 @@ test = false
 doc = false
 bench = false
 
+# br-asupersync-clf22o — structure-aware malformed source-block harness for
+# src/raptorq/decoder.rs. Builds valid source blocks from fuzzed K/source bytes,
+# then mutates source-symbol metadata and repair packets while asserting the
+# decoder entrypoints never panic.
+[[bin]]
+name = "raptorq_decoder_malformed"
+path = "fuzz_targets/raptorq_decoder_malformed.rs"
+test = false
+doc = false
+bench = false
+
 # Tests adjusted_frame_len boundary conditions with saturating arithmetic and i64/usize conversion.
 # Exercises length adjustment overflow/underflow scenarios, frame length validation boundaries,
 # negative frame length handling, arithmetic saturation behavior, and integer conversion edge cases
