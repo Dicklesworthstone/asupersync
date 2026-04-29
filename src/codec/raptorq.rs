@@ -387,7 +387,6 @@ mod golden_tests {
     fn rfc6330_section6_high_loss_recovery_differential_conformance() {
         use crate::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
         use crate::raptorq::systematic::SystematicEncoder;
-        use crate::util::DetRng;
 
         // RFC 6330 §6 high-loss scenario: K=10, simulate severe packet loss
         let k = 10; // Total source symbols required
@@ -399,7 +398,6 @@ mod golden_tests {
         let repair_symbols_needed = k + 4; // Extra repair symbols to ensure decoding
 
         // RFC 6330 §6 reference source data pattern for differential testing
-        let mut rng = DetRng::new(seed);
         let source_data: Vec<Vec<u8>> = (0..k)
             .map(|i| {
                 // RFC 6330 test pattern: deterministic but non-trivial
@@ -426,7 +424,7 @@ mod golden_tests {
             if (esi as usize) < source_data.len() {
                 received.push(ReceivedSymbol::source(
                     esi,
-                    source_data[esi as usize].clone()
+                    source_data[esi as usize].clone(),
                 ));
             }
         }
@@ -455,10 +453,15 @@ mod golden_tests {
         assert_eq!(
             decode_result.source.len(),
             k,
-            "RFC 6330 §6 high-loss: decoded block must contain exactly K={} symbols", k
+            "RFC 6330 §6 high-loss: decoded block must contain exactly K={} symbols",
+            k
         );
 
-        for (i, (original, decoded)) in source_data.iter().zip(decode_result.source.iter()).enumerate() {
+        for (i, (original, decoded)) in source_data
+            .iter()
+            .zip(decode_result.source.iter())
+            .enumerate()
+        {
             assert_eq!(
                 original, decoded,
                 "RFC 6330 §6 high-loss differential test failed: symbol {} recovery incorrect \
@@ -483,7 +486,10 @@ mod golden_tests {
         let loss_rate = ((k - available_source_symbols) as f64 / k as f64) * 100.0;
 
         println!("✓ RFC 6330 §6 High-Loss Recovery Differential Conformance VERIFIED");
-        println!("  - Source symbols: {} (loss rate: {:.1}%)", available_source_symbols, loss_rate);
+        println!(
+            "  - Source symbols: {} (loss rate: {:.1}%)",
+            available_source_symbols, loss_rate
+        );
         println!("  - Repair symbols used: {}", repair_symbols_needed);
         println!("  - Total symbols recovered: {}/{}", recovered_symbols, k);
         println!("  - Inactivation decoder successfully handled high-loss scenario");
