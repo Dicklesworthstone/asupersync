@@ -5211,8 +5211,8 @@ mod tests {
 
         // Create specific deadline-ordering scenario: 3-lane / 5-task / 1-cancel state
         // 4 non-cancel tasks with different priorities and 1 cancel task
-        worker.schedule_local(TaskId::new_for_test(300, 1), 10);  // High priority ready task
-        worker.schedule_local(TaskId::new_for_test(301, 1), 50);  // Lower priority ready task
+        worker.schedule_local(TaskId::new_for_test(300, 1), 10); // High priority ready task
+        worker.schedule_local(TaskId::new_for_test(301, 1), 50); // Lower priority ready task
         worker.schedule_local_timed(TaskId::new_for_test(302, 1), Time::from_nanos(10_000)); // Timed task
         worker.schedule_local_timed(TaskId::new_for_test(303, 1), Time::from_nanos(20_000)); // Another timed task
         worker.schedule_local_cancel(TaskId::new_for_test(304, 1), 95); // Cancel task
@@ -5245,15 +5245,15 @@ mod tests {
 
         // Create 9-task scenario: 6 ready + 2 timed + 1 cancel (deadline task already created)
         // Ready lane tasks - various priorities
-        worker.schedule_local(TaskId::new_for_test(400, 1), 80);  // High priority ready
-        worker.schedule_local(TaskId::new_for_test(401, 1), 60);  // Medium-high priority ready
-        worker.schedule_local(TaskId::new_for_test(402, 1), 40);  // Medium priority ready
-        worker.schedule_local(TaskId::new_for_test(403, 1), 30);  // Medium-low priority ready
-        worker.schedule_local(TaskId::new_for_test(404, 1), 20);  // Low priority ready
-        worker.schedule_local(TaskId::new_for_test(405, 1), 10);  // Lowest priority ready
+        worker.schedule_local(TaskId::new_for_test(400, 1), 80); // High priority ready
+        worker.schedule_local(TaskId::new_for_test(401, 1), 60); // Medium-high priority ready
+        worker.schedule_local(TaskId::new_for_test(402, 1), 40); // Medium priority ready
+        worker.schedule_local(TaskId::new_for_test(403, 1), 30); // Medium-low priority ready
+        worker.schedule_local(TaskId::new_for_test(404, 1), 20); // Low priority ready
+        worker.schedule_local(TaskId::new_for_test(405, 1), 10); // Lowest priority ready
 
         // Timed lane tasks - one overdue (deadline miss), one future
-        worker.schedule_local_timed(TaskId::new_for_test(406, 1), Time::from_nanos(75_000));  // Past deadline (miss)
+        worker.schedule_local_timed(TaskId::new_for_test(406, 1), Time::from_nanos(75_000)); // Past deadline (miss)
         worker.schedule_local_timed(TaskId::new_for_test(407, 1), Time::from_nanos(200_000)); // Future deadline
 
         // Cancel lane tasks - create multiple to establish cancel streak
@@ -5278,7 +5278,11 @@ mod tests {
 
         worker.verify_scheduler_invariants();
 
-        worker_state_dump_scrubbed("decision_trace_complex_scenario", worker, &dispatch_sequence)
+        worker_state_dump_scrubbed(
+            "decision_trace_complex_scenario",
+            worker,
+            &dispatch_sequence,
+        )
     }
 
     #[test]
@@ -11341,6 +11345,147 @@ mod tests {
         })
     }
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum StaticOracleLane {
+        Timed,
+        Cancel,
+        Ready,
+    }
+
+    fn static_oracle_lane_label(lane: StaticOracleLane) -> &'static str {
+        match lane {
+            StaticOracleLane::Timed => "timed",
+            StaticOracleLane::Cancel => "cancel",
+            StaticOracleLane::Ready => "ready",
+        }
+    }
+
+    fn classify_static_oracle_lane(
+        task: TaskId,
+        timed_task: TaskId,
+        cancel_tasks: &[TaskId; 2],
+        ready_tasks: &[TaskId; 2],
+    ) -> StaticOracleLane {
+        if task == timed_task {
+            StaticOracleLane::Timed
+        } else if cancel_tasks.contains(&task) {
+            StaticOracleLane::Cancel
+        } else if ready_tasks.contains(&task) {
+            StaticOracleLane::Ready
+        } else {
+            panic!("unexpected task in static oracle trace: {task:?}");
+        }
+    }
+
+    fn scheduler_decision_static_oracle_100_fixed_seed_json(seed: u64) -> Value {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+
+        const CASE_COUNT: u32 = 20;
+        const EXPECTED_CYCLE: [StaticOracleLane; 5] = [
+            StaticOracleLane::Timed,
+            StaticOracleLane::Cancel,
+            StaticOracleLane::Cancel,
+            StaticOracleLane::Ready,
+            StaticOracleLane::Ready,
+        ];
+
+        let mut lane_trace = Vec::with_capacity(CASE_COUNT as usize * EXPECTED_CYCLE.len());
+        for case_idx in 0..CASE_COUNT {
+            let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(999_000_000)));
+            let mut state = RuntimeState::new();
+            state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock.clone()));
+            state.now = Time::from_nanos(999_000_000);
+            let root = state.create_root_region(Budget::unlimited());
+            let (_task_id, _handle) = state
+                .create_task(root, Budget::with_deadline_ns(1_000_000_000), async {})
+                .expect("create deadline-pressured task");
+            let state = Arc::new(ContendedMutex::new("runtime_state", state));
+
+            let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 2, true, 1);
+            let mut workers = scheduler.take_workers();
+            let worker = workers
+                .first_mut()
+                .expect("scheduler should create a worker");
+            worker.rng = crate::util::DetRng::new(seed ^ u64::from(case_idx));
+            worker.decision_contract = None;
+            worker.decision_posterior = None;
+
+            let timed_task = TaskId::new_for_test(9_100 + case_idx, 1);
+            let cancel_tasks = [
+                TaskId::new_for_test(9_200 + case_idx, 1),
+                TaskId::new_for_test(9_200 + case_idx, 2),
+            ];
+            let ready_tasks = [
+                TaskId::new_for_test(9_300 + case_idx, 1),
+                TaskId::new_for_test(9_300 + case_idx, 2),
+            ];
+
+            worker.schedule_local_timed(timed_task, Time::from_nanos(500_000_000));
+            for task in cancel_tasks {
+                worker.schedule_local_cancel(task, 100);
+            }
+            for task in ready_tasks {
+                worker.fast_queue.push(task);
+            }
+
+            assert_eq!(
+                worker.governor_suggest(),
+                SchedulingSuggestion::MeetDeadlines,
+                "oracle case {case_idx} must stay in meet_deadlines mode"
+            );
+
+            for (case_step, expected_lane) in EXPECTED_CYCLE.iter().copied().enumerate() {
+                let task = worker
+                    .next_task()
+                    .unwrap_or_else(|| panic!("case {case_idx} missing task at step {case_step}"));
+                let actual_lane =
+                    classify_static_oracle_lane(task, timed_task, &cancel_tasks, &ready_tasks);
+                assert_eq!(
+                    actual_lane, expected_lane,
+                    "lane oracle mismatch in case {case_idx} step {case_step}: task={task:?}"
+                );
+
+                let _global_step = case_idx as usize * EXPECTED_CYCLE.len() + case_step;
+                lane_trace.push(static_oracle_lane_label(actual_lane));
+            }
+
+            assert_eq!(
+                worker.next_task(),
+                None,
+                "oracle case {case_idx} should be exhausted after five dispatches"
+            );
+
+            let cert = worker.preemption_fairness_certificate();
+            assert!(
+                cert.invariant_holds(),
+                "fairness certificate broke in case {case_idx}"
+            );
+            assert_eq!(cert.cancel_dispatches, 2, "case {case_idx} cancel count");
+            assert_eq!(cert.timed_dispatches, 1, "case {case_idx} timed count");
+            assert_eq!(cert.ready_dispatches, 2, "case {case_idx} ready count");
+            assert_eq!(
+                cert.observed_non_cancel_stall_steps(),
+                2,
+                "case {case_idx} non-cancel stall should match the documented two-cancel bound"
+            );
+        }
+
+        json!({
+            "seed": format!("0x{:016X}", seed),
+            "total_decisions": lane_trace.len(),
+            "oracle_cycle": EXPECTED_CYCLE
+                .into_iter()
+                .map(static_oracle_lane_label)
+                .collect::<Vec<_>>(),
+            "dispatch_counts": {
+                "timed": CASE_COUNT,
+                "cancel": CASE_COUNT * 2,
+                "ready": CASE_COUNT * 2,
+            },
+            "lane_trace": lane_trace,
+        })
+    }
+
     #[test]
     fn golden_test_cancel_streak_adaptivity_same_seed_replays_limit_trace() {
         let trace_a = replay_adaptive_limit_trace(0xC0DE_CAFE_BEEF_0001, 24);
@@ -11381,6 +11526,14 @@ mod tests {
         insta::assert_json_snapshot!(
             "three_lane_scheduler_decision_trace_fixed_seed",
             scheduler_decision_trace_fixed_seed_json(0xC0DE_CAFE_BEEF_0191)
+        );
+    }
+
+    #[test]
+    fn three_lane_scheduler_decision_static_oracle_100_fixed_seed() {
+        insta::assert_json_snapshot!(
+            "three_lane_scheduler_decision_static_oracle_100_fixed_seed",
+            scheduler_decision_static_oracle_100_fixed_seed_json(0xC0DE_CAFE_BEEF_1190)
         );
     }
 
