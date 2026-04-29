@@ -163,6 +163,29 @@ impl NatsError {
 /// to APM collectors). The redacted Debug impl substitutes the
 /// sentinel `<redacted>` for any present credential and `None` for
 /// absent ones.
+/// # Auth-method support matrix (audit, 2026-04-29)
+///
+/// The asupersync NATS client supports the **legacy** auth methods only:
+///
+/// | NATS auth method               | Supported here? | Notes |
+/// | ------------------------------ | --------------- | ----- |
+/// | None                           | ✅              | default |
+/// | `user` + `pass`                | ✅              | requires TLS via `require_tls` or server INFO `tls_required` |
+/// | `auth_token`                   | ✅              | same TLS gate as user/pass |
+/// | nkey (nonce challenge, ed25519) | ❌ NOT IMPLEMENTED | server INFO `nonce` field is not parsed; CONNECT has no `nkey`/`sig` field |
+/// | JWT (decentralized auth, NGS)  | ❌ NOT IMPLEMENTED | CONNECT has no `jwt`/`sig` field |
+/// | sealing-key rotation           | ❌ N/A          | no JWT, so nothing to rotate |
+///
+/// Filed as `[security-audit-for-saas] nats client lacks nkey/JWT auth`.
+/// Operators connecting to a server configured for nkey-only or JWT-only
+/// auth (typical for NGS / Synadia Cloud) will see every CONNECT
+/// rejected with `-ERR 'Authorization Violation'`. The future fix
+/// will add `Option<NkeyCredentials>` and `Option<UserJwt>` fields plus
+/// a sign-the-INFO-nonce path before CONNECT.
+///
+/// Subject-permission enforcement is correctly delegated to the
+/// server; the client propagates server `-ERR 'Permissions Violation'`
+/// as `NatsError::Server` (see test `server_err_propagates_as_nats_error`).
 #[derive(Clone)]
 pub struct NatsConfig {
     /// Host address.
@@ -170,10 +193,21 @@ pub struct NatsConfig {
     /// Port.
     pub port: u16,
     /// Optional username for authentication.
+    ///
+    /// Wire format: emitted as the `user` field in CONNECT JSON. Sent
+    /// in cleartext over the chosen transport — gated by
+    /// [`Self::require_tls`] / server `tls_required` (br-asupersync-2kmc12).
     pub user: Option<String>,
     /// Optional password for authentication.
+    ///
+    /// Same TLS gate as [`Self::user`].
     pub password: Option<String>,
-    /// Optional auth token.
+    /// Optional auth token (legacy single-token auth).
+    ///
+    /// Same TLS gate. Note: this is the static `auth_token` field, NOT
+    /// a JWT. NATS-protocol JWT auth (CONNECT `jwt` + nonce-signed
+    /// `sig`) is not supported; see the auth-method matrix on
+    /// [`NatsConfig`].
     pub token: Option<String>,
     /// Client name sent to server.
     pub name: Option<String>,
@@ -533,6 +567,11 @@ fn validate_nats_token(value: &str, field: &str) -> Result<(), NatsError> {
     if value.is_empty() {
         return Err(NatsError::Protocol(format!("{field} must not be empty")));
     }
+    if value.len() > MAX_NATS_SUBJECT_BYTES {
+        return Err(NatsError::Protocol(format!(
+            "{field} exceeds the {MAX_NATS_SUBJECT_BYTES}-byte NATS subject bound"
+        )));
+    }
     if value
         .chars()
         .any(|ch| ch.is_ascii_control() || ch.is_whitespace())
@@ -543,6 +582,11 @@ fn validate_nats_token(value: &str, field: &str) -> Result<(), NatsError> {
     }
     Ok(())
 }
+
+/// Conservative per-subject bound aligned with the default NATS
+/// `max_control_line` server limit (4KB). A subject longer than this
+/// cannot fit on the default control line.
+const MAX_NATS_SUBJECT_BYTES: usize = 4 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SubscriptionPatternToken<'a> {
@@ -619,6 +663,18 @@ fn validate_nats_subscription_pattern(pattern: &str, field: &str) -> Result<(), 
         )));
     }
     Ok(())
+}
+
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_validate_nats_publish_subject(subject: &str) -> Result<(), String> {
+    validate_nats_publish_subject(subject, "subject").map_err(|err| err.to_string())
+}
+
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub const fn fuzz_nats_subject_max_bytes() -> usize {
+    MAX_NATS_SUBJECT_BYTES
 }
 
 #[cfg(any(test, feature = "test-internals"))]
@@ -3475,6 +3531,19 @@ mod tests {
     fn test_validate_nats_token_rejects_newline_injection() {
         // A subject with \r\nPUB would inject a second command
         assert!(validate_nats_token("foo\r\nPUB evil 0\r\n", "subject").is_err());
+    }
+
+    #[test]
+    fn test_validate_nats_token_rejects_oversized_subject() {
+        let oversized = "a".repeat(MAX_NATS_SUBJECT_BYTES + 1);
+        let err = validate_nats_token(&oversized, "subject").unwrap_err();
+        match err {
+            NatsError::Protocol(message) => {
+                assert!(message.contains("exceeds"));
+                assert!(message.contains("4096-byte"));
+            }
+            other => panic!("expected protocol error, got {other:?}"),
+        }
     }
 
     #[test]
