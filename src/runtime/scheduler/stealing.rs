@@ -226,6 +226,84 @@ mod tests {
     }
 
     #[test]
+    fn test_steal_task_concurrent_owner_pop_on_resized_queue_preserves_task_set() {
+        let queues: Vec<_> = (0..3)
+            .map(|_| Arc::new(LocalQueue::new_for_test(383)))
+            .collect();
+        let per_queue = 128usize;
+        let total = per_queue * queues.len();
+
+        for (queue_idx, queue) in queues.iter().enumerate() {
+            let base = queue_idx * per_queue;
+            for task_id in base..base + per_queue {
+                queue.push(task(task_id as u32));
+            }
+        }
+
+        let counts: Arc<Vec<AtomicUsize>> =
+            Arc::new((0..total).map(|_| AtomicUsize::new(0)).collect());
+        let observed_total = Arc::new(AtomicUsize::new(0));
+        let stealer_threads = 4;
+        let barrier = Arc::new(Barrier::new(stealer_threads + 2));
+
+        let owner_queue = Arc::clone(&queues[0]);
+        let owner_counts = Arc::clone(&counts);
+        let owner_observed_total = Arc::clone(&observed_total);
+        let owner_barrier = Arc::clone(&barrier);
+        let owner = thread::spawn(move || {
+            owner_barrier.wait();
+            while let Some(task_id) = owner_queue.pop() {
+                let idx = task_id.0.index() as usize;
+                owner_counts[idx].fetch_add(1, Ordering::SeqCst);
+                owner_observed_total.fetch_add(1, Ordering::SeqCst);
+                thread::yield_now();
+            }
+        });
+
+        let mut stealer_handles = Vec::new();
+        for seed in 0_u64..stealer_threads as u64 {
+            let stealers: Vec<_> = queues.iter().map(|queue| queue.stealer()).collect();
+            let counts = Arc::clone(&counts);
+            let observed_total = Arc::clone(&observed_total);
+            let barrier = Arc::clone(&barrier);
+            stealer_handles.push(thread::spawn(move || {
+                let mut rng = DetRng::new(seed + 1);
+                barrier.wait();
+                while observed_total.load(Ordering::SeqCst) < total {
+                    if let Some(task_id) = steal_task(&stealers, &mut rng) {
+                        let idx = task_id.0.index() as usize;
+                        counts[idx].fetch_add(1, Ordering::SeqCst);
+                        observed_total.fetch_add(1, Ordering::SeqCst);
+                    } else {
+                        thread::yield_now();
+                    }
+                }
+            }));
+        }
+
+        barrier.wait();
+        owner
+            .join()
+            .expect("owner thread should complete without losing tasks");
+        for handle in stealer_handles {
+            handle
+                .join()
+                .expect("stealer thread should complete without deadlock");
+        }
+
+        let mut total_seen = 0usize;
+        for (idx, count) in counts.iter().enumerate() {
+            let seen = count.load(Ordering::SeqCst);
+            assert_eq!(seen, 1, "task {idx} seen {seen} times");
+            total_seen += seen;
+        }
+        assert_eq!(
+            total_seen, total,
+            "owner pops and steal_task victim selection must preserve the exact task set"
+        );
+    }
+
+    #[test]
     fn test_steal_deterministic_with_same_seed() {
         // Use two separate queue sets so the first steal doesn't mutate
         // the queues used by the second steal.
