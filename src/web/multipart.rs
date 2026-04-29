@@ -506,7 +506,7 @@ fn parse_multipart(
             ));
         }
 
-        let part_headers = parse_part_headers(headers_section);
+        let part_headers = parse_part_headers(headers_section)?;
 
         // Body starts after the blank line.
         let body_start = headers_end.1;
@@ -659,11 +659,16 @@ fn strip_trailing_crlf(data: &[u8], end: usize) -> usize {
 }
 
 /// Parse part headers from raw bytes. Keys are lowercased.
-fn parse_part_headers(data: &[u8]) -> HashMap<String, String> {
+///
+/// SECURITY: Rejects non-UTF8 header data to prevent bypass of nested
+/// multipart detection via malformed Content-Type headers (br-asupersync-vzvpk9).
+fn parse_part_headers(data: &[u8]) -> Result<HashMap<String, String>, ExtractionError> {
     let mut headers = HashMap::new();
-    let Ok(text) = std::str::from_utf8(data) else {
-        return headers;
-    };
+    let text = std::str::from_utf8(data).map_err(|_| {
+        ExtractionError::bad_request(
+            "multipart part headers contain invalid UTF-8"
+        )
+    })?;
     for line in text.split('\n') {
         let line = line.trim_end_matches('\r');
         if line.is_empty() {
@@ -673,7 +678,7 @@ fn parse_part_headers(data: &[u8]) -> HashMap<String, String> {
             headers.insert(key.trim().to_ascii_lowercase(), value.trim().to_string());
         }
     }
-    headers
+    Ok(headers)
 }
 
 /// Sanitize a filename to prevent path traversal attacks.
@@ -998,7 +1003,7 @@ mod tests {
     #[test]
     fn parse_headers_basic() {
         let raw = b"Content-Disposition: form-data; name=\"file\"\r\nContent-Type: image/png";
-        let hdrs = parse_part_headers(raw);
+        let hdrs = parse_part_headers(raw).unwrap();
         assert_eq!(hdrs.len(), 2);
         assert!(hdrs.get("content-disposition").unwrap().contains("name="));
         assert_eq!(hdrs.get("content-type").unwrap(), "image/png");
@@ -1006,8 +1011,20 @@ mod tests {
 
     #[test]
     fn parse_headers_empty() {
-        let hdrs = parse_part_headers(b"");
+        let hdrs = parse_part_headers(b"").unwrap();
         assert!(hdrs.is_empty());
+    }
+
+    #[test]
+    fn parse_headers_rejects_non_utf8() {
+        // SECURITY TEST: Non-UTF8 headers must be rejected to prevent
+        // bypass of nested multipart detection (br-asupersync-vzvpk9).
+        let non_utf8 = b"Content-Type: multipart/mixed\xFF\xFE\r\n";
+        let result = parse_part_headers(non_utf8);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(err.message.contains("invalid UTF-8"));
     }
 
     // ================================================================
@@ -1133,6 +1150,30 @@ mod tests {
 
         assert_eq!(err.status, StatusCode::BAD_REQUEST);
         assert_eq!(err.message, "nested multipart parts are not supported");
+    }
+
+    #[test]
+    fn parse_rejects_non_utf8_header_bypass_attempt() {
+        // SECURITY TEST: Verify that non-UTF8 headers cannot bypass
+        // nested multipart detection (br-asupersync-vzvpk9).
+        let nested = b"--INNER\r\nContent-Disposition: form-data; name=\"inner\"\r\n\r\nvalue\r\n--INNER--\r\n";
+
+        // Create a multipart body where the headers contain non-UTF8 bytes
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"--OUTER\r\n");
+        buf.extend_from_slice(b"Content-Disposition: form-data; name=\"payload\"\r\n");
+        // Inject non-UTF8 bytes in Content-Type header to try bypassing detection
+        buf.extend_from_slice(b"Content-Type: multipart/mixed\xFF\xFE; boundary=INNER\r\n");
+        buf.extend_from_slice(b"\r\n");
+        buf.extend_from_slice(nested);
+        buf.extend_from_slice(b"\r\n--OUTER--\r\n");
+        let body = Bytes::from(buf);
+
+        // This should fail due to non-UTF8 headers, not due to nested multipart detection
+        let err = parse_multipart(&body, "OUTER", &MultipartLimits::default(), wall_now()).unwrap_err();
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(err.message.contains("invalid UTF-8"));
     }
 
     #[test]
