@@ -3223,7 +3223,7 @@ mod tests {
         // Keep a single differential matrix over the RESP3 composite/value
         // variants we care about here. redis-rs preserves map/set ordering on
         // the wire, exposes verbatim strings as (format, text), and treats big
-        // numbers as exact arbitrary-precision decimal payloads.
+        // numbers as exact signed arbitrary-precision decimal payloads.
         let cases: Vec<(&str, RespValue, &'static [u8])> = vec![
             (
                 "map",
@@ -3267,6 +3267,11 @@ mod tests {
                 "big_number",
                 RespValue::BigNumber("3492890328409238509324850943850943825024385".to_string()),
                 b"(3492890328409238509324850943850943825024385\r\n",
+            ),
+            (
+                "big_number_negative",
+                RespValue::BigNumber("-3492890328409238509324850943850943825024385".to_string()),
+                b"(-3492890328409238509324850943850943825024385\r\n",
             ),
         ];
 
