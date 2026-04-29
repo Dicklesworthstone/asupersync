@@ -1171,6 +1171,17 @@ test = false
 doc = false
 bench = false
 
+# Structure-aware encoder write_buf fuzz for LengthDelimitedCodec. Drives
+# prefilled destination buffers plus decode-only builder knobs through the
+# encode path and asserts exact append bytes, prefix preservation, and
+# fail-closed invalid cases.
+[[bin]]
+name = "length_delimited_encoder_write_buf"
+path = "fuzz_targets/length_delimited_encoder_write_buf.rs"
+test = false
+doc = false
+bench = false
+
 [[bin]]
 name = "length_delimited_decoder_state"
 path = "fuzz_targets/length_delimited_decoder_state.rs"
