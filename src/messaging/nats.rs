@@ -325,6 +325,8 @@ pub struct Message {
     pub sid: u64,
     /// Optional reply-to subject for request/reply pattern.
     pub reply_to: Option<String>,
+    /// Optional raw NATS/1.0 header block for HMSG replies.
+    pub headers: Option<Vec<u8>>,
     /// Message payload.
     pub payload: Vec<u8>,
 }
@@ -1067,6 +1069,8 @@ impl NatsClient {
             return self.parse_info();
         } else if buf.starts_with(b"MSG ") {
             return self.parse_msg();
+        } else if buf.starts_with(b"HMSG ") {
+            return self.parse_hmsg();
         } else if buf.starts_with(b"+OK") {
             if buf.len() >= 5 && buf[3] == b'\r' && buf[4] == b'\n' {
                 self.read_buf.consume(5);
@@ -1204,6 +1208,102 @@ impl NatsClient {
             subject,
             sid,
             reply_to,
+            headers: None,
+            payload,
+        })))
+    }
+
+    /// Parse HMSG message.
+    fn parse_hmsg(&mut self) -> Result<Option<NatsMessage>, NatsError> {
+        let buf = self.read_buf.available();
+        let Some(header_end) = self.read_buf.find_crlf() else {
+            return Ok(None);
+        };
+
+        let header = std::str::from_utf8(&buf[..header_end])
+            .map_err(|_| NatsError::Protocol("invalid UTF-8 in HMSG header".to_string()))?;
+
+        // HMSG <subject> <sid> [reply-to] <#header bytes> <#total bytes>
+        let mut parts = header.split_whitespace();
+        let _hmsg = parts.next(); // "HMSG"
+        let subject_str = parts
+            .next()
+            .ok_or_else(|| NatsError::Protocol(format!("malformed HMSG header: {header}")))?;
+        let sid_str = parts
+            .next()
+            .ok_or_else(|| NatsError::Protocol(format!("malformed HMSG header: {header}")))?;
+        let remaining: Vec<_> = parts.collect();
+
+        let (reply_to, header_len_str, total_len_str) = match remaining.as_slice() {
+            [header_len_str, total_len_str] => (None, *header_len_str, *total_len_str),
+            [reply_to, header_len_str, total_len_str] => {
+                (Some((*reply_to).to_string()), *header_len_str, *total_len_str)
+            }
+            _ => {
+                return Err(NatsError::Protocol(format!(
+                    "malformed HMSG header: {header}"
+                )));
+            }
+        };
+
+        let subject = subject_str.to_string();
+        let sid: u64 = sid_str
+            .parse()
+            .map_err(|_| NatsError::Protocol(format!("invalid SID: {sid_str}")))?;
+        let header_len = header_len_str.parse::<usize>().map_err(|_| {
+            NatsError::Protocol(format!("invalid HMSG header length: {header_len_str}"))
+        })?;
+        let total_len = total_len_str.parse::<usize>().map_err(|_| {
+            NatsError::Protocol(format!("invalid HMSG total length: {total_len_str}"))
+        })?;
+
+        if header_len == 0 || header_len > total_len {
+            return Err(NatsError::Protocol(format!(
+                "invalid HMSG lengths: header_len={header_len}, total_len={total_len}"
+            )));
+        }
+
+        let max_buf = self.config.max_read_buffer;
+        if total_len > max_buf {
+            return Err(NatsError::Protocol(format!(
+                "HMSG total length {total_len} exceeds maximum ({max_buf} bytes)"
+            )));
+        }
+
+        let body_start = header_end + 2;
+        let body_end = body_start
+            .checked_add(total_len)
+            .ok_or_else(|| NatsError::Protocol("HMSG body length overflow".to_string()))?;
+        let total_frame_len = body_end
+            .checked_add(2)
+            .ok_or_else(|| NatsError::Protocol("HMSG frame length overflow".to_string()))?;
+
+        if buf.len() < total_frame_len {
+            return Ok(None);
+        }
+        if buf[body_end] != b'\r' || buf[body_end + 1] != b'\n' {
+            return Err(NatsError::Protocol(
+                "malformed HMSG payload terminator".to_string(),
+            ));
+        }
+
+        let header_block_end = body_start + header_len;
+        let header_block = buf[body_start..header_block_end].to_vec();
+        if !header_block.starts_with(b"NATS/1.0\r\n") || !header_block.ends_with(b"\r\n\r\n") {
+            return Err(NatsError::Protocol(
+                "malformed HMSG header block".to_string(),
+            ));
+        }
+
+        let payload = buf[header_block_end..body_end].to_vec();
+
+        self.read_buf.consume(total_frame_len);
+
+        Ok(Some(NatsMessage::Msg(Message {
+            subject,
+            sid,
+            reply_to,
+            headers: Some(header_block),
             payload,
         })))
     }
@@ -1226,6 +1326,41 @@ impl NatsClient {
 
         self.read_buf.consume(end + 2);
         Ok(Some(NatsMessage::Err(msg)))
+    }
+
+    fn reply_status_error(message: &Message) -> Option<NatsError> {
+        if !message.payload.is_empty() {
+            return None;
+        }
+
+        let headers = message.headers.as_deref()?;
+        let header_text = std::str::from_utf8(headers).ok()?;
+        if !header_text.starts_with("NATS/1.0\r\n") {
+            return None;
+        }
+
+        let mut status = None;
+        let mut description = None;
+        for line in header_text["NATS/1.0\r\n".len()..].split("\r\n") {
+            if line.is_empty() {
+                break;
+            }
+            let (name, value) = line.split_once(':')?;
+            let value = value.trim();
+            if name.eq_ignore_ascii_case("Status") {
+                status = value.parse::<u16>().ok();
+            } else if name.eq_ignore_ascii_case("Description") {
+                description = Some(value.to_string());
+            }
+        }
+
+        let status = status?;
+        if status < 300 {
+            return None;
+        }
+
+        let detail = description.unwrap_or_else(|| format!("status {status}"));
+        Some(NatsError::Server(format!("status {status}: {detail}")))
     }
 
     /// Publish a message to a subject.
@@ -1477,6 +1612,9 @@ impl NatsClient {
                     Some(NatsMessage::Msg(m)) => {
                         if m.sid == sub.sid() {
                             self.unsubscribe(cx, sub.sid()).await?;
+                            if let Some(err) = Self::reply_status_error(&m) {
+                                return Err(err);
+                            }
                             return Ok(m);
                         }
                         self.dispatch_message(m);
@@ -1511,6 +1649,9 @@ impl NatsClient {
 
             if let Some(msg) = sub.try_next() {
                 self.unsubscribe(cx, sub.sid()).await?;
+                if let Some(err) = Self::reply_status_error(&msg) {
+                    return Err(err);
+                }
                 return Ok(msg);
             }
         }
@@ -1585,6 +1726,9 @@ impl NatsClient {
                         if m.sid == sub.sid() {
                             // This is our reply - clean up and return
                             self.unsubscribe(cx, sub.sid()).await?;
+                            if let Some(err) = Self::reply_status_error(&m) {
+                                return Err(err);
+                            }
                             return Ok(m);
                         }
                         // Dispatch to other subscriptions
@@ -1621,6 +1765,9 @@ impl NatsClient {
             // Also check the subscription channel in case message was already dispatched
             if let Some(msg) = sub.try_next() {
                 self.unsubscribe(cx, sub.sid()).await?;
+                if let Some(err) = Self::reply_status_error(&msg) {
+                    return Err(err);
+                }
                 return Ok(msg);
             }
         }
@@ -3058,6 +3205,7 @@ mod tests {
             subject: "foo.bar".into(),
             sid: 1,
             reply_to: Some("_INBOX.123".into()),
+            headers: None,
             payload: b"hello".to_vec(),
         };
         let dbg = format!("{msg:?}");
@@ -3076,6 +3224,7 @@ mod tests {
             subject: "test".into(),
             sid: 0,
             reply_to: None,
+            headers: None,
             payload: vec![],
         };
         assert!(msg.reply_to.is_none());
@@ -3088,10 +3237,90 @@ mod tests {
             subject: "svc.echo".into(),
             sid: 7,
             reply_to: Some("_INBOX.42.reply".into()),
+            headers: None,
             payload: b"{\"event\":\"published\",\"seq\":12}".to_vec(),
         };
 
         insta::assert_json_snapshot!("nats_pubsub_event_scrubbed", message_event_snapshot(&msg));
+    }
+
+    #[test]
+    fn parse_hmsg_preserves_header_block_and_payload_72u8k4() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept client");
+            drop(stream);
+        });
+
+        run_test_with_cx(|_cx| async move {
+            let stream = TcpStream::connect(format!("{addr}"))
+                .await
+                .expect("connect client");
+            let mut client = NatsClient {
+                config: NatsConfig::default(),
+                stream,
+                read_buf: NatsReadBuffer::new(),
+                state: Arc::new(SharedState::new()),
+                next_sid: AtomicU64::new(1),
+                connected: true,
+            };
+
+            let headers = b"NATS/1.0\r\nFoo: bar\r\n\r\n";
+            let payload = b"hello";
+            let frame = format!(
+                "HMSG headers.test 789 {} {}\r\n",
+                headers.len(),
+                headers.len() + payload.len()
+            );
+            client
+                .read_buf
+                .extend(frame.as_bytes())
+                .expect("buffer HMSG header");
+            client.read_buf.extend(headers).expect("buffer headers");
+            client.read_buf.extend(payload).expect("buffer payload");
+            client.read_buf.extend(b"\r\n").expect("buffer terminator");
+
+            let parsed = client
+                .try_parse_message()
+                .expect("parse HMSG")
+                .expect("complete HMSG frame");
+            let NatsMessage::Msg(message) = parsed else {
+                panic!("expected HMSG to parse as Msg");
+            };
+
+            assert_eq!(message.subject, "headers.test");
+            assert_eq!(message.sid, 789);
+            assert!(message.reply_to.is_none());
+            assert_eq!(message.headers.as_deref(), Some(headers.as_slice()));
+            assert_eq!(message.payload, payload);
+        });
+
+        server.join().expect("server join");
+    }
+
+    #[test]
+    fn reply_status_error_surfaces_no_responders_hmsg_72u8k4() {
+        let message = Message {
+            subject: "_INBOX.1".into(),
+            sid: 1,
+            reply_to: None,
+            headers: Some(b"NATS/1.0\r\nStatus: 503\r\nDescription: No Responders\r\n\r\n".to_vec()),
+            payload: Vec::new(),
+        };
+
+        let err = NatsClient::reply_status_error(&message)
+            .expect("empty status-only HMSG reply must surface as error");
+        match err {
+            NatsError::Server(message) => {
+                assert!(message.contains("503"), "expected status code, got {message}");
+                assert!(
+                    message.contains("No Responders"),
+                    "expected server description, got {message}"
+                );
+            }
+            other => panic!("expected server error, got {other:?}"),
+        }
     }
 
     #[test]
