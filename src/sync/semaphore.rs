@@ -1568,6 +1568,92 @@ mod tests {
         crate::test_complete!("add_permits_increases_available");
     }
 
+    /// MR: releasing `N` permits via ordinary RAII drop is observationally
+    /// equivalent to leaking them with `forget()` and then replenishing the
+    /// same `N` permits via `add_permits(N)`.
+    #[test]
+    fn metamorphic_forget_then_replenish_matches_drop_release() {
+        init_test("metamorphic_forget_then_replenish_matches_drop_release");
+
+        let baseline = Semaphore::new(3);
+        let transformed = Semaphore::new(3);
+        let baseline_cx = test_cx();
+        let transformed_cx = test_cx();
+
+        let baseline_held = baseline.try_acquire(2).expect("baseline acquire 2");
+        let transformed_held = transformed.try_acquire(2).expect("transformed acquire 2");
+
+        let mut baseline_waiter = baseline.acquire(&baseline_cx, 2);
+        let mut transformed_waiter = transformed.acquire(&transformed_cx, 2);
+
+        crate::assert_with_log!(
+            poll_once(&mut baseline_waiter).is_none(),
+            "baseline waiter initially pending",
+            true,
+            true
+        );
+        crate::assert_with_log!(
+            poll_once(&mut transformed_waiter).is_none(),
+            "transformed waiter initially pending",
+            true,
+            true
+        );
+
+        drop(baseline_held);
+        transformed_held.forget();
+
+        let baseline_waiter_permit = poll_once(&mut baseline_waiter)
+            .expect("baseline waiter wakes after dropped permit")
+            .expect("baseline waiter acquires");
+        crate::assert_with_log!(
+            poll_once(&mut transformed_waiter).is_none(),
+            "forget without replenish leaves transformed waiter pending",
+            true,
+            true
+        );
+        crate::assert_with_log!(
+            transformed.available_permits() == 1,
+            "forget preserves leaked deficit before replenish",
+            1usize,
+            transformed.available_permits()
+        );
+
+        transformed.add_permits(2);
+        let transformed_waiter_permit = poll_once(&mut transformed_waiter)
+            .expect("transformed waiter wakes after replenish")
+            .expect("transformed waiter acquires");
+
+        crate::assert_with_log!(
+            baseline.available_permits() == transformed.available_permits(),
+            "post-acquire visible capacity matches",
+            baseline.available_permits(),
+            transformed.available_permits()
+        );
+        crate::assert_with_log!(
+            baseline_waiter_permit.count() == transformed_waiter_permit.count(),
+            "both waiters acquire the same permit count",
+            baseline_waiter_permit.count(),
+            transformed_waiter_permit.count()
+        );
+
+        drop(baseline_waiter_permit);
+        drop(transformed_waiter_permit);
+
+        crate::assert_with_log!(
+            baseline.available_permits() == 3,
+            "baseline capacity fully restored",
+            3usize,
+            baseline.available_permits()
+        );
+        crate::assert_with_log!(
+            transformed.available_permits() == 3,
+            "transformed capacity fully restored",
+            3usize,
+            transformed.available_permits()
+        );
+        crate::test_complete!("metamorphic_forget_then_replenish_matches_drop_release");
+    }
+
     #[test]
     fn drop_permit_restores_count() {
         init_test("drop_permit_restores_count");
