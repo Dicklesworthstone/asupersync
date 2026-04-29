@@ -1,13 +1,15 @@
 #![no_main]
 
-//! Cargo-fuzz target for RaptorQ systematic-encoder payload generation.
+//! Cargo-fuzz target for RaptorQ systematic-encoder payload edge handling.
 //!
-//! Drives `asupersync::raptorq::systematic::SystematicEncoder` with
-//! structurally-bounded inputs (Arbitrary-derived `K`, `symbol_size`,
-//! `repair_count`, `seed`, source bytes) and asserts:
+//! Drives `asupersync::raptorq::systematic::{SystematicEncoder, SystematicParams}`
+//! across three explicit K-edge cases: `K=1`, `K=42`, and `K=8192`.
+//! The first two run the real encoder/emission path; the `K=8192` lane
+//! stays on parameter / repair-equation math so the fuzzer can keep making
+//! forward progress instead of spending its budget inside the cubic solve.
 //!
 //!   1. **Constructor never panics** for any (K, symbol_size, seed)
-//!      triple in the bounded envelope. Configurations the systematic
+//!      triple in the small/medium edge lanes. Configurations the systematic
 //!      block can't satisfy must return `None`, not unwind.
 //!
 //!   2. **Repair-symbol size is exactly `symbol_size`** for every
@@ -25,6 +27,11 @@
 //!      the encoder is a pure function of (intermediate symbols, esi)
 //!      after `new` returns.
 //!
+//!   5. **Large-K payload math stays valid at K=8192.** The parameter
+//!      ladder, source chunking, and RFC repair-equation generation must
+//!      remain coherent for a realistic high-K edge without relying on the
+//!      full encoder solve on every fuzz iteration.
+//!
 //! Existing coverage: `codec_raptorq_roundtrip.rs` exercises the high-
 //! level `EncodingPipeline` round-trip but not the low-level
 //! `SystematicEncoder` API directly. This target locks the lower-level
@@ -32,43 +39,71 @@
 //! when the higher-level decoder happens to compensate.
 
 use arbitrary::Arbitrary;
-use asupersync::raptorq::systematic::SystematicEncoder;
+use asupersync::raptorq::systematic::{SystematicEncoder, SystematicParams};
 use libfuzzer_sys::fuzz_target;
 
-/// Upper bound on K. Keeps each iteration sub-second; the systematic
-/// encoder's constraint-matrix solve is O((K + S + H)^3) so K=64 is
-/// already a few hundred milliseconds.
-const MAX_K: usize = 64;
-/// Symbol size envelope. Caps memory use per iteration at
-/// `MAX_K * MAX_SYMBOL_SIZE = 16 KiB` of source data plus the
-/// intermediate-symbol working set.
-const MAX_SYMBOL_SIZE: usize = 256;
-/// Upper bound on repair_count. Probing every repair ESI is O(K^2)
-/// solve work amortised plus one matrix-vector mul per ESI; bounded.
-const MAX_REPAIR_COUNT: usize = 32;
+const SMALL_MEDIUM_MAX_SYMBOL_SIZE: usize = 256;
+const LARGE_K_MAX_SYMBOL_SIZE: usize = 8;
+const SMALL_MEDIUM_MAX_REPAIR_COUNT: usize = 32;
+const LARGE_K_MAX_REPAIR_COUNT: usize = 4;
 
 /// Structured fuzz input. Derives Arbitrary so libFuzzer can mutate
 /// each field independently (better coverage than reading raw bytes).
+#[derive(Arbitrary, Debug, Clone, Copy)]
+enum KEdge {
+    K1,
+    K42,
+    K8192,
+}
+
 #[derive(Arbitrary, Debug)]
 struct EncoderInput {
-    /// Number of source symbols. Bounded `[1, MAX_K]` after modulo.
-    k: u8,
-    /// Symbol size in bytes. Bounded `[1, MAX_SYMBOL_SIZE]`.
+    /// Explicit edge-case K selector.
+    k_edge: KEdge,
+    /// Symbol size in bytes. Tightened further for K=8192.
     symbol_size: u16,
-    /// Number of repair symbols to emit and validate. Bounded
-    /// `[0, MAX_REPAIR_COUNT]`.
+    /// Number of repair symbols to emit and validate.
     repair_count: u8,
     /// Encoder seed. Drives the precode randomness.
     seed: u64,
+    /// Extra repair ESI probe offset for large-K parameter checks.
+    probe_offset: u8,
     /// Source byte stream. Chunked into K source symbols of size
     /// `symbol_size`; padded with zeros if short, truncated if long.
     source: Vec<u8>,
 }
 
 fuzz_target!(|input: EncoderInput| {
-    let k = (usize::from(input.k) % MAX_K) + 1;
-    let symbol_size = (usize::from(input.symbol_size) % MAX_SYMBOL_SIZE) + 1;
-    let repair_count = usize::from(input.repair_count) % (MAX_REPAIR_COUNT + 1);
+    let k = match input.k_edge {
+        KEdge::K1 => 1,
+        KEdge::K42 => 42,
+        KEdge::K8192 => 8192,
+    };
+    let symbol_size = match input.k_edge {
+        KEdge::K8192 => (usize::from(input.symbol_size) % LARGE_K_MAX_SYMBOL_SIZE) + 1,
+        KEdge::K1 | KEdge::K42 => {
+            (usize::from(input.symbol_size) % SMALL_MEDIUM_MAX_SYMBOL_SIZE) + 1
+        }
+    };
+    let repair_count = match input.k_edge {
+        KEdge::K8192 => usize::from(input.repair_count) % (LARGE_K_MAX_REPAIR_COUNT + 1),
+        KEdge::K1 | KEdge::K42 => {
+            usize::from(input.repair_count) % (SMALL_MEDIUM_MAX_REPAIR_COUNT + 1)
+        }
+    };
+    let params = SystematicParams::for_source_block(k, symbol_size);
+    assert_eq!(params.k, k, "SystematicParams must preserve K");
+    assert!(
+        params.k_prime >= k,
+        "SystematicParams must choose K' >= K (K={}, K'={})",
+        k,
+        params.k_prime
+    );
+    assert_eq!(
+        params.l,
+        params.k_prime + params.s + params.h,
+        "L must equal K' + S + H"
+    );
 
     // Assemble exactly K source symbols of exactly `symbol_size` bytes
     // each. Zero-pad on the tail when `input.source` is short; this is
@@ -87,22 +122,84 @@ fuzz_target!(|input: EncoderInput| {
         debug_assert_eq!(sym.len(), symbol_size);
         source_symbols.push(sym);
     }
+    assert_eq!(
+        source_symbols.len(),
+        k,
+        "source chunking must yield exactly K source symbols"
+    );
+
+    if matches!(input.k_edge, KEdge::K8192) {
+        let repair_esi = (k as u32).saturating_add(u32::from(input.probe_offset % 4));
+        let (columns, coefficients) = params
+            .rfc_repair_equation(repair_esi)
+            .expect("large-K repair equation generation must succeed");
+        assert!(
+            !columns.is_empty(),
+            "large-K repair equations must reference at least one intermediate symbol"
+        );
+        assert_eq!(
+            columns.len(),
+            coefficients.len(),
+            "large-K repair equation arity must stay matched"
+        );
+        assert!(
+            columns.iter().all(|&column| column < params.l),
+            "large-K repair equations must stay within intermediate-symbol bounds"
+        );
+        return;
+    }
 
     // Property 1: constructor never panics. None is acceptable for
     // configurations the systematic block can't satisfy (e.g., the
     // constraint matrix happens to be singular for this seed/K
     // combination — extremely rare in practice but legal).
-    let encoder = match SystematicEncoder::new(&source_symbols, symbol_size, input.seed) {
+    let mut encoder = match SystematicEncoder::new(&source_symbols, symbol_size, input.seed) {
         Some(enc) => enc,
         None => return,
     };
 
+    let emitted_systematic = encoder.emit_systematic();
+    assert_eq!(
+        emitted_systematic.len(),
+        k,
+        "emit_systematic must emit exactly K source symbols at edge K={k}"
+    );
+    for (esi, symbol) in emitted_systematic.iter().enumerate() {
+        assert!(
+            symbol.is_source,
+            "systematic emission must stay on source lane"
+        );
+        assert_eq!(
+            symbol.esi, esi as u32,
+            "systematic ESI order must stay contiguous"
+        );
+        assert_eq!(
+            symbol.data.len(),
+            symbol_size,
+            "systematic payload length must stay equal to symbol_size"
+        );
+    }
+
     // Property 2 + 3: probe every repair ESI in [K, K + repair_count)
     // and validate length. Track counts so we can also assert
     // K + repair_count emissions.
+    let emitted_repairs = encoder.emit_repair(repair_count);
+    assert_eq!(
+        emitted_repairs.len(),
+        repair_count,
+        "emit_repair must emit the requested count"
+    );
     let mut emitted = 0usize;
-    for offset in 0..repair_count {
+    for (offset, emitted_symbol) in emitted_repairs.iter().enumerate() {
         let esi = (k + offset) as u32;
+        assert!(
+            !emitted_symbol.is_source,
+            "repair emission must stay on repair lane"
+        );
+        assert_eq!(
+            emitted_symbol.esi, esi,
+            "repair ESI order must stay contiguous"
+        );
         let symbol = encoder.repair_symbol(esi);
         assert_eq!(
             symbol.len(),
@@ -125,5 +222,10 @@ fuzz_target!(|input: EncoderInput| {
     assert_eq!(
         emitted, repair_count,
         "fuzzer must probe every requested repair ESI",
+    );
+    assert_eq!(
+        encoder.next_repair_esi(),
+        (k + repair_count) as u32,
+        "repair cursor must advance by the emitted repair count"
     );
 });
