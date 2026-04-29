@@ -524,27 +524,16 @@ mod pg {
 #[cfg(feature = "mysql")]
 mod mysql {
     use super::*;
-    use asupersync::database::mysql::{MySqlConnection, MySqlError};
-
-    struct MySqlRealManager {
-        url: String,
-    }
-
-    impl AsyncConnectionManager for MySqlRealManager {
-        type Connection = MySqlConnection;
-        type Error = MySqlError;
-
-        async fn connect(&self, cx: &Cx) -> Outcome<Self::Connection, Self::Error> {
-            MySqlConnection::connect(cx, &self.url).await
-        }
-
-        async fn is_valid(&self, _cx: &Cx, _conn: &mut Self::Connection) -> bool {
-            true
-        }
-    }
+    use asupersync::database::mysql::{MySqlConnectOptions, MySqlConnectionManager};
 
     fn url(port: u16) -> String {
         format!("mysql://testuser:testpass@127.0.0.1:{port}/testdb")
+    }
+
+    fn manager(port: u16) -> MySqlConnectionManager {
+        MySqlConnectionManager::new(
+            MySqlConnectOptions::parse(&url(port)).expect("parse mysql pool url"),
+        )
     }
 
     #[test]
@@ -566,7 +555,7 @@ mod mysql {
         );
 
         let pool = AsyncDbPool::new(
-            MySqlRealManager { url: url(c.port) },
+            manager(c.port),
             DbPoolConfig::with_max_size(2)
                 .validate_on_checkout(false)
                 .connection_timeout(Duration::from_secs(8)),
@@ -597,7 +586,7 @@ mod mysql {
         };
 
         let pool = AsyncDbPool::new(
-            MySqlRealManager { url: url(c.port) },
+            manager(c.port),
             DbPoolConfig::with_max_size(2)
                 .validate_on_checkout(false)
                 .connection_timeout(Duration::from_secs(8)),
@@ -613,7 +602,7 @@ mod mysql {
         }
 
         let pool = AsyncDbPool::new(
-            MySqlRealManager { url: url(c.port) },
+            manager(c.port),
             DbPoolConfig::with_max_size(2)
                 .validate_on_checkout(false)
                 .connection_timeout(Duration::from_millis(2_000)),
@@ -648,7 +637,7 @@ mod mysql {
         block.disarm();
         std::thread::sleep(Duration::from_millis(200));
         let pool = AsyncDbPool::new(
-            MySqlRealManager { url: url(c.port) },
+            manager(c.port),
             DbPoolConfig::with_max_size(2)
                 .validate_on_checkout(false)
                 .connection_timeout(Duration::from_secs(5)),

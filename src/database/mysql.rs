@@ -1305,6 +1305,14 @@ struct MySqlConnectionInner {
     needs_rollback: bool,
     /// Maximum number of rows to return from a result set.
     max_result_rows: usize,
+    /// Logical pool-borrow epoch for prepared statement handles.
+    ///
+    /// `connection_id` alone is not enough to scope prepared handles:
+    /// a generic pool may hand the same physical connection back to a
+    /// different borrower later. The epoch increments at each pool
+    /// handoff so handles from a prior checkout fail closed before any
+    /// wire I/O.
+    prepared_statement_epoch: u64,
     /// br-asupersync-22i5tn: set to `true` for the duration of any
     /// public method that issues a query/exec command and clears on
     /// completion (success, error, or cancellation). When the OUTER
@@ -1526,6 +1534,7 @@ impl MySqlConnection {
                 server_version: String::new(),
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                prepared_statement_epoch: 0,
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
             },
             // Stash options so cancel_in_flight_query can reopen a fresh
@@ -3112,6 +3121,11 @@ impl MySqlConnection {
         self.inner.status_flags & 0x0001 != 0 // SERVER_STATUS_IN_TRANS
     }
 
+    /// Advance the logical prepared-statement epoch for pooled reuse.
+    fn invalidate_prepared_statements_for_pool_return(&mut self) {
+        self.inner.prepared_statement_epoch = self.inner.prepared_statement_epoch.wrapping_add(1);
+    }
+
     /// Close the connection.
     pub async fn close(&mut self) -> Result<(), MySqlError> {
         if self.inner.closed {
@@ -3265,6 +3279,7 @@ impl MySqlConnection {
         let stmt = MySqlStatement {
             statement_id,
             owner_connection_id: self.inner.connection_id,
+            owner_prepared_statement_epoch: self.inner.prepared_statement_epoch,
             param_count,
             column_count,
             params,
@@ -3296,6 +3311,13 @@ impl MySqlConnection {
             return Outcome::Err(MySqlError::InvalidParameter(format!(
                 "prepared statement belongs to connection {} but current connection is {}",
                 stmt.owner_connection_id, self.inner.connection_id
+            )));
+        }
+
+        if stmt.owner_prepared_statement_epoch != self.inner.prepared_statement_epoch {
+            return Outcome::Err(MySqlError::InvalidParameter(format!(
+                "prepared statement belongs to pooled checkout epoch {} but current epoch is {}",
+                stmt.owner_prepared_statement_epoch, self.inner.prepared_statement_epoch
             )));
         }
 
@@ -3398,6 +3420,13 @@ impl MySqlConnection {
             return Outcome::Err(MySqlError::InvalidParameter(format!(
                 "prepared statement belongs to connection {} but current connection is {}",
                 stmt.owner_connection_id, self.inner.connection_id
+            )));
+        }
+
+        if stmt.owner_prepared_statement_epoch != self.inner.prepared_statement_epoch {
+            return Outcome::Err(MySqlError::InvalidParameter(format!(
+                "prepared statement belongs to pooled checkout epoch {} but current epoch is {}",
+                stmt.owner_prepared_statement_epoch, self.inner.prepared_statement_epoch
             )));
         }
 
@@ -4202,11 +4231,17 @@ mod param_flag {
 }
 
 /// A MySQL prepared statement.
+///
+/// When pooling connections, use [`MySqlConnectionManager`] so prepared
+/// handles are invalidated across pool handoff and cannot leak into a
+/// later logical session on the same physical connection.
 pub struct MySqlStatement {
     /// Server-side statement ID.
     statement_id: u32,
     /// Server connection/session that owns this statement.
     owner_connection_id: u32,
+    /// Logical pool-borrow epoch that prepared this statement.
+    owner_prepared_statement_epoch: u64,
     /// Number of parameters.
     param_count: u16,
     /// Number of columns.
@@ -4222,6 +4257,12 @@ impl MySqlStatement {
     #[must_use]
     pub fn owner_connection_id(&self) -> u32 {
         self.owner_connection_id
+    }
+
+    /// Logical pool-borrow epoch that prepared this statement.
+    #[must_use]
+    pub fn owner_prepared_statement_epoch(&self) -> u64 {
+        self.owner_prepared_statement_epoch
     }
 
     /// Number of parameters in this statement.
@@ -4246,6 +4287,62 @@ impl MySqlStatement {
     #[must_use]
     pub fn columns(&self) -> &[MySqlColumn] {
         &self.columns
+    }
+}
+
+/// Pool manager for MySQL connections.
+///
+/// This manager treats each checkout as a distinct logical session for
+/// prepared statements. When a connection is returned to the pool, it
+/// advances the prepared-statement epoch before the next borrower can
+/// reuse that physical socket. A retained [`MySqlStatement`] from an
+/// earlier checkout therefore fails closed even if the pool later
+/// reuses the same server `connection_id`.
+pub struct MySqlConnectionManager {
+    options: MySqlConnectOptions,
+}
+
+impl fmt::Debug for MySqlConnectionManager {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MySqlConnectionManager")
+            .field("options", &self.options)
+            .finish()
+    }
+}
+
+impl MySqlConnectionManager {
+    /// Create a new manager that mints connections using `options`.
+    #[must_use]
+    pub fn new(options: MySqlConnectOptions) -> Self {
+        Self { options }
+    }
+
+    /// Returns the options this manager uses to mint connections.
+    #[must_use]
+    pub fn options(&self) -> &MySqlConnectOptions {
+        &self.options
+    }
+}
+
+impl crate::database::pool::AsyncConnectionManager for MySqlConnectionManager {
+    type Connection = MySqlConnection;
+    type Error = MySqlError;
+
+    async fn connect(&self, cx: &Cx) -> Outcome<Self::Connection, Self::Error> {
+        MySqlConnection::connect_with_options(cx, self.options.clone()).await
+    }
+
+    async fn is_valid(&self, _cx: &Cx, conn: &mut Self::Connection) -> bool {
+        !conn.inner.closed && !conn.in_transaction() && !conn.inner.needs_rollback
+    }
+
+    fn release_check(&self, conn: &mut Self::Connection) -> bool {
+        if conn.inner.closed || conn.in_transaction() || conn.inner.needs_rollback {
+            return false;
+        }
+
+        conn.invalidate_prepared_statements_for_pool_return();
+        true
     }
 }
 
@@ -4679,6 +4776,7 @@ mod tests {
                 server_version: String::new(),
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                prepared_statement_epoch: 0,
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
             },
             options: None,
@@ -4736,6 +4834,7 @@ mod tests {
                 server_version: String::new(),
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                prepared_statement_epoch: 0,
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
             },
             options: None,
@@ -4779,6 +4878,7 @@ mod tests {
                     server_version: String::new(),
                     needs_rollback: false,
                     max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                    prepared_statement_epoch: 0,
                     query_in_flight: std::sync::atomic::AtomicBool::new(false),
                 },
                 options: None,
@@ -5868,6 +5968,7 @@ mod tests {
                 server_version: String::new(),
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                prepared_statement_epoch: 0,
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
             },
             options: None,
@@ -5945,6 +6046,7 @@ mod tests {
                 server_version: String::new(),
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                prepared_statement_epoch: 0,
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
             },
             options: None,
@@ -6019,6 +6121,7 @@ mod tests {
                 server_version: String::new(),
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                prepared_statement_epoch: 0,
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
             },
             options: None,
@@ -6126,6 +6229,7 @@ mod tests {
                 server_version: String::new(),
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                prepared_statement_epoch: 0,
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
             },
             options: None,
@@ -6198,6 +6302,7 @@ mod tests {
                 server_version: String::new(),
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                prepared_statement_epoch: 0,
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
             },
             options: None,
@@ -6291,6 +6396,7 @@ mod tests {
                 server_version: String::new(),
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                prepared_statement_epoch: 0,
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
             },
             options: None,
@@ -6379,6 +6485,7 @@ mod tests {
                 server_version: String::new(),
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                prepared_statement_epoch: 0,
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
             },
             options: None,
@@ -6386,6 +6493,7 @@ mod tests {
         let stmt = MySqlStatement {
             statement_id: 7,
             owner_connection_id: 0,
+            owner_prepared_statement_epoch: 0,
             param_count: 0,
             column_count: 1,
             params: Vec::new(),
@@ -6417,6 +6525,7 @@ mod tests {
         let stmt = MySqlStatement {
             statement_id: 11,
             owner_connection_id: 99,
+            owner_prepared_statement_epoch: 0,
             param_count: 0,
             column_count: 0,
             params: Vec::new(),
@@ -6436,6 +6545,70 @@ mod tests {
         assert!(
             !conn.inner.closed,
             "mismatch must fail before any protocol I/O marks the connection closed"
+        );
+    }
+
+    #[test]
+    fn pooled_reuse_invalidates_prepared_statement_from_prior_checkout() {
+        struct PoolAwareTestManager;
+
+        impl crate::database::pool::AsyncConnectionManager for PoolAwareTestManager {
+            type Connection = MySqlConnection;
+            type Error = MySqlError;
+
+            async fn connect(&self, _cx: &Cx) -> Outcome<Self::Connection, Self::Error> {
+                let mut conn = make_test_connection();
+                conn.inner.connection_id = 77;
+                Outcome::Ok(conn)
+            }
+
+            async fn is_valid(&self, _cx: &Cx, _conn: &mut Self::Connection) -> bool {
+                true
+            }
+
+            fn release_check(&self, conn: &mut Self::Connection) -> bool {
+                conn.invalidate_prepared_statements_for_pool_return();
+                true
+            }
+        }
+
+        let pool = crate::database::pool::AsyncDbPool::new(
+            PoolAwareTestManager,
+            crate::database::pool::DbPoolConfig::with_max_size(1).validate_on_checkout(false),
+        );
+        let cx = Cx::for_testing();
+
+        let stmt = {
+            let pooled = run(pool.get(&cx)).expect("first pool checkout");
+            let stmt = MySqlStatement {
+                statement_id: 31,
+                owner_connection_id: pooled.connection_id(),
+                owner_prepared_statement_epoch: pooled.inner.prepared_statement_epoch,
+                param_count: 0,
+                column_count: 0,
+                params: Vec::new(),
+                columns: Vec::new(),
+            };
+            drop(pooled);
+            stmt
+        };
+
+        let mut pooled = run(pool.get(&cx)).expect("second pool checkout");
+        assert_eq!(pooled.connection_id(), 77);
+        assert_eq!(pooled.inner.prepared_statement_epoch, 1);
+
+        let outcome = run(pooled.query_prepared(&cx, &stmt, &[]));
+        match outcome {
+            Outcome::Err(MySqlError::InvalidParameter(msg)) => {
+                assert!(msg.contains("pooled checkout epoch 0"));
+                assert!(msg.contains("current epoch is 1"));
+            }
+            other => panic!("expected stale pooled-checkout error, got {other:?}"),
+        }
+
+        assert!(
+            !pooled.inner.closed,
+            "stale pooled statement must fail before any protocol I/O marks the connection closed"
         );
     }
 
@@ -6488,6 +6661,7 @@ mod tests {
                 server_version: String::new(),
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                prepared_statement_epoch: 0,
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
             },
             options: None,
@@ -6495,6 +6669,7 @@ mod tests {
         let stmt = MySqlStatement {
             statement_id: 7,
             owner_connection_id: 0,
+            owner_prepared_statement_epoch: 0,
             param_count: 0,
             column_count: 0,
             params: Vec::new(),
@@ -6524,6 +6699,7 @@ mod tests {
         let stmt = MySqlStatement {
             statement_id: 23,
             owner_connection_id: 88,
+            owner_prepared_statement_epoch: 0,
             param_count: 0,
             column_count: 0,
             params: Vec::new(),
@@ -6900,6 +7076,7 @@ mod tests {
                 server_version: String::new(),
                 needs_rollback: false,
                 max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                prepared_statement_epoch: 0,
                 query_in_flight: std::sync::atomic::AtomicBool::new(false),
             },
             options: None,
