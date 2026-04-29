@@ -2802,3 +2802,14 @@ path = "fuzz_targets/raptorq_decoder_n_max.rs"
 test = false
 doc = false
 bench = false
+
+# Tests progressive symbol arrival under cancellation storm for RaptorQ decoder wavefront pipeline.
+# Exercises batch processing patterns, cancellation timing, peeling queue consistency, and resource
+# cleanup under cancel pressure. Validates that partial progress is safely discarded on interruption
+# and that decoder state remains valid across cancel/retry sequences.
+[[bin]]
+name = "raptorq_progressive_cancel_storm"
+path = "fuzz_targets/raptorq_progressive_cancel_storm.rs"
+test = false
+doc = false
+bench = false
