@@ -4,10 +4,12 @@
 //! handling against the h2 reference implementation to ensure identical
 //! connection state transitions per RFC 7540.
 
-use asupersync::http::h2::{Connection, Settings, frame::GoAwayFrame, error::ErrorCode};
 use asupersync::bytes::Bytes;
+use asupersync::http::h2::{Connection, Settings, error::ErrorCode, frame::GoAwayFrame};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+
+const H2_REFERENCE_UNIMPLEMENTED: &str = "h2 reference comparison not yet implemented";
 
 /// Test verdict for individual conformance cases.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -238,10 +240,16 @@ impl GoAwayConformanceTester {
                 } else {
                     (
                         GoAwayTestVerdict::Fail,
-                        Some(format!("Connection state differences: {}", differences.join(", "))),
+                        Some(format!(
+                            "Connection state differences: {}",
+                            differences.join(", ")
+                        )),
                         differences,
                     )
                 }
+            }
+            (_, Err(h2_err)) if h2_err == H2_REFERENCE_UNIMPLEMENTED => {
+                (GoAwayTestVerdict::Skipped, Some(h2_err.clone()), Vec::new())
             }
             (Err(asupersync_err), Err(h2_err)) => {
                 // Both failed - check if they failed the same way
@@ -254,7 +262,10 @@ impl GoAwayConformanceTester {
                             "Different error behaviors: asupersync={}, h2={}",
                             asupersync_err, h2_err
                         )),
-                        vec![format!("Error divergence: {} vs {}", asupersync_err, h2_err)],
+                        vec![format!(
+                            "Error divergence: {} vs {}",
+                            asupersync_err, h2_err
+                        )],
                     )
                 }
             }
@@ -265,7 +276,10 @@ impl GoAwayConformanceTester {
             ),
             (Err(asupersync_err), Ok(_)) => (
                 GoAwayTestVerdict::Fail,
-                Some(format!("asupersync failed, h2 succeeded: {}", asupersync_err)),
+                Some(format!(
+                    "asupersync failed, h2 succeeded: {}",
+                    asupersync_err
+                )),
                 vec!["Implementation success divergence".to_string()],
             ),
         };
@@ -313,24 +327,7 @@ impl GoAwayConformanceTester {
         &self,
         _case: &GoAwayConformanceCase,
     ) -> Result<GoAwayConnectionState, String> {
-        // TODO: Implement h2 reference comparison
-        // For now, return a placeholder that matches asupersync for passing tests
-        // In a real implementation, this would:
-        // 1. Set up an h2 connection
-        // 2. Create the same streams
-        // 3. Apply the same GOAWAY sequence
-        // 4. Extract the resulting connection state
-        // 5. Return it for comparison
-
-        // Placeholder implementation
-        Ok(GoAwayConnectionState {
-            goaway_received: true,
-            goaway_sent: false,
-            connection_state: "Closing".to_string(),
-            received_goaway_last_stream_id: Some(0),
-            sent_goaway_last_stream_id: None,
-            reset_streams: Vec::new(),
-        })
+        Err(H2_REFERENCE_UNIMPLEMENTED.to_string())
     }
 
     /// Compare connection states between implementations.
@@ -404,9 +401,15 @@ impl GoAwayConformanceTester {
         output.push_str("## Summary\n\n");
         output.push_str(&format!("- **Passed:** {}\n", report.summary.passed));
         output.push_str(&format!("- **Failed:** {}\n", report.summary.failed));
-        output.push_str(&format!("- **Expected Failures:** {}\n", report.summary.expected_failures));
+        output.push_str(&format!(
+            "- **Expected Failures:** {}\n",
+            report.summary.expected_failures
+        ));
         output.push_str(&format!("- **Skipped:** {}\n", report.summary.skipped));
-        output.push_str(&format!("- **Compliance Score:** {:.1}%\n\n", report.summary.compliance_score * 100.0));
+        output.push_str(&format!(
+            "- **Compliance Score:** {:.1}%\n\n",
+            report.summary.compliance_score * 100.0
+        ));
 
         if report.summary.failed > 0 {
             output.push_str("## Failures\n\n");
@@ -451,10 +454,7 @@ impl Default for GoAwayConformanceTester {
 }
 
 /// Helper function to simulate stream creation in asupersync connection.
-fn simulate_stream_creation(
-    _connection: &mut Connection,
-    _stream_id: u32,
-) -> Result<(), String> {
+fn simulate_stream_creation(_connection: &mut Connection, _stream_id: u32) -> Result<(), String> {
     // This would need to be implemented based on how Connection manages streams
     // For now, return Ok to allow compilation
     // In real implementation, this would:
@@ -505,13 +505,11 @@ fn create_goaway_test_cases() -> Vec<GoAwayConformanceCase> {
             id: "goaway-001".to_string(),
             description: "Basic GOAWAY frame sets connection to closing state".to_string(),
             requirement_level: RequirementLevel::Must,
-            goaway_sequence: vec![
-                SerializableGoAwayFrame {
-                    last_stream_id: 3,
-                    error_code: "NoError".to_string(),
-                    debug_data: vec![],
-                },
-            ],
+            goaway_sequence: vec![SerializableGoAwayFrame {
+                last_stream_id: 3,
+                error_code: "NoError".to_string(),
+                debug_data: vec![],
+            }],
             existing_streams: vec![1, 3],
             expected_connection_state: GoAwayConnectionState {
                 goaway_received: true,
@@ -522,19 +520,16 @@ fn create_goaway_test_cases() -> Vec<GoAwayConformanceCase> {
                 reset_streams: vec![],
             },
         },
-
         // Test Case 2: GOAWAY with stream reset
         GoAwayConformanceCase {
             id: "goaway-002".to_string(),
             description: "GOAWAY resets streams beyond last_stream_id".to_string(),
             requirement_level: RequirementLevel::Must,
-            goaway_sequence: vec![
-                SerializableGoAwayFrame {
-                    last_stream_id: 3,
-                    error_code: "NoError".to_string(),
-                    debug_data: vec![],
-                },
-            ],
+            goaway_sequence: vec![SerializableGoAwayFrame {
+                last_stream_id: 3,
+                error_code: "NoError".to_string(),
+                debug_data: vec![],
+            }],
             existing_streams: vec![1, 3, 5, 7],
             expected_connection_state: GoAwayConnectionState {
                 goaway_received: true,
@@ -545,7 +540,6 @@ fn create_goaway_test_cases() -> Vec<GoAwayConformanceCase> {
                 reset_streams: vec![5, 7], // Streams > last_stream_id should be reset
             },
         },
-
         // Test Case 3: Multiple GOAWAY frames with decreasing last_stream_id
         GoAwayConformanceCase {
             id: "goaway-003".to_string(),
@@ -573,19 +567,16 @@ fn create_goaway_test_cases() -> Vec<GoAwayConformanceCase> {
                 reset_streams: vec![5, 7, 9],
             },
         },
-
         // Test Case 4: GOAWAY with error code
         GoAwayConformanceCase {
             id: "goaway-004".to_string(),
             description: "GOAWAY with protocol error".to_string(),
             requirement_level: RequirementLevel::Must,
-            goaway_sequence: vec![
-                SerializableGoAwayFrame {
-                    last_stream_id: 1,
-                    error_code: "ProtocolError".to_string(),
-                    debug_data: b"Protocol violation detected".to_vec(),
-                },
-            ],
+            goaway_sequence: vec![SerializableGoAwayFrame {
+                last_stream_id: 1,
+                error_code: "ProtocolError".to_string(),
+                debug_data: b"Protocol violation detected".to_vec(),
+            }],
             existing_streams: vec![1, 3, 5],
             expected_connection_state: GoAwayConnectionState {
                 goaway_received: true,
@@ -596,19 +587,16 @@ fn create_goaway_test_cases() -> Vec<GoAwayConformanceCase> {
                 reset_streams: vec![3, 5],
             },
         },
-
         // Test Case 5: GOAWAY with zero last_stream_id
         GoAwayConformanceCase {
             id: "goaway-005".to_string(),
             description: "GOAWAY with zero last_stream_id rejects all streams".to_string(),
             requirement_level: RequirementLevel::Must,
-            goaway_sequence: vec![
-                SerializableGoAwayFrame {
-                    last_stream_id: 0,
-                    error_code: "EnhanceYourCalm".to_string(),
-                    debug_data: vec![],
-                },
-            ],
+            goaway_sequence: vec![SerializableGoAwayFrame {
+                last_stream_id: 0,
+                error_code: "EnhanceYourCalm".to_string(),
+                debug_data: vec![],
+            }],
             existing_streams: vec![1, 3, 5, 7],
             expected_connection_state: GoAwayConnectionState {
                 goaway_received: true,
@@ -619,19 +607,16 @@ fn create_goaway_test_cases() -> Vec<GoAwayConformanceCase> {
                 reset_streams: vec![1, 3, 5, 7], // All streams should be reset
             },
         },
-
         // Test Case 6: GOAWAY with maximum stream ID
         GoAwayConformanceCase {
             id: "goaway-006".to_string(),
             description: "GOAWAY with max stream ID allows all existing streams".to_string(),
             requirement_level: RequirementLevel::Should,
-            goaway_sequence: vec![
-                SerializableGoAwayFrame {
-                    last_stream_id: u32::MAX & 0x7FFF_FFFF, // Max valid stream ID (no R bit)
-                    error_code: "NoError".to_string(),
-                    debug_data: vec![],
-                },
-            ],
+            goaway_sequence: vec![SerializableGoAwayFrame {
+                last_stream_id: u32::MAX & 0x7FFF_FFFF, // Max valid stream ID (no R bit)
+                error_code: "NoError".to_string(),
+                debug_data: vec![],
+            }],
             existing_streams: vec![1, 3, 5, 7, 9],
             expected_connection_state: GoAwayConnectionState {
                 goaway_received: true,
@@ -642,11 +627,11 @@ fn create_goaway_test_cases() -> Vec<GoAwayConformanceCase> {
                 reset_streams: vec![], // No streams should be reset
             },
         },
-
         // Test Case 7: GOAWAY with increasing last_stream_id sequence
         GoAwayConformanceCase {
             id: "goaway-007".to_string(),
-            description: "Multiple GOAWAY frames with increasing last_stream_id - first wins".to_string(),
+            description: "Multiple GOAWAY frames with increasing last_stream_id - first wins"
+                .to_string(),
             requirement_level: RequirementLevel::Must,
             goaway_sequence: vec![
                 SerializableGoAwayFrame {
@@ -671,4 +656,20 @@ fn create_goaway_test_cases() -> Vec<GoAwayConformanceCase> {
             },
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_unimplemented_h2_reference_skips_instead_of_faking_pass() {
+        let tester = GoAwayConformanceTester::new();
+        let result = tester.run_single_test(&tester.test_cases[0]).await;
+
+        assert_eq!(result.verdict, GoAwayTestVerdict::Skipped);
+        assert_eq!(result.error.as_deref(), Some(H2_REFERENCE_UNIMPLEMENTED));
+        assert!(result.differences.is_empty());
+        assert!(result.h2_state.is_none());
+    }
 }

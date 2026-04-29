@@ -4,10 +4,12 @@
 //! END_STREAM handling against the h2 reference implementation to ensure
 //! identical stream state transitions per RFC 7540.
 
-use asupersync::http::h2::{Connection, Settings, frame::DataFrame};
 use asupersync::bytes::Bytes;
+use asupersync::http::h2::{Connection, Settings, frame::DataFrame};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+
+const H2_REFERENCE_UNIMPLEMENTED: &str = "h2 reference comparison not yet implemented";
 
 /// Test verdict for individual conformance cases.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -214,7 +216,10 @@ impl DataEndStreamConformanceTester {
     }
 
     /// Run a single conformance test case.
-    async fn run_single_test(&self, case: &DataEndStreamConformanceCase) -> DataEndStreamConformanceResult {
+    async fn run_single_test(
+        &self,
+        case: &DataEndStreamConformanceCase,
+    ) -> DataEndStreamConformanceResult {
         // Test asupersync implementation
         let asupersync_result = self.test_asupersync_data_end_stream(case).await;
 
@@ -230,11 +235,19 @@ impl DataEndStreamConformanceTester {
                 } else {
                     (
                         DataEndStreamTestVerdict::Fail,
-                        Some(format!("Connection state differences: {}", differences.join(", "))),
+                        Some(format!(
+                            "Connection state differences: {}",
+                            differences.join(", ")
+                        )),
                         differences,
                     )
                 }
             }
+            (_, Err(h2_err)) if h2_err == H2_REFERENCE_UNIMPLEMENTED => (
+                DataEndStreamTestVerdict::Skipped,
+                Some(h2_err.clone()),
+                Vec::new(),
+            ),
             (Err(asupersync_err), Err(h2_err)) => {
                 // Both failed - check if they failed the same way
                 if asupersync_err == h2_err {
@@ -246,7 +259,10 @@ impl DataEndStreamConformanceTester {
                             "Different error behaviors: asupersync={}, h2={}",
                             asupersync_err, h2_err
                         )),
-                        vec![format!("Error divergence: {} vs {}", asupersync_err, h2_err)],
+                        vec![format!(
+                            "Error divergence: {} vs {}",
+                            asupersync_err, h2_err
+                        )],
                     )
                 }
             }
@@ -257,7 +273,10 @@ impl DataEndStreamConformanceTester {
             ),
             (Err(asupersync_err), Ok(_)) => (
                 DataEndStreamTestVerdict::Fail,
-                Some(format!("asupersync failed, h2 succeeded: {}", asupersync_err)),
+                Some(format!(
+                    "asupersync failed, h2 succeeded: {}",
+                    asupersync_err
+                )),
                 vec!["Implementation success divergence".to_string()],
             ),
         };
@@ -292,15 +311,19 @@ impl DataEndStreamConformanceTester {
         for serializable_frame in &case.data_sequence {
             let data_frame: DataFrame = serializable_frame.clone().into();
             match simulate_data_frame_processing(&mut connection, &data_frame) {
-                Ok(_) => {},
+                Ok(_) => {}
                 Err(e) => {
-                    error_messages.push(format!("DATA frame error on stream {}: {}", data_frame.stream_id, e));
+                    error_messages.push(format!(
+                        "DATA frame error on stream {}: {}",
+                        data_frame.stream_id, e
+                    ));
                 }
             }
         }
 
         // Extract connection state
-        let connection_state = extract_asupersync_data_end_stream_state(&connection, error_messages);
+        let connection_state =
+            extract_asupersync_data_end_stream_state(&connection, error_messages);
         Ok(connection_state)
     }
 
@@ -309,22 +332,7 @@ impl DataEndStreamConformanceTester {
         &self,
         _case: &DataEndStreamConformanceCase,
     ) -> Result<DataEndStreamConnectionState, String> {
-        // TODO: Implement h2 reference comparison
-        // For now, return a placeholder that matches asupersync for passing tests
-        // In a real implementation, this would:
-        // 1. Set up an h2 connection
-        // 2. Initialize the same streams
-        // 3. Apply the same DATA sequence
-        // 4. Extract the resulting connection and stream states
-        // 5. Return it for comparison
-
-        // Placeholder implementation
-        Ok(DataEndStreamConnectionState {
-            connection_state: "Open".to_string(),
-            stream_states: Vec::new(),
-            has_errors: false,
-            error_messages: Vec::new(),
-        })
+        Err(H2_REFERENCE_UNIMPLEMENTED.to_string())
     }
 
     /// Compare connection states between implementations.
@@ -353,10 +361,13 @@ impl DataEndStreamConformanceTester {
         if asupersync.stream_states.len() != h2.stream_states.len() {
             differences.push(format!(
                 "stream_states count differs: asupersync={}, h2={}",
-                asupersync.stream_states.len(), h2.stream_states.len()
+                asupersync.stream_states.len(),
+                h2.stream_states.len()
             ));
         } else {
-            for (asupersync_stream, h2_stream) in asupersync.stream_states.iter().zip(&h2.stream_states) {
+            for (asupersync_stream, h2_stream) in
+                asupersync.stream_states.iter().zip(&h2.stream_states)
+            {
                 if asupersync_stream.stream_id != h2_stream.stream_id {
                     differences.push(format!(
                         "stream_id mismatch: asupersync={}, h2={}",
@@ -388,7 +399,8 @@ impl DataEndStreamConformanceTester {
         if asupersync.error_messages.len() != h2.error_messages.len() {
             differences.push(format!(
                 "error_messages count differs: asupersync={}, h2={}",
-                asupersync.error_messages.len(), h2.error_messages.len()
+                asupersync.error_messages.len(),
+                h2.error_messages.len()
             ));
         } else {
             let mut asupersync_errors = asupersync.error_messages.clone();
@@ -416,9 +428,15 @@ impl DataEndStreamConformanceTester {
         output.push_str("## Summary\n\n");
         output.push_str(&format!("- **Passed:** {}\n", report.summary.passed));
         output.push_str(&format!("- **Failed:** {}\n", report.summary.failed));
-        output.push_str(&format!("- **Expected Failures:** {}\n", report.summary.expected_failures));
+        output.push_str(&format!(
+            "- **Expected Failures:** {}\n",
+            report.summary.expected_failures
+        ));
         output.push_str(&format!("- **Skipped:** {}\n", report.summary.skipped));
-        output.push_str(&format!("- **Compliance Score:** {:.1}%\n\n", report.summary.compliance_score * 100.0));
+        output.push_str(&format!(
+            "- **Compliance Score:** {:.1}%\n\n",
+            report.summary.compliance_score * 100.0
+        ));
 
         if report.summary.failed > 0 {
             output.push_str("## Failures\n\n");
@@ -518,33 +536,29 @@ fn create_data_end_stream_test_cases() -> Vec<DataEndStreamConformanceCase> {
             description: "Basic DATA frame with END_STREAM closes stream correctly".to_string(),
             requirement_level: RequirementLevel::Must,
             initial_streams: vec![1],
-            data_sequence: vec![
-                SerializableDataFrame {
-                    stream_id: 1,
-                    data: b"Hello, World!".to_vec(),
-                    end_stream: true,
-                },
-            ],
+            data_sequence: vec![SerializableDataFrame {
+                stream_id: 1,
+                data: b"Hello, World!".to_vec(),
+                end_stream: true,
+            }],
             expected_connection_state: DataEndStreamConnectionState {
                 connection_state: "Open".to_string(),
-                stream_states: vec![
-                    StreamEndStreamState {
-                        stream_id: 1,
-                        state: "HalfClosedRemote".to_string(),
-                        can_recv: false,
-                        can_send: true,
-                        error_code: None,
-                    },
-                ],
+                stream_states: vec![StreamEndStreamState {
+                    stream_id: 1,
+                    state: "HalfClosedRemote".to_string(),
+                    can_recv: false,
+                    can_send: true,
+                    error_code: None,
+                }],
                 has_errors: false,
                 error_messages: Vec::new(),
             },
         },
-
         // Test Case 2: DATA after END_STREAM should be rejected
         DataEndStreamConformanceCase {
             id: "data-end-stream-002".to_string(),
-            description: "DATA frame after END_STREAM is rejected with StreamClosed error".to_string(),
+            description: "DATA frame after END_STREAM is rejected with StreamClosed error"
+                .to_string(),
             requirement_level: RequirementLevel::Must,
             initial_streams: vec![1],
             data_sequence: vec![
@@ -561,20 +575,17 @@ fn create_data_end_stream_test_cases() -> Vec<DataEndStreamConformanceCase> {
             ],
             expected_connection_state: DataEndStreamConnectionState {
                 connection_state: "Open".to_string(),
-                stream_states: vec![
-                    StreamEndStreamState {
-                        stream_id: 1,
-                        state: "HalfClosedRemote".to_string(),
-                        can_recv: false,
-                        can_send: true,
-                        error_code: None,
-                    },
-                ],
+                stream_states: vec![StreamEndStreamState {
+                    stream_id: 1,
+                    state: "HalfClosedRemote".to_string(),
+                    can_recv: false,
+                    can_send: true,
+                    error_code: None,
+                }],
                 has_errors: true,
                 error_messages: vec!["DATA frame error on stream 1: StreamClosed".to_string()],
             },
         },
-
         // Test Case 3: Multiple DATA frames, last with END_STREAM
         DataEndStreamConformanceCase {
             id: "data-end-stream-003".to_string(),
@@ -600,49 +611,41 @@ fn create_data_end_stream_test_cases() -> Vec<DataEndStreamConformanceCase> {
             ],
             expected_connection_state: DataEndStreamConnectionState {
                 connection_state: "Open".to_string(),
-                stream_states: vec![
-                    StreamEndStreamState {
-                        stream_id: 1,
-                        state: "HalfClosedRemote".to_string(),
-                        can_recv: false,
-                        can_send: true,
-                        error_code: None,
-                    },
-                ],
+                stream_states: vec![StreamEndStreamState {
+                    stream_id: 1,
+                    state: "HalfClosedRemote".to_string(),
+                    can_recv: false,
+                    can_send: true,
+                    error_code: None,
+                }],
                 has_errors: false,
                 error_messages: Vec::new(),
             },
         },
-
         // Test Case 4: Empty DATA with END_STREAM
         DataEndStreamConformanceCase {
             id: "data-end-stream-004".to_string(),
             description: "Empty DATA frame with END_STREAM closes stream".to_string(),
             requirement_level: RequirementLevel::Must,
             initial_streams: vec![1],
-            data_sequence: vec![
-                SerializableDataFrame {
-                    stream_id: 1,
-                    data: Vec::new(), // Empty payload
-                    end_stream: true,
-                },
-            ],
+            data_sequence: vec![SerializableDataFrame {
+                stream_id: 1,
+                data: Vec::new(), // Empty payload
+                end_stream: true,
+            }],
             expected_connection_state: DataEndStreamConnectionState {
                 connection_state: "Open".to_string(),
-                stream_states: vec![
-                    StreamEndStreamState {
-                        stream_id: 1,
-                        state: "HalfClosedRemote".to_string(),
-                        can_recv: false,
-                        can_send: true,
-                        error_code: None,
-                    },
-                ],
+                stream_states: vec![StreamEndStreamState {
+                    stream_id: 1,
+                    state: "HalfClosedRemote".to_string(),
+                    can_recv: false,
+                    can_send: true,
+                    error_code: None,
+                }],
                 has_errors: false,
                 error_messages: Vec::new(),
             },
         },
-
         // Test Case 5: Multiple streams with END_STREAM
         DataEndStreamConformanceCase {
             id: "data-end-stream-005".to_string(),
@@ -695,36 +698,30 @@ fn create_data_end_stream_test_cases() -> Vec<DataEndStreamConformanceCase> {
                 error_messages: Vec::new(),
             },
         },
-
         // Test Case 6: Large DATA with END_STREAM
         DataEndStreamConformanceCase {
             id: "data-end-stream-006".to_string(),
             description: "Large DATA frame with END_STREAM handles correctly".to_string(),
             requirement_level: RequirementLevel::Should,
             initial_streams: vec![1],
-            data_sequence: vec![
-                SerializableDataFrame {
-                    stream_id: 1,
-                    data: vec![0u8; 8192], // 8KB payload
-                    end_stream: true,
-                },
-            ],
+            data_sequence: vec![SerializableDataFrame {
+                stream_id: 1,
+                data: vec![0u8; 8192], // 8KB payload
+                end_stream: true,
+            }],
             expected_connection_state: DataEndStreamConnectionState {
                 connection_state: "Open".to_string(),
-                stream_states: vec![
-                    StreamEndStreamState {
-                        stream_id: 1,
-                        state: "HalfClosedRemote".to_string(),
-                        can_recv: false,
-                        can_send: true,
-                        error_code: None,
-                    },
-                ],
+                stream_states: vec![StreamEndStreamState {
+                    stream_id: 1,
+                    state: "HalfClosedRemote".to_string(),
+                    can_recv: false,
+                    can_send: true,
+                    error_code: None,
+                }],
                 has_errors: false,
                 error_messages: Vec::new(),
             },
         },
-
         // Test Case 7: Attempt to send multiple END_STREAM frames
         DataEndStreamConformanceCase {
             id: "data-end-stream-007".to_string(),
@@ -745,18 +742,32 @@ fn create_data_end_stream_test_cases() -> Vec<DataEndStreamConformanceCase> {
             ],
             expected_connection_state: DataEndStreamConnectionState {
                 connection_state: "Open".to_string(),
-                stream_states: vec![
-                    StreamEndStreamState {
-                        stream_id: 1,
-                        state: "HalfClosedRemote".to_string(),
-                        can_recv: false,
-                        can_send: true,
-                        error_code: None,
-                    },
-                ],
+                stream_states: vec![StreamEndStreamState {
+                    stream_id: 1,
+                    state: "HalfClosedRemote".to_string(),
+                    can_recv: false,
+                    can_send: true,
+                    error_code: None,
+                }],
                 has_errors: true,
                 error_messages: vec!["DATA frame error on stream 1: StreamClosed".to_string()],
             },
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_unimplemented_h2_reference_skips_instead_of_faking_pass() {
+        let tester = DataEndStreamConformanceTester::new();
+        let result = tester.run_single_test(&tester.test_cases[0]).await;
+
+        assert_eq!(result.verdict, DataEndStreamTestVerdict::Skipped);
+        assert_eq!(result.error.as_deref(), Some(H2_REFERENCE_UNIMPLEMENTED));
+        assert!(result.differences.is_empty());
+        assert!(result.h2_state.is_none());
+    }
 }

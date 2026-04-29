@@ -6,8 +6,9 @@
 
 use asupersync::http::h2::{Connection, Settings, frame::PingFrame};
 use serde::{Deserialize, Serialize};
-use std::time::{Duration, Instant};
 use std::fmt;
+
+const H2_REFERENCE_UNIMPLEMENTED: &str = "h2 reference comparison not yet implemented";
 
 /// Test verdict for individual conformance cases.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,6 +221,11 @@ impl PingConformanceTester {
 
         // Compare results
         let (verdict, error, differences) = match (&asupersync_result, &h2_result) {
+            (_, Err(h2_err)) if h2_err == H2_REFERENCE_UNIMPLEMENTED => (
+                PingTestVerdict::Skipped,
+                Some(H2_REFERENCE_UNIMPLEMENTED.to_string()),
+                Vec::new(),
+            ),
             (Ok(asupersync_state), Ok(h2_state)) => {
                 let differences = self.compare_connection_states(asupersync_state, h2_state);
                 if differences.is_empty() {
@@ -227,7 +233,10 @@ impl PingConformanceTester {
                 } else {
                     (
                         PingTestVerdict::Fail,
-                        Some(format!("Connection state differences: {}", differences.join(", "))),
+                        Some(format!(
+                            "Connection state differences: {}",
+                            differences.join(", ")
+                        )),
                         differences,
                     )
                 }
@@ -243,7 +252,10 @@ impl PingConformanceTester {
                             "Different error behaviors: asupersync={}, h2={}",
                             asupersync_err, h2_err
                         )),
-                        vec![format!("Error divergence: {} vs {}", asupersync_err, h2_err)],
+                        vec![format!(
+                            "Error divergence: {} vs {}",
+                            asupersync_err, h2_err
+                        )],
                     )
                 }
             }
@@ -254,7 +266,10 @@ impl PingConformanceTester {
             ),
             (Err(asupersync_err), Ok(_)) => (
                 PingTestVerdict::Fail,
-                Some(format!("asupersync failed, h2 succeeded: {}", asupersync_err)),
+                Some(format!(
+                    "asupersync failed, h2 succeeded: {}",
+                    asupersync_err
+                )),
                 vec!["Implementation success divergence".to_string()],
             ),
         };
@@ -277,12 +292,10 @@ impl PingConformanceTester {
         let settings = Settings::default();
         let mut connection = Connection::server(settings);
         let mut ping_timings = Vec::new();
-        let base_time = Instant::now();
 
         // Apply PING sequence with timing
         for serializable_frame in &case.ping_sequence {
             let ping_frame: PingFrame = serializable_frame.clone().into();
-            let timestamp = base_time + Duration::from_millis(serializable_frame.timestamp_ms);
 
             if !ping_frame.ack {
                 // This is a PING request - track timing
@@ -297,7 +310,8 @@ impl PingConformanceTester {
                 if let Some(last_timing) = ping_timings.last_mut() {
                     last_timing.ack_received_at_ms = Some(serializable_frame.timestamp_ms);
                     if let Some(sent_at) = Some(last_timing.sent_at_ms) {
-                        last_timing.rtt_ms = Some(serializable_frame.timestamp_ms.saturating_sub(sent_at));
+                        last_timing.rtt_ms =
+                            Some(serializable_frame.timestamp_ms.saturating_sub(sent_at));
                     }
                 }
             }
@@ -318,21 +332,7 @@ impl PingConformanceTester {
         &self,
         _case: &PingConformanceCase,
     ) -> Result<PingConnectionState, String> {
-        // TODO: Implement h2 reference comparison
-        // For now, return a placeholder that matches asupersync for passing tests
-        // In a real implementation, this would:
-        // 1. Set up an h2 connection
-        // 2. Apply the same PING sequence with timing
-        // 3. Extract the resulting connection state and RTT measurements
-        // 4. Return it for comparison
-
-        // Placeholder implementation
-        Ok(PingConnectionState {
-            connection_state: "Open".to_string(),
-            pending_ping_acks: 0,
-            ping_timings: Vec::new(),
-            has_errors: false,
-        })
+        Err(H2_REFERENCE_UNIMPLEMENTED.to_string())
     }
 
     /// Compare connection states between implementations.
@@ -368,14 +368,23 @@ impl PingConformanceTester {
         if asupersync.ping_timings.len() != h2.ping_timings.len() {
             differences.push(format!(
                 "ping_timings count differs: asupersync={}, h2={}",
-                asupersync.ping_timings.len(), h2.ping_timings.len()
+                asupersync.ping_timings.len(),
+                h2.ping_timings.len()
             ));
         } else {
             // Compare RTT values (within tolerance)
-            for (i, (asupersync_timing, h2_timing)) in asupersync.ping_timings.iter().zip(&h2.ping_timings).enumerate() {
-                if let (Some(asupersync_rtt), Some(h2_rtt)) = (asupersync_timing.rtt_ms, h2_timing.rtt_ms) {
+            for (i, (asupersync_timing, h2_timing)) in asupersync
+                .ping_timings
+                .iter()
+                .zip(&h2.ping_timings)
+                .enumerate()
+            {
+                if let (Some(asupersync_rtt), Some(h2_rtt)) =
+                    (asupersync_timing.rtt_ms, h2_timing.rtt_ms)
+                {
                     let diff = asupersync_rtt.abs_diff(h2_rtt);
-                    if diff > 5 { // 5ms tolerance
+                    if diff > 5 {
+                        // 5ms tolerance
                         differences.push(format!(
                             "ping_timing[{}] RTT differs by {}ms: asupersync={}ms, h2={}ms",
                             i, diff, asupersync_rtt, h2_rtt
@@ -405,9 +414,15 @@ impl PingConformanceTester {
         output.push_str("## Summary\n\n");
         output.push_str(&format!("- **Passed:** {}\n", report.summary.passed));
         output.push_str(&format!("- **Failed:** {}\n", report.summary.failed));
-        output.push_str(&format!("- **Expected Failures:** {}\n", report.summary.expected_failures));
+        output.push_str(&format!(
+            "- **Expected Failures:** {}\n",
+            report.summary.expected_failures
+        ));
         output.push_str(&format!("- **Skipped:** {}\n", report.summary.skipped));
-        output.push_str(&format!("- **Compliance Score:** {:.1}%\n\n", report.summary.compliance_score * 100.0));
+        output.push_str(&format!(
+            "- **Compliance Score:** {:.1}%\n\n",
+            report.summary.compliance_score * 100.0
+        ));
 
         if report.summary.failed > 0 {
             output.push_str("## Failures\n\n");
@@ -517,7 +532,6 @@ fn create_ping_test_cases() -> Vec<PingConformanceCase> {
             },
             expected_rtt_behavior: "RTT calculated from PING/ACK timing".to_string(),
         },
-
         // Test Case 2: PING with zero payload
         PingConformanceCase {
             id: "ping-002".to_string(),
@@ -547,7 +561,6 @@ fn create_ping_test_cases() -> Vec<PingConformanceCase> {
             },
             expected_rtt_behavior: "RTT calculated correctly with zero payload".to_string(),
         },
-
         // Test Case 3: PING with maximum payload
         PingConformanceCase {
             id: "ping-003".to_string(),
@@ -577,7 +590,6 @@ fn create_ping_test_cases() -> Vec<PingConformanceCase> {
             },
             expected_rtt_behavior: "RTT calculated correctly with max payload".to_string(),
         },
-
         // Test Case 4: Multiple PING exchanges
         PingConformanceCase {
             id: "ping-004".to_string(),
@@ -626,7 +638,6 @@ fn create_ping_test_cases() -> Vec<PingConformanceCase> {
             },
             expected_rtt_behavior: "Multiple RTT measurements maintained".to_string(),
         },
-
         // Test Case 5: PING without ACK (pending state)
         PingConformanceCase {
             id: "ping-005".to_string(),
@@ -652,19 +663,16 @@ fn create_ping_test_cases() -> Vec<PingConformanceCase> {
             },
             expected_rtt_behavior: "Pending PING tracked without RTT".to_string(),
         },
-
         // Test Case 6: PING ACK only (no corresponding PING)
         PingConformanceCase {
             id: "ping-006".to_string(),
             description: "Received PING_ACK without PING should not cause errors".to_string(),
             requirement_level: RequirementLevel::Should,
-            ping_sequence: vec![
-                SerializablePingFrame {
-                    opaque_data: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22],
-                    ack: true, // ACK without corresponding PING
-                    timestamp_ms: 50,
-                },
-            ],
+            ping_sequence: vec![SerializablePingFrame {
+                opaque_data: [0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22],
+                ack: true, // ACK without corresponding PING
+                timestamp_ms: 50,
+            }],
             expected_connection_state: PingConnectionState {
                 connection_state: "Open".to_string(),
                 pending_ping_acks: 0,
@@ -673,7 +681,6 @@ fn create_ping_test_cases() -> Vec<PingConformanceCase> {
             },
             expected_rtt_behavior: "Orphan PING_ACK ignored gracefully".to_string(),
         },
-
         // Test Case 7: High-frequency PING stress test
         PingConformanceCase {
             id: "ping-007".to_string(),
@@ -717,13 +724,26 @@ fn create_ping_test_cases() -> Vec<PingConformanceCase> {
                 connection_state: "Open".to_string(), // No spurious GOAWAY
                 pending_ping_acks: 0,
                 ping_timings: vec![
-                    PingTiming { sent_at_ms: 0, ack_received_at_ms: Some(15), rtt_ms: Some(15) },
-                    PingTiming { sent_at_ms: 5, ack_received_at_ms: Some(20), rtt_ms: Some(15) },
-                    PingTiming { sent_at_ms: 10, ack_received_at_ms: Some(25), rtt_ms: Some(15) },
+                    PingTiming {
+                        sent_at_ms: 0,
+                        ack_received_at_ms: Some(15),
+                        rtt_ms: Some(15),
+                    },
+                    PingTiming {
+                        sent_at_ms: 5,
+                        ack_received_at_ms: Some(20),
+                        rtt_ms: Some(15),
+                    },
+                    PingTiming {
+                        sent_at_ms: 10,
+                        ack_received_at_ms: Some(25),
+                        rtt_ms: Some(15),
+                    },
                 ],
                 has_errors: false,
             },
-            expected_rtt_behavior: "High-frequency PING does not destabilize connection".to_string(),
+            expected_rtt_behavior: "High-frequency PING does not destabilize connection"
+                .to_string(),
         },
     ]
 }
