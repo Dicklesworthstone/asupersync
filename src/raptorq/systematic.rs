@@ -1221,6 +1221,8 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use crate::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
+    use proptest::prelude::*;
 
     fn make_source_symbols(k: usize, symbol_size: usize) -> Vec<Vec<u8>> {
         (0..k)
@@ -1253,6 +1255,28 @@ mod tests {
         format!(
             "scenario_id={scenario_id} seed={seed} parameter_set={parameter_set},k={k},symbol_size={symbol_size} replay_ref={replay_ref}"
         )
+    }
+
+    fn decode_emitted_symbols(
+        symbols: &[EmittedSymbol],
+        k: usize,
+        symbol_size: usize,
+        seed: u64,
+    ) -> Result<Vec<Vec<u8>>, crate::raptorq::decoder::DecodeError> {
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let mut received = decoder.constraint_symbols();
+
+        for symbol in symbols {
+            let row = if symbol.is_source {
+                ReceivedSymbol::source(symbol.esi, symbol.data.clone())
+            } else {
+                let (columns, coefficients) = decoder.repair_equation(symbol.esi).unwrap();
+                ReceivedSymbol::repair(symbol.esi, columns, coefficients, symbol.data.clone())
+            };
+            received.push(row);
+        }
+
+        decoder.decode(&received).map(|decoded| decoded.source)
     }
 
     #[test]
@@ -1942,6 +1966,73 @@ mod tests {
         let source = make_source_symbols(k, symbol_size);
         let enc = SystematicEncoder::new(&source, symbol_size, 42);
         assert!(enc.is_some(), "encoder should be constructible for k={k}");
+    }
+
+    #[test]
+    fn mr_emit_repair_substitutes_for_withheld_systematic_across_arbitrary_k() {
+        proptest!(|(
+            k in 2usize..48,
+            symbol_size in prop_oneof![Just(8usize), Just(16usize), Just(24usize)],
+            seed in any::<u64>(),
+            withheld_raw in 1usize..5,
+        )| {
+            let source: Vec<Vec<u8>> = (0..k)
+                .map(|i| {
+                    (0..symbol_size)
+                        .map(|j| {
+                            seed.wrapping_add((i as u64).wrapping_mul(37))
+                                .wrapping_add((j as u64).wrapping_mul(13))
+                                .wrapping_add(7) as u8
+                        })
+                        .collect()
+                })
+                .collect();
+
+            let mut baseline = SystematicEncoder::new(&source, symbol_size, seed)
+                .expect("baseline encoder construction should succeed");
+            let systematic = baseline.emit_systematic();
+            let baseline_decoded = decode_emitted_symbols(&systematic, k, symbol_size, seed)
+                .expect("full systematic emission must decode");
+            prop_assert_eq!(
+                baseline_decoded,
+                source,
+                "MR baseline violated: full systematic emission must preserve identity"
+            );
+
+            let withheld = withheld_raw.min(k - 1);
+            let mut transformed = SystematicEncoder::new(&source, symbol_size, seed)
+                .expect("transformed encoder construction should succeed");
+            let systematic_prefix = transformed.emit_systematic();
+            let repair_count = transformed.params().l + withheld;
+            let repair_symbols = transformed.emit_repair(repair_count);
+
+            let mut substituted = systematic_prefix[..k - withheld].to_vec();
+            substituted.extend(repair_symbols);
+
+            let substituted_decoded = decode_emitted_symbols(&substituted, k, symbol_size, seed)
+                .expect("repair-backed transformed emission must decode");
+            prop_assert_eq!(
+                substituted_decoded,
+                source,
+                "MR violated: repair-backed transformed emission must preserve identity \
+                 for k={}, symbol_size={}, withheld={}, seed={:#x}",
+                k,
+                symbol_size,
+                withheld,
+                seed
+            );
+            prop_assert_eq!(
+                substituted_decoded,
+                baseline_decoded,
+                "MR violated: withholding systematic symbols and substituting repairs \
+                 changed the decoded source for k={}, symbol_size={}, \
+                 withheld={}, seed={:#x}",
+                k,
+                symbol_size,
+                withheld,
+                seed
+            );
+        });
     }
 
     #[test]
