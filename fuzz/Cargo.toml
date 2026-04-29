@@ -2846,3 +2846,14 @@ path = "fuzz_targets/raptorq_decoder_symbol_corruption.rs"
 test = false
 doc = false
 bench = false
+
+# Tests adjusted_frame_len boundary conditions with saturating arithmetic and i64/usize conversion.
+# Exercises length adjustment overflow/underflow scenarios, frame length validation boundaries,
+# negative frame length handling, arithmetic saturation behavior, and integer conversion edge cases
+# in length-delimited frame processing with intelligent boundary condition testing.
+[[bin]]
+name = "length_delimited_adjust_saturating_boundary"
+path = "fuzz_targets/length_delimited_adjust_saturating_boundary.rs"
+test = false
+doc = false
+bench = false
