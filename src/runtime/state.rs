@@ -5063,6 +5063,48 @@ mod tests {
         })
     }
 
+    fn region_close_to_quiescence_transition_trace_snapshot() -> Value {
+        let mut runtime = crate::lab::runtime::LabRuntime::with_seed(17);
+        let state = &mut runtime.state;
+        let root = state.create_root_region(Budget::INFINITE);
+        let child = create_child_region(state, root);
+        let task = insert_task(state, child);
+        let labels = [(root, "root"), (child, "child")];
+
+        let _ = state.cancel_request(root, &CancelReason::user("done"), None);
+        state
+            .task_mut(task)
+            .expect("task")
+            .complete(Outcome::Cancelled(CancelReason::parent_cancelled()));
+        let _ = state.task_completed(task);
+
+        let events = state
+            .trace
+            .snapshot()
+            .into_iter()
+            .filter_map(|event| match event.kind {
+                TraceEventKind::RegionCloseBegin | TraceEventKind::RegionCloseComplete => {
+                    let TraceData::Region { region, parent } = event.data else {
+                        panic!("expected region trace data");
+                    };
+
+                    Some(json!({
+                        "kind": serde_json::to_value(EventKindSnapshot::from(event.kind)).unwrap(),
+                        "time": "[event_time]",
+                        "region": label_region_for_snapshot(region, &labels),
+                        "parent": parent.map(|region| label_region_for_snapshot(region, &labels)),
+                    }))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        json!({
+            "seed": 17,
+            "events": events,
+        })
+    }
+
     fn init_test(name: &str) {
         init_test_logging();
         crate::test_phase!(name);
@@ -5957,6 +5999,18 @@ mod tests {
         );
 
         crate::test_complete!("region_cancel_cause_chain_dump_scrubbed");
+    }
+
+    #[test]
+    fn region_close_to_quiescence_transition_trace_scrubbed() {
+        init_test("region_close_to_quiescence_transition_trace_scrubbed");
+
+        insta::assert_json_snapshot!(
+            "region_close_to_quiescence_transition_trace_scrubbed",
+            region_close_to_quiescence_transition_trace_snapshot()
+        );
+
+        crate::test_complete!("region_close_to_quiescence_transition_trace_scrubbed");
     }
 
     #[test]
