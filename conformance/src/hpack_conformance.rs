@@ -4,8 +4,8 @@
 //! wire vectors and expected outcomes. Header ordering and duplicate fields are
 //! part of the contract and must not be collapsed away during comparison.
 
+use asupersync::bytes::Bytes;
 use asupersync::http::h2::HpackDecoder;
-use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -428,7 +428,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_hpack_conformance_empty() {
-        let mut tester = HpackConformanceTester::new();
+        let tester = HpackConformanceTester::new();
         let report = tester.run_all_tests().await;
 
         assert!(report.total_cases > 0);

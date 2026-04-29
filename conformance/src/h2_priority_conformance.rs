@@ -431,8 +431,8 @@ impl Default for PriorityConformanceTester {
 
 /// Helper function to simulate PRIORITY frame processing in asupersync connection.
 fn simulate_priority_frame_processing(
-    connection: &mut Connection,
-    priority_frame: &PriorityFrame,
+    _connection: &mut Connection,
+    _priority_frame: &PriorityFrame,
 ) -> Result<(), String> {
     // This would need to be implemented based on how Connection processes frames
     // For now, return Ok to allow compilation
@@ -443,7 +443,7 @@ fn simulate_priority_frame_processing(
 }
 
 /// Extract priority states from asupersync connection.
-fn extract_asupersync_priority_states(connection: &Connection) -> Vec<StreamPriorityState> {
+fn extract_asupersync_priority_states(_connection: &Connection) -> Vec<StreamPriorityState> {
     // This would need to be implemented to extract actual priority states
     // For now, return empty Vec to allow compilation
     // In real implementation, this would:
@@ -463,9 +463,9 @@ fn create_priority_test_cases() -> Vec<PriorityConformanceCase> {
             description: "Basic PRIORITY frame sets stream priority correctly".to_string(),
             requirement_level: RequirementLevel::Must,
             priority_sequence: vec![
-                PriorityFrame {
+                SerializablePriorityFrame {
                     stream_id: 1,
-                    priority: PrioritySpec {
+                    priority: SerializablePrioritySpec {
                         exclusive: false,
                         dependency: 0,
                         weight: 16,
@@ -488,9 +488,9 @@ fn create_priority_test_cases() -> Vec<PriorityConformanceCase> {
             description: "PRIORITY frame with exclusive dependency flag".to_string(),
             requirement_level: RequirementLevel::Must,
             priority_sequence: vec![
-                PriorityFrame {
+                SerializablePriorityFrame {
                     stream_id: 3,
-                    priority: PrioritySpec {
+                    priority: SerializablePrioritySpec {
                         exclusive: true,
                         dependency: 1,
                         weight: 32,
@@ -513,25 +513,25 @@ fn create_priority_test_cases() -> Vec<PriorityConformanceCase> {
             description: "Multiple streams with dependency chain".to_string(),
             requirement_level: RequirementLevel::Must,
             priority_sequence: vec![
-                PriorityFrame {
+                SerializablePriorityFrame {
                     stream_id: 1,
-                    priority: PrioritySpec {
+                    priority: SerializablePrioritySpec {
                         exclusive: false,
                         dependency: 0,
                         weight: 16,
                     },
                 },
-                PriorityFrame {
+                SerializablePriorityFrame {
                     stream_id: 3,
-                    priority: PrioritySpec {
+                    priority: SerializablePrioritySpec {
                         exclusive: false,
                         dependency: 1,
                         weight: 8,
                     },
                 },
-                PriorityFrame {
+                SerializablePriorityFrame {
                     stream_id: 5,
-                    priority: PrioritySpec {
+                    priority: SerializablePrioritySpec {
                         exclusive: false,
                         dependency: 3,
                         weight: 4,
@@ -566,17 +566,17 @@ fn create_priority_test_cases() -> Vec<PriorityConformanceCase> {
             description: "PRIORITY weight at minimum and maximum values".to_string(),
             requirement_level: RequirementLevel::Must,
             priority_sequence: vec![
-                PriorityFrame {
+                SerializablePriorityFrame {
                     stream_id: 1,
-                    priority: PrioritySpec {
+                    priority: SerializablePrioritySpec {
                         exclusive: false,
                         dependency: 0,
                         weight: 1, // Minimum weight (stored as 0)
                     },
                 },
-                PriorityFrame {
+                SerializablePriorityFrame {
                     stream_id: 3,
-                    priority: PrioritySpec {
+                    priority: SerializablePrioritySpec {
                         exclusive: false,
                         dependency: 0,
                         weight: 255, // Maximum weight (represents 256)
@@ -606,18 +606,18 @@ fn create_priority_test_cases() -> Vec<PriorityConformanceCase> {
             requirement_level: RequirementLevel::Must,
             priority_sequence: vec![
                 // Initial priority
-                PriorityFrame {
+                SerializablePriorityFrame {
                     stream_id: 1,
-                    priority: PrioritySpec {
+                    priority: SerializablePrioritySpec {
                         exclusive: false,
                         dependency: 0,
                         weight: 16,
                     },
                 },
                 // Update priority
-                PriorityFrame {
+                SerializablePriorityFrame {
                     stream_id: 1,
-                    priority: PrioritySpec {
+                    priority: SerializablePrioritySpec {
                         exclusive: true,
                         dependency: 3,
                         weight: 64,
@@ -640,25 +640,25 @@ fn create_priority_test_cases() -> Vec<PriorityConformanceCase> {
             description: "Multiple streams depending on the same parent".to_string(),
             requirement_level: RequirementLevel::Should,
             priority_sequence: vec![
-                PriorityFrame {
+                SerializablePriorityFrame {
                     stream_id: 3,
-                    priority: PrioritySpec {
+                    priority: SerializablePrioritySpec {
                         exclusive: false,
                         dependency: 1,
                         weight: 32,
                     },
                 },
-                PriorityFrame {
+                SerializablePriorityFrame {
                     stream_id: 5,
-                    priority: PrioritySpec {
+                    priority: SerializablePrioritySpec {
                         exclusive: false,
                         dependency: 1,
                         weight: 16,
                     },
                 },
-                PriorityFrame {
+                SerializablePriorityFrame {
                     stream_id: 7,
-                    priority: PrioritySpec {
+                    priority: SerializablePrioritySpec {
                         exclusive: false,
                         dependency: 1,
                         weight: 8,
@@ -693,17 +693,17 @@ fn create_priority_test_cases() -> Vec<PriorityConformanceCase> {
             description: "Handle circular dependency in priority graph".to_string(),
             requirement_level: RequirementLevel::Must,
             priority_sequence: vec![
-                PriorityFrame {
+                SerializablePriorityFrame {
                     stream_id: 1,
-                    priority: PrioritySpec {
+                    priority: SerializablePrioritySpec {
                         exclusive: false,
                         dependency: 3,
                         weight: 16,
                     },
                 },
-                PriorityFrame {
+                SerializablePriorityFrame {
                     stream_id: 3,
-                    priority: PrioritySpec {
+                    priority: SerializablePrioritySpec {
                         exclusive: false,
                         dependency: 1,  // Creates circular dependency
                         weight: 16,

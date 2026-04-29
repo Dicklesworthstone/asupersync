@@ -311,6 +311,10 @@ fastrand = "2.3"
 httparse = "1.8"
 # tokio-util for differential conformance testing of LengthDelimitedCodec
 tokio-util = { version = "0.7", features = ["codec"] }
+# sqlx MySQL reference implementation for binary-protocol differential tests
+sqlx = { version = "0.8.6", default-features = false, features = ["mysql", "runtime-tokio-rustls"] }
+# redis-rs for differential conformance testing of RESP3 push dispatch
+redis = "0.26"
 # External RFC 6330 decoder for byte-level RaptorQ interoperability checks
 raptorq = "1.7.0"
 # Tokio for differential semaphore fairness conformance testing

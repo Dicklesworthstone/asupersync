@@ -4293,6 +4293,21 @@ pub fn fuzz_parse_data_row_or_terminator(
     MySqlConnection::parse_data_row_or_terminator(data, columns, deprecate_eof)
 }
 
+#[doc(hidden)]
+pub fn fuzz_build_stmt_execute_packet(
+    statement_id: u32,
+    params: &[&dyn ToSql],
+) -> Result<Vec<u8>, MySqlError> {
+    let mut buf = PacketBuffer::new();
+    buf.set_sequence(0);
+    buf.write_byte(command::COM_STMT_EXECUTE);
+    buf.write_u32_le(statement_id);
+    buf.write_byte(0x00);
+    buf.write_u32_le(1);
+    write_stmt_execute_params(&mut buf, params)?;
+    Ok(buf.build_packet().bytes)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(

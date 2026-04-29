@@ -50,6 +50,10 @@ path = "src/bin/hpack_conformance.rs"
 name = "prometheus_conformance"
 path = "src/bin/prometheus_conformance.rs"
 
+[[bin]]
+name = "otel_resource_conformance"
+path = "src/bin/otel_resource_conformance.rs"
+
 [dependencies]
 asupersync = { path = ".." }
 serde = { version = "1", features = ["derive"] }
@@ -64,6 +68,8 @@ h2 = "0.4"
 bytes = "1.11"
 uuid = { version = "1.0", features = ["v4"] }
 prometheus-client = "0.23"
+opentelemetry = { version = "0.31", features = ["trace"] }
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "trace", "metrics"] }
 
 [dev-dependencies]
 # Runtimes can be added here for testing

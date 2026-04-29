@@ -36,6 +36,7 @@ use std::pin::Pin;
 use std::time::Duration;
 
 pub mod bench;
+pub mod h2_goaway_conformance;
 pub mod h2_priority_conformance;
 pub mod h2_settings_conformance;
 pub mod hpack_conformance;
@@ -59,6 +60,11 @@ pub use bench::{
     BenchThresholds, Benchmark, Comparison, ComparisonConfidence, RegressionCheck,
     RegressionConfig, RegressionMetric, Stats, StatsError, default_benchmarks,
     run_benchmark_comparison,
+};
+pub use h2_goaway_conformance::{
+    GoAwayComplianceReport, GoAwayComplianceSummary, GoAwayConformanceCase,
+    GoAwayConformanceResult, GoAwayConformanceTester, GoAwayTestVerdict, RequirementLevel as GoAwayRequirementLevel,
+    GoAwayConnectionState, SerializableGoAwayFrame,
 };
 pub use h2_priority_conformance::{
     PriorityComplianceReport, PriorityComplianceSummary, PriorityConformanceCase,
