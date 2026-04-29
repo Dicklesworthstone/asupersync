@@ -4498,6 +4498,14 @@ impl PgConnection {
         )
     }
 
+    /// Fail closed for any command tag that may reflect a session mutation.
+    ///
+    /// PostgreSQL reports both `SET LOCAL ...` and session-scoped `SET ...`
+    /// with the same `SET` command tag, so pooled reuse cannot distinguish
+    /// whether the setting was transaction-local or session-wide from the
+    /// backend response alone. Treating all `SET` completions as
+    /// discard-on-pool-return ensures the next tenant never inherits
+    /// ambiguous role/GUC state.
     fn command_tag_requires_session_discard(tag: &str) -> bool {
         let Some(verb) = tag.split_ascii_whitespace().next() else {
             return false;
@@ -9648,6 +9656,85 @@ mod tests {
         assert!(
             !mgr.release_check(&mut conn),
             "pool return must reject connections with prior role state"
+        );
+    }
+
+    #[test]
+    fn set_local_transaction_marks_connection_discard_before_pool_reuse() {
+        use crate::database::pool::AsyncConnectionManager;
+
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let cx = crate::cx::Cx::for_testing();
+        let mgr = PgConnectionManager::new(
+            PgConnectOptions::parse("postgres://localhost/testdb").unwrap(),
+        );
+
+        let responder = std::thread::spawn(move || {
+            let begin_request = read_until_contains(&mut peer, b"BEGIN");
+            assert!(
+                begin_request
+                    .windows("BEGIN".len())
+                    .any(|window| window == b"BEGIN"),
+                "request should contain BEGIN"
+            );
+            std::io::Write::write_all(&mut peer, &backend_message(b'C', b"BEGIN\0"))
+                .expect("command complete should be written");
+            std::io::Write::write_all(&mut peer, &ready_for_query(b'T'))
+                .expect("ready for query should be written");
+
+            let set_request =
+                read_until_contains(&mut peer, b"SET LOCAL application_name = 'tenant_a'");
+            assert!(
+                set_request
+                    .windows("SET LOCAL application_name = 'tenant_a'".len())
+                    .any(|window| window == b"SET LOCAL application_name = 'tenant_a'"),
+                "request should contain SET LOCAL"
+            );
+            std::io::Write::write_all(&mut peer, &backend_message(b'C', b"SET\0"))
+                .expect("command complete should be written");
+            std::io::Write::write_all(&mut peer, &ready_for_query(b'T'))
+                .expect("ready for query should be written");
+
+            let commit_request = read_until_contains(&mut peer, b"COMMIT");
+            assert!(
+                commit_request
+                    .windows("COMMIT".len())
+                    .any(|window| window == b"COMMIT"),
+                "request should contain COMMIT"
+            );
+            std::io::Write::write_all(&mut peer, &backend_message(b'C', b"COMMIT\0"))
+                .expect("command complete should be written");
+            std::io::Write::write_all(&mut peer, &ready_for_query(b'I'))
+                .expect("ready for query should be written");
+        });
+
+        let mut tx = match run(conn.begin(&cx)) {
+            Outcome::Ok(tx) => tx,
+            other => panic!("expected successful BEGIN, got {other:?}"),
+        };
+        match run(tx.execute_unchecked(&cx, "SET LOCAL application_name = 'tenant_a'")) {
+            Outcome::Ok(affected) => assert_eq!(affected, 0),
+            other => panic!("expected successful SET LOCAL, got {other:?}"),
+        }
+        match run(tx.commit(&cx)) {
+            Outcome::Ok(()) => {}
+            other => panic!("expected successful COMMIT, got {other:?}"),
+        }
+        responder
+            .join()
+            .expect("SET LOCAL responder should exit cleanly");
+
+        assert_eq!(
+            conn.inner.transaction_status, b'I',
+            "SET LOCAL transaction should be closed before pool reuse decision"
+        );
+        assert!(
+            conn.inner.needs_discard,
+            "ambiguous SET command tag must fail closed for pooled reuse"
+        );
+        assert!(
+            !mgr.release_check(&mut conn),
+            "pool return must drop SET LOCAL connections so next tenant cannot inherit GUC state"
         );
     }
 
