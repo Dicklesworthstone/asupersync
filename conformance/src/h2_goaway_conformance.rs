@@ -4,10 +4,9 @@
 //! handling against the h2 reference implementation to ensure identical
 //! connection state transitions per RFC 7540.
 
-use asupersync::http::h2::{Connection, Settings, frame::{GoAwayFrame, ErrorCode}};
+use asupersync::http::h2::{Connection, Settings, frame::GoAwayFrame, error::ErrorCode};
 use asupersync::bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fmt;
 
 /// Test verdict for individual conformance cases.

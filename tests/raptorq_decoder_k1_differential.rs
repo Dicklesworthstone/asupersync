@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use asupersync::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
+use asupersync::raptorq::rfc6330::rand as rfc_rand;
 use asupersync::raptorq::systematic::SystematicEncoder;
 use raptorq::{
     Decoder as RaptorqRsDecoder, EncodingPacket as RaptorqRsEncodingPacket,
@@ -16,6 +17,39 @@ fn make_source_data(k: usize, symbol_size: usize) -> Vec<Vec<u8>> {
                 .collect()
         })
         .collect()
+}
+
+fn pick_unique_drop_indices_from_draws(
+    k: usize,
+    draw_count: usize,
+    unique_target: usize,
+    seed: u32,
+) -> Vec<usize> {
+    assert!(
+        unique_target <= k,
+        "drop target must fit inside the source block"
+    );
+    let limit = u32::try_from(k).expect("K must fit in u32");
+    let mut drops = BTreeSet::new();
+    for draw in 0..draw_count {
+        let draw_u32 = u32::try_from(draw).expect("draw index must fit in u32");
+        let idx = usize::try_from(rfc_rand(
+            seed.wrapping_add(draw_u32),
+            (draw % 251) as u8,
+            limit,
+        ))
+        .expect("drop draw must fit in usize");
+        drops.insert(idx);
+        if drops.len() == unique_target {
+            break;
+        }
+    }
+    assert_eq!(
+        drops.len(),
+        unique_target,
+        "draw schedule must produce the requested number of unique drops"
+    );
+    drops.into_iter().collect()
 }
 
 fn build_received_symbols(
@@ -158,5 +192,23 @@ fn k10_thirty_percent_loss_matches_raptorq_rs() {
         &[1usize, 4usize, 8usize],
         7,
         "the K=10 mixed source+repair case at 30% packet loss",
+    );
+}
+
+#[test]
+fn k42_thirty_percent_loss_matches_raptorq_rs() {
+    let k = 42usize;
+    let loss_count = (k * 30).div_ceil(100);
+    let repair_count = loss_count + 4;
+    let draw_count = k.saturating_mul(16).max(loss_count.saturating_mul(4));
+    let drop_indices =
+        pick_unique_drop_indices_from_draws(k, draw_count, loss_count, 0xA1B2_C342_u32);
+    assert_case_matches_raptorq_rs(
+        k,
+        64,
+        0x6330_042A_u64,
+        &drop_indices,
+        repair_count,
+        "the canonical K=42 mixed source+repair case at 30% packet loss",
     );
 }

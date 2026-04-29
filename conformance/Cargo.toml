@@ -35,6 +35,10 @@ name = "mysql_conformance_runner"
 path = "src/bin/mysql_conformance_runner.rs"
 
 [[bin]]
+name = "h2_goaway_conformance"
+path = "src/bin/h2_goaway_conformance.rs"
+
+[[bin]]
 name = "h2_priority_conformance"
 path = "src/bin/h2_priority_conformance.rs"
 
@@ -53,6 +57,10 @@ path = "src/bin/prometheus_conformance.rs"
 [[bin]]
 name = "otel_resource_conformance"
 path = "src/bin/otel_resource_conformance.rs"
+
+[[bin]]
+name = "trace_context_conformance"
+path = "src/bin/trace_context_conformance.rs"
 
 [dependencies]
 asupersync = { path = ".." }
