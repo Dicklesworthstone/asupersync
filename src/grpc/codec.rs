@@ -1673,7 +1673,7 @@ mod tests {
                     payload_size,
                     name
                 );
-                if let Ok(Some(ref decoded)) = medium_result {
+                if let Ok(Some(decoded)) = medium_result.as_ref() {
                     assert_eq!(
                         decoded.data.len(),
                         payload_size,
@@ -1700,7 +1700,7 @@ mod tests {
                     payload_size,
                     name
                 );
-                if let Ok(Some(ref decoded)) = large_result {
+                if let Ok(Some(decoded)) = large_result.as_ref() {
                     assert_eq!(
                         decoded.data.len(),
                         payload_size,
