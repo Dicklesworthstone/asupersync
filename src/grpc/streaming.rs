@@ -552,7 +552,9 @@ impl<T> StreamingRequest<T> {
     /// Future polls will return the error instead of None.
     pub fn cancel_with_error(&mut self, status: Status) {
         self.closed = true;
-        self.terminal_status = Some(status);
+        if self.terminal_status.is_none() {
+            self.terminal_status = Some(status);
+        }
         wake_waiter(&mut self.waiter);
     }
 }
@@ -759,7 +761,9 @@ impl<T> ResponseStream<T> {
     /// Used for fail-closed cancellation where the stream should propagate
     /// the cancellation reason rather than appearing normally completed.
     pub fn cancel_with_error(&mut self, status: Status) {
-        self.terminal_status = Some(status);
+        if self.terminal_status.is_none() {
+            self.terminal_status = Some(status);
+        }
         self.closed = true;
         wake_waiter(&mut self.waiter);
     }
@@ -2377,6 +2381,98 @@ mod tests {
         }
 
         crate::test_complete!("differential_bidirectional_cancellation_semantics_vs_grpc_go");
+    }
+
+    #[test]
+    fn late_rst_stream_cancel_does_not_mask_prior_request_window_underflow() {
+        init_test("late_rst_stream_cancel_does_not_mask_prior_request_window_underflow");
+
+        let mut request_stream = StreamingRequest::<String>::open();
+        request_stream
+            .push("buffered-request".to_string())
+            .expect("buffer request item");
+        request_stream.cancel_with_error(Status::resource_exhausted("WINDOW_UPDATE underflow"));
+        request_stream.cancel_with_error(grpc_go_rst_stream_status(ErrorCode::Cancel));
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut pinned_request = Pin::new(&mut request_stream);
+
+        assert!(
+            matches!(
+                pinned_request.as_mut().poll_next(&mut cx),
+                Poll::Ready(Some(Ok(ref msg))) if msg == "buffered-request"
+            ),
+            "buffered request should still drain before the terminal status"
+        );
+
+        for attempt in 0..2 {
+            match pinned_request.as_mut().poll_next(&mut cx) {
+                Poll::Ready(Some(Err(status))) => {
+                    assert_eq!(
+                        status.code(),
+                        Code::ResourceExhausted,
+                        "late RST_STREAM must not mask prior window-underflow status on attempt {attempt}"
+                    );
+                    assert!(
+                        status.message().contains("WINDOW_UPDATE underflow"),
+                        "original flow-control failure message must be preserved on attempt {attempt}"
+                    );
+                }
+                other => panic!(
+                    "expected preserved request-side terminal status after late RST_STREAM, got {other:?}"
+                ),
+            }
+        }
+
+        crate::test_complete!(
+            "late_rst_stream_cancel_does_not_mask_prior_request_window_underflow"
+        );
+    }
+
+    #[test]
+    fn late_rst_stream_cancel_does_not_mask_prior_response_decode_poison() {
+        init_test("late_rst_stream_cancel_does_not_mask_prior_response_decode_poison");
+
+        let mut response_stream = ResponseStream::<String>::open();
+        response_stream
+            .push(Ok("buffered-response".to_string()))
+            .expect("buffer response item");
+        response_stream.cancel_with_error(Status::internal("decode poison"));
+        response_stream.cancel_with_error(grpc_go_rst_stream_status(ErrorCode::Cancel));
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut pinned_response = Pin::new(&mut response_stream);
+
+        assert!(
+            matches!(
+                pinned_response.as_mut().poll_next(&mut cx),
+                Poll::Ready(Some(Ok(ref msg))) if msg == "buffered-response"
+            ),
+            "buffered response should still drain before the terminal status"
+        );
+
+        for attempt in 0..2 {
+            match pinned_response.as_mut().poll_next(&mut cx) {
+                Poll::Ready(Some(Err(status))) => {
+                    assert_eq!(
+                        status.code(),
+                        Code::Internal,
+                        "late RST_STREAM must not mask prior decode-poison status on attempt {attempt}"
+                    );
+                    assert!(
+                        status.message().contains("decode poison"),
+                        "original decode-poison message must be preserved on attempt {attempt}"
+                    );
+                }
+                other => panic!(
+                    "expected preserved response-side terminal status after late RST_STREAM, got {other:?}"
+                ),
+            }
+        }
+
+        crate::test_complete!("late_rst_stream_cancel_does_not_mask_prior_response_decode_poison");
     }
 
     /// GRPC-DIFF-RST: RST_STREAM error codes must propagate with grpc-go-style
