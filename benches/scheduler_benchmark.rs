@@ -401,6 +401,32 @@ fn bench_priority_scheduler(c: &mut Criterion) {
         )
     });
 
+    for &count in &[256usize, 4096, 16_384] {
+        group.throughput(Throughput::Elements(count as u64));
+        group.bench_with_input(
+            BenchmarkId::new("promote_ready_to_cancel", count),
+            &count,
+            |b, &count| {
+                let task_ids = tasks(count);
+                let promoted = task_ids[count / 2];
+                b.iter_batched(
+                    || {
+                        let mut scheduler = Scheduler::with_capacity(count);
+                        for (i, task_id) in task_ids.iter().enumerate() {
+                            scheduler.schedule(*task_id, (i % 32) as u8);
+                        }
+                        (scheduler, promoted)
+                    },
+                    |(mut scheduler, promoted)| {
+                        scheduler.schedule_cancel(promoted, 255);
+                        black_box(scheduler.has_cancel_work())
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+    }
+
     group.finish();
 }
 
