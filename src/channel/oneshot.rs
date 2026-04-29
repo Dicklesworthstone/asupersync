@@ -1756,6 +1756,51 @@ mod tests {
         (state, value, rx.is_closed())
     }
 
+    fn send_then_receiver_drop_signature(
+        park_waiter_before_send: bool,
+    ) -> (usize, bool, bool, bool, bool, bool, bool) {
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<i32>();
+        let inner = Arc::clone(&rx.inner);
+        let wake_counter = Arc::new(AtomicUsize::new(0));
+
+        if park_waiter_before_send {
+            let recv_waker = counting_waker(Arc::clone(&wake_counter));
+            let mut task_cx = Context::from_waker(&recv_waker);
+            let mut fut = Box::pin(rx.recv(&cx));
+            assert!(matches!(fut.as_mut().poll(&mut task_cx), Poll::Pending));
+            let guard = inner.lock();
+            assert!(
+                guard.waker.is_some(),
+                "pending recv should register a waker"
+            );
+            assert!(
+                guard.waker_id.is_some(),
+                "pending recv should register a waiter id"
+            );
+            drop(guard);
+
+            tx.send(&cx, 55).expect("send should succeed");
+            drop(fut);
+        } else {
+            tx.send(&cx, 55).expect("send should succeed");
+        }
+
+        let ready_before_drop = rx.is_ready();
+        drop(rx);
+
+        let guard = inner.lock();
+        (
+            wake_counter.load(Ordering::SeqCst),
+            ready_before_drop,
+            guard.receiver_dropped,
+            guard.value.is_none(),
+            guard.waker.is_none(),
+            guard.waker_id.is_none(),
+            !guard.permit_outstanding && guard.is_closed(),
+        )
+    }
+
     // --- Audit tests (SapphireHill, 2026-02-15) ---
 
     #[test]
@@ -1798,6 +1843,66 @@ mod tests {
         crate::test_complete!(
             "metamorphic_value_ready_recv_ignores_post_send_receiver_cancellation"
         );
+    }
+
+    #[test]
+    fn metamorphic_send_then_receiver_drop_preserves_no_leak_invariant() {
+        init_test("metamorphic_send_then_receiver_drop_preserves_no_leak_invariant");
+
+        let no_waiter = send_then_receiver_drop_signature(false);
+        let parked_waiter = send_then_receiver_drop_signature(true);
+
+        crate::assert_with_log!(
+            no_waiter.1 == parked_waiter.1
+                && no_waiter.2 == parked_waiter.2
+                && no_waiter.3 == parked_waiter.3
+                && no_waiter.4 == parked_waiter.4
+                && no_waiter.5 == parked_waiter.5
+                && no_waiter.6 == parked_waiter.6,
+            "parking a waiter before send changes wake count only, not the terminal no-leak state after receiver drop",
+            format!(
+                "{:?}",
+                (
+                    no_waiter.1,
+                    no_waiter.2,
+                    no_waiter.3,
+                    no_waiter.4,
+                    no_waiter.5,
+                    no_waiter.6
+                )
+            ),
+            format!(
+                "{:?}",
+                (
+                    parked_waiter.1,
+                    parked_waiter.2,
+                    parked_waiter.3,
+                    parked_waiter.4,
+                    parked_waiter.5,
+                    parked_waiter.6
+                )
+            )
+        );
+        crate::assert_with_log!(
+            no_waiter.0 == 0,
+            "without a parked waiter the send path should not emit wakeups",
+            0,
+            no_waiter.0
+        );
+        crate::assert_with_log!(
+            parked_waiter.0 == 1,
+            "with a parked waiter the send path should emit exactly one wakeup before receiver drop",
+            1,
+            parked_waiter.0
+        );
+        crate::assert_with_log!(
+            no_waiter.1 && no_waiter.2 && no_waiter.3 && no_waiter.4 && no_waiter.5 && no_waiter.6,
+            "send-then-receiver-drop must converge to the terminal no-leak state",
+            true,
+            no_waiter.1 && no_waiter.2 && no_waiter.3 && no_waiter.4 && no_waiter.5 && no_waiter.6
+        );
+
+        crate::test_complete!("metamorphic_send_then_receiver_drop_preserves_no_leak_invariant");
     }
 
     #[test]
@@ -2052,7 +2157,9 @@ mod tests {
     /// but before the receive call is made.
     #[test]
     fn metamorphic_value_ready_receive_invariant_under_post_send_receiver_cancellation() {
-        init_test("metamorphic_value_ready_receive_invariant_under_post_send_receiver_cancellation");
+        init_test(
+            "metamorphic_value_ready_receive_invariant_under_post_send_receiver_cancellation",
+        );
 
         let test_value = 42i32;
         let sender_cx = Cx::for_testing();
@@ -2068,7 +2175,10 @@ mod tests {
 
         // Now cancel the receiver context AFTER the value was committed
         receiver_cx.set_cancel_requested(true);
-        assert!(receiver_cx.is_cancel_requested(), "receiver cx should be cancelled");
+        assert!(
+            receiver_cx.is_cancel_requested(),
+            "receiver cx should be cancelled"
+        );
 
         // Create a new channel with same scenario for comparison
         let (tx2, mut rx2) = channel::<i32>();
@@ -2083,7 +2193,10 @@ mod tests {
         // Both should succeed with the same value
         match (result_cancelled, result_normal) {
             (Ok(val1), Ok(val2)) => {
-                assert_eq!(val1, val2, "value should be same regardless of post-send cancellation");
+                assert_eq!(
+                    val1, val2,
+                    "value should be same regardless of post-send cancellation"
+                );
                 assert_eq!(val1, test_value, "received value should match sent value");
             }
             (result1, result2) => {
@@ -2096,11 +2209,17 @@ mod tests {
         }
 
         // Verify both channels are in terminal closed state
-        assert!(matches!(rx.try_recv(), Err(TryRecvError::Closed)),
-                "channel should be closed after recv");
-        assert!(matches!(rx2.try_recv(), Err(TryRecvError::Closed)),
-                "control channel should be closed after recv");
+        assert!(
+            matches!(rx.try_recv(), Err(TryRecvError::Closed)),
+            "channel should be closed after recv"
+        );
+        assert!(
+            matches!(rx2.try_recv(), Err(TryRecvError::Closed)),
+            "control channel should be closed after recv"
+        );
 
-        crate::test_complete!("metamorphic_value_ready_receive_invariant_under_post_send_receiver_cancellation");
+        crate::test_complete!(
+            "metamorphic_value_ready_receive_invariant_under_post_send_receiver_cancellation"
+        );
     }
 }
