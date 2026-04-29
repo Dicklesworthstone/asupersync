@@ -304,7 +304,17 @@ impl AdaptiveCancelStreakPolicy {
     }
 
     fn set_epoch_steps(&mut self, epoch_steps: u32) {
-        self.epoch_steps = epoch_steps.max(1);
+        let epoch_steps = epoch_steps.max(1);
+        if self.epoch_steps == epoch_steps {
+            return;
+        }
+        self.epoch_steps = epoch_steps;
+        // Drop any in-flight epoch window when the operator changes the
+        // configured length. Carrying the old snapshot/progress forward would
+        // mix two different epoch regimes into one reward update and skew both
+        // learning and the exposed adaptive metrics (br-asupersync-nr5uak).
+        self.steps_in_epoch = 0;
+        self.epoch_start = None;
     }
 
     fn current_limit(&self) -> usize {
@@ -7339,6 +7349,13 @@ mod tests {
         let state = Arc::new(ContendedMutex::new("runtime_state", state));
 
         let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 16, true, 4);
+
+        // Inject tasks to create scheduler-level work like the working test
+        let cancel_task = TaskId::new_for_test(1, 42);
+        let timed_task = TaskId::new_for_test(1, 43);
+        scheduler.inject_cancel(cancel_task, 100);
+        scheduler.inject_timed(timed_task, Time::from_nanos(500_000_000));
+
         let mut workers = scheduler.take_workers();
         let worker = workers.first_mut().expect("worker");
 
@@ -11366,6 +11383,84 @@ mod tests {
         assert_eq!(
             with_idle_probe, baseline,
             "empty next_task probes must not change the first completed adaptive epoch metrics"
+        );
+    }
+
+    #[test]
+    fn reconfiguring_adaptive_epoch_steps_resets_inflight_epoch_progress() {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 4);
+        scheduler.set_adaptive_cancel_streak(true, 4);
+
+        let first_task = {
+            let mut runtime_state = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let root = runtime_state.create_root_region(Budget::INFINITE);
+            let (task_id, _handle) = runtime_state
+                .create_task(root, Budget::INFINITE, async {})
+                .expect("task create");
+            task_id
+        };
+        scheduler.inject_ready(first_task, 50);
+
+        {
+            let worker = scheduler.workers.first_mut().expect("worker");
+            assert_eq!(worker.next_task(), Some(first_task));
+            worker.execute(first_task);
+            let policy = worker
+                .adaptive_cancel_policy
+                .as_ref()
+                .expect("adaptive policy");
+            assert_eq!(policy.steps_in_epoch, 1);
+            assert!(
+                policy.epoch_start.is_some(),
+                "first executed dispatch should arm an epoch snapshot"
+            );
+        }
+
+        scheduler.set_adaptive_cancel_streak(true, 2);
+
+        let second_task = {
+            let mut runtime_state = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let root = runtime_state.create_root_region(Budget::INFINITE);
+            let (task_id, _handle) = runtime_state
+                .create_task(root, Budget::INFINITE, async {})
+                .expect("task create");
+            task_id
+        };
+        scheduler.inject_ready(second_task, 50);
+
+        let worker = scheduler.workers.first_mut().expect("worker");
+        let policy = worker
+            .adaptive_cancel_policy
+            .as_ref()
+            .expect("adaptive policy");
+        assert_eq!(policy.epoch_steps, 2);
+        assert_eq!(
+            policy.steps_in_epoch, 0,
+            "reconfiguring epoch_steps must drop stale partial progress"
+        );
+        assert!(
+            policy.epoch_start.is_none(),
+            "reconfiguring epoch_steps must clear the stale epoch snapshot"
+        );
+        assert_eq!(worker.next_task(), Some(second_task));
+        worker.execute(second_task);
+        let policy = worker
+            .adaptive_cancel_policy
+            .as_ref()
+            .expect("adaptive policy");
+        assert_eq!(
+            policy.epoch_count, 0,
+            "the first dispatch after reconfiguration must start a fresh 2-step epoch"
+        );
+        assert_eq!(
+            worker.preemption_metrics().adaptive_epochs,
+            0,
+            "exposed metrics must not report a completed epoch after only one fresh step"
         );
     }
 
