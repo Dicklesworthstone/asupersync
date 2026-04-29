@@ -2462,14 +2462,17 @@ mod tests {
 
     /// Differential test: asupersync vs tokio-util on max_frame_length boundary.
     ///
-    /// This test ensures our LengthDelimitedCodec matches tokio-util's behavior
+    /// This test would ensure our LengthDelimitedCodec matches tokio-util's behavior
     /// exactly when frames exceed the max_frame_length limit, testing both
     /// boundary conditions and error message compatibility.
+    ///
+    /// DISABLED: Removed tokio_util dependency to maintain async runtime independence
     #[cfg(test)]
     #[test]
+    #[ignore = "tokio_util dependency removed for runtime independence"]
     fn conformance_differential_max_frame_length_vs_tokio_util() {
-        use prost::bytes::BytesMut as TokioBytesMut;
-        use tokio_util::codec::{Decoder as TokioDecoder, LengthDelimitedCodec as TokioCodec};
+        // use prost::bytes::BytesMut as TokioBytesMut;
+        // use tokio_util::codec::{Decoder as TokioDecoder, LengthDelimitedCodec as TokioCodec};
 
         let test_cases = [
             ("exact_boundary", 100, 100), // Exactly at max (should pass)

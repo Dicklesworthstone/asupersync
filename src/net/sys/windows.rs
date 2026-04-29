@@ -1,8 +1,8 @@
 //! Windows-specific networking primitives.
 //!
-//! This module currently provides a named-pipe client surface that mirrors the
-//! core migration shape from `tokio::net::windows::named_pipe::ClientOptions`
-//! and `NamedPipeClient`.
+//! This module currently provides a named-pipe client surface with async/await
+//! support for Windows named pipes, providing ClientOptions and NamedPipeClient
+//! functionality built on asupersync's async runtime primitives.
 
 #![cfg(target_os = "windows")]
 
