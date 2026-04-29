@@ -2650,6 +2650,111 @@ mod tests {
         parts[3].parse().expect("parse PUB payload length")
     }
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct CapturedPublish {
+        subject: String,
+        payload: Vec<u8>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct PublishTranscript {
+        connect: String,
+        publishes: Vec<CapturedPublish>,
+    }
+
+    fn parse_plain_publish(header: &str) -> (String, usize) {
+        let parts: Vec<_> = header.split_whitespace().collect();
+        assert_eq!(parts.first().copied(), Some("PUB"));
+        assert_eq!(parts.len(), 3, "plain publish must not include reply-to");
+        (
+            parts[1].to_string(),
+            parts[2].parse().expect("parse plain PUB payload length"),
+        )
+    }
+
+    fn capture_publish_transcript<F, Fut>(publish_count: usize, action: F) -> PublishTranscript
+    where
+        F: FnOnce(Cx, std::net::SocketAddr) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind JetStream ack listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+
+            let (mut stream, _) = listener.accept().expect("accept test client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+            stream
+                .write_all(
+                    b"INFO {\"server_id\":\"test\",\"server_name\":\"test\",\"version\":\"2.9.0\",\"proto\":1,\"max_payload\":1048576,\"tls_required\":false}\r\n",
+                )
+                .expect("write INFO");
+            stream.flush().expect("flush INFO");
+
+            let connect = String::from_utf8(read_crlf_line(&mut stream)).expect("CONNECT utf8");
+            let mut publishes = Vec::with_capacity(publish_count);
+            for _ in 0..publish_count {
+                let publish = String::from_utf8(read_crlf_line(&mut stream)).expect("PUB utf8");
+                let (subject, payload_len) = parse_plain_publish(&publish);
+                let mut payload = vec![0_u8; payload_len];
+                stream.read_exact(&mut payload).expect("read PUB payload");
+                let mut crlf = [0_u8; 2];
+                stream.read_exact(&mut crlf).expect("read payload CRLF");
+                assert_eq!(&crlf, b"\r\n");
+                publishes.push(CapturedPublish { subject, payload });
+            }
+
+            PublishTranscript { connect, publishes }
+        });
+
+        run_test_with_cx(|cx| action(cx, addr));
+
+        server.join().expect("server thread join")
+    }
+
+    fn parse_ack_floor_candidate(reply_subject: &str) -> u64 {
+        let parts: Vec<_> = reply_subject.split('.').collect();
+        assert!(
+            parts.len() >= 9 && parts.starts_with(&["$JS", "ACK"]),
+            "expected JetStream ACK reply subject, got {reply_subject:?}"
+        );
+        parts[parts.len() - 4]
+            .parse()
+            .expect("parse JetStream stream sequence")
+    }
+
+    fn reference_ack_floor_history(
+        policy: AckPolicy,
+        initial_floor: u64,
+        subjects: &[String],
+    ) -> Vec<u64> {
+        let mut floor = initial_floor;
+        let mut pending_explicit = std::collections::BTreeSet::new();
+        let mut history = Vec::with_capacity(subjects.len());
+
+        for subject in subjects {
+            let candidate = parse_ack_floor_candidate(subject);
+            match policy {
+                AckPolicy::Explicit => {
+                    pending_explicit.insert(candidate);
+                    while pending_explicit.remove(&floor.saturating_add(1)) {
+                        floor = floor.saturating_add(1);
+                    }
+                }
+                AckPolicy::All => {
+                    floor = floor.max(candidate);
+                }
+                AckPolicy::None => panic!("tick130 models only acking JetStream policies"),
+            }
+            history.push(floor);
+        }
+
+        history
+    }
+
     fn capture_wire_transcript<F, Fut>(reply: MockServerReply, action: F) -> String
     where
         F: FnOnce(Cx, std::net::SocketAddr) -> Fut,
@@ -2934,6 +3039,193 @@ mod tests {
             pull_wire, raw_pull_wire,
             "JetStream pull must emit the same NATS wire bytes as the raw subscribe/publish_request sequence"
         );
+    }
+
+    #[test]
+    fn durable_consumer_ack_floor_matches_raw_nats_reference_tick130() {
+        let cases = [
+            (AckPolicy::Explicit, "explicit", vec![9_u64, 11_u64]),
+            (AckPolicy::All, "all", vec![11_u64, 11_u64]),
+        ];
+
+        for (policy, policy_name, expected_floor_history) in cases {
+            let create_reply = br#"{"name":"processor"}"#.to_vec();
+            let create_wire = capture_wire_transcript(
+                MockServerReply::Request(create_reply.clone()),
+                move |cx, addr| async move {
+                    let mut js = JetStreamContext::new(
+                        NatsClient::connect_with_config(
+                            &cx,
+                            NatsConfig {
+                                host: addr.ip().to_string(),
+                                port: addr.port(),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .expect("connect JetStream create-consumer mock server"),
+                    );
+
+                    let consumer = js
+                        .create_consumer(
+                            &cx,
+                            "ORDERS",
+                            ConsumerConfig::new("processor").ack_policy(policy),
+                        )
+                        .await
+                        .expect("JetStream create_consumer");
+                    assert_eq!(consumer.stream(), "ORDERS");
+                    assert_eq!(consumer.name(), "processor");
+                },
+            );
+            let raw_create_wire = capture_wire_transcript(
+                MockServerReply::Request(create_reply.clone()),
+                move |cx, addr| {
+                    let create_reply = create_reply.clone();
+                    async move {
+                        let mut client = NatsClient::connect_with_config(
+                            &cx,
+                            NatsConfig {
+                                host: addr.ip().to_string(),
+                                port: addr.port(),
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .expect("connect raw create-consumer mock server");
+                        let config = ConsumerConfig::new("processor").ack_policy(policy);
+                        let payload = format!(
+                            "{{\"stream_name\":\"{}\",\"config\":{}}}",
+                            json_escape("ORDERS"),
+                            config.to_json()
+                        );
+                        let response = client
+                            .request(
+                                &cx,
+                                "$JS.API.CONSUMER.CREATE.ORDERS.processor",
+                                payload.as_bytes(),
+                            )
+                            .await
+                            .expect("raw create-consumer request");
+                        assert_eq!(response.payload, create_reply);
+                    }
+                },
+            );
+            assert_eq!(
+                create_wire, raw_create_wire,
+                "JetStream durable create_consumer must emit the same NATS wire bytes as raw request for ack_policy={policy_name}"
+            );
+            assert!(
+                create_wire.contains(&format!("\"ack_policy\":\"{policy_name}\"")),
+                "durable create_consumer wire body must serialize ack_policy={policy_name}, got: {create_wire}"
+            );
+
+            // Single-stream contiguous delivery: stream_seq and consumer_seq
+            // advance together, so the reference floor can use stream_seq.
+            let reply_subjects = vec![
+                "$JS.ACK.ORDERS.processor.1.11.11.1713790000000000001.0".to_string(),
+                "$JS.ACK.ORDERS.processor.1.10.10.1713790000000000000.1".to_string(),
+            ];
+
+            let jetstream_ack_wire = capture_publish_transcript(2, {
+                let reply_subjects = reply_subjects.clone();
+                move |cx, addr| async move {
+                    let mut client = NatsClient::connect_with_config(
+                        &cx,
+                        NatsConfig {
+                            host: addr.ip().to_string(),
+                            port: addr.port(),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .expect("connect JetStream ack mock server");
+
+                    let late_message = JsMessage {
+                        subject: "orders.created".to_string(),
+                        payload: br#"{"seq":11}"#.to_vec(),
+                        sequence: 11,
+                        delivered: 1,
+                        reply_subject: reply_subjects[0].clone(),
+                        ack_state: AtomicU8::new(ACK_STATE_PENDING),
+                    };
+                    let earlier_message = JsMessage {
+                        subject: "orders.created".to_string(),
+                        payload: br#"{"seq":10}"#.to_vec(),
+                        sequence: 10,
+                        delivered: 1,
+                        reply_subject: reply_subjects[1].clone(),
+                        ack_state: AtomicU8::new(ACK_STATE_PENDING),
+                    };
+
+                    late_message
+                        .ack(&mut client, &cx)
+                        .await
+                        .expect("ack later message");
+                    earlier_message
+                        .ack(&mut client, &cx)
+                        .await
+                        .expect("ack earlier message");
+                }
+            });
+            let raw_ack_wire = capture_publish_transcript(2, {
+                let reply_subjects = reply_subjects.clone();
+                move |cx, addr| async move {
+                    let mut client = NatsClient::connect_with_config(
+                        &cx,
+                        NatsConfig {
+                            host: addr.ip().to_string(),
+                            port: addr.port(),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .expect("connect raw ack mock server");
+
+                    client
+                        .publish(&cx, &reply_subjects[0], b"+ACK")
+                        .await
+                        .expect("raw ack later message");
+                    client
+                        .publish(&cx, &reply_subjects[1], b"+ACK")
+                        .await
+                        .expect("raw ack earlier message");
+                }
+            });
+            assert_eq!(
+                jetstream_ack_wire, raw_ack_wire,
+                "JetStream durable ack path must emit the same NATS wire bytes as raw publish for ack_policy={policy_name}"
+            );
+            assert!(
+                jetstream_ack_wire
+                    .publishes
+                    .iter()
+                    .all(|publish| publish.payload == b"+ACK"),
+                "durable ack path must publish +ACK control frames"
+            );
+
+            let jetstream_subjects = jetstream_ack_wire
+                .publishes
+                .iter()
+                .map(|publish| publish.subject.clone())
+                .collect::<Vec<_>>();
+            let raw_subjects = raw_ack_wire
+                .publishes
+                .iter()
+                .map(|publish| publish.subject.clone())
+                .collect::<Vec<_>>();
+            let jetstream_floor_history =
+                reference_ack_floor_history(policy, 9, &jetstream_subjects);
+            let raw_floor_history = reference_ack_floor_history(policy, 9, &raw_subjects);
+            assert_eq!(
+                jetstream_floor_history, raw_floor_history,
+                "JetStream durable ack floor must match the raw NATS reference model for ack_policy={policy_name}"
+            );
+            assert_eq!(
+                jetstream_floor_history, expected_floor_history,
+                "unexpected ack-floor progression for ack_policy={policy_name}"
+            );
+        }
     }
 
     #[test]
