@@ -1,14 +1,19 @@
+#![allow(clippy::similar_names)]
+
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 
 use asupersync::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
-use asupersync::raptorq::gf256::Gf256;
+use asupersync::raptorq::gf256::{Gf256, gf256_addmul_slice};
 use asupersync::raptorq::proof::DecodeConfig;
-use asupersync::raptorq::systematic::{SystematicEncoder, SystematicParamError, SystematicParams};
+use asupersync::raptorq::systematic::{
+    ConstraintMatrix, SystematicEncoder, SystematicParamError, SystematicParams,
+};
 use asupersync::types::ObjectId;
 use std::collections::{BTreeSet, HashSet};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 /// Fuzzing parameters for RaptorQ systematic encoding/decoding.
 #[derive(Debug, Clone, Arbitrary)]
@@ -43,8 +48,8 @@ fn normalize_config(config: &mut FuzzConfig) {
     // exercised separately via cheap table-only checks below.
     config.k = config.k.clamp(1, 256);
 
-    // Clamp symbol size to reasonable range
-    config.symbol_size = config.symbol_size.clamp(1, 1024);
+    // Keep full-matrix intermediate verification bounded enough for fuzzing.
+    config.symbol_size = config.symbol_size.clamp(1, 256);
 
     // Limit repair count for performance
     config.repair_count = config.repair_count.clamp(0, config.k.saturating_mul(2));
@@ -258,6 +263,223 @@ fn generate_source_data(k: usize, symbol_size: usize, seed: u64) -> Vec<Vec<u8>>
     source
 }
 
+fn build_encoder_rhs(source: &[Vec<u8>], params: &SystematicParams) -> Vec<Vec<u8>> {
+    let mut rhs = Vec::with_capacity(params.s + params.h + params.k_prime);
+
+    for _ in 0..params.s + params.h {
+        rhs.push(vec![0u8; params.symbol_size]);
+    }
+
+    rhs.extend(source.iter().cloned());
+
+    for _ in source.len()..params.k_prime {
+        rhs.push(vec![0u8; params.symbol_size]);
+    }
+
+    rhs
+}
+
+fn row_nonzero_count(matrix: &ConstraintMatrix, row: usize) -> usize {
+    (0..matrix.cols)
+        .filter(|&col| !matrix.get(row, col).is_zero())
+        .count()
+}
+
+fn assert_constraint_matrix_shape(
+    matrix: &ConstraintMatrix,
+    params: &SystematicParams,
+) -> Result<(), String> {
+    let expected_rows = params.s + params.h + params.k_prime;
+    if matrix.rows != expected_rows {
+        return Err(format!(
+            "constraint matrix row count mismatch: expected {expected_rows}, got {}",
+            matrix.rows
+        ));
+    }
+    if matrix.cols != params.l {
+        return Err(format!(
+            "constraint matrix col count mismatch: expected {}, got {}",
+            params.l, matrix.cols
+        ));
+    }
+
+    for row in 0..params.s {
+        if matrix.get(row, params.k_prime + row) != Gf256::ONE {
+            return Err(format!(
+                "LDPC identity block missing at row {row}, col {}",
+                params.k_prime + row
+            ));
+        }
+        if row_nonzero_count(matrix, row) < 4 {
+            return Err(format!(
+                "LDPC row {row} unexpectedly sparse: degree {}",
+                row_nonzero_count(matrix, row)
+            ));
+        }
+    }
+
+    for row in 0..params.h {
+        let matrix_row = params.s + row;
+        let identity_col = params.k_prime + params.s + row;
+        if matrix.get(matrix_row, identity_col) != Gf256::ONE {
+            return Err(format!(
+                "HDPC identity block missing at row {matrix_row}, col {identity_col}"
+            ));
+        }
+        if row_nonzero_count(matrix, matrix_row) < 2 {
+            return Err(format!(
+                "HDPC row {matrix_row} unexpectedly sparse: degree {}",
+                row_nonzero_count(matrix, matrix_row)
+            ));
+        }
+    }
+
+    for row in 0..params.k_prime {
+        let matrix_row = params.s + params.h + row;
+        if matrix.get(matrix_row, row) != Gf256::ONE {
+            return Err(format!(
+                "LT identity block missing at row {matrix_row}, col {row}"
+            ));
+        }
+        if row_nonzero_count(matrix, matrix_row) != 1 {
+            return Err(format!(
+                "LT row {matrix_row} must stay degree-1, saw degree {}",
+                row_nonzero_count(matrix, matrix_row)
+            ));
+        }
+    }
+
+    for col in 0..matrix.cols {
+        let covered = (0..matrix.rows).any(|row| !matrix.get(row, col).is_zero());
+        if !covered {
+            return Err(format!("constraint matrix left column {col} uncovered"));
+        }
+    }
+
+    Ok(())
+}
+
+fn assert_solution_satisfies_rhs(
+    matrix: &ConstraintMatrix,
+    intermediate: &[Vec<u8>],
+    rhs: &[Vec<u8>],
+) -> Result<(), String> {
+    if intermediate.len() != matrix.cols {
+        return Err(format!(
+            "intermediate symbol count mismatch: expected {}, got {}",
+            matrix.cols,
+            intermediate.len()
+        ));
+    }
+
+    let symbol_size = rhs.first().map_or(0, Vec::len);
+    if intermediate.iter().any(|symbol| symbol.len() != symbol_size) {
+        return Err("intermediate symbols had inconsistent widths".to_string());
+    }
+
+    for row in 0..matrix.rows {
+        let mut reconstructed = vec![0u8; symbol_size];
+        for (col, symbol) in intermediate.iter().enumerate().take(matrix.cols) {
+            let coefficient = matrix.get(row, col);
+            if coefficient.is_zero() {
+                continue;
+            }
+            gf256_addmul_slice(&mut reconstructed, symbol, coefficient);
+        }
+
+        if reconstructed != rhs[row] {
+            return Err(format!("A·C = D invariant failed at row {row}"));
+        }
+    }
+
+    Ok(())
+}
+
+fn assert_encoder_matches_intermediate_solution(
+    encoder: &SystematicEncoder,
+    expected: &[Vec<u8>],
+) -> Result<(), String> {
+    let params = encoder.params();
+    if params.l != expected.len() {
+        return Err(format!(
+            "encoder parameter L mismatch: expected {} solved symbols, got {}",
+            expected.len(),
+            params.l
+        ));
+    }
+
+    for (idx, solved) in expected.iter().enumerate() {
+        if encoder.intermediate_symbol(idx) != solved.as_slice() {
+            return Err(format!(
+                "encoder intermediate symbol diverged from solved matrix at index {idx}"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn assert_param_shapes_match_encoder(
+    params: &SystematicParams,
+    encoder: &SystematicEncoder,
+) -> Result<(), String> {
+    let encoder_params = encoder.params();
+    let same = params.k == encoder_params.k
+        && params.k_prime == encoder_params.k_prime
+        && params.j == encoder_params.j
+        && params.s == encoder_params.s
+        && params.h == encoder_params.h
+        && params.l == encoder_params.l
+        && params.w == encoder_params.w
+        && params.p == encoder_params.p
+        && params.b == encoder_params.b
+        && params.symbol_size == encoder_params.symbol_size;
+    if !same {
+        return Err(format!(
+            "encoder params diverged from systematic lookup: expected {params:?}, got {encoder_params:?}"
+        ));
+    }
+    Ok(())
+}
+
+fn test_intermediate_symbol_generation(
+    k: usize,
+    symbol_size: usize,
+    seed: u64,
+) -> Result<(), String> {
+    let params = SystematicParams::for_source_block(k, symbol_size);
+    assert_param_invariants(&params)?;
+
+    let matrix = catch_unwind(AssertUnwindSafe(|| ConstraintMatrix::build(&params, seed)))
+        .map_err(|_| {
+            format!("ConstraintMatrix::build panicked for K={k}, T={symbol_size}, seed={seed}")
+        })?;
+    assert_constraint_matrix_shape(&matrix, &params)?;
+
+    let source = generate_source_data(k, symbol_size, seed);
+    let rhs = build_encoder_rhs(&source, &params);
+
+    let solved = catch_unwind(AssertUnwindSafe(|| matrix.solve(&rhs)))
+        .map_err(|_| format!("ConstraintMatrix::solve panicked for K={k}, T={symbol_size}, seed={seed}"))?
+        .ok_or_else(|| {
+            format!("ConstraintMatrix::solve returned singular matrix for K={k}, T={symbol_size}")
+        })?;
+    assert_solution_satisfies_rhs(&matrix, &solved, &rhs)?;
+
+    let encoder = catch_unwind(AssertUnwindSafe(|| {
+        SystematicEncoder::new(&source, symbol_size, seed)
+    }))
+    .map_err(|_| format!("SystematicEncoder::new panicked for K={k}, T={symbol_size}, seed={seed}"))?
+    .ok_or_else(|| {
+        format!("SystematicEncoder::new returned None for K={k}, T={symbol_size}, seed={seed}")
+    })?;
+
+    assert_param_shapes_match_encoder(&params, &encoder)?;
+    assert_encoder_matches_intermediate_solution(&encoder, &solved)?;
+
+    Ok(())
+}
+
 /// Apply permutation to source symbols to test permutation invariance
 fn apply_permutation(source: &mut [Vec<u8>], indices: &[u16]) {
     if indices.len() != source.len() {
@@ -394,7 +616,10 @@ fn test_rank_deficiency_handling(
         Ok(decode_result) => {
             // Verify proof consistency
             let hash = decode_result.proof.content_hash();
-            assert!(hash != 0, "Proof hash should be non-zero");
+            assert!(
+                hash.as_bytes().iter().any(|&byte| byte != 0),
+                "Proof hash should not be all zeros"
+            );
 
             // Verify decode correctness
             if decode_result.result.source.len() == source.len() {
@@ -568,27 +793,32 @@ fn fuzz_systematic(mut config: FuzzConfig) -> Result<(), String> {
         return Ok(());
     }
 
-    // Test 1: K/K' parameter boundary conditions
+    // Test 1: intermediate-symbol generation via the systematic constraint
+    // matrix. This exercises LDPC/HDPC/LT partitioning plus the solved
+    // `A·C = D` contract that underpins encoder intermediate-symbol output.
+    test_intermediate_symbol_generation(k, symbol_size, seed)?;
+
+    // Test 2: K/K' parameter boundary conditions
     if config.test_boundary_conditions {
         test_boundary_conditions(k, symbol_size, seed)?;
     }
 
-    // Test 2: Symbol permutation invariance
+    // Test 3: Symbol permutation invariance
     if !config.permutation_indices.is_empty() && config.permutation_indices.len() == k {
         test_permutation_invariance(k, symbol_size, seed, &config.permutation_indices)?;
     }
 
-    // Test 3: LT vs systematic row mixing under rank deficiency
+    // Test 4: LT vs systematic row mixing under rank deficiency
     if config.test_rank_deficiency && repair_count > 0 {
         test_rank_deficiency_handling(k, symbol_size, seed, repair_count)?;
     }
 
-    // Test 4: Proof validation consistency
+    // Test 5: Proof validation consistency
     if repair_count > 0 {
         test_proof_consistency(k, symbol_size, seed, repair_count)?;
     }
 
-    // Test 5: Basic encode/decode round-trip
+    // Test 6: Basic encode/decode round-trip
     let source = generate_source_data(k, symbol_size, seed);
     if let Some(mut encoder) = SystematicEncoder::new(&source, symbol_size, seed) {
         // Generate symbols with source subset masking
