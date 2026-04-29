@@ -11,10 +11,10 @@ use crate::types::TaskId;
 #[cfg(any(test, feature = "test-internals"))]
 use crate::types::{Budget, RegionId};
 use crate::util::Arena;
+use hashbrown::HashSet;
 use parking_lot::Mutex;
 use smallvec::SmallVec;
 use std::cell::RefCell;
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -68,19 +68,10 @@ impl TaskSource {
 /// All write paths (push, push_many, pop, steal, steal_batch) keep `queue`
 /// and `presence` in sync under a single mutex acquisition so the index
 /// never drifts from the storage.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct LocalQueueInner {
     queue: SmallVec<[TaskId; 32]>,
     presence: HashSet<TaskId>,
-}
-
-impl Default for LocalQueueInner {
-    fn default() -> Self {
-        Self {
-            queue: SmallVec::new(),
-            presence: HashSet::with_capacity(32),
-        }
-    }
 }
 
 /// A local task queue for a worker.
@@ -432,16 +423,8 @@ impl Stealer {
         let steal_limit = (initial_len / 2).clamp(1, 256);
         let mut stolen = 0;
         let scan_limit = initial_len.min(Self::SKIPPED_LOCALS_INLINE_CAP);
-        let steal_budget = steal_limit.min(scan_limit);
         let mut kept_prefix_len = 0;
         let mut scanned_len = 0;
-
-        // Steal batches usually target an empty destination queue. Reserving
-        // the bounded growth once keeps the batch-transfer critical section
-        // from paying repeated HashSet growth while it is still holding both
-        // queue locks.
-        dest.queue.reserve(steal_budget);
-        dest.presence.reserve(steal_budget);
 
         while scanned_len < scan_limit && stolen < steal_limit {
             let task_id = src.queue[scanned_len];
