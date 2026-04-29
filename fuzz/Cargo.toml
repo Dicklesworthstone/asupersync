@@ -2790,3 +2790,15 @@ path = "fuzz_targets/jetstream_api_responses.rs"
 test = false
 doc = false
 bench = false
+
+# Structure-aware RaptorQ decoder N_max boundary fuzzer targeting RFC 6330 §5.3.5.1 N_max constraint.
+# Tests decoder ESI handling near the RFC 6330 N_max boundary (2^20 - 1) with intelligent input
+# generation for repair symbol ESI values approaching the maximum limit, overflow scenarios when
+# computing repair ISI from ESI + K' padding, edge cases with very large ESI values, and
+# validation of repair equation generation near the maximum repair symbol indices.
+[[bin]]
+name = "raptorq_decoder_n_max"
+path = "fuzz_targets/raptorq_decoder_n_max.rs"
+test = false
+doc = false
+bench = false
