@@ -17,7 +17,9 @@ use std::task::{Context, Poll, Waker};
 
 use crate::bytes::Bytes;
 
-use super::status::{GrpcError, Status};
+#[cfg(test)]
+use super::status::GrpcError;
+use super::status::Status;
 
 /// A gRPC request with metadata.
 #[derive(Debug)]
@@ -691,6 +693,7 @@ where
 /// adjacent `Streaming` trait + `ServerStreaming` adapter have an
 /// in-file driver to exercise their poll loop without spinning up a
 /// real connection (br-asupersync-iuoayq).
+#[cfg(test)]
 #[derive(Debug)]
 pub struct ResponseStream<T> {
     /// Buffered stream items.
@@ -703,6 +706,7 @@ pub struct ResponseStream<T> {
     waiter: Option<Waker>,
 }
 
+#[cfg(test)]
 impl<T> ResponseStream<T> {
     /// Create a new response stream.
     #[must_use]
@@ -761,12 +765,14 @@ impl<T> ResponseStream<T> {
     }
 }
 
+#[cfg(test)]
 impl<T> Default for ResponseStream<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(test)]
 impl<T: Send + std::marker::Unpin> Streaming for ResponseStream<T> {
     type Message = T;
 
@@ -802,6 +808,7 @@ impl<T: Send + std::marker::Unpin> Streaming for ResponseStream<T> {
 /// observe silently dropped sends; importing
 /// `crate::grpc::client::RequestSink` is the only correct production
 /// path (br-asupersync-iuoayq).
+#[cfg(test)]
 #[derive(Debug)]
 pub struct RequestSink<T> {
     /// Whether the sink has been closed.
@@ -812,6 +819,7 @@ pub struct RequestSink<T> {
     _marker: PhantomData<T>,
 }
 
+#[cfg(test)]
 impl<T> RequestSink<T> {
     /// Create a new request sink.
     #[must_use]
@@ -847,6 +855,7 @@ impl<T> RequestSink<T> {
     }
 }
 
+#[cfg(test)]
 impl<T> Default for RequestSink<T> {
     fn default() -> Self {
         Self::new()
