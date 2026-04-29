@@ -2535,6 +2535,127 @@ mod tests {
         crate::test_complete!("metamorphic_midstream_subscription_isolation");
     }
 
+    /// MR3b: Cancelled Receive Cursor Invariance (Equivalence Relation)
+    /// Cancelling one receiver's queued recv must not perturb peer delivery,
+    /// and the cancelled receiver must resume at the same cursor afterward.
+    #[test]
+    fn metamorphic_cancelled_recv_preserves_peer_delivery_counts() {
+        init_test("metamorphic_cancelled_recv_preserves_peer_delivery_counts");
+
+        for total_messages in 1..=8usize {
+            let messages: Vec<i32> = (0..i32::try_from(total_messages).unwrap()).collect();
+
+            for prefix_len in 0..total_messages {
+                let baseline = {
+                    let cx = test_cx();
+                    let (tx, mut rx_cancelled) = channel::<i32>(total_messages + 2);
+                    let mut rx_peer = tx.subscribe();
+
+                    for &msg in &messages {
+                        tx.send(&cx, msg).expect("baseline send");
+                    }
+
+                    let mut cancelled_sequence = Vec::new();
+                    let mut peer_sequence = Vec::new();
+
+                    for _ in 0..total_messages {
+                        cancelled_sequence
+                            .push(block_on(rx_cancelled.recv(&cx)).expect("baseline cancelled"));
+                    }
+                    for _ in 0..total_messages {
+                        peer_sequence.push(block_on(rx_peer.recv(&cx)).expect("baseline peer"));
+                    }
+
+                    (cancelled_sequence, peer_sequence)
+                };
+
+                let transformed = {
+                    let cx = test_cx();
+                    let (tx, mut rx_cancelled) = channel::<i32>(total_messages + 2);
+                    let mut rx_peer = tx.subscribe();
+
+                    for &msg in &messages {
+                        tx.send(&cx, msg).expect("transformed send");
+                    }
+
+                    let mut cancelled_prefix = Vec::new();
+                    for _ in 0..prefix_len {
+                        cancelled_prefix.push(
+                            block_on(rx_cancelled.recv(&cx)).expect("transformed prefix recv"),
+                        );
+                    }
+
+                    cx.set_cancel_requested(true);
+                    let cancelled = block_on(rx_cancelled.recv(&cx));
+                    crate::assert_with_log!(
+                        matches!(cancelled, Err(RecvError::Cancelled)),
+                        format!(
+                            "queued recv cancelled (prefix={}/{})",
+                            prefix_len, total_messages
+                        ),
+                        "Err(Cancelled)",
+                        format!("{cancelled:?}")
+                    );
+                    cx.set_cancel_requested(false);
+
+                    let mut peer_sequence = Vec::new();
+                    for _ in 0..total_messages {
+                        peer_sequence.push(block_on(rx_peer.recv(&cx)).expect("transformed peer"));
+                    }
+
+                    let mut cancelled_suffix = Vec::new();
+                    for _ in prefix_len..total_messages {
+                        cancelled_suffix.push(
+                            block_on(rx_cancelled.recv(&cx)).expect("transformed suffix recv"),
+                        );
+                    }
+
+                    cancelled_prefix.extend(cancelled_suffix);
+                    (cancelled_prefix, peer_sequence)
+                };
+
+                crate::assert_with_log!(
+                    transformed.0 == baseline.0,
+                    format!(
+                        "cancelled receiver transcript matches baseline (prefix={}/{})",
+                        prefix_len, total_messages
+                    ),
+                    baseline.0.clone(),
+                    transformed.0.clone()
+                );
+                crate::assert_with_log!(
+                    transformed.1 == baseline.1,
+                    format!(
+                        "peer transcript matches baseline (prefix={}/{})",
+                        prefix_len, total_messages
+                    ),
+                    baseline.1.clone(),
+                    transformed.1.clone()
+                );
+                crate::assert_with_log!(
+                    transformed.0 == messages,
+                    format!(
+                        "cancelled receiver delivery count preserved (prefix={}/{})",
+                        prefix_len, total_messages
+                    ),
+                    messages.clone(),
+                    transformed.0.clone()
+                );
+                crate::assert_with_log!(
+                    transformed.1 == messages,
+                    format!(
+                        "peer delivery count preserved (prefix={}/{})",
+                        prefix_len, total_messages
+                    ),
+                    messages.clone(),
+                    transformed.1.clone()
+                );
+            }
+        }
+
+        crate::test_complete!("metamorphic_cancelled_recv_preserves_peer_delivery_counts");
+    }
+
     /// MR4: Close Propagation (Equivalence Relation)
     /// Sender drop propagates Closed error to all active receivers.
     /// Transformation: Vary number of senders, timing of drops
