@@ -1299,6 +1299,44 @@ mod tests {
         }
 
         #[test]
+        fn mr_steal_then_push_preserves_thief_fifo_order(
+            total in 1usize..64,
+            split in 0usize..64,
+        ) {
+            let split = split.min(total);
+            let baseline = queue(total as u32);
+            let variant = queue(total as u32);
+
+            push_task_range(&baseline, 0..total);
+            push_task_range(&variant, 0..split);
+
+            let baseline_drained = drain_thief(&baseline);
+            let stealer = variant.stealer();
+            let mut variant_drained = Vec::new();
+            while let Some(task_id) = stealer.steal() {
+                variant_drained.push(task_id);
+            }
+
+            push_task_range(&variant, split..total);
+            while let Some(task_id) = stealer.steal() {
+                variant_drained.push(task_id);
+            }
+
+            let expected: Vec<_> = (0..total).map(|id| task(id as u32)).collect();
+
+            prop_assert_eq!(
+                baseline_drained,
+                expected.clone(),
+                "thief FIFO drain should match arrival order when all pushes happen before stealing",
+            );
+            prop_assert_eq!(
+                variant_drained,
+                expected,
+                "starting steals at any push boundary must preserve FIFO thief order",
+            );
+        }
+
+        #[test]
         fn mr_chunked_push_equivalent_for_repeated_steal_fifo_mode(
             total in 1usize..64,
             split in 0usize..64,
