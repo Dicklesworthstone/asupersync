@@ -293,6 +293,8 @@ pub mod oid {
     pub const FLOAT4: u32 = 700;
     /// Double-precision float.
     pub const FLOAT8: u32 = 701;
+    /// Arbitrary precision decimal.
+    pub const NUMERIC: u32 = 1700;
     /// Variable-length character string.
     pub const VARCHAR: u32 = 1043;
     /// Text (unlimited length).
@@ -5108,6 +5110,7 @@ impl PgConnection {
                     data.len()
                 )));
             }
+            oid::NUMERIC => PgValue::Text(decode_binary_numeric_to_text(data)?),
             oid::BYTEA => PgValue::Bytes(data.to_vec()),
             oid::JSONB => {
                 if data.first() == Some(&1) {
@@ -5425,6 +5428,114 @@ impl PgConnection {
                 return Ok(());
             }
         }
+    }
+}
+
+fn decode_binary_numeric_to_text(data: &[u8]) -> Result<String, PgError> {
+    const NUMERIC_POS: u16 = 0x0000;
+    const NUMERIC_NEG: u16 = 0x4000;
+    const NUMERIC_NAN: u16 = 0xC000;
+
+    let mut reader = MessageReader::new(data);
+    let ndigits_i16 = reader.read_i16()?;
+    if ndigits_i16 < 0 {
+        return Err(PgError::Protocol(format!(
+            "negative digit count in NUMERIC: {ndigits_i16}"
+        )));
+    }
+    let weight = reader.read_i16()?;
+    let sign = reader.read_i16()? as u16;
+    let scale_i16 = reader.read_i16()?;
+    if scale_i16 < 0 {
+        return Err(PgError::Protocol(format!(
+            "negative scale in NUMERIC: {scale_i16}"
+        )));
+    }
+    let scale = scale_i16 as usize;
+
+    let mut digits = Vec::with_capacity(ndigits_i16 as usize);
+    for idx in 0..ndigits_i16 as usize {
+        let digit = reader.read_i16()?;
+        if !(0..10_000).contains(&digit) {
+            return Err(PgError::Protocol(format!(
+                "NUMERIC digit {idx} out of range: {digit}"
+            )));
+        }
+        digits.push(digit as u16);
+    }
+    reader.ensure_consumed("NUMERIC")?;
+
+    if sign == NUMERIC_NAN {
+        return Err(PgError::Protocol(
+            "NUMERIC NaN is not supported".to_string(),
+        ));
+    }
+    if sign != NUMERIC_POS && sign != NUMERIC_NEG {
+        return Err(PgError::Protocol(format!(
+            "invalid NUMERIC sign: 0x{sign:04X}"
+        )));
+    }
+
+    let digit_at_exponent = |exp: i16| -> u16 {
+        let idx = weight - exp;
+        if idx < 0 {
+            0
+        } else {
+            digits.get(idx as usize).copied().unwrap_or(0)
+        }
+    };
+
+    let integer_groups = if weight >= 0 {
+        (0..=weight)
+            .rev()
+            .map(digit_at_exponent)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+
+    let mut integer_parts = integer_groups
+        .into_iter()
+        .skip_while(|digit| *digit == 0)
+        .collect::<Vec<_>>();
+
+    let integer = if integer_parts.is_empty() {
+        "0".to_string()
+    } else {
+        let first = integer_parts.remove(0);
+        let mut rendered = first.to_string();
+        for digit in integer_parts {
+            use std::fmt::Write as _;
+            let _ = write!(rendered, "{digit:04}");
+        }
+        rendered
+    };
+
+    let fractional = if scale == 0 {
+        String::new()
+    } else {
+        let fractional_groups = scale.div_ceil(4);
+        let mut rendered = String::with_capacity(fractional_groups * 4);
+        for group_idx in 0..fractional_groups {
+            let exp = -1 - group_idx as i16;
+            use std::fmt::Write as _;
+            let _ = write!(rendered, "{:04}", digit_at_exponent(exp));
+        }
+        rendered.truncate(scale);
+        rendered
+    };
+
+    let is_zero = digits.iter().all(|digit| *digit == 0);
+    let sign_prefix = if sign == NUMERIC_NEG && !is_zero {
+        "-"
+    } else {
+        ""
+    };
+
+    if scale == 0 {
+        Ok(format!("{sign_prefix}{integer}"))
+    } else {
+        Ok(format!("{sign_prefix}{integer}.{fractional}"))
     }
 }
 
@@ -8040,6 +8151,22 @@ mod tests {
             .parse_binary_value(&2.5f64.to_be_bytes(), oid::FLOAT8)
             .unwrap();
         assert_eq!(v, PgValue::Float8(2.5));
+    }
+
+    #[test]
+    fn parse_binary_value_numeric_preserves_decimal_scale() {
+        let conn = make_test_connection();
+        let numeric = [
+            0x00, 0x03, // ndigits = 3
+            0x00, 0x01, // weight = 1
+            0x00, 0x00, // sign = positive
+            0x00, 0x04, // scale = 4
+            0x00, 0x01, // 1
+            0x09, 0x29, // 2345
+            0x1A, 0x85, // 6789
+        ];
+        let v = conn.parse_binary_value(&numeric, oid::NUMERIC).unwrap();
+        assert_eq!(v, PgValue::Text("12345.6789".to_string()));
     }
 
     #[test]
@@ -11771,5 +11898,147 @@ mod tests {
         println!("  - Text format (36 chars): \"{}\"", uuid_string);
         println!("  - Binary format (16 bytes): {:?}", uuid_bytes);
         println!("  - Both formats produced equivalent UUID: {}", uuid_string);
+    }
+
+    #[test]
+    fn data_row_binary_float_numeric_decode_matches_sqlx_reference() {
+        /// Differential conformance test against sqlx's PostgreSQL binary decode rules.
+        ///
+        /// sqlx decodes FLOAT4/FLOAT8 directly from big-endian IEEE754 bytes and
+        /// decodes NUMERIC from the PostgreSQL base-10000 wire format. This test
+        /// pins our DataRow binary decode to the same logical results for one
+        /// representative row containing FLOAT4, FLOAT8, and NUMERIC columns.
+        fn sqlx_reference_numeric_to_text(data: &[u8]) -> String {
+            let ndigits = u16::from_be_bytes([data[0], data[1]]) as usize;
+            let weight = i16::from_be_bytes([data[2], data[3]]);
+            let sign = u16::from_be_bytes([data[4], data[5]]);
+            let scale = u16::from_be_bytes([data[6], data[7]]) as usize;
+            let digits = (0..ndigits)
+                .map(|idx| {
+                    let offset = 8 + (idx * 2);
+                    u16::from_be_bytes([data[offset], data[offset + 1]]) as u32
+                })
+                .collect::<Vec<_>>();
+
+            let digit_at_exponent = |exp: i16| -> u32 {
+                let idx = weight - exp;
+                if idx < 0 {
+                    0
+                } else {
+                    digits.get(idx as usize).copied().unwrap_or(0)
+                }
+            };
+
+            let integer_groups = if weight >= 0 {
+                (0..=weight)
+                    .rev()
+                    .map(digit_at_exponent)
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+
+            let mut integer_parts = integer_groups
+                .into_iter()
+                .skip_while(|digit| *digit == 0)
+                .collect::<Vec<_>>();
+            let integer = if integer_parts.is_empty() {
+                "0".to_string()
+            } else {
+                let first = integer_parts.remove(0);
+                let mut rendered = first.to_string();
+                for digit in integer_parts {
+                    use std::fmt::Write as _;
+                    let _ = write!(rendered, "{digit:04}");
+                }
+                rendered
+            };
+
+            let fractional = if scale == 0 {
+                String::new()
+            } else {
+                let fractional_groups = scale.div_ceil(4);
+                let mut rendered = String::with_capacity(fractional_groups * 4);
+                for group_idx in 0..fractional_groups {
+                    let exp = -1 - group_idx as i16;
+                    use std::fmt::Write as _;
+                    let _ = write!(rendered, "{:04}", digit_at_exponent(exp));
+                }
+                rendered.truncate(scale);
+                rendered
+            };
+
+            let is_zero = digits.iter().all(|digit| *digit == 0);
+            let sign_prefix = if sign == 0x4000 && !is_zero { "-" } else { "" };
+            if scale == 0 {
+                format!("{sign_prefix}{integer}")
+            } else {
+                format!("{sign_prefix}{integer}.{fractional}")
+            }
+        }
+
+        let conn = make_test_connection();
+        let numeric_bytes = [
+            0x00, 0x03, // ndigits = 3
+            0x00, 0x01, // weight = 1
+            0x00, 0x00, // sign = positive
+            0x00, 0x04, // scale = 4
+            0x00, 0x01, // 1
+            0x09, 0x29, // 2345
+            0x1A, 0x85, // 6789
+        ];
+        let float4 = 3.5f32;
+        let float8 = -42.125f64;
+
+        let columns = vec![
+            PgColumn {
+                name: "f4".to_string(),
+                table_oid: 0,
+                column_id: 0,
+                type_oid: oid::FLOAT4,
+                type_size: 4,
+                type_modifier: -1,
+                format_code: 1,
+            },
+            PgColumn {
+                name: "f8".to_string(),
+                table_oid: 0,
+                column_id: 0,
+                type_oid: oid::FLOAT8,
+                type_size: 8,
+                type_modifier: -1,
+                format_code: 1,
+            },
+            PgColumn {
+                name: "num".to_string(),
+                table_oid: 0,
+                column_id: 0,
+                type_oid: oid::NUMERIC,
+                type_size: -1,
+                type_modifier: -1,
+                format_code: 1,
+            },
+        ];
+
+        let mut data_row = Vec::new();
+        data_row.extend_from_slice(&3i16.to_be_bytes());
+        data_row.extend_from_slice(&4i32.to_be_bytes());
+        data_row.extend_from_slice(&float4.to_be_bytes());
+        data_row.extend_from_slice(&8i32.to_be_bytes());
+        data_row.extend_from_slice(&float8.to_be_bytes());
+        data_row.extend_from_slice(&(numeric_bytes.len() as i32).to_be_bytes());
+        data_row.extend_from_slice(&numeric_bytes);
+
+        let values = conn
+            .parse_data_row(&data_row, &columns)
+            .expect("binary DataRow should parse successfully");
+
+        assert_eq!(values.len(), 3);
+        assert_eq!(values[0], PgValue::Float4(float4));
+        assert_eq!(values[1], PgValue::Float8(float8));
+        assert_eq!(
+            values[2],
+            PgValue::Text(sqlx_reference_numeric_to_text(&numeric_bytes))
+        );
     }
 }
