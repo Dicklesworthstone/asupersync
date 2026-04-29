@@ -117,6 +117,10 @@ fn make_patterned_source(k: usize, symbol_size: usize) -> Vec<Vec<u8>> {
         .collect()
 }
 
+fn flatten_source_bytes(source: &[Vec<u8>]) -> Vec<u8> {
+    source.iter().flatten().copied().collect()
+}
+
 /// Build received symbols from encoder, optionally dropping some.
 /// Extract non-zero columns and GF(256) coefficients for a constraint matrix row.
 fn constraint_row_equation(constraints: &ConstraintMatrix, row: usize) -> (Vec<usize>, Vec<Gf256>) {
@@ -992,7 +996,7 @@ mod pipeline_e2e {
 
     #[derive(Serialize)]
     struct ProofReport {
-        hash: u64,
+        hash: String,
         summary_bytes: usize,
         outcome: String,
         received_total: usize,
@@ -1027,7 +1031,7 @@ mod pipeline_e2e {
     #[derive(Serialize)]
     struct ProofSummary {
         version: u8,
-        hash: u64,
+        hash: String,
         received_total: usize,
         peeling_solved: usize,
         inactivated: usize,
@@ -1264,14 +1268,14 @@ mod pipeline_e2e {
     }
 
     fn proof_report(proof: &asupersync::raptorq::DecodeProof) -> ProofReport {
-        let hash = proof.content_hash();
+        let hash = proof.content_hash().to_hex();
         let outcome = match &proof.outcome {
             ProofOutcome::Success { .. } => "success".to_string(),
             ProofOutcome::Failure { reason } => format!("{reason:?}"),
         };
         let summary = ProofSummary {
             version: proof.version,
-            hash,
+            hash: hash.clone(),
             received_total: proof.received.total,
             peeling_solved: proof.peeling.solved,
             inactivated: proof.elimination.inactivated,
@@ -1305,7 +1309,7 @@ mod pipeline_e2e {
         data_len: usize,
         data_seed: u64,
         object_id: ObjectId,
-    ) -> (String, u64, u64, bool) {
+    ) -> (String, u64, String, bool) {
         let symbol_size = usize::from(encoding.symbol_size);
         let data = make_bytes(data_len, data_seed);
         let block_k = data_len.div_ceil(symbol_size);
@@ -1412,7 +1416,7 @@ mod pipeline_e2e {
             .replay_and_verify(&received_for_proof)
             .expect("proof replay");
 
-        let proof_hash = proof.content_hash();
+        let proof_hash = proof.content_hash().to_hex();
         let proof_report = proof_report(&proof);
 
         let reject_reason = match last_reject {
@@ -1645,6 +1649,11 @@ mod differential_harness {
     use asupersync::raptorq::test_log_schema::{
         UnitDecodeStats, UnitGovernanceDecision, UnitLogEntry, validate_unit_log_json,
     };
+    use raptorq::{
+        Decoder as RaptorqRsDecoder, EncodingPacket as RaptorqRsEncodingPacket,
+        ObjectTransmissionInformation as RaptorqRsObjectTransmissionInformation,
+        PayloadId as RaptorqRsPayloadId,
+    };
 
     const DIFF_REPLAY_REF: &str = "replay:rq-d2-diff-harness-v1";
     const DIFF_ARTIFACT_PATH: &str = "artifacts/raptorq_d2_differential_harness_v1.json";
@@ -1810,6 +1819,110 @@ mod differential_harness {
                 Err(ReferenceDecodeError::SingularMatrix)
             }
         }
+    }
+
+    fn reference_decode_with_raptorq_rs(
+        case: DifferentialCase,
+        encoder: &SystematicEncoder,
+        source: &[Vec<u8>],
+        drop_indices: &[usize],
+        repair_esi_upper: u32,
+    ) -> Vec<u8> {
+        let transfer_length = case
+            .k
+            .checked_mul(case.symbol_size)
+            .expect("transfer length overflow");
+        let symbol_size = u16::try_from(case.symbol_size).expect("symbol size must fit in u16");
+        let config = RaptorqRsObjectTransmissionInformation::new(
+            transfer_length as u64,
+            symbol_size,
+            1,
+            1,
+            1,
+        );
+        let mut decoder = RaptorqRsDecoder::new(config);
+        let mut packets = Vec::new();
+
+        for (esi, data) in source.iter().enumerate() {
+            if !drop_indices.contains(&esi) {
+                packets.push(RaptorqRsEncodingPacket::new(
+                    RaptorqRsPayloadId::new(0, esi as u32),
+                    data.clone(),
+                ));
+            }
+        }
+
+        for esi in (case.k as u32)..repair_esi_upper {
+            packets.push(RaptorqRsEncodingPacket::new(
+                RaptorqRsPayloadId::new(0, esi),
+                encoder.repair_symbol(esi),
+            ));
+        }
+
+        let mut decoded = None;
+        for packet in packets {
+            decoded = decoder.decode(packet);
+            if decoded.is_some() {
+                break;
+            }
+        }
+
+        decoded.expect("raptorq-rs reference decode should succeed")
+    }
+
+    #[test]
+    fn differential_harness_known_bad_k10_matches_raptorq_rs() {
+        // Pinned lower-bound K=10 regression slice at the K'=10 floor.
+        let case = DifferentialCase {
+            scenario_id: "RQ-D2-DIFF-K10-RAPTORQ-RS",
+            k: 10,
+            symbol_size: 64,
+            seed: 2024,
+            drop_modulus: Some(3),
+            drop_remainder: 1,
+            repair_budget: RepairBudget::ByDropped { extra: 3 },
+            expect_success: true,
+            expected_error_kind: None,
+        };
+
+        let source = make_source_data(case.k, case.symbol_size, case.seed.wrapping_mul(17));
+        let encoder = SystematicEncoder::new(&source, case.symbol_size, case.seed)
+            .unwrap_or_else(|| panic!("scenario={} failed to build encoder", case.scenario_id));
+        let decoder = InactivationDecoder::new(case.k, case.symbol_size, case.seed);
+        let drop_indices = drop_indices_for(case);
+        let repair_esi_upper = max_repair_esi(case, decoder.params().l, drop_indices.len());
+        let received = build_received_symbols(
+            &encoder,
+            &decoder,
+            &source,
+            &drop_indices,
+            repair_esi_upper,
+            case.seed,
+        );
+
+        let our_decoded = decoder
+            .decode(&received)
+            .unwrap_or_else(|err| panic!("scenario={} decoder failed: {err:?}", case.scenario_id));
+        let our_bytes = flatten_source_bytes(&our_decoded.source);
+        let reference_bytes =
+            reference_decode_with_raptorq_rs(case, &encoder, &source, &drop_indices, repair_esi_upper);
+        let expected_bytes = flatten_source_bytes(&source);
+
+        assert_eq!(
+            our_bytes, expected_bytes,
+            "scenario={} our decoder must recover the exact K=10 source block",
+            case.scenario_id
+        );
+        assert_eq!(
+            reference_bytes, expected_bytes,
+            "scenario={} raptorq-rs must recover the exact K=10 source block",
+            case.scenario_id
+        );
+        assert_eq!(
+            our_bytes, reference_bytes,
+            "scenario={} decoders must emit byte-identical output for the pinned K=10 slice",
+            case.scenario_id
+        );
     }
 
     #[test]
