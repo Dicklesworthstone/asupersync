@@ -1745,6 +1745,13 @@ impl CleanupCoordinator {
             }
         }
 
+        if result.completed {
+            // Reentrant or concurrent register_handler() calls during cleanup
+            // must not leak stale per-object handlers after the object has
+            // reached a completed terminal state.
+            self.handlers.write().remove(&object_id);
+        }
+
         result
     }
 
@@ -5339,6 +5346,56 @@ mod tests {
         assert_eq!(stats.pending_objects, 0);
         assert_eq!(stats.pending_symbols, 0);
         assert_eq!(stats.pending_bytes, 0);
+        assert!(coordinator.completed.read().contains(&object_id));
+    }
+
+    #[test]
+    fn cleanup_completed_path_scrubs_reentrant_handler_re_registration() {
+        use std::sync::Arc;
+
+        struct ReRegisteringHandler {
+            coordinator: Arc<CleanupCoordinator>,
+        }
+
+        impl CleanupHandler for ReRegisteringHandler {
+            fn name(&self) -> &'static str {
+                "re-registering"
+            }
+
+            fn cleanup(
+                &self,
+                object_id: ObjectId,
+                _symbols: Vec<Symbol>,
+            ) -> crate::error::Result<usize> {
+                self.coordinator
+                    .register_handler(object_id, CountingCleanupHandler);
+                Ok(1)
+            }
+        }
+
+        let coordinator = Arc::new(CleanupCoordinator::new());
+        let object_id = ObjectId::new_for_test(1234);
+
+        coordinator.register_pending(
+            object_id,
+            Symbol::new_for_test(1234, 0, 0, b"initial"),
+            Time::from_millis(200),
+        );
+        coordinator.register_handler(
+            object_id,
+            ReRegisteringHandler {
+                coordinator: Arc::clone(&coordinator),
+            },
+        );
+
+        let result = coordinator.cleanup(object_id, None);
+        assert!(result.completed, "cleanup should still complete");
+        assert_eq!(result.symbols_cleaned, 1);
+        assert_eq!(result.bytes_freed, b"initial".len());
+        assert!(
+            !coordinator.handlers.read().contains_key(&object_id),
+            "completed cleanup must scrub handlers re-registered during the callback"
+        );
         assert!(coordinator.completed.read().contains(&object_id));
     }
 
