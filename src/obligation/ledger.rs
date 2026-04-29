@@ -1513,6 +1513,114 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_stale_token_after_reset_matches_drop_before_reset_round_trip() {
+        init_test("metamorphic_stale_token_after_reset_matches_drop_before_reset_round_trip");
+        let task = make_task();
+        let region = make_region();
+
+        let mut baseline = ObligationLedger::new();
+        let baseline_stale =
+            baseline.acquire(ObligationKind::Lease, task, region, Time::from_nanos(1));
+        let baseline_stale_id = baseline_stale.id();
+        baseline.abort_by_id(
+            baseline_stale_id,
+            Time::from_nanos(2),
+            ObligationAbortReason::Cancel,
+        );
+        drop(baseline_stale);
+        baseline.reset();
+
+        let baseline_fresh =
+            baseline.acquire(ObligationKind::Ack, task, region, Time::from_nanos(10));
+        let baseline_fresh_id = baseline_fresh.id();
+        baseline.commit(baseline_fresh, Time::from_nanos(20));
+        let baseline_observation = observe_ledger(&baseline, task, region);
+        let baseline_resolution = observable_resolution_state(&baseline, baseline_fresh_id);
+
+        let mut commit_replay = ObligationLedger::new();
+        let stale_commit =
+            commit_replay.acquire(ObligationKind::Lease, task, region, Time::from_nanos(1));
+        let stale_commit_id = stale_commit.id();
+        commit_replay.abort_by_id(
+            stale_commit_id,
+            Time::from_nanos(2),
+            ObligationAbortReason::Cancel,
+        );
+        commit_replay.reset();
+
+        let commit_fresh =
+            commit_replay.acquire(ObligationKind::Ack, task, region, Time::from_nanos(10));
+        let commit_fresh_id = commit_fresh.id();
+        commit_replay.commit(commit_fresh, Time::from_nanos(20));
+        let stale_commit_replay = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            commit_replay.commit(stale_commit, Time::from_nanos(21))
+        }));
+        crate::assert_with_log!(
+            stale_commit_replay.is_err(),
+            "stale commit replay rejected after reset",
+            true,
+            stale_commit_replay.is_err()
+        );
+        crate::assert_with_log!(
+            observable_resolution_state(&commit_replay, commit_fresh_id) == baseline_resolution,
+            "stale commit replay preserves fresh terminal observables",
+            baseline_resolution,
+            observable_resolution_state(&commit_replay, commit_fresh_id)
+        );
+        crate::assert_with_log!(
+            observe_ledger(&commit_replay, task, region) == baseline_observation,
+            "stale commit replay preserves ledger observation",
+            baseline_observation,
+            observe_ledger(&commit_replay, task, region)
+        );
+
+        let mut abort_replay = ObligationLedger::new();
+        let stale_abort =
+            abort_replay.acquire(ObligationKind::Lease, task, region, Time::from_nanos(1));
+        let stale_abort_id = stale_abort.id();
+        abort_replay.abort_by_id(
+            stale_abort_id,
+            Time::from_nanos(2),
+            ObligationAbortReason::Cancel,
+        );
+        abort_replay.reset();
+
+        let abort_fresh =
+            abort_replay.acquire(ObligationKind::Ack, task, region, Time::from_nanos(10));
+        let abort_fresh_id = abort_fresh.id();
+        abort_replay.commit(abort_fresh, Time::from_nanos(20));
+        let stale_abort_replay = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            abort_replay.abort(
+                stale_abort,
+                Time::from_nanos(21),
+                ObligationAbortReason::Explicit,
+            )
+        }));
+        crate::assert_with_log!(
+            stale_abort_replay.is_err(),
+            "stale abort replay rejected after reset",
+            true,
+            stale_abort_replay.is_err()
+        );
+        crate::assert_with_log!(
+            observable_resolution_state(&abort_replay, abort_fresh_id) == baseline_resolution,
+            "stale abort replay preserves fresh terminal observables",
+            baseline_resolution,
+            observable_resolution_state(&abort_replay, abort_fresh_id)
+        );
+        crate::assert_with_log!(
+            observe_ledger(&abort_replay, task, region) == baseline_observation,
+            "stale abort replay preserves ledger observation",
+            baseline_observation,
+            observe_ledger(&abort_replay, task, region)
+        );
+
+        crate::test_complete!(
+            "metamorphic_stale_token_after_reset_matches_drop_before_reset_round_trip"
+        );
+    }
+
+    #[test]
     fn metamorphic_failed_reset_then_commit_matches_commit_then_reset() {
         init_test("metamorphic_failed_reset_then_commit_matches_commit_then_reset");
         let task = make_task();
