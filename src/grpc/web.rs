@@ -2046,6 +2046,64 @@ mod tests {
         assert_eq!(out, payload);
     }
 
+    #[test]
+    fn grpc_web_text_mode_chunked_trailer_only_stream_round_trips_vs_grpcweb() {
+        // gRPC-Web text mode base64-encodes the entire binary frame
+        // stream, including trailer-only responses. grpcweb-style HTTP
+        // chunking can split that text at arbitrary quartet boundaries,
+        // so a trailer block carrying both percent-escaped grpc-message
+        // text and nested -bin metadata still has to decode back to the
+        // original trailer frame.
+        init_test("grpc_web_text_mode_chunked_trailer_only_stream_round_trips_vs_grpcweb");
+
+        let codec = WebFrameCodec::new();
+        let status = Status::invalid_argument("bad field\nline 2");
+        let mut metadata = Metadata::new();
+        assert!(metadata.insert("x-request-id", "req-42"));
+        assert!(metadata.insert_bin("trace-bin", Bytes::from_static(b"\x01\x02\xfe\xff")));
+
+        let mut binary = BytesMut::new();
+        codec
+            .encode_trailers(&status, &metadata, &mut binary)
+            .expect("trailer-only grpc-web response must encode");
+
+        let text = base64_encode(binary.as_ref());
+        let decoded = _37svtb_decode_via_chunks(&text, &[1, 5, 2, 7, 3, 4, 6]);
+        assert_eq!(
+            decoded,
+            binary.to_vec(),
+            "chunked grpc-web-text must reconstruct the exact trailer frame bytes"
+        );
+
+        let mut decode_buf = BytesMut::from(decoded.as_slice());
+        let frame = codec
+            .decode(&mut decode_buf)
+            .expect("decoded trailer-only frame must parse")
+            .expect("decoded trailer-only frame must be complete");
+        let WebFrame::Trailers(trailers) = frame else {
+            panic!("expected trailer frame after grpc-web-text decode")
+        };
+
+        assert_eq!(trailers.status.code(), status.code());
+        assert_eq!(trailers.status.message(), status.message());
+        assert_eq!(
+            trailers.metadata.get("x-request-id"),
+            metadata.get("x-request-id")
+        );
+        assert_eq!(
+            trailers.metadata.get("trace-bin"),
+            metadata.get("trace-bin")
+        );
+        assert!(
+            decode_buf.is_empty(),
+            "decoded trailer-only grpc-web-text stream must not leave trailing bytes"
+        );
+        assert!(
+            codec.decode(&mut decode_buf).unwrap().is_none(),
+            "grpc-web trailer-only stream must decode to exactly one frame"
+        );
+    }
+
     /// GRPC-WEB-TRAILER-PADDING: Differential test for trailer framing vs gRPC-Web spec
     ///
     /// This test verifies our trailer framing behavior exactly matches the gRPC-Web
