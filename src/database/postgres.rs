@@ -2503,6 +2503,7 @@ fn cancelled_error(cx: &Cx) -> PgError {
 
 const MAX_BACKEND_MESSAGE_LEN: i32 = 64 * 1024 * 1024;
 const MAX_NOTIFICATION_CHANNEL_NAME_BYTES: usize = 63;
+const MAX_NOTIFICATION_PAYLOAD_BYTES: usize = 7_999;
 
 fn backend_message_body_len(len_i32: i32) -> Result<usize, PgError> {
     // Practical PostgreSQL message limit. The protocol allows up to 2 GiB
@@ -2535,6 +2536,17 @@ fn validate_notification_channel_name(channel: &str) -> Result<(), PgError> {
         return Err(PgError::Protocol(
             "notification channel name cannot contain NUL bytes".to_string(),
         ));
+    }
+    Ok(())
+}
+
+fn validate_notification_payload(payload: &str) -> Result<(), PgError> {
+    if payload.len() > MAX_NOTIFICATION_PAYLOAD_BYTES {
+        return Err(PgError::Protocol(format!(
+            "notification payload exceeds PostgreSQL default {}-byte limit: {} bytes",
+            MAX_NOTIFICATION_PAYLOAD_BYTES,
+            payload.len()
+        )));
     }
     Ok(())
 }
@@ -3714,6 +3726,9 @@ impl PgConnection {
     /// channel-name interpolation.
     pub async fn notify(&mut self, cx: &Cx, channel: &str, payload: &str) -> Outcome<(), PgError> {
         if let Err(err) = validate_notification_channel_name(channel) {
+            return Outcome::Err(err);
+        }
+        if let Err(err) = validate_notification_payload(payload) {
             return Outcome::Err(err);
         }
         let params = [&channel as &dyn ToSql, &payload as &dyn ToSql];
@@ -6797,6 +6812,21 @@ mod tests {
         match run(conn.notify(&cx, &channel, "payload")) {
             Outcome::Err(PgError::Protocol(msg)) => {
                 assert!(msg.contains("63-byte limit"), "got: {msg}");
+            }
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
+        assert!(!conn.inner.closed);
+    }
+
+    #[test]
+    fn notify_rejects_overlong_payload_before_query_message() {
+        let mut conn = make_test_connection();
+        let cx = crate::cx::Cx::for_testing();
+        let payload = "p".repeat(MAX_NOTIFICATION_PAYLOAD_BYTES + 1);
+
+        match run(conn.notify(&cx, "jobs", &payload)) {
+            Outcome::Err(PgError::Protocol(msg)) => {
+                assert!(msg.contains("7999-byte limit"), "got: {msg}");
             }
             other => panic!("expected Protocol error, got {other:?}"),
         }
