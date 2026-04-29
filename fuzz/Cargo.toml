@@ -3175,3 +3175,16 @@ path = "fuzz_targets/grpc_gzip_decompress.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "otlp_span_validation"
+path = "fuzz_targets/otlp_span_validation.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "grpc_streaming_bidi_cancel"
+path = "fuzz_targets/grpc_streaming_bidi_cancel.rs"
+test = false
+doc = false
+bench = false
