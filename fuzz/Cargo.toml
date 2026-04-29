@@ -2824,3 +2824,14 @@ path = "fuzz_targets/grpc_health_watch_transitions.rs"
 test = false
 doc = false
 bench = false
+
+# Tests Kafka ProduceResponse parser with structure-aware input generation for edge cases.
+# Exercises response frame validation, error code handling, RecordMetadata parsing, length-prefixed
+# string handling, integer boundary conditions, and malformed frame structure detection under
+# various consistency patterns and delivery result parsing scenarios.
+[[bin]]
+name = "kafka_produce_response"
+path = "fuzz_targets/kafka_produce_response.rs"
+test = false
+doc = false
+bench = false
