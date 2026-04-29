@@ -748,7 +748,7 @@ mod tests {
             self.obligations_leaked.lock().unwrap().push(region_id);
         }
 
-        fn scheduler_tick(&self, _ready_count: usize, _tick__duration: std::time::Duration) {
+        fn scheduler_tick(&self, _ready_count: usize, _tick_duration: std::time::Duration) {
             // Simple implementation - could extend if needed for testing
         }
 
@@ -1074,7 +1074,7 @@ mod tests {
                 self.obligations_leaked.lock().unwrap().push(region_id);
             }
 
-            fn scheduler_tick(&self, _ready_count: usize, _tick__duration: std::time::Duration) {
+            fn scheduler_tick(&self, _ready_count: usize, _tick_duration: std::time::Duration) {
                 // Simple implementation - could extend if needed for testing
             }
 
