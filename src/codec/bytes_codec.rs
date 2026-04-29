@@ -306,16 +306,35 @@ mod tests {
         Pending,
     }
 
+    #[derive(Clone, Copy)]
+    enum FlushStep {
+        Ready,
+        Pending,
+    }
+
     struct ScriptedWriter {
         inner: Vec<u8>,
-        steps: VecDeque<WriteStep>,
+        write_steps: VecDeque<WriteStep>,
+        flush_steps: VecDeque<FlushStep>,
     }
 
     impl ScriptedWriter {
         fn new(steps: impl IntoIterator<Item = WriteStep>) -> Self {
             Self {
                 inner: Vec::new(),
-                steps: steps.into_iter().collect(),
+                write_steps: steps.into_iter().collect(),
+                flush_steps: VecDeque::new(),
+            }
+        }
+
+        fn with_flush_steps(
+            steps: impl IntoIterator<Item = WriteStep>,
+            flush_steps: impl IntoIterator<Item = FlushStep>,
+        ) -> Self {
+            Self {
+                inner: Vec::new(),
+                write_steps: steps.into_iter().collect(),
+                flush_steps: flush_steps.into_iter().collect(),
             }
         }
     }
@@ -328,7 +347,7 @@ mod tests {
         ) -> Poll<io::Result<usize>> {
             let this = self.get_mut();
             match this
-                .steps
+                .write_steps
                 .pop_front()
                 .unwrap_or(WriteStep::Write(buf.len()))
             {
@@ -342,7 +361,11 @@ mod tests {
         }
 
         fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-            Poll::Ready(Ok(()))
+            let this = self.get_mut();
+            match this.flush_steps.pop_front().unwrap_or(FlushStep::Ready) {
+                FlushStep::Ready => Poll::Ready(Ok(())),
+                FlushStep::Pending => Poll::Pending,
+            }
         }
 
         fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -453,5 +476,59 @@ mod tests {
         assert!(reference.write_buffer().is_empty());
         assert_eq!(actual.get_ref().inner, reference.get_ref().inner);
         assert_eq!(&actual.get_ref().inner, payload);
+    }
+
+    #[test]
+    fn conformance_transport_flush_pending_after_write_matches_tokio_util_bytes_codec() {
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let payload = b"abcdef";
+
+        let mut actual = FramedWrite::new(
+            ScriptedWriter::with_flush_steps(
+                [WriteStep::Write(payload.len())],
+                [FlushStep::Pending, FlushStep::Ready],
+            ),
+            BytesCodec::new(),
+        );
+        let mut reference = TokioUtilBytesCodecWriteRef::new(ScriptedWriter::with_flush_steps(
+            [WriteStep::Write(payload.len())],
+            [FlushStep::Pending, FlushStep::Ready],
+        ));
+
+        actual
+            .send(Bytes::copy_from_slice(payload))
+            .expect("encode actual payload");
+        reference
+            .send(tokio_util::bytes::Bytes::copy_from_slice(payload))
+            .expect("encode reference payload");
+
+        assert!(
+            matches!(actual.poll_flush(&mut cx), Poll::Pending),
+            "our framed writer should propagate inner flush pending after draining bytes"
+        );
+        assert!(
+            matches!(reference.poll_flush(&mut cx), Poll::Pending),
+            "tokio-util reference should propagate the same inner flush pending state"
+        );
+
+        assert_eq!(actual.get_ref().inner, reference.get_ref().inner);
+        assert_eq!(&actual.get_ref().inner, payload);
+        assert!(actual.write_buffer().is_empty());
+        assert!(reference.write_buffer().is_empty());
+
+        assert!(
+            matches!(actual.poll_flush(&mut cx), Poll::Ready(Ok(()))),
+            "our framed writer should complete once the inner transport flush becomes ready"
+        );
+        assert!(
+            matches!(reference.poll_flush(&mut cx), Poll::Ready(Ok(()))),
+            "tokio-util reference should complete on the same resumed flush"
+        );
+
+        assert_eq!(actual.get_ref().inner, reference.get_ref().inner);
+        assert_eq!(&actual.get_ref().inner, payload);
+        assert!(actual.write_buffer().is_empty());
+        assert!(reference.write_buffer().is_empty());
     }
 }
