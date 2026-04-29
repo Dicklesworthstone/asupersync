@@ -42,7 +42,7 @@ use std::borrow::Cow;
 use std::fmt;
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// br-asupersync-w7n2qx: client-side cap on stream and consumer name
 /// length, in bytes. Mirrors the upstream `nats-server` 256-byte cap on
@@ -606,8 +606,20 @@ impl ConsumerConfig {
             "\"deliver_policy\":\"{}\"",
             self.deliver_policy.as_str()
         ));
-        if let DeliverPolicy::ByStartSequence(seq) = self.deliver_policy {
-            parts.push(format!("\"opt_start_seq\":{seq}"));
+        match self.deliver_policy {
+            DeliverPolicy::ByStartSequence(seq) => {
+                parts.push(format!("\"opt_start_seq\":{seq}"));
+            }
+            DeliverPolicy::ByStartTime(start_time) => {
+                parts.push(format!(
+                    "\"opt_start_time\":\"{}\"",
+                    json_escape(&format_system_time_rfc3339(start_time))
+                ));
+            }
+            DeliverPolicy::All
+            | DeliverPolicy::New
+            | DeliverPolicy::Last
+            | DeliverPolicy::LastPerSubject => {}
         }
         parts.push(format!("\"ack_policy\":\"{}\"", self.ack_policy.as_str()));
         parts.push(format!("\"ack_wait\":{}", self.ack_wait.as_nanos()));
@@ -633,6 +645,8 @@ pub enum DeliverPolicy {
     New,
     /// Deliver from a specific sequence.
     ByStartSequence(u64),
+    /// Deliver from the first message on or after the given RFC3339 wall-clock time.
+    ByStartTime(SystemTime),
     /// Deliver from last received.
     Last,
     /// Deliver from last per subject.
@@ -645,6 +659,7 @@ impl DeliverPolicy {
             Self::All => "all",
             Self::New => "new",
             Self::ByStartSequence(_) => "by_start_sequence",
+            Self::ByStartTime(_) => "by_start_time",
             Self::Last => "last",
             Self::LastPerSubject => "last_per_subject",
         }
@@ -1851,6 +1866,43 @@ fn duration_to_nanos_saturating(duration: Duration) -> u64 {
     duration.as_nanos().min(u128::from(u64::MAX)) as u64
 }
 
+fn format_system_time_rfc3339(time: SystemTime) -> String {
+    const NANOS_PER_SEC: i128 = 1_000_000_000;
+    const SECS_PER_DAY: i128 = 86_400;
+
+    let total_nanos = match time.duration_since(UNIX_EPOCH) {
+        Ok(duration) => i128::try_from(duration.as_nanos()).unwrap_or(i128::MAX),
+        Err(err) => -i128::try_from(err.duration().as_nanos()).unwrap_or(i128::MAX),
+    };
+    let total_secs = total_nanos.div_euclid(NANOS_PER_SEC);
+    let nanos = total_nanos.rem_euclid(NANOS_PER_SEC) as u32;
+    let days = total_secs.div_euclid(SECS_PER_DAY);
+    let secs_of_day = total_secs.rem_euclid(SECS_PER_DAY) as u32;
+
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 }.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096).div_euclid(365);
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2).div_euclid(153);
+    let day = doy - (153 * mp + 2).div_euclid(5) + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    if month <= 2 {
+        year += 1;
+    }
+
+    let hour = secs_of_day / 3_600;
+    let minute = (secs_of_day % 3_600) / 60;
+    let second = secs_of_day % 60;
+
+    format!(
+        "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{nanos:09}Z",
+        month = month as u32,
+        day = day as u32
+    )
+}
+
 fn compute_client_deadline(now: Time, pull_timeout: Duration, slack: Duration) -> Option<Time> {
     if pull_timeout.is_zero() {
         None
@@ -1952,6 +2004,19 @@ mod tests {
     }
 
     #[test]
+    fn consumer_config_to_json_includes_start_time_for_deliver_by_start_time_tick137() {
+        let config = ConsumerConfig::new("time-consumer")
+            .deliver_policy(DeliverPolicy::ByStartTime(
+                UNIX_EPOCH + Duration::new(42, 123_456_789),
+            ))
+            .ack_policy(AckPolicy::Explicit);
+
+        let json = config.to_json();
+        assert!(json.contains("\"deliver_policy\":\"by_start_time\""));
+        assert!(json.contains("\"opt_start_time\":\"1970-01-01T00:00:42.123456789Z\""));
+    }
+
+    #[test]
     fn test_ephemeral_consumer_config_to_json() {
         // Regression test: ephemeral consumers (no name) should not produce invalid JSON
         let config = ConsumerConfig::ephemeral();
@@ -2035,7 +2100,16 @@ mod tests {
     fn test_deliver_policy_str() {
         assert_eq!(DeliverPolicy::All.as_str(), "all");
         assert_eq!(DeliverPolicy::New.as_str(), "new");
+        assert_eq!(
+            DeliverPolicy::ByStartSequence(7).as_str(),
+            "by_start_sequence"
+        );
+        assert_eq!(
+            DeliverPolicy::ByStartTime(UNIX_EPOCH).as_str(),
+            "by_start_time"
+        );
         assert_eq!(DeliverPolicy::Last.as_str(), "last");
+        assert_eq!(DeliverPolicy::LastPerSubject.as_str(), "last_per_subject");
     }
 
     #[test]
@@ -2249,6 +2323,31 @@ mod tests {
         let d = DeliverPolicy::ByStartSequence(42);
         assert_eq!(d, DeliverPolicy::ByStartSequence(42));
         assert_ne!(d, DeliverPolicy::ByStartSequence(99));
+    }
+
+    #[test]
+    fn deliver_policy_by_start_time_tick137() {
+        let d = DeliverPolicy::ByStartTime(UNIX_EPOCH + Duration::new(5, 6));
+        assert_eq!(
+            d,
+            DeliverPolicy::ByStartTime(UNIX_EPOCH + Duration::new(5, 6))
+        );
+        assert_ne!(
+            d,
+            DeliverPolicy::ByStartTime(UNIX_EPOCH + Duration::new(6, 6))
+        );
+    }
+
+    #[test]
+    fn format_system_time_rfc3339_handles_epoch_offsets_tick137() {
+        assert_eq!(
+            format_system_time_rfc3339(UNIX_EPOCH + Duration::new(42, 123_456_789)),
+            "1970-01-01T00:00:42.123456789Z"
+        );
+        assert_eq!(
+            format_system_time_rfc3339(UNIX_EPOCH - Duration::from_secs(1)),
+            "1969-12-31T23:59:59.000000000Z"
+        );
     }
 
     #[test]

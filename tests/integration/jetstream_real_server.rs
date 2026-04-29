@@ -348,6 +348,21 @@ fn raw_consumer_create_payload(
     )
 }
 
+fn raw_consumer_create_start_time_payload(
+    stream: &str,
+    consumer: &str,
+    subject: &str,
+    start_time: SystemTime,
+    ack_wait: Duration,
+) -> String {
+    let start_time = chrono::DateTime::<chrono::Utc>::from(start_time)
+        .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+    format!(
+        "{{\"stream_name\":\"{stream}\",\"config\":{{\"name\":\"{consumer}\",\"deliver_policy\":\"by_start_time\",\"opt_start_time\":\"{start_time}\",\"ack_policy\":\"explicit\",\"ack_wait\":{},\"max_deliver\":4,\"max_ack_pending\":1000,\"filter_subject\":\"{subject}\"}}}}",
+        ack_wait.as_nanos()
+    )
+}
+
 fn raw_pull_request_payload(batch: usize, expires: Duration) -> String {
     format!("{{\"batch\":{batch},\"expires\":{}}}", expires.as_nanos())
 }
@@ -906,6 +921,229 @@ fn jetstream_real_deliver_by_start_sequence_matches_raw_nats_first_delivery_tick
         raw.request(&cx, &format!("$JS.API.STREAM.DELETE.{raw_stream}"), b"")
             .await
             .expect("delete raw-reference stream");
+
+        raw.close(&cx).await.expect("close raw client");
+        js.client()
+            .close(&cx)
+            .await
+            .expect("close JetStream client");
+    });
+
+    log.end("pass");
+}
+
+#[test]
+fn jetstream_real_deliver_by_start_time_matches_raw_nats_first_delivery_tick137() {
+    let cfg = RealJetStreamConfig::from_env();
+    if skip_if_disabled(
+        &cfg,
+        "jetstream_real_deliver_by_start_time_matches_raw_nats_first_delivery_tick137",
+    ) {
+        return;
+    }
+
+    let log = Arc::new(JetStreamTestLogger::new(
+        "jetstream_real",
+        "jetstream_real_deliver_by_start_time_matches_raw_nats_first_delivery_tick137",
+    ));
+
+    let local_server = cfg
+        .external_url
+        .is_none()
+        .then(|| {
+            let bin = cfg
+                .nats_server_bin
+                .as_deref()
+                .expect("enabled config without nats-server binary");
+            LocalJetStreamServer::start(bin, &log)
+        })
+        .transpose()
+        .expect("start local nats-server");
+    let url = local_server.as_ref().map_or_else(
+        || cfg.external_url.clone().unwrap(),
+        |server| server.url.clone(),
+    );
+
+    let stream = unique_stream_name("jetstream_start_time");
+    let subject = unique_subject("start_time");
+    let js_consumer = unique_name("start_time_js");
+    let raw_consumer = unique_name("start_time_raw");
+    let duplicate_window = Duration::from_secs(60);
+    let ack_wait = Duration::from_secs(2);
+    let pull_timeout = Duration::from_secs(2);
+    let inter_publish_gap = Duration::from_millis(150);
+
+    log.line(
+        "fixture",
+        &[
+            ("url", url.clone()),
+            ("stream", stream.clone()),
+            ("subject", subject.clone()),
+            (
+                "inter_publish_gap_ms",
+                inter_publish_gap.as_millis().to_string(),
+            ),
+        ],
+    );
+
+    let log_for_runtime = Arc::clone(&log);
+    run_runtime("jetstream-real-start-time-parity", async move {
+        let cx = Cx::current().expect("runtime task context");
+        let client = NatsClient::connect(&cx, &url)
+            .await
+            .expect("connect JetStream client");
+        let mut js = JetStreamContext::new(client);
+        let mut raw = NatsClient::connect(&cx, &url)
+            .await
+            .expect("connect raw NATS client");
+
+        js.create_stream(
+            &cx,
+            StreamConfig::new(&stream)
+                .subjects(&[subject.as_str()])
+                .storage(StorageType::Memory)
+                .max_messages(64)
+                .duplicate_window(duplicate_window),
+        )
+        .await
+        .expect("create stream");
+
+        let first_ack = js
+            .publish(&cx, &subject, b"first")
+            .await
+            .expect("publish first message");
+        thread::sleep(inter_publish_gap);
+        let start_time = SystemTime::now();
+        thread::sleep(inter_publish_gap);
+        let second_ack = js
+            .publish(&cx, &subject, b"second")
+            .await
+            .expect("publish second message");
+        let third_ack = js
+            .publish(&cx, &subject, b"third")
+            .await
+            .expect("publish third message");
+        assert_eq!(first_ack.seq, 1, "first publish sequence drifted");
+        assert_eq!(second_ack.seq, 2, "second publish sequence drifted");
+        assert_eq!(third_ack.seq, 3, "third publish sequence drifted");
+        log_for_runtime.line(
+            "publish_window",
+            &[
+                (
+                    "start_time_epoch_ms",
+                    start_time
+                        .duration_since(UNIX_EPOCH)
+                        .expect("post-epoch start_time")
+                        .as_millis()
+                        .to_string(),
+                ),
+                ("first_seq", first_ack.seq.to_string()),
+                ("second_seq", second_ack.seq.to_string()),
+                ("third_seq", third_ack.seq.to_string()),
+            ],
+        );
+
+        let consumer = js
+            .create_consumer(
+                &cx,
+                &stream,
+                ConsumerConfig::new(&js_consumer)
+                    .deliver_policy(DeliverPolicy::ByStartTime(start_time))
+                    .ack_policy(AckPolicy::Explicit)
+                    .ack_wait(ack_wait)
+                    .filter_subject(&subject)
+                    .max_deliver(4),
+            )
+            .await
+            .expect("create JetStream start-time consumer");
+
+        let raw_consumer_payload = raw_consumer_create_start_time_payload(
+            &stream,
+            &raw_consumer,
+            &subject,
+            start_time,
+            ack_wait,
+        );
+        raw.request(
+            &cx,
+            &format!("$JS.API.CONSUMER.CREATE.{stream}.{raw_consumer}"),
+            raw_consumer_payload.as_bytes(),
+        )
+        .await
+        .expect("create raw-reference start-time consumer");
+
+        let mut js_messages = consumer
+            .pull_with_timeout(js.client(), &cx, 1, pull_timeout)
+            .await
+            .expect("pull JetStream start-time first message");
+        assert_eq!(js_messages.len(), 1, "expected one JetStream message");
+        let js_message = js_messages
+            .pop()
+            .expect("JetStream first start-time message");
+
+        let raw_reply = raw
+            .request(
+                &cx,
+                &format!("$JS.API.CONSUMER.MSG.NEXT.{stream}.{raw_consumer}"),
+                raw_pull_request_payload(1, pull_timeout).as_bytes(),
+            )
+            .await
+            .expect("pull raw-reference start-time first message");
+        let raw_reply_subject = raw_reply
+            .reply_to
+            .clone()
+            .expect("raw reference pull reply subject");
+        let raw_first_sequence = parse_ack_reply_sequence(&raw_reply_subject);
+
+        assert_eq!(
+            js_message.sequence, raw_first_sequence,
+            "DeliverByStartTime must select the same first stream sequence as the raw NATS JetStream API"
+        );
+        assert_eq!(
+            js_message.payload, raw_reply.payload,
+            "DeliverByStartTime must select the same first payload as the raw NATS JetStream API"
+        );
+        assert_eq!(
+            js_message.sequence, 2,
+            "DeliverByStartTime(start_time between first and second publish) must start with stream sequence 2"
+        );
+        assert_eq!(
+            js_message.payload,
+            b"second".to_vec(),
+            "DeliverByStartTime must skip messages published before the start_time"
+        );
+        log_for_runtime.line(
+            "first_delivery",
+            &[
+                ("sequence", js_message.sequence.to_string()),
+                (
+                    "payload",
+                    String::from_utf8_lossy(&js_message.payload).into_owned(),
+                ),
+            ],
+        );
+
+        js_message
+            .ack(js.client(), &cx)
+            .await
+            .expect("ack JetStream start-time first message");
+        raw.publish(&cx, &raw_reply_subject, b"+ACK")
+            .await
+            .expect("ack raw-reference start-time first message");
+
+        raw.request(
+            &cx,
+            &format!("$JS.API.CONSUMER.DELETE.{stream}.{raw_consumer}"),
+            b"",
+        )
+        .await
+        .expect("delete raw-reference consumer");
+        js.delete_consumer(&cx, &stream, &js_consumer)
+            .await
+            .expect("delete JetStream consumer");
+        js.delete_stream(&cx, &stream)
+            .await
+            .expect("delete JetStream stream");
 
         raw.close(&cx).await.expect("close raw client");
         js.client()
