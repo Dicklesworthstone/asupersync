@@ -1858,6 +1858,107 @@ mod tests {
                 _ => prop_assert!(false, "branch permutation changed the first-success result"),
             }
         }
+
+        #[test]
+        fn metamorphic_race_all_cancel_storm_padding_preserves_first_success_unique_winner(
+            branch_count in 2usize..12,
+            raw_winner_index in 0usize..24,
+            winner_value in any::<i16>(),
+            cancel_storm_losers in prop::collection::vec(
+                race_cancel_storm_loser_strategy(),
+                1usize..11,
+            ),
+            prefix_cancelled in prop::collection::vec(
+                race_cancel_storm_loser_strategy(),
+                0usize..6,
+            ),
+            suffix_cancelled in prop::collection::vec(
+                race_cancel_storm_loser_strategy(),
+                0usize..6,
+            ),
+        ) {
+            prop_assume!(!prefix_cancelled.is_empty() || !suffix_cancelled.is_empty());
+
+            let winner_index = raw_winner_index % branch_count;
+            let winner_value = i32::from(winner_value);
+
+            let mut base_outcomes =
+                vec![Outcome::Cancelled(CancelReason::race_loser()); branch_count];
+            let mut loser_slot = 0usize;
+            for (index, outcome) in base_outcomes.iter_mut().enumerate() {
+                if index == winner_index {
+                    *outcome = Outcome::Ok(winner_value);
+                } else {
+                    *outcome = cancel_storm_losers
+                        .get(loser_slot)
+                        .cloned()
+                        .unwrap_or_else(|| Outcome::Cancelled(CancelReason::race_loser()));
+                    loser_slot += 1;
+                }
+            }
+
+            let base_result = race_all_outcomes(winner_index, base_outcomes.clone());
+            prop_assert_eq!(base_result.winner_index, winner_index);
+            prop_assert_eq!(
+                race_outcome_signature(&base_result.winner_outcome),
+                race_outcome_signature(&Outcome::Ok(winner_value)),
+            );
+            let base_final = make_race_all_result(winner_index, base_outcomes.clone());
+            match &base_final {
+                Ok(value) => prop_assert_eq!(*value, winner_value),
+                Err(_) => prop_assert!(false, "cancel storm changed the first-success winner"),
+            }
+
+            let padded_winner_index = winner_index + prefix_cancelled.len();
+            let mut padded_outcomes = Vec::with_capacity(
+                prefix_cancelled.len() + base_outcomes.len() + suffix_cancelled.len(),
+            );
+            padded_outcomes.extend(prefix_cancelled.iter().cloned());
+            padded_outcomes.extend(base_outcomes.iter().cloned());
+            padded_outcomes.extend(suffix_cancelled.iter().cloned());
+
+            let padded_result = race_all_outcomes(padded_winner_index, padded_outcomes.clone());
+            prop_assert_eq!(padded_result.winner_index, padded_winner_index);
+            prop_assert_eq!(
+                race_outcome_signature(&padded_result.winner_outcome),
+                race_outcome_signature(&Outcome::Ok(winner_value)),
+                "injecting extra cancelled losers must preserve the first-success winner"
+            );
+
+            let mut base_loser_projection = base_result
+                .loser_outcomes
+                .iter()
+                .map(|(index, outcome)| (*index, race_outcome_signature(outcome)))
+                .collect::<Vec<_>>();
+            let mut retained_projection = padded_result
+                .loser_outcomes
+                .iter()
+                .filter_map(|(index, outcome)| {
+                    let shifted = *index;
+                    ((prefix_cancelled.len()..prefix_cancelled.len() + branch_count)
+                        .contains(&shifted))
+                    .then_some((
+                        shifted - prefix_cancelled.len(),
+                        race_outcome_signature(outcome),
+                    ))
+                })
+                .collect::<Vec<_>>();
+            base_loser_projection.sort_unstable_by_key(|(index, _)| *index);
+            retained_projection.sort_unstable_by_key(|(index, _)| *index);
+            prop_assert_eq!(
+                base_loser_projection,
+                retained_projection,
+                "stripping padded cancelled losers must recover the original loser projection"
+            );
+
+            let padded_final = make_race_all_result(padded_winner_index, padded_outcomes);
+            match (&base_final, &padded_final) {
+                (Ok(base_value), Ok(padded_value)) => {
+                    prop_assert_eq!(base_value, padded_value);
+                }
+                _ => prop_assert!(false, "cancel-storm padding changed the first-success result"),
+            }
+        }
     }
 
     // =========================================================================
