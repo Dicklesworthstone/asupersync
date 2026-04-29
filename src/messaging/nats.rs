@@ -1236,9 +1236,11 @@ impl NatsClient {
 
         let (reply_to, header_len_str, total_len_str) = match remaining.as_slice() {
             [header_len_str, total_len_str] => (None, *header_len_str, *total_len_str),
-            [reply_to, header_len_str, total_len_str] => {
-                (Some((*reply_to).to_string()), *header_len_str, *total_len_str)
-            }
+            [reply_to, header_len_str, total_len_str] => (
+                Some((*reply_to).to_string()),
+                *header_len_str,
+                *total_len_str,
+            ),
             _ => {
                 return Err(NatsError::Protocol(format!(
                     "malformed HMSG header: {header}"
@@ -3305,7 +3307,9 @@ mod tests {
             subject: "_INBOX.1".into(),
             sid: 1,
             reply_to: None,
-            headers: Some(b"NATS/1.0\r\nStatus: 503\r\nDescription: No Responders\r\n\r\n".to_vec()),
+            headers: Some(
+                b"NATS/1.0\r\nStatus: 503\r\nDescription: No Responders\r\n\r\n".to_vec(),
+            ),
             payload: Vec::new(),
         };
 
@@ -3313,7 +3317,10 @@ mod tests {
             .expect("empty status-only HMSG reply must surface as error");
         match err {
             NatsError::Server(message) => {
-                assert!(message.contains("503"), "expected status code, got {message}");
+                assert!(
+                    message.contains("503"),
+                    "expected status code, got {message}"
+                );
                 assert!(
                     message.contains("No Responders"),
                     "expected server description, got {message}"
