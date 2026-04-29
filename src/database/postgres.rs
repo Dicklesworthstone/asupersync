@@ -3442,6 +3442,7 @@ impl PgConnection {
         let mut rows = Vec::with_capacity(16);
 
         let mut invalidate_prepared_cache = false;
+        let mut discard_on_pool_return = false;
         loop {
             if cx.checkpoint().is_err() {
                 return self.cancel_in_flight(cx);
@@ -3494,6 +3495,7 @@ impl PgConnection {
                     if let Some(tag) = Self::parse_command_tag(&data) {
                         invalidate_prepared_cache |=
                             Self::command_tag_requires_prepared_cache_invalidation(tag);
+                        discard_on_pool_return |= Self::command_tag_requires_session_discard(tag);
                     }
                 }
                 b'I' => {
@@ -3507,6 +3509,9 @@ impl PgConnection {
                     }
                     if invalidate_prepared_cache {
                         self.invalidate_prepared_cache_after_schema_or_session_change();
+                    }
+                    if discard_on_pool_return {
+                        self.inner.needs_discard = true;
                     }
                     break;
                 }
@@ -4493,6 +4498,13 @@ impl PgConnection {
         )
     }
 
+    fn command_tag_requires_session_discard(tag: &str) -> bool {
+        let Some(verb) = tag.split_ascii_whitespace().next() else {
+            return false;
+        };
+        matches!(verb, "DISCARD" | "RESET" | "SET")
+    }
+
     fn invalidate_prepared_cache_after_schema_or_session_change(&mut self) {
         let stale_names = self.inner.prepared_cache.clear_returning_names();
         for name in stale_names {
@@ -5229,6 +5241,7 @@ impl PgConnection {
         let mut columns: Option<Arc<Vec<PgColumn>>> = None;
         let mut column_indices: Option<Arc<BTreeMap<String, usize>>> = None;
         let mut rows = Vec::with_capacity(16);
+        let mut discard_on_pool_return = false;
 
         loop {
             if cx.checkpoint().is_err() {
@@ -5274,12 +5287,20 @@ impl PgConnection {
                         Err(e) => return self.fail_in_flight(e),
                     }
                 }
-                b'C' | b's' => { /* CommandComplete / PortalSuspended */ }
+                b'C' => {
+                    if let Some(tag) = Self::parse_command_tag(&data) {
+                        discard_on_pool_return |= Self::command_tag_requires_session_discard(tag);
+                    }
+                }
+                b's' => { /* PortalSuspended */ }
                 b'Z' => {
                     // ReadyForQuery — protocol exchange completed cleanly.
                     self.inner.closed = false;
                     if !data.is_empty() {
                         self.inner.transaction_status = data[0];
+                    }
+                    if discard_on_pool_return {
+                        self.inner.needs_discard = true;
                     }
                     break;
                 }
@@ -5308,6 +5329,7 @@ impl PgConnection {
         let mut affected_rows = 0u64;
         let mut saw_row_response = false;
         let mut invalidate_prepared_cache = false;
+        let mut discard_on_pool_return = false;
 
         loop {
             if cx.checkpoint().is_err() {
@@ -5328,6 +5350,7 @@ impl PgConnection {
                         }
                         invalidate_prepared_cache |=
                             Self::command_tag_requires_prepared_cache_invalidation(tag);
+                        discard_on_pool_return |= Self::command_tag_requires_session_discard(tag);
                     }
                 }
                 b'T' | b'D' => {
@@ -5350,6 +5373,9 @@ impl PgConnection {
                     }
                     if invalidate_prepared_cache {
                         self.invalidate_prepared_cache_after_schema_or_session_change();
+                    }
+                    if discard_on_pool_return {
+                        self.inner.needs_discard = true;
                     }
                     break;
                 }
@@ -9584,6 +9610,48 @@ mod tests {
     }
 
     #[test]
+    fn execute_set_role_marks_connection_discard_only_for_pool_return() {
+        use crate::database::pool::AsyncConnectionManager;
+
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        let cx = crate::cx::Cx::for_testing();
+        let mgr = PgConnectionManager::new(
+            PgConnectOptions::parse("postgres://localhost/testdb").unwrap(),
+        );
+
+        let responder = std::thread::spawn(move || {
+            let request = read_until_contains(&mut peer, b"SET ROLE app_reader");
+            assert!(
+                request
+                    .windows("SET ROLE app_reader".len())
+                    .any(|window| window == b"SET ROLE app_reader"),
+                "request should contain SET ROLE"
+            );
+            std::io::Write::write_all(&mut peer, &backend_message(b'C', b"SET\0"))
+                .expect("command complete should be written");
+            std::io::Write::write_all(&mut peer, &ready_for_query(b'I'))
+                .expect("ready for query should be written");
+        });
+
+        match run(conn.execute_unchecked(&cx, "SET ROLE app_reader")) {
+            Outcome::Ok(affected) => assert_eq!(affected, 0),
+            other => panic!("expected successful SET ROLE, got {other:?}"),
+        }
+        responder
+            .join()
+            .expect("SET ROLE responder should exit cleanly");
+
+        assert!(
+            conn.inner.needs_discard,
+            "successful SET ROLE must poison pooled reuse"
+        );
+        assert!(
+            !mgr.release_check(&mut conn),
+            "pool return must reject connections with prior role state"
+        );
+    }
+
+    #[test]
     fn execute_rejects_row_returning_response() {
         let (mut conn, mut peer) = make_test_connection_with_peer();
         let row_description = single_text_row_description();
@@ -10806,6 +10874,23 @@ mod tests {
         assert!(PgConnection::command_tag_requires_prepared_cache_invalidation("DISCARD ALL"));
         assert!(!PgConnection::command_tag_requires_prepared_cache_invalidation("SELECT 1"));
         assert!(!PgConnection::command_tag_requires_prepared_cache_invalidation("UPDATE 3"));
+    }
+
+    #[test]
+    fn command_tag_session_discard_matches_session_mutations() {
+        assert!(PgConnection::command_tag_requires_session_discard("SET"));
+        assert!(PgConnection::command_tag_requires_session_discard(
+            "RESET ALL"
+        ));
+        assert!(PgConnection::command_tag_requires_session_discard(
+            "DISCARD ALL"
+        ));
+        assert!(!PgConnection::command_tag_requires_session_discard(
+            "SELECT 1"
+        ));
+        assert!(!PgConnection::command_tag_requires_session_discard(
+            "ALTER TABLE"
+        ));
     }
 
     #[test]
