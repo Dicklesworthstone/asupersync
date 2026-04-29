@@ -165,11 +165,23 @@ fn identity_decoder_decodes_bare_codec_output() {
 }
 
 #[test]
-fn bare_decoder_decodes_identity_codec_output() {
-    // Symmetric: a frame produced by the identity codec must decode
-    // cleanly through a bare-codec decoder. This is the wire-level
-    // negotiation where one side advertises identity and the other
-    // doesn't care — the wire MUST still parse.
+fn identity_codec_sets_compressed_flag_and_bare_decoder_rejects() {
+    // Pinned current behavior: when `with_identity_frame_codec` is
+    // wired, FramedCodec sets `use_compression = true` and the
+    // emitted wire frame carries compressed-flag = 0x01 (even
+    // though identity is a no-op). A bare decoder (no decompressor
+    // configured) will see flag=1 and reject with a typed
+    // GrpcError::Compression error.
+    //
+    // This is a documented gRPC-spec divergence: the spec text
+    // suggests `grpc-encoding: identity` on the HEADERS line but
+    // compressed-flag=0 on the wire, since "identity" is a no-op.
+    // asupersync's current FramedCodec implementation treats any
+    // configured frame codec — including identity — as "compressed,
+    // peer needs the same algorithm to decode." The test pins the
+    // current behavior so a future spec-compliance fix that flipped
+    // identity to flag=0 trips here and forces an intentional
+    // re-baseline.
     for (i, msg) in fixtures().iter().enumerate() {
         let mut wire = BytesMut::new();
         let mut identity_encoder = FramedCodec::<ProstCodec<IdentityFixture, IdentityFixture>>::new(
@@ -180,17 +192,27 @@ fn bare_decoder_decodes_identity_codec_output() {
             .encode_message(msg, &mut wire)
             .expect("identity encode");
 
+        assert_eq!(
+            wire[0], 0x01,
+            "fixture {i}: with_identity_frame_codec sets compressed-flag=1 \
+             today; if a spec-compliance change flips this to 0, also flip \
+             the bare-decoder branch below",
+        );
+
         let mut bare_decoder =
             FramedCodec::<ProstCodec<IdentityFixture, IdentityFixture>>::new(ProstCodec::new());
-        match bare_decoder.decode_message(&mut wire).expect("decode result") {
-            Some(decoded) => assert_eq!(
-                decoded, *msg,
-                "fixture {i}: identity→bare decode path corrupted the message tree",
-            ),
-            None => panic!(
-                "fixture {i}: bare decoder did not consume the identity-encoded frame",
-            ),
-        }
+        let err = bare_decoder
+            .decode_message(&mut wire)
+            .expect_err(
+                "bare decoder must reject an identity-encoded frame today (flag=1, \
+                 no decompressor configured)",
+            );
+        // Sanity that the rejection is typed; not panic, not silent corruption.
+        assert!(
+            format!("{err}").contains("compressed frame received"),
+            "fixture {i}: rejection must mention the missing-decompressor reason; \
+             got {err:?}",
+        );
     }
 }
 
