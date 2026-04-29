@@ -33,7 +33,7 @@
 //! }
 //! ```
 
-use super::nats::{Message, NatsClient, NatsConfig, NatsError};
+use super::nats::{Message, NatsClient, NatsError};
 use crate::cx::Cx;
 use crate::time::{timeout_at, wall_now};
 use crate::tracing_compat::warn;
