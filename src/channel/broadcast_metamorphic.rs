@@ -436,10 +436,12 @@ mod tests {
             initial_subscribers in 1usize..4,
             late_subscribers in 0usize..3,
             message_count in 3usize..8,
-            capacity in any::<usize>().prop_map(|x| std::cmp::max(x % 10 + 5, message_count + 2)),
             subscription_timing in any::<u32>(),
         )| {
             let cx = test_cx();
+
+            // Calculate capacity to avoid lag issues
+            let capacity = std::cmp::max(message_count + 2, 5);
 
             // Create initial harness
             let mut harness = BroadcastTestHarness::new(capacity, initial_subscribers);

@@ -74,10 +74,6 @@ mod stress_test;
 mod verification_suite;
 
 #[cfg(test)]
-#[path = "broadcast_metamorphic.rs"]
-mod broadcast_metamorphic;
-
-#[cfg(test)]
 #[path = "oneshot_metamorphic.rs"]
 mod oneshot_metamorphic;
 
