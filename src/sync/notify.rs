@@ -644,6 +644,26 @@ mod tests {
         Pin::new(fut).poll(&mut cx)
     }
 
+    struct FreshWake;
+
+    impl std::task::Wake for FreshWake {
+        fn wake(self: Arc<Self>) {}
+
+        fn wake_by_ref(self: &Arc<Self>) {}
+    }
+
+    fn fresh_waker() -> Waker {
+        Waker::from(Arc::new(FreshWake))
+    }
+
+    fn poll_with_waker<F>(fut: &mut F, waker: &Waker) -> Poll<F::Output>
+    where
+        F: Future + Unpin,
+    {
+        let mut cx = Context::from_waker(waker);
+        Pin::new(fut).poll(&mut cx)
+    }
+
     fn init_test(name: &str) {
         init_test_logging();
         crate::test_phase!(name);
@@ -735,6 +755,36 @@ mod tests {
         }
         assert!(poll_once(&mut fut2).is_pending());
         assert!(poll_once(&mut fut3).is_pending());
+
+        notify.notify_one();
+
+        let ready = [
+            poll_once(&mut fut1).is_ready(),
+            poll_once(&mut fut2).is_ready(),
+            poll_once(&mut fut3).is_ready(),
+        ];
+        drop(fut1);
+        drop(fut2);
+        drop(fut3);
+
+        let stored = notify.stored_notifications.load(Ordering::Acquire);
+        (ready, stored)
+    }
+
+    fn younger_waker_churn_notify_one_signature(young_repolls: usize) -> ([bool; 3], usize) {
+        let notify = Notify::new();
+
+        let mut fut1 = notify.notified();
+        let mut fut2 = notify.notified();
+        let mut fut3 = notify.notified();
+        assert!(poll_once(&mut fut1).is_pending());
+        assert!(poll_once(&mut fut2).is_pending());
+        assert!(poll_once(&mut fut3).is_pending());
+
+        for _ in 0..young_repolls {
+            let fresh = fresh_waker();
+            assert!(poll_with_waker(&mut fut3, &fresh).is_pending());
+        }
 
         notify.notify_one();
 
@@ -1782,6 +1832,37 @@ mod tests {
         );
 
         crate::test_complete!("metamorphic_extra_repolls_preserve_single_notify_one_consumer");
+    }
+
+    #[test]
+    fn metamorphic_younger_waker_churn_preserves_oldest_notify_one_consumer() {
+        init_test("metamorphic_younger_waker_churn_preserves_oldest_notify_one_consumer");
+
+        let baseline = younger_waker_churn_notify_one_signature(0);
+        let churned = younger_waker_churn_notify_one_signature(5);
+
+        crate::assert_with_log!(
+            churned == baseline,
+            "youngest waiter waker churn does not change which waiter consumes notify_one",
+            format!("{baseline:?}"),
+            format!("{churned:?}")
+        );
+        crate::assert_with_log!(
+            baseline.0 == [true, false, false],
+            "notify_one still wakes the oldest parked waiter first",
+            [true, false, false],
+            baseline.0
+        );
+        crate::assert_with_log!(
+            baseline.1 == 0,
+            "young waiter waker churn does not mint or leak a stored notify token",
+            0usize,
+            baseline.1
+        );
+
+        crate::test_complete!(
+            "metamorphic_younger_waker_churn_preserves_oldest_notify_one_consumer"
+        );
     }
 
     #[test]
