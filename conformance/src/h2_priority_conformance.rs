@@ -4,10 +4,15 @@
 //! handling against the h2 reference implementation to ensure identical
 //! stream priority graph management per RFC 7540.
 
-use asupersync::http::h2::{Connection, Settings, frame::{PriorityFrame, PrioritySpec}};
+use asupersync::http::h2::{
+    Connection, Settings,
+    frame::{PriorityFrame, PrioritySpec},
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
+
+const H2_REFERENCE_UNIMPLEMENTED: &str = "h2 reference comparison not yet implemented";
 
 /// Test verdict for individual conformance cases.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -229,17 +234,26 @@ impl PriorityConformanceTester {
         // Compare results
         let (verdict, error, differences) = match (&asupersync_result, &h2_result) {
             (Ok(asupersync_priorities), Ok(h2_priorities)) => {
-                let differences = self.compare_priority_states(asupersync_priorities, h2_priorities);
+                let differences =
+                    self.compare_priority_states(asupersync_priorities, h2_priorities);
                 if differences.is_empty() {
                     (PriorityTestVerdict::Pass, None, differences)
                 } else {
                     (
                         PriorityTestVerdict::Fail,
-                        Some(format!("Priority state differences: {}", differences.join(", "))),
+                        Some(format!(
+                            "Priority state differences: {}",
+                            differences.join(", ")
+                        )),
                         differences,
                     )
                 }
             }
+            (_, Err(h2_err)) if h2_err == H2_REFERENCE_UNIMPLEMENTED => (
+                PriorityTestVerdict::Skipped,
+                Some(h2_err.clone()),
+                Vec::new(),
+            ),
             (Err(asupersync_err), Err(h2_err)) => {
                 // Both failed - check if they failed the same way
                 if asupersync_err == h2_err {
@@ -251,7 +265,10 @@ impl PriorityConformanceTester {
                             "Different error behaviors: asupersync={}, h2={}",
                             asupersync_err, h2_err
                         )),
-                        vec![format!("Error divergence: {} vs {}", asupersync_err, h2_err)],
+                        vec![format!(
+                            "Error divergence: {} vs {}",
+                            asupersync_err, h2_err
+                        )],
                     )
                 }
             }
@@ -262,7 +279,10 @@ impl PriorityConformanceTester {
             ),
             (Err(asupersync_err), Ok(_)) => (
                 PriorityTestVerdict::Fail,
-                Some(format!("asupersync failed, h2 succeeded: {}", asupersync_err)),
+                Some(format!(
+                    "asupersync failed, h2 succeeded: {}",
+                    asupersync_err
+                )),
                 vec!["Implementation success divergence".to_string()],
             ),
         };
@@ -304,16 +324,7 @@ impl PriorityConformanceTester {
         &self,
         _case: &PriorityConformanceCase,
     ) -> Result<Vec<StreamPriorityState>, String> {
-        // TODO: Implement h2 reference comparison
-        // For now, return a placeholder that matches asupersync for passing tests
-        // In a real implementation, this would:
-        // 1. Set up an h2 connection
-        // 2. Apply the same priority sequence
-        // 3. Extract the resulting priority states
-        // 4. Return them for comparison
-
-        // Placeholder implementation
-        Ok(Vec::new())
+        Err(H2_REFERENCE_UNIMPLEMENTED.to_string())
     }
 
     /// Compare priority states between implementations.
@@ -333,14 +344,20 @@ impl PriorityConformanceTester {
         // Check for streams in asupersync but not in h2
         for &stream_id in asupersync_map.keys() {
             if !h2_map.contains_key(&stream_id) {
-                differences.push(format!("Stream {} present in asupersync but not h2", stream_id));
+                differences.push(format!(
+                    "Stream {} present in asupersync but not h2",
+                    stream_id
+                ));
             }
         }
 
         // Check for streams in h2 but not in asupersync
         for &stream_id in h2_map.keys() {
             if !asupersync_map.contains_key(&stream_id) {
-                differences.push(format!("Stream {} present in h2 but not asupersync", stream_id));
+                differences.push(format!(
+                    "Stream {} present in h2 but not asupersync",
+                    stream_id
+                ));
             }
         }
 
@@ -383,9 +400,15 @@ impl PriorityConformanceTester {
         output.push_str("## Summary\n\n");
         output.push_str(&format!("- **Passed:** {}\n", report.summary.passed));
         output.push_str(&format!("- **Failed:** {}\n", report.summary.failed));
-        output.push_str(&format!("- **Expected Failures:** {}\n", report.summary.expected_failures));
+        output.push_str(&format!(
+            "- **Expected Failures:** {}\n",
+            report.summary.expected_failures
+        ));
         output.push_str(&format!("- **Skipped:** {}\n", report.summary.skipped));
-        output.push_str(&format!("- **Compliance Score:** {:.1}%\n\n", report.summary.compliance_score * 100.0));
+        output.push_str(&format!(
+            "- **Compliance Score:** {:.1}%\n\n",
+            report.summary.compliance_score * 100.0
+        ));
 
         if report.summary.failed > 0 {
             output.push_str("## Failures\n\n");
@@ -462,51 +485,41 @@ fn create_priority_test_cases() -> Vec<PriorityConformanceCase> {
             id: "priority-001".to_string(),
             description: "Basic PRIORITY frame sets stream priority correctly".to_string(),
             requirement_level: RequirementLevel::Must,
-            priority_sequence: vec![
-                SerializablePriorityFrame {
-                    stream_id: 1,
-                    priority: SerializablePrioritySpec {
-                        exclusive: false,
-                        dependency: 0,
-                        weight: 16,
-                    },
-                },
-            ],
-            expected_priority_graph: vec![
-                StreamPriorityState {
-                    stream_id: 1,
+            priority_sequence: vec![SerializablePriorityFrame {
+                stream_id: 1,
+                priority: SerializablePrioritySpec {
                     exclusive: false,
                     dependency: 0,
                     weight: 16,
                 },
-            ],
+            }],
+            expected_priority_graph: vec![StreamPriorityState {
+                stream_id: 1,
+                exclusive: false,
+                dependency: 0,
+                weight: 16,
+            }],
         },
-
         // Test Case 2: Exclusive dependency
         PriorityConformanceCase {
             id: "priority-002".to_string(),
             description: "PRIORITY frame with exclusive dependency flag".to_string(),
             requirement_level: RequirementLevel::Must,
-            priority_sequence: vec![
-                SerializablePriorityFrame {
-                    stream_id: 3,
-                    priority: SerializablePrioritySpec {
-                        exclusive: true,
-                        dependency: 1,
-                        weight: 32,
-                    },
-                },
-            ],
-            expected_priority_graph: vec![
-                StreamPriorityState {
-                    stream_id: 3,
+            priority_sequence: vec![SerializablePriorityFrame {
+                stream_id: 3,
+                priority: SerializablePrioritySpec {
                     exclusive: true,
                     dependency: 1,
                     weight: 32,
                 },
-            ],
+            }],
+            expected_priority_graph: vec![StreamPriorityState {
+                stream_id: 3,
+                exclusive: true,
+                dependency: 1,
+                weight: 32,
+            }],
         },
-
         // Test Case 3: Priority dependency chain
         PriorityConformanceCase {
             id: "priority-003".to_string(),
@@ -559,7 +572,6 @@ fn create_priority_test_cases() -> Vec<PriorityConformanceCase> {
                 },
             ],
         },
-
         // Test Case 4: Priority weight range boundaries
         PriorityConformanceCase {
             id: "priority-004".to_string(),
@@ -598,7 +610,6 @@ fn create_priority_test_cases() -> Vec<PriorityConformanceCase> {
                 },
             ],
         },
-
         // Test Case 5: Priority update on existing stream
         PriorityConformanceCase {
             id: "priority-005".to_string(),
@@ -624,16 +635,13 @@ fn create_priority_test_cases() -> Vec<PriorityConformanceCase> {
                     },
                 },
             ],
-            expected_priority_graph: vec![
-                StreamPriorityState {
-                    stream_id: 1,
-                    exclusive: true,
-                    dependency: 3,
-                    weight: 64,
-                },
-            ],
+            expected_priority_graph: vec![StreamPriorityState {
+                stream_id: 1,
+                exclusive: true,
+                dependency: 3,
+                weight: 64,
+            }],
         },
-
         // Test Case 6: Multiple streams with same dependency
         PriorityConformanceCase {
             id: "priority-006".to_string(),
@@ -686,7 +694,6 @@ fn create_priority_test_cases() -> Vec<PriorityConformanceCase> {
                 },
             ],
         },
-
         // Test Case 7: Circular dependency prevention
         PriorityConformanceCase {
             id: "priority-007".to_string(),
@@ -705,7 +712,7 @@ fn create_priority_test_cases() -> Vec<PriorityConformanceCase> {
                     stream_id: 3,
                     priority: SerializablePrioritySpec {
                         exclusive: false,
-                        dependency: 1,  // Creates circular dependency
+                        dependency: 1, // Creates circular dependency
                         weight: 16,
                     },
                 },
@@ -726,4 +733,20 @@ fn create_priority_test_cases() -> Vec<PriorityConformanceCase> {
             ],
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_unimplemented_h2_reference_skips_instead_of_faking_pass() {
+        let tester = PriorityConformanceTester::new();
+        let result = tester.run_single_test(&tester.test_cases[0]).await;
+
+        assert_eq!(result.verdict, PriorityTestVerdict::Skipped);
+        assert_eq!(result.error.as_deref(), Some(H2_REFERENCE_UNIMPLEMENTED));
+        assert!(result.differences.is_empty());
+        assert!(result.h2_priorities.is_none());
+    }
 }
