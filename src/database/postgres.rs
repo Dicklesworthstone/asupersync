@@ -303,6 +303,8 @@ pub mod oid {
     pub const DATE: u32 = 1082;
     /// Timestamp without timezone.
     pub const TIMESTAMP: u32 = 1114;
+    /// Time interval.
+    pub const INTERVAL: u32 = 1186;
     /// Timestamp with timezone.
     pub const TIMESTAMPTZ: u32 = 1184;
     /// UUID.
@@ -830,6 +832,7 @@ impl FromSql for String {
                 | oid::JSONB
                 | oid::UUID
                 | oid::DATE
+                | oid::INTERVAL
                 | oid::TIMESTAMP
                 | oid::TIMESTAMPTZ
         )
@@ -1309,6 +1312,24 @@ impl<'a> MessageReader<'a> {
             self.data[self.pos + 3],
         ]);
         self.pos += 4;
+        Ok(v)
+    }
+
+    fn read_i64(&mut self) -> Result<i64, PgError> {
+        if self.pos + 8 > self.data.len() {
+            return Err(PgError::Protocol("unexpected end of message".to_string()));
+        }
+        let v = i64::from_be_bytes([
+            self.data[self.pos],
+            self.data[self.pos + 1],
+            self.data[self.pos + 2],
+            self.data[self.pos + 3],
+            self.data[self.pos + 4],
+            self.data[self.pos + 5],
+            self.data[self.pos + 6],
+            self.data[self.pos + 7],
+        ]);
+        self.pos += 8;
         Ok(v)
     }
 
@@ -5109,6 +5130,9 @@ impl PgConnection {
                     data.len()
                 )));
             }
+            oid::DATE => PgValue::Text(decode_binary_date_to_text(data)?),
+            oid::TIMESTAMP => PgValue::Text(decode_binary_timestamp_to_text(data)?),
+            oid::INTERVAL => PgValue::Text(decode_binary_interval_to_text(data)?),
             oid::NUMERIC => PgValue::Text(decode_binary_numeric_to_text(data)?),
             oid::BYTEA => PgValue::Bytes(data.to_vec()),
             oid::JSONB => {
@@ -5536,6 +5560,129 @@ fn decode_binary_numeric_to_text(data: &[u8]) -> Result<String, PgError> {
     } else {
         Ok(format!("{sign_prefix}{integer}.{fractional}"))
     }
+}
+
+const POSTGRES_EPOCH_UNIX_DAYS: i64 = 10_957;
+const POSTGRES_DAY_MICROSECONDS: i64 = 86_400_000_000;
+
+fn decode_binary_date_to_text(data: &[u8]) -> Result<String, PgError> {
+    if data.len() != 4 {
+        return Err(PgError::Protocol(format!(
+            "DATE requires exactly 4 bytes, got {}",
+            data.len()
+        )));
+    }
+
+    let days = i32::from_be_bytes([data[0], data[1], data[2], data[3]]) as i64;
+    let (year, month, day) = civil_from_unix_days(POSTGRES_EPOCH_UNIX_DAYS + days);
+    Ok(format!("{year:04}-{month:02}-{day:02}"))
+}
+
+fn decode_binary_timestamp_to_text(data: &[u8]) -> Result<String, PgError> {
+    if data.len() != 8 {
+        return Err(PgError::Protocol(format!(
+            "TIMESTAMP requires exactly 8 bytes, got {}",
+            data.len()
+        )));
+    }
+
+    let micros = i64::from_be_bytes([
+        data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+    ]);
+    let days = micros.div_euclid(POSTGRES_DAY_MICROSECONDS);
+    let micros_of_day = micros.rem_euclid(POSTGRES_DAY_MICROSECONDS);
+    let (year, month, day) = civil_from_unix_days(POSTGRES_EPOCH_UNIX_DAYS + days);
+    let (hour, minute, second, fractional_micros) = split_day_microseconds(micros_of_day as u64);
+
+    if fractional_micros == 0 {
+        Ok(format!(
+            "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}"
+        ))
+    } else {
+        let mut fractional = format!("{fractional_micros:06}");
+        while fractional.ends_with('0') {
+            fractional.pop();
+        }
+        Ok(format!(
+            "{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02}.{fractional}"
+        ))
+    }
+}
+
+fn decode_binary_interval_to_text(data: &[u8]) -> Result<String, PgError> {
+    if data.len() != 16 {
+        return Err(PgError::Protocol(format!(
+            "INTERVAL requires exactly 16 bytes, got {}",
+            data.len()
+        )));
+    }
+
+    let mut reader = MessageReader::new(data);
+    let microseconds = reader.read_i64()?;
+    let days = reader.read_i32()?;
+    let months = reader.read_i32()?;
+    reader.ensure_consumed("INTERVAL")?;
+
+    Ok(render_interval_text(months, days, microseconds))
+}
+
+fn civil_from_unix_days(days_since_unix_epoch: i64) -> (i32, u32, u32) {
+    let z = days_since_unix_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    let year = year + if month <= 2 { 1 } else { 0 };
+    (year as i32, month as u32, day as u32)
+}
+
+fn split_day_microseconds(micros_of_day: u64) -> (u64, u64, u64, u64) {
+    let hour = micros_of_day / 3_600_000_000;
+    let minute = (micros_of_day % 3_600_000_000) / 60_000_000;
+    let second = (micros_of_day % 60_000_000) / 1_000_000;
+    let fractional_micros = micros_of_day % 1_000_000;
+    (hour, minute, second, fractional_micros)
+}
+
+fn render_interval_text(months: i32, days: i32, microseconds: i64) -> String {
+    let mut parts = Vec::new();
+
+    if months != 0 {
+        parts.push(format!(
+            "{months} {}",
+            if months.abs() == 1 { "mon" } else { "mons" }
+        ));
+    }
+    if days != 0 {
+        parts.push(format!(
+            "{days} {}",
+            if days.abs() == 1 { "day" } else { "days" }
+        ));
+    }
+
+    if microseconds != 0 || parts.is_empty() {
+        let sign = if microseconds < 0 { "-" } else { "" };
+        let abs_microseconds = microseconds.unsigned_abs();
+        let (hour, minute, second, fractional_micros) = split_day_microseconds(abs_microseconds);
+        if fractional_micros == 0 {
+            parts.push(format!("{sign}{hour:02}:{minute:02}:{second:02}"));
+        } else {
+            let mut fractional = format!("{fractional_micros:06}");
+            while fractional.ends_with('0') {
+                fractional.pop();
+            }
+            parts.push(format!(
+                "{sign}{hour:02}:{minute:02}:{second:02}.{fractional}"
+            ));
+        }
+    }
+
+    parts.join(" ")
 }
 
 // ============================================================================
@@ -12038,6 +12185,116 @@ mod tests {
         assert_eq!(
             values[2],
             PgValue::Text(sqlx_reference_numeric_to_text(&numeric_bytes))
+        );
+    }
+
+    #[test]
+    fn data_row_binary_temporal_decode_matches_sqlx_reference() {
+        /// Differential conformance test against sqlx's PostgreSQL binary decode rules.
+        ///
+        /// sqlx decodes DATE as days since 2000-01-01, TIMESTAMP as microseconds
+        /// since 2000-01-01 00:00:00, and INTERVAL as a `(months, days,
+        /// microseconds)` triple. Our row surface represents these as canonical
+        /// text values, so this test pins that text against an independently
+        /// decoded sqlx-derived reference.
+        fn sqlx_reference_date_to_text(data: &[u8]) -> String {
+            let days = i32::from_be_bytes([data[0], data[1], data[2], data[3]]) as i64;
+            let epoch =
+                chrono::NaiveDate::from_ymd_opt(2000, 1, 1).expect("valid postgres date epoch");
+            (epoch + chrono::TimeDelta::days(days)).to_string()
+        }
+
+        fn sqlx_reference_timestamp_to_text(data: &[u8]) -> String {
+            let micros = i64::from_be_bytes([
+                data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
+            ]);
+            let epoch = chrono::NaiveDate::from_ymd_opt(2000, 1, 1)
+                .expect("valid postgres timestamp epoch date")
+                .and_hms_opt(0, 0, 0)
+                .expect("valid postgres timestamp epoch");
+            (epoch + chrono::TimeDelta::microseconds(micros)).to_string()
+        }
+
+        fn sqlx_reference_interval_to_text(data: &[u8]) -> String {
+            let mut reader = MessageReader::new(data);
+            let microseconds = reader.read_i64().expect("interval microseconds");
+            let days = reader.read_i32().expect("interval days");
+            let months = reader.read_i32().expect("interval months");
+            reader
+                .ensure_consumed("sqlx reference INTERVAL")
+                .expect("interval payload fully consumed");
+            render_interval_text(months, days, microseconds)
+        }
+
+        let conn = make_test_connection();
+        let date_days = 8_825i32;
+        let timestamp_micros = 1_234_567i64;
+        let interval_micros = 14_706_789_000i64;
+        let interval_days = 3i32;
+        let interval_months = 2i32;
+
+        let columns = vec![
+            PgColumn {
+                name: "d".to_string(),
+                table_oid: 0,
+                column_id: 0,
+                type_oid: oid::DATE,
+                type_size: 4,
+                type_modifier: -1,
+                format_code: 1,
+            },
+            PgColumn {
+                name: "ts".to_string(),
+                table_oid: 0,
+                column_id: 0,
+                type_oid: oid::TIMESTAMP,
+                type_size: 8,
+                type_modifier: -1,
+                format_code: 1,
+            },
+            PgColumn {
+                name: "iv".to_string(),
+                table_oid: 0,
+                column_id: 0,
+                type_oid: oid::INTERVAL,
+                type_size: 16,
+                type_modifier: -1,
+                format_code: 1,
+            },
+        ];
+
+        let date_bytes = date_days.to_be_bytes();
+        let timestamp_bytes = timestamp_micros.to_be_bytes();
+        let mut interval_bytes = Vec::new();
+        interval_bytes.extend_from_slice(&interval_micros.to_be_bytes());
+        interval_bytes.extend_from_slice(&interval_days.to_be_bytes());
+        interval_bytes.extend_from_slice(&interval_months.to_be_bytes());
+
+        let mut data_row = Vec::new();
+        data_row.extend_from_slice(&3i16.to_be_bytes());
+        data_row.extend_from_slice(&4i32.to_be_bytes());
+        data_row.extend_from_slice(&date_bytes);
+        data_row.extend_from_slice(&8i32.to_be_bytes());
+        data_row.extend_from_slice(&timestamp_bytes);
+        data_row.extend_from_slice(&(interval_bytes.len() as i32).to_be_bytes());
+        data_row.extend_from_slice(&interval_bytes);
+
+        let values = conn
+            .parse_data_row(&data_row, &columns)
+            .expect("binary temporal DataRow should parse successfully");
+
+        assert_eq!(values.len(), 3);
+        assert_eq!(
+            values[0],
+            PgValue::Text(sqlx_reference_date_to_text(&date_bytes))
+        );
+        assert_eq!(
+            values[1],
+            PgValue::Text(sqlx_reference_timestamp_to_text(&timestamp_bytes))
+        );
+        assert_eq!(
+            values[2],
+            PgValue::Text(sqlx_reference_interval_to_text(&interval_bytes))
         );
     }
 }
