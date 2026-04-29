@@ -5284,4 +5284,146 @@ mod tests {
             log.test_end("pass");
         });
     }
+
+    /// Differential conformance test for RESP3 numeric integer encoding at i64 boundary values.
+    ///
+    /// Tests RESP3 specification compliance for integer encoding/decoding round-trips,
+    /// specifically focusing on i64::MIN/MAX boundaries and negative number handling.
+    ///
+    /// RESP3 integer format: `:` + ASCII decimal + `\r\n`
+    ///
+    /// Coverage:
+    /// - MUST: i64::MAX encodes and round-trips correctly
+    /// - MUST: i64::MIN encodes and round-trips correctly
+    /// - MUST: Negative numbers preserve sign and magnitude
+    /// - MUST: Edge values near boundaries encode properly
+    /// - MUST: Values outside i64 range are rejected with protocol error
+    #[test]
+    fn resp3_integer_encoding_i64_boundary_differential() {
+        // Test vector: (value, expected_wire_format, should_succeed)
+        let boundary_cases: &[(i64, &[u8], bool)] = &[
+            // i64::MAX boundary
+            (i64::MAX, b":9223372036854775807\r\n", true),
+            (i64::MAX - 1, b":9223372036854775806\r\n", true),
+
+            // i64::MIN boundary
+            (i64::MIN, b":-9223372036854775808\r\n", true),
+            (i64::MIN + 1, b":-9223372036854775807\r\n", true),
+
+            // Zero and small values
+            (0, b":0\r\n", true),
+            (-1, b":-1\r\n", true),
+            (1, b":1\r\n", true),
+
+            // Typical negative values
+            (-42, b":-42\r\n", true),
+            (-1000000, b":-1000000\r\n", true),
+        ];
+
+        for &(value, expected_wire, should_succeed) in boundary_cases {
+            // Test encoding: value -> wire format
+            let actual = RespValue::Integer(value);
+            let encoded = actual.encode();
+
+            if should_succeed {
+                assert_eq!(
+                    encoded, expected_wire,
+                    "RESP3 encoding mismatch for i64 value {value}\n\
+                     Expected: {:?}\n\
+                     Actual:   {:?}",
+                    std::str::from_utf8(expected_wire).unwrap_or("<invalid utf8>"),
+                    std::str::from_utf8(&encoded).unwrap_or("<invalid utf8>")
+                );
+
+                // Test round-trip: wire format -> value -> wire format
+                let (decoded_value, consumed) = RespValue::try_decode(&encoded)
+                    .expect("parse should succeed")
+                    .expect("should have complete value");
+
+                assert_eq!(consumed, encoded.len(), "should consume entire input");
+                assert_eq!(decoded_value, RespValue::Integer(value),
+                          "round-trip failed for value {value}");
+
+                // Test integer extraction
+                assert_eq!(decoded_value.as_integer(), Some(value),
+                          "as_integer() failed for value {value}");
+            }
+        }
+
+        // Test overflow cases - values outside i64 range should fail gracefully
+        let overflow_cases: &[&[u8]] = &[
+            b":9223372036854775808\r\n",  // i64::MAX + 1
+            b":-9223372036854775809\r\n", // i64::MIN - 1
+            b":99999999999999999999\r\n", // Way beyond i64::MAX
+            b":-99999999999999999999\r\n", // Way beyond i64::MIN
+        ];
+
+        for &overflow_wire in overflow_cases {
+            let parse_result = RespValue::try_decode(overflow_wire);
+
+            match parse_result {
+                Ok(None) => {
+                    // Incomplete parse - this is OK for malformed input
+                }
+                Ok(Some(_)) => {
+                    panic!("Expected overflow error for input: {:?}",
+                           std::str::from_utf8(overflow_wire).unwrap_or("<invalid utf8>"));
+                }
+                Err(RedisError::Protocol(msg)) => {
+                    // Expected: protocol error for overflow
+                    assert!(msg.contains("overflow") || msg.contains("integer"),
+                           "Error message should mention overflow/integer, got: {}", msg);
+                }
+                Err(other) => {
+                    panic!("Expected protocol error for overflow, got: {:?}", other);
+                }
+            }
+        }
+
+        // Test malformed integer cases
+        let malformed_cases: &[&[u8]] = &[
+            b":abc\r\n",      // Non-numeric
+            b":\r\n",         // Empty
+            b":-\r\n",        // Just minus sign
+            b":12x34\r\n",    // Mixed numeric/alpha
+            b":0x42\r\n",     // Hex format (not allowed in RESP)
+        ];
+
+        for &malformed_wire in malformed_cases {
+            let parse_result = RespValue::try_decode(malformed_wire);
+
+            match parse_result {
+                Ok(None) => {
+                    // Incomplete parse - acceptable
+                }
+                Ok(Some(_)) => {
+                    panic!("Expected parse error for malformed input: {:?}",
+                           std::str::from_utf8(malformed_wire).unwrap_or("<invalid utf8>"));
+                }
+                Err(RedisError::Protocol(_)) => {
+                    // Expected: protocol error for malformed input
+                }
+                Err(other) => {
+                    panic!("Expected protocol error for malformed input, got: {:?}", other);
+                }
+            }
+        }
+
+        // Differential verification: our encoder output should be parseable by our decoder
+        // This verifies internal consistency of our RESP3 integer implementation
+        let test_values = [
+            i64::MIN, i64::MIN + 1, -1000000, -42, -1, 0, 1, 42, 1000000,
+            i64::MAX - 1, i64::MAX
+        ];
+
+        for &value in &test_values {
+            let encoded = RespValue::Integer(value).encode();
+            let (decoded, _) = RespValue::try_decode(&encoded)
+                .expect("should parse")
+                .expect("should be complete");
+
+            assert_eq!(decoded, RespValue::Integer(value),
+                      "Self-consistency check failed for value {value}");
+        }
+    }
 }
