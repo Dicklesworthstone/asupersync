@@ -1445,7 +1445,6 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
-    use crate::cx::Cx;
     use serde_json::json;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Instant;
@@ -2037,7 +2036,7 @@ mod tests {
         }"#;
         let err2 = JetStreamContext::parse_api_error(json2);
         assert!(
-            matches!(err2, JsError::Api { code: 503, description } if description == "server busy"),
+            matches!(err2, JsError::Api { code: 503, ref description } if description == "server busy"),
             "API error fields must come from the nested error object, got: {err2:?}"
         );
     }
@@ -2136,21 +2135,6 @@ mod tests {
             );
         }
 
-        fn assert_match(&self, field: &str, expected: &str, actual: &str) -> bool {
-            let matches = expected == actual;
-            eprintln!(
-                "{{\"ts\":\"{}\",\"suite\":\"{}\",\"test\":\"{}\",\"event\":\"assertion\",\"data\":{{\"field\":\"{}\",\"expected\":\"{}\",\"actual\":\"{}\",\"match\":{}}}}}",
-                format_ts(),
-                self.suite_name,
-                self.test_name,
-                field,
-                expected,
-                actual,
-                matches
-            );
-            matches
-        }
-
         fn test_end(&self, result: &str) {
             let duration_ms = self.start_time.elapsed().as_millis();
             eprintln!(
@@ -2172,10 +2156,8 @@ mod tests {
 
     /// Test harness for real NATS server integration tests
     struct JetStreamTestHarness {
-        nats_url: String,
         logger: JetStreamTestLogger,
         cleanup_streams: Vec<String>,
-        cleanup_consumers: Vec<(String, String)>, // (stream, consumer)
     }
 
     impl JetStreamTestHarness {
@@ -2198,10 +2180,8 @@ mod tests {
             logger.server_snapshot(&nats_url, 0, 0);
 
             Self {
-                nats_url,
                 logger,
                 cleanup_streams: Vec::new(),
-                cleanup_consumers: Vec::new(),
             }
         }
 
@@ -2214,86 +2194,20 @@ mod tests {
             std::env::var("NATS_TEST_URL").unwrap_or_else(|_| "nats://localhost:4222".to_string())
         }
 
-        async fn create_test_client(&mut self, _cx: &Cx) -> NatsClient {
-            self.logger.phase("nats_connect");
-
-            // In a real implementation, this would connect to the actual NATS server
-            // For now, we'll simulate the connection setup
-            eprintln!(
-                "{{\"ts\":\"{}\",\"suite\":\"{}\",\"test\":\"{}\",\"event\":\"nats_connect\",\"data\":{{\"url\":\"{}\"}}}}",
-                format_ts(),
-                self.logger.suite_name,
-                self.logger.test_name,
-                self.nats_url
-            );
-
-            // This is a placeholder - in real implementation would call:
-            // NatsClient::connect(cx, &self.nats_url).await.expect("NATS connection")
-            todo!("Real NATS client connection would go here")
-        }
-
         fn track_stream(&mut self, name: &str) {
             self.cleanup_streams.push(name.to_string());
-        }
-
-        fn track_consumer(&mut self, stream: &str, consumer: &str) {
-            self.cleanup_consumers
-                .push((stream.to_string(), consumer.to_string()));
-        }
-
-        async fn cleanup(&mut self, client: &mut NatsClient, cx: &Cx) {
-            let _ = (client, cx);
-            self.logger.phase("cleanup");
-
-            let mut cleaned = 0;
-            let failed = 0;
-
-            // Clean consumers first (LIFO respects dependencies)
-            for (stream, consumer) in self.cleanup_consumers.drain(..).rev() {
-                cleaned += 1;
-                eprintln!(
-                    "{{\"ts\":\"{}\",\"suite\":\"{}\",\"test\":\"{}\",\"event\":\"cleanup_consumer\",\"data\":{{\"stream\":\"{}\",\"consumer\":\"{}\",\"result\":\"skipped\"}}}}",
-                    format_ts(),
-                    self.logger.suite_name,
-                    self.logger.test_name,
-                    stream,
-                    consumer
-                );
-            }
-
-            // Clean streams
-            for stream in self.cleanup_streams.drain(..).rev() {
-                cleaned += 1;
-                eprintln!(
-                    "{{\"ts\":\"{}\",\"suite\":\"{}\",\"test\":\"{}\",\"event\":\"cleanup_stream\",\"data\":{{\"stream\":\"{}\",\"result\":\"skipped\"}}}}",
-                    format_ts(),
-                    self.logger.suite_name,
-                    self.logger.test_name,
-                    stream
-                );
-            }
-
-            eprintln!(
-                "{{\"ts\":\"{}\",\"suite\":\"{}\",\"test\":\"{}\",\"event\":\"cleanup_summary\",\"data\":{{\"cleaned\":{},\"failed\":{}}}}}",
-                format_ts(),
-                self.logger.suite_name,
-                self.logger.test_name,
-                cleaned,
-                failed
-            );
         }
     }
 
     impl Drop for JetStreamTestHarness {
         fn drop(&mut self) {
-            if !self.cleanup_streams.is_empty() || !self.cleanup_consumers.is_empty() {
+            if !self.cleanup_streams.is_empty() {
                 eprintln!(
-                    "{{\"ts\":\"{}\",\"suite\":\"{}\",\"test\":\"{}\",\"event\":\"cleanup_warning\",\"data\":{{\"unclean_streams\":{},\"unclean_consumers\":{}}}}}",
+                    "{{\"ts\":\"{}\",\"suite\":\"{}\",\"test\":\"{}\",\"event\":\"cleanup_warning\",\"data\":{{\"unclean_streams\":{}}}}}",
                     format_ts(),
                     self.logger.suite_name,
                     self.logger.test_name,
                     self.cleanup_streams.len(),
-                    self.cleanup_consumers.len()
                 );
             }
         }

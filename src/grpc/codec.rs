@@ -1261,168 +1261,161 @@ mod tests {
                 .unwrap_or_else(|| panic!("gzip decode case {i} yielded None"));
             assert_eq!(&decoded[..], &payload[..], "gzip round-trip drift case {i}");
         }
+        crate::test_complete!("mr_framed_codec_round_trip_across_compression_algos");
+    }
 
-        /// Differential conformance test: gRPC initial-window backpressure vs grpc-go reference.
-        ///
-        /// Verifies that our gRPC codec implementation handles initial window size limits
-        /// and backpressure the same way as grpc-go. This ensures compatibility with
-        /// grpc-go flow control behavior and prevents interoperability issues.
-        #[test]
-        fn grpc_go_initial_window_backpressure_differential_conformance() {
-            init_test("grpc_go_initial_window_backpressure_differential_conformance");
+    /// Differential conformance test: gRPC initial-window backpressure vs grpc-go reference.
+    ///
+    /// Verifies that our gRPC codec implementation handles initial window size limits
+    /// and backpressure the same way as grpc-go. This ensures compatibility with
+    /// grpc-go flow control behavior and prevents interoperability issues.
+    #[test]
+    fn grpc_go_initial_window_backpressure_differential_conformance() {
+        init_test("grpc_go_initial_window_backpressure_differential_conformance");
 
-            // Test parameters matching grpc-go default behavior
-            let initial_stream_window_size = 65536u32; // grpc-go default: 64KB
-            let initial_connection_window_size = 65536u32; // grpc-go default: 64KB
-            let large_message_size = 128 * 1024; // 128KB - exceeds initial window
+        // Test parameters matching grpc-go default behavior
+        let initial_stream_window_size = 65536u32; // grpc-go default: 64KB
+        let large_message_size = 128 * 1024; // 128KB - exceeds initial window
 
-            // CONFORMANCE CHECK 1: Small message within initial window (grpc-go allows)
-            let small_payload = vec![0x42u8; 32 * 1024]; // 32KB - within window
-            let mut small_codec = FramedCodec::with_message_size_limits(
-                IdentityCodec,
-                large_message_size,
-                large_message_size
-            );
+        // CONFORMANCE CHECK 1: Small message within initial window (grpc-go allows)
+        let small_payload = vec![0x42u8; 32 * 1024]; // 32KB - within window
+        let mut small_codec = FramedCodec::with_message_size_limits(
+            IdentityCodec,
+            large_message_size,
+            large_message_size,
+        );
 
-            let mut small_buf = BytesMut::new();
-            let small_result = small_codec.encode_message(&Bytes::from(small_payload), &mut small_buf);
-            assert!(
-                small_result.is_ok(),
-                "Small message within initial window must succeed per grpc-go behavior"
-            );
+        let mut small_buf = BytesMut::new();
+        let small_result = small_codec.encode_message(&Bytes::from(small_payload), &mut small_buf);
+        assert!(
+            small_result.is_ok(),
+            "Small message within initial window must succeed per grpc-go behavior"
+        );
 
-            // CONFORMANCE CHECK 2: Message at exact initial window boundary (grpc-go allows)
-            let boundary_payload = vec![0x43u8; initial_stream_window_size as usize];
-            let mut boundary_codec = FramedCodec::with_message_size_limits(
-                IdentityCodec,
-                large_message_size,
-                large_message_size
-            );
+        // CONFORMANCE CHECK 2: Message at exact initial window boundary (grpc-go allows)
+        let boundary_payload = vec![0x43u8; initial_stream_window_size as usize];
+        let mut boundary_codec = FramedCodec::with_message_size_limits(
+            IdentityCodec,
+            large_message_size,
+            large_message_size,
+        );
 
-            let mut boundary_buf = BytesMut::new();
-            let boundary_result = boundary_codec.encode_message(&Bytes::from(boundary_payload), &mut boundary_buf);
-            assert!(
-                boundary_result.is_ok(),
-                "Message at exact initial window boundary must succeed per grpc-go behavior"
-            );
+        let mut boundary_buf = BytesMut::new();
+        let boundary_result =
+            boundary_codec.encode_message(&Bytes::from(boundary_payload), &mut boundary_buf);
+        assert!(
+            boundary_result.is_ok(),
+            "Message at exact initial window boundary must succeed per grpc-go behavior"
+        );
 
-            // CONFORMANCE CHECK 3: Large message exceeding window (grpc-go requires framing)
-            // Note: Our codec doesn't implement HTTP/2 flow control directly, but should
-            // handle large messages correctly at the framing level
-            let large_payload = vec![0x44u8; large_message_size];
-            let mut large_codec = FramedCodec::with_message_size_limits(
-                IdentityCodec,
-                large_message_size + 1024, // Allow slightly larger to test framing
-                large_message_size + 1024
-            );
+        // CONFORMANCE CHECK 3: Large message exceeding window (grpc-go requires framing)
+        // Note: Our codec doesn't implement HTTP/2 flow control directly, but should
+        // handle large messages correctly at the framing level
+        let large_payload = vec![0x44u8; large_message_size];
+        let mut large_codec = FramedCodec::with_message_size_limits(
+            IdentityCodec,
+            large_message_size + 1024, // Allow slightly larger to test framing
+            large_message_size + 1024,
+        );
 
-            let mut large_buf = BytesMut::new();
-            let large_result = large_codec.encode_message(&Bytes::from(large_payload), &mut large_buf);
-            assert!(
-                large_result.is_ok(),
-                "Large message encoding must succeed at framing level per grpc-go behavior"
-            );
+        let mut large_buf = BytesMut::new();
+        let large_result = large_codec.encode_message(&Bytes::from(large_payload), &mut large_buf);
+        assert!(
+            large_result.is_ok(),
+            "Large message encoding must succeed at framing level per grpc-go behavior"
+        );
 
-            // CONFORMANCE CHECK 4: Window size enforcement at codec level
-            // Test that messages exceeding our configured limits are rejected like grpc-go
-            let oversized_payload = vec![0x45u8; large_message_size];
-            let mut strict_codec = FramedCodec::with_message_size_limits(
-                IdentityCodec,
-                32 * 1024, // 32KB limit - strict
-                32 * 1024
-            );
+        // CONFORMANCE CHECK 4: Window size enforcement at codec level
+        // Test that messages exceeding our configured limits are rejected like grpc-go
+        let oversized_payload = vec![0x45u8; large_message_size];
+        let mut strict_codec =
+            FramedCodec::with_message_size_limits(IdentityCodec, 32 * 1024, 32 * 1024);
 
-            let mut strict_buf = BytesMut::new();
-            let strict_result = strict_codec.encode_message(&Bytes::from(oversized_payload), &mut strict_buf);
-            assert!(
-                matches!(strict_result, Err(GrpcError::MessageTooLarge)),
-                "Oversized message must be rejected with MessageTooLarge per grpc-go behavior"
-            );
+        let mut strict_buf = BytesMut::new();
+        let strict_result =
+            strict_codec.encode_message(&Bytes::from(oversized_payload), &mut strict_buf);
+        assert!(
+            matches!(strict_result, Err(GrpcError::MessageTooLarge)),
+            "Oversized message must be rejected with MessageTooLarge per grpc-go behavior"
+        );
 
-            // CONFORMANCE CHECK 5: Decode-side window limit enforcement
-            // Test that received messages exceeding limits are rejected like grpc-go
-            let mut decode_codec = FramedCodec::with_message_size_limits(
-                IdentityCodec,
-                large_message_size,
-                16 * 1024 // 16KB decode limit
-            );
+        // CONFORMANCE CHECK 5: Decode-side window limit enforcement
+        // Test that received messages exceeding limits are rejected like grpc-go
+        let mut decode_codec =
+            FramedCodec::with_message_size_limits(IdentityCodec, large_message_size, 16 * 1024);
 
-            // Create a valid frame that exceeds decode limit
-            let mut oversized_frame = BytesMut::new();
-            let mut producer = GrpcCodec::new();
-            producer.encode(
+        // Create a valid frame that exceeds decode limit
+        let mut oversized_frame = BytesMut::new();
+        let mut producer = GrpcCodec::new();
+        producer
+            .encode(
                 GrpcMessage::new(Bytes::from(vec![0x46u8; 32 * 1024])), // 32KB payload
-                &mut oversized_frame
-            ).expect("producer encode must succeed");
+                &mut oversized_frame,
+            )
+            .expect("producer encode must succeed");
 
-            let decode_result = decode_codec.decode_message(&mut oversized_frame);
-            assert!(
-                matches!(decode_result, Err(GrpcError::MessageTooLarge)),
-                "Oversized received frame must be rejected per grpc-go flow control"
-            );
+        let decode_result = decode_codec.decode_message(&mut oversized_frame);
+        assert!(
+            matches!(decode_result, Err(GrpcError::MessageTooLarge)),
+            "Oversized received frame must be rejected per grpc-go flow control"
+        );
 
-            // CONFORMANCE CHECK 6: Bidirectional flow control consistency
-            // Verify that encode and decode limits work independently like grpc-go
-            let mut bidirectional_codec = FramedCodec::with_message_size_limits(
-                IdentityCodec,
-                8 * 1024,  // 8KB encode limit
-                16 * 1024  // 16KB decode limit
-            );
+        // CONFORMANCE CHECK 6: Bidirectional flow control consistency
+        // Verify that encode and decode limits work independently like grpc-go
+        let mut bidirectional_codec =
+            FramedCodec::with_message_size_limits(IdentityCodec, 8 * 1024, 16 * 1024);
 
-            // Should reject encode that exceeds encode limit
-            let encode_oversized = vec![0x47u8; 12 * 1024]; // 12KB
-            let encode_result = bidirectional_codec.encode_message(
-                &Bytes::from(encode_oversized),
-                &mut BytesMut::new()
-            );
-            assert!(
-                matches!(encode_result, Err(GrpcError::MessageTooLarge)),
-                "Bidirectional codec must enforce independent encode limits per grpc-go"
-            );
+        // Should reject encode that exceeds encode limit
+        let encode_oversized = vec![0x47u8; 12 * 1024]; // 12KB
+        let encode_result = bidirectional_codec
+            .encode_message(&Bytes::from(encode_oversized), &mut BytesMut::new());
+        assert!(
+            matches!(encode_result, Err(GrpcError::MessageTooLarge)),
+            "Bidirectional codec must enforce independent encode limits per grpc-go"
+        );
 
-            // Should allow decode within decode limit
-            let mut decode_frame = BytesMut::new();
-            let mut decode_producer = GrpcCodec::new();
-            decode_producer.encode(
+        // Should allow decode within decode limit
+        let mut decode_frame = BytesMut::new();
+        let mut decode_producer = GrpcCodec::new();
+        decode_producer
+            .encode(
                 GrpcMessage::new(Bytes::from(vec![0x48u8; 12 * 1024])), // 12KB payload
-                &mut decode_frame
-            ).expect("decode producer must succeed");
+                &mut decode_frame,
+            )
+            .expect("decode producer must succeed");
 
-            let decode_result = bidirectional_codec.decode_message(&mut decode_frame);
-            assert!(
-                decode_result.is_ok(),
-                "Bidirectional codec must allow decode within decode limit per grpc-go"
-            );
+        let decode_result = bidirectional_codec.decode_message(&mut decode_frame);
+        assert!(
+            decode_result.is_ok(),
+            "Bidirectional codec must allow decode within decode limit per grpc-go"
+        );
 
-            // CONFORMANCE VERIFICATION: According to grpc-go flow control specification,
-            // initial window sizes determine backpressure behavior and message size limits
-            // must be enforced independently for encode and decode operations.
-            println!("✓ gRPC initial-window backpressure differential conformance verified");
-            println!(
-                "  - Small messages within window: PASS (32KB ≤ {}B)",
-                initial_stream_window_size
-            );
-            println!(
-                "  - Boundary messages at window limit: PASS ({}B)",
-                initial_stream_window_size
-            );
-            println!(
-                "  - Large message framing: PASS ({}KB)",
-                large_message_size / 1024
-            );
-            println!(
-                "  - Oversized message rejection: PASS ({}KB limit enforced)",
-                32
-            );
-            println!(
-                "  - Decode-side limit enforcement: PASS ({}KB limit enforced)",
-                16
-            );
-            println!(
-                "  - Bidirectional flow control: PASS (independent encode/decode limits)"
-            );
+        // CONFORMANCE VERIFICATION: According to grpc-go flow control specification,
+        // initial window sizes determine backpressure behavior and message size limits
+        // must be enforced independently for encode and decode operations.
+        println!("✓ gRPC initial-window backpressure differential conformance verified");
+        println!(
+            "  - Small messages within window: PASS (32KB ≤ {}B)",
+            initial_stream_window_size
+        );
+        println!(
+            "  - Boundary messages at window limit: PASS ({}B)",
+            initial_stream_window_size
+        );
+        println!(
+            "  - Large message framing: PASS ({}KB)",
+            large_message_size / 1024
+        );
+        println!(
+            "  - Oversized message rejection: PASS ({}KB limit enforced)",
+            32
+        );
+        println!(
+            "  - Decode-side limit enforcement: PASS ({}KB limit enforced)",
+            16
+        );
+        println!("  - Bidirectional flow control: PASS (independent encode/decode limits)");
 
-            crate::test_complete!("grpc_go_initial_window_backpressure_differential_conformance");
-        }
+        crate::test_complete!("grpc_go_initial_window_backpressure_differential_conformance");
     }
 }

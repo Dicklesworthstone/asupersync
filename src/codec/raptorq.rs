@@ -297,9 +297,15 @@ mod golden_tests {
             let repair_data = encoder.repair_symbol(esi);
             // Get equation coefficients for this repair symbol from RFC algorithm
             let decoder = InactivationDecoder::new(k, symbol_size, seed);
-            let (columns, coefficients) = decoder.repair_equation(esi)
+            let (columns, coefficients) = decoder
+                .repair_equation(esi)
                 .expect("RFC 6330 repair equation generation must succeed");
-            received_symbols.push(ReceivedSymbol::repair(esi, columns, coefficients, repair_data));
+            received_symbols.push(ReceivedSymbol::repair(
+                esi,
+                columns,
+                coefficients,
+                repair_data,
+            ));
         }
 
         // CONFORMANCE CHECK 2: Decode using inactivation decoder (RFC 6330 §6.2)
@@ -310,11 +316,12 @@ mod golden_tests {
         let mut all_symbols = constraint_symbols;
         all_symbols.extend(received_symbols);
 
-        let decode_result = decoder.decode(&all_symbols)
+        let decode_result = decoder
+            .decode(&all_symbols)
             .expect("RFC 6330 compliant decode operation must succeed");
 
         // CONFORMANCE CHECK 3: Round-trip identity verification (RFC 6330 §6.3)
-        let decoded_data = decode_result.source_symbols;
+        let decoded_data = decode_result.source;
         assert_eq!(
             decoded_data.len(),
             source_data.len(),
@@ -323,8 +330,7 @@ mod golden_tests {
 
         for (i, (original, decoded)) in source_data.iter().zip(decoded_data.iter()).enumerate() {
             assert_eq!(
-                original,
-                decoded,
+                original, decoded,
                 "Source symbol {i} round-trip failed: decoded data must exactly match original"
             );
         }
@@ -333,8 +339,7 @@ mod golden_tests {
         // First K symbols in decode output must match first K source symbols
         for (i, original_symbol) in source_data.iter().enumerate() {
             assert_eq!(
-                &decoded_data[i],
-                original_symbol,
+                &decoded_data[i], original_symbol,
                 "Systematic property violation: symbol {i} position not preserved"
             );
         }
@@ -348,8 +353,7 @@ mod golden_tests {
             let repair1 = encoder.repair_symbol(esi);
             let repair2 = encoder2.repair_symbol(esi);
             assert_eq!(
-                repair1,
-                repair2,
+                repair1, repair2,
                 "RFC 6330 determinism requirement: repair symbol {esi} must be identical"
             );
         }
@@ -357,7 +361,9 @@ mod golden_tests {
         // CONFORMANCE VERIFICATION: According to RFC 6330 Section 6,
         // the encode-decode round-trip must preserve data integrity with
         // systematic encoding and inactivation decoding properties.
-        println!("✓ RFC 6330 §6 RaptorQ encode-decode round-trip differential conformance verified");
+        println!(
+            "✓ RFC 6330 §6 RaptorQ encode-decode round-trip differential conformance verified"
+        );
         println!(
             "  - Encoded {} source symbols of {} bytes each using seed 0x{:08x}",
             k, symbol_size, seed
@@ -366,11 +372,7 @@ mod golden_tests {
             "  - Generated {} repair symbols using RFC 6330 algorithm",
             repair_count
         );
-        println!(
-            "  - Decoded successfully with systematic property preserved"
-        );
-        println!(
-            "  - Round-trip identity verified: original data recovered exactly"
-        );
+        println!("  - Decoded successfully with systematic property preserved");
+        println!("  - Round-trip identity verified: original data recovered exactly");
     }
 }
