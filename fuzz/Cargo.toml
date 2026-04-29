@@ -2952,3 +2952,17 @@ path = "fuzz_targets/h2_frame_codec_arbitrary_bytes.rs"
 test = false
 doc = false
 bench = false
+
+# Structure-aware macaroon attenuation chain associativity fuzzer.
+# Tests mathematical properties of macaroon capability token attenuation:
+# - (a∘b)(t) ≡ b(a(t)) composition associativity
+# - No caveat dropping possible - monotonic restriction property
+# - Three-way associativity (a∘b)∘c ≡ a∘(b∘c)
+# - Identity element and idempotence properties
+# Uses Arbitrary derive on caveats for intelligent structure-aware input generation.
+[[bin]]
+name = "macaroon_attenuation_associativity"
+path = "fuzz_targets/macaroon_attenuation_associativity.rs"
+test = false
+doc = false
+bench = false
