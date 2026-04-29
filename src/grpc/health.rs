@@ -204,14 +204,17 @@ impl HealthService {
     /// Note: This is a simplified implementation that checks header presence and format.
     /// Production deployments should integrate with proper auth token validation.
     fn validate_auth_metadata(&self, metadata: &super::streaming::Metadata) -> Result<(), Status> {
-        let auth_header = metadata.get("authorization")
-            .ok_or_else(|| Status::unauthenticated("health check endpoint requires authentication"))?;
+        let auth_header = metadata.get("authorization").ok_or_else(|| {
+            Status::unauthenticated("health check endpoint requires authentication")
+        })?;
 
         // Extract string value from MetadataValue enum
         let auth_str = match auth_header {
             super::streaming::MetadataValue::Ascii(s) => s.as_str(),
             super::streaming::MetadataValue::Binary(_) => {
-                return Err(Status::unauthenticated("authorization header must be ASCII"));
+                return Err(Status::unauthenticated(
+                    "authorization header must be ASCII",
+                ));
             }
         };
 
@@ -221,7 +224,9 @@ impl HealthService {
         }
 
         if !auth_str.starts_with("Bearer ") || auth_str.len() < 8 {
-            return Err(Status::unauthenticated("invalid authorization format - Bearer token required"));
+            return Err(Status::unauthenticated(
+                "invalid authorization format - Bearer token required",
+            ));
         }
 
         // TODO: Add actual token validation against your auth system
@@ -471,7 +476,9 @@ impl HealthService {
 
         // TODO: Implement configurable authentication mode (None/RequireAuth/Custom)
         // For now, allowing internal health checks but with security warning
-        tracing::warn!("Health check accessed without authentication validation - ensure this is from authorized internal probe");
+        tracing::warn!(
+            "Health check accessed without authentication validation - ensure this is from authorized internal probe"
+        );
 
         let statuses = self.statuses.read();
 
@@ -500,9 +507,7 @@ impl HealthService {
             // While the gRPC health spec suggests NotFound for missing services, this
             // enables enumeration attacks. Using PermissionDenied provides security
             // without revealing service topology to unauthorized clients.
-            Err(Status::permission_denied(
-                "health check access denied",
-            ))
+            Err(Status::permission_denied("health check access denied"))
         }
     }
 
@@ -925,6 +930,15 @@ mod tests {
 
     fn counting_waker(counter: &Arc<CountingWake>) -> Waker {
         Waker::from(counter.clone())
+    }
+
+    fn authed_health_request(service: &str) -> Request<HealthCheckRequest> {
+        let mut request = Request::new(HealthCheckRequest::new(service));
+        let inserted = request
+            .metadata_mut()
+            .insert("authorization", "Bearer test-token");
+        crate::assert_with_log!(inserted, "test auth metadata inserted", true, inserted);
+        request
     }
 
     #[test]
@@ -1391,7 +1405,7 @@ mod tests {
         let service = HealthService::new();
         service.set_status("svc", ServingStatus::Serving);
 
-        let request = Request::new(HealthCheckRequest::new("svc"));
+        let request = authed_health_request("svc");
         let response = futures_lite::future::block_on(service.watch_async(&request))
             .expect("watch_async should construct a stream");
         let mut stream = response.into_inner();
@@ -1452,6 +1466,91 @@ mod tests {
         crate::test_complete!("health_watch_async_emits_initial_status_and_wakes_on_change");
     }
 
+    /// GRPC-DIFF-HWATCH-HALFCLOSE: grpc-go keeps Health/Watch open after the
+    /// client sends its single request message and half-closes the send side.
+    /// The server stream must stay pending for future updates instead of
+    /// terminating when no more client request bytes can arrive.
+    #[test]
+    fn differential_health_watch_send_half_close_semantics_vs_grpc_go() {
+        init_test("differential_health_watch_send_half_close_semantics_vs_grpc_go");
+        let service = HealthService::new();
+        service.set_status("svc", ServingStatus::Serving);
+
+        let request = authed_health_request("svc");
+        let response = futures_lite::future::block_on(service.watch_async(&request))
+            .expect("watch_async should construct a stream");
+        drop(request);
+        let mut stream = response.into_inner();
+
+        let first = futures_lite::future::block_on(futures_lite::future::poll_fn(|cx| {
+            Streaming::poll_next(Pin::new(&mut stream), cx)
+        }));
+        let first_ok = matches!(
+            first,
+            Some(Ok(HealthCheckResponse {
+                status: ServingStatus::Serving
+            }))
+        );
+        crate::assert_with_log!(
+            first_ok,
+            "grpc-go: initial watch snapshot is emitted before half-close matters",
+            true,
+            first_ok
+        );
+
+        let wake_counter = Arc::new(CountingWake::default());
+        let waker = counting_waker(&wake_counter);
+        let mut cx = Context::from_waker(&waker);
+        let pending_after_half_close = matches!(
+            Streaming::poll_next(Pin::new(&mut stream), &mut cx),
+            Poll::Pending
+        );
+        crate::assert_with_log!(
+            pending_after_half_close,
+            "grpc-go: send-half-close must not terminate Health/Watch",
+            true,
+            pending_after_half_close
+        );
+
+        let waiter_count = service
+            .watch_waiters
+            .lock()
+            .get("svc")
+            .map_or(0, std::collections::HashMap::len);
+        crate::assert_with_log!(
+            waiter_count == 1,
+            "grpc-go: pending Watch keeps exactly one waiter after half-close",
+            1,
+            waiter_count
+        );
+
+        service.set_status("svc", ServingStatus::NotServing);
+        crate::assert_with_log!(
+            wake_counter.wakes.load(Ordering::SeqCst) == 1,
+            "grpc-go: status transition wakes half-closed watch",
+            1,
+            wake_counter.wakes.load(Ordering::SeqCst)
+        );
+
+        let next = futures_lite::future::block_on(futures_lite::future::poll_fn(|cx| {
+            Streaming::poll_next(Pin::new(&mut stream), cx)
+        }));
+        let next_ok = matches!(
+            next,
+            Some(Ok(HealthCheckResponse {
+                status: ServingStatus::NotServing
+            }))
+        );
+        crate::assert_with_log!(
+            next_ok,
+            "grpc-go: half-closed watch still emits later status changes",
+            true,
+            next_ok
+        );
+
+        crate::test_complete!("differential_health_watch_send_half_close_semantics_vs_grpc_go");
+    }
+
     #[test]
     fn health_watch_async_missing_auth_matches_check_async_and_registers_no_waiter() {
         init_test("health_watch_async_missing_auth_matches_check_async_and_registers_no_waiter");
@@ -1500,7 +1599,7 @@ mod tests {
         let service = HealthService::new();
         service.set_status("svc", ServingStatus::Serving);
 
-        let request = Request::new(HealthCheckRequest::new("svc"));
+        let request = authed_health_request("svc");
         let response = futures_lite::future::block_on(service.watch_async(&request))
             .expect("watch_async should construct a stream");
         let mut stream = response.into_inner();
@@ -1551,7 +1650,7 @@ mod tests {
         let service = HealthService::new();
         service.set_status("svc", ServingStatus::Serving);
 
-        let request = Request::new(HealthCheckRequest::new("svc"));
+        let request = authed_health_request("svc");
         let response = futures_lite::future::block_on(service.watch_async(&request))
             .expect("watch_async should construct a stream");
         let mut stream = response.into_inner();
