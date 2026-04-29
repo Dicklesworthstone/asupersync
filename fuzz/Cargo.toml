@@ -2745,6 +2745,17 @@ test = false
 doc = false
 bench = false
 
+# Structure-aware fuzzer for RESP3 BulkString length-prefix parsing.
+# Targets src/messaging/redis.rs bulk string length handling with explicit
+# cases for over-limit declarations, i64 overflow in ASCII prefixes,
+# invalid negative lengths, truncated payloads, and malformed trailing CRLF.
+[[bin]]
+name = "redis_resp3_bulk_string_length_prefix"
+path = "fuzz_targets/redis_resp3_bulk_string_length_prefix.rs"
+test = false
+doc = false
+bench = false
+
 # Structure-aware fuzz target for codec/framed.rs decoder reset-and-reuse cycle testing.
 # Tests state consistency across Framed::into_parts() -> reconstruct cycles where decoders
 # must maintain parsing context across transport reconstruction. Exercises buffer migration,
