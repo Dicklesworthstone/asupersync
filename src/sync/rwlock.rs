@@ -3224,6 +3224,19 @@ mod metamorphic_tests {
         writer_wakes_before_reader: Vec<usize>,
     }
 
+    #[derive(Debug, PartialEq, Eq)]
+    struct UpgradeWriterLivenessSignature {
+        active_readers_after_queue: usize,
+        queued_writer_waiters_after_queue: usize,
+        queued_reader_waiters_after_queue: usize,
+        late_reader_wakes_before_writer_turn: Vec<usize>,
+        late_readers_pending_while_writer_held: usize,
+        late_readers_ready_after_writer_release: usize,
+        final_readers: usize,
+        final_writer_waiters: usize,
+        final_reader_waiters: usize,
+    }
+
     fn older_reader_admission_with_younger_writer_suffix(
         extra_writers: usize,
     ) -> OlderReaderSuffixOutcome {
@@ -3283,6 +3296,98 @@ mod metamorphic_tests {
                 .iter()
                 .map(|count| count.load(Ordering::SeqCst))
                 .collect(),
+        }
+    }
+
+    fn upgrade_writer_liveness_signature(
+        prime_with_read: bool,
+        late_readers: usize,
+    ) -> UpgradeWriterLivenessSignature {
+        let harness = RwLockTestHarness::new(0u64);
+        let lock = harness.lock();
+        let cx = test_cx();
+
+        let blocking_peer_reader = block_on(lock.read(&cx)).expect("peer reader should acquire");
+        if prime_with_read {
+            let transient_reader = block_on(lock.read(&cx)).expect("upgrade reader should acquire");
+            drop(transient_reader);
+        }
+
+        let mut writer_fut = OwnedRwLockWriteGuard::write(lock.clone(), &cx);
+        let (writer_waker, writer_wake_count) = CountWaker::new();
+        let writer_waker_obj = Waker::from(Arc::new(writer_waker));
+        let mut writer_task_cx = Context::from_waker(&writer_waker_obj);
+        assert!(
+            std::pin::Pin::new(&mut writer_fut)
+                .poll(&mut writer_task_cx)
+                .is_pending(),
+            "writer should queue while the blocking reader is active"
+        );
+
+        let mut late_reader_futs = Vec::new();
+        let mut late_reader_wake_counts = Vec::new();
+        let mut late_reader_wakers = Vec::new();
+        for _ in 0..late_readers {
+            let mut late_reader_fut = OwnedRwLockReadGuard::read(lock.clone(), &cx);
+            let (late_reader_waker, late_reader_wake_count) = CountWaker::new();
+            let late_reader_waker_obj = Waker::from(Arc::new(late_reader_waker));
+            let mut late_reader_task_cx = Context::from_waker(&late_reader_waker_obj);
+            assert!(
+                std::pin::Pin::new(&mut late_reader_fut)
+                    .poll(&mut late_reader_task_cx)
+                    .is_pending(),
+                "late reader should queue behind the waiting writer"
+            );
+            late_reader_futs.push((late_reader_fut, late_reader_task_cx));
+            late_reader_wake_counts.push(late_reader_wake_count);
+            late_reader_wakers.push(late_reader_waker_obj);
+        }
+
+        let queued_state = lock.debug_state();
+        drop(blocking_peer_reader);
+
+        assert!(
+            writer_wake_count.load(Ordering::SeqCst) > 0,
+            "writer should be woken once the last blocking reader releases"
+        );
+        let writer_guard = match std::pin::Pin::new(&mut writer_fut).poll(&mut writer_task_cx) {
+            Poll::Ready(Ok(guard)) => guard,
+            other => panic!("writer did not acquire after wake: {other:?}"),
+        };
+
+        let late_reader_wakes_before_writer_turn = late_reader_wake_counts
+            .iter()
+            .map(|count| count.load(Ordering::SeqCst))
+            .collect::<Vec<_>>();
+        let late_readers_pending_while_writer_held = late_reader_futs
+            .iter_mut()
+            .filter(|(fut, task_cx)| std::pin::Pin::new(fut).poll(task_cx).is_pending())
+            .count();
+
+        drop(writer_guard);
+
+        let mut admitted_late_readers = Vec::new();
+        for (mut late_reader_fut, mut late_reader_task_cx) in late_reader_futs {
+            match std::pin::Pin::new(&mut late_reader_fut).poll(&mut late_reader_task_cx) {
+                Poll::Ready(Ok(guard)) => admitted_late_readers.push(guard),
+                other => panic!("late reader did not acquire after writer turn: {other:?}"),
+            }
+        }
+        drop(late_reader_wakers);
+        let late_readers_ready_after_writer_release = admitted_late_readers.len();
+        drop(admitted_late_readers);
+
+        let final_state = lock.debug_state();
+        UpgradeWriterLivenessSignature {
+            active_readers_after_queue: queued_state.readers,
+            queued_writer_waiters_after_queue: queued_state.writer_waiters,
+            queued_reader_waiters_after_queue: queued_state.reader_waiters.len(),
+            late_reader_wakes_before_writer_turn,
+            late_readers_pending_while_writer_held,
+            late_readers_ready_after_writer_release,
+            final_readers: final_state.readers,
+            final_writer_waiters: final_state.writer_waiters,
+            final_reader_waiters: final_state.reader_waiters.len(),
         }
     }
 
@@ -3447,6 +3552,53 @@ mod metamorphic_tests {
                 Poll::Ready(Ok(_))
             ),
             "reader should acquire after the cancelled writer is removed"
+        );
+    }
+
+    #[test]
+    fn metamorphic_read_then_write_preserves_liveness_under_reader_pressure() {
+        let baseline = upgrade_writer_liveness_signature(false, 2);
+        let transformed = upgrade_writer_liveness_signature(true, 2);
+
+        assert_eq!(
+            transformed, baseline,
+            "dropping an upgrader's read guard before queueing write must preserve the same writer-liveness signature under reader pressure"
+        );
+        assert_eq!(
+            baseline.active_readers_after_queue, 1,
+            "the transient upgrader read must not leak into the queued writer state"
+        );
+        assert_eq!(
+            baseline.queued_writer_waiters_after_queue, 1,
+            "exactly one writer should be queued in the upgrade-liveness scenario"
+        );
+        assert_eq!(
+            baseline.queued_reader_waiters_after_queue, 2,
+            "both late readers should remain queued behind the writer"
+        );
+        assert!(
+            baseline
+                .late_reader_wakes_before_writer_turn
+                .iter()
+                .all(|wake_count| *wake_count == 0),
+            "late readers must not be woken before the writer turn completes"
+        );
+        assert_eq!(
+            baseline.late_readers_pending_while_writer_held, 2,
+            "late readers must stay pending while the writer guard is held"
+        );
+        assert_eq!(
+            baseline.late_readers_ready_after_writer_release, 2,
+            "all queued late readers should be admitted once the writer releases"
+        );
+        assert_eq!(
+            (
+                baseline.final_readers,
+                baseline.final_writer_waiters,
+                baseline.final_reader_waiters
+            ),
+            (0, 0, 0),
+            "the mixed read-then-write path must drain all waiter state"
         );
     }
 
