@@ -1953,4 +1953,92 @@ mod tests {
         assert!(already.to_string().contains("already initialized"));
         assert!(cancelled.to_string().contains("cancelled"));
     }
+
+    // =========================================================================
+    // Metamorphic property: Init-then-get equivalence under concurrent races
+    // =========================================================================
+
+    #[test]
+    fn metamorphic_init_then_get_equivalence_under_concurrent_first_init_race() {
+        init_test("metamorphic_init_then_get_equivalence_under_concurrent_first_init_race");
+
+        // Property: When multiple threads race to initialize the same OnceCell,
+        // exactly one initialization function executes, and all callers (both
+        // the winner and all waiters) observe the exact same value.
+        //
+        // Metamorphic relationship: Varying the number of concurrent initializers
+        // or their individual values should NOT change which value all threads
+        // eventually observe - only the race winner's value should be visible.
+
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Test with different numbers of concurrent initializers
+        for num_racers in [2, 3, 5, 8, 13] {
+            let cell = Arc::new(OnceCell::<u32>::new());
+            let init_count = Arc::new(AtomicUsize::new(0));
+            let mut handles = Vec::new();
+
+            // Each racer attempts to initialize with a unique value
+            for racer_id in 0..num_racers {
+                let cell_ref = Arc::clone(&cell);
+                let counter = Arc::clone(&init_count);
+                let unique_value = (racer_id + 1) * 100; // 100, 200, 300, ...
+
+                let handle = std::thread::spawn(move || {
+                    let observed_value = cell_ref.get_or_init_blocking(|| {
+                        // Track that this init function was called
+                        counter.fetch_add(1, Ordering::SeqCst);
+                        unique_value
+                    });
+                    *observed_value
+                });
+                handles.push(handle);
+            }
+
+            // Collect all observed values
+            let mut observed_values = Vec::new();
+            for handle in handles {
+                let value = handle.join().expect("thread should not panic");
+                observed_values.push(value);
+            }
+
+            // METAMORPHIC ASSERTIONS:
+
+            // 1. Exactly one initialization function executed
+            let actual_init_calls = init_count.load(Ordering::SeqCst);
+            assert_eq!(
+                actual_init_calls, 1,
+                "RACE VIOLATION: {} init functions executed, expected exactly 1 (racers={})",
+                actual_init_calls, num_racers
+            );
+
+            // 2. All threads observed the same value (init-then-get equivalence)
+            let first_observed = observed_values[0];
+            assert!(
+                observed_values.iter().all(|&v| v == first_observed),
+                "EQUIVALENCE VIOLATION: Threads observed different values: {:?} (racers={})",
+                observed_values, num_racers
+            );
+
+            // 3. The observed value must be one of the racer's intended values
+            let intended_values: Vec<u32> = (0..num_racers).map(|i| (i + 1) * 100).collect();
+            assert!(
+                intended_values.contains(&first_observed),
+                "CONSISTENCY VIOLATION: Observed value {} not in intended set {:?}",
+                first_observed, intended_values
+            );
+
+            // 4. Cell remains initialized with the same value for subsequent calls
+            let subsequent_value = *cell.get_or_init_blocking(|| {
+                panic!("init should not be called again on initialized cell")
+            });
+            assert_eq!(
+                subsequent_value, first_observed,
+                "PERSISTENCE VIOLATION: Subsequent get returned different value"
+            );
+        }
+
+        crate::test_complete!("metamorphic_init_then_get_equivalence_under_concurrent_first_init_race");
+    }
 }
