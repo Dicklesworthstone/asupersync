@@ -121,6 +121,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_h1_server_request"
+path = "fuzz_targets/h1_server_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_hpack_decode"
 path = "fuzz_targets/hpack_decode.rs"
 test = false
@@ -943,6 +950,15 @@ bench = false
 [[bin]]
 name = "fuzz_oneshot_drop_race"
 path = "fuzz_targets/oneshot_drop_race.rs"
+test = false
+doc = false
+bench = false
+
+# Oneshot send-then-recv vs cancel-mid-send timing verification
+# Tests arbitrary cancellation timing to ensure receiver gets either value OR Cancelled, never wedged
+[[bin]]
+name = "oneshot_cancellation_timing"
+path = "fuzz_targets/oneshot_cancellation_timing.rs"
 test = false
 doc = false
 bench = false
@@ -2116,6 +2132,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_hpack_malformed_dynatable"
+path = "fuzz_targets/hpack_malformed_dynatable.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "length_delimited_decode"
 path = "fuzz_targets/length_delimited_decode.rs"
 test = false
@@ -3120,6 +3143,16 @@ test = false
 doc = false
 bench = false
 
+# RwLock writer-priority fairness testing for acquire-shared/exclusive interleavings
+# Tests arbitrary acquire sequences to verify writer never blocked indefinitely by readers,
+# no read-after-write reordering, and proper writer-preference enforcement.
+[[bin]]
+name = "rwlock_writer_priority_fairness"
+path = "fuzz_targets/rwlock_writer_priority_fairness.rs"
+test = false
+doc = false
+bench = false
+
 # Tick #119 — OnceCell concurrent initialization race condition testing
 # Tests arbitrary thread count with same init closure to verify exactly one closure
 # invocation and all threads see the same value under concurrent access patterns.
@@ -3185,6 +3218,17 @@ doc = false
 [[bin]]
 name = "grpc_streaming_bidi_cancel"
 path = "fuzz_targets/grpc_streaming_bidi_cancel.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #126 — Redis pubsub subscribe/unsubscribe bookkeeping fuzzing.
+# Tests arbitrary subscribe/unsubscribe sequences against the real internal
+# dedup/untrack helpers to ensure no duplicate subscription leaks and no
+# unsubscribe-without-subscribe failure on the bookkeeping seam.
+[[bin]]
+name = "redis_pubsub_state_machine"
+path = "fuzz_targets/redis_pubsub_state_machine.rs"
 test = false
 doc = false
 bench = false

@@ -2969,6 +2969,72 @@ pub fn parse_pubsub_event_for_fuzz(value: RespValue) -> Result<PubSubEvent, Redi
     RedisPubSub::parse_event(value)
 }
 
+#[cfg(any(test, feature = "test-internals"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum FuzzPubSubLane {
+    Channel,
+    Pattern,
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum FuzzPubSubOp {
+    Subscribe,
+    Unsubscribe,
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct FuzzPubSubState {
+    pub channels: Vec<String>,
+    pub patterns: Vec<String>,
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[doc(hidden)]
+pub fn fuzz_apply_pubsub_state_step(
+    state: &mut FuzzPubSubState,
+    lane: FuzzPubSubLane,
+    op: FuzzPubSubOp,
+    values: &[String],
+) -> Result<(), RedisError> {
+    let (list, subscribe_err) = match lane {
+        FuzzPubSubLane::Channel => (
+            &mut state.channels,
+            "SUBSCRIBE requires at least one channel",
+        ),
+        FuzzPubSubLane::Pattern => (
+            &mut state.patterns,
+            "PSUBSCRIBE requires at least one pattern",
+        ),
+    };
+
+    match op {
+        FuzzPubSubOp::Subscribe => {
+            if values.is_empty() {
+                return Err(RedisError::Protocol(subscribe_err.to_string()));
+            }
+            for value in values {
+                RedisPubSub::track_subscribe(list, value);
+            }
+        }
+        FuzzPubSubOp::Unsubscribe => {
+            if values.is_empty() {
+                list.clear();
+            } else {
+                for value in values {
+                    RedisPubSub::untrack_subscribe(list, value);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(
