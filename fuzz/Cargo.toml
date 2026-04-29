@@ -2731,3 +2731,16 @@ path = "fuzz_targets/lines_codec_boundary_case.rs"
 test = false
 doc = false
 bench = false
+
+# Structure-aware fuzzer for Redis RESP3 Big-Number type encoding.
+# Tests src/messaging/redis.rs RESP3 Big-Number parsing with intelligent input generation
+# targeting UTF-8 validation, CRLF injection, buffer overflow, and malformed wire formats.
+# Exercises encoding/decoding round-trip consistency, boundary conditions, attack scenarios,
+# and validates fail-closed behavior on malformed Big-Number type inputs. Covers numeric
+# edge cases, encoding validation, and protocol compliance for RESP3 big number handling.
+[[bin]]
+name = "redis_resp3_big_number"
+path = "fuzz_targets/redis_resp3_big_number.rs"
+test = false
+doc = false
+bench = false

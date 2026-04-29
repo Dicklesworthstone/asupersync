@@ -10461,4 +10461,141 @@ mod tests {
             test_value
         );
     }
+
+    #[test]
+    fn row_description_uuid_text_vs_binary_format_differential() {
+        /// Differential conformance test for UUID RowDescription text vs binary format.
+        ///
+        /// Tests that UUID values produce equivalent results when parsed from:
+        /// - Text format (format_code = 0): "550e8400-e29b-41d4-a716-446655440000"
+        /// - Binary format (format_code = 1): 16 bytes in network byte order
+        ///
+        /// Verifies PostgreSQL wire protocol conformance for non-trivial types
+        /// where text and binary representations differ significantly.
+        let conn = make_test_connection();
+
+        // Test UUID: 550e8400-e29b-41d4-a716-446655440000
+        let uuid_string = "550e8400-e29b-41d4-a716-446655440000";
+        let uuid_bytes: [u8; 16] = [
+            0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4,
+            0xa7, 0x16, 0x44, 0x66, 0x55, 0x44, 0x00, 0x00,
+        ];
+
+        let column_name = "uuid_col";
+        let type_oid = oid::UUID;
+
+        // Create RowDescription with text format (format_code = 0)
+        let mut text_row_desc = Vec::new();
+        text_row_desc.extend_from_slice(&1i16.to_be_bytes()); // field count
+        text_row_desc.extend_from_slice(column_name.as_bytes());
+        text_row_desc.push(0); // null terminator
+        text_row_desc.extend_from_slice(&0u32.to_be_bytes()); // table_oid
+        text_row_desc.extend_from_slice(&0i16.to_be_bytes()); // column_id
+        text_row_desc.extend_from_slice(&type_oid.to_be_bytes());
+        text_row_desc.extend_from_slice(&(-1i16).to_be_bytes()); // type_size (-1 = variable)
+        text_row_desc.extend_from_slice(&(-1i32).to_be_bytes()); // type_modifier
+        text_row_desc.extend_from_slice(&0i16.to_be_bytes()); // format_code = TEXT
+
+        // Create RowDescription with binary format (format_code = 1)
+        let mut binary_row_desc = Vec::new();
+        binary_row_desc.extend_from_slice(&1i16.to_be_bytes()); // field count
+        binary_row_desc.extend_from_slice(column_name.as_bytes());
+        binary_row_desc.push(0); // null terminator
+        binary_row_desc.extend_from_slice(&0u32.to_be_bytes()); // table_oid
+        binary_row_desc.extend_from_slice(&0i16.to_be_bytes()); // column_id
+        binary_row_desc.extend_from_slice(&type_oid.to_be_bytes());
+        binary_row_desc.extend_from_slice(&(-1i16).to_be_bytes()); // type_size (-1 = variable)
+        binary_row_desc.extend_from_slice(&(-1i32).to_be_bytes()); // type_modifier
+        binary_row_desc.extend_from_slice(&1i16.to_be_bytes()); // format_code = BINARY
+
+        // Parse both RowDescription messages
+        let (text_columns, text_indices) = conn
+            .parse_row_description(&text_row_desc)
+            .expect("text UUID RowDescription should parse successfully");
+        let (binary_columns, binary_indices) = conn
+            .parse_row_description(&binary_row_desc)
+            .expect("binary UUID RowDescription should parse successfully");
+
+        // CONFORMANCE CHECK 1: Format codes must be correctly interpreted
+        assert_eq!(text_columns[0].format_code, 0, "text format code must be 0");
+        assert_eq!(
+            binary_columns[0].format_code, 1,
+            "binary format code must be 1"
+        );
+
+        // CONFORMANCE CHECK 2: All other column metadata must be identical
+        assert_eq!(
+            text_columns[0].name, binary_columns[0].name,
+            "column names must match"
+        );
+        assert_eq!(
+            text_columns[0].type_oid, binary_columns[0].type_oid,
+            "type OIDs must match UUID"
+        );
+        assert_eq!(text_columns[0].type_oid, oid::UUID, "must be UUID type OID");
+
+        // Create corresponding DataRow messages for each format
+        // Text format: UUID string
+        let mut text_data_row = Vec::new();
+        text_data_row.extend_from_slice(&1i16.to_be_bytes()); // field count
+        text_data_row.extend_from_slice(&(uuid_string.len() as i32).to_be_bytes());
+        text_data_row.extend_from_slice(uuid_string.as_bytes());
+
+        // Binary format: 16-byte UUID in network byte order
+        let mut binary_data_row = Vec::new();
+        binary_data_row.extend_from_slice(&1i16.to_be_bytes()); // field count
+        binary_data_row.extend_from_slice(&(uuid_bytes.len() as i32).to_be_bytes());
+        binary_data_row.extend_from_slice(&uuid_bytes);
+
+        // Parse DataRow messages using respective column definitions
+        let text_values = conn
+            .parse_data_row(&text_data_row, &text_columns)
+            .expect("text UUID DataRow should parse successfully");
+        let binary_values = conn
+            .parse_data_row(&binary_data_row, &binary_columns)
+            .expect("binary UUID DataRow should parse successfully");
+
+        // CONFORMANCE CHECK 3: Different wire formats must produce equivalent logical values
+        assert_eq!(text_values.len(), 1, "text row must have one value");
+        assert_eq!(binary_values.len(), 1, "binary row must have one value");
+
+        // Both should parse to PgValue::Text with the same UUID string
+        match (&text_values[0], &binary_values[0]) {
+            (PgValue::Text(text_val), PgValue::Text(binary_val)) => {
+                assert_eq!(
+                    text_val, binary_val,
+                    "text format UUID '{}' must equal binary format UUID '{}'",
+                    text_val, binary_val
+                );
+                assert_eq!(
+                    *text_val, uuid_string,
+                    "text parsed UUID must equal expected '{}'",
+                    uuid_string
+                );
+                assert_eq!(
+                    *binary_val, uuid_string,
+                    "binary parsed UUID must equal expected '{}'",
+                    uuid_string
+                );
+            }
+            _ => panic!(
+                "both values should be PgValue::Text for UUID, got text={:?} binary={:?}",
+                text_values[0], binary_values[0]
+            ),
+        }
+
+        // CONFORMANCE CHECK 4: Column indices must be consistent regardless of format
+        assert_eq!(
+            text_indices, binary_indices,
+            "column indices must be format-independent"
+        );
+
+        // CONFORMANCE VERIFICATION: According to PostgreSQL wire protocol specification,
+        // UUID values can be transmitted as either text strings (36 chars with dashes) or
+        // binary (16 bytes), but both must produce the same logical UUID value.
+        println!("✓ PostgreSQL UUID text vs binary format differential conformance verified");
+        println!("  - Text format (36 chars): \"{}\"", uuid_string);
+        println!("  - Binary format (16 bytes): {:?}", uuid_bytes);
+        println!("  - Both formats produced equivalent UUID: {}", uuid_string);
+    }
 }

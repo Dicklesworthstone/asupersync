@@ -339,6 +339,8 @@ pub struct FramedCodec<C> {
     compressor: Option<FrameCompressor>,
     /// Optional frame-level decompressor.
     decompressor: Option<FrameDecompressor>,
+    /// Once a decode-side protocol or payload error occurs, fail closed.
+    poisoned: bool,
 }
 
 impl<C: fmt::Debug> fmt::Debug for FramedCodec<C> {
@@ -349,6 +351,7 @@ impl<C: fmt::Debug> fmt::Debug for FramedCodec<C> {
             .field("use_compression", &self.use_compression)
             .field("has_compressor", &self.compressor.is_some())
             .field("has_decompressor", &self.decompressor.is_some())
+            .field("poisoned", &self.poisoned)
             .finish()
     }
 }
@@ -384,6 +387,7 @@ impl<C: Codec> FramedCodec<C> {
             use_compression: false,
             compressor: None,
             decompressor: None,
+            poisoned: false,
         }
     }
 
@@ -462,6 +466,12 @@ impl<C: Codec> FramedCodec<C> {
         self.framing.max_decode_message_size()
     }
 
+    /// Returns whether a prior decode-side error poisoned this stream.
+    #[must_use]
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned
+    }
+
     /// Encode a message with framing.
     pub fn encode_message(
         &mut self,
@@ -493,28 +503,52 @@ impl<C: Codec> FramedCodec<C> {
 
     /// Decode a message with framing.
     pub fn decode_message(&mut self, src: &mut BytesMut) -> Result<Option<C::Decode>, GrpcError> {
+        if self.poisoned {
+            return Err(GrpcError::protocol(
+                "gRPC framed codec is poisoned after a previous decode error",
+            ));
+        }
+
         // Decode framing
-        let Some(message) = self.framing.decode(src)? else {
-            return Ok(None);
+        let message = match self.framing.decode(src) {
+            Ok(Some(message)) => message,
+            Ok(None) => return Ok(None),
+            Err(error) => {
+                self.poisoned = true;
+                return Err(error);
+            }
         };
 
         // Handle compression
         let data = if message.compressed {
-            let decompressor = self.decompressor.ok_or_else(|| {
-                GrpcError::compression(
+            let Some(decompressor) = self.decompressor else {
+                self.poisoned = true;
+                return Err(GrpcError::compression(
                     "compressed frame received but no frame decompressor configured",
-                )
-            })?;
+                ));
+            };
             // br-asupersync-535iu9: pass Bytes by-value (move) — identity
             // decompressor is zero-copy; gzip pre-allocates output
             // with a sized hint (br-ky9o3j).
-            decompressor(message.data, self.max_decode_message_size())?
+            match decompressor(message.data, self.max_decode_message_size()) {
+                Ok(data) => data,
+                Err(error) => {
+                    self.poisoned = true;
+                    return Err(error);
+                }
+            }
         } else {
             message.data
         };
 
         // Deserialize the message
-        let decoded = self.inner.decode(&data).map_err(C::map_decode_error)?;
+        let decoded = match self.inner.decode(&data).map_err(C::map_decode_error) {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                self.poisoned = true;
+                return Err(error);
+            }
+        };
 
         Ok(Some(decoded))
     }
@@ -884,6 +918,61 @@ mod tests {
         let drained = buf.is_empty();
         crate::assert_with_log!(drained, "compressed frame consumed", true, drained);
         crate::test_complete!("test_framed_codec_decode_rejects_compressed_frame");
+    }
+
+    #[test]
+    fn test_framed_codec_poisoned_after_consumed_compressed_frame_error() {
+        init_test("test_framed_codec_poisoned_after_consumed_compressed_frame_error");
+        let mut codec = FramedCodec::new(IdentityCodec);
+        let mut buf = BytesMut::new();
+
+        buf.put_u8(1);
+        buf.put_u32(3);
+        buf.extend_from_slice(b"bad");
+        buf.put_u8(0);
+        buf.put_u32(2);
+        buf.extend_from_slice(b"ok");
+
+        let first = codec.decode_message(&mut buf);
+        let first_rejected = matches!(first, Err(GrpcError::Compression(_)));
+        crate::assert_with_log!(
+            first_rejected,
+            "compressed frame without decompressor is rejected",
+            true,
+            first_rejected
+        );
+        crate::assert_with_log!(
+            codec.is_poisoned(),
+            "codec becomes poisoned after consumed-frame decode error",
+            true,
+            codec.is_poisoned()
+        );
+        crate::assert_with_log!(
+            buf.len() == MESSAGE_HEADER_SIZE + 2,
+            "subsequent frame remains buffered after poison",
+            MESSAGE_HEADER_SIZE + 2,
+            buf.len()
+        );
+
+        let second = codec.decode_message(&mut buf);
+        let poisoned = matches!(
+            second,
+            Err(GrpcError::Protocol(message))
+                if message.contains("poisoned after a previous decode error")
+        );
+        crate::assert_with_log!(
+            poisoned,
+            "poisoned codec rejects later buffered frame",
+            true,
+            poisoned
+        );
+        crate::assert_with_log!(
+            buf.len() == MESSAGE_HEADER_SIZE + 2,
+            "poisoned reject does not consume later frame",
+            MESSAGE_HEADER_SIZE + 2,
+            buf.len()
+        );
+        crate::test_complete!("test_framed_codec_poisoned_after_consumed_compressed_frame_error");
     }
 
     #[test]
