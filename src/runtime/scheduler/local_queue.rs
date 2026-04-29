@@ -363,13 +363,46 @@ impl Stealer {
         self.cached_len.load(Ordering::Acquire)
     }
 
+    /// Returns a bounded hint for how many tasks are currently stealable.
+    ///
+    /// This scans only the same front prefix that [`steal`] and
+    /// [`steal_batch`] inspect, so victim selection does not over-rank queues
+    /// whose visible backlog is entirely local-only work.
+    #[inline]
+    #[must_use]
+    pub fn stealable_len_hint(&self) -> usize {
+        if self.cached_len.load(Ordering::Acquire) == 0 {
+            return 0;
+        }
+
+        self.tasks.with_tasks_arena_mut(|arena| {
+            let inner = self.inner.lock();
+            let scan_limit = inner.queue.len().min(Self::SKIPPED_LOCALS_INLINE_CAP);
+            let mut stealable = 0;
+
+            for idx in 0..scan_limit {
+                let task_id = inner.queue[idx];
+                match arena.get(task_id.arena_index()) {
+                    Some(record) if record.is_local() => {}
+                    _ => {
+                        stealable += 1;
+                    }
+                }
+            }
+
+            stealable
+        })
+    }
+
     /// Returns true if the queue has no stealable items.
     ///
-    /// br-asupersync-pvbwxm: lock-free atomic check.
+    /// Mirrors the work-stealing scan window, not the raw queue length, so a
+    /// queue fronted entirely by local-only tasks correctly appears empty to
+    /// thieves.
     #[inline]
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.cached_len.load(Ordering::Acquire) == 0
+        self.stealable_len_hint() == 0
     }
 
     #[inline]
@@ -918,6 +951,38 @@ mod tests {
 
         let _ = queue.pop();
         assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn stealer_hint_ignores_local_only_prefix() {
+        let state = LocalQueue::test_state(10);
+        let queue = LocalQueue::new(Arc::clone(&state));
+
+        {
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for id in 0..8 {
+                let record = guard.task_mut(task(id)).expect("task record missing");
+                record.mark_local();
+            }
+        }
+
+        for id in 0..8 {
+            queue.push(task(id));
+        }
+        queue.push(task(8));
+
+        let stealer = queue.stealer();
+        assert_eq!(
+            stealer.stealable_len_hint(),
+            0,
+            "queues with only local work in the steal scan window should not advertise stealable backlog"
+        );
+        assert!(
+            stealer.is_empty(),
+            "a thief should treat a local-only visible prefix as empty"
+        );
     }
 
     #[test]

@@ -30,8 +30,8 @@ pub fn steal_task(stealers: &[Stealer], rng: &mut DetRng) -> Option<TaskId> {
         idx2 = (idx1 + 1) % len;
     }
 
-    let len1 = stealers[idx1].len();
-    let len2 = stealers[idx2].len();
+    let len1 = stealers[idx1].stealable_len_hint();
+    let len2 = stealers[idx2].stealable_len_hint();
 
     // Prefer the queue that appears to have more work.
     let (primary, secondary) = if len1 >= len2 {
@@ -303,6 +303,39 @@ mod tests {
             stolen,
             Some(task(2)),
             "steal should fall back to the secondary queue when primary has only local tasks"
+        );
+    }
+
+    #[test]
+    fn test_power_of_two_prefers_stealable_hint_over_total_queue_len() {
+        let state = LocalQueue::test_state(20);
+        let local_heavy = LocalQueue::new(Arc::clone(&state));
+        let remote_light = LocalQueue::new(Arc::clone(&state));
+
+        {
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for id in 0..8 {
+                let record = guard.task_mut(task(id)).expect("task record missing");
+                record.mark_local();
+            }
+        }
+
+        for id in 0..8 {
+            local_heavy.push(task(id));
+        }
+        local_heavy.push(task(9));
+        remote_light.push(task(10));
+
+        let stealers = vec![local_heavy.stealer(), remote_light.stealer()];
+        let mut rng = DetRng::new(7);
+
+        let stolen = steal_task(&stealers, &mut rng);
+        assert_eq!(
+            stolen,
+            Some(task(10)),
+            "victim ranking should prefer actually stealable work over a larger local-only backlog"
         );
     }
 
