@@ -18,10 +18,10 @@ use asupersync::raptorq::systematic::SystematicEncoder;
 use asupersync::types::ObjectId;
 
 const MAX_SOURCE_BYTES: usize = 64 * 1024;
-const LARGE_K_THRESHOLD: usize = 1024;
+const LARGE_K_THRESHOLD: usize = 842;
 const SMALL_K_CANDIDATES: &[usize] = &[1, 2, 3, 4, 7, 8, 15, 16, 17, 31, 32, 33];
 const MEDIUM_K_CANDIDATES: &[usize] = &[63, 64, 65, 127, 128, 129, 255, 256, 257, 511, 512, 513];
-const LARGE_K_CANDIDATES: &[usize] = &[1023, 1024, 1025, 2047, 2048, 2049];
+const LARGE_K_CANDIDATES: &[usize] = &[842, 1023, 1024, 1025, 2047, 2048, 2049];
 const SMALL_SYMBOL_SIZE_CANDIDATES: &[usize] =
     &[1, 2, 3, 4, 7, 8, 15, 16, 31, 32, 63, 64, 127, 128, 255, 256];
 const LARGE_SYMBOL_SIZE_CANDIDATES: &[usize] = &[1, 2, 3, 4, 8, 16, 32];
@@ -163,7 +163,7 @@ fn build_valid_packets(
     source: &[Vec<u8>],
     missing_sources: &[u8],
     extra_repairs: usize,
-) -> Vec<ReceivedSymbol> {
+) -> Option<Vec<ReceivedSymbol>> {
     let k = source.len();
     let mut missing = vec![false; k];
     let missing_cap = (k / 8).clamp(1, MAX_MISSING_SOURCES);
@@ -184,12 +184,14 @@ fn build_valid_packets(
 
     for repair_offset in 0..repair_count {
         let esi = k as u32 + repair_offset as u32;
-        let (columns, coefficients) = decoder.repair_equation(esi);
+        let Ok((columns, coefficients)) = decoder.repair_equation(esi) else {
+            return None;
+        };
         let data = encoder.repair_symbol(esi);
         packets.push(ReceivedSymbol::repair(esi, columns, coefficients, data));
     }
 
-    packets
+    Some(packets)
 }
 
 fn apply_reorder(packets: &mut [ReceivedSymbol], reorder: PacketReorder) {
@@ -372,13 +374,15 @@ fuzz_target!(|data: &[u8]| {
     };
     let decoder = InactivationDecoder::new(k, symbol_size, input.seed);
 
-    let baseline_packets = build_valid_packets(
+    let Some(baseline_packets) = build_valid_packets(
         &decoder,
         &encoder,
         &source,
         &input.missing_sources,
         input.extra_repairs as usize,
-    );
+    ) else {
+        return;
+    };
     let baseline_received = combine_symbols(&decoder, &baseline_packets);
     let baseline_batch = if baseline_received.is_empty() {
         0
@@ -475,6 +479,23 @@ mod tests {
     }
 
     #[test]
+    fn k_selector_includes_large_k_842_edge_case() {
+        assert!(
+            LARGE_K_CANDIDATES.contains(&842),
+            "large-K candidate set must include the canonical K=842 edge"
+        );
+        let selector = 8 * LARGE_K_CANDIDATES
+            .iter()
+            .position(|&candidate| candidate == 842)
+            .expect("K=842 must be selectable");
+        assert_eq!(
+            select_k_candidate(selector),
+            842,
+            "selector normalization must be able to reach K=842"
+        );
+    }
+
+    #[test]
     fn symbol_size_selector_keeps_large_k_targets_within_budget() {
         let symbol_size = select_symbol_size_candidate(6, 2048, 64 * 1024);
         assert!(symbol_size <= 32);
@@ -488,6 +509,14 @@ mod tests {
         assert_eq!(symbol_size, 256);
         assert!(SMALL_SYMBOL_SIZE_CANDIDATES.contains(&symbol_size));
         assert!(SMALL_K_CANDIDATES.contains(&select_k_candidate(63)));
+    }
+
+    #[test]
+    fn symbol_size_selector_treats_k842_as_large_k_profile() {
+        let symbol_size = select_symbol_size_candidate(6, 842, 64 * 1024);
+        assert!(symbol_size <= 32);
+        assert!(LARGE_SYMBOL_SIZE_CANDIDATES.contains(&symbol_size));
+        assert!(842usize.saturating_mul(symbol_size) <= 64 * 1024);
     }
 
     #[test]
