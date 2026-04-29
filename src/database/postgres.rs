@@ -1507,17 +1507,34 @@ impl ScramAuth {
         let mut iterations = None;
 
         for part in server_first.split(',') {
-            if let Some(value) = part.strip_prefix("r=") {
-                server_nonce = Some(value.to_string());
+            if part.starts_with("m=") {
+                return Err(PgError::AuthenticationFailed(
+                    "unsupported SCRAM mandatory extension".to_string(),
+                ));
+            } else if let Some(value) = part.strip_prefix("r=") {
+                if server_nonce.replace(value.to_string()).is_some() {
+                    return Err(PgError::AuthenticationFailed(
+                        "duplicate server nonce".to_string(),
+                    ));
+                }
             } else if let Some(value) = part.strip_prefix("s=") {
-                salt = Some(
+                let decoded =
                     base64::Engine::decode(&base64::engine::general_purpose::STANDARD, value)
-                        .map_err(|e| PgError::AuthenticationFailed(format!("invalid salt: {e}")))?,
-                );
+                        .map_err(|e| PgError::AuthenticationFailed(format!("invalid salt: {e}")))?;
+                if salt.replace(decoded).is_some() {
+                    return Err(PgError::AuthenticationFailed(
+                        "duplicate salt".to_string(),
+                    ));
+                }
             } else if let Some(value) = part.strip_prefix("i=") {
-                iterations = Some(value.parse().map_err(|e| {
+                let parsed = value.parse().map_err(|e| {
                     PgError::AuthenticationFailed(format!("invalid iterations: {e}"))
-                })?);
+                })?;
+                if iterations.replace(parsed).is_some() {
+                    return Err(PgError::AuthenticationFailed(
+                        "duplicate iterations".to_string(),
+                    ));
+                }
             }
         }
 
@@ -1590,9 +1607,43 @@ impl ScramAuth {
 
     /// Verify server-final message.
     fn verify_server_final(&self, server_final: &str) -> Result<(), PgError> {
-        // Parse server-final-message: v=<server-signature>
-        let server_sig_b64 = server_final
-            .strip_prefix("v=")
+        // Parse server-final-message: either v=<server-signature> or e=<server-error>
+        let mut server_sig_b64 = None;
+        let mut server_error = None;
+
+        for part in server_final.split(',') {
+            if part.starts_with("m=") {
+                return Err(PgError::AuthenticationFailed(
+                    "unsupported SCRAM mandatory extension".to_string(),
+                ));
+            } else if let Some(value) = part.strip_prefix("v=") {
+                if server_sig_b64.replace(value).is_some() {
+                    return Err(PgError::AuthenticationFailed(
+                        "duplicate server signature".to_string(),
+                    ));
+                }
+            } else if let Some(value) = part.strip_prefix("e=") {
+                if server_error.replace(value).is_some() {
+                    return Err(PgError::AuthenticationFailed(
+                        "duplicate server error".to_string(),
+                    ));
+                }
+            }
+        }
+
+        if server_sig_b64.is_some() && server_error.is_some() {
+            return Err(PgError::AuthenticationFailed(
+                "invalid server-final: verifier and error both present".to_string(),
+            ));
+        }
+
+        if let Some(server_error) = server_error {
+            return Err(PgError::AuthenticationFailed(format!(
+                "server rejected SCRAM exchange: {server_error}"
+            )));
+        }
+
+        let server_sig_b64 = server_sig_b64
             .ok_or_else(|| PgError::AuthenticationFailed("invalid server-final".to_string()))?;
 
         let server_sig =
@@ -6369,6 +6420,57 @@ mod tests {
         match auth.verify_server_final(&format!("v={truncated_sig}")) {
             Err(PgError::AuthenticationFailed(msg)) => {
                 assert!(msg.contains("server signature mismatch"), "got: {msg}");
+            }
+            other => panic!("expected AuthenticationFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_scram_sha256_rejects_reserved_server_first_extension() {
+        let cx = Cx::for_testing();
+        let mut auth = ScramAuth::new(&cx, "user", "pencil", ScramChannelBinding::None);
+        auth.client_nonce = "rOprNGfwEbeRWgbNEkqO".to_string();
+        auth.client_first_bare = "n=user,r=rOprNGfwEbeRWgbNEkqO".to_string();
+
+        let server_first = "m=cb-required,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096";
+        match auth.process_server_first(server_first) {
+            Err(PgError::AuthenticationFailed(msg)) => {
+                assert!(msg.contains("mandatory extension"), "got: {msg}");
+            }
+            other => panic!("expected AuthenticationFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_scram_sha256_rejects_duplicate_server_first_iterations() {
+        let cx = Cx::for_testing();
+        let mut auth = ScramAuth::new(&cx, "user", "pencil", ScramChannelBinding::None);
+        auth.client_nonce = "rOprNGfwEbeRWgbNEkqO".to_string();
+        auth.client_first_bare = "n=user,r=rOprNGfwEbeRWgbNEkqO".to_string();
+
+        let server_first = "r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096,i=8192";
+        match auth.process_server_first(server_first) {
+            Err(PgError::AuthenticationFailed(msg)) => {
+                assert!(msg.contains("duplicate iterations"), "got: {msg}");
+            }
+            other => panic!("expected AuthenticationFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_scram_sha256_rejects_server_final_error_before_auth_ok() {
+        let cx = Cx::for_testing();
+        let mut auth = ScramAuth::new(&cx, "user", "pencil", ScramChannelBinding::None);
+        auth.client_nonce = "rOprNGfwEbeRWgbNEkqO".to_string();
+        auth.client_first_bare = "n=user,r=rOprNGfwEbeRWgbNEkqO".to_string();
+
+        let server_first = "r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096";
+        auth.process_server_first(server_first)
+            .expect("Should process RFC server first message");
+
+        match auth.verify_server_final("e=invalid-proof") {
+            Err(PgError::AuthenticationFailed(msg)) => {
+                assert!(msg.contains("invalid-proof"), "got: {msg}");
             }
             other => panic!("expected AuthenticationFailed, got {other:?}"),
         }
