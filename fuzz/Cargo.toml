@@ -698,6 +698,17 @@ test = false
 doc = false
 bench = false
 
+# Tick #118 — Local queue steal-half operations correctness testing
+# Tests arbitrary push/local-pop/steal-half sequences across multiple workers
+# to verify: total drained == total pushed, no duplicates, and FIFO within local operations.
+# Validates LIFO owner behavior, FIFO stealer behavior, and steal-batch properties.
+[[bin]]
+name = "local_queue_steal_half"
+path = "fuzz_targets/local_queue_steal_half.rs"
+test = false
+doc = false
+bench = false
+
 [[bin]]
 name = "fuzz_qpack_decode"
 path = "fuzz_targets/qpack_decode.rs"
@@ -1723,6 +1734,13 @@ bench = false
 [[bin]]
 name = "grpc_streaming_server_cancel_timing"
 path = "fuzz_targets/grpc_streaming_server_cancel_timing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_health_service_name"
+path = "fuzz_targets/grpc_health_service_name.rs"
 test = false
 doc = false
 bench = false
