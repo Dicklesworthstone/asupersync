@@ -4904,6 +4904,101 @@ mod tests {
         crate::test_complete!("metamorphic_resource_reuse_equivalence");
     }
 
+    #[derive(Debug, PartialEq, Eq)]
+    struct AcquireDropEquivalenceSurface {
+        stats_after_release: (usize, usize, usize, u64),
+        reacquired_value: u32,
+        stats_while_reacquired: (usize, usize, usize, u64),
+    }
+
+    fn run_acquire_drop_equivalence_surface(explicit_drop: bool) -> AcquireDropEquivalenceSurface {
+        let counter = std::sync::atomic::AtomicU32::new(0);
+        let factory = move || {
+            let id = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move { Ok::<_, Box<dyn std::error::Error + Send + Sync>>(id) })
+                as std::pin::Pin<Box<dyn Future<Output = _> + Send>>
+        };
+
+        let pool = GenericPool::new(factory, PoolConfig::with_max_size(2));
+        let cx: crate::cx::Cx = crate::cx::Cx::for_testing();
+
+        if explicit_drop {
+            let resource =
+                futures_lite::future::block_on(pool.acquire(&cx)).expect("acquire should succeed");
+            drop(resource);
+        } else {
+            {
+                let _resource = futures_lite::future::block_on(pool.acquire(&cx))
+                    .expect("acquire should succeed");
+            }
+        }
+
+        let stats_after_release = {
+            let stats = pool.stats();
+            (
+                stats.active,
+                stats.idle,
+                stats.total,
+                stats.total_acquisitions,
+            )
+        };
+
+        let reacquired =
+            futures_lite::future::block_on(pool.acquire(&cx)).expect("reacquire should succeed");
+        let reacquired_value = *reacquired;
+        let stats_while_reacquired = {
+            let stats = pool.stats();
+            (
+                stats.active,
+                stats.idle,
+                stats.total,
+                stats.total_acquisitions,
+            )
+        };
+        reacquired.return_to_pool();
+
+        AcquireDropEquivalenceSurface {
+            stats_after_release,
+            reacquired_value,
+            stats_while_reacquired,
+        }
+    }
+
+    #[test]
+    fn metamorphic_acquire_then_explicit_drop_matches_scope_drop() {
+        init_test("metamorphic_acquire_then_explicit_drop_matches_scope_drop");
+
+        let explicit_drop = run_acquire_drop_equivalence_surface(true);
+        let scope_drop = run_acquire_drop_equivalence_surface(false);
+
+        crate::assert_with_log!(
+            explicit_drop == scope_drop,
+            "explicit drop and scope-end drop should produce the same pool surface",
+            format!("{scope_drop:?}"),
+            format!("{explicit_drop:?}")
+        );
+        crate::assert_with_log!(
+            explicit_drop.stats_after_release == (0, 1, 1, 1),
+            "released surface after first acquire",
+            (0usize, 1usize, 1usize, 1u64),
+            explicit_drop.stats_after_release
+        );
+        crate::assert_with_log!(
+            explicit_drop.stats_while_reacquired == (1, 0, 1, 2),
+            "reacquire surface after drop equivalence",
+            (1usize, 0usize, 1usize, 2u64),
+            explicit_drop.stats_while_reacquired
+        );
+        crate::assert_with_log!(
+            explicit_drop.reacquired_value == 0,
+            "both drop paths should recycle the same first resource",
+            0u32,
+            explicit_drop.reacquired_value
+        );
+
+        crate::test_complete!("metamorphic_acquire_then_explicit_drop_matches_scope_drop");
+    }
+
     #[test]
     fn metamorphic_cancelled_waiter_preserves_reuse_identity() {
         init_test("metamorphic_cancelled_waiter_preserves_reuse_identity");
