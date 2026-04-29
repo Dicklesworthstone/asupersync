@@ -1181,6 +1181,112 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_async_panic_recovery_preserves_no_poison_surface() {
+        init_test("metamorphic_async_panic_recovery_preserves_no_poison_surface");
+
+        let recovered = OnceCell::<u32>::new();
+        let fresh = OnceCell::<u32>::new();
+        let panic_gate = Arc::new(AtomicBool::new(false));
+        let recovery_runs = Arc::new(AtomicUsize::new(0));
+        let expected = 55u32;
+
+        let panic_gate_for_init = Arc::clone(&panic_gate);
+        let mut panicking_init = Box::pin(recovered.get_or_init(move || {
+            let panic_gate_for_init = Arc::clone(&panic_gate_for_init);
+            async move {
+                poll_fn(move |_| {
+                    if panic_gate_for_init.load(Ordering::SeqCst) {
+                        panic!("boom");
+                    }
+                    Poll::Pending
+                })
+                .await
+            }
+        }));
+
+        let recovery_runs_for_waiter = Arc::clone(&recovery_runs);
+        let mut waiter = Box::pin(recovered.get_or_init(move || {
+            let recovery_runs_for_waiter = Arc::clone(&recovery_runs_for_waiter);
+            async move {
+                recovery_runs_for_waiter.fetch_add(1, Ordering::SeqCst);
+                expected
+            }
+        }));
+
+        let noop = noop_waker();
+        let mut cx = Context::from_waker(&noop);
+
+        assert!(Future::poll(panicking_init.as_mut(), &mut cx).is_pending());
+        assert!(Future::poll(waiter.as_mut(), &mut cx).is_pending());
+        assert_eq!(recovered.state.load(Ordering::Acquire), INITIALIZING);
+        assert_eq!(
+            recovered
+                .waiters
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .waiters
+                .len(),
+            1,
+            "the waiter should be registered while the first initializer is inflight"
+        );
+
+        panic_gate.store(true, Ordering::SeqCst);
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            Future::poll(panicking_init.as_mut(), &mut cx)
+        }));
+        assert!(
+            panic_result.is_err(),
+            "initializer panic should propagate to the initiating caller"
+        );
+
+        assert_eq!(
+            recovered.state.load(Ordering::Acquire),
+            UNINIT,
+            "panic recovery must reset the cell to the uninitialized state"
+        );
+        assert!(!recovered.is_initialized());
+        assert_eq!(recovered.get(), None);
+        assert_eq!(
+            recovered
+                .waiters
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .waiters
+                .len(),
+            0,
+            "panic recovery must drain queued waiter registrations"
+        );
+
+        let recovered_value = match Future::poll(waiter.as_mut(), &mut cx) {
+            Poll::Ready(value) => *value,
+            Poll::Pending => panic!("waiter should retry and initialize after panic recovery"),
+        };
+        let fresh_value = *block_on(fresh.get_or_init(|| async move { expected }));
+
+        assert_eq!(
+            recovery_runs.load(Ordering::SeqCst),
+            1,
+            "exactly one recovery initializer should run"
+        );
+        assert_eq!(recovered_value, fresh_value);
+        assert_eq!(recovered.get(), fresh.get());
+        assert_eq!(recovered.is_initialized(), fresh.is_initialized());
+        assert_eq!(recovered.state.load(Ordering::Acquire), INITIALIZED);
+        assert_eq!(
+            recovered
+                .waiters
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .waiters
+                .len(),
+            0,
+            "the recovery path must not leave behind waiter state"
+        );
+
+        crate::test_complete!("metamorphic_async_panic_recovery_preserves_no_poison_surface");
+    }
+
+    #[test]
     fn metamorphic_blocking_contenders_converge_on_single_observable_winner() {
         init_test("metamorphic_blocking_contenders_converge_on_single_observable_winner");
         let _lock = acquire_blocking_test_lock();
