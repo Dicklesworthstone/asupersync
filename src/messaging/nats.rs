@@ -630,7 +630,7 @@ fn parse_subscription_pattern(pattern: &str) -> Option<Vec<SubscriptionPatternTo
 }
 
 fn parse_publish_subject(subject: &str) -> Option<Vec<&str>> {
-    if subject.is_empty() {
+    if subject.is_empty() || subject.len() > MAX_NATS_SUBJECT_BYTES {
         return None;
     }
 
@@ -669,6 +669,12 @@ fn validate_nats_subscription_pattern(pattern: &str, field: &str) -> Result<(), 
 #[doc(hidden)]
 pub fn fuzz_validate_nats_publish_subject(subject: &str) -> Result<(), String> {
     validate_nats_publish_subject(subject, "subject").map_err(|err| err.to_string())
+}
+
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_parse_nats_publish_subject(subject: &str) -> Option<Vec<String>> {
+    parse_publish_subject(subject).map(|tokens| tokens.into_iter().map(ToOwned::to_owned).collect())
 }
 
 #[cfg(feature = "test-internals")]
@@ -3549,6 +3555,12 @@ mod tests {
     #[test]
     fn test_validate_nats_token_rejects_tab() {
         assert!(validate_nats_token("foo\tbar", "queue").is_err());
+    }
+
+    #[test]
+    fn test_parse_publish_subject_rejects_oversized_subject() {
+        let oversized = "a".repeat(MAX_NATS_SUBJECT_BYTES + 1);
+        assert!(parse_publish_subject(&oversized).is_none());
     }
 
     #[test]
