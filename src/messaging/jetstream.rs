@@ -580,17 +580,12 @@ impl ConsumerConfig {
                 name.len(),
             )));
         }
-        if name.chars().any(|ch| {
-            ch.is_whitespace()
-                || ch == '.'
-                || ch == '*'
-                || ch == '>'
-                || ch == '/'
-                || ch == '\\'
-                || ch.is_control()
-        }) {
+        if name
+            .chars()
+            .any(|ch| !matches!(ch, 'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_'))
+        {
             return Err(JsError::InvalidConfig(format!(
-                "stream name contains prohibited characters: {name:?}"
+                "stream name must contain only ASCII letters, digits, '-' or '_': {name:?}"
             )));
         }
         Ok(())
@@ -1836,6 +1831,19 @@ mod tests {
             err.to_string()
                 .contains("consumer name contains prohibited characters")
         );
+    }
+
+    #[test]
+    fn stream_config_rejects_unicode_confusables() {
+        let err = ConsumerConfig::validate_stream_name("orders．prod").unwrap_err();
+        assert!(matches!(err, JsError::InvalidConfig(_)));
+        assert!(err.to_string().contains("ASCII letters"));
+
+        let err = ConsumerConfig::validate_stream_name("orders／prod").unwrap_err();
+        assert!(matches!(err, JsError::InvalidConfig(_)));
+        assert!(err.to_string().contains("ASCII letters"));
+
+        assert!(ConsumerConfig::validate_stream_name("orders_prod-1").is_ok());
     }
 
     #[test]

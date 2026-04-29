@@ -21,6 +21,9 @@ enum SubjectMutation {
     InsertCr,
     InsertLf,
     InsertDot,
+    InsertFullwidthDot,
+    InsertFullwidthSlash,
+    InsertCyrillicA,
     OversizedAscii,
 }
 
@@ -50,6 +53,9 @@ fn insert_char(name: &mut String, insertion: usize, mutation: SubjectMutation) {
         SubjectMutation::InsertCr => insert_str_at_char(name, insertion, "\r"),
         SubjectMutation::InsertLf => insert_str_at_char(name, insertion, "\n"),
         SubjectMutation::InsertDot => insert_str_at_char(name, insertion, "."),
+        SubjectMutation::InsertFullwidthDot => insert_str_at_char(name, insertion, "．"),
+        SubjectMutation::InsertFullwidthSlash => insert_str_at_char(name, insertion, "／"),
+        SubjectMutation::InsertCyrillicA => insert_str_at_char(name, insertion, "а"),
     }
 }
 
@@ -62,16 +68,9 @@ fn insert_str_at_char(name: &mut String, insertion: usize, value: &str) {
     name.insert_str(byte_index, value);
 }
 
-fn has_prohibited_chars(name: &str) -> bool {
-    name.chars().any(|ch| {
-        ch.is_whitespace()
-            || ch == '.'
-            || ch == '*'
-            || ch == '>'
-            || ch == '/'
-            || ch == '\\'
-            || ch.is_control()
-    })
+fn has_invalid_stream_name_chars(name: &str) -> bool {
+    name.chars()
+        .any(|ch| !matches!(ch, 'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_'))
 }
 
 fuzz_target!(|input: SubjectNameInput| {
@@ -111,10 +110,10 @@ fuzz_target!(|input: SubjectNameInput| {
         );
     }
 
-    if has_prohibited_chars(&name) {
+    if has_invalid_stream_name_chars(&name) {
         assert!(
             validation.is_err(),
-            "stream name with prohibited characters should be rejected: {:?}",
+            "stream name with non-ASCII or prohibited characters should be rejected: {:?}",
             name
         );
     }
@@ -122,6 +121,7 @@ fuzz_target!(|input: SubjectNameInput| {
     if let Ok(()) = validation {
         assert!(!name.is_empty());
         assert!(name.len() <= max_name_bytes);
-        assert!(!has_prohibited_chars(&name));
+        assert!(name.is_ascii());
+        assert!(!has_invalid_stream_name_chars(&name));
     }
 });
