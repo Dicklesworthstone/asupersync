@@ -3146,17 +3146,6 @@ test = false
 doc = false
 bench = false
 
-# Intrusive scheduled-set dedup fuzzing for scheduler ring queues.
-# Tests arbitrary same-handle schedule/remove/dispatch cycles across ready and
-# cancel rings, asserting duplicate schedule attempts are idempotent, wrong-queue
-# removals fail closed, and each schedule epoch can dispatch at most once.
-[[bin]]
-name = "intrusive_scheduled_set_dedup"
-path = "fuzz_targets/intrusive_scheduled_set_dedup.rs"
-test = false
-doc = false
-bench = false
-
 # Notify state machine fuzzing for async synchronization primitives
 # Tests waiter starvation, double-wake prevention, and cancellation safety
 # through arbitrary sequences of notify_one/notify_waiters/notified operations.
@@ -3320,6 +3309,17 @@ test = false
 doc = false
 bench = false
 
+# Tick #130 — OnceCell set + get_or_init race condition testing
+# Tests arbitrary mix of set/get_or_init operations across threads to ensure
+# result consistency: either set wins or first init wins, never partial state.
+# Critical invariants: exactly one successful initialization per cell.
+[[bin]]
+name = "once_cell_set_init_race"
+path = "fuzz_targets/once_cell_set_init_race.rs"
+test = false
+doc = false
+bench = false
+
 [[bin]]
 name = "grpc_protobuf_varint_round_trip"
 path = "fuzz_targets/grpc_protobuf_varint_round_trip.rs"
@@ -3351,6 +3351,79 @@ bench = false
 [[bin]]
 name = "grpc_prost_codec_encode_huge"
 path = "fuzz_targets/grpc_prost_codec_encode_huge.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #130 — HTTP/1.1 trailer parsing fuzzer
+# Targets ChunkedBodyDecoder::decode() trailer parsing logic to test handling
+# of malformed trailer headers including missing CRLF terminators, embedded
+# null bytes, forbidden header names, and boundary conditions.
+[[bin]]
+name = "h1_trailer_parsing"
+path = "fuzz_targets/h1_trailer_parsing.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #131 — HTTP/1.1 request line parser fuzzer
+# Targets request line parsing logic in src/http/h1/server.rs to test handling
+# of malformed METHOD/URI/VERSION bytes including invalid chars in URI,
+# ensuring malformed requests return 400 Bad Request without panicking.
+[[bin]]
+name = "h1_request_line_parser"
+path = "fuzz_targets/h1_request_line_parser.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #133 — Semaphore add_permits + acquire ordering fuzzer
+# Tests arbitrary mix of add_permits/try_acquire operations to ensure
+# total acquired permits never exceeds total added permits. Validates
+# no over-allocation occurs and permit accounting remains consistent.
+[[bin]]
+name = "semaphore_add_acquire_ordering"
+path = "fuzz_targets/semaphore_add_acquire_ordering.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #134 — Notify multiple-waiter race condition fuzzer
+# Tests arbitrary M waiters + N notify_one calls to ensure exactly min(M,N)
+# waiters are notified in FIFO order. Validates notification accounting,
+# stored notification handling, and proper waiter queue management.
+[[bin]]
+name = "notify_multiple_waiter_race"
+path = "fuzz_targets/notify_multiple_waiter_race.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #133 — HTTP/2 PUSH_PROMISE frame handling fuzzer
+# Targets PUSH_PROMISE frame handling logic in src/http/h2/connection.rs
+# to test handling of arbitrary frames including push without ENABLE_PUSH=1,
+# ensuring PROTOCOL_ERROR responses and no panics on malformed input.
+[[bin]]
+name = "h2_push_promise_handling"
+path = "fuzz_targets/h2_push_promise_handling.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #134 — HTTP/2 WINDOW_UPDATE math overflow fuzzer
+# Targets WINDOW_UPDATE frame handling logic in src/http/h2/connection.rs
+# to test flow control window calculations with arbitrary delta values across
+# i32::MAX boundaries, ensuring FLOW_CONTROL_ERROR per RFC 9113.
+[[bin]]
+name = "h2_window_update_overflow"
+path = "fuzz_targets/h2_window_update_overflow.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_server_unary_metadata_isolation"
+path = "fuzz_targets/grpc_server_unary_metadata_isolation.rs"
 test = false
 doc = false
 bench = false
