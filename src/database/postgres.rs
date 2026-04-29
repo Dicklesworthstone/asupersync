@@ -5235,10 +5235,34 @@ pub fn build_bind_msg(
     buf.write_cstring(portal);
     buf.write_cstring(stmt_name);
 
-    // Parameter format codes — one per parameter.
-    buf.write_i16(params.len() as i16);
+    // PostgreSQL allows the format-code section to be compressed when all
+    // parameters share the same format. psql/libpq emits count=0 for the
+    // default all-text case and count=1 for any uniform non-text case.
+    let mut param_formats = Vec::with_capacity(params.len());
+    let mut all_text = true;
+    let mut all_same = true;
+    let mut first_format = None;
     for p in params {
-        buf.write_i16(p.format() as i16);
+        let format = p.format();
+        all_text &= format == Format::Text;
+        if let Some(first) = first_format {
+            all_same &= format == first;
+        } else {
+            first_format = Some(format);
+        }
+        param_formats.push(format);
+    }
+
+    if param_formats.is_empty() || all_text {
+        buf.write_i16(0);
+    } else if all_same {
+        buf.write_i16(1);
+        buf.write_i16(first_format.expect("uniform format code must exist") as i16);
+    } else {
+        buf.write_i16(param_formats.len() as i16);
+        for format in param_formats {
+            buf.write_i16(format as i16);
+        }
     }
 
     // Parameter values.
@@ -8096,6 +8120,35 @@ mod tests {
     }
 
     #[test]
+    fn build_bind_execute_msg_matches_psql_prepared_statement_wire_bytes() {
+        let params: Vec<&dyn ToSql> = vec![&42i32];
+        let bind = build_bind_msg("", "s", &params, Format::Text).unwrap();
+        let execute = build_execute_msg("", 0).unwrap();
+
+        // Captured from `psql 18.0` using:
+        //   PREPARE s(int) AS SELECT $1::int4;
+        //   \bind_named s 42
+        //   \g
+        //
+        // The trace shows psql/libpq compresses the parameter-format section to
+        // count=0 for the default all-text case, while still emitting a single
+        // result-format code of 0.
+        let expected_bind = vec![
+            b'B', 0, 0, 0, 21, 0, b's', 0, 0, 0, 0, 1, 0, 0, 0, 2, b'4', b'2', 0, 1, 0, 0,
+        ];
+        let expected_execute = vec![b'E', 0, 0, 0, 9, 0, 0, 0, 0, 0];
+
+        assert_eq!(
+            bind, expected_bind,
+            "Bind wire bytes must match psql for named prepared statements"
+        );
+        assert_eq!(
+            execute, expected_execute,
+            "Execute wire bytes must match psql for named prepared statements"
+        );
+    }
+
+    #[test]
     fn build_bind_msg_with_null() {
         let val: Option<i32> = None;
         let params: Vec<&dyn ToSql> = vec![&val];
@@ -9487,7 +9540,10 @@ mod tests {
 
             // CONFORMANCE CHECK 1: CopyData message structure vs wire protocol spec
             // Format: type byte 'd' (0x64) + 4-byte big-endian length + data
-            assert_eq!(copy_data_msg[0], b'd', "CopyData type byte must be 'd' (0x64)");
+            assert_eq!(
+                copy_data_msg[0], b'd',
+                "CopyData type byte must be 'd' (0x64)"
+            );
 
             let data_length = u32::from_be_bytes([
                 copy_data_msg[1],
@@ -9503,8 +9559,7 @@ mod tests {
 
             let payload = &copy_data_msg[5..];
             assert_eq!(
-                payload,
-                test_data,
+                payload, test_data,
                 "CopyData payload must exactly match input data"
             );
 
@@ -9520,8 +9575,15 @@ mod tests {
 
             // CONFORMANCE CHECK 2: CopyDone message structure vs wire protocol spec
             // Format: type byte 'c' (0x63) + 4-byte big-endian length of 0
-            assert_eq!(copy_done_msg[0], b'c', "CopyDone type byte must be 'c' (0x63)");
-            assert_eq!(copy_done_msg.len(), 5, "CopyDone must be exactly 5 bytes total");
+            assert_eq!(
+                copy_done_msg[0], b'c',
+                "CopyDone type byte must be 'c' (0x63)"
+            );
+            assert_eq!(
+                copy_done_msg.len(),
+                5,
+                "CopyDone must be exactly 5 bytes total"
+            );
 
             let done_length = u32::from_be_bytes([
                 copy_done_msg[1],
@@ -9529,7 +9591,10 @@ mod tests {
                 copy_done_msg[3],
                 copy_done_msg[4],
             ]);
-            assert_eq!(done_length, 0, "CopyDone length field must be 0 (no payload)");
+            assert_eq!(
+                done_length, 0,
+                "CopyDone length field must be 0 (no payload)"
+            );
 
             // CONFORMANCE CHECK 3: Message sequence compatibility
             // Verify that a CopyData + CopyDone sequence forms a valid protocol exchange
@@ -9548,22 +9613,27 @@ mod tests {
 
             let second_msg_start = 5 + first_msg_len; // Skip type + length + data of first message
             assert_eq!(
-                full_sequence[second_msg_start],
-                b'c',
+                full_sequence[second_msg_start], b'c',
                 "Second message must be CopyDone"
             );
 
             // CONFORMANCE VERIFICATION: According to PostgreSQL wire protocol specification,
             // CopyData and CopyDone messages must follow exact byte layout for compatibility
             // with all PostgreSQL clients (psql, libpq, etc.)
-            println!("✓ PostgreSQL CopyData/CopyDone wire format differential conformance verified");
+            println!(
+                "✓ PostgreSQL CopyData/CopyDone wire format differential conformance verified"
+            );
             println!(
                 "  - CopyData: type=0x{:02x}, length={}, data={}bytes",
-                copy_data_msg[0], data_length, test_data.len()
+                copy_data_msg[0],
+                data_length,
+                test_data.len()
             );
             println!(
                 "  - CopyDone: type=0x{:02x}, length={}, total={}bytes",
-                copy_done_msg[0], done_length, copy_done_msg.len()
+                copy_done_msg[0],
+                done_length,
+                copy_done_msg.len()
             );
             println!("  - Message sequence forms valid PostgreSQL wire protocol exchange");
         }
@@ -10477,8 +10547,8 @@ mod tests {
         // Test UUID: 550e8400-e29b-41d4-a716-446655440000
         let uuid_string = "550e8400-e29b-41d4-a716-446655440000";
         let uuid_bytes: [u8; 16] = [
-            0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4,
-            0xa7, 0x16, 0x44, 0x66, 0x55, 0x44, 0x00, 0x00,
+            0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4, 0xa7, 0x16, 0x44, 0x66, 0x55, 0x44,
+            0x00, 0x00,
         ];
 
         let column_name = "uuid_col";
