@@ -21,29 +21,62 @@ fn load_scenario(name: &str) -> Scenario {
         .unwrap_or_else(|e| panic!("Failed to parse {}: {e}", path.display()))
 }
 
+fn assert_scenario_valid(name: &str) {
+    let errors = load_scenario(name).validate();
+    assert!(errors.is_empty(), "Validation errors: {errors:?}");
+}
+
+fn assert_scenario_run_passes(name: &str, require_faults: bool) {
+    let scenario = load_scenario(name);
+    let result = ScenarioRunner::run_with_seed(&scenario, None).expect("scenario runner error");
+    assert!(
+        result.passed(),
+        "Scenario failed: violations={:?}",
+        result.lab_report.invariant_violations
+    );
+    if require_faults {
+        assert!(
+            result.faults_injected > 0,
+            "Expected faults to be injected in saga partition scenario"
+        );
+    }
+}
+
+fn assert_replay_matches(name: &str, expected_id: &str) {
+    let scenario = load_scenario(name);
+    let result = ScenarioRunner::validate_replay(&scenario).expect("replay divergence detected");
+    assert_eq!(result.scenario_id, expected_id);
+}
+
+fn assert_explore_passes(name: &str, seeds: usize) {
+    let scenario = load_scenario(name);
+    let result = ScenarioRunner::explore_seeds(&scenario, 0, seeds).expect("exploration error");
+    assert!(
+        result.all_passed(),
+        "Failed seeds: {}/{}. First failure at seed {:?}",
+        result.failed,
+        result.seeds_explored,
+        result.first_failure_seed
+    );
+}
+
 // -----------------------------------------------------------------------
 // Step 1: All scenarios validate without errors
 // -----------------------------------------------------------------------
 
 #[test]
 fn validate_01_race_condition() {
-    let scenario = load_scenario("01_race_condition.yaml");
-    let errors = scenario.validate();
-    assert!(errors.is_empty(), "Validation errors: {errors:?}");
+    assert_scenario_valid("01_race_condition.yaml");
 }
 
 #[test]
 fn validate_02_obligation_leak() {
-    let scenario = load_scenario("02_obligation_leak.yaml");
-    let errors = scenario.validate();
-    assert!(errors.is_empty(), "Validation errors: {errors:?}");
+    assert_scenario_valid("02_obligation_leak.yaml");
 }
 
 #[test]
 fn validate_03_saga_partition() {
-    let scenario = load_scenario("03_saga_partition.yaml");
-    let errors = scenario.validate();
-    assert!(errors.is_empty(), "Validation errors: {errors:?}");
+    assert_scenario_valid("03_saga_partition.yaml");
 }
 
 // -----------------------------------------------------------------------
@@ -52,40 +85,17 @@ fn validate_03_saga_partition() {
 
 #[test]
 fn run_01_race_condition() {
-    let scenario = load_scenario("01_race_condition.yaml");
-    let result = ScenarioRunner::run_with_seed(&scenario, None).expect("scenario runner error");
-    assert!(
-        result.passed(),
-        "Scenario failed: violations={:?}",
-        result.lab_report.invariant_violations
-    );
+    assert_scenario_run_passes("01_race_condition.yaml", false);
 }
 
 #[test]
 fn run_02_obligation_leak() {
-    let scenario = load_scenario("02_obligation_leak.yaml");
-    let result = ScenarioRunner::run_with_seed(&scenario, None).expect("scenario runner error");
-    assert!(
-        result.passed(),
-        "Scenario failed: violations={:?}",
-        result.lab_report.invariant_violations
-    );
+    assert_scenario_run_passes("02_obligation_leak.yaml", false);
 }
 
 #[test]
 fn run_03_saga_partition() {
-    let scenario = load_scenario("03_saga_partition.yaml");
-    let result = ScenarioRunner::run_with_seed(&scenario, None).expect("scenario runner error");
-    assert!(
-        result.passed(),
-        "Scenario failed: violations={:?}",
-        result.lab_report.invariant_violations
-    );
-    // Verify faults were actually injected
-    assert!(
-        result.faults_injected > 0,
-        "Expected faults to be injected in saga partition scenario"
-    );
+    assert_scenario_run_passes("03_saga_partition.yaml", true);
 }
 
 // -----------------------------------------------------------------------
@@ -94,23 +104,17 @@ fn run_03_saga_partition() {
 
 #[test]
 fn replay_01_race_condition() {
-    let scenario = load_scenario("01_race_condition.yaml");
-    let result = ScenarioRunner::validate_replay(&scenario).expect("replay divergence detected");
-    assert_eq!(result.scenario_id, "example-race-condition");
+    assert_replay_matches("01_race_condition.yaml", "example-race-condition");
 }
 
 #[test]
 fn replay_02_obligation_leak() {
-    let scenario = load_scenario("02_obligation_leak.yaml");
-    let result = ScenarioRunner::validate_replay(&scenario).expect("replay divergence detected");
-    assert_eq!(result.scenario_id, "example-obligation-leak");
+    assert_replay_matches("02_obligation_leak.yaml", "example-obligation-leak");
 }
 
 #[test]
 fn replay_03_saga_partition() {
-    let scenario = load_scenario("03_saga_partition.yaml");
-    let result = ScenarioRunner::validate_replay(&scenario).expect("replay divergence detected");
-    assert_eq!(result.scenario_id, "example-saga-partition");
+    assert_replay_matches("03_saga_partition.yaml", "example-saga-partition");
 }
 
 // -----------------------------------------------------------------------
@@ -119,28 +123,12 @@ fn replay_03_saga_partition() {
 
 #[test]
 fn explore_01_race_condition_50_seeds() {
-    let scenario = load_scenario("01_race_condition.yaml");
-    let result = ScenarioRunner::explore_seeds(&scenario, 0, 50).expect("exploration error");
-    assert!(
-        result.all_passed(),
-        "Failed seeds: {}/{}. First failure at seed {:?}",
-        result.failed,
-        result.seeds_explored,
-        result.first_failure_seed
-    );
+    assert_explore_passes("01_race_condition.yaml", 50);
 }
 
 #[test]
 fn explore_02_obligation_leak_30_seeds() {
-    let scenario = load_scenario("02_obligation_leak.yaml");
-    let result = ScenarioRunner::explore_seeds(&scenario, 0, 30).expect("exploration error");
-    assert!(
-        result.all_passed(),
-        "Failed seeds: {}/{}. First failure at seed {:?}",
-        result.failed,
-        result.seeds_explored,
-        result.first_failure_seed
-    );
+    assert_explore_passes("02_obligation_leak.yaml", 30);
 }
 
 // -----------------------------------------------------------------------
