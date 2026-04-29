@@ -3973,6 +3973,8 @@ impl ThreeLaneWorker {
                 priority,
                 Time::from_nanos(current_time),
             );
+
+            self.parker.unpark();
         }
     }
 
@@ -4058,6 +4060,8 @@ impl ThreeLaneWorker {
                 0, // Timed tasks use priority 0
                 Time::from_nanos(current_time),
             );
+
+            self.parker.unpark();
         }
     }
 
@@ -9886,6 +9890,67 @@ mod tests {
         let next = worker.local.lock().pop_timed_only(Time::from_nanos(2000));
         assert!(next.is_some(), "task should be in local timed lane");
         assert_eq!(next.unwrap(), task_id);
+    }
+
+    #[test]
+    fn schedule_local_ready_and_timed_unpark_idle_worker() {
+        use std::sync::Barrier;
+        use std::sync::atomic::AtomicBool;
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let (mut scheduler, _state, _task_table) = task_table_scheduler(1, 3);
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
+        let parker = worker.parker.clone();
+
+        let parked = Arc::new(Barrier::new(2));
+        let woke_early = Arc::new(AtomicBool::new(false));
+
+        let parked_clone = Arc::clone(&parked);
+        let woke_early_clone = Arc::clone(&woke_early);
+        let wait_handle = thread::spawn(move || {
+            parked_clone.wait();
+            let start = Instant::now();
+            parker.park_timeout(Duration::from_millis(200));
+            woke_early_clone.store(
+                start.elapsed() < Duration::from_millis(150),
+                Ordering::SeqCst,
+            );
+        });
+
+        parked.wait();
+        thread::sleep(Duration::from_millis(10));
+        worker.schedule_local(TaskId::new_for_test(1, 0), 50);
+        wait_handle.join().expect("parker waiter should finish");
+        assert!(
+            woke_early.load(Ordering::SeqCst),
+            "schedule_local should unpark an idle worker"
+        );
+
+        let parker = worker.parker.clone();
+        let parked = Arc::new(Barrier::new(2));
+        let woke_early = Arc::new(AtomicBool::new(false));
+        let parked_clone = Arc::clone(&parked);
+        let woke_early_clone = Arc::clone(&woke_early);
+        let wait_handle = thread::spawn(move || {
+            parked_clone.wait();
+            let start = Instant::now();
+            parker.park_timeout(Duration::from_millis(200));
+            woke_early_clone.store(
+                start.elapsed() < Duration::from_millis(150),
+                Ordering::SeqCst,
+            );
+        });
+
+        parked.wait();
+        thread::sleep(Duration::from_millis(10));
+        worker.schedule_local_timed(TaskId::new_for_test(1, 1), Time::from_nanos(1000));
+        wait_handle.join().expect("parker waiter should finish");
+        assert!(
+            woke_early.load(Ordering::SeqCst),
+            "schedule_local_timed should unpark an idle worker"
+        );
     }
 
     #[test]
