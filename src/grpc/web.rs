@@ -310,6 +310,11 @@ pub struct WebFrameCodec {
     /// single-threaded and `Cell` matches that contract without the
     /// runtime cost of `RefCell`.
     poisoned: std::cell::Cell<bool>,
+    /// Once a trailer frame has decoded successfully, the gRPC-Web
+    /// stream is complete. Any later bytes are a protocol violation
+    /// and must fail closed instead of being parsed as a second
+    /// logical response.
+    completed: std::cell::Cell<bool>,
 }
 
 impl WebFrameCodec {
@@ -325,6 +330,7 @@ impl WebFrameCodec {
         Self {
             max_frame_size,
             poisoned: std::cell::Cell::new(false),
+            completed: std::cell::Cell::new(false),
         }
     }
 
@@ -347,6 +353,16 @@ impl WebFrameCodec {
                 "gRPC-Web codec is poisoned after a prior unrecoverable \
                  decode error (br-asupersync-nln9sc); construct a new \
                  WebFrameCodec to resume",
+            ));
+        }
+        if self.completed.get() {
+            if src.is_empty() {
+                return Ok(None);
+            }
+            self.poisoned.set(true);
+            return Err(GrpcError::protocol(
+                "received bytes after terminal gRPC-Web trailer \
+                 (br-asupersync-p2lx74)",
             ));
         }
 
@@ -408,6 +424,14 @@ impl WebFrameCodec {
             let trailer = decode_trailers(&payload).inspect_err(|_| {
                 self.poisoned.set(true);
             })?;
+            self.completed.set(true);
+            if !src.is_empty() {
+                self.poisoned.set(true);
+                return Err(GrpcError::protocol(
+                    "received bytes after terminal gRPC-Web trailer \
+                     (br-asupersync-p2lx74)",
+                ));
+            }
             Ok(Some(WebFrame::Trailers(trailer)))
         } else {
             Ok(Some(WebFrame::Data {
@@ -1226,6 +1250,37 @@ mod tests {
         let empty = buf.is_empty();
         crate::assert_with_log!(empty, "buffer consumed", true, empty);
         crate::test_complete!("test_mixed_data_and_trailers");
+    }
+
+    #[test]
+    fn p2lx74_binary_codec_rejects_bytes_after_terminal_trailer() {
+        init_test("p2lx74_binary_codec_rejects_bytes_after_terminal_trailer");
+        let codec = WebFrameCodec::new();
+        let mut buf = BytesMut::new();
+        codec
+            .encode_trailers(&Status::ok(), &Metadata::new(), &mut buf)
+            .expect("trailer encodes");
+        codec
+            .encode_data(b"smuggled", false, &mut buf)
+            .expect("extra frame encodes");
+
+        let err = codec
+            .decode(&mut buf)
+            .expect_err("bytes after terminal trailer must fail closed");
+        match err {
+            GrpcError::Protocol(msg) => {
+                assert!(
+                    msg.contains("terminal gRPC-Web trailer")
+                        && msg.contains("br-asupersync-p2lx74"),
+                    "unexpected protocol error: {msg}"
+                );
+            }
+            other => panic!("expected protocol error, got {other:?}"),
+        }
+        assert!(
+            codec.is_poisoned(),
+            "trailing bytes after trailer must poison the codec"
+        );
     }
 
     #[test]
@@ -2101,6 +2156,42 @@ mod tests {
         assert!(
             codec.decode(&mut decode_buf).unwrap().is_none(),
             "grpc-web trailer-only stream must decode to exactly one frame"
+        );
+    }
+
+    #[test]
+    fn p2lx74_text_mode_rejects_base64_stream_with_bytes_after_trailer() {
+        init_test("p2lx74_text_mode_rejects_base64_stream_with_bytes_after_trailer");
+
+        let codec = WebFrameCodec::new();
+        let mut binary = BytesMut::new();
+        codec
+            .encode_trailers(&Status::ok(), &Metadata::new(), &mut binary)
+            .expect("trailer-only grpc-web response must encode");
+        codec
+            .encode_data(b"smuggled", false, &mut binary)
+            .expect("trailing data frame encodes");
+
+        let text = base64_encode(binary.as_ref());
+        let decoded = _37svtb_decode_via_chunks(&text, &[2, 3, 5, 7, 11]);
+        let mut decode_buf = BytesMut::from(decoded.as_slice());
+
+        let err = codec
+            .decode(&mut decode_buf)
+            .expect_err("text-mode trailer smuggling must fail closed");
+        match err {
+            GrpcError::Protocol(msg) => {
+                assert!(
+                    msg.contains("terminal gRPC-Web trailer")
+                        && msg.contains("br-asupersync-p2lx74"),
+                    "unexpected protocol error: {msg}"
+                );
+            }
+            other => panic!("expected protocol error, got {other:?}"),
+        }
+        assert!(
+            codec.is_poisoned(),
+            "trailing bytes after trailer must poison the codec"
         );
     }
 
