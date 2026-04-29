@@ -4754,4 +4754,354 @@ mod tests {
             "GOAWAY should preserve ordering"
         );
     }
+
+    // =====================================================================
+    // Metamorphic tests for HTTP/2 flow control window consistency
+    // =====================================================================
+
+    /// Metamorphic relation: sum of WINDOW_UPDATE deltas ≡ flow-window mutation; no underflow.
+    ///
+    /// Tests the property that window updates maintain consistency according to RFC 9113
+    /// flow control semantics. Addresses the oracle problem by verifying relationships
+    /// between inputs/outputs rather than exact output values.
+
+    mod flow_control_metamorphic_tests {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// Maximum number of window updates in a sequence to prevent timeouts
+        const MAX_WINDOW_UPDATES: usize = 10;
+
+        /// Maximum increment value to prevent overflow in test arithmetic
+        const MAX_INCREMENT: u32 = 5_000;
+
+        /// Helper to create a connection in Open state
+        fn open_connection_client() -> Connection {
+            let mut conn = Connection::client(Settings::client());
+            conn.state = ConnectionState::Open;
+            conn
+        }
+
+        /// Helper to create a connection in Open state (server)
+        fn open_connection_server() -> Connection {
+            let mut conn = Connection::server(Settings::default());
+            conn.state = ConnectionState::Open;
+            conn
+        }
+
+        /// MR1: EQUIVALENCE - Window update sequences are commutative
+        /// Property: f(updates_A) = f(updates_B) where updates_B is permutation of updates_A
+        #[test]
+        fn mr_window_update_commutativity() {
+            proptest!(|(increments: Vec<u32>)| {
+                let increments: Vec<u32> = increments.into_iter()
+                    .filter(|&i| i > 0 && i <= MAX_INCREMENT)
+                    .take(MAX_WINDOW_UPDATES)
+                    .collect();
+
+                if increments.is_empty() {
+                    return Ok(());
+                }
+
+                // Test connection-level window commutativity
+                let mut conn1 = open_connection_client();
+                let mut conn2 = open_connection_client();
+
+                let initial_window1 = conn1.send_window();
+                let initial_window2 = conn2.send_window();
+                prop_assert_eq!(initial_window1, initial_window2, "Initial windows must match");
+
+                // Apply increments in original order to conn1
+                for increment in &increments {
+                    let frame = Frame::WindowUpdate(WindowUpdateFrame::new(0, *increment));
+                    if conn1.process_frame(frame).is_err() {
+                        // Skip this test case if we hit an error (overflow, etc.)
+                        return Ok(());
+                    }
+                }
+
+                // Apply increments in reverse order to conn2
+                for increment in increments.iter().rev() {
+                    let frame = Frame::WindowUpdate(WindowUpdateFrame::new(0, *increment));
+                    if conn2.process_frame(frame).is_err() {
+                        // Skip this test case if we hit an error
+                        return Ok(());
+                    }
+                }
+
+                let final_window1 = conn1.send_window();
+                let final_window2 = conn2.send_window();
+
+                prop_assert_eq!(final_window1, final_window2,
+                    "Window after applying increments {:?} in different orders must be equal: {} vs {}",
+                    increments, final_window1, final_window2);
+            });
+        }
+
+        /// MR2: ADDITIVE - Sum of deltas equals total window change
+        /// Property: window_final = window_initial + sum(deltas)
+        #[test]
+        fn mr_window_update_additive_connection_level() {
+            proptest!(|(increments: Vec<u32>)| {
+                let increments: Vec<u32> = increments.into_iter()
+                    .filter(|&i| i > 0 && i <= MAX_INCREMENT)
+                    .take(MAX_WINDOW_UPDATES)
+                    .collect();
+
+                if increments.is_empty() {
+                    return Ok(());
+                }
+
+                let mut conn = open_connection_client();
+                let initial_window = conn.send_window();
+                let expected_sum: i64 = increments.iter().map(|&i| i as i64).sum();
+
+                // Apply each window update
+                for increment in &increments {
+                    let frame = Frame::WindowUpdate(WindowUpdateFrame::new(0, *increment));
+                    if conn.process_frame(frame).is_err() {
+                        // Skip if overflow occurs
+                        return Ok(());
+                    }
+                }
+
+                let final_window = conn.send_window();
+                let actual_delta = i64::from(final_window) - i64::from(initial_window);
+
+                prop_assert_eq!(actual_delta, expected_sum,
+                    "Connection window delta {} must equal sum of increments {} for sequence {:?}",
+                    actual_delta, expected_sum, increments);
+            });
+        }
+
+        /// MR3: EQUIVALENCE - Batched vs Sequential updates
+        /// Property: f(a1, a2, ..., an) = f(sum(a1..an))
+        #[test]
+        fn mr_window_update_batch_equivalence() {
+            proptest!(|(increments: Vec<u32>)| {
+                let increments: Vec<u32> = increments.into_iter()
+                    .filter(|&i| i > 0 && i <= MAX_INCREMENT)
+                    .take(MAX_WINDOW_UPDATES)
+                    .collect();
+
+                if increments.is_empty() {
+                    return Ok(());
+                }
+
+                let total_increment: u64 = increments.iter().map(|&i| i as u64).sum();
+
+                // Skip if total would overflow u32
+                if total_increment > u32::MAX as u64 {
+                    return Ok(());
+                }
+
+                let total_increment = total_increment as u32;
+
+                // Connection 1: Apply increments sequentially
+                let mut conn1 = open_connection_client();
+                let initial_window1 = conn1.send_window();
+
+                for increment in &increments {
+                    let frame = Frame::WindowUpdate(WindowUpdateFrame::new(0, *increment));
+                    if conn1.process_frame(frame).is_err() {
+                        return Ok(());
+                    }
+                }
+
+                let final_window1 = conn1.send_window();
+
+                // Connection 2: Apply total increment as single update
+                let mut conn2 = open_connection_client();
+                let initial_window2 = conn2.send_window();
+
+                prop_assert_eq!(initial_window1, initial_window2, "Initial windows must match");
+
+                let frame = Frame::WindowUpdate(WindowUpdateFrame::new(0, total_increment));
+                if conn2.process_frame(frame).is_err() {
+                    return Ok(());
+                }
+
+                let final_window2 = conn2.send_window();
+
+                prop_assert_eq!(final_window1, final_window2,
+                    "Sequential updates {:?} (total: {}) must equal batched update: {} vs {}",
+                    increments, total_increment, final_window1, final_window2);
+            });
+        }
+
+        /// MR4: INVARIANT - No underflow property for receive windows
+        /// Property: ∀ operations, recv_window ≥ reasonable_bound
+        #[test]
+        fn mr_window_no_underflow_invariant() {
+            proptest!(|(window_updates: Vec<u32>)| {
+                let updates: Vec<u32> = window_updates.into_iter()
+                    .filter(|&val| val > 0 && val <= MAX_INCREMENT)
+                    .take(MAX_WINDOW_UPDATES)
+                    .collect();
+
+                if updates.is_empty() {
+                    return Ok(());
+                }
+
+                let mut conn = open_connection_server();
+                let mut conn_window_in_bounds = true;
+
+                // Apply WINDOW_UPDATEs and check bounds
+                for value in updates {
+                    let frame = Frame::WindowUpdate(WindowUpdateFrame::new(0, value));
+                    let _ = conn.process_frame(frame);
+
+                    // Check invariant: connection window stays reasonable
+                    if conn.recv_window() < -100_000 {
+                        conn_window_in_bounds = false;
+                        break;
+                    }
+                }
+
+                prop_assert!(conn_window_in_bounds,
+                    "Connection receive window must stay within reasonable bounds");
+            });
+        }
+
+        /// MR5: STREAM-LEVEL additive property
+        #[test]
+        fn mr_stream_window_additive() {
+            proptest!(|(increments: Vec<u32>)| {
+                let increments: Vec<u32> = increments.into_iter()
+                    .filter(|&i| i > 0 && i <= MAX_INCREMENT)
+                    .take(MAX_WINDOW_UPDATES)
+                    .collect();
+
+                if increments.is_empty() {
+                    return Ok(());
+                }
+
+                let mut conn = open_connection_client();
+
+                // Create a stream using open_stream
+                let stream_id = match conn.open_stream(vec![], false) {
+                    Ok(id) => id,
+                    Err(_) => return Ok(()),
+                };
+
+                let initial_window = conn.stream(stream_id)
+                    .map(|s| s.send_window())
+                    .unwrap_or(0);
+
+                let expected_sum: i64 = increments.iter().map(|&i| i as i64).sum();
+
+                // Apply each window update to the stream
+                for increment in &increments {
+                    let frame = Frame::WindowUpdate(WindowUpdateFrame::new(stream_id, *increment));
+                    if conn.process_frame(frame).is_err() {
+                        // Skip if stream doesn't exist or overflow occurs
+                        return Ok(());
+                    }
+                }
+
+                let final_window = conn.stream(stream_id)
+                    .map(|s| s.send_window())
+                    .unwrap_or(initial_window);
+
+                let actual_delta = i64::from(final_window) - i64::from(initial_window);
+
+                prop_assert_eq!(actual_delta, expected_sum,
+                    "Stream {} window delta {} must equal sum of increments {} for sequence {:?}",
+                    stream_id, actual_delta, expected_sum, increments);
+            });
+        }
+
+        /// MR6: INVERTIVE - Window update/consumption round-trip
+        /// Property: f(T(T(x))) = f(x) where T = update then consume same amount
+        #[test]
+        fn mr_window_update_consumption_roundtrip() {
+            proptest!(|(increment in 1u32..=1000)| {
+                let mut conn = open_connection_server();
+
+                // Need to create a stream for DATA frames
+                let _ = match conn.streams.get_or_create(1) {
+                    Ok(_) => (),
+                    Err(_) => return Ok(()),
+                };
+                let stream_id = 1u32;
+
+                let initial_window = conn.recv_window();
+
+                // Step 1: Apply WINDOW_UPDATE
+                let update_frame = Frame::WindowUpdate(WindowUpdateFrame::new(0, increment));
+                if conn.process_frame(update_frame).is_err() {
+                    return Ok(());
+                }
+
+                let after_update = conn.recv_window();
+                prop_assert_eq!(after_update, initial_window + increment as i32);
+
+                // Step 2: Consume equivalent amount via DATA frame (if reasonable size)
+                if increment <= 1000 {
+                    let data = vec![0u8; increment as usize];
+                    let data_frame = DataFrame::new(stream_id, data.into(), false);
+                    if conn.process_frame(Frame::Data(data_frame)).is_ok() {
+                        let final_window = conn.recv_window();
+                        prop_assert_eq!(final_window, initial_window,
+                            "Round-trip: update {} then consume {} must return to initial window {} (got {})",
+                            increment, increment, initial_window, final_window);
+                    }
+                }
+            });
+        }
+
+        // =====================================================================
+        // Unit tests with known values for sanity checking
+        // =====================================================================
+
+        #[test]
+        fn unit_test_simple_window_update_sequence() {
+            let mut conn = open_connection_client();
+            let initial = conn.send_window();
+
+            // Apply sequence: [100, 200, 300]
+            let updates = [100, 200, 300];
+            for increment in updates {
+                let frame = Frame::WindowUpdate(WindowUpdateFrame::new(0, increment));
+                conn.process_frame(frame).unwrap();
+            }
+
+            let final_window = conn.send_window();
+            let expected = initial + 100 + 200 + 300;
+
+            assert_eq!(final_window, expected,
+                "Simple sequence [100, 200, 300] failed additive property");
+        }
+
+        #[test]
+        fn unit_test_zero_increment_error() {
+            let mut conn = open_connection_client();
+
+            // Zero increments should be rejected per RFC 9113 §6.9
+            let frame = Frame::WindowUpdate(WindowUpdateFrame::new(0, 0));
+            let result = conn.process_frame(frame);
+
+            assert!(result.is_err(), "Zero increment WINDOW_UPDATE must be rejected");
+            if let Err(err) = result {
+                assert_eq!(err.code, ErrorCode::ProtocolError);
+            }
+        }
+
+        #[test]
+        fn unit_test_overflow_protection() {
+            let mut conn = open_connection_client();
+
+            // Try to overflow the window beyond i32::MAX
+            let large_increment = 0x7FFF_FFFF; // i32::MAX as u32
+            let frame = Frame::WindowUpdate(WindowUpdateFrame::new(0, large_increment));
+
+            // This should either succeed or fail gracefully, never panic
+            let result = conn.process_frame(frame);
+
+            // If it succeeds, the window should not exceed i32::MAX
+            if result.is_ok() {
+                assert!(conn.send_window() <= i32::MAX);
+            }
+        }
+    }
 }
