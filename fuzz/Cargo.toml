@@ -2766,3 +2766,15 @@ path = "fuzz_targets/framed_decoder_reset_reuse_cycle.rs"
 test = false
 doc = false
 bench = false
+
+# Structure-aware RaptorQ decoder Schedule construction edge cases fuzzer.
+# Tests pivot selection and dense elimination scheduling during inactivation phase
+# with intelligent input generation targeting different pivoting strategies, dense
+# matrix dimensions, sparsity patterns, tie-breaking scenarios, fallback conditions,
+# and cache behavior for Schedule construction robustness testing.
+[[bin]]
+name = "raptorq_decoder_schedule_edge_cases"
+path = "fuzz_targets/raptorq_decoder_schedule_edge_cases.rs"
+test = false
+doc = false
+bench = false
