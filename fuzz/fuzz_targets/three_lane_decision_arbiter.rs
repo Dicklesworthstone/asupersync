@@ -1,12 +1,18 @@
 #![no_main]
 
+use std::sync::Arc;
+
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
 use asupersync::obligation::lyapunov::{
     LyapunovGovernor, PotentialWeights, SchedulingSuggestion, StateSnapshot,
 };
-use asupersync::types::Time;
+use asupersync::runtime::scheduler::three_lane::ThreeLaneScheduler;
+use asupersync::runtime::state::RuntimeState;
+use asupersync::sync::ContendedMutex;
+use asupersync::time::{TimerDriverHandle, VirtualClock};
+use asupersync::types::{TaskId, Time};
 
 /// Structure-aware input for fuzzing the three-lane scheduler decision arbiter.
 ///
@@ -24,6 +30,8 @@ pub struct DecisionArbiterInput {
     scheduler_context: FuzzSchedulerContext,
     /// Environmental decision factors
     environment: FuzzEnvironment,
+    /// Concrete lane mix driven through the real scheduler arbiter.
+    workload: FuzzLaneWorkload,
 }
 
 /// Fuzzable version of PotentialWeights with bounded ranges
@@ -91,6 +99,33 @@ pub struct FuzzEnvironment {
     consistency_context: FuzzConsistencyContext,
 }
 
+/// Structure-aware workload for exercising the real scheduler arbiter.
+#[derive(Debug, Clone, Arbitrary)]
+pub struct FuzzLaneWorkload {
+    /// Base cancel streak limit to enforce before fairness yields.
+    #[arbitrary(with = bounded_cancel_limit)]
+    cancel_streak_limit: usize,
+    /// Cached governor suggestion used to model budget pressure.
+    cached_suggestion: FuzzSchedulingSuggestion,
+    /// Cancel-lane tasks and priorities.
+    #[arbitrary(with = bounded_priority_vec)]
+    cancel_priorities: Vec<u8>,
+    /// Ready-lane tasks and priorities.
+    #[arbitrary(with = bounded_priority_vec)]
+    ready_priorities: Vec<u8>,
+    /// Due timed tasks bucketed by relative deadline.
+    #[arbitrary(with = bounded_timed_buckets)]
+    timed_deadline_buckets: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, Arbitrary)]
+pub enum FuzzSchedulingSuggestion {
+    NoPreference,
+    MeetDeadlines,
+    DrainObligations,
+    DrainRegions,
+}
+
 /// Decision consistency tracking for metamorphic properties
 #[derive(Debug, Clone, Arbitrary)]
 pub struct FuzzConsistencyContext {
@@ -116,6 +151,28 @@ fn bounded_deadline_pressure(u: &mut arbitrary::Unstructured) -> arbitrary::Resu
     Ok(f64::from(u.int_in_range::<u16>(0..=10_000)?) / 100.0) // 0.0 to 100.0
 }
 
+fn bounded_cancel_limit(u: &mut arbitrary::Unstructured) -> arbitrary::Result<usize> {
+    Ok(usize::from(u.int_in_range::<u8>(1..=8)?))
+}
+
+fn bounded_priority_vec(u: &mut arbitrary::Unstructured) -> arbitrary::Result<Vec<u8>> {
+    let len = usize::from(u.int_in_range::<u8>(0..=24)?);
+    let mut priorities = Vec::with_capacity(len);
+    for _ in 0..len {
+        priorities.push(u.int_in_range(0..=100)?);
+    }
+    Ok(priorities)
+}
+
+fn bounded_timed_buckets(u: &mut arbitrary::Unstructured) -> arbitrary::Result<Vec<u8>> {
+    let len = usize::from(u.int_in_range::<u8>(0..=24)?);
+    let mut buckets = Vec::with_capacity(len);
+    for _ in 0..len {
+        buckets.push(u.int_in_range(0..=3)?);
+    }
+    Ok(buckets)
+}
+
 impl From<FuzzPotentialWeights> for PotentialWeights {
     fn from(fuzz_weights: FuzzPotentialWeights) -> Self {
         Self {
@@ -123,6 +180,17 @@ impl From<FuzzPotentialWeights> for PotentialWeights {
             w_obligation_age: fuzz_weights.w_obligation_age,
             w_draining_regions: fuzz_weights.w_draining_regions,
             w_deadline_pressure: fuzz_weights.w_deadline_pressure,
+        }
+    }
+}
+
+impl From<FuzzSchedulingSuggestion> for SchedulingSuggestion {
+    fn from(suggestion: FuzzSchedulingSuggestion) -> Self {
+        match suggestion {
+            FuzzSchedulingSuggestion::NoPreference => Self::NoPreference,
+            FuzzSchedulingSuggestion::MeetDeadlines => Self::MeetDeadlines,
+            FuzzSchedulingSuggestion::DrainObligations => Self::DrainObligations,
+            FuzzSchedulingSuggestion::DrainRegions => Self::DrainRegions,
         }
     }
 }
@@ -172,6 +240,142 @@ fn test_decision_determinism(weights: &PotentialWeights, snapshots: &[StateSnaps
     true
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaneKind {
+    Cancel,
+    Timed,
+    Ready,
+}
+
+fn timed_deadline_from_bucket(bucket: u8) -> Time {
+    match bucket % 4 {
+        0 => Time::from_nanos(0),
+        1 => Time::from_nanos(250),
+        2 => Time::from_nanos(500),
+        _ => Time::from_nanos(1_000),
+    }
+}
+
+fn scheduler_task_id(base: u32, index: usize) -> TaskId {
+    TaskId::new_for_test(base + u32::try_from(index).unwrap_or(u32::MAX), 0)
+}
+
+fn assert_scheduler_fairness(workload: &FuzzLaneWorkload) {
+    let total_tasks = workload.cancel_priorities.len()
+        + workload.ready_priorities.len()
+        + workload.timed_deadline_buckets.len();
+    if total_tasks == 0 {
+        return;
+    }
+
+    let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(1_000)));
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+    {
+        let mut guard = state.lock().expect("lock runtime state");
+        guard.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
+    }
+
+    let mut scheduler =
+        ThreeLaneScheduler::new_with_options(1, &state, workload.cancel_streak_limit, true, 1);
+
+    let mut cancel_tasks = Vec::with_capacity(workload.cancel_priorities.len());
+    let mut timed_tasks = Vec::with_capacity(workload.timed_deadline_buckets.len());
+    let mut ready_tasks = Vec::with_capacity(workload.ready_priorities.len());
+
+    for (index, &priority) in workload.cancel_priorities.iter().enumerate() {
+        let task = scheduler_task_id(10_000, index);
+        cancel_tasks.push(task);
+        scheduler.inject_cancel(task, priority);
+    }
+
+    for (index, &bucket) in workload.timed_deadline_buckets.iter().enumerate() {
+        let task = scheduler_task_id(20_000, index);
+        timed_tasks.push(task);
+        scheduler.inject_timed(task, timed_deadline_from_bucket(bucket));
+    }
+
+    for (index, &priority) in workload.ready_priorities.iter().enumerate() {
+        let task = scheduler_task_id(30_000, index);
+        ready_tasks.push(task);
+        scheduler.inject_ready(task, priority);
+    }
+
+    let mut workers = scheduler.take_workers();
+    let worker = &mut workers[0];
+    worker.set_cached_suggestion(workload.cached_suggestion.into());
+
+    let mut dispatch_trace = Vec::with_capacity(total_tasks);
+    while dispatch_trace.len() < total_tasks {
+        let Some(task) = worker.next_task() else {
+            break;
+        };
+
+        let lane = if cancel_tasks.contains(&task) {
+            LaneKind::Cancel
+        } else if timed_tasks.contains(&task) {
+            LaneKind::Timed
+        } else if ready_tasks.contains(&task) {
+            LaneKind::Ready
+        } else {
+            panic!("dispatched unknown task {task:?}");
+        };
+        dispatch_trace.push(lane);
+    }
+
+    assert_eq!(
+        dispatch_trace.len(),
+        total_tasks,
+        "all injected due workloads should drain under the arbiter"
+    );
+
+    let cert = worker.preemption_fairness_certificate();
+    assert!(
+        cert.invariant_holds(),
+        "fairness certificate must hold under arbitrary pressure: {cert:?}"
+    );
+    assert_eq!(cert.cancel_dispatches as usize, cancel_tasks.len());
+    assert_eq!(cert.timed_dispatches as usize, timed_tasks.len());
+    assert_eq!(cert.ready_dispatches as usize, ready_tasks.len());
+
+    if !cancel_tasks.is_empty() {
+        assert!(dispatch_trace.contains(&LaneKind::Cancel));
+    }
+    if !timed_tasks.is_empty() {
+        assert!(dispatch_trace.contains(&LaneKind::Timed));
+        assert!(
+            cert.observed_max_timed_stall_steps <= cert.ready_stall_bound_steps(),
+            "timed lane exceeded fairness stall bound: {cert:?}"
+        );
+    }
+    if !ready_tasks.is_empty() {
+        assert!(dispatch_trace.contains(&LaneKind::Ready));
+        assert!(
+            cert.observed_max_ready_stall_steps <= cert.ready_stall_bound_steps(),
+            "ready lane exceeded fairness stall bound: {cert:?}"
+        );
+    }
+
+    if (!ready_tasks.is_empty() || !timed_tasks.is_empty()) && !cancel_tasks.is_empty() {
+        let first_non_cancel = dispatch_trace
+            .iter()
+            .position(|lane| *lane != LaneKind::Cancel)
+            .expect("competing non-cancel work should dispatch");
+        assert!(
+            first_non_cancel <= cert.ready_stall_bound_steps(),
+            "non-cancel work starved beyond fairness bound: first_non_cancel={first_non_cancel}, cert={cert:?}"
+        );
+    }
+
+    if cert.cancel_dispatches as usize > cert.effective_limit
+        && (!ready_tasks.is_empty() || !timed_tasks.is_empty())
+    {
+        assert!(
+            cert.fairness_yields > 0,
+            "cancel pressure above effective limit should force a fairness yield: {cert:?}"
+        );
+    }
+}
+
 // Main fuzzing target for three-lane scheduler decision arbiter.
 fuzz_target!(|input: DecisionArbiterInput| {
     // Convert fuzz inputs to real types
@@ -211,4 +415,7 @@ fuzz_target!(|input: DecisionArbiterInput| {
             | SchedulingSuggestion::NoPreference => {}
         }
     }
+
+    // Test 3: Real scheduler no-starvation invariant under arbitrary lane mixes.
+    assert_scheduler_fairness(&input.workload);
 });
