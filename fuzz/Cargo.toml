@@ -1624,6 +1624,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "raptorq_encoder_transition_cases"
+path = "fuzz_targets/raptorq_encoder_transition_cases.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "web_multipart"
 path = "fuzz_targets/web_multipart.rs"
 test = false
@@ -2994,6 +3001,16 @@ bench = false
 [[bin]]
 name = "notify_state_machine"
 path = "fuzz_targets/notify_state_machine.rs"
+test = false
+doc = false
+bench = false
+
+# ContendedMutex commutativity and deadlock-freedom fuzzing for sharded state
+# Tests no-deadlock guarantee, final-value commutativity, and poison safety
+# through arbitrary sequences of read/write/modify operations across multiple threads.
+[[bin]]
+name = "contended_mutex_commutativity"
+path = "fuzz_targets/contended_mutex_commutativity.rs"
 test = false
 doc = false
 bench = false
