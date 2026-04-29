@@ -128,6 +128,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_h1_upgrade_handling"
+path = "fuzz_targets/h1_upgrade_handling.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_h1_upgrade_robust"
+path = "fuzz_targets/h1_upgrade_robust.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_hpack_decode"
 path = "fuzz_targets/hpack_decode.rs"
 test = false
@@ -505,6 +519,13 @@ bench = false
 [[bin]]
 name = "jetstream_parser"
 path = "fuzz_targets/jetstream_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jetstream_pull_subscriber_state_machine"
+path = "fuzz_targets/jetstream_pull_subscriber_state_machine.rs"
 test = false
 doc = false
 bench = false
@@ -2928,6 +2949,17 @@ test = false
 doc = false
 bench = false
 
+# Structure-aware fuzzer for RESP3 client-tracking push parsing.
+# Drives `invalidate` and `tracking` push frames through RespValue::try_decode,
+# asserting valid frames preserve kind/payload shape byte-for-byte and malformed
+# frames fail closed without panicking.
+[[bin]]
+name = "redis_client_tracking_push"
+path = "fuzz_targets/redis_client_tracking_push.rs"
+test = false
+doc = false
+bench = false
+
 # Structure-aware fuzz target for codec/framed.rs decoder reset-and-reuse cycle testing.
 # Tests state consistency across Framed::into_parts() -> reconstruct cycles where decoders
 # must maintain parsing context across transport reconstruction. Exercises buffer migration,
@@ -3229,6 +3261,46 @@ bench = false
 [[bin]]
 name = "redis_pubsub_state_machine"
 path = "fuzz_targets/redis_pubsub_state_machine.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #123 — Mutex acquire-release-poison sequence testing
+# Tests arbitrary acquire/release/poison operations to verify poisoned mutex
+# returns Err on subsequent acquire and release after poison is no-op.
+# Validates poison state consistency and RAII guard behavior under thread-based poisoning.
+[[bin]]
+name = "mutex_poison_sequence"
+path = "fuzz_targets/mutex_poison_sequence.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #127 — Watch channel version-counter wrap boundary testing
+# Tests arbitrary update/borrow_and_update sequences across u64 wrap boundary
+# to ensure changed() detection remains correct when versions wrap from u64::MAX to 0.
+# Validates inequality comparison (current != seen_version) works correctly across wrap.
+[[bin]]
+name = "watch_version_counter_wrap"
+path = "fuzz_targets/watch_version_counter_wrap.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #128 — Barrier wait-N reset cycle testing
+# Tests arbitrary cycles of (wait until N) → (reset) → (wait until N) to ensure
+# reset between cycles works without spurious wake. Validates exactly one leader per
+# generation, proper generation advancement, and clean reset state after trip.
+[[bin]]
+name = "barrier_wait_reset_cycle"
+path = "fuzz_targets/barrier_wait_reset_cycle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_protobuf_varint_round_trip"
+path = "fuzz_targets/grpc_protobuf_varint_round_trip.rs"
 test = false
 doc = false
 bench = false
