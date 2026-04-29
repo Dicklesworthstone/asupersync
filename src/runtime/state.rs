@@ -2375,6 +2375,7 @@ impl RuntimeState {
     /// - No live tasks are running
     /// - No pending obligations exist
     /// - No I/O sources are registered (if I/O driver is present)
+    /// - No region is still in the close lifecycle
     #[must_use]
     pub fn is_quiescent(&self) -> bool {
         // Short-circuit: each check is progressively more expensive, so bail
@@ -2382,7 +2383,10 @@ impl RuntimeState {
         self.live_task_count() == 0
             && self.pending_obligation_count() == 0
             && self.io_driver.as_ref().is_none_or(IoDriverHandle::is_empty)
-            && self.regions.iter().all(|(_, r)| r.finalizers_empty())
+            && self
+                .regions
+                .iter()
+                .all(|(_, r)| r.finalizers_empty() && !r.state().is_closing())
     }
 
     /// Applies the region policy when a child reaches a terminal outcome.
@@ -8111,6 +8115,39 @@ mod tests {
         let quiescent = state.is_quiescent();
         crate::assert_with_log!(quiescent, "quiescent", true, quiescent);
         crate::test_complete!("is_quiescent_without_io_driver_ignores_io");
+    }
+
+    #[test]
+    fn is_quiescent_waits_for_region_close_completion() {
+        init_test("is_quiescent_waits_for_region_close_completion");
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::INFINITE);
+
+        let region = state
+            .regions
+            .get_mut(root.arena_index())
+            .expect("root missing");
+        let began_close = region.begin_close(None);
+        crate::assert_with_log!(began_close, "begin_close succeeds", true, began_close);
+
+        let quiescent_while_closing = state.is_quiescent();
+        crate::assert_with_log!(
+            !quiescent_while_closing,
+            "closing region keeps runtime non-quiescent until teardown finishes",
+            false,
+            quiescent_while_closing
+        );
+
+        state.advance_region_state(root);
+
+        let quiescent_after_close = state.is_quiescent();
+        crate::assert_with_log!(
+            quiescent_after_close,
+            "runtime becomes quiescent after close lifecycle completes",
+            true,
+            quiescent_after_close
+        );
+        crate::test_complete!("is_quiescent_waits_for_region_close_completion");
     }
 
     // =========================================================================
