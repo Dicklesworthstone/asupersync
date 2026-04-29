@@ -1219,6 +1219,21 @@ pub fn fuzz_parse_ack_control(payload: &[u8]) -> FuzzJsAckControl {
     }
 }
 
+/// Fuzz-target re-exporter for durable consumer-name validation and alias
+/// canonicalization.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_normalize_consumer_identity(
+    name: Option<&str>,
+    durable_name: Option<&str>,
+) -> Result<Option<String>, JsError> {
+    let mut config = ConsumerConfig::ephemeral();
+    config.name = name.map(ToOwned::to_owned);
+    config.durable_name = durable_name.map(ToOwned::to_owned);
+    config.normalize_identity()?;
+    Ok(config.name)
+}
+
 impl JsMessage {
     /// Acknowledge the message (marks as processed).
     ///
@@ -1648,9 +1663,10 @@ mod tests {
         let mut cfg = ConsumerConfig::new("worker.bad");
         let err = cfg.normalize_identity().unwrap_err();
         assert!(matches!(err, JsError::InvalidConfig(_)));
-        assert!(err
-            .to_string()
-            .contains("consumer name contains prohibited characters"));
+        assert!(
+            err.to_string()
+                .contains("consumer name contains prohibited characters")
+        );
     }
 
     #[test]

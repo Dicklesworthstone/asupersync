@@ -1505,6 +1505,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "jetstream_durable"
+path = "fuzz_targets/jetstream_durable.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "transport_router"
 path = "fuzz_targets/transport_router.rs"
 test = false
