@@ -57,21 +57,14 @@ pub fn find_divergence(a: &[TraceEvent], b: &[TraceEvent]) -> Option<TraceDiverg
     // Check for length mismatch
     if a_events.len() != b_events.len() {
         let position = a_events.len().min(b_events.len());
-        #[allow(clippy::map_unwrap_or)]
         return Some(TraceDivergence {
             position,
-            event_a: a_events
-                .get(position)
-                .map(|e| (*e).clone())
-                .unwrap_or_else(|| {
-                    TraceEvent::user_trace(0, crate::types::Time::ZERO, "<end of trace A>")
-                }),
-            event_b: b_events
-                .get(position)
-                .map(|e| (*e).clone())
-                .unwrap_or_else(|| {
-                    TraceEvent::user_trace(0, crate::types::Time::ZERO, "<end of trace B>")
-                }),
+            event_a: a_events.get(position).cloned().unwrap_or_else(|| {
+                TraceEvent::user_trace(0, crate::types::Time::ZERO, "<end of trace A>")
+            }),
+            event_b: b_events.get(position).cloned().unwrap_or_else(|| {
+                TraceEvent::user_trace(0, crate::types::Time::ZERO, "<end of trace B>")
+            }),
         });
     }
 
