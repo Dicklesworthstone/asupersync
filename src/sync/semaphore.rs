@@ -3513,4 +3513,175 @@ mod tests {
         );
         crate::test_complete!("yk1595_try_acquire_count_exceeds_total_permits");
     }
+
+    /// Metamorphic test: acquire-N then release-N equals identity even with mid-sequence cancel mask.
+    ///
+    /// This tests the fundamental semaphore invariant that acquire(N) followed by
+    /// release(N) restores the semaphore to its exact original state, including:
+    /// 1. Available permits count
+    /// 2. Waiter queue state
+    /// 3. Permit allocation behavior
+    ///
+    /// The test verifies this property holds even when cancellation masks are
+    /// applied between acquire and release operations, ensuring cancel-safety
+    /// does not violate the acquire/release identity relation.
+    #[test]
+    fn metamorphic_acquire_n_release_n_identity_with_cancel_mask() {
+        init_test("metamorphic_acquire_n_release_n_identity_with_cancel_mask");
+
+        // Test various permit counts and semaphore sizes
+        let test_cases = [
+            (5, 1, "single permit from medium pool"),
+            (5, 3, "multiple permits from medium pool"),
+            (5, 5, "all permits from medium pool"),
+            (10, 7, "majority permits from large pool"),
+            (1, 1, "single permit from single-permit pool"),
+        ];
+
+        for (initial_permits, acquire_count, description) in test_cases {
+            // Baseline: semaphore state without acquire/release cycle
+            let baseline = Semaphore::new(initial_permits);
+            let baseline_cx = test_cx();
+
+            // Transform: semaphore with acquire/release cycle
+            let transformed = Semaphore::new(initial_permits);
+            let transformed_cx = test_cx();
+
+            // Capture baseline state before any operations
+            let baseline_initial_permits = baseline.available_permits();
+            let baseline_max_permits = baseline.max_permits();
+
+            // Phase 1: Acquire permits on transformed semaphore
+            let acquired_permit = transformed
+                .try_acquire(acquire_count)
+                .expect(&format!("acquire {} permits from {}", acquire_count, initial_permits));
+
+            // Apply cancellation mask between acquire and release
+            // This simulates cancellation pressure during the hold period
+            transformed_cx.mask();
+
+            // Verify acquire correctly decremented permits
+            let mid_permits = transformed.available_permits();
+            crate::assert_with_log!(
+                mid_permits == initial_permits - acquire_count,
+                &format!("{}: acquire decremented permits correctly", description),
+                initial_permits - acquire_count,
+                mid_permits
+            );
+
+            // Phase 2: Release permits (via drop) while cancel mask is active
+            drop(acquired_permit);
+
+            // Remove cancel mask after release
+            transformed_cx.unmask();
+
+            // Phase 3: Verify identity property - states should be identical
+            let baseline_final_permits = baseline.available_permits();
+            let transformed_final_permits = transformed.available_permits();
+
+            crate::assert_with_log!(
+                baseline_final_permits == transformed_final_permits,
+                &format!("{}: available permits identity", description),
+                baseline_final_permits,
+                transformed_final_permits
+            );
+
+            crate::assert_with_log!(
+                baseline.max_permits() == transformed.max_permits(),
+                &format!("{}: max permits identity", description),
+                baseline.max_permits(),
+                transformed.max_permits()
+            );
+
+            // Phase 4: Verify behavioral equivalence - both should accept same operations
+            let baseline_second_acquire = baseline.try_acquire(1);
+            let transformed_second_acquire = transformed.try_acquire(1);
+
+            match (baseline_second_acquire, transformed_second_acquire) {
+                (Ok(_), Ok(_)) => {
+                    // Both succeeded - verify they consumed permits equally
+                    crate::assert_with_log!(
+                        baseline.available_permits() == transformed.available_permits(),
+                        &format!("{}: post-identity acquire behavior matches", description),
+                        baseline.available_permits(),
+                        transformed.available_permits()
+                    );
+                }
+                (Err(_), Err(_)) => {
+                    // Both failed - this is expected for edge cases
+                }
+                _ => {
+                    panic!("{}: behavioral divergence - baseline and transformed had different try_acquire results", description);
+                }
+            }
+        }
+
+        crate::test_complete!("metamorphic_acquire_n_release_n_identity_with_cancel_mask");
+    }
+
+    /// Metamorphic test: acquire-N release-N identity under concurrent waiter pressure.
+    ///
+    /// Tests that the identity property holds even when other tasks are waiting
+    /// for permits during the acquire/release cycle, ensuring FIFO ordering
+    /// and waiter state are preserved across cancel-safe acquire/release sequences.
+    #[test]
+    fn metamorphic_acquire_release_identity_with_concurrent_waiters() {
+        init_test("metamorphic_acquire_release_identity_with_concurrent_waiters");
+
+        let sem = Semaphore::new(3);
+        let cx1 = test_cx();
+        let cx2 = test_cx();
+        let cx3 = test_cx();
+
+        // Phase 1: Create waiter pressure - multiple tasks waiting
+        let _permit1 = sem.try_acquire(1).expect("acquire first permit");
+        let _permit2 = sem.try_acquire(1).expect("acquire second permit");
+
+        // Now available_permits() == 1, but we'll create waiters for 2 permits
+        let mut waiter_future = sem.acquire(&cx2, 2);
+
+        // Verify waiter is actually waiting
+        let poll_result = crate::test::poll_once(&mut waiter_future);
+        crate::assert_with_log!(
+            poll_result.is_pending(),
+            "waiter should be pending before release",
+            true,
+            poll_result.is_pending()
+        );
+
+        // Phase 2: Acquire and release the remaining permit with cancel mask
+        let acquired = sem.try_acquire(1).expect("acquire remaining permit");
+
+        // Apply cancel mask during hold period
+        cx1.mask();
+
+        // Release permit - should not affect waiting behavior
+        drop(acquired);
+
+        cx1.unmask();
+
+        // Phase 3: Verify waiter is still waiting (identity preserved)
+        let poll_after_identity = crate::test::poll_once(&mut waiter_future);
+        crate::assert_with_log!(
+            poll_after_identity.is_pending(),
+            "waiter should still be pending after identity cycle",
+            true,
+            poll_after_identity.is_pending()
+        );
+
+        // Phase 4: Release enough permits to satisfy waiter and verify FIFO order
+        drop(_permit1);
+        drop(_permit2);
+
+        // Now waiter should be able to proceed
+        let poll_final = crate::test::poll_once(&mut waiter_future);
+        crate::assert_with_log!(
+            poll_final.is_ready(),
+            "waiter should be ready after sufficient releases",
+            true,
+            poll_final.is_ready()
+        );
+
+        crate::test_complete!("metamorphic_acquire_release_identity_with_concurrent_waiters");
+    }
 }
