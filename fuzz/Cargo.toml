@@ -1295,6 +1295,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "nats_publish_subject_parser"
+path = "fuzz_targets/nats_publish_subject_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "unix_stream"
 path = "fuzz_targets/unix_stream.rs"
 test = false
@@ -3066,6 +3073,17 @@ bench = false
 [[bin]]
 name = "rwlock_reader_writer_queue"
 path = "fuzz_targets/rwlock_reader_writer_queue.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #119 — OnceCell concurrent initialization race condition testing
+# Tests arbitrary thread count with same init closure to verify exactly one closure
+# invocation and all threads see the same value under concurrent access patterns.
+# Validates initialization synchronization and proper race-free value propagation.
+[[bin]]
+name = "once_cell_concurrent_init"
+path = "fuzz_targets/once_cell_concurrent_init.rs"
 test = false
 doc = false
 bench = false
