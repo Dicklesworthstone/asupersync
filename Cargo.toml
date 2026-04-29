@@ -304,7 +304,7 @@ rayon = "1.12"
 serde_yaml = "0.9"
 flate2 = "1.1"
 # Golden snapshot testing for encoded blocks and artifacts
-insta = { version = "1.40", features = ["json"] }
+insta = { version = "1.40", features = ["json", "yaml"] }
 # Lightweight deterministic RNG for randomized test harnesses
 fastrand = "2.3"
 # HTTP/1.1 reference implementation for conformance testing

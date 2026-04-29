@@ -505,7 +505,6 @@ mod golden_tests {
 
     #[cfg(test)]
     mod metamorphic_tests {
-        use super::*;
         use crate::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
         use crate::raptorq::systematic::SystematicEncoder;
         use crate::util::DetRng;
@@ -812,8 +811,8 @@ mod golden_tests {
         proptest! {
             #[test]
             fn proptest_mr_raptorq_round_trip_identity(
-                k in 2u32..8u32,
-                symbol_size in 8u16..20u16,
+                k in 2usize..8usize,
+                symbol_size in 8usize..20usize,
                 seed in 0x1000u64..0xFFFFu64,
                 data_pattern in 0u8..255u8,
             ) {
@@ -840,7 +839,7 @@ mod golden_tests {
                 }
 
                 // Add minimal repair symbols
-                let repair_esi = k;
+                let repair_esi = k as u32;
                 let (columns, coefficients) = decoder
                     .repair_equation(repair_esi)
                     .expect("Property test repair equation must be valid");
