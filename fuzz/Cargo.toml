@@ -2718,3 +2718,16 @@ path = "fuzz_targets/raptorq_encoder_k1_boundary.rs"
 test = false
 doc = false
 bench = false
+
+# Structure-aware LineCodec boundary case fuzzer for max_length + LF/CRLF mix.
+# Tests src/codec/lines.rs decoder boundary conditions where line length enforcement
+# interacts with different line ending types (LF vs CRLF). Focuses on scenarios where
+# lines are exactly at max_length, exceed by 1, and mixed ending types that may cause
+# different boundary behavior. Exercises state transitions between normal and discard
+# modes, recovery after max length violations, and CRLF vs LF handling edge cases.
+[[bin]]
+name = "lines_codec_boundary_case"
+path = "fuzz_targets/lines_codec_boundary_case.rs"
+test = false
+doc = false
+bench = false
