@@ -233,10 +233,12 @@ impl LocalQueue {
             return;
         }
         let mut inner = self.inner.lock();
+        // Batch enqueue already knows the exact growth ahead of time, so avoid
+        // repeated SmallVec / HashSet growth while inserting the slice.
+        inner.queue.reserve(tasks.len());
+        inner.presence.reserve(tasks.len());
         inner.queue.extend_from_slice(tasks);
-        for task in tasks {
-            inner.presence.insert(*task);
-        }
+        inner.presence.extend(tasks.iter().copied());
         let new_len = inner.queue.len();
         drop(inner);
         self.cached_len.store(new_len, Ordering::Release);

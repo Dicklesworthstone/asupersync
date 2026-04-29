@@ -168,6 +168,32 @@ fn bench_local_queue(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_local_queue_push_many(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scheduler/local_queue_push_many");
+    group.warm_up_time(Duration::from_millis(200));
+    group.measurement_time(Duration::from_millis(600));
+    group.sample_size(30);
+
+    for &count in &[8usize, 32, 128, 512] {
+        group.throughput(Throughput::Elements(count as u64));
+        let task_ids = tasks(count);
+        let max_id = count as u32 - 1;
+
+        group.bench_with_input(BenchmarkId::new("push_many", count), &count, |b, &_count| {
+            b.iter_batched(
+                || (local_queue(max_id), task_ids.clone()),
+                |(queue, task_ids)| {
+                    queue.push_many(black_box(&task_ids));
+                    black_box(queue.len())
+                },
+                BatchSize::SmallInput,
+            )
+        });
+    }
+
+    group.finish();
+}
+
 // =============================================================================
 // GLOBAL QUEUE BENCHMARKS
 // =============================================================================
@@ -1600,6 +1626,7 @@ fn bench_adaptive_cancel_streak_policy(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_local_queue,
+    bench_local_queue_push_many,
     bench_global_queue,
     bench_priority_scheduler,
     bench_priority_observability,
