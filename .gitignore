@@ -125,8 +125,10 @@ artifacts/*
 # Insta pending snapshot files (generated when tests fail or a new
 # snapshot is recorded; awaiting `cargo insta accept` review). Never
 # committed — only accepted `.snap` files go into git.
+# Includes the per-test hidden form like `.marking.rs.pending-snap`.
 *.snap.new
 .insta.pending-snap
+**/.*.pending-snap
 
 # Refactor artifact bulk dumps (per-run baselines that are too large
 # and too transient to commit; the small ledger.md / isomorphism.md
