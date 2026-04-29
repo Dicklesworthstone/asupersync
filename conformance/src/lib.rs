@@ -37,6 +37,7 @@ use std::time::Duration;
 
 pub mod bench;
 pub mod h2_goaway_conformance;
+pub mod h2_ping_conformance;
 pub mod h2_priority_conformance;
 pub mod h2_settings_conformance;
 pub mod hpack_conformance;
@@ -65,6 +66,11 @@ pub use h2_goaway_conformance::{
     GoAwayComplianceReport, GoAwayComplianceSummary, GoAwayConformanceCase,
     GoAwayConformanceResult, GoAwayConformanceTester, GoAwayTestVerdict, RequirementLevel as GoAwayRequirementLevel,
     GoAwayConnectionState, SerializableGoAwayFrame,
+};
+pub use h2_ping_conformance::{
+    PingComplianceReport, PingComplianceSummary, PingConformanceCase,
+    PingConformanceResult, PingConformanceTester, PingTestVerdict, RequirementLevel as PingRequirementLevel,
+    PingConnectionState, PingTiming, SerializablePingFrame,
 };
 pub use h2_priority_conformance::{
     PriorityComplianceReport, PriorityComplianceSummary, PriorityConformanceCase,

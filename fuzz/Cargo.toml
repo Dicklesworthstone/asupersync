@@ -2281,6 +2281,17 @@ test = false
 doc = false
 bench = false
 
+# Tick #120: structure-aware proof verifier determinism fuzzer for the live
+# DecodeProof::replay_and_verify seam in src/raptorq/proof.rs. Maps arbitrary
+# leaf/path byte blobs onto malformed proof/symbol mutations and asserts
+# deterministic verification plus malformed-proof rejection.
+[[bin]]
+name = "raptorq_proof_verifier_determinism"
+path = "fuzz_targets/raptorq_proof_verifier_determinism.rs"
+test = false
+doc = false
+bench = false
+
 # br-asupersync-voxekc — degenerate-config fuzz for RaptorQSenderBuilder /
 # RaptorQReceiverBuilder. NaN/Inf repair_overhead, symbol_size 0,
 # zero parallelism, tiny memory budgets must all be cleanly rejected
@@ -2865,6 +2876,17 @@ bench = false
 [[bin]]
 name = "redis_resp3_verbatim_string"
 path = "fuzz_targets/redis_resp3_verbatim_string.rs"
+test = false
+doc = false
+bench = false
+
+# Structure-aware fuzzer for Redis hash command encoding and wrapper response parsing.
+# Drives arbitrary binary key/field/value bytes through HSET/HGET command construction
+# via Pipeline::cmd_bytes, and exercises the public hset/hget wrapper result parsing on
+# valid UTF-8 key/field subsets to assert malformed replies fail closed without panicking.
+[[bin]]
+name = "redis_hash_command_parser"
+path = "fuzz_targets/redis_hash_command_parser.rs"
 test = false
 doc = false
 bench = false

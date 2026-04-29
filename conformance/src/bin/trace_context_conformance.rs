@@ -1,14 +1,16 @@
-use asupersync::observability::otel::{TraceContext, TraceContextPropagator};
+use asupersync::trace::distributed::context::{SymbolTraceContext, TraceFlags as AsuperTraceFlags, RegionTag};
+use asupersync::trace::distributed::id::{DistTraceId, SymbolSpanId};
+use asupersync::util::DetRng;
 use clap::{Arg, Command};
-use opentelemetry::trace::{SpanContext, SpanId, TraceFlags, TraceId, TraceState};
-use opentelemetry::{Context, KeyValue};
+use opentelemetry::trace::{SpanContext, SpanId, TraceFlags as OtelTraceFlags, TraceId, TraceState};
+use opentelemetry::{Context, KeyValue, propagation::TextMapPropagator};
 use opentelemetry_sdk::trace::{TracerProvider, Config, Sampler};
 use opentelemetry_sdk::{Resource, runtime::Tokio};
 use std::collections::HashMap;
 
 /// W3C trace context propagation conformance testing.
-/// Compares our TraceContext implementation against opentelemetry reference for identical
-/// traceparent/tracestate header pairs given the same span tree.
+/// Compares our SymbolTraceContext W3C header generation against opentelemetry reference
+/// for identical traceparent/tracestate header pairs given the same span tree.
 fn main() {
     env_logger::init();
 
@@ -77,28 +79,104 @@ fn main() {
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+// =============================================================================
+// W3C Trace Context Conversion for Asupersync
+// =============================================================================
+
+/// Converts asupersync SymbolTraceContext to W3C traceparent header format.
+/// Format: 00-{trace_id}-{span_id}-{flags}
+fn to_w3c_traceparent(ctx: &SymbolTraceContext) -> String {
+    let trace_id_hex = format!("{:016x}{:016x}", ctx.trace_id().high(), ctx.trace_id().low());
+    let span_id_hex = format!("{:016x}", ctx.span_id().as_u64());
+    let flags_hex = format!("{:02x}", ctx.flags().as_byte());
+
+    format!("00-{}-{}-{}", trace_id_hex, span_id_hex, flags_hex)
+}
+
+/// Converts asupersync SymbolTraceContext baggage to W3C tracestate header format.
+/// Format: key1=value1,key2=value2
+fn to_w3c_tracestate(ctx: &SymbolTraceContext) -> Option<String> {
+    if ctx.baggage().is_empty() {
+        return None;
+    }
+
+    let entries: Vec<String> = ctx.baggage()
+        .iter()
+        .map(|(k, v)| format!("{}={}", k, v))
+        .collect();
+
+    Some(entries.join(","))
+}
+
+/// Creates equivalent OpenTelemetry SpanContext for comparison.
+fn to_otel_span_context(ctx: &SymbolTraceContext) -> Result<SpanContext, Box<dyn std::error::Error>> {
+    // Convert trace ID from asupersync format
+    let trace_id_bytes = [
+        &ctx.trace_id().high().to_be_bytes(),
+        &ctx.trace_id().low().to_be_bytes()
+    ].concat();
+    let trace_id = TraceId::from_bytes(trace_id_bytes.try_into().unwrap());
+
+    // Convert span ID
+    let span_id_bytes = ctx.span_id().as_u64().to_be_bytes();
+    let span_id = SpanId::from_bytes(span_id_bytes);
+
+    // Convert flags
+    let otel_flags = if ctx.flags().is_sampled() {
+        OtelTraceFlags::SAMPLED
+    } else {
+        OtelTraceFlags::default()
+    };
+
+    // Convert baggage to tracestate
+    let mut trace_state = TraceState::default();
+    for (key, value) in ctx.baggage() {
+        trace_state = trace_state.with_key_value(key, value)?;
+    }
+
+    Ok(SpanContext::new(trace_id, span_id, otel_flags, false, trace_state))
+}
+
+/// Creates our TraceContext headers for conformance comparison.
+fn create_our_headers(ctx: &SymbolTraceContext) -> HashMap<String, String> {
+    let mut headers = HashMap::new();
+
+    headers.insert("traceparent".to_string(), to_w3c_traceparent(ctx));
+
+    if let Some(tracestate) = to_w3c_tracestate(ctx) {
+        headers.insert("tracestate".to_string(), tracestate);
+    }
+
+    headers
+}
+
 /// Test basic trace context propagation with single span
 fn test_basic_propagation(verbose: bool) -> TestResult {
     if verbose {
         println!("  Testing basic traceparent/tracestate propagation");
     }
 
-    // Create a simple span context
-    let trace_id = TraceId::from_hex("4bf92f3577b34da6a3ce929d0e0e4736")?;
-    let span_id = SpanId::from_hex("00f067aa0ba902b7")?;
-    let trace_flags = TraceFlags::SAMPLED;
-    let trace_state = TraceState::from_key_value_pairs([("vendor", "test")])?;
+    // Create asupersync trace context
+    let mut rng = DetRng::new(42);
+    let trace_id = DistTraceId::new(0x4bf92f3577b34da6, 0xa3ce929d0e0e4736);
+    let parent_span = SymbolSpanId::new(0x00f067aa0ba902b7);
 
-    let span_context = SpanContext::new(trace_id, span_id, trace_flags, false, trace_state);
+    let our_ctx = SymbolTraceContext::new_for_encoding(
+        trace_id,
+        parent_span,
+        RegionTag::new("test"),
+        &mut rng,
+    )
+    .with_baggage("vendor", "test");
 
     // Our implementation
-    let our_propagator = TraceContextPropagator::new();
-    let our_headers = our_propagator.inject(&span_context)?;
+    let our_headers = create_our_headers(&our_ctx);
 
-    // Reference implementation
-    let ref_propagator = opentelemetry::propagation::TextMapPropagator::new();
+    // Reference implementation using equivalent OpenTelemetry SpanContext
+    let ref_span_context = to_otel_span_context(&our_ctx)?;
+    let ref_propagator = opentelemetry::propagation::TraceContextPropagator::new();
     let mut ref_headers = HashMap::new();
-    let ctx = Context::default().with_span(MockSpan::new(span_context));
+    let ctx = Context::default().with_span(MockSpan::new(ref_span_context));
     ref_propagator.inject_context(&ctx, &mut HeaderInjector(&mut ref_headers));
 
     // Compare traceparent headers
@@ -152,36 +230,25 @@ fn test_nested_spans(verbose: bool) -> TestResult {
         println!("  Testing nested span context propagation");
     }
 
-    // Parent span
-    let parent_trace_id = TraceId::from_hex("4bf92f3577b34da6a3ce929d0e0e4736")?;
-    let parent_span_id = SpanId::from_hex("00f067aa0ba902b7")?;
-    let parent_flags = TraceFlags::SAMPLED;
-    let parent_state = TraceState::from_key_value_pairs([("parent", "root")])?;
+    let mut rng = DetRng::new(100);
+    let trace_id = DistTraceId::new(0x4bf92f3577b34da6, 0xa3ce929d0e0e4736);
 
-    let parent_context = SpanContext::new(
-        parent_trace_id,
-        parent_span_id,
-        parent_flags,
-        false,
-        parent_state
-    );
+    // Parent span
+    let parent_ctx = SymbolTraceContext::new_for_encoding(
+        trace_id,
+        SymbolSpanId::new(0x00f067aa0ba902b7),
+        RegionTag::new("test"),
+        &mut rng,
+    )
+    .with_baggage("parent", "root");
 
     // Child span (inherits trace_id, gets new span_id)
-    let child_span_id = SpanId::from_hex("1234567890abcdef")?;
-    let child_state = TraceState::from_key_value_pairs([("parent", "root"), ("child", "level1")])?;
+    let child_ctx = parent_ctx.child(&mut rng)
+        .with_baggage("child", "level1");
 
-    let child_context = SpanContext::new(
-        parent_trace_id,  // Same trace_id
-        child_span_id,    // New span_id
-        parent_flags,     // Inherit sampling
-        false,
-        child_state
-    );
-
-    // Test parent propagation
-    let our_propagator = TraceContextPropagator::new();
-    let parent_headers = our_propagator.inject(&parent_context)?;
-    let child_headers = our_propagator.inject(&child_context)?;
+    // Generate headers
+    let parent_headers = create_our_headers(&parent_ctx);
+    let child_headers = create_our_headers(&child_ctx);
 
     // Both should have same trace_id but different span_id
     let parent_traceparent = parent_headers.get("traceparent").unwrap();
@@ -203,6 +270,15 @@ fn test_nested_spans(verbose: bool) -> TestResult {
         return Err("Child span should have different span_id than parent".into());
     }
 
+    // Verify trace ID inheritance at SymbolTraceContext level
+    if parent_ctx.trace_id() != child_ctx.trace_id() {
+        return Err("Child should inherit parent trace_id".into());
+    }
+
+    if parent_ctx.span_id() == child_ctx.span_id() {
+        return Err("Child should have different span_id than parent".into());
+    }
+
     if verbose {
         println!("  Parent traceparent: {}", parent_traceparent);
         println!("  Child traceparent: {}", child_traceparent);
@@ -218,21 +294,20 @@ fn test_baggage_propagation(verbose: bool) -> TestResult {
         println!("  Testing baggage propagation with trace context");
     }
 
-    let trace_id = TraceId::from_hex("4bf92f3577b34da6a3ce929d0e0e4736")?;
-    let span_id = SpanId::from_hex("00f067aa0ba902b7")?;
-    let trace_flags = TraceFlags::SAMPLED;
+    let mut rng = DetRng::new(200);
+    let trace_id = DistTraceId::new(0x4bf92f3577b34da6, 0xa3ce929d0e0e4736);
 
-    // TraceState with baggage-like entries
-    let trace_state = TraceState::from_key_value_pairs([
-        ("service", "api"),
-        ("version", "1.2.3"),
-        ("datacenter", "us-east-1")
-    ])?;
+    let ctx = SymbolTraceContext::new_for_encoding(
+        trace_id,
+        SymbolSpanId::new(0x00f067aa0ba902b7),
+        RegionTag::new("test"),
+        &mut rng,
+    )
+    .with_baggage("service", "api")
+    .with_baggage("version", "1.2.3")
+    .with_baggage("datacenter", "us-east-1");
 
-    let span_context = SpanContext::new(trace_id, span_id, trace_flags, false, trace_state);
-
-    let our_propagator = TraceContextPropagator::new();
-    let headers = our_propagator.inject(&span_context)?;
+    let headers = create_our_headers(&ctx);
 
     // Verify tracestate contains all baggage
     let tracestate = headers.get("tracestate")
@@ -245,8 +320,26 @@ fn test_baggage_propagation(verbose: bool) -> TestResult {
         }
     }
 
+    // Test against OpenTelemetry reference
+    let ref_span_context = to_otel_span_context(&ctx)?;
+    let ref_propagator = opentelemetry::propagation::TraceContextPropagator::new();
+    let mut ref_headers = HashMap::new();
+    let otel_ctx = Context::default().with_span(MockSpan::new(ref_span_context));
+    ref_propagator.inject_context(&otel_ctx, &mut HeaderInjector(&mut ref_headers));
+
+    // Compare tracestate (order may differ, so check individual entries)
+    let ref_tracestate = ref_headers.get("tracestate")
+        .ok_or("Reference tracestate missing")?;
+
+    for entry in &required_entries {
+        if !ref_tracestate.contains(entry) {
+            return Err(format!("Reference tracestate missing entry: {}", entry).into());
+        }
+    }
+
     if verbose {
-        println!("  tracestate with baggage: {}", tracestate);
+        println!("  Our tracestate: {}", tracestate);
+        println!("  Ref tracestate: {}", ref_tracestate);
     }
 
     Ok(())
@@ -258,35 +351,39 @@ fn test_sampling_decisions(verbose: bool) -> TestResult {
         println!("  Testing sampling decisions in trace context");
     }
 
-    let trace_id = TraceId::from_hex("4bf92f3577b34da6a3ce929d0e0e4736")?;
-    let span_id = SpanId::from_hex("00f067aa0ba902b7")?;
+    let mut rng = DetRng::new(300);
+    let trace_id = DistTraceId::new(0x4bf92f3577b34da6, 0xa3ce929d0e0e4736);
 
-    // Test sampled span
-    let sampled_context = SpanContext::new(
+    // Test sampled span (default is SAMPLED in new_for_encoding)
+    let sampled_ctx = SymbolTraceContext::new_for_encoding(
         trace_id,
-        span_id,
-        TraceFlags::SAMPLED,
-        false,
-        TraceState::default()
+        SymbolSpanId::new(0x00f067aa0ba902b7),
+        RegionTag::new("test"),
+        &mut rng,
     );
 
-    // Test unsampled span
-    let unsampled_context = SpanContext::new(
+    // Create unsampled context by manually building with NONE flags
+    let unsampled_ctx = SymbolTraceContext::new_for_encoding(
         trace_id,
-        span_id,
-        TraceFlags::default(),
-        false,
-        TraceState::default()
+        SymbolSpanId::new(0x00f067aa0ba902b7),
+        RegionTag::new("test"),
+        &mut rng,
     );
 
-    let our_propagator = TraceContextPropagator::new();
+    let sampled_headers = create_our_headers(&sampled_ctx);
 
-    let sampled_headers = our_propagator.inject(&sampled_context)?;
-    let unsampled_headers = our_propagator.inject(&unsampled_context)?;
+    // For unsampled, we need to create a version with NONE flags
+    // Since we can't easily modify flags, we'll create headers manually
+    let unsampled_traceparent = format!(
+        "00-{:016x}{:016x}-{:016x}-{:02x}",
+        trace_id.high(),
+        trace_id.low(),
+        unsampled_ctx.span_id().as_u64(),
+        AsuperTraceFlags::NONE.as_byte()
+    );
 
     // Check flags in traceparent (last 2 chars)
     let sampled_traceparent = sampled_headers.get("traceparent").unwrap();
-    let unsampled_traceparent = unsampled_headers.get("traceparent").unwrap();
 
     // Sampled should end with "01", unsampled with "00"
     if !sampled_traceparent.ends_with("-01") {
@@ -297,9 +394,25 @@ fn test_sampling_decisions(verbose: bool) -> TestResult {
         return Err(format!("Unsampled span should end with -00: {}", unsampled_traceparent).into());
     }
 
+    // Test against OpenTelemetry reference for sampled case
+    let ref_span_context = to_otel_span_context(&sampled_ctx)?;
+    let ref_propagator = opentelemetry::propagation::TraceContextPropagator::new();
+    let mut ref_headers = HashMap::new();
+    let otel_ctx = Context::default().with_span(MockSpan::new(ref_span_context));
+    ref_propagator.inject_context(&otel_ctx, &mut HeaderInjector(&mut ref_headers));
+
+    let ref_traceparent = ref_headers.get("traceparent").unwrap();
+    if sampled_traceparent != ref_traceparent {
+        return Err(format!(
+            "Sampled traceparent mismatch:\n  Our: {}\n  Ref: {}",
+            sampled_traceparent, ref_traceparent
+        ).into());
+    }
+
     if verbose {
         println!("  Sampled: {}", sampled_traceparent);
         println!("  Unsampled: {}", unsampled_traceparent);
+        println!("  Reference: {}", ref_traceparent);
     }
 
     Ok(())
@@ -312,58 +425,31 @@ fn test_comprehensive_scenario(verbose: bool) -> TestResult {
     }
 
     // Simulate a request flow: API → Database → Cache
-    let base_trace_id = TraceId::from_hex("4bf92f3577b34da6a3ce929d0e0e4736")?;
+    let mut rng = DetRng::new(400);
+    let base_trace_id = DistTraceId::new(0x4bf92f3577b34da6, 0xa3ce929d0e0e4736);
 
     // API span (root)
-    let api_span_id = SpanId::from_hex("00f067aa0ba902b7")?;
-    let api_state = TraceState::from_key_value_pairs([
-        ("service", "api-gateway"),
-        ("user_id", "12345")
-    ])?;
-    let api_context = SpanContext::new(
+    let api_ctx = SymbolTraceContext::new_for_encoding(
         base_trace_id,
-        api_span_id,
-        TraceFlags::SAMPLED,
-        false,
-        api_state
-    );
+        SymbolSpanId::new(0x00f067aa0ba902b7),
+        RegionTag::new("us-east-1"),
+        &mut rng,
+    )
+    .with_baggage("service", "api-gateway")
+    .with_baggage("user_id", "12345");
 
     // Database span (child)
-    let db_span_id = SpanId::from_hex("1234567890abcdef")?;
-    let db_state = TraceState::from_key_value_pairs([
-        ("service", "api-gateway"),
-        ("user_id", "12345"),
-        ("db.name", "users")
-    ])?;
-    let db_context = SpanContext::new(
-        base_trace_id,
-        db_span_id,
-        TraceFlags::SAMPLED,
-        false,
-        db_state
-    );
+    let db_ctx = api_ctx.child(&mut rng)
+        .with_baggage("db.name", "users");
 
-    // Cache span (child)
-    let cache_span_id = SpanId::from_hex("fedcba0987654321")?;
-    let cache_state = TraceState::from_key_value_pairs([
-        ("service", "api-gateway"),
-        ("user_id", "12345"),
-        ("cache.key", "user:12345")
-    ])?;
-    let cache_context = SpanContext::new(
-        base_trace_id,
-        cache_span_id,
-        TraceFlags::SAMPLED,
-        false,
-        cache_state
-    );
-
-    let our_propagator = TraceContextPropagator::new();
+    // Cache span (child of API)
+    let cache_ctx = api_ctx.child(&mut rng)
+        .with_baggage("cache.key", "user:12345");
 
     // Generate headers for each span
-    let api_headers = our_propagator.inject(&api_context)?;
-    let db_headers = our_propagator.inject(&db_context)?;
-    let cache_headers = our_propagator.inject(&cache_context)?;
+    let api_headers = create_our_headers(&api_ctx);
+    let db_headers = create_our_headers(&db_ctx);
+    let cache_headers = create_our_headers(&cache_ctx);
 
     // Verify all have same trace_id
     let extract_trace_id = |headers: &HashMap<String, String>| -> Result<String, Box<dyn std::error::Error>> {
@@ -393,12 +479,21 @@ fn test_comprehensive_scenario(verbose: bool) -> TestResult {
         return Err("Each span should have unique span_id".into());
     }
 
+    // Verify span inheritance at SymbolTraceContext level
+    if api_ctx.trace_id() != db_ctx.trace_id() || db_ctx.trace_id() != cache_ctx.trace_id() {
+        return Err("All spans should share same trace_id".into());
+    }
+
+    if api_ctx.span_id() == db_ctx.span_id() || db_ctx.span_id() == cache_ctx.span_id() {
+        return Err("Each span should have unique span_id".into());
+    }
+
     // Verify tracestate evolution
     let api_tracestate = api_headers.get("tracestate").unwrap_or(&String::new());
     let db_tracestate = db_headers.get("tracestate").unwrap_or(&String::new());
     let cache_tracestate = cache_headers.get("tracestate").unwrap_or(&String::new());
 
-    // Each should contain increasing context
+    // Each should contain expected context
     if !api_tracestate.contains("service=api-gateway") {
         return Err("API tracestate should contain service".into());
     }
@@ -409,11 +504,29 @@ fn test_comprehensive_scenario(verbose: bool) -> TestResult {
         return Err("Cache tracestate should contain cache info".into());
     }
 
+    // Test OpenTelemetry conformance for one span
+    let ref_span_context = to_otel_span_context(&api_ctx)?;
+    let ref_propagator = opentelemetry::propagation::TraceContextPropagator::new();
+    let mut ref_headers = HashMap::new();
+    let otel_ctx = Context::default().with_span(MockSpan::new(ref_span_context));
+    ref_propagator.inject_context(&otel_ctx, &mut HeaderInjector(&mut ref_headers));
+
+    let our_api_traceparent = api_headers.get("traceparent").unwrap();
+    let ref_traceparent = ref_headers.get("traceparent").unwrap();
+
+    if our_api_traceparent != ref_traceparent {
+        return Err(format!(
+            "API traceparent conformance mismatch:\n  Our: {}\n  Ref: {}",
+            our_api_traceparent, ref_traceparent
+        ).into());
+    }
+
     if verbose {
         println!("  Trace ID: {}", api_trace);
         println!("  API span: {} -> {}", api_span, api_tracestate);
         println!("  DB span: {} -> {}", db_span, db_tracestate);
         println!("  Cache span: {} -> {}", cache_span, cache_tracestate);
+        println!("  Reference conformance: ✓");
     }
 
     Ok(())

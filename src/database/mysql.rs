@@ -3743,6 +3743,14 @@ pub trait ToSql: Sync {
     }
 }
 
+trait StaticMySqlTypeInfo {
+    fn static_mysql_type_code() -> u8;
+
+    fn static_is_unsigned() -> bool {
+        false
+    }
+}
+
 impl ToSql for bool {
     fn to_sql(&self) -> Result<Vec<u8>, MySqlError> {
         Ok(vec![u8::from(*self)])
@@ -3760,6 +3768,16 @@ impl ToSql for bool {
     }
 }
 
+impl StaticMySqlTypeInfo for bool {
+    fn static_mysql_type_code() -> u8 {
+        mysql_type::MYSQL_TYPE_TINY
+    }
+
+    fn static_is_unsigned() -> bool {
+        true
+    }
+}
+
 // ----- Signed integers --------------------------------------------------
 
 impl ToSql for i8 {
@@ -3768,6 +3786,12 @@ impl ToSql for i8 {
     }
 
     fn mysql_type_code(&self) -> u8 {
+        mysql_type::MYSQL_TYPE_TINY
+    }
+}
+
+impl StaticMySqlTypeInfo for i8 {
+    fn static_mysql_type_code() -> u8 {
         mysql_type::MYSQL_TYPE_TINY
     }
 }
@@ -3782,6 +3806,12 @@ impl ToSql for i16 {
     }
 }
 
+impl StaticMySqlTypeInfo for i16 {
+    fn static_mysql_type_code() -> u8 {
+        mysql_type::MYSQL_TYPE_SHORT
+    }
+}
+
 impl ToSql for i32 {
     fn to_sql(&self) -> Result<Vec<u8>, MySqlError> {
         Ok(self.to_le_bytes().to_vec())
@@ -3792,12 +3822,24 @@ impl ToSql for i32 {
     }
 }
 
+impl StaticMySqlTypeInfo for i32 {
+    fn static_mysql_type_code() -> u8 {
+        mysql_type::MYSQL_TYPE_LONG
+    }
+}
+
 impl ToSql for i64 {
     fn to_sql(&self) -> Result<Vec<u8>, MySqlError> {
         Ok(self.to_le_bytes().to_vec())
     }
 
     fn mysql_type_code(&self) -> u8 {
+        mysql_type::MYSQL_TYPE_LONGLONG
+    }
+}
+
+impl StaticMySqlTypeInfo for i64 {
+    fn static_mysql_type_code() -> u8 {
         mysql_type::MYSQL_TYPE_LONGLONG
     }
 }
@@ -3826,6 +3868,16 @@ impl ToSql for u8 {
     }
 }
 
+impl StaticMySqlTypeInfo for u8 {
+    fn static_mysql_type_code() -> u8 {
+        mysql_type::MYSQL_TYPE_TINY
+    }
+
+    fn static_is_unsigned() -> bool {
+        true
+    }
+}
+
 impl ToSql for u16 {
     fn to_sql(&self) -> Result<Vec<u8>, MySqlError> {
         Ok(self.to_le_bytes().to_vec())
@@ -3836,6 +3888,16 @@ impl ToSql for u16 {
     }
 
     fn is_unsigned(&self) -> bool {
+        true
+    }
+}
+
+impl StaticMySqlTypeInfo for u16 {
+    fn static_mysql_type_code() -> u8 {
+        mysql_type::MYSQL_TYPE_SHORT
+    }
+
+    fn static_is_unsigned() -> bool {
         true
     }
 }
@@ -3854,6 +3916,16 @@ impl ToSql for u32 {
     }
 }
 
+impl StaticMySqlTypeInfo for u32 {
+    fn static_mysql_type_code() -> u8 {
+        mysql_type::MYSQL_TYPE_LONG
+    }
+
+    fn static_is_unsigned() -> bool {
+        true
+    }
+}
+
 impl ToSql for u64 {
     fn to_sql(&self) -> Result<Vec<u8>, MySqlError> {
         Ok(self.to_le_bytes().to_vec())
@@ -3864,6 +3936,16 @@ impl ToSql for u64 {
     }
 
     fn is_unsigned(&self) -> bool {
+        true
+    }
+}
+
+impl StaticMySqlTypeInfo for u64 {
+    fn static_mysql_type_code() -> u8 {
+        mysql_type::MYSQL_TYPE_LONGLONG
+    }
+
+    fn static_is_unsigned() -> bool {
         true
     }
 }
@@ -3885,12 +3967,28 @@ impl ToSql for usize {
     }
 }
 
+impl StaticMySqlTypeInfo for usize {
+    fn static_mysql_type_code() -> u8 {
+        mysql_type::MYSQL_TYPE_LONGLONG
+    }
+
+    fn static_is_unsigned() -> bool {
+        true
+    }
+}
+
 impl ToSql for f32 {
     fn to_sql(&self) -> Result<Vec<u8>, MySqlError> {
         Ok(self.to_le_bytes().to_vec())
     }
 
     fn mysql_type_code(&self) -> u8 {
+        mysql_type::MYSQL_TYPE_FLOAT
+    }
+}
+
+impl StaticMySqlTypeInfo for f32 {
+    fn static_mysql_type_code() -> u8 {
         mysql_type::MYSQL_TYPE_FLOAT
     }
 }
@@ -3905,12 +4003,24 @@ impl ToSql for f64 {
     }
 }
 
+impl StaticMySqlTypeInfo for f64 {
+    fn static_mysql_type_code() -> u8 {
+        mysql_type::MYSQL_TYPE_DOUBLE
+    }
+}
+
 impl ToSql for str {
     fn to_sql(&self) -> Result<Vec<u8>, MySqlError> {
         Ok(encode_lenenc_bytes(self.as_bytes()))
     }
 
     fn mysql_type_code(&self) -> u8 {
+        mysql_type::MYSQL_TYPE_VAR_STRING
+    }
+}
+
+impl StaticMySqlTypeInfo for str {
+    fn static_mysql_type_code() -> u8 {
         mysql_type::MYSQL_TYPE_VAR_STRING
     }
 }
@@ -3925,12 +4035,24 @@ impl ToSql for String {
     }
 }
 
+impl StaticMySqlTypeInfo for String {
+    fn static_mysql_type_code() -> u8 {
+        mysql_type::MYSQL_TYPE_VAR_STRING
+    }
+}
+
 impl ToSql for [u8] {
     fn to_sql(&self) -> Result<Vec<u8>, MySqlError> {
         Ok(encode_lenenc_bytes(self))
     }
 
     fn mysql_type_code(&self) -> u8 {
+        mysql_type::MYSQL_TYPE_BLOB
+    }
+}
+
+impl StaticMySqlTypeInfo for [u8] {
+    fn static_mysql_type_code() -> u8 {
         mysql_type::MYSQL_TYPE_BLOB
     }
 }
@@ -3945,7 +4067,23 @@ impl ToSql for Vec<u8> {
     }
 }
 
-impl<T: ToSql> ToSql for Option<T> {
+impl StaticMySqlTypeInfo for Vec<u8> {
+    fn static_mysql_type_code() -> u8 {
+        mysql_type::MYSQL_TYPE_BLOB
+    }
+}
+
+impl<T: StaticMySqlTypeInfo + ?Sized> StaticMySqlTypeInfo for &T {
+    fn static_mysql_type_code() -> u8 {
+        T::static_mysql_type_code()
+    }
+
+    fn static_is_unsigned() -> bool {
+        T::static_is_unsigned()
+    }
+}
+
+impl<T: ToSql + StaticMySqlTypeInfo> ToSql for Option<T> {
     fn to_sql(&self) -> Result<Vec<u8>, MySqlError> {
         match self {
             Some(value) => value.to_sql(),
@@ -3956,7 +4094,7 @@ impl<T: ToSql> ToSql for Option<T> {
     fn mysql_type_code(&self) -> u8 {
         match self {
             Some(value) => value.mysql_type_code(),
-            None => mysql_type::MYSQL_TYPE_NULL,
+            None => T::static_mysql_type_code(),
         }
     }
 
@@ -3967,7 +4105,7 @@ impl<T: ToSql> ToSql for Option<T> {
     fn is_unsigned(&self) -> bool {
         match self {
             Some(value) => value.is_unsigned(),
-            None => false,
+            None => T::static_is_unsigned(),
         }
     }
 }
@@ -4048,7 +4186,6 @@ mod mysql_type {
     pub const MYSQL_TYPE_LONG: u8 = 3;
     pub const MYSQL_TYPE_FLOAT: u8 = 4;
     pub const MYSQL_TYPE_DOUBLE: u8 = 5;
-    pub const MYSQL_TYPE_NULL: u8 = 6;
     pub const MYSQL_TYPE_LONGLONG: u8 = 8;
     pub const MYSQL_TYPE_VAR_STRING: u8 = 253;
     pub const MYSQL_TYPE_BLOB: u8 = 252;
@@ -6031,6 +6168,96 @@ mod tests {
             conn.inner.closed,
             "empty COM_STMT_PREPARE response must keep connection fail-closed"
         );
+    }
+
+    #[test]
+    fn repeated_prepare_of_same_sql_hits_wire_each_time() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let sql = "SELECT ? + ?";
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+
+            for expected_statement_id in [101_u32, 202_u32] {
+                let mut header = [0_u8; 4];
+                stream.read_exact(&mut header).expect("read prepare header");
+                let payload_len = usize::from(header[0])
+                    | (usize::from(header[1]) << 8)
+                    | (usize::from(header[2]) << 16);
+                let mut payload = vec![0_u8; payload_len];
+                stream
+                    .read_exact(&mut payload)
+                    .expect("read prepare payload");
+                assert_eq!(payload[0], command::COM_STMT_PREPARE);
+                assert_eq!(
+                    std::str::from_utf8(&payload[1..]).expect("prepare sql utf8"),
+                    sql
+                );
+
+                let mut response = PacketBuffer::new();
+                response.write_byte(0x00);
+                response.write_u32_le(expected_statement_id);
+                response.write_u16_le(0);
+                response.write_u16_le(2);
+                response.write_byte(0x00);
+                response.write_u16_le(0);
+
+                let mut packet = PacketBuffer::new();
+                packet.set_sequence(1);
+                packet.buf = response.buf;
+                let packet = packet.build_packet();
+                stream
+                    .write_all(&packet.bytes)
+                    .expect("write prepare OK response");
+                stream.flush().expect("flush prepare OK response");
+            }
+        });
+
+        let stream = run(async {
+            crate::net::TcpStream::connect_socket_addr(addr)
+                .await
+                .expect("connect client")
+        });
+
+        let mut conn = MySqlConnection {
+            inner: MySqlConnectionInner {
+                stream,
+                connection_id: 55,
+                capabilities: 0,
+                charset: 0,
+                status_flags: 0,
+                sequence: 0,
+                closed: false,
+                server_version: String::new(),
+                needs_rollback: false,
+                max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                query_in_flight: std::sync::atomic::AtomicBool::new(false),
+            },
+            options: None,
+        };
+        let cx = Cx::for_testing();
+
+        let stmt1 = match run(conn.prepare(&cx, sql)) {
+            Outcome::Ok(stmt) => stmt,
+            other => panic!("expected first prepare OK, got {other:?}"),
+        };
+        let stmt2 = match run(conn.prepare(&cx, sql)) {
+            Outcome::Ok(stmt) => stmt,
+            other => panic!("expected second prepare OK, got {other:?}"),
+        };
+
+        server.join().expect("join server");
+        assert_eq!(stmt1.statement_id, 101);
+        assert_eq!(stmt2.statement_id, 202);
+        assert_eq!(stmt1.owner_connection_id(), 55);
+        assert_eq!(stmt2.owner_connection_id(), 55);
+        assert_eq!(stmt1.param_count(), 2);
+        assert_eq!(stmt2.param_count(), 2);
+        assert!(!conn.inner.closed);
     }
 
     #[test]

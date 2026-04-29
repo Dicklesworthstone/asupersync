@@ -39,6 +39,10 @@ name = "h2_goaway_conformance"
 path = "src/bin/h2_goaway_conformance.rs"
 
 [[bin]]
+name = "h2_ping_conformance"
+path = "src/bin/h2_ping_conformance.rs"
+
+[[bin]]
 name = "h2_priority_conformance"
 path = "src/bin/h2_priority_conformance.rs"
 

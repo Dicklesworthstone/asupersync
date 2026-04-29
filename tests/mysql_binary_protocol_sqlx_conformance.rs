@@ -1,4 +1,5 @@
 #![cfg(all(feature = "mysql", feature = "test-internals"))]
+//! Differential conformance harness for MySQL COM_STMT_EXECUTE bytes vs sqlx.
 
 use asupersync::database::mysql::{ToSql, fuzz_build_stmt_execute_packet};
 use sqlx::mysql::{MySqlConnectOptions, MySqlSslMode};
