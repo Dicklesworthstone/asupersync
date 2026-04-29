@@ -4162,6 +4162,103 @@ mod tests {
     }
 
     #[test]
+    fn cluster_moved_redirect_retries_and_records_slot_like_redis_rs() {
+        let primary_listener =
+            StdTcpListener::bind("127.0.0.1:0").expect("bind primary redis listener");
+        let primary_addr = primary_listener
+            .local_addr()
+            .expect("primary listener addr");
+        let redirect_listener =
+            StdTcpListener::bind("127.0.0.1:0").expect("bind redirect redis listener");
+        let redirect_addr = redirect_listener
+            .local_addr()
+            .expect("redirect listener addr");
+        let redirect_target = format!("{}:{}", redirect_addr.ip(), redirect_addr.port());
+
+        let primary_server = thread::spawn({
+            let redirect_target = redirect_target.clone();
+            move || {
+                let (mut stream, _) = primary_listener.accept().expect("accept primary client");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .expect("set primary read timeout");
+
+                let hello = read_resp_frame(&mut stream);
+                assert_resp_command(hello, &[b"HELLO", b"3"]);
+                let hello_reply = RespValue::Map(vec![(
+                    RespValue::SimpleString("proto".to_string()),
+                    RespValue::Integer(3),
+                )])
+                .encode();
+                stream
+                    .write_all(&hello_reply)
+                    .expect("write primary HELLO reply");
+                stream.flush().expect("flush primary HELLO reply");
+
+                let get = read_resp_frame(&mut stream);
+                assert_resp_command(get, &[b"GET", b"moved-key"]);
+                let moved = format!("-MOVED 123 {redirect_target}\r\n");
+                stream
+                    .write_all(moved.as_bytes())
+                    .expect("write MOVED redirect");
+                stream.flush().expect("flush MOVED redirect");
+            }
+        });
+
+        let redirect_server = thread::spawn(move || {
+            let (mut stream, _) = redirect_listener
+                .accept()
+                .expect("accept redirected client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("set redirect read timeout");
+
+            let hello = read_resp_frame(&mut stream);
+            assert_resp_command(hello, &[b"HELLO", b"3"]);
+            let hello_reply = RespValue::Map(vec![(
+                RespValue::SimpleString("proto".to_string()),
+                RespValue::Integer(3),
+            )])
+            .encode();
+            stream
+                .write_all(&hello_reply)
+                .expect("write redirect HELLO reply");
+            stream.flush().expect("flush redirect HELLO reply");
+
+            let get = read_resp_frame(&mut stream);
+            assert_resp_command(get, &[b"GET", b"moved-key"]);
+            let value = RespValue::BulkString(Some(b"value".to_vec())).encode();
+            stream.write_all(&value).expect("write redirect value");
+            stream.flush().expect("flush redirect value");
+        });
+
+        run_test_with_cx(|cx| async move {
+            let client = RedisClient::connect(
+                &cx,
+                &format!("redis://{}:{}/0", primary_addr.ip(), primary_addr.port()),
+            )
+            .await
+            .expect("connect redis client");
+
+            let response = client
+                .cmd(&cx, &["GET", "moved-key"])
+                .await
+                .expect("MOVED redirect should retry against target");
+            assert_eq!(response, RespValue::BulkString(Some(b"value".to_vec())));
+
+            let slot_map = client.slot_map_snapshot();
+            assert_eq!(
+                slot_map.get(&123).map(String::as_str),
+                Some(redirect_target.as_str()),
+                "MOVED handling must record the redirected slot owner like redis-rs"
+            );
+        });
+
+        primary_server.join().expect("primary server join");
+        redirect_server.join().expect("redirect server join");
+    }
+
+    #[test]
     fn resp3_attributes_do_not_desynchronize_pooled_command_replies() {
         let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test listener");
         let addr = listener.local_addr().expect("listener addr");
