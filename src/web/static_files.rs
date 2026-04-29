@@ -25,6 +25,7 @@ use std::fmt::Write as _;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
+use crate::bytes::Bytes;
 use sha2::{Digest, Sha256};
 
 use super::handler::Handler;
@@ -251,13 +252,18 @@ pub struct StaticFilesHandler {
 
 impl Handler for StaticFilesHandler {
     fn call(&self, req: super::extract::Request) -> Response {
+        let head_only = req.method.eq_ignore_ascii_case("HEAD");
         let if_none_match = req.header("if-none-match").map(str::to_owned);
         let request_path = &req.path;
 
-        self.config.resolve_path(request_path).map_or_else(
+        let mut response = self.config.resolve_path(request_path).map_or_else(
             || Response::empty(StatusCode::NOT_FOUND),
             |file_path| self.config.serve_file(&file_path, if_none_match.as_deref()),
-        )
+        );
+        if head_only {
+            response.body = Bytes::new();
+        }
+        response
     }
 }
 
@@ -824,6 +830,30 @@ mod tests {
     }
 
     #[test]
+    fn handler_head_omits_body_but_preserves_conditional_headers() {
+        use super::super::handler::Handler;
+
+        let dir = setup_dir();
+        let sf = StaticFiles::new(dir.path());
+        let handler = sf.handler();
+
+        let get_resp = handler.call(super::super::extract::Request::new("GET", "/hello.txt"));
+        let head_resp = handler.call(super::super::extract::Request::new("HEAD", "/hello.txt"));
+
+        assert_eq!(head_resp.status, StatusCode::OK);
+        assert!(head_resp.body.is_empty());
+        assert_eq!(
+            head_resp.headers.get("content-type"),
+            get_resp.headers.get("content-type")
+        );
+        assert_eq!(head_resp.headers.get("etag"), get_resp.headers.get("etag"));
+        assert_eq!(
+            head_resp.headers.get("cache-control"),
+            get_resp.headers.get("cache-control")
+        );
+    }
+
+    #[test]
     fn handler_returns_404() {
         use super::super::handler::Handler;
 
@@ -854,6 +884,27 @@ mod tests {
             .with_header("If-None-Match", etag);
         let resp2 = handler.call(req2);
         assert_eq!(resp2.status, StatusCode::NOT_MODIFIED);
+    }
+
+    #[test]
+    fn handler_head_304_with_etag_stays_empty() {
+        use super::super::handler::Handler;
+
+        let dir = setup_dir();
+        let sf = StaticFiles::new(dir.path());
+        let handler = sf.handler();
+
+        let get_resp = handler.call(super::super::extract::Request::new("GET", "/hello.txt"));
+        let etag = get_resp.headers.get("etag").unwrap().clone();
+
+        let head_req = super::super::extract::Request::new("HEAD", "/hello.txt")
+            .with_header("If-None-Match", etag);
+        let head_resp = handler.call(head_req);
+
+        assert_eq!(head_resp.status, StatusCode::NOT_MODIFIED);
+        assert!(head_resp.body.is_empty());
+        assert!(head_resp.headers.contains_key("etag"));
+        assert!(head_resp.headers.contains_key("cache-control"));
     }
 
     // ================================================================
