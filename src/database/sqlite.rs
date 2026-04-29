@@ -131,6 +131,39 @@ fn skip_sql_trivia(sql: &str, mut index: usize) -> usize {
     index
 }
 
+fn skip_sql_quoted(sql: &str, mut index: usize) -> usize {
+    let bytes = sql.as_bytes();
+    match bytes[index] {
+        b'\'' | b'"' | b'`' => {
+            let quote = bytes[index];
+            index += 1;
+            while index < bytes.len() {
+                if bytes[index] == quote {
+                    if bytes.get(index + 1) == Some(&quote) {
+                        index += 2;
+                        continue;
+                    }
+                    index += 1;
+                    break;
+                }
+                index += 1;
+            }
+        }
+        b'[' => {
+            index += 1;
+            while index < bytes.len() {
+                if bytes[index] == b']' {
+                    index += 1;
+                    break;
+                }
+                index += 1;
+            }
+        }
+        _ => {}
+    }
+    index
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SqlSurfaceViolation {
     Pragma,
@@ -150,10 +183,20 @@ impl SqlSurfaceViolation {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TriggerScanState {
+    None,
+    AfterCreate,
+    AfterCreateTemp,
+    AfterCreateTrigger,
+    InBody,
+}
+
 fn classify_sql_surface_violation(sql: &str) -> Option<SqlSurfaceViolation> {
     let bytes = sql.as_bytes();
     let mut index = 0usize;
     let mut statement_start = true;
+    let mut trigger_state = TriggerScanState::None;
 
     while index < bytes.len() {
         index = skip_sql_trivia(sql, index);
@@ -161,22 +204,39 @@ fn classify_sql_surface_violation(sql: &str) -> Option<SqlSurfaceViolation> {
             break;
         }
 
+        if matches!(bytes[index], b'\'' | b'"' | b'`' | b'[') {
+            statement_start = false;
+            index = skip_sql_quoted(sql, index);
+            continue;
+        }
+
         if bytes[index] == b';' {
             statement_start = true;
+            if trigger_state != TriggerScanState::InBody {
+                trigger_state = TriggerScanState::None;
+            }
             index += 1;
             continue;
         }
 
-        if statement_start {
-            if bytes[index].is_ascii_alphabetic() {
-                let start = index;
+        if bytes[index].is_ascii_alphabetic() {
+            let start = index;
+            index += 1;
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+            {
                 index += 1;
-                while index < bytes.len()
-                    && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+            }
+            let keyword = &sql[start..index];
+
+            if statement_start {
+                if trigger_state == TriggerScanState::InBody && keyword.eq_ignore_ascii_case("END")
                 {
-                    index += 1;
+                    trigger_state = TriggerScanState::None;
+                    statement_start = false;
+                    continue;
                 }
-                let keyword = &sql[start..index];
+
                 if keyword.eq_ignore_ascii_case("PRAGMA") {
                     return Some(SqlSurfaceViolation::Pragma);
                 }
@@ -194,9 +254,35 @@ fn classify_sql_surface_violation(sql: &str) -> Option<SqlSurfaceViolation> {
                     return Some(SqlSurfaceViolation::TransactionControl);
                 }
             }
+
+            trigger_state = match trigger_state {
+                TriggerScanState::None if keyword.eq_ignore_ascii_case("CREATE") => {
+                    TriggerScanState::AfterCreate
+                }
+                TriggerScanState::AfterCreate
+                    if keyword.eq_ignore_ascii_case("TEMP")
+                        || keyword.eq_ignore_ascii_case("TEMPORARY") =>
+                {
+                    TriggerScanState::AfterCreateTemp
+                }
+                TriggerScanState::AfterCreate | TriggerScanState::AfterCreateTemp
+                    if keyword.eq_ignore_ascii_case("TRIGGER") =>
+                {
+                    TriggerScanState::AfterCreateTrigger
+                }
+                TriggerScanState::AfterCreate => TriggerScanState::None,
+                TriggerScanState::AfterCreateTemp => TriggerScanState::None,
+                TriggerScanState::AfterCreateTrigger if keyword.eq_ignore_ascii_case("BEGIN") => {
+                    TriggerScanState::InBody
+                }
+                other => other,
+            };
+
             statement_start = false;
+            continue;
         }
 
+        statement_start = false;
         index += 1;
     }
 
@@ -1605,6 +1691,30 @@ mod tests {
             ensure_checked_sql_surface(sql)
                 .unwrap_or_else(|err| panic!("checked surface should allow {sql:?}: {err:?}"));
         }
+    }
+
+    #[test]
+    fn checked_sql_surface_allows_create_trigger_ddl() {
+        let sql = "
+            CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT);
+            CREATE TRIGGER t_audit
+            AFTER INSERT ON t
+            BEGIN
+                INSERT INTO t(name) VALUES ('copied;still literal');
+            END;
+        ";
+
+        ensure_checked_sql_surface(sql)
+            .unwrap_or_else(|err| panic!("checked surface should allow trigger DDL: {err:?}"));
+    }
+
+    #[test]
+    fn checked_sql_surface_rejects_top_level_end_transaction_control() {
+        let err = ensure_checked_sql_surface("END").unwrap_err();
+        assert!(
+            matches!(err, SqliteError::UnsafeSql(_)),
+            "expected unsafe SQL rejection for END, got {err:?}"
+        );
     }
 
     // ---- SqliteError From<io::Error> ----
