@@ -1760,6 +1760,15 @@ pub struct ThreeLaneWorker {
     invariant_monitor: Mutex<super::invariant_monitor::SchedulerInvariantMonitor>,
 }
 
+#[derive(Debug, Clone)]
+struct WaiterWakeMetadata {
+    priority: u8,
+    is_local: bool,
+    pinned_worker: Option<WorkerId>,
+    wake_state: Arc<crate::record::task::TaskWakeState>,
+    notified: bool,
+}
+
 /// Per-worker metrics tracking cancel-lane preemption and fairness.
 #[derive(Debug, Clone, Default)]
 pub struct PreemptionMetrics {
@@ -4087,6 +4096,38 @@ impl ThreeLaneWorker {
         }
     }
 
+    /// Looks up waiter routing metadata from the active task-record source.
+    ///
+    /// In task-table-backed mode, waiter records may exist only in the sharded
+    /// task table rather than `RuntimeState::tasks`, so completion-side wake
+    /// routing must consult the shard directly.
+    fn waiter_wake_metadata(
+        &self,
+        state: &RuntimeState,
+        waiter: TaskId,
+    ) -> Option<WaiterWakeMetadata> {
+        if let Some(tt) = &self.task_table {
+            let guard = tt.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let record = guard.task(waiter)?;
+            Some(WaiterWakeMetadata {
+                priority: record.sched_priority,
+                is_local: record.is_local(),
+                pinned_worker: record.pinned_worker(),
+                wake_state: Arc::clone(&record.wake_state),
+                notified: record.wake_state.notify(),
+            })
+        } else {
+            let record = state.task(waiter)?;
+            Some(WaiterWakeMetadata {
+                priority: record.sched_priority,
+                is_local: record.is_local(),
+                pinned_worker: record.pinned_worker(),
+                wake_state: Arc::clone(&record.wake_state),
+                notified: record.wake_state.notify(),
+            })
+        }
+    }
+
     /// Wakes a list of dependent tasks (waiters) while holding the RuntimeState lock.
     ///
     /// This handles local/global routing and centralized deduplication via `wake_state`.
@@ -4097,40 +4138,40 @@ impl ThreeLaneWorker {
     ) {
         let mut global_tasks = smallvec::SmallVec::<[(TaskId, u8); 16]>::new();
         for waiter in waiters {
-            if let Some(record) = state.task(waiter) {
-                let waiter_priority = record.sched_priority;
-                if record.wake_state.notify() {
-                    if record.is_local() {
-                        if let Some(worker_id) = record.pinned_worker() {
-                            if let Some(queue) = self.all_local_ready.get(worker_id) {
-                                queue.lock().push_back(waiter);
-                                self.coordinator.wake_worker(worker_id);
-                            } else {
-                                // SAFETY: Invalid worker id for a local waiter means
-                                // we can't route to the correct queue. Skipping the
-                                // wake avoids misrouting the task; clear the dedup
-                                // bit so a later valid wake can retry.
-                                record.wake_state.clear();
-                                debug_assert!(
-                                    false,
-                                    "Pinned local waiter {waiter:?} has invalid worker id {worker_id}"
-                                );
-                                error!(
-                                    ?waiter,
-                                    worker_id,
-                                    "execute: pinned local waiter has invalid worker id, wake skipped and wake_state cleared"
-                                );
-                            }
+            let Some(metadata) = self.waiter_wake_metadata(state, waiter) else {
+                continue;
+            };
+            if metadata.notified {
+                if metadata.is_local {
+                    if let Some(worker_id) = metadata.pinned_worker {
+                        if let Some(queue) = self.all_local_ready.get(worker_id) {
+                            queue.lock().push_back(waiter);
+                            self.coordinator.wake_worker(worker_id);
                         } else {
-                            // Local task without a pinned worker yet.
-                            // Schedule on the current worker's local queue.
-                            self.local_ready.lock().push_back(waiter);
-                            self.parker.unpark();
+                            // SAFETY: Invalid worker id for a local waiter means
+                            // we can't route to the correct queue. Skipping the
+                            // wake avoids misrouting the task; clear the dedup
+                            // bit so a later valid wake can retry.
+                            metadata.wake_state.clear();
+                            debug_assert!(
+                                false,
+                                "Pinned local waiter {waiter:?} has invalid worker id {worker_id}"
+                            );
+                            error!(
+                                ?waiter,
+                                worker_id,
+                                "execute: pinned local waiter has invalid worker id, wake skipped and wake_state cleared"
+                            );
                         }
                     } else {
-                        // Global waiters are ready tasks.
-                        global_tasks.push((waiter, waiter_priority));
+                        // Local task without a pinned worker yet.
+                        // Schedule on the current worker's local queue.
+                        self.local_ready.lock().push_back(waiter);
+                        self.parker.unpark();
                     }
+                } else {
+                    // Global waiters are ready tasks.
+                    global_tasks.push((waiter, metadata.priority));
                 }
             }
         }
@@ -10052,6 +10093,39 @@ mod tests {
             third.is_some(),
             "should be injectable after wake_state clear"
         );
+    }
+
+    #[test]
+    fn task_table_backed_waiter_wake_routing_uses_sharded_table() {
+        let (mut scheduler, state, task_table) = task_table_scheduler(1, 3);
+        let waiter_id = TaskId::new_for_test(1, 0);
+        assert!(
+            state.lock().expect("lock state").task(waiter_id).is_none(),
+            "regression precondition: waiter exists only in the sharded task table"
+        );
+        assert!(
+            task_table
+                .lock()
+                .expect("task table lock poisoned")
+                .task(waiter_id)
+                .is_some(),
+            "waiter should exist in the sharded task table"
+        );
+
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
+
+        {
+            let guard = state.lock().expect("lock state");
+            worker.wake_dependents_locked(&guard, [waiter_id]);
+        }
+
+        let popped = worker.global.pop_ready();
+        assert!(
+            popped.is_some(),
+            "waiter wake must route through the task-table shard"
+        );
+        assert_eq!(popped.unwrap().task, waiter_id);
     }
 
     #[test]
