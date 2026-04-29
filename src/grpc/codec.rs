@@ -1574,6 +1574,88 @@ mod tests {
     }
 
     #[test]
+    fn grpc_go_initial_stream_open_window_update_differential() {
+        init_test("grpc_go_initial_stream_open_window_update_differential");
+
+        let rfc_default_stream_window = 65_535usize;
+        let grpc_go_initial_stream_window = 96 * 1024usize;
+        let stream_open_window_update =
+            grpc_go_initial_stream_window - rfc_default_stream_window;
+
+        assert_eq!(
+            grpc_go_initial_stream_window,
+            rfc_default_stream_window + stream_open_window_update,
+            "stream-open WINDOW_UPDATE should expand the stream budget above the RFC default"
+        );
+
+        let payload_at_expanded_window = vec![0x5Au8; grpc_go_initial_stream_window];
+        let payload_over_expanded_window = vec![0x5Bu8; grpc_go_initial_stream_window + 1];
+
+        let mut producer =
+            GrpcCodec::with_message_size_limits(grpc_go_initial_stream_window + 1024, usize::MAX);
+
+        let mut expanded_window_frame = BytesMut::new();
+        producer
+            .encode(
+                GrpcMessage::new(Bytes::from(payload_at_expanded_window.clone())),
+                &mut expanded_window_frame,
+            )
+            .expect("producer should frame payload exactly at expanded window");
+
+        let mut exact_boundary_decoder = GrpcCodec::with_message_size_limits(
+            grpc_go_initial_stream_window + 1024,
+            grpc_go_initial_stream_window,
+        );
+        let mut exact_boundary_buf = expanded_window_frame.clone();
+        let decoded = exact_boundary_decoder
+            .decode(&mut exact_boundary_buf)
+            .expect("grpc-go accepts a first message exactly at the post-WINDOW_UPDATE boundary")
+            .expect("frame exactly at expanded window should decode");
+        assert_eq!(
+            decoded.data.len(),
+            grpc_go_initial_stream_window,
+            "exact expanded-window payload should survive framing intact"
+        );
+        assert!(
+            exact_boundary_buf.is_empty(),
+            "decoder must consume the full frame at the expanded-window boundary"
+        );
+
+        let mut default_window_decoder = GrpcCodec::with_message_size_limits(
+            grpc_go_initial_stream_window + 1024,
+            rfc_default_stream_window,
+        );
+        let mut default_window_buf = expanded_window_frame.clone();
+        let default_window_result = default_window_decoder.decode(&mut default_window_buf);
+        assert!(
+            matches!(default_window_result, Err(GrpcError::MessageTooLarge)),
+            "without the stream-open WINDOW_UPDATE delta, the same frame should still be over the RFC default budget"
+        );
+
+        let mut oversized_frame = BytesMut::new();
+        producer
+            .encode(
+                GrpcMessage::new(Bytes::from(payload_over_expanded_window)),
+                &mut oversized_frame,
+            )
+            .expect("producer should frame payload just over expanded window");
+
+        let mut expanded_window_limit_decoder = GrpcCodec::with_message_size_limits(
+            grpc_go_initial_stream_window + 1024,
+            grpc_go_initial_stream_window,
+        );
+        let mut expanded_window_limit_buf = oversized_frame;
+        let expanded_window_limit_result =
+            expanded_window_limit_decoder.decode(&mut expanded_window_limit_buf);
+        assert!(
+            matches!(expanded_window_limit_result, Err(GrpcError::MessageTooLarge)),
+            "grpc-go rejects a first message once it exceeds the effective post-WINDOW_UPDATE window by one byte"
+        );
+
+        crate::test_complete!("grpc_go_initial_stream_open_window_update_differential");
+    }
+
+    #[test]
     fn grpc_codec_max_decoded_len_differential() {
         /// Differential conformance test for gRPC codec max_decode_message_size enforcement.
         ///
