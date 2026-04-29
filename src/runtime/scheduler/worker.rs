@@ -1600,6 +1600,91 @@ mod tests {
     }
 
     #[test]
+    fn test_execute_panic_schedules_ready_async_finalizer() {
+        use crate::record::task::TaskRecord;
+        use crate::runtime::RuntimeState;
+        use crate::runtime::stored_task::StoredTask;
+        use crate::sync::ContendedMutex;
+        use crate::types::{Budget, RegionId};
+
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let global = Arc::new(GlobalQueue::new());
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let panicking_task = TaskId::new_for_test(0, 0);
+        let region = {
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let region = guard.create_root_region(Budget::INFINITE);
+            let panicking_record = TaskRecord::new(panicking_task, region, Budget::INFINITE);
+            let _panicking_idx = guard.insert_task(panicking_record);
+            assert!(
+                guard.register_async_finalizer(region, async {}),
+                "async finalizer should register"
+            );
+            let region_record = guard
+                .regions
+                .get_mut(region.arena_index())
+                .expect("region should exist");
+            region_record.begin_close(None);
+            region_record.begin_finalize();
+            guard.finalizing_regions.push(region);
+            guard.store_spawned_task(
+                panicking_task,
+                StoredTask::new_with_id(
+                    async move { unreachable!("worker panic finalizer regression") },
+                    panicking_task,
+                ),
+            );
+            region
+        };
+
+        let worker = Worker::new(
+            0,
+            Vec::new(),
+            Arc::clone(&global),
+            Arc::clone(&state),
+            Arc::clone(&shutdown),
+        );
+
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            worker.execute(panicking_task);
+        }));
+        assert!(
+            panic_result.is_err(),
+            "panicking task should still propagate unwind to caller"
+        );
+
+        let finalizer_task = global
+            .pop()
+            .expect("panic completion should schedule ready async finalizer");
+        assert_ne!(
+            finalizer_task, panicking_task,
+            "scheduled task should be the async finalizer, not the completed task"
+        );
+        assert!(
+            global.pop().is_none(),
+            "only the async finalizer task should be queued in this scenario"
+        );
+
+        let guard = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            guard.task(panicking_task).is_none(),
+            "panicking task should be removed from runtime state"
+        );
+        let finalizer_record = guard
+            .task(finalizer_task)
+            .expect("async finalizer task should remain live");
+        assert_eq!(
+            finalizer_record.owner, region,
+            "async finalizer should stay attached to the closing region"
+        );
+    }
+
+    #[test]
     fn test_execute_ready_with_foreign_local_waiter_does_not_panic() {
         use crate::record::task::TaskRecord;
         use crate::runtime::RuntimeState;
