@@ -3105,8 +3105,6 @@ impl ThreeLaneWorker {
             let _ = timer.process_timers();
         }
 
-        self.ensure_adaptive_epoch_started();
-
         // Consult the governor for scheduling suggestion (amortised).
         let suggestion = self.governor_suggest();
         let base_limit = self.current_base_cancel_limit();
@@ -3135,7 +3133,7 @@ impl ThreeLaneWorker {
             // Deadline pressure: global timed first.
             if let Some(tt) = self.global.pop_timed_if_due(now) {
                 self.record_timed_dispatch();
-                return Some(self.finish_dispatch(tt.task));
+                return Some(self.dispatch_with_adaptive_epoch(tt.task));
             }
         } else {
             // Default / drain: cancel > timed.
@@ -3144,7 +3142,7 @@ impl ThreeLaneWorker {
                     self.cancel_streak += 1;
                     self.ready_dispatch_streak = 0;
                     self.record_cancel_dispatch(base_limit, effective_limit);
-                    return Some(self.finish_dispatch(pt.task));
+                    return Some(self.dispatch_with_adaptive_epoch(pt.task));
                 }
             }
         }
@@ -3160,7 +3158,7 @@ impl ThreeLaneWorker {
             if let Some(task) = local.pop_timed_only_with_hint(rng_hint, now) {
                 drop(local);
                 self.record_timed_dispatch();
-                return Some(self.finish_dispatch(task));
+                return Some(self.dispatch_with_adaptive_epoch(task));
             }
             if check_cancel {
                 if let Some(pt) = self.global.pop_cancel() {
@@ -3168,14 +3166,14 @@ impl ThreeLaneWorker {
                     self.cancel_streak += 1;
                     self.ready_dispatch_streak = 0;
                     self.record_cancel_dispatch(base_limit, effective_limit);
-                    return Some(self.finish_dispatch(pt.task));
+                    return Some(self.dispatch_with_adaptive_epoch(pt.task));
                 }
                 if let Some(task) = local.pop_cancel_only_with_hint(rng_hint) {
                     drop(local);
                     self.cancel_streak += 1;
                     self.ready_dispatch_streak = 0;
                     self.record_cancel_dispatch(base_limit, effective_limit);
-                    return Some(self.finish_dispatch(task));
+                    return Some(self.dispatch_with_adaptive_epoch(task));
                 }
             }
         } else {
@@ -3186,18 +3184,18 @@ impl ThreeLaneWorker {
                     self.cancel_streak += 1;
                     self.ready_dispatch_streak = 0;
                     self.record_cancel_dispatch(base_limit, effective_limit);
-                    return Some(self.finish_dispatch(task));
+                    return Some(self.dispatch_with_adaptive_epoch(task));
                 }
             }
             if let Some(tt) = self.global.pop_timed_if_due(now) {
                 drop(local);
                 self.record_timed_dispatch();
-                return Some(self.finish_dispatch(tt.task));
+                return Some(self.dispatch_with_adaptive_epoch(tt.task));
             }
             if let Some(task) = local.pop_timed_only_with_hint(rng_hint, now) {
                 drop(local);
                 self.record_timed_dispatch();
-                return Some(self.finish_dispatch(task));
+                return Some(self.dispatch_with_adaptive_epoch(task));
             }
         }
         drop(local);
@@ -3215,7 +3213,7 @@ impl ThreeLaneWorker {
         let local_ready_task = self.local_ready.lock().pop_front();
         if let Some(task) = local_ready_task {
             self.record_ready_dispatch();
-            return Some(self.finish_dispatch(task));
+            return Some(self.dispatch_with_adaptive_epoch(task));
         }
 
         // br-asupersync-fvixmw: pre-fix took self.local.lock() THREE additional
@@ -3235,13 +3233,13 @@ impl ThreeLaneWorker {
             let dispatched_priority = self.task_sched_priority(task);
             self.record_ready_priority_inversion(blocked_local_task, task, dispatched_priority);
             self.record_ready_dispatch();
-            return Some(self.finish_dispatch(task));
+            return Some(self.dispatch_with_adaptive_epoch(task));
         }
         if let Some(pt) = self.global.pop_ready() {
             let blocked_local_task = self.local.lock().peek_ready_task();
             self.record_ready_priority_inversion(blocked_local_task, pt.task, Some(pt.priority));
             self.record_ready_dispatch();
-            return Some(self.finish_dispatch(pt.task));
+            return Some(self.dispatch_with_adaptive_epoch(pt.task));
         }
 
         // ── PHASE 3b: Local Ready Lane ───────────────────────────────
@@ -3256,13 +3254,13 @@ impl ThreeLaneWorker {
         };
         if let Some(task) = local_task {
             self.record_ready_dispatch();
-            return Some(self.finish_dispatch(task));
+            return Some(self.dispatch_with_adaptive_epoch(task));
         }
 
         // ── PHASE 4: Steal from other workers ────────────────────────
         if let Some(task) = self.try_steal() {
             self.record_ready_dispatch();
-            return Some(self.finish_dispatch(task));
+            return Some(self.dispatch_with_adaptive_epoch(task));
         }
 
         // ── PHASE 5: Fallback cancel ─────────────────────────────────
@@ -3276,7 +3274,7 @@ impl ThreeLaneWorker {
                 self.cancel_streak = 1;
                 self.ready_dispatch_streak = 0;
                 self.record_cancel_dispatch(base_limit, effective_limit);
-                return Some(self.finish_dispatch(task));
+                return Some(self.dispatch_with_adaptive_epoch(task));
             }
             self.cancel_streak = 0;
         }
@@ -3386,6 +3384,12 @@ impl ThreeLaneWorker {
     #[inline]
     fn task_sched_priority(&self, task: TaskId) -> Option<u8> {
         self.with_task_table_ref(|tt| tt.task(task).map(|record| record.sched_priority))
+    }
+
+    #[inline]
+    fn dispatch_with_adaptive_epoch(&mut self, task: TaskId) -> TaskId {
+        self.ensure_adaptive_epoch_started();
+        self.finish_dispatch(task)
     }
 
     #[inline]
@@ -11198,6 +11202,65 @@ mod tests {
         assert_eq!(
             adaptive_next_rng, baseline_next_rng,
             "deterministic UCB epoch updates must not consume extra RNG state"
+        );
+    }
+
+    fn first_adaptive_epoch_metrics_after_optional_idle_probe(
+        idle_probe: bool,
+    ) -> (f64, f64, usize, u64) {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 4);
+        scheduler.set_adaptive_cancel_streak(true, 1);
+
+        if idle_probe {
+            let worker = scheduler.workers.first_mut().expect("worker");
+            assert_eq!(worker.next_task(), None, "idle probe should find no work");
+            assert!(
+                worker
+                    .adaptive_cancel_policy
+                    .as_ref()
+                    .expect("adaptive policy")
+                    .epoch_start
+                    .is_none(),
+                "empty next_task probe must not arm an adaptive epoch"
+            );
+        }
+
+        {
+            let mut runtime_state = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let root = runtime_state.create_root_region(Budget::INFINITE);
+            let _ = runtime_state
+                .create_task(root, Budget::INFINITE, async {})
+                .expect("task create");
+        }
+
+        let ready_task = TaskId::new_for_test(9300, 1);
+        scheduler.inject_ready(ready_task, 50);
+
+        let worker = scheduler.workers.first_mut().expect("worker");
+        assert_eq!(worker.next_task(), Some(ready_task));
+        let policy = worker
+            .adaptive_cancel_policy
+            .as_ref()
+            .expect("adaptive policy");
+        (
+            policy.mean_rewards[2],
+            worker.preemption_metrics.adaptive_reward_ema,
+            worker.preemption_metrics.adaptive_current_limit,
+            worker.preemption_metrics.adaptive_epochs,
+        )
+    }
+
+    #[test]
+    fn idle_probe_does_not_shift_first_adaptive_epoch_reward_window() {
+        let baseline = first_adaptive_epoch_metrics_after_optional_idle_probe(false);
+        let with_idle_probe = first_adaptive_epoch_metrics_after_optional_idle_probe(true);
+
+        assert_eq!(
+            with_idle_probe, baseline,
+            "empty next_task probes must not change the first completed adaptive epoch metrics"
         );
     }
 
