@@ -402,6 +402,131 @@ fn install_cancel_mask(state: &Arc<ContendedMutex<RuntimeState>>, snapshot: &Fuz
     }
 }
 
+fn runtime_cancel_mask_snapshot(state: &Arc<ContendedMutex<RuntimeState>>) -> StateSnapshot {
+    let guard = state
+        .lock()
+        .expect("lock runtime state for cancel-mask snapshot");
+    StateSnapshot::from_runtime_state(&guard)
+}
+
+fn assert_cancel_mask_propagation(workload: &FuzzLaneWorkload, cancel_mask: &FuzzStateSnapshot) {
+    if cancel_mask.total_cancel_mask_tasks() == 0 {
+        return;
+    }
+
+    let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(2_000)));
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+    {
+        let mut guard = state.lock().expect("lock runtime state");
+        guard.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
+    }
+    install_cancel_mask(&state, cancel_mask);
+
+    let initial_snapshot = runtime_cancel_mask_snapshot(&state);
+    assert_eq!(
+        initial_snapshot.cancel_requested_tasks,
+        u32::from(cancel_mask.cancel_requested_tasks),
+        "cancel-requested count must propagate from RuntimeState into StateSnapshot"
+    );
+    assert_eq!(
+        initial_snapshot.cancelling_tasks,
+        u32::from(cancel_mask.cancelling_tasks),
+        "cancelling count must propagate from RuntimeState into StateSnapshot"
+    );
+    assert_eq!(
+        initial_snapshot.finalizing_tasks,
+        u32::from(cancel_mask.finalizing_tasks),
+        "finalizing count must propagate from RuntimeState into StateSnapshot"
+    );
+    assert_eq!(
+        initial_snapshot.live_tasks,
+        cancel_mask.total_cancel_mask_tasks(),
+        "cancel-mask installation should account for every synthetic task in live_tasks"
+    );
+
+    let total_dispatchable = workload.cancel_priorities.len()
+        + workload.ready_priorities.len()
+        + workload.timed_deadline_buckets.len();
+
+    let mut scheduler =
+        ThreeLaneScheduler::new_with_options(1, &state, workload.cancel_streak_limit, true, 1);
+
+    let mut cancel_tasks = Vec::with_capacity(workload.cancel_priorities.len());
+    let mut timed_tasks = Vec::with_capacity(workload.timed_deadline_buckets.len());
+    let mut ready_tasks = Vec::with_capacity(workload.ready_priorities.len());
+
+    for (index, &priority) in workload.cancel_priorities.iter().enumerate() {
+        let task = scheduler_task_id(10_000, index);
+        cancel_tasks.push(task);
+        scheduler.inject_cancel(task, priority);
+    }
+
+    for (index, &bucket) in workload.timed_deadline_buckets.iter().enumerate() {
+        let task = scheduler_task_id(20_000, index);
+        timed_tasks.push(task);
+        scheduler.inject_timed(task, timed_deadline_from_bucket(bucket));
+    }
+
+    for (index, &priority) in workload.ready_priorities.iter().enumerate() {
+        let task = scheduler_task_id(30_000, index);
+        ready_tasks.push(task);
+        scheduler.inject_ready(task, priority);
+    }
+
+    let mut workers = scheduler.take_workers();
+    let worker = &mut workers[0];
+    worker.set_cached_suggestion(workload.cached_suggestion.into());
+
+    let mut dispatched = Vec::with_capacity(total_dispatchable);
+    while dispatched.len() < total_dispatchable {
+        let Some(task) = worker.next_task() else {
+            break;
+        };
+        assert!(
+            cancel_tasks.contains(&task)
+                || timed_tasks.contains(&task)
+                || ready_tasks.contains(&task),
+            "cancel-mask propagation leaked non-runnable synthetic state into dispatch: {task:?}"
+        );
+        assert!(
+            !dispatched.contains(&task),
+            "dispatch loop duplicated task {task:?} while cancel-mask state was active"
+        );
+        dispatched.push(task);
+    }
+
+    assert_eq!(
+        dispatched.len(),
+        total_dispatchable,
+        "cancel-mask propagation must not strand or fabricate dispatchable work"
+    );
+    for _ in 0..3 {
+        assert_eq!(
+            worker.next_task(),
+            None,
+            "cancel-mask-only state must not keep producing runnable tasks after injected work drains"
+        );
+    }
+
+    let final_snapshot = runtime_cancel_mask_snapshot(&state);
+    assert_eq!(
+        final_snapshot.cancel_requested_tasks, initial_snapshot.cancel_requested_tasks,
+        "scheduling injected work must not mutate cancel-requested mask counts"
+    );
+    assert_eq!(
+        final_snapshot.cancelling_tasks, initial_snapshot.cancelling_tasks,
+        "scheduling injected work must not mutate cancelling mask counts"
+    );
+    assert_eq!(
+        final_snapshot.finalizing_tasks, initial_snapshot.finalizing_tasks,
+        "scheduling injected work must not mutate finalizing mask counts"
+    );
+    assert_eq!(
+        final_snapshot.live_tasks, initial_snapshot.live_tasks,
+        "cancel-mask propagation must preserve the live-task accounting for synthetic state"
+    );
+}
+
 fn assert_scheduler_fairness(workload: &FuzzLaneWorkload, cancel_mask: &FuzzStateSnapshot) {
     let total_tasks = workload.cancel_priorities.len()
         + workload.ready_priorities.len()
@@ -529,6 +654,55 @@ fn assert_scheduler_fairness(workload: &FuzzLaneWorkload, cancel_mask: &FuzzStat
         assert!(
             cert.fairness_yields > 0,
             "cancel pressure above effective limit should force a fairness yield: {cert:?}"
+        );
+    }
+}
+
+fn assert_timed_lane_edf_order(workload: &FuzzLaneWorkload) {
+    if workload.timed_deadline_buckets.is_empty() {
+        return;
+    }
+
+    let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(1_000)));
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+    {
+        let mut guard = state.lock().expect("lock runtime state");
+        guard.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
+    }
+
+    let mut scheduler =
+        ThreeLaneScheduler::new_with_options(1, &state, workload.cancel_streak_limit, true, 1);
+    let mut expected = Vec::with_capacity(workload.timed_deadline_buckets.len());
+
+    for (index, &bucket) in workload.timed_deadline_buckets.iter().enumerate() {
+        let task = scheduler_task_id(80_000, index);
+        let deadline = timed_deadline_from_bucket(bucket);
+        expected.push((deadline.as_nanos(), index, task));
+        scheduler.inject_timed(task, deadline);
+    }
+
+    expected.sort_by_key(|&(deadline_ns, arrival_index, _)| (deadline_ns, arrival_index));
+    let expected_tasks: Vec<_> = expected.into_iter().map(|(_, _, task)| task).collect();
+
+    let mut workers = scheduler.take_workers();
+    let worker = &mut workers[0];
+    let actual: Vec<_> = (0..expected_tasks.len())
+        .map(|_| {
+            worker
+                .next_task()
+                .expect("all due timed tasks should drain from the lane")
+        })
+        .collect();
+
+    assert_eq!(
+        actual, expected_tasks,
+        "timed lane must preserve stable earliest-deadline-first order for arbitrary arrival order"
+    );
+    for _ in 0..2 {
+        assert_eq!(
+            worker.next_task(),
+            None,
+            "timed lane should be empty after draining the EDF-ordered workload"
         );
     }
 }
@@ -712,6 +886,14 @@ fuzz_target!(|input: DecisionArbiterInput| {
     // Test 3: Real scheduler no-starvation invariant under arbitrary lane mixes.
     assert_scheduler_fairness(&input.workload, &input.state_snapshots[0]);
 
-    // Test 4: Adaptive cancel-streak governor stays bounded and terminates.
+    // Test 4: Timed lane preserves stable EDF order under arbitrary deadlines
+    // and arrival order.
+    assert_timed_lane_edf_order(&input.workload);
+
+    // Test 5: Cancel-mask state propagates into scheduler snapshots without
+    // becoming runnable phantom work.
+    assert_cancel_mask_propagation(&input.workload, &input.state_snapshots[0]);
+
+    // Test 6: Adaptive cancel-streak governor stays bounded and terminates.
     assert_adaptive_budget_governor(&input.adaptive_budget, &weights);
 });
