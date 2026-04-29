@@ -1,4 +1,4 @@
-//! Fuzz target for RaptorQ decoder encoded packet corruption.
+//! Fuzz target for RaptorQ decoder packet corruption and burst-loss recovery.
 //!
 //! The harness builds a valid, decodable source block first, then mutates the
 //! received source/repair packets at the byte and metadata levels. Corrupted
@@ -6,6 +6,10 @@
 //! on either:
 //! - successful recovery of the original source block, or
 //! - the same decode error.
+//!
+//! The same structured input also drives contiguous loss bursts over valid
+//! source+repair packets. Whenever at least `K` payload packets survive, decode
+//! must still recover the original source block.
 
 #![no_main]
 
@@ -28,6 +32,7 @@ const LARGE_SYMBOL_SIZE_CANDIDATES: &[usize] = &[1, 2, 3, 4, 8, 16, 32];
 const MAX_MUTATIONS: usize = 32;
 const MAX_PACKET_BYTES: usize = 4096;
 const MAX_EXTRA_REPAIRS: usize = 8;
+const MAX_BURST_WINDOWS: usize = 8;
 const MAX_MISSING_SOURCES: usize = 64;
 
 #[derive(Debug, Arbitrary)]
@@ -36,12 +41,20 @@ struct DecoderPacketInput {
     symbol_size_selector: u16,
     seed: u64,
     extra_repairs: u8,
+    burst_repair_overhead: u8,
     missing_sources: Vec<u8>,
+    loss_windows: Vec<LossWindow>,
     packet_bytes: Vec<u8>,
     mutations: Vec<PacketMutation>,
     reorder: PacketReorder,
     wavefront_batch: u8,
     object_id: u128,
+}
+
+#[derive(Debug, Clone, Arbitrary)]
+struct LossWindow {
+    start: u16,
+    len: u16,
 }
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -86,7 +99,10 @@ impl DecoderPacketInput {
             u16::try_from(symbol_size).expect("fuzz symbol-size candidates fit in u16");
 
         self.extra_repairs = (self.extra_repairs as usize % (MAX_EXTRA_REPAIRS + 1)) as u8;
+        self.burst_repair_overhead =
+            (self.burst_repair_overhead as usize % (MAX_EXTRA_REPAIRS + 1)) as u8;
         self.packet_bytes.truncate(MAX_PACKET_BYTES);
+        self.loss_windows.truncate(MAX_BURST_WINDOWS);
         self.mutations.truncate(MAX_MUTATIONS);
         self.missing_sources.truncate(MAX_MISSING_SOURCES);
     }
@@ -192,6 +208,26 @@ fn build_valid_packets(
     }
 
     Some(packets)
+}
+
+fn burst_repair_count(loss_windows: &[LossWindow], extra_repairs: usize, k: usize) -> usize {
+    let requested_loss = loss_windows.iter().fold(0usize, |sum, window| {
+        sum.saturating_add(window.len as usize + 1)
+    });
+    requested_loss.min(k).saturating_add(extra_repairs).max(1)
+}
+
+fn apply_contiguous_loss_windows(packets: &mut Vec<ReceivedSymbol>, loss_windows: &[LossWindow]) {
+    for window in loss_windows {
+        if packets.is_empty() {
+            return;
+        }
+
+        let start = window.start as usize % packets.len();
+        let len = (window.len as usize % packets.len()).saturating_add(1);
+        let end = start.saturating_add(len).min(packets.len());
+        packets.drain(start..end);
+    }
 }
 
 fn apply_reorder(packets: &mut [ReceivedSymbol], reorder: PacketReorder) {
@@ -355,6 +391,49 @@ fn assert_recoverable_or_unrecoverable(err: &DecodeError) {
     );
 }
 
+fn assert_burst_loss_recovers_when_received_at_least_k(
+    decoder: &InactivationDecoder,
+    encoder: &SystematicEncoder,
+    source: &[Vec<u8>],
+    loss_windows: &[LossWindow],
+    extra_repairs: usize,
+    wavefront_batch: usize,
+    object_id: ObjectId,
+) {
+    let k = source.len();
+    let repair_count = burst_repair_count(loss_windows, extra_repairs, k);
+    let Some(mut payload_packets) = build_valid_packets(
+        decoder,
+        encoder,
+        source,
+        &[],
+        repair_count.saturating_sub(1),
+    ) else {
+        return;
+    };
+
+    apply_contiguous_loss_windows(&mut payload_packets, loss_windows);
+    if payload_packets.len() < k {
+        return;
+    }
+
+    let received = combine_symbols(decoder, &payload_packets);
+    let batch = if received.is_empty() {
+        0
+    } else {
+        wavefront_batch % (received.len() + 1)
+    };
+
+    assert_decode_consensus(decoder, &received, source, batch, object_id);
+    let decoded = decoder
+        .decode(&received)
+        .expect("burst-loss payload with at least K surviving packets must decode");
+    assert_eq!(
+        decoded.source, source,
+        "burst-loss payload with at least K surviving packets must recover original source"
+    );
+}
+
 fuzz_target!(|data: &[u8]| {
     if data.len() > 200_000 {
         return;
@@ -390,6 +469,18 @@ fuzz_target!(|data: &[u8]| {
         input.wavefront_batch as usize % (baseline_received.len() + 1)
     };
     let object_id = ObjectId::from_u128(input.object_id);
+
+    if !input.loss_windows.is_empty() {
+        assert_burst_loss_recovers_when_received_at_least_k(
+            &decoder,
+            &encoder,
+            &source,
+            &input.loss_windows,
+            input.burst_repair_overhead as usize,
+            input.wavefront_batch as usize,
+            object_id,
+        );
+    }
 
     assert_decode_consensus(
         &decoder,
@@ -465,9 +556,10 @@ fuzz_target!(|data: &[u8]| {
 #[cfg(test)]
 mod tests {
     use super::{
-        LARGE_K_CANDIDATES, LARGE_K_THRESHOLD, LARGE_SYMBOL_SIZE_CANDIDATES, MutationKind,
-        PacketMutation, SMALL_K_CANDIDATES, SMALL_SYMBOL_SIZE_CANDIDATES, apply_mutations,
-        select_k_candidate, select_symbol_size_candidate,
+        LARGE_K_CANDIDATES, LARGE_K_THRESHOLD, LARGE_SYMBOL_SIZE_CANDIDATES, LossWindow,
+        MutationKind, PacketMutation, SMALL_K_CANDIDATES, SMALL_SYMBOL_SIZE_CANDIDATES,
+        apply_contiguous_loss_windows, apply_mutations, burst_repair_count, select_k_candidate,
+        select_symbol_size_candidate,
     };
     use asupersync::raptorq::decoder::ReceivedSymbol;
 
@@ -517,6 +609,47 @@ mod tests {
         assert!(symbol_size <= 32);
         assert!(LARGE_SYMBOL_SIZE_CANDIDATES.contains(&symbol_size));
         assert!(842usize.saturating_mul(symbol_size) <= 64 * 1024);
+    }
+
+    #[test]
+    fn burst_repair_budget_caps_requested_loss_at_k() {
+        let repair_count = burst_repair_count(
+            &[
+                LossWindow {
+                    start: 0,
+                    len: u16::MAX,
+                },
+                LossWindow {
+                    start: 17,
+                    len: u16::MAX,
+                },
+            ],
+            3,
+            842,
+        );
+        assert_eq!(repair_count, 845);
+    }
+
+    #[test]
+    fn contiguous_loss_windows_remove_packet_runs_in_order() {
+        let mut packets = vec![
+            ReceivedSymbol::source(0, vec![0]),
+            ReceivedSymbol::source(1, vec![1]),
+            ReceivedSymbol::source(2, vec![2]),
+            ReceivedSymbol::source(3, vec![3]),
+            ReceivedSymbol::source(4, vec![4]),
+        ];
+
+        apply_contiguous_loss_windows(
+            &mut packets,
+            &[
+                LossWindow { start: 1, len: 0 },
+                LossWindow { start: 2, len: 0 },
+            ],
+        );
+
+        let surviving_esis: Vec<u32> = packets.iter().map(|packet| packet.esi).collect();
+        assert_eq!(surviving_esis, vec![0, 2, 4]);
     }
 
     #[test]
