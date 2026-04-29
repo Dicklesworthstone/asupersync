@@ -4,7 +4,6 @@
 //! in multiple formats (Markdown, JSON, HTML, badges) for documentation and CI.
 
 use clap::{Arg, ArgAction, Command};
-use serde_json;
 use std::fs;
 use std::path::PathBuf;
 
@@ -235,8 +234,7 @@ fn main() {
     let format = matches.get_one::<String>("format").unwrap();
     let implementation_version = matches
         .get_one::<String>("implementation-version")
-        .map(|s| s.clone())
-        .unwrap_or_else(|| detect_implementation_version());
+        .map_or_else(detect_implementation_version, Clone::clone);
     let ci_mode = matches.get_flag("ci-mode");
     let include_failures = matches.get_flag("include-failures");
 
@@ -331,22 +329,20 @@ fn detect_implementation_version() -> String {
 
     // Try to get git describe output
     if let Ok(output) = Command::new("git")
-        .args(&["describe", "--tags", "--always", "--dirty"])
+        .args(["describe", "--tags", "--always", "--dirty"])
         .output()
+        && output.status.success()
     {
-        if output.status.success() {
-            return String::from_utf8_lossy(&output.stdout).trim().to_string();
-        }
+        return String::from_utf8_lossy(&output.stdout).trim().to_string();
     }
 
     // Fallback to commit hash
     if let Ok(output) = Command::new("git")
-        .args(&["rev-parse", "--short", "HEAD"])
+        .args(["rev-parse", "--short", "HEAD"])
         .output()
+        && output.status.success()
     {
-        if output.status.success() {
-            return String::from_utf8_lossy(&output.stdout).trim().to_string();
-        }
+        return String::from_utf8_lossy(&output.stdout).trim().to_string();
     }
 
     // Final fallback
@@ -373,9 +369,7 @@ fn generate_all_formats(
     matrix: &ComplianceMatrix,
     base_path: Option<&String>,
 ) {
-    let base = base_path
-        .map(|p| PathBuf::from(p))
-        .unwrap_or_else(|| PathBuf::from("conformance_report"));
+    let base = base_path.map_or_else(|| PathBuf::from("conformance_report"), PathBuf::from);
 
     // Generate each format
     let formats = [
