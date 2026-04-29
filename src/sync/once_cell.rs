@@ -960,6 +960,98 @@ mod tests {
         )
     }
 
+    fn run_async_waiter_cancel_subset_case(
+        fallbacks: &[u32],
+        cancelled_waiters: usize,
+    ) -> (Vec<u32>, usize, usize, Option<u32>) {
+        assert!(cancelled_waiters <= fallbacks.len());
+
+        let cell: OnceCell<u32> = OnceCell::new();
+        let release_winner = Arc::new(AtomicBool::new(false));
+        let fallback_runs = Arc::new(AtomicUsize::new(0));
+        let winner_value = 41u32;
+
+        let release_for_init = Arc::clone(&release_winner);
+        let mut init_fut = Box::pin(cell.get_or_init(move || {
+            let release_for_init = Arc::clone(&release_for_init);
+            async move {
+                poll_fn(move |_| {
+                    if release_for_init.load(Ordering::SeqCst) {
+                        Poll::Ready(winner_value)
+                    } else {
+                        Poll::Pending
+                    }
+                })
+                .await
+            }
+        }));
+
+        let noop = noop_waker();
+        let mut cx = Context::from_waker(&noop);
+        assert!(Future::poll(init_fut.as_mut(), &mut cx).is_pending());
+
+        let mut waiters = Vec::with_capacity(fallbacks.len());
+        for &fallback in fallbacks {
+            let fallback_runs = Arc::clone(&fallback_runs);
+            waiters.push(Box::pin(cell.get_or_init(move || {
+                let fallback_runs = Arc::clone(&fallback_runs);
+                async move {
+                    fallback_runs.fetch_add(1, Ordering::SeqCst);
+                    fallback
+                }
+            })));
+        }
+
+        for waiter in &mut waiters {
+            assert!(Future::poll(waiter.as_mut(), &mut cx).is_pending());
+        }
+
+        for _ in 0..cancelled_waiters {
+            drop(waiters.pop().expect("cancelled waiter must exist"));
+        }
+
+        let queued_waiters_after_cancel = cell
+            .waiters
+            .lock()
+            .expect("waiters lock poisoned")
+            .waiters
+            .len();
+        assert_eq!(
+            queued_waiters_after_cancel,
+            fallbacks.len() - cancelled_waiters,
+            "cancelled waiters should be removed immediately"
+        );
+
+        release_winner.store(true, Ordering::SeqCst);
+
+        let mut observed = Vec::with_capacity(waiters.len() + 1);
+        match Future::poll(init_fut.as_mut(), &mut cx) {
+            Poll::Ready(value) => observed.push(*value),
+            Poll::Pending => panic!("winner should complete after release"),
+        }
+
+        for waiter in &mut waiters {
+            match Future::poll(waiter.as_mut(), &mut cx) {
+                Poll::Ready(value) => observed.push(*value),
+                Poll::Pending => panic!("surviving waiter should observe the winner"),
+            }
+        }
+
+        let queued_waiters_after_release = cell
+            .waiters
+            .lock()
+            .expect("waiters lock poisoned")
+            .waiters
+            .len();
+
+        (
+            observed,
+            fallback_runs.load(Ordering::SeqCst),
+            queued_waiters_after_release,
+            cell.get().copied(),
+        )
+    }
+
     #[test]
     fn metamorphic_async_waiters_converge_on_winner_without_running_fallbacks() {
         init_test("metamorphic_async_waiters_converge_on_winner_without_running_fallbacks");
@@ -1050,6 +1142,42 @@ mod tests {
         }
 
         crate::test_complete!("metamorphic_async_get_or_init_surface_is_invariant_to_racer_count");
+    }
+
+    #[test]
+    fn metamorphic_async_get_or_init_surface_is_invariant_to_cancelled_waiter_subset() {
+        init_test("metamorphic_async_get_or_init_surface_is_invariant_to_cancelled_waiter_subset");
+
+        let fallbacks = [7u32, 13, 21, 34, 55];
+        let baseline = run_async_waiter_cancel_subset_case(&fallbacks, 0);
+        assert_eq!(baseline.1, 0, "fallback initializers must stay dormant");
+        assert_eq!(baseline.2, 0, "all waiter registrations should be drained");
+        assert_eq!(baseline.3, Some(41));
+        assert_eq!(baseline.0.len(), fallbacks.len() + 1);
+        assert!(baseline.0.iter().all(|&value| value == baseline.0[0]));
+
+        for cancelled_waiters in 1..=fallbacks.len() {
+            let transformed = run_async_waiter_cancel_subset_case(&fallbacks, cancelled_waiters);
+            assert_eq!(transformed.1, 0, "fallback initializers must stay dormant");
+            assert_eq!(
+                transformed.2, 0,
+                "all waiter registrations should be drained"
+            );
+            assert_eq!(
+                transformed.3, baseline.3,
+                "winner visibility must be stable after waiter cancellation"
+            );
+            assert_eq!(transformed.0.len(), fallbacks.len() + 1 - cancelled_waiters);
+            assert!(
+                transformed.0.iter().all(|&value| value == baseline.0[0]),
+                "surviving racers should observe the same winner: {:?}",
+                transformed.0
+            );
+        }
+
+        crate::test_complete!(
+            "metamorphic_async_get_or_init_surface_is_invariant_to_cancelled_waiter_subset"
+        );
     }
 
     #[test]
