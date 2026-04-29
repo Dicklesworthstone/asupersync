@@ -259,6 +259,14 @@ fn k4_transition_missing_sources(seed: u64, missing_count: usize) -> Vec<u8> {
         .collect()
 }
 
+fn k8_low_intermediate_missing_sources(seed: u64, missing_count: usize) -> Vec<u8> {
+    let k = 8usize;
+    let start = seed as usize % k;
+    (0..missing_count.min(k))
+        .map(|offset| ((start + offset) % k) as u8)
+        .collect()
+}
+
 fn burst_repair_count(loss_windows: &[LossWindow], extra_repairs: usize, k: usize) -> usize {
     let requested_loss = loss_windows.iter().fold(0usize, |sum, window| {
         sum.saturating_add(window.len as usize + 1)
@@ -585,6 +593,68 @@ fn assert_k4_transition_sparse_vs_dense_repairs_recover(
     }
 }
 
+fn assert_k8_low_intermediate_sparse_vs_dense_repairs_recover(
+    decoder: &InactivationDecoder,
+    encoder: &SystematicEncoder,
+    source: &[Vec<u8>],
+    seed: u64,
+    extra_repairs: usize,
+    wavefront_batch: usize,
+    object_id: ObjectId,
+) {
+    if source.len() != 8 {
+        return;
+    }
+
+    let params = decoder.params();
+    assert_eq!(params.k, 8, "K=8 decoder oracle must preserve the public K");
+    assert_eq!(
+        params.k_prime, 10,
+        "K=8 decoder oracle must stay on the first padded RFC row"
+    );
+    assert!(
+        params.k_prime > params.k,
+        "K=8 decoder oracle must exercise padded K..K' synthesis"
+    );
+
+    let sparse_gap_raw = seed.rotate_left(19) as u8;
+    let low_intermediate_extra_repairs = extra_repairs.saturating_add(2);
+    for missing_count in [0usize, 1, 4, 8] {
+        let missing_sources = k8_low_intermediate_missing_sources(seed, missing_count);
+        for repair_distribution in [
+            RepairDistribution::Dense,
+            RepairDistribution::Sparse {
+                gap_raw: sparse_gap_raw,
+            },
+        ] {
+            let Some(payload_packets) = build_valid_packets(
+                decoder,
+                encoder,
+                source,
+                &missing_sources,
+                low_intermediate_extra_repairs,
+                repair_distribution,
+            ) else {
+                return;
+            };
+            let received = combine_symbols(decoder, &payload_packets);
+            let batch = if received.is_empty() {
+                0
+            } else {
+                wavefront_batch % (received.len() + 1)
+            };
+            assert_decode_consensus(decoder, &received, source, batch, object_id);
+            let decoded = decoder
+                .decode(&received)
+                .expect("K=8 low-intermediate dense/sparse repair mixes must remain decodable");
+            assert_eq!(
+                decoded.source, source,
+                "K=8 low-intermediate dense/sparse repair mixes must recover original source"
+            );
+        }
+    }
+}
+
 fuzz_target!(|data: &[u8]| {
     if data.len() > 200_000 {
         return;
@@ -635,6 +705,16 @@ fuzz_target!(|data: &[u8]| {
     }
 
     assert_k4_transition_sparse_vs_dense_repairs_recover(
+        &decoder,
+        &encoder,
+        &source,
+        input.seed,
+        input.extra_repairs as usize,
+        input.wavefront_batch as usize,
+        object_id,
+    );
+
+    assert_k8_low_intermediate_sparse_vs_dense_repairs_recover(
         &decoder,
         &encoder,
         &source,
@@ -733,8 +813,8 @@ mod tests {
         MutationKind, PacketMutation, RepairDistribution, SMALL_K_CANDIDATES,
         SMALL_SYMBOL_SIZE_CANDIDATES, apply_contiguous_loss_windows, apply_mutations,
         build_repair_esi_sequence, burst_repair_count, k4_transition_missing_sources,
-        repair_stress_missing_sources, select_k_candidate, select_symbol_size_candidate,
-        sparse_repair_stride,
+        k8_low_intermediate_missing_sources, repair_stress_missing_sources, select_k_candidate,
+        select_symbol_size_candidate, sparse_repair_stride,
     };
     use asupersync::raptorq::decoder::ReceivedSymbol;
 
@@ -836,6 +916,20 @@ mod tests {
         assert_eq!(k4_transition_missing_sources(0, 3), vec![0, 1, 2]);
         assert_eq!(k4_transition_missing_sources(3, 4), vec![3, 0, 1, 2]);
         assert_eq!(k4_transition_missing_sources(7, 5), vec![3, 0, 1, 2]);
+    }
+
+    #[test]
+    fn k8_low_intermediate_missing_sources_wraps_contiguously() {
+        assert_eq!(k8_low_intermediate_missing_sources(0, 0), Vec::<u8>::new());
+        assert_eq!(k8_low_intermediate_missing_sources(0, 4), vec![0, 1, 2, 3]);
+        assert_eq!(
+            k8_low_intermediate_missing_sources(7, 8),
+            vec![7, 0, 1, 2, 3, 4, 5, 6]
+        );
+        assert_eq!(
+            k8_low_intermediate_missing_sources(13, 9),
+            vec![5, 6, 7, 0, 1, 2, 3, 4]
+        );
     }
 
     #[test]
