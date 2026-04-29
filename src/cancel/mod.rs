@@ -13,6 +13,8 @@ pub mod protocol_state_machines;
 #[cfg(test)]
 pub mod protocol_validator_test_suite;
 pub mod symbol_cancel;
+#[cfg(test)]
+pub mod symbol_cancel_golden;
 
 pub use progress_certificate::{
     CertificateVerdict, DrainPhase, EvidenceEntry, ProgressCertificate, ProgressConfig,
