@@ -137,11 +137,38 @@ async fn wait_retry_delay(cx: &Cx, delay: Duration) -> Result<(), CancelReason> 
     .await
 }
 
+async fn retry_with_policy<T, E, Op, OpFut, Pred>(
+    cx: &Cx,
+    policy: &RetryPolicy,
+    mut op: Op,
+    is_retryable: Pred,
+) -> Outcome<T, E>
+where
+    Op: FnMut() -> OpFut,
+    OpFut: Future<Output = Outcome<T, E>>,
+    Pred: Fn(&E) -> bool,
+{
+    let mut attempt = 0u32;
+    loop {
+        let result = op().await;
+        match &result {
+            Outcome::Err(err) if is_retryable(err) && attempt < policy.max_retries => {
+                let delay = policy.delay_for(attempt);
+                attempt += 1;
+                if let Err(reason) = wait_retry_delay(cx, delay).await {
+                    return Outcome::Cancelled(reason);
+                }
+            }
+            _ => return result,
+        }
+    }
+}
+
 // ─── PostgreSQL helpers ──────────────────────────────────────────────────────
 
 #[cfg(feature = "postgres")]
 mod pg {
-    use super::{Cx, Future, Outcome, RetryPolicy, validate_savepoint_name, wait_retry_delay};
+    use super::{Cx, Future, Outcome, RetryPolicy, retry_with_policy, validate_savepoint_name};
     use crate::database::postgres::{PgConnection, PgError, PgTransaction};
     use std::fmt;
 
@@ -221,20 +248,13 @@ mod pg {
         F: FnMut(&mut PgTransaction<'_>, &Cx) -> MkFut,
         MkFut: Future<Output = Outcome<T, PgError>>,
     {
-        let mut attempt = 0u32;
-        loop {
-            let result = with_pg_transaction(conn, cx, &mut f).await;
-            match &result {
-                Outcome::Err(e) if e.is_serialization_failure() && attempt < policy.max_retries => {
-                    attempt += 1;
-                    let delay = policy.delay_for(attempt.saturating_sub(1));
-                    if let Err(reason) = wait_retry_delay(cx, delay).await {
-                        return Outcome::Cancelled(reason);
-                    }
-                }
-                _ => return result,
-            }
-        }
+        retry_with_policy(
+            cx,
+            policy,
+            || with_pg_transaction(conn, cx, &mut f),
+            PgError::is_serialization_failure,
+        )
+        .await
     }
 
     /// A PostgreSQL savepoint within an active transaction.
@@ -349,7 +369,7 @@ pub use pg::{PgSavepoint, with_pg_transaction, with_pg_transaction_retry};
 
 #[cfg(feature = "sqlite")]
 mod sqlite {
-    use super::{Cx, Future, Outcome, RetryPolicy, validate_savepoint_name, wait_retry_delay};
+    use super::{Cx, Future, Outcome, RetryPolicy, retry_with_policy, validate_savepoint_name};
     use crate::database::sqlite::{SqliteConnection, SqliteError, SqliteTransaction};
     use std::{fmt, pin::Pin};
 
@@ -470,22 +490,13 @@ mod sqlite {
     where
         F: for<'a> FnMut(&'a SqliteTransaction<'_>, &'a Cx) -> SqliteTxFuture<'a, T>,
     {
-        let mut attempt = 0u32;
-        loop {
-            let result = with_sqlite_transaction(conn, cx, &mut f).await;
-            match &result {
-                Outcome::Err(e)
-                    if (e.is_busy() || e.is_locked()) && attempt < policy.max_retries =>
-                {
-                    attempt += 1;
-                    let delay = policy.delay_for(attempt.saturating_sub(1));
-                    if let Err(reason) = wait_retry_delay(cx, delay).await {
-                        return Outcome::Cancelled(reason);
-                    }
-                }
-                _ => return result,
-            }
-        }
+        retry_with_policy(
+            cx,
+            policy,
+            || with_sqlite_transaction(conn, cx, &mut f),
+            |e| e.is_busy() || e.is_locked(),
+        )
+        .await
     }
 
     /// A SQLite savepoint within an active transaction.
@@ -601,7 +612,7 @@ pub use sqlite::{
 
 #[cfg(feature = "mysql")]
 mod mysql {
-    use super::{Cx, Future, Outcome, RetryPolicy, validate_savepoint_name, wait_retry_delay};
+    use super::{Cx, Future, Outcome, RetryPolicy, retry_with_policy, validate_savepoint_name};
     use crate::database::mysql::{MySqlConnection, MySqlError, MySqlTransaction};
     use std::fmt;
 
@@ -672,20 +683,13 @@ mod mysql {
         F: FnMut(&mut MySqlTransaction<'_>, &Cx) -> MkFut,
         MkFut: Future<Output = Outcome<T, MySqlError>>,
     {
-        let mut attempt = 0u32;
-        loop {
-            let result = with_mysql_transaction(conn, cx, &mut f).await;
-            match &result {
-                Outcome::Err(e) if e.is_deadlock() && attempt < policy.max_retries => {
-                    attempt += 1;
-                    let delay = policy.delay_for(attempt.saturating_sub(1));
-                    if let Err(reason) = wait_retry_delay(cx, delay).await {
-                        return Outcome::Cancelled(reason);
-                    }
-                }
-                _ => return result,
-            }
-        }
+        retry_with_policy(
+            cx,
+            policy,
+            || with_mysql_transaction(conn, cx, &mut f),
+            MySqlError::is_deadlock,
+        )
+        .await
     }
 
     /// A MySQL savepoint within an active transaction.
@@ -813,6 +817,9 @@ mod tests {
     #[cfg(feature = "sqlite")]
     use crate::database::sqlite::{SqliteConnection, SqliteError, SqliteValue};
     use std::task::{Context, Poll, Waker};
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct FakeRetryError(&'static str);
 
     fn noop_waker() -> Waker {
         std::task::Waker::noop().clone()
@@ -957,6 +964,69 @@ mod tests {
             other => panic!("expected cancelled zero-delay retry wait, got {other:?}"),
         }
         crate::test_complete!("wait_retry_delay_zero_delay_returns_cancelled_after_yield");
+    }
+
+    #[test]
+    fn retry_with_policy_stops_after_max_retries_on_persistent_error() {
+        init_test("retry_with_policy_stops_after_max_retries_on_persistent_error");
+        let cx = Cx::for_testing();
+        let policy = RetryPolicy {
+            max_retries: 3,
+            base_delay: Duration::ZERO,
+            max_delay: Duration::ZERO,
+        };
+        let mut attempts = 0u32;
+
+        let outcome = futures_lite::future::block_on(retry_with_policy(
+            &cx,
+            &policy,
+            || {
+                attempts += 1;
+                std::future::ready(Outcome::<(), FakeRetryError>::Err(FakeRetryError(
+                    "retryable",
+                )))
+            },
+            |_| true,
+        ));
+
+        match outcome {
+            Outcome::Err(err) => assert_eq!(err, FakeRetryError("retryable")),
+            other => panic!("expected persistent retryable error, got {other:?}"),
+        }
+        assert_eq!(
+            attempts, 4,
+            "max_retries=3 must stop after 4 total attempts"
+        );
+        crate::test_complete!("retry_with_policy_stops_after_max_retries_on_persistent_error");
+    }
+
+    #[test]
+    fn retry_with_policy_returns_non_retryable_error_immediately() {
+        init_test("retry_with_policy_returns_non_retryable_error_immediately");
+        let cx = Cx::for_testing();
+        let policy = RetryPolicy {
+            max_retries: 10,
+            base_delay: Duration::ZERO,
+            max_delay: Duration::ZERO,
+        };
+        let mut attempts = 0u32;
+
+        let outcome = futures_lite::future::block_on(retry_with_policy(
+            &cx,
+            &policy,
+            || {
+                attempts += 1;
+                std::future::ready(Outcome::<(), FakeRetryError>::Err(FakeRetryError("fatal")))
+            },
+            |_| false,
+        ));
+
+        match outcome {
+            Outcome::Err(err) => assert_eq!(err, FakeRetryError("fatal")),
+            other => panic!("expected non-retryable error, got {other:?}"),
+        }
+        assert_eq!(attempts, 1, "non-retryable errors must not loop");
+        crate::test_complete!("retry_with_policy_returns_non_retryable_error_immediately");
     }
 
     #[cfg(feature = "sqlite")]
