@@ -10404,6 +10404,144 @@ mod tests {
     }
 
     #[test]
+    fn prepared_query_cache_hit_preserves_row_decode_for_same_sql_and_params() {
+        use std::io::Write;
+
+        run(async {
+            let (mut conn, mut peer) = make_test_connection_with_peer();
+            let cx = Cx::for_testing();
+            let sql = "SELECT $1::text AS value";
+            let param_value = "same-bytes";
+
+            let responder = std::thread::spawn({
+                let sql = sql.to_string();
+                let param_value = param_value.to_string();
+                let mut peer_clone = peer.try_clone().expect("clone peer");
+                move || {
+                    let parse_request = read_until_contains(&mut peer_clone, b"__asupersync_s0");
+                    assert!(
+                        parse_request
+                            .windows(sql.len())
+                            .any(|window| window == sql.as_bytes()),
+                        "cold prepare should send Parse for the SQL text"
+                    );
+
+                    let mut parameter_description = Vec::new();
+                    parameter_description.extend_from_slice(&1i16.to_be_bytes());
+                    parameter_description.extend_from_slice(&(oid::TEXT as i32).to_be_bytes());
+
+                    let mut prepare_response = Vec::new();
+                    prepare_response.extend_from_slice(&backend_message(b'1', &[]));
+                    prepare_response
+                        .extend_from_slice(&backend_message(b't', &parameter_description));
+                    prepare_response.extend_from_slice(&single_text_row_description());
+                    prepare_response.extend_from_slice(&ready_for_query(b'I'));
+                    peer_clone
+                        .write_all(&prepare_response)
+                        .expect("write cold prepare response");
+
+                    let first_bind = read_until_contains(&mut peer_clone, param_value.as_bytes());
+                    assert!(
+                        first_bind
+                            .windows(b"__asupersync_s0".len())
+                            .any(|window| window == b"__asupersync_s0"),
+                        "cold execute should bind the prepared statement name"
+                    );
+
+                    let mut data_row = Vec::new();
+                    data_row.extend_from_slice(&1i16.to_be_bytes());
+                    data_row.extend_from_slice(&(param_value.len() as i32).to_be_bytes());
+                    data_row.extend_from_slice(param_value.as_bytes());
+
+                    let mut first_query_response = Vec::new();
+                    first_query_response.extend_from_slice(&backend_message(b'2', &[]));
+                    first_query_response.extend_from_slice(&single_text_row_description());
+                    first_query_response.extend_from_slice(&backend_message(b'D', &data_row));
+                    first_query_response.extend_from_slice(&backend_message(b'C', b"SELECT 1\0"));
+                    first_query_response.extend_from_slice(&ready_for_query(b'I'));
+                    peer_clone
+                        .write_all(&first_query_response)
+                        .expect("write cold execute response");
+
+                    let second_bind = read_until_contains(&mut peer_clone, param_value.as_bytes());
+                    assert!(
+                        second_bind
+                            .windows(b"__asupersync_s0".len())
+                            .any(|window| window == b"__asupersync_s0"),
+                        "warm execute should reuse the cached prepared statement name"
+                    );
+                    assert!(
+                        !second_bind
+                            .windows(sql.len())
+                            .any(|window| window == sql.as_bytes()),
+                        "cache-hit execute must not re-send the SQL text"
+                    );
+
+                    let mut second_query_response = Vec::new();
+                    second_query_response.extend_from_slice(&backend_message(b'2', &[]));
+                    second_query_response.extend_from_slice(&single_text_row_description());
+                    second_query_response.extend_from_slice(&backend_message(b'D', &data_row));
+                    second_query_response.extend_from_slice(&backend_message(b'C', b"SELECT 1\0"));
+                    second_query_response.extend_from_slice(&ready_for_query(b'I'));
+                    peer_clone
+                        .write_all(&second_query_response)
+                        .expect("write warm execute response");
+                }
+            });
+
+            let cold_stmt = match conn.prepare(&cx, sql).await {
+                Outcome::Ok(stmt) => stmt,
+                other => panic!("cold prepare should succeed, got {other:?}"),
+            };
+            let cold_params: [&dyn ToSql; 1] = [&param_value];
+            let cold_rows = match conn.query_prepared(&cx, &cold_stmt, &cold_params).await {
+                Outcome::Ok(rows) => rows,
+                other => panic!("cold execute should succeed, got {other:?}"),
+            };
+
+            let stmt_id_after_cold_prepare = conn.inner.next_stmt_id;
+            let warm_stmt = match conn.prepare(&cx, sql).await {
+                Outcome::Ok(stmt) => stmt,
+                other => panic!("warm prepare should hit cache, got {other:?}"),
+            };
+            assert_eq!(
+                warm_stmt.name, cold_stmt.name,
+                "same SQL should reuse the cached server statement"
+            );
+            assert_eq!(
+                conn.inner.next_stmt_id,
+                stmt_id_after_cold_prepare,
+                "cache-hit prepare must not allocate a new statement id"
+            );
+
+            let warm_params: [&dyn ToSql; 1] = [&param_value];
+            let warm_rows = match conn.query_prepared(&cx, &warm_stmt, &warm_params).await {
+                Outcome::Ok(rows) => rows,
+                other => panic!("warm execute should succeed, got {other:?}"),
+            };
+
+            responder.join().expect("responder");
+
+            assert_eq!(cold_rows.len(), 1, "cold path should decode one row");
+            assert_eq!(warm_rows.len(), 1, "warm path should decode one row");
+
+            let cold_value: String = cold_rows[0]
+                .get_typed("value")
+                .expect("cold row should decode TEXT column");
+            let warm_value: String = warm_rows[0]
+                .get_typed("value")
+                .expect("warm row should decode TEXT column");
+
+            assert_eq!(cold_value, param_value);
+            assert_eq!(warm_value, param_value);
+            assert_eq!(
+                cold_value, warm_value,
+                "same SQL and same parameter bytes must decode identically regardless of cache state"
+            );
+        });
+    }
+
+    #[test]
     fn prepared_cache_get_and_touch_promotes_lru() {
         // Touching an entry must move it to MRU so it survives the next
         // eviction round. Otherwise frequently-reused statements get
