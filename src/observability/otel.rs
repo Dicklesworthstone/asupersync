@@ -2050,6 +2050,9 @@ pub mod span_semantics {
     use opentelemetry::trace::{
         SpanContext, SpanId, SpanKind, Status, TraceFlags, TraceId, TraceState,
     };
+    use opentelemetry_proto::tonic::common::v1::{
+        AnyValue, KeyValue, any_value::Value as ProtoValue,
+    };
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -2246,6 +2249,8 @@ pub mod span_semantics {
         pub end_time: Option<SystemTime>,
         /// Span attributes.
         pub attributes: HashMap<String, String>,
+        /// OTLP-typed span attributes for wire-format conformance helpers.
+        pub attribute_values: HashMap<String, AttributeValue>,
         /// Span events.
         pub events: Vec<SpanEvent>,
         /// Span status.
@@ -2268,6 +2273,19 @@ pub mod span_semantics {
         pub timestamp: SystemTime,
         /// Event attributes.
         pub attributes: HashMap<String, String>,
+    }
+
+    /// OTLP attribute value variants for typed span-attribute coverage.
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum AttributeValue {
+        String(String),
+        Int(i64),
+        Float(f64),
+        Bool(bool),
+        StringArray(Vec<String>),
+        IntArray(Vec<i64>),
+        FloatArray(Vec<f64>),
+        BoolArray(Vec<bool>),
     }
 
     impl TestSpan {
@@ -2363,6 +2381,7 @@ pub mod span_semantics {
                 start_time: next_test_time(),
                 end_time: None,
                 attributes: HashMap::new(),
+                attribute_values: HashMap::new(),
                 events: Vec::new(),
                 status: Status::Unset,
                 parent_context,
@@ -2381,10 +2400,32 @@ pub mod span_semantics {
         /// hardening); values are truncated by the existing
         /// `max_attribute_length` config field.
         pub fn set_attribute(&mut self, key: &str, value: &str) {
+            self.set_attribute_value(key, AttributeValue::String(value.to_string()));
+        }
+
+        /// Set an integer span attribute.
+        pub fn set_int_attribute(&mut self, key: &str, value: i64) {
+            self.set_attribute_value(key, AttributeValue::Int(value));
+        }
+
+        /// Set a floating-point span attribute.
+        pub fn set_float_attribute(&mut self, key: &str, value: f64) {
+            self.set_attribute_value(key, AttributeValue::Float(value));
+        }
+
+        /// Set a boolean span attribute.
+        pub fn set_bool_attribute(&mut self, key: &str, value: bool) {
+            self.set_attribute_value(key, AttributeValue::Bool(value));
+        }
+
+        /// Set an OTLP-typed span attribute for protobuf conformance checks.
+        pub fn set_attribute_value(&mut self, key: &str, value: AttributeValue) {
             let key = truncate_key(key);
-            let value = truncate_value(value, self.max_attribute_length);
             if self.attributes.contains_key(&key) || self.attributes.len() < self.max_attributes {
-                self.attributes.insert(key, value);
+                let value = self.normalize_attribute_value(value);
+                self.attributes
+                    .insert(key.clone(), attribute_value_text(&value));
+                self.attribute_values.insert(key, value);
             }
         }
 
@@ -2445,6 +2486,119 @@ pub mod span_semantics {
         /// Check if span is ended.
         pub fn is_ended(&self) -> bool {
             self.end_time.is_some()
+        }
+
+        /// Convert span attributes to OTLP protobuf key/value pairs with stable ordering.
+        pub fn to_otlp_attributes(&self) -> Vec<KeyValue> {
+            let mut attributes: Vec<_> = self
+                .attribute_values
+                .iter()
+                .map(|(key, value)| KeyValue {
+                    key: key.clone(),
+                    value: Some(attribute_value_to_any_value(value)),
+                })
+                .collect();
+            attributes.sort_by(|left, right| left.key.cmp(&right.key));
+            attributes
+        }
+
+        fn normalize_attribute_value(&self, value: AttributeValue) -> AttributeValue {
+            match value {
+                AttributeValue::String(value) => {
+                    AttributeValue::String(truncate_value(&value, self.max_attribute_length))
+                }
+                AttributeValue::StringArray(values) => AttributeValue::StringArray(
+                    values
+                        .into_iter()
+                        .map(|value| truncate_value(&value, self.max_attribute_length))
+                        .collect(),
+                ),
+                other => other,
+            }
+        }
+    }
+
+    fn attribute_value_text(value: &AttributeValue) -> String {
+        match value {
+            AttributeValue::String(value) => value.clone(),
+            AttributeValue::Int(value) => value.to_string(),
+            AttributeValue::Float(value) => value.to_string(),
+            AttributeValue::Bool(value) => value.to_string(),
+            AttributeValue::StringArray(values) => values.join(","),
+            AttributeValue::IntArray(values) => values
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+            AttributeValue::FloatArray(values) => values
+                .iter()
+                .map(f64::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+            AttributeValue::BoolArray(values) => values
+                .iter()
+                .map(bool::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+        }
+    }
+
+    fn attribute_value_to_any_value(value: &AttributeValue) -> AnyValue {
+        use opentelemetry_proto::tonic::common::v1::ArrayValue;
+
+        match value {
+            AttributeValue::String(value) => AnyValue {
+                value: Some(ProtoValue::StringValue(value.clone())),
+            },
+            AttributeValue::Int(value) => AnyValue {
+                value: Some(ProtoValue::IntValue(*value)),
+            },
+            AttributeValue::Float(value) => AnyValue {
+                value: Some(ProtoValue::DoubleValue(*value)),
+            },
+            AttributeValue::Bool(value) => AnyValue {
+                value: Some(ProtoValue::BoolValue(*value)),
+            },
+            AttributeValue::StringArray(values) => AnyValue {
+                value: Some(ProtoValue::ArrayValue(ArrayValue {
+                    values: values
+                        .iter()
+                        .map(|value| AnyValue {
+                            value: Some(ProtoValue::StringValue(value.clone())),
+                        })
+                        .collect(),
+                })),
+            },
+            AttributeValue::IntArray(values) => AnyValue {
+                value: Some(ProtoValue::ArrayValue(ArrayValue {
+                    values: values
+                        .iter()
+                        .map(|value| AnyValue {
+                            value: Some(ProtoValue::IntValue(*value)),
+                        })
+                        .collect(),
+                })),
+            },
+            AttributeValue::FloatArray(values) => AnyValue {
+                value: Some(ProtoValue::ArrayValue(ArrayValue {
+                    values: values
+                        .iter()
+                        .map(|value| AnyValue {
+                            value: Some(ProtoValue::DoubleValue(*value)),
+                        })
+                        .collect(),
+                })),
+            },
+            AttributeValue::BoolArray(values) => AnyValue {
+                value: Some(ProtoValue::ArrayValue(ArrayValue {
+                    values: values
+                        .iter()
+                        .map(|value| AnyValue {
+                            value: Some(ProtoValue::BoolValue(*value)),
+                        })
+                        .collect(),
+                })),
+            },
         }
     }
 
@@ -3274,6 +3428,57 @@ pub mod span_semantics {
             span.end();
             assert!(span.is_ended());
             assert!(span.duration().is_some());
+        }
+
+        #[test]
+        fn test_span_typed_attributes_round_trip_to_otlp() {
+            use opentelemetry_proto::tonic::common::v1::any_value::Value as ProtoValue;
+
+            let mut span = TestSpan::new("typed", SpanKind::Internal);
+            span.set_attribute("service.name", "edge");
+            span.set_int_attribute("http.status_code", 200);
+            span.set_float_attribute("latency_ms", 1.5);
+            span.set_bool_attribute("cached", true);
+            span.set_attribute_value("replicas", AttributeValue::IntArray(vec![1, 2, 3]));
+
+            let otlp = span.to_otlp_attributes();
+            assert_eq!(otlp.len(), 5);
+
+            let replicas = otlp
+                .iter()
+                .find(|attr| attr.key == "replicas")
+                .and_then(|attr| attr.value.as_ref())
+                .and_then(|value| value.value.as_ref());
+            assert!(matches!(replicas, Some(ProtoValue::ArrayValue(_))));
+
+            let status = otlp
+                .iter()
+                .find(|attr| attr.key == "http.status_code")
+                .and_then(|attr| attr.value.as_ref())
+                .and_then(|value| value.value.as_ref());
+            assert_eq!(status, Some(&ProtoValue::IntValue(200)));
+        }
+
+        #[test]
+        fn test_span_typed_attribute_limits_apply() {
+            let config = SpanConformanceConfig {
+                max_attributes: 2,
+                max_events: 4,
+                max_attribute_length: Some(4),
+                test_sampling: true,
+                test_context_propagation: true,
+            };
+            let mut span = TestSpan::new_with_config("typed", SpanKind::Internal, &config);
+
+            span.set_attribute("alpha", "abcdef");
+            span.set_int_attribute("beta", 42);
+            span.set_bool_attribute("gamma", true);
+
+            assert_eq!(span.to_otlp_attributes().len(), 2);
+            assert_eq!(
+                span.attributes.get("alpha").map(String::as_str),
+                Some("abcd")
+            );
         }
 
         #[test]
@@ -4552,17 +4757,17 @@ mod otlp_wire_format_tests {
     #[test]
     #[cfg(feature = "tracing-integration")]
     fn otlp_export_conformance_byte_identical() {
+        use opentelemetry::trace::{SpanBuilder, SpanKind, Status, TraceContextExt, Tracer};
+        use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
+        use opentelemetry_proto::tonic::resource::v1::Resource;
         use opentelemetry_proto::tonic::trace::v1::{
             ExportTraceServiceRequest, ResourceSpans, ScopeSpans, Span as OtlpSpan,
         };
-        use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
-        use opentelemetry_proto::tonic::resource::v1::Resource;
-        use opentelemetry::trace::{SpanBuilder, SpanKind, Status, TraceContextExt, Tracer};
-        use opentelemetry_sdk::trace::{TracerProvider, BatchSpanProcessor};
         use opentelemetry_sdk::Resource as SdkResource;
+        use opentelemetry_sdk::trace::{BatchSpanProcessor, TracerProvider};
         use prost::Message;
-        use std::sync::{Arc, Mutex};
         use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
 
         // Shared span data for both implementations
         #[derive(Clone)]
@@ -4591,12 +4796,12 @@ mod otlp_wire_format_tests {
                                 ("service.name".to_string(), "asupersync".to_string()),
                                 ("http.method".to_string(), "POST".to_string()),
                                 ("http.url".to_string(), "/api/v1/process".to_string()),
-                            ].into(),
-                            events: vec![
-                                ("request.received".to_string(), [
-                                    ("bytes".to_string(), "1024".to_string()),
-                                ].into()),
-                            ],
+                            ]
+                            .into(),
+                            events: vec![(
+                                "request.received".to_string(),
+                                [("bytes".to_string(), "1024".to_string())].into(),
+                            )],
                             status: Status::Ok,
                             parent_idx: None,
                         },
@@ -4605,13 +4810,18 @@ mod otlp_wire_format_tests {
                             kind: SpanKind::Client,
                             attributes: [
                                 ("db.system".to_string(), "postgresql".to_string()),
-                                ("db.statement".to_string(), "SELECT * FROM users".to_string()),
-                            ].into(),
+                                (
+                                    "db.statement".to_string(),
+                                    "SELECT * FROM users".to_string(),
+                                ),
+                            ]
+                            .into(),
                             events: vec![
                                 ("query.start".to_string(), HashMap::new()),
-                                ("query.end".to_string(), [
-                                    ("rows".to_string(), "42".to_string()),
-                                ].into()),
+                                (
+                                    "query.end".to_string(),
+                                    [("rows".to_string(), "42".to_string())].into(),
+                                ),
                             ],
                             status: Status::Ok,
                             parent_idx: Some(0),
@@ -4619,9 +4829,8 @@ mod otlp_wire_format_tests {
                         CanonicalSpan {
                             name: "response_processing".to_string(),
                             kind: SpanKind::Internal,
-                            attributes: [
-                                ("component".to_string(), "json_serializer".to_string()),
-                            ].into(),
+                            attributes: [("component".to_string(), "json_serializer".to_string())]
+                                .into(),
                             events: vec![],
                             status: Status::Ok,
                             parent_idx: Some(0),
@@ -4635,16 +4844,16 @@ mod otlp_wire_format_tests {
         fn build_our_otlp_export(tree: &CanonicalSpanTree) -> Vec<u8> {
             // Create OTLP request using our implementation patterns
             let resource = Resource {
-                attributes: vec![
-                    KeyValue {
-                        key: "service.name".to_string(),
-                        value: Some(AnyValue {
-                            value: Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(
-                                "asupersync".to_string()
-                            )),
-                        }),
-                    },
-                ],
+                attributes: vec![KeyValue {
+                    key: "service.name".to_string(),
+                    value: Some(AnyValue {
+                        value: Some(
+                            opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(
+                                "asupersync".to_string(),
+                            ),
+                        ),
+                    }),
+                }],
                 dropped_attributes_count: 0,
             };
 
@@ -4709,12 +4918,14 @@ mod otlp_wire_format_tests {
             }).collect();
 
             let scope_spans = ScopeSpans {
-                scope: Some(opentelemetry_proto::tonic::common::v1::InstrumentationScope {
-                    name: "asupersync".to_string(),
-                    version: "0.3.1".to_string(),
-                    attributes: vec![],
-                    dropped_attributes_count: 0,
-                }),
+                scope: Some(
+                    opentelemetry_proto::tonic::common::v1::InstrumentationScope {
+                        name: "asupersync".to_string(),
+                        version: "0.3.1".to_string(),
+                        attributes: vec![],
+                        dropped_attributes_count: 0,
+                    },
+                ),
                 spans,
                 schema_url: String::new(),
             };
@@ -4744,13 +4955,17 @@ mod otlp_wire_format_tests {
             }
 
             impl opentelemetry_sdk::export::trace::SpanExporter for ByteCapturingExporter {
-                fn export(&mut self, batch: Vec<opentelemetry_sdk::export::trace::SpanData>) -> opentelemetry_sdk::export::trace::ExportResult {
+                fn export(
+                    &mut self,
+                    batch: Vec<opentelemetry_sdk::export::trace::SpanData>,
+                ) -> opentelemetry_sdk::export::trace::ExportResult {
                     // Convert SpanData to OTLP and capture bytes
                     use opentelemetry_proto::transform::trace::spans_to_proto;
 
-                    let resource = SdkResource::new(vec![
-                        opentelemetry::KeyValue::new("service.name", "asupersync"),
-                    ]);
+                    let resource = SdkResource::new(vec![opentelemetry::KeyValue::new(
+                        "service.name",
+                        "asupersync",
+                    )]);
 
                     let resource_spans = spans_to_proto(resource, batch);
                     let request = ExportTraceServiceRequest { resource_spans };
@@ -4767,9 +4982,10 @@ mod otlp_wire_format_tests {
 
             let tracer_provider = TracerProvider::builder()
                 .with_simple_exporter(exporter)
-                .with_resource(SdkResource::new(vec![
-                    opentelemetry::KeyValue::new("service.name", "asupersync"),
-                ]))
+                .with_resource(SdkResource::new(vec![opentelemetry::KeyValue::new(
+                    "service.name",
+                    "asupersync",
+                )]))
                 .build();
 
             let tracer = tracer_provider.tracer("asupersync");
@@ -4778,13 +4994,17 @@ mod otlp_wire_format_tests {
             let mut span_contexts = Vec::new();
 
             for (idx, canonical_span) in tree.spans.iter().enumerate() {
-                let span_builder = tracer.span_builder(&canonical_span.name)
+                let span_builder = tracer
+                    .span_builder(&canonical_span.name)
                     .with_kind(canonical_span.kind);
 
                 let span_context = if let Some(parent_idx) = canonical_span.parent_idx {
                     // Set parent context
-                    opentelemetry::Context::current()
-                        .with_span(opentelemetry::trace::noop::NoopSpan::new(span_contexts[parent_idx].clone()))
+                    opentelemetry::Context::current().with_span(
+                        opentelemetry::trace::noop::NoopSpan::new(
+                            span_contexts[parent_idx].clone(),
+                        ),
+                    )
                 } else {
                     opentelemetry::Context::current()
                 };
@@ -4796,12 +5016,14 @@ mod otlp_wire_format_tests {
                 }
 
                 for (event_name, event_attrs) in &canonical_span.events {
-                    let attrs: Vec<_> = event_attrs.iter()
+                    let attrs: Vec<_> = event_attrs
+                        .iter()
                         .map(|(k, v)| opentelemetry::KeyValue::new(k.clone(), v.clone()))
                         .collect();
                     span.add_event_with_timestamp(
                         event_name.clone(),
-                        std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_nanos(1000500000),
+                        std::time::SystemTime::UNIX_EPOCH
+                            + std::time::Duration::from_nanos(1000500000),
                         attrs,
                     );
                 }
@@ -4826,15 +5048,21 @@ mod otlp_wire_format_tests {
         // Verify byte-identical output
         if our_bytes != reference_bytes {
             // For debugging: decode both and compare structure
-            let our_decoded = ExportTraceServiceRequest::decode(our_bytes.as_slice())
-                .expect("decode our OTLP");
+            let our_decoded =
+                ExportTraceServiceRequest::decode(our_bytes.as_slice()).expect("decode our OTLP");
             let ref_decoded = ExportTraceServiceRequest::decode(reference_bytes.as_slice())
                 .expect("decode reference OTLP");
 
             // Create detailed comparison for debugging
             eprintln!("OTLP Conformance Failure:");
-            eprintln!("Our implementation spans: {}", our_decoded.resource_spans.len());
-            eprintln!("Reference implementation spans: {}", ref_decoded.resource_spans.len());
+            eprintln!(
+                "Our implementation spans: {}",
+                our_decoded.resource_spans.len()
+            );
+            eprintln!(
+                "Reference implementation spans: {}",
+                ref_decoded.resource_spans.len()
+            );
 
             // Use insta for detailed comparison snapshot
             insta::with_settings!({
