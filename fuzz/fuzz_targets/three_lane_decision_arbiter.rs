@@ -36,6 +36,8 @@ pub struct DecisionArbiterInput {
     environment: FuzzEnvironment,
     /// Concrete lane mix driven through the real scheduler arbiter.
     workload: FuzzLaneWorkload,
+    /// Local timed tasks promoted after deadline miss.
+    deadline_promotion: FuzzDeadlinePromotionScenario,
     /// Adaptive governor workload driven by arrival bursts and Lyapunov state.
     adaptive_budget: FuzzAdaptiveBudgetScenario,
 }
@@ -131,6 +133,27 @@ pub struct FuzzLaneWorkload {
     /// Due timed tasks bucketed by relative deadline.
     #[arbitrary(with = bounded_timed_buckets)]
     timed_deadline_buckets: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Arbitrary)]
+pub struct FuzzDeadlinePromotionScenario {
+    /// Timed tasks subjected to repeated post-deadline promotion decisions.
+    #[arbitrary(with = bounded_deadline_promotion_tasks)]
+    tasks: Vec<FuzzDeadlinePromotionTask>,
+}
+
+#[derive(Debug, Clone, Arbitrary)]
+pub struct FuzzDeadlinePromotionTask {
+    /// Relative deadline bucket for the timed lane.
+    deadline_bucket: u8,
+    /// Whether this task is promoted after missing its deadline.
+    promote_after_miss: bool,
+    /// Number of repeated promote decisions applied after the miss.
+    #[arbitrary(with = bounded_promote_attempts)]
+    promote_attempts: u8,
+    /// Cancel priority used for the promotion path.
+    #[arbitrary(with = |u: &mut arbitrary::Unstructured| u.int_in_range(0..=100))]
+    cancel_priority: u8,
 }
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -234,6 +257,21 @@ fn bounded_timed_buckets(u: &mut arbitrary::Unstructured) -> arbitrary::Result<V
         buckets.push(u.int_in_range(0..=3)?);
     }
     Ok(buckets)
+}
+
+fn bounded_promote_attempts(u: &mut arbitrary::Unstructured) -> arbitrary::Result<u8> {
+    u.int_in_range(1..=4)
+}
+
+fn bounded_deadline_promotion_tasks(
+    u: &mut arbitrary::Unstructured,
+) -> arbitrary::Result<Vec<FuzzDeadlinePromotionTask>> {
+    let len = usize::from(u.int_in_range::<u8>(0..=12)?);
+    let mut tasks = Vec::with_capacity(len);
+    for _ in 0..len {
+        tasks.push(u.arbitrary()?);
+    }
+    Ok(tasks)
 }
 
 impl From<FuzzPotentialWeights> for PotentialWeights {
@@ -707,6 +745,110 @@ fn assert_timed_lane_edf_order(workload: &FuzzLaneWorkload) {
     }
 }
 
+fn assert_deadline_miss_promotion_once(scenario: &FuzzDeadlinePromotionScenario) {
+    if scenario.tasks.is_empty() {
+        return;
+    }
+
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+    let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+    {
+        let mut guard = state.lock().expect("lock runtime state");
+        guard.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock.clone()));
+    }
+
+    let cancel_limit = scenario.tasks.len().max(1);
+    let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, cancel_limit);
+    let mut workers = scheduler.take_workers();
+    let worker = workers.first_mut().expect("worker");
+
+    let mut max_deadline_ns = 0u64;
+    let mut promoted_tasks = Vec::new();
+    let mut expected_total = 0usize;
+
+    for (index, task) in scenario.tasks.iter().enumerate() {
+        let task_id = scheduler_task_id(95_000, index);
+        let deadline = timed_deadline_from_bucket(task.deadline_bucket);
+        max_deadline_ns = max_deadline_ns.max(deadline.as_nanos());
+        worker.schedule_local_timed(task_id, deadline);
+        expected_total += 1;
+        if task.promote_after_miss {
+            promoted_tasks.push((task_id, task.promote_attempts, task.cancel_priority));
+        }
+    }
+
+    clock.advance_to(Time::from_nanos(max_deadline_ns.saturating_add(1)));
+    for (task_id, attempts, priority) in &promoted_tasks {
+        for _ in 0..usize::from(*attempts) {
+            worker.schedule_local_cancel(*task_id, *priority);
+        }
+    }
+
+    let mut dispatch_trace = Vec::with_capacity(expected_total);
+    while dispatch_trace.len() < expected_total {
+        let Some(task) = worker.next_task() else {
+            break;
+        };
+        assert!(
+            !dispatch_trace.contains(&task),
+            "missed-deadline promotion duplicated task {task:?}"
+        );
+        dispatch_trace.push(task);
+    }
+
+    assert_eq!(
+        dispatch_trace.len(),
+        expected_total,
+        "missed-deadline promotion must preserve total timed tasks without fabricating or dropping work"
+    );
+
+    let promoted_ids: Vec<_> = promoted_tasks
+        .iter()
+        .map(|(task_id, _, _)| *task_id)
+        .collect();
+    for task_id in &promoted_ids {
+        assert!(
+            dispatch_trace.contains(task_id),
+            "promoted task {task_id:?} must still dispatch exactly once"
+        );
+    }
+
+    let promoted_prefix_len = promoted_ids.len();
+    if promoted_prefix_len > 0 {
+        assert!(
+            dispatch_trace[..promoted_prefix_len]
+                .iter()
+                .all(|task_id| promoted_ids.contains(task_id)),
+            "promoted missed-deadline tasks must dispatch from cancel lane before remaining timed work"
+        );
+    }
+
+    let metrics = worker.preemption_metrics();
+    assert_eq!(
+        metrics.cancel_dispatches as usize,
+        promoted_ids.len(),
+        "each missed-deadline promotion should contribute exactly one cancel dispatch"
+    );
+    assert_eq!(
+        metrics.timed_dispatches as usize,
+        scenario.tasks.len().saturating_sub(promoted_ids.len()),
+        "promoted missed-deadline tasks must not remain observable through the timed lane"
+    );
+    assert_eq!(metrics.ready_dispatches, 0);
+    assert!(
+        worker.invariant_violations().is_empty(),
+        "missed-deadline promotion must not introduce scheduler invariant violations"
+    );
+
+    for _ in 0..2 {
+        assert_eq!(
+            worker.next_task(),
+            None,
+            "worker should quiesce after draining the missed-deadline promotion scenario"
+        );
+    }
+}
+
 fn assert_adaptive_budget_governor(
     scenario: &FuzzAdaptiveBudgetScenario,
     weights: &PotentialWeights,
@@ -890,10 +1032,13 @@ fuzz_target!(|input: DecisionArbiterInput| {
     // and arrival order.
     assert_timed_lane_edf_order(&input.workload);
 
-    // Test 5: Cancel-mask state propagates into scheduler snapshots without
+    // Test 5: Missed-deadline promotion collapses to a single cancel observation.
+    assert_deadline_miss_promotion_once(&input.deadline_promotion);
+
+    // Test 6: Cancel-mask state propagates into scheduler snapshots without
     // becoming runnable phantom work.
     assert_cancel_mask_propagation(&input.workload, &input.state_snapshots[0]);
 
-    // Test 6: Adaptive cancel-streak governor stays bounded and terminates.
+    // Test 7: Adaptive cancel-streak governor stays bounded and terminates.
     assert_adaptive_budget_governor(&input.adaptive_budget, &weights);
 });
