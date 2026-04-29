@@ -33,6 +33,10 @@ path = "raptorq_rfc6330/reporting/bin/maintain_fixtures.rs"
 name = "mysql_conformance_runner"
 path = "src/bin/mysql_conformance_runner.rs"
 
+[[bin]]
+name = "h2_settings_conformance"
+path = "src/bin/h2_settings_conformance.rs"
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -40,10 +44,17 @@ tempfile = "3"
 clap = { version = "4.0", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 crc32fast = "1.4"
-tokio = { version = "1.0", features = ["time"] }
+tokio = { version = "1.0", features = ["time", "net", "sync", "macros", "rt-multi-thread"] }
+env_logger = "0.10"
+h2 = "0.4"
+bytes = "1.11"
 
 [dev-dependencies]
 # Runtimes can be added here for testing
 opentelemetry-proto = "0.31"
 prost = "0.14"
 redis = "0.26"
+# h2 reference implementation for HTTP/2 SETTINGS conformance testing
+h2 = "0.4"
+tokio-util = { version = "0.7", features = ["codec"] }
+bytes = "1.11"

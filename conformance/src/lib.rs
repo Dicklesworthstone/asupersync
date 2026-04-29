@@ -36,6 +36,7 @@ use std::pin::Pin;
 use std::time::Duration;
 
 pub mod bench;
+pub mod h2_settings_conformance;
 pub mod kafka_record_batch_v2;
 pub mod lean_coverage_matrix;
 pub mod lean_frontier;
@@ -56,6 +57,11 @@ pub use bench::{
     BenchThresholds, Benchmark, Comparison, ComparisonConfidence, RegressionCheck,
     RegressionConfig, RegressionMetric, Stats, StatsError, default_benchmarks,
     run_benchmark_comparison,
+};
+pub use h2_settings_conformance::{
+    SettingsConformanceTester, SettingsSnapshot, SettingsConformanceCase, SettingsFrame,
+    Setting, ExpectedOutcome, ConformanceResult, TestVerdict, ComplianceReport,
+    ComplianceSummary,
 };
 pub use kafka_record_batch_v2::{
     ConformanceTestResult, Header, KafkaConformanceHarness, RecordAttribute, RecordBatchV2,
