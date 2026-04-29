@@ -52,6 +52,28 @@ pub enum LedgerError {
         /// The obligation whose token was presented after finalize.
         obligation: ObligationId,
     },
+    /// The obligation has already been resolved (committed, aborted,
+    /// or leaked). Returned by the fallible `try_abort_by_id` path
+    /// when a drain caller races with the obligation's natural
+    /// completion. The infallible `abort_by_id` keeps its existing
+    /// double-resolve panic shape; this variant exists for callsites
+    /// (drain loops, recovery handlers) that legitimately race with
+    /// the obligation's normal commit/abort and prefer a `Result`
+    /// return.
+    AlreadyResolved {
+        /// The obligation whose ID was looked up after it had already
+        /// transitioned out of the Reserved state.
+        obligation: ObligationId,
+        /// The terminal state observed at the time of the racy call.
+        state: ObligationState,
+    },
+    /// The obligation ID is not known to the ledger. Returned by the
+    /// fallible `try_abort_by_id` path. The infallible `abort_by_id`
+    /// keeps its existing not-found panic shape.
+    NotFound {
+        /// The obligation ID that was not present in the ledger.
+        obligation: ObligationId,
+    },
 }
 
 impl std::fmt::Display for LedgerError {
@@ -61,6 +83,15 @@ impl std::fmt::Display for LedgerError {
                 f,
                 "obligation {obligation:?} cannot transition: owning region {region:?} \
                  was already finalized (br-asupersync-qyf37e)"
+            ),
+            Self::AlreadyResolved { obligation, state } => write!(
+                f,
+                "obligation {obligation:?} cannot abort_by_id: already resolved \
+                 (state={state:?})"
+            ),
+            Self::NotFound { obligation } => write!(
+                f,
+                "obligation {obligation:?} not found in ledger"
             ),
         }
     }
@@ -565,6 +596,64 @@ impl ObligationLedger {
         self.stats.total_aborted += 1;
         self.resolve_one_pending("abort_by_id");
         duration
+    }
+
+    /// Race-tolerant variant of [`Self::abort_by_id`] for drain loops
+    /// and recovery handlers that legitimately race with an
+    /// obligation's natural completion.
+    ///
+    /// Token-double-fulfillment scenario this exists to handle:
+    /// thread T1 holds the ledger lock and commits a token
+    /// (state → Committed), then thread T2 acquires the ledger lock
+    /// inside a region drain and calls `abort_by_id(id)` for the same
+    /// obligation. The infallible `abort_by_id` panics in that
+    /// situation (`pending_record_for_id_mut` asserts `is_pending()`).
+    /// `try_abort_by_id` instead returns `Err(LedgerError::AlreadyResolved)`
+    /// so the drain loop can continue without unwinding the worker.
+    ///
+    /// Contract:
+    ///   * Returns `Ok(0)` if the owning region is finalized (same
+    ///     fail-closed behavior as `abort_by_id`).
+    ///   * Returns `Err(LedgerError::NotFound)` if the obligation was
+    ///     never in the ledger.
+    ///   * Returns `Err(LedgerError::AlreadyResolved)` if the obligation
+    ///     exists but has already transitioned out of `Reserved` (i.e.
+    ///     committed, aborted, or leaked) — the new variant from
+    ///     br-asupersync-qrt5gw.
+    ///   * Otherwise transitions to `Aborted` and returns `Ok(duration)`.
+    ///
+    /// Stats accounting matches `abort_by_id` exactly:
+    /// `total_aborted += 1` and `pending -= 1` only on the successful
+    /// transition path. The two error paths and the finalized-region
+    /// fast-return touch neither counter, so the ledger's
+    /// `LedgerStats::is_clean()` invariant is preserved across racy
+    /// callers.
+    pub fn try_abort_by_id(
+        &mut self,
+        id: ObligationId,
+        now: Time,
+        reason: ObligationAbortReason,
+    ) -> Result<u64, LedgerError> {
+        let Some(record_state_and_region) =
+            self.obligations.get(&id).map(|r| (r.state, r.region))
+        else {
+            return Err(LedgerError::NotFound { obligation: id });
+        };
+        let (state, region) = record_state_and_region;
+        if self.finalized_regions.contains(&region) {
+            return Ok(0);
+        }
+        if state != ObligationState::Reserved {
+            return Err(LedgerError::AlreadyResolved {
+                obligation: id,
+                state,
+            });
+        }
+        let record = self.pending_record_for_id_mut(id, "try_abort_by_id");
+        let duration = record.abort(now, reason);
+        self.stats.total_aborted += 1;
+        self.resolve_one_pending("try_abort_by_id");
+        Ok(duration)
     }
 
     /// Marks an obligation as leaked (runtime detected the holder completed
@@ -1898,6 +1987,118 @@ mod tests {
         crate::assert_with_log!(stats.total_leaked == 0, "leaked", 0, stats.total_leaked);
         crate::assert_with_log!(stats.pending == 0, "pending", 0, stats.pending);
         crate::test_complete!("abort_by_id_double_resolve_panics_without_pending_underflow");
+    }
+
+    /// Race-tolerance contract for `try_abort_by_id` covering all four
+    /// branches: NotFound, AlreadyResolved (committed and aborted), the
+    /// happy reserved-then-aborted path, and the no-op fast-return for
+    /// already-finalized regions. Pinned together so a future refactor
+    /// that drops one branch can't pass the rest in isolation.
+    #[test]
+    fn try_abort_by_id_race_branches() {
+        let mut ledger = ObligationLedger::new();
+        let task = make_task();
+        let region = make_region();
+
+        // (a) NotFound: no acquire happened for this ID. Use a fabricated
+        // ID by acquiring + dropping (marking the slot used), then synthesise
+        // a never-acquired ID via new_for_test in a fresh generation that
+        // the ledger never minted.
+        let phantom_id = ObligationId::new_for_test(99_999, 7);
+        match ledger.try_abort_by_id(
+            phantom_id,
+            Time::from_nanos(1),
+            ObligationAbortReason::Cancel,
+        ) {
+            Err(LedgerError::NotFound { obligation }) => {
+                assert_eq!(obligation, phantom_id);
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+        assert_eq!(ledger.stats().pending, 0);
+        assert_eq!(ledger.stats().total_aborted, 0);
+
+        // (b) Happy path: reserve then race-tolerant abort succeeds.
+        let token_b = ledger.acquire(ObligationKind::Lease, task, region, Time::ZERO);
+        let id_b = token_b.id();
+        match ledger.try_abort_by_id(
+            id_b,
+            Time::from_nanos(10),
+            ObligationAbortReason::Cancel,
+        ) {
+            Ok(duration) => assert_eq!(duration, 10),
+            other => panic!("expected Ok(10), got {other:?}"),
+        }
+        assert_eq!(ledger.stats().total_aborted, 1);
+        assert_eq!(ledger.stats().pending, 0);
+
+        // (c) AlreadyResolved (Aborted): hitting the just-aborted record
+        // again must not panic and must not double-decrement pending.
+        let pending_before = ledger.stats().pending;
+        let aborted_before = ledger.stats().total_aborted;
+        match ledger.try_abort_by_id(
+            id_b,
+            Time::from_nanos(20),
+            ObligationAbortReason::Cancel,
+        ) {
+            Err(LedgerError::AlreadyResolved { obligation, state }) => {
+                assert_eq!(obligation, id_b);
+                assert_eq!(state, ObligationState::Aborted);
+            }
+            other => panic!("expected AlreadyResolved(Aborted), got {other:?}"),
+        }
+        assert_eq!(ledger.stats().pending, pending_before);
+        assert_eq!(ledger.stats().total_aborted, aborted_before);
+
+        // (d) AlreadyResolved (Committed): the canonical token-double-
+        // fulfillment race — commit happens first, drain calls
+        // try_abort_by_id second. Must observe Committed without panicking.
+        let token_d = ledger.acquire(ObligationKind::Lease, task, region, Time::ZERO);
+        let id_d = token_d.id();
+        let _ = ledger.commit(token_d, Time::from_nanos(40));
+        match ledger.try_abort_by_id(
+            id_d,
+            Time::from_nanos(50),
+            ObligationAbortReason::Cancel,
+        ) {
+            Err(LedgerError::AlreadyResolved { obligation, state }) => {
+                assert_eq!(obligation, id_d);
+                assert_eq!(state, ObligationState::Committed);
+            }
+            other => panic!("expected AlreadyResolved(Committed), got {other:?}"),
+        }
+        // Stats unchanged from the commit alone (one committed, no abort).
+        let stats_d = ledger.stats();
+        assert_eq!(stats_d.total_committed, 1);
+        assert_eq!(stats_d.total_aborted, 1, "from branch (b), unchanged here");
+        assert_eq!(stats_d.pending, 0);
+
+        // (e) Region finalized: the same fail-closed Ok(0) sentinel as
+        // abort_by_id, surfaced through the Result. mark_region_finalized
+        // is intentionally idempotent so this can run after branch (d).
+        let token_e = ledger.acquire(ObligationKind::Lease, task, region, Time::ZERO);
+        let id_e = token_e.id();
+        ledger.mark_region_finalized(region);
+        match ledger.try_abort_by_id(
+            id_e,
+            Time::from_nanos(60),
+            ObligationAbortReason::Cancel,
+        ) {
+            Ok(0) => {}
+            other => panic!("expected Ok(0) after finalize, got {other:?}"),
+        }
+        // The pending count for id_e MUST stay >0 — the fence prevented
+        // the abort path from running, so the obligation is still
+        // outstanding (and the leak detector will flag it on close, which
+        // is the documented contract).
+        // We discard the token to satisfy the Drop linearity check; any
+        // late-arrival drain would now route through the same fence.
+        std::mem::drop(token_e);
+        assert!(
+            ledger.stats().pending >= 1,
+            "fence must NOT decrement pending; got {:?}",
+            ledger.stats(),
+        );
     }
 
     #[test]
