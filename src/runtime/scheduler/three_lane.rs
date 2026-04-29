@@ -4082,7 +4082,9 @@ impl ThreeLaneWorker {
                             } else {
                                 // SAFETY: Invalid worker id for a local waiter means
                                 // we can't route to the correct queue. Skipping the
-                                // wake may hang the waiter, but avoids potential UB.
+                                // wake avoids misrouting the task; clear the dedup
+                                // bit so a later valid wake can retry.
+                                record.wake_state.clear();
                                 debug_assert!(
                                     false,
                                     "Pinned local waiter {waiter:?} has invalid worker id {worker_id}"
@@ -4090,7 +4092,7 @@ impl ThreeLaneWorker {
                                 error!(
                                     ?waiter,
                                     worker_id,
-                                    "execute: pinned local waiter has invalid worker id, wake skipped"
+                                    "execute: pinned local waiter has invalid worker id, wake skipped and wake_state cleared"
                                 );
                             }
                         } else {
@@ -9703,6 +9705,52 @@ mod tests {
 
         assert!(!worker_1_has_it, "Task incorrectly scheduled on Worker 1");
         assert!(worker_0_has_it, "Task correctly routed to Worker 0");
+    }
+
+    #[test]
+    fn invalid_local_waiter_route_clears_wake_state_for_retry() {
+        use crate::runtime::RuntimeState;
+        use crate::sync::ContendedMutex;
+        use crate::types::Budget;
+
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let waiter_id = {
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let region = guard.create_root_region(Budget::INFINITE);
+            let (tid, _) = guard
+                .create_task(region, Budget::INFINITE, async { 1 })
+                .expect("create task");
+            let record = guard.task_mut(tid).expect("task record");
+            record.pin_to_worker(99);
+            tid
+        };
+
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let mut workers = scheduler.take_workers();
+        let worker = workers.first_mut().expect("worker");
+
+        {
+            let guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            worker.wake_dependents_locked(&guard, [waiter_id]);
+        }
+
+        let guard = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let record = guard.task(waiter_id).expect("task record");
+
+        assert!(
+            record.wake_state.notify(),
+            "invalid local routing should clear wake_state so a later wake can retry"
+        );
+        assert!(
+            worker.local_ready.lock().is_empty(),
+            "invalid local routing must not misroute onto the current worker queue"
+        );
     }
 
     // =========================================================================
