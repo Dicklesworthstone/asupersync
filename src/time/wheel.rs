@@ -2723,6 +2723,171 @@ mod tests {
     }
 
     #[test]
+    fn metamorphic_split_advance_with_interleaved_register_cancel_matches_survivors() {
+        init_test("metamorphic_split_advance_with_interleaved_register_cancel_matches_survivors");
+
+        let early_survivor_deadline = Time::from_millis(5);
+        let cancelled_mid_deadline = Time::from_millis(40);
+        let late_registered_survivor_deadline = Time::from_millis(500);
+        let cancelled_late_deadline = Time::from_millis(1200);
+        let long_survivor_deadline = Time::from_millis(1500);
+        let first_advance = Time::from_millis(10);
+        let second_advance = Time::from_millis(100);
+        let final_advance = Time::from_secs(2);
+
+        let interleaved_early = Arc::new(AtomicU64::new(0));
+        let interleaved_cancelled_mid = Arc::new(AtomicU64::new(0));
+        let interleaved_late_survivor = Arc::new(AtomicU64::new(0));
+        let interleaved_cancelled_late = Arc::new(AtomicU64::new(0));
+        let interleaved_long = Arc::new(AtomicU64::new(0));
+
+        let mut interleaved = TimerWheel::new_at(Time::ZERO);
+        interleaved.register(
+            early_survivor_deadline,
+            counter_waker(interleaved_early.clone()),
+        );
+        let cancelled_mid_handle = interleaved.register(
+            cancelled_mid_deadline,
+            counter_waker(interleaved_cancelled_mid.clone()),
+        );
+        interleaved.register(
+            long_survivor_deadline,
+            counter_waker(interleaved_long.clone()),
+        );
+
+        let mut previous_time = interleaved.current_time();
+        let wakers = interleaved.collect_expired(first_advance);
+        for waker in wakers {
+            waker.wake();
+        }
+        let current_time = interleaved.current_time();
+        crate::assert_with_log!(
+            current_time >= previous_time,
+            "first split advance stays monotonic",
+            true,
+            current_time >= previous_time
+        );
+        previous_time = current_time;
+
+        let cancelled_mid = interleaved.cancel(&cancelled_mid_handle);
+        crate::assert_with_log!(
+            cancelled_mid,
+            "mid-range timer cancelled before deadline",
+            true,
+            cancelled_mid
+        );
+
+        interleaved.register(
+            late_registered_survivor_deadline,
+            counter_waker(interleaved_late_survivor.clone()),
+        );
+        let cancelled_late_handle = interleaved.register(
+            cancelled_late_deadline,
+            counter_waker(interleaved_cancelled_late.clone()),
+        );
+
+        let wakers = interleaved.collect_expired(second_advance);
+        for waker in wakers {
+            waker.wake();
+        }
+        let current_time = interleaved.current_time();
+        crate::assert_with_log!(
+            current_time >= previous_time,
+            "second split advance stays monotonic",
+            true,
+            current_time >= previous_time
+        );
+        previous_time = current_time;
+
+        let cancelled_late = interleaved.cancel(&cancelled_late_handle);
+        crate::assert_with_log!(
+            cancelled_late,
+            "late timer cancelled before final advance",
+            true,
+            cancelled_late
+        );
+
+        let wakers = interleaved.collect_expired(final_advance);
+        for waker in wakers {
+            waker.wake();
+        }
+        let current_time = interleaved.current_time();
+        crate::assert_with_log!(
+            current_time >= previous_time,
+            "final split advance stays monotonic",
+            true,
+            current_time >= previous_time
+        );
+
+        let baseline_early = Arc::new(AtomicU64::new(0));
+        let baseline_late_survivor = Arc::new(AtomicU64::new(0));
+        let baseline_long = Arc::new(AtomicU64::new(0));
+
+        let mut baseline = TimerWheel::new_at(Time::ZERO);
+        baseline.register(
+            early_survivor_deadline,
+            counter_waker(baseline_early.clone()),
+        );
+        baseline.register(
+            late_registered_survivor_deadline,
+            counter_waker(baseline_late_survivor.clone()),
+        );
+        baseline.register(long_survivor_deadline, counter_waker(baseline_long.clone()));
+
+        let wakers = baseline.collect_expired(final_advance);
+        for waker in wakers {
+            waker.wake();
+        }
+
+        let mut interleaved_fired = vec![];
+        if interleaved_early.load(Ordering::SeqCst) > 0 {
+            interleaved_fired.push("early_survivor");
+        }
+        if interleaved_late_survivor.load(Ordering::SeqCst) > 0 {
+            interleaved_fired.push("late_registered_survivor");
+        }
+        if interleaved_long.load(Ordering::SeqCst) > 0 {
+            interleaved_fired.push("long_survivor");
+        }
+        interleaved_fired.sort_unstable();
+
+        let mut baseline_fired = vec![];
+        if baseline_early.load(Ordering::SeqCst) > 0 {
+            baseline_fired.push("early_survivor");
+        }
+        if baseline_late_survivor.load(Ordering::SeqCst) > 0 {
+            baseline_fired.push("late_registered_survivor");
+        }
+        if baseline_long.load(Ordering::SeqCst) > 0 {
+            baseline_fired.push("long_survivor");
+        }
+        baseline_fired.sort_unstable();
+
+        crate::assert_with_log!(
+            interleaved_fired == baseline_fired,
+            "split advance with interleaved register/cancel matches survivor baseline",
+            &baseline_fired,
+            &interleaved_fired
+        );
+        crate::assert_with_log!(
+            interleaved_cancelled_mid.load(Ordering::SeqCst) == 0,
+            "cancelled mid timer never fires",
+            0,
+            interleaved_cancelled_mid.load(Ordering::SeqCst)
+        );
+        crate::assert_with_log!(
+            interleaved_cancelled_late.load(Ordering::SeqCst) == 0,
+            "cancelled late timer never fires",
+            0,
+            interleaved_cancelled_late.load(Ordering::SeqCst)
+        );
+
+        crate::test_complete!(
+            "metamorphic_split_advance_with_interleaved_register_cancel_matches_survivors"
+        );
+    }
+
+    #[test]
     fn conformance_coalescing_group_behavior() {
         init_test("conformance_coalescing_group_behavior");
 
