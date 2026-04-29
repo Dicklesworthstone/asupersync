@@ -4244,6 +4244,38 @@ mod tests {
     }
 
     #[test]
+    fn differential_k1_single_repair_matches_raptorq_rs() {
+        let k = 1;
+        let symbol_size = 32;
+        let seed = 0x6330_0001_u64;
+        let drop_indices = [0usize];
+        let repair_count = 1usize;
+
+        let source = make_source_data(k, symbol_size);
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+        let received =
+            build_mixed_received_symbols(&decoder, &encoder, &source, &drop_indices, repair_count);
+
+        let ours = decoder.decode(&received).unwrap_or_else(|err| {
+            panic!("K=1 single-repair differential decode must succeed: {err:?}")
+        });
+        let reference =
+            reference_decode_with_raptorq_rs(&source, &encoder, &drop_indices, repair_count);
+
+        assert_eq!(
+            ours.source.concat(),
+            reference,
+            "our decoder must match raptorq-rs for the degenerate K=1 single-repair case"
+        );
+        assert_eq!(
+            ours.source,
+            source,
+            "a single repair packet must recover the original K=1 source symbol"
+        );
+    }
+
+    #[test]
     fn differential_loss_matrix_matches_raptorq_rs() {
         for &(k, symbol_size, seed, drop_seed) in &[
             (10, 64, 0x6330_0010_u64, 0xA1B2_C310_u32),
