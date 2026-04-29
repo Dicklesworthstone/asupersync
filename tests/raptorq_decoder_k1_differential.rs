@@ -94,7 +94,7 @@ fn reference_decode_with_raptorq_rs(
         }
     }
 
-    panic!("raptorq-rs reference decode must succeed for this degenerate repair case");
+    panic!("raptorq-rs reference decode must succeed for this differential repair case");
 }
 
 fn assert_case_matches_raptorq_rs(
@@ -147,4 +147,16 @@ fn k2_single_erasure_single_repair_matches_raptorq_rs() {
         );
         assert_case_matches_raptorq_rs(2, 32, 0x6330_0002_u64, &[missing_symbol], 1, &case_name);
     }
+}
+
+#[test]
+fn k10_thirty_percent_loss_matches_raptorq_rs() {
+    assert_case_matches_raptorq_rs(
+        10,
+        64,
+        0x6330_0010_u64,
+        &[1usize, 4usize, 8usize],
+        7,
+        "the K=10 mixed source+repair case at 30% packet loss",
+    );
 }
