@@ -27,12 +27,11 @@ use arbitrary::Arbitrary;
 use asupersync::{
     cx::Cx,
     database::sqlite::{
-        fuzz_validate_sqlite_open_path, SqliteConnection, SqliteError, SqliteValue,
+        SqliteConnection, SqliteError, SqliteValue, fuzz_validate_sqlite_open_path,
     },
-    types::{Outcome, RegionId, TaskId},
-    util::ArenaIndex,
+    types::Outcome,
 };
-use futures_lite::future::block_on;
+use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -48,6 +47,12 @@ const SQLITE_MAX_LENGTH: usize = 1_000_000_000;
 
 /// Maximum reasonable parameter count for fuzzing
 const MAX_PARAM_COUNT: usize = 1000;
+
+/// Bound text size for arbitrary SQLite values.
+const MAX_TEXT_BYTES: usize = 256;
+
+/// Bound blob size for arbitrary SQLite values.
+const MAX_BLOB_BYTES: usize = 1024;
 
 /// SQL statement type classification
 #[derive(Debug, Clone, PartialEq)]
@@ -138,11 +143,42 @@ struct ParameterStrategy {
     /// Number of parameters to bind
     param_count: u8,
     /// Parameter values
-    params: Vec<SqliteValue>,
+    params: Vec<BindValueInput>,
     /// Whether to intentionally mismatch parameter count
     mismatch_count: bool,
     /// Whether to include oversized blobs
     oversized_blob: bool,
+}
+
+#[derive(Arbitrary, Debug, Clone)]
+enum BindValueInput {
+    Null,
+    Integer(i64),
+    Real(f64),
+    Text(String),
+    Blob(Vec<u8>),
+}
+
+impl BindValueInput {
+    fn sanitize(self) -> Self {
+        match self {
+            Self::Null => Self::Null,
+            Self::Integer(value) => Self::Integer(value),
+            Self::Real(value) => Self::Real(if value.is_finite() { value } else { 0.0 }),
+            Self::Text(value) => Self::Text(value.chars().take(MAX_TEXT_BYTES).collect()),
+            Self::Blob(value) => Self::Blob(value.into_iter().take(MAX_BLOB_BYTES).collect()),
+        }
+    }
+
+    fn to_sqlite_value(&self) -> SqliteValue {
+        match self {
+            Self::Null => SqliteValue::Null,
+            Self::Integer(value) => SqliteValue::Integer(*value),
+            Self::Real(value) => SqliteValue::Real(*value),
+            Self::Text(value) => SqliteValue::Text(value.clone()),
+            Self::Blob(value) => SqliteValue::Blob(value.clone()),
+        }
+    }
 }
 
 /// Test case for SQLite fuzzing
@@ -356,7 +392,14 @@ impl SqliteFuzzInput {
 
     /// Generate parameter values based on strategy
     fn generate_params(&self) -> Vec<SqliteValue> {
-        let mut params = self.param_strategy.params.clone();
+        let mut params = self
+            .param_strategy
+            .params
+            .clone()
+            .into_iter()
+            .map(BindValueInput::sanitize)
+            .map(|value| value.to_sqlite_value())
+            .collect::<Vec<_>>();
 
         // Truncate to reasonable size
         params.truncate(MAX_PARAM_COUNT);
@@ -516,18 +559,17 @@ impl SqliteTestHarness {
             Outcome::Cancelled(_) => Err(SqliteError::Cancelled(
                 asupersync::types::CancelReason::user("setup cancelled"),
             )),
+            Outcome::Panicked(_) => panic!("sqlite open_in_memory panicked"),
         }
     }
 
     fn create_test_cx() -> Cx {
-        Cx::new(
-            RegionId::from_arena(ArenaIndex::new(0, 0)),
-            TaskId::from_arena(ArenaIndex::new(0, 0)),
-        )
+        Cx::for_testing()
     }
 
     async fn test_sql_execution(&mut self, input: &SqliteFuzzInput) -> Result<(), SqliteError> {
-        self.test_attach_path_probe(&input.attach_path_probe).await?;
+        self.test_attach_path_probe(&input.attach_path_probe)
+            .await?;
 
         let sql = input.generate_sql();
         let params = input.generate_params();
@@ -557,9 +599,13 @@ impl SqliteTestHarness {
                         );
                     }
                 }
+                Outcome::Err(_) => {
+                    // Any clean error is acceptable on malformed/mismatched binds.
+                }
                 Outcome::Cancelled(_) => {
                     // Cancellation is acceptable
                 }
+                Outcome::Panicked(_) => panic!("sqlite execute panicked"),
             }
             return Ok(());
         }
@@ -570,12 +616,13 @@ impl SqliteTestHarness {
                 Outcome::Ok(_) => {
                     // PRAGMA statements should either succeed or fail gracefully
                 }
-                Outcome::Err(SqliteError::Sqlite(_)) => {
+                Outcome::Err(_) => {
                     // Errors are acceptable for invalid PRAGMA statements
                 }
                 Outcome::Cancelled(_) => {
                     // Cancellation is acceptable
                 }
+                Outcome::Panicked(_) => panic!("sqlite execute panicked"),
             }
             return Ok(());
         }
@@ -597,7 +644,11 @@ impl SqliteTestHarness {
                             msg
                         );
                     }
+                    Outcome::Err(_) => {
+                        // Non-engine wrapper errors are also acceptable and must stay non-panicking.
+                    }
                     Outcome::Cancelled(_) => {}
+                    Outcome::Panicked(_) => panic!("sqlite execute panicked"),
                 }
             }
             SqlStatementType::DML => {
@@ -606,10 +657,11 @@ impl SqliteTestHarness {
                     Outcome::Ok(_) => {
                         // DML succeeded
                     }
-                    Outcome::Err(SqliteError::Sqlite(_)) => {
+                    Outcome::Err(_) => {
                         // DML errors are acceptable (syntax errors, constraints, etc.)
                     }
                     Outcome::Cancelled(_) => {}
+                    Outcome::Panicked(_) => panic!("sqlite execute panicked"),
                 }
             }
             SqlStatementType::TCL => {
@@ -634,15 +686,19 @@ impl SqliteTestHarness {
 
                 match self.conn.execute(&self.cx, &sql, &params).await {
                     Outcome::Ok(_) => {}
-                    Outcome::Err(SqliteError::Sqlite(_)) => {
+                    Outcome::Err(_) => {
                         // Transaction control errors are acceptable
                     }
                     Outcome::Cancelled(_) => {}
+                    Outcome::Panicked(_) => panic!("sqlite execute panicked"),
                 }
             }
             _ => {
                 // Unknown statement types - just try to execute
-                let _ = self.conn.execute(&self.cx, &sql, &params).await;
+                match self.conn.execute(&self.cx, &sql, &params).await {
+                    Outcome::Ok(_) | Outcome::Err(_) | Outcome::Cancelled(_) => {}
+                    Outcome::Panicked(_) => panic!("sqlite execute panicked"),
+                }
             }
         }
 
@@ -661,10 +717,7 @@ impl SqliteTestHarness {
         Ok(())
     }
 
-    async fn test_attach_path_probe(
-        &mut self,
-        probe: &AttachPathProbe,
-    ) -> Result<(), SqliteError> {
+    async fn test_attach_path_probe(&mut self, probe: &AttachPathProbe) -> Result<(), SqliteError> {
         match self
             .conn
             .execute_unchecked(&self.cx, &probe.attach_sql(), &[])
@@ -677,6 +730,7 @@ impl SqliteTestHarness {
                 );
             }
             Outcome::Cancelled(_) => {}
+            Outcome::Panicked(_) => panic!("sqlite execute_unchecked panicked"),
             other => panic!("expected ATTACH rejection, got: {other:?}"),
         }
 
