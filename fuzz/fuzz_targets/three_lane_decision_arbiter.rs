@@ -38,6 +38,8 @@ pub struct DecisionArbiterInput {
     workload: FuzzLaneWorkload,
     /// Local timed tasks promoted after deadline miss.
     deadline_promotion: FuzzDeadlinePromotionScenario,
+    /// Zero-reward adaptive policy trace for discounted arm-mass stability.
+    zero_reward_trace: FuzzZeroRewardPolicyTrace,
     /// Adaptive governor workload driven by arrival bursts and Lyapunov state.
     adaptive_budget: FuzzAdaptiveBudgetScenario,
 }
@@ -157,6 +159,16 @@ pub struct FuzzDeadlinePromotionTask {
 }
 
 #[derive(Debug, Clone, Arbitrary)]
+pub struct FuzzZeroRewardPolicyTrace {
+    /// Number of dispatches per adaptive epoch.
+    #[arbitrary(with = bounded_epoch_steps)]
+    epoch_steps: u32,
+    /// Forced arm sequence for repeated all-zero reward updates.
+    #[arbitrary(with = bounded_zero_reward_arm_trace)]
+    forced_arms: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Arbitrary)]
 pub struct FuzzAdaptiveBudgetScenario {
     /// Number of executed dispatches per adaptive epoch.
     #[arbitrary(with = bounded_epoch_steps)]
@@ -272,6 +284,15 @@ fn bounded_deadline_promotion_tasks(
         tasks.push(u.arbitrary()?);
     }
     Ok(tasks)
+}
+
+fn bounded_zero_reward_arm_trace(u: &mut arbitrary::Unstructured) -> arbitrary::Result<Vec<u8>> {
+    let len = usize::from(u.int_in_range::<u8>(1..=24)?);
+    let mut trace = Vec::with_capacity(len);
+    for _ in 0..len {
+        trace.push(u.int_in_range(0..=8)?);
+    }
+    Ok(trace)
 }
 
 impl From<FuzzPotentialWeights> for PotentialWeights {
@@ -849,6 +870,65 @@ fn assert_deadline_miss_promotion_once(scenario: &FuzzDeadlinePromotionScenario)
     }
 }
 
+fn assert_zero_reward_policy_trace(trace: &FuzzZeroRewardPolicyTrace) {
+    if trace.forced_arms.is_empty() {
+        return;
+    }
+
+    let mut policy = AdaptiveCancelStreakPolicyBench::new(trace.epoch_steps);
+    policy.seed_history([0.0; 5], [1e-9; 5]);
+    policy.begin_epoch(AdaptivePolicyBenchSnapshot::new(0.0, 0.0, 0, 0, 0));
+
+    let mut potential = 0.0f64;
+    for &arm_seed in &trace.forced_arms {
+        let arm = usize::from(arm_seed) % policy.arm_count();
+        policy.force_selected_arm(arm);
+
+        let next_potential = potential.mul_add(2.0, 1.0);
+        let reward = policy
+            .complete_epoch(AdaptivePolicyBenchSnapshot::new(
+                next_potential,
+                0.0,
+                0,
+                0,
+                0,
+            ))
+            .expect("zero-reward trace must have an open epoch");
+        assert!(
+            reward.abs() <= f64::EPSILON,
+            "synthetic all-zero reward trace should stay at zero reward, got {reward}"
+        );
+
+        let discounted_pulls = policy.discounted_pulls();
+        for (idx, weight) in discounted_pulls.iter().enumerate() {
+            assert!(
+                weight.is_finite() && *weight > 0.0,
+                "discounted arm mass must stay finite and strictly positive under zero rewards: arm={idx} weight={weight}"
+            );
+        }
+
+        let mean_rewards = policy.mean_rewards();
+        for (idx, mean_reward) in mean_rewards.iter().enumerate() {
+            assert!(
+                mean_reward.is_finite() && (0.0..=1.0).contains(mean_reward),
+                "mean reward must stay finite and bounded under zero rewards: arm={idx} mean={mean_reward}"
+            );
+        }
+
+        let e_value = policy.e_value();
+        assert!(
+            e_value.is_finite() && e_value > 0.0,
+            "adaptive e-process must stay finite and strictly positive under zero rewards: {e_value}"
+        );
+        assert!(
+            policy.select_arm_ucb() < policy.arm_count(),
+            "zero-reward adaptive trace must keep selecting a valid arm"
+        );
+
+        potential = next_potential;
+    }
+}
+
 fn assert_adaptive_budget_governor(
     scenario: &FuzzAdaptiveBudgetScenario,
     weights: &PotentialWeights,
@@ -1035,10 +1115,14 @@ fuzz_target!(|input: DecisionArbiterInput| {
     // Test 5: Missed-deadline promotion collapses to a single cancel observation.
     assert_deadline_miss_promotion_once(&input.deadline_promotion);
 
-    // Test 6: Cancel-mask state propagates into scheduler snapshots without
+    // Test 6: All-zero adaptive reward traces must keep discounted arm masses
+    // finite and strictly positive.
+    assert_zero_reward_policy_trace(&input.zero_reward_trace);
+
+    // Test 7: Cancel-mask state propagates into scheduler snapshots without
     // becoming runnable phantom work.
     assert_cancel_mask_propagation(&input.workload, &input.state_snapshots[0]);
 
-    // Test 7: Adaptive cancel-streak governor stays bounded and terminates.
+    // Test 8: Adaptive cancel-streak governor stays bounded and terminates.
     assert_adaptive_budget_governor(&input.adaptive_budget, &weights);
 });

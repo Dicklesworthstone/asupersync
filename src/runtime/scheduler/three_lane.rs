@@ -480,6 +480,24 @@ impl AdaptiveCancelStreakPolicyBench {
         self.policy.complete_epoch(end.0)
     }
 
+    /// Inspect the discounted per-arm pull masses used by the adaptive policy.
+    #[must_use]
+    pub fn discounted_pulls(&self) -> [f64; ADAPTIVE_STREAK_ARMS.len()] {
+        self.policy.discounted_pulls
+    }
+
+    /// Inspect the current per-arm mean rewards.
+    #[must_use]
+    pub fn mean_rewards(&self) -> [f64; ADAPTIVE_STREAK_ARMS.len()] {
+        self.policy.mean_rewards
+    }
+
+    /// Return the current anytime-valid e-process value.
+    #[must_use]
+    pub fn e_value(&self) -> f64 {
+        self.policy.e_value()
+    }
+
     /// Select the next arm using the current UCB state.
     #[must_use]
     pub fn select_arm_ucb(&self) -> usize {
@@ -3335,15 +3353,25 @@ impl ThreeLaneWorker {
         }
 
         if let Some(task) = self.fast_queue.pop() {
-            let blocked_local_task = self.peek_blocked_local_ready_for_inversion();
-            let dispatched_priority = self.task_sched_priority(task);
-            self.record_ready_priority_inversion(blocked_local_task, task, dispatched_priority);
+            if let Some(blocked_local_task) = self.peek_blocked_local_ready_for_inversion() {
+                let dispatched_priority = self.task_sched_priority(task);
+                self.record_ready_priority_inversion(
+                    Some(blocked_local_task),
+                    task,
+                    dispatched_priority,
+                );
+            }
             self.record_ready_dispatch();
             return Some(self.dispatch_with_adaptive_epoch(task));
         }
         if let Some(pt) = self.global.pop_ready() {
-            let blocked_local_task = self.peek_blocked_local_ready_for_inversion();
-            self.record_ready_priority_inversion(blocked_local_task, pt.task, Some(pt.priority));
+            if let Some(blocked_local_task) = self.peek_blocked_local_ready_for_inversion() {
+                self.record_ready_priority_inversion(
+                    Some(blocked_local_task),
+                    pt.task,
+                    Some(pt.priority),
+                );
+            }
             self.record_ready_dispatch();
             return Some(self.dispatch_with_adaptive_epoch(pt.task));
         }
@@ -3422,19 +3450,22 @@ impl ThreeLaneWorker {
         if gap > self.preemption_metrics.max_ready_priority_inversion_gap {
             self.preemption_metrics.max_ready_priority_inversion_gap = gap;
         }
-        self.invariant_monitor.lock().record_task_requeue(
-            blocked_task,
-            "local_ready_heap",
-            blocked_priority,
-            timestamp,
-        );
-        self.invariant_monitor.lock().verify_priority_ordering(
-            executing_task,
-            executing_priority,
-            blocked_task,
-            blocked_priority,
-            timestamp,
-        );
+        {
+            let mut invariant_monitor = self.invariant_monitor.lock();
+            invariant_monitor.record_task_requeue(
+                blocked_task,
+                "local_ready_heap",
+                blocked_priority,
+                timestamp,
+            );
+            invariant_monitor.verify_priority_ordering(
+                executing_task,
+                executing_priority,
+                blocked_task,
+                blocked_priority,
+                timestamp,
+            );
+        }
         self.fairness_monitor.lock().record_priority_inversion(
             blocked_task,
             blocked_priority,
