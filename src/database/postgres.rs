@@ -3042,7 +3042,6 @@ impl PgConnection {
                         }
                         10 => {
                             // AuthenticationSASL
-                            auth_challenged = true;
                             let mechanisms = Self::read_sasl_mechanisms(&mut reader)?;
                             // Channel-binding selection (br-asupersync-7n2xsi):
                             //   * If TLS is in use AND the server advertised
