@@ -607,28 +607,16 @@ fn send_browser_websocket_message(
     })
 }
 
-#[cfg(target_arch = "wasm32")]
 fn recv_browser_websocket_message(
     handle: &WasmHandleRef,
 ) -> Result<WasmAbiOutcomeEnvelope, String> {
     with_websocket_state_mut(handle, |state| {
-        Ok(state
-            .inbox
-            .borrow_mut()
-            .pop_front()
-            .unwrap_or_else(websocket_idle_outcome))
-    })
-}
+        #[cfg(target_arch = "wasm32")]
+        let next = state.inbox.borrow_mut().pop_front();
+        #[cfg(not(target_arch = "wasm32"))]
+        let next = state.inbox.pop_front();
 
-#[cfg(not(target_arch = "wasm32"))]
-fn recv_browser_websocket_message(
-    handle: &WasmHandleRef,
-) -> Result<WasmAbiOutcomeEnvelope, String> {
-    with_websocket_state_mut(handle, |state| {
-        Ok(state
-            .inbox
-            .pop_front()
-            .unwrap_or_else(websocket_idle_outcome))
+        Ok(next.unwrap_or_else(websocket_idle_outcome))
     })
 }
 
