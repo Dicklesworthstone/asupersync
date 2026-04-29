@@ -3137,6 +3137,71 @@ mod tests {
     }
 
     #[test]
+    fn resp2_reference_vectors_match_redis_rs_value_model() {
+        // Lock the RESP2 fallback parser to the same shared low-level value
+        // model that redis-rs exposes for the direct subset here. Avoid the
+        // RESP2 `+OK` and nil normalization cases because redis-rs folds those
+        // into special variants that this parser intentionally models
+        // separately.
+        let cases: Vec<(&str, RespValue, &'static [u8])> = vec![
+            (
+                "simple_string",
+                RespValue::SimpleString("PONG".to_string()),
+                b"+PONG\r\n",
+            ),
+            ("integer", RespValue::Integer(-7), b":-7\r\n"),
+            (
+                "bulk_string_binary",
+                RespValue::BulkString(Some(b"bin\0ary".to_vec())),
+                b"$7\r\nbin\0ary\r\n",
+            ),
+            (
+                "array",
+                RespValue::Array(Some(vec![
+                    RespValue::SimpleString("PONG".to_string()),
+                    RespValue::BulkString(Some(b"bin\0ary".to_vec())),
+                    RespValue::Integer(-7),
+                ])),
+                b"*3\r\n+PONG\r\n$7\r\nbin\0ary\r\n:-7\r\n",
+            ),
+            (
+                "nested_array",
+                RespValue::Array(Some(vec![
+                    RespValue::Array(Some(vec![])),
+                    RespValue::Array(Some(vec![
+                        RespValue::BulkString(Some(b"foo".to_vec())),
+                        RespValue::Integer(42),
+                    ])),
+                ])),
+                b"*2\r\n*0\r\n*2\r\n$3\r\nfoo\r\n:42\r\n",
+            ),
+        ];
+
+        for (name, value, expected) in cases {
+            assert_eq!(
+                value.encode(),
+                expected,
+                "RESP2 {name} encoding must stay byte-compatible with redis-rs's \
+                 low-level value model"
+            );
+
+            let (decoded, consumed) = RespValue::try_decode(expected)
+                .unwrap()
+                .unwrap_or_else(|| panic!("RESP2 {name} vector should decode"));
+            assert_eq!(
+                decoded, value,
+                "RESP2 {name} decoding must preserve the redis-rs-compatible \
+                 low-level value model"
+            );
+            assert_eq!(
+                consumed,
+                expected.len(),
+                "RESP2 {name} decoder must consume the full reference vector"
+            );
+        }
+    }
+
+    #[test]
     fn resp3_nested_map_set_roundtrip_matches_redis_rs_value_model() {
         // redis-rs models RESP3 maps as ordered Vec<(Value, Value)> pairs and
         // RESP3 sets as Vec<Value>; lock the corresponding wire form here.
