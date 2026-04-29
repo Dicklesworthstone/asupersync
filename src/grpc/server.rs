@@ -197,9 +197,31 @@ impl ConnectionRegistry {
 /// gRPC server configuration.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
-    /// Maximum message size for receiving.
+    /// Maximum message size for receiving, in bytes.
+    ///
+    /// **WIRING GAP (2026-04-29):** this field is configured via
+    /// [`ServerBuilder::max_recv_message_size`] and stored, but
+    /// `grep -rn 'max_recv_message_size' src/grpc/server.rs` shows
+    /// no enforcement code path inside server dispatch reads it. The
+    /// CLIENT side wires its symmetric `max_recv_message_size` into
+    /// the codec at `src/grpc/client.rs:109`; the server side does
+    /// not. The on-the-wire defense currently relies on the codec's
+    /// own `DEFAULT_MAX_MESSAGE_SIZE` (4 MiB, matching this field's
+    /// default), so a server that uses the default value is
+    /// protected, but any operator who LOWERS this expecting a
+    /// stricter cap (or RAISES it expecting larger messages to
+    /// flow) will silently get the codec default instead. Filed as
+    /// a P1 security audit finding; see the
+    /// `[security-audit-for-saas] grpc/server max_recv_message_size
+    /// unwired` bead for the fix track.
     pub max_recv_message_size: usize,
-    /// Maximum message size for sending.
+    /// Maximum message size for sending, in bytes.
+    ///
+    /// Same wiring gap as [`Self::max_recv_message_size`]: stored on
+    /// the config but not propagated into the codec's send path
+    /// inside this file. The codec enforces its own
+    /// `DEFAULT_MAX_MESSAGE_SIZE` so the protection is not absent —
+    /// only the per-server override is.
     pub max_send_message_size: usize,
     /// Initial connection window size.
     pub initial_connection_window_size: u32,
