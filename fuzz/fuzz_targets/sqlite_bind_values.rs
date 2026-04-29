@@ -17,10 +17,12 @@ use asupersync::{
 };
 use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
+use tempfile::tempdir;
 
 const MAX_TEXT_CHARS: usize = 256;
 const MAX_BLOB_BYTES: usize = 1024;
 const MAX_PARAM_VALUES: usize = 5;
+const MAX_SQL_CHARS: usize = 256;
 const STRICT_TYPE_MISMATCH_PREFIX: &str = "type-mismatch-";
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -133,6 +135,12 @@ enum Scenario {
         raw_a: BindValueInput,
         strict_integer: i64,
     },
+    PrepareBindExecuteDropCleanup {
+        warmup: BindValueInput,
+        sql: String,
+        params: Vec<BindValueInput>,
+        use_execute: bool,
+    },
 }
 
 struct SqliteHarness {
@@ -244,6 +252,10 @@ fn sanitize_text(value: String) -> String {
 
 fn sanitize_blob(value: Vec<u8>) -> Vec<u8> {
     value.into_iter().take(MAX_BLOB_BYTES).collect()
+}
+
+fn sanitize_sql(value: String) -> String {
+    value.chars().take(MAX_SQL_CHARS).collect()
 }
 
 fn invalid_value_for_strict_column(column: StrictColumn, mismatch: BindValueInput) -> SqliteValue {
@@ -761,6 +773,114 @@ async fn run_scenario(scenario: Scenario) {
                     .expect("strict_integer accessor should succeed"),
                 strict_integer
             );
+        }
+        Scenario::PrepareBindExecuteDropCleanup {
+            warmup,
+            sql,
+            params,
+            use_execute,
+        } => {
+            let warmup = warmup.sanitize();
+            let sql = sanitize_sql(sql);
+            let params = params
+                .into_iter()
+                .take(MAX_PARAM_VALUES)
+                .map(BindValueInput::sanitize)
+                .map(|value| value.to_sqlite_value())
+                .collect::<Vec<_>>();
+
+            let dir = tempdir().expect("tempdir should be available");
+            let db_path = dir.path().join("sqlite_bind_lifecycle.sqlite3");
+
+            {
+                let cx = Cx::for_testing();
+                let conn = match SqliteConnection::open(&cx, &db_path).await {
+                    Outcome::Ok(conn) => conn,
+                    Outcome::Err(error) => panic!("file-backed sqlite open failed: {error:?}"),
+                    Outcome::Cancelled(reason) => {
+                        panic!("file-backed sqlite open cancelled: {reason:?}")
+                    }
+                    Outcome::Panicked(_) => panic!("file-backed sqlite open panicked"),
+                };
+
+                match conn
+                    .execute_batch(
+                        &cx,
+                        "CREATE TABLE lifecycle_probe (id INTEGER PRIMARY KEY, value TEXT);",
+                    )
+                    .await
+                {
+                    Outcome::Ok(()) => {}
+                    other => panic!("lifecycle schema setup failed: {other:?}"),
+                }
+
+                let warmup_params = [warmup.to_sqlite_value()];
+                let warm_row = match conn
+                    .query_row(&cx, "SELECT ?1 AS value", warmup_params.as_slice())
+                    .await
+                {
+                    Outcome::Ok(Some(row)) => row,
+                    other => panic!("warmup cached query failed: {other:?}"),
+                };
+                assert_round_trip_value(&warm_row, "value", &warmup);
+
+                if use_execute {
+                    let _ = conn.execute(&cx, &sql, params.as_slice()).await;
+                } else {
+                    let _ = conn.query(&cx, &sql, params.as_slice()).await;
+                }
+
+                let probe_params = [SqliteValue::Text("after-error".to_string())];
+                let probe_row = match conn
+                    .query_row(&cx, "SELECT ?1 AS value", probe_params.as_slice())
+                    .await
+                {
+                    Outcome::Ok(Some(row)) => row,
+                    other => panic!("post-error cached query failed: {other:?}"),
+                };
+                assert_eq!(
+                    probe_row.get_str("value").expect("probe value"),
+                    "after-error"
+                );
+            }
+
+            let reopened_cx = Cx::for_testing();
+            let reopened = match SqliteConnection::open(&reopened_cx, &db_path).await {
+                Outcome::Ok(conn) => conn,
+                Outcome::Err(error) => panic!("reopen after drop failed: {error:?}"),
+                Outcome::Cancelled(reason) => panic!("reopen after drop cancelled: {reason:?}"),
+                Outcome::Panicked(_) => panic!("reopen after drop panicked"),
+            };
+
+            match reopened
+                .execute(
+                    &reopened_cx,
+                    "INSERT INTO lifecycle_probe(value) VALUES (?1)",
+                    &[SqliteValue::Text("reopened".to_string())],
+                )
+                .await
+            {
+                Outcome::Ok(1) => {}
+                other => panic!("reopened insert failed after drop cleanup: {other:?}"),
+            }
+
+            let row = match reopened
+                .query_row(
+                    &reopened_cx,
+                    "SELECT COUNT(*) AS row_count FROM lifecycle_probe",
+                    &[],
+                )
+                .await
+            {
+                Outcome::Ok(Some(row)) => row,
+                other => panic!("reopened count query failed: {other:?}"),
+            };
+            assert!(
+                row.get_i64("row_count").expect("row_count column") >= 1,
+                "reopened connection should remain writable after drop cleanup"
+            );
+
+            reopened.close().expect("explicit close should succeed");
         }
     }
 }
