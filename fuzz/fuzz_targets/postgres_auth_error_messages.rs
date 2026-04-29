@@ -70,43 +70,51 @@ struct ErrorField {
     value: BoundedString,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExpectedErrorResponse {
+    code: String,
+    message: String,
+    detail: Option<String>,
+    hint: Option<String>,
+}
+
 /// PostgreSQL error field codes per wire protocol
 #[derive(Debug, Clone, Arbitrary)]
 enum ErrorFieldCode {
     /// Severity: ERROR, FATAL, WARNING, NOTICE, DEBUG, INFO, LOG
-    Severity,           // 'S'
+    Severity, // 'S'
     /// SQLSTATE code (5-char string)
-    Code,              // 'C'
+    Code, // 'C'
     /// Primary human-readable error message
-    Message,           // 'M'
+    Message, // 'M'
     /// Optional detail message
-    Detail,            // 'D'
+    Detail, // 'D'
     /// Optional hint message
-    Hint,              // 'H'
+    Hint, // 'H'
     /// Position of error in query string
-    Position,          // 'P'
+    Position, // 'P'
     /// Internal position (for internally generated commands)
-    InternalPosition,  // 'p'
+    InternalPosition, // 'p'
     /// Internal query text
-    InternalQuery,     // 'q'
+    InternalQuery, // 'q'
     /// Context in which error occurred
-    Where,             // 'W'
+    Where, // 'W'
     /// Schema name
-    SchemaName,        // 's'
+    SchemaName, // 's'
     /// Table name
-    TableName,         // 't'
+    TableName, // 't'
     /// Column name
-    ColumnName,        // 'c'
+    ColumnName, // 'c'
     /// Data type name
-    DataTypeName,      // 'd'
+    DataTypeName, // 'd'
     /// Constraint name
-    ConstraintName,    // 'n'
+    ConstraintName, // 'n'
     /// Source file name
-    File,              // 'F'
+    File, // 'F'
     /// Source line number
-    Line,              // 'L'
+    Line, // 'L'
     /// Source function name
-    Routine,           // 'R'
+    Routine, // 'R'
     /// Unknown/custom field code
     Unknown(u8),
 }
@@ -146,7 +154,9 @@ struct BoundedString {
 /// Generate bounded strings to prevent memory exhaustion
 fn arbitrary_bounded_string(u: &mut arbitrary::Unstructured) -> arbitrary::Result<String> {
     let len = u.int_in_range(0..=MAX_FIELD_LENGTH)?;
-    let bytes: Vec<u8> = (0..len).map(|_| u.arbitrary()).collect::<arbitrary::Result<_>>()?;
+    let bytes: Vec<u8> = (0..len)
+        .map(|_| u.arbitrary())
+        .collect::<arbitrary::Result<_>>()?;
 
     // Try to create valid UTF-8, fall back to lossy conversion
     String::from_utf8(bytes).or_else(|e| Ok(String::from_utf8_lossy(&e.into_bytes()).into_owned()))
@@ -214,11 +224,11 @@ enum EdgeCaseType {
 #[derive(Debug, Clone, Arbitrary)]
 enum PayloadModification {
     /// Flip random bits
-    BitFlip(u8),        // Position to flip
+    BitFlip(u8), // Position to flip
     /// Insert random bytes
     ByteInsert(u8, u8), // Position, value
     /// Delete bytes
-    ByteDelete(u8),     // Position
+    ByteDelete(u8), // Position
     /// Duplicate sections
     SectionDuplicate,
     /// Reverse byte order
@@ -231,7 +241,8 @@ fn build_error_message(fields: &[ErrorField], termination: &MalformedTermination
 
     for field in fields {
         message.push(field.field_code.to_byte());
-        message.extend_from_slice(field.value.value.as_bytes());
+        let value = sanitize_field_value(&field.value.value);
+        message.extend_from_slice(value.as_bytes());
         message.push(0); // Null terminator for field value
     }
 
@@ -265,8 +276,61 @@ fn build_error_message(fields: &[ErrorField], termination: &MalformedTermination
     message
 }
 
+fn sanitize_field_value(value: &str) -> String {
+    value
+        .chars()
+        .take(MAX_FIELD_LENGTH)
+        .filter(|&ch| ch != '\0')
+        .collect()
+}
+
+fn expected_error_response(fields: &[ErrorField]) -> ExpectedErrorResponse {
+    let mut expected = ExpectedErrorResponse {
+        code: String::new(),
+        message: String::new(),
+        detail: None,
+        hint: None,
+    };
+
+    for field in fields.iter().take(MAX_ERROR_FIELDS) {
+        let value = sanitize_field_value(&field.value.value);
+        match field.field_code {
+            ErrorFieldCode::Code => expected.code = value,
+            ErrorFieldCode::Message => expected.message = value,
+            ErrorFieldCode::Detail => expected.detail = Some(value),
+            ErrorFieldCode::Hint => expected.hint = Some(value),
+            _ => {}
+        }
+    }
+
+    expected
+}
+
+fn assert_error_response_round_trip(fields: &[ErrorField], message: &[u8]) {
+    let expected = expected_error_response(fields);
+    match fuzz_parse_error_response(message) {
+        Ok(asupersync::database::postgres::PgError::Server {
+            code,
+            message,
+            detail,
+            hint,
+        }) => {
+            assert_eq!(code, expected.code);
+            assert_eq!(message, expected.message);
+            assert_eq!(detail, expected.detail);
+            assert_eq!(hint, expected.hint);
+        }
+        Ok(other) => panic!("expected PgError::Server, got {other:?}"),
+        Err(err) => panic!("expected successful ErrorResponse parse, got {err:?}"),
+    }
+}
+
 /// Build ParameterStatus message format
-fn build_parameter_message(name: &BoundedString, value: &BoundedString, boundary: &BoundaryTest) -> Vec<u8> {
+fn build_parameter_message(
+    name: &BoundedString,
+    value: &BoundedString,
+    boundary: &BoundaryTest,
+) -> Vec<u8> {
     let mut message = Vec::new();
 
     let (actual_name, actual_value) = match boundary {
@@ -275,9 +339,7 @@ fn build_parameter_message(name: &BoundedString, value: &BoundedString, boundary
         BoundaryTest::OversizedFields => {
             ("x".repeat(MAX_FIELD_LENGTH), "y".repeat(MAX_FIELD_LENGTH))
         }
-        BoundaryTest::SpecialChars => {
-            ("param\0name\x01\x02".to_string(), value.value.clone())
-        }
+        BoundaryTest::SpecialChars => ("param\0name\x01\x02".to_string(), value.value.clone()),
         BoundaryTest::InjectionAttempts => {
             (name.value.clone(), "'; DROP TABLE users; --".to_string())
         }
@@ -338,7 +400,8 @@ fn apply_modifications(mut data: Vec<u8>, modifications: &[PayloadModification])
     for modification in modifications {
         match modification {
             PayloadModification::BitFlip(pos) => {
-                if let Some(byte) = data.get_mut(*pos as usize % data.len().max(1)) {
+                let idx = (*pos as usize) % data.len().max(1);
+                if let Some(byte) = data.get_mut(idx) {
                     *byte ^= 1; // Flip LSB
                 }
             }
@@ -376,9 +439,11 @@ fuzz_target!(|scenario: PgMessageScenario| {
         PgMessageScenario::NoticeMessage { notice_fields, .. } => {
             notice_fields.len() * MAX_FIELD_LENGTH
         }
-        PgMessageScenario::ParameterStatus { parameter_name, parameter_value, .. } => {
-            parameter_name.value.len() + parameter_value.value.len()
-        }
+        PgMessageScenario::ParameterStatus {
+            parameter_name,
+            parameter_value,
+            ..
+        } => parameter_name.value.len() + parameter_value.value.len(),
         PgMessageScenario::EdgeCaseMessage { .. } => MAX_MESSAGE_SIZE,
     };
 
@@ -387,17 +452,37 @@ fuzz_target!(|scenario: PgMessageScenario| {
     }
 
     match scenario {
-        PgMessageScenario::StandardError { error_fields, malformed_termination } => {
+        PgMessageScenario::StandardError {
+            error_fields,
+            malformed_termination,
+        } => {
             let message = build_error_message(&error_fields, &malformed_termination);
 
-            // Test ErrorResponse parsing
-            let _ = fuzz_parse_error_response(&message);
+            match malformed_termination {
+                MalformedTermination::Proper => {
+                    assert_error_response_round_trip(&error_fields, &message);
+                }
+                MalformedTermination::MissingTerminator
+                | MalformedTermination::ExtraTerminators(_)
+                | MalformedTermination::Truncated(_) => {
+                    assert!(
+                        fuzz_parse_error_response(&message).is_err(),
+                        "malformed ErrorResponse payload should return Err"
+                    );
+                }
+                MalformedTermination::EmbeddedNulls => {
+                    let _ = fuzz_parse_error_response(&message);
+                }
+            }
 
             // Test NoticeResponse parsing (same structure)
             let _ = fuzz_parse_notice_response(&message);
         }
 
-        PgMessageScenario::NoticeMessage { notice_fields, encoding_issues } => {
+        PgMessageScenario::NoticeMessage {
+            notice_fields,
+            encoding_issues,
+        } => {
             let mut message = build_error_message(&notice_fields, &MalformedTermination::Proper);
             apply_encoding_variant(&mut message, &encoding_issues);
 
@@ -405,14 +490,22 @@ fuzz_target!(|scenario: PgMessageScenario| {
             let _ = fuzz_parse_notice_response(&message);
         }
 
-        PgMessageScenario::ParameterStatus { parameter_name, parameter_value, boundary_conditions } => {
-            let message = build_parameter_message(&parameter_name, &parameter_value, &boundary_conditions);
+        PgMessageScenario::ParameterStatus {
+            parameter_name,
+            parameter_value,
+            boundary_conditions,
+        } => {
+            let message =
+                build_parameter_message(&parameter_name, &parameter_value, &boundary_conditions);
 
             // Test ParameterStatus parsing
             let _ = fuzz_parse_parameter_status(&message);
         }
 
-        PgMessageScenario::EdgeCaseMessage { message_type, payload_modifications } => {
+        PgMessageScenario::EdgeCaseMessage {
+            message_type,
+            payload_modifications,
+        } => {
             let base_message = match message_type {
                 EdgeCaseType::Empty => vec![],
                 EdgeCaseType::SingleByte(byte) => vec![byte],
