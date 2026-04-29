@@ -3797,6 +3797,80 @@ pub mod backpressure_metamorphic {
             .expect("Metamorphic receiver drop backpressure property test failed");
     }
 
+    #[derive(Debug, PartialEq, Eq)]
+    struct ReceiverCancelSurface {
+        final_state: (usize, usize, usize, usize),
+        disconnected_try_send: bool,
+        receiver_dropped: bool,
+    }
+
+    fn run_receiver_cancel_surface(
+        capacity: usize,
+        buffered_prefix: usize,
+    ) -> ReceiverCancelSurface {
+        let (sender, receiver) = channel::<u32>(capacity);
+
+        for ordinal in 0..buffered_prefix {
+            sender
+                .try_send(ordinal as u32)
+                .expect("buffered prefix should fit within the configured capacity");
+        }
+
+        let queued_before_drop = observe_channel_state(&sender).0;
+        assert_eq!(
+            queued_before_drop, buffered_prefix,
+            "queued prefix should be fully observable before receiver cancellation"
+        );
+
+        drop(receiver);
+
+        ReceiverCancelSurface {
+            final_state: observe_channel_state(&sender),
+            disconnected_try_send: matches!(
+                sender.try_send(u32::MAX),
+                Err(SendError::Disconnected(u32::MAX))
+            ),
+            receiver_dropped: sender.receiver_dropped(),
+        }
+    }
+
+    #[test]
+    fn metamorphic_send_prefix_then_cancel_receiver_leaves_no_dangling_buffer() {
+        use proptest::test_runner::TestRunner;
+
+        let mut runner = TestRunner::default();
+        runner
+            .run(
+                &(1usize..8).prop_flat_map(|capacity| {
+                    (Just(capacity), 1usize..=capacity)
+                }),
+                |(capacity, buffered_prefix)| {
+                    let baseline = run_receiver_cancel_surface(capacity, 0);
+                    let transformed = run_receiver_cancel_surface(capacity, buffered_prefix);
+
+                    prop_assert_eq!(
+                        transformed, baseline,
+                        "buffering messages before receiver cancellation must not leave a dangling post-cancel channel surface"
+                    );
+                    prop_assert_eq!(
+                        baseline.final_state,
+                        (0, 0, capacity, 0),
+                        "receiver cancellation should drain queued messages and waiter state"
+                    );
+                    prop_assert!(
+                        baseline.disconnected_try_send,
+                        "sends after receiver cancellation must fail with Disconnected"
+                    );
+                    prop_assert!(
+                        baseline.receiver_dropped,
+                        "receiver cancellation must publish the dropped flag"
+                    );
+                    Ok(())
+                },
+            )
+            .expect("Metamorphic receiver cancellation no-dangling-buffer property test failed");
+    }
+
     #[derive(Debug, Clone, Copy)]
     enum ProducerOrdering {
         Sequential,  // Producer 1 sends all, then Producer 2, etc.
