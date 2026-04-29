@@ -2744,3 +2744,14 @@ path = "fuzz_targets/redis_resp3_big_number.rs"
 test = false
 doc = false
 bench = false
+
+# Structure-aware fuzz target for codec/framed.rs decoder reset-and-reuse cycle testing.
+# Tests state consistency across Framed::into_parts() -> reconstruct cycles where decoders
+# must maintain parsing context across transport reconstruction. Exercises buffer migration,
+# codec state preservation, partial frame handling, and invariant violations during reset.
+[[bin]]
+name = "framed_decoder_reset_reuse_cycle"
+path = "fuzz_targets/framed_decoder_reset_reuse_cycle.rs"
+test = false
+doc = false
+bench = false
