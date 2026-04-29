@@ -33,7 +33,7 @@
 //! }
 //! ```
 
-use super::nats::{Message, NatsClient, NatsError};
+use super::nats::{Message, NatsClient, NatsConfig, NatsError};
 use crate::cx::Cx;
 use crate::time::{timeout_at, wall_now};
 use crate::tracing_compat::warn;
@@ -41,8 +41,26 @@ use crate::types::Time;
 use std::borrow::Cow;
 use std::fmt;
 use std::fmt::Write as _;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
+
+/// br-asupersync-w7n2qx: client-side cap on stream and consumer name
+/// length, in bytes. Mirrors the upstream `nats-server` 256-byte cap on
+/// stream / consumer names so a buggy or hostile caller cannot smuggle
+/// a megabyte-long name into the JSON request body or the
+/// `format!()`-built NATS subject.
+const MAX_NAME_BYTES: usize = 256;
+
+/// br-asupersync-w7n2qx: client-side cap on the `batch` argument to
+/// pull-consumer requests. The pull path pre-allocates
+/// `Vec::with_capacity(batch)` for received messages; without a cap a
+/// caller passing `usize::MAX` would either panic the allocator or
+/// silently consume gigabytes of resident memory while waiting for
+/// responses that the server's own `max_ack_pending` will never let
+/// arrive. 1024 matches the typical batch ceiling in the upstream
+/// nats.go pull-consumer client and the NATS JetStream documented
+/// recommendation.
+const MAX_PULL_BATCH: usize = 1024;
 
 /// JetStream-specific errors.
 #[derive(Debug)]
@@ -508,6 +526,20 @@ impl ConsumerConfig {
             )));
         }
 
+        // br-asupersync-w7n2qx: bound consumer-name length client-side.
+        // The NATS server enforces its own cap (256 bytes per the
+        // upstream nats-server defaults) but a buggy caller passing a
+        // megabyte-long name would otherwise smuggle that string into
+        // the JSON request body and the format!()-built subject before
+        // the wire ever sees a server. A client-side cap turns that
+        // into a typed configuration error at the call site.
+        if value.len() > MAX_NAME_BYTES {
+            return Err(JsError::InvalidConfig(format!(
+                "consumer {field} exceeds {MAX_NAME_BYTES}-byte cap (got {} bytes)",
+                value.len(),
+            )));
+        }
+
         if value.chars().any(|ch| {
             ch.is_whitespace()
                 || ch == '.'
@@ -523,6 +555,45 @@ impl ConsumerConfig {
         }
 
         Ok(Some(value))
+    }
+
+    /// br-asupersync-w7n2qx: validate a stream name with the same
+    /// length + character-set rules that already apply to consumer
+    /// names. Stream names flow through both the JSON request body
+    /// (`json_escape`'d, so JSON-injection-safe) AND the NATS
+    /// subject `format!("{}.STREAM.CREATE.{}", prefix, name)` — the
+    /// subject path has no upstream escape, so a name containing
+    /// `.`, `*`, `>` lands as a wildcard-bearing subject that the
+    /// underlying NATS layer rejects with a confusing protocol
+    /// error several layers down. Validating at the JetStream API
+    /// boundary surfaces the typed `JsError::InvalidConfig` at the
+    /// natural callsite and matches `ConsumerConfig::validate_consumer_name`.
+    pub(crate) fn validate_stream_name(name: &str) -> Result<(), JsError> {
+        if name.is_empty() {
+            return Err(JsError::InvalidConfig(
+                "stream name must be non-empty".to_string(),
+            ));
+        }
+        if name.len() > MAX_NAME_BYTES {
+            return Err(JsError::InvalidConfig(format!(
+                "stream name exceeds {MAX_NAME_BYTES}-byte cap (got {} bytes)",
+                name.len(),
+            )));
+        }
+        if name.chars().any(|ch| {
+            ch.is_whitespace()
+                || ch == '.'
+                || ch == '*'
+                || ch == '>'
+                || ch == '/'
+                || ch == '\\'
+                || ch.is_control()
+        }) {
+            return Err(JsError::InvalidConfig(format!(
+                "stream name contains prohibited characters: {name:?}"
+            )));
+        }
+        Ok(())
     }
 
     /// Encode to JSON for API request.
@@ -630,8 +701,8 @@ pub struct JsMessage {
     pub delivered: u32,
     /// Reply subject for ack.
     reply_subject: String,
-    /// Whether the message has been acked.
-    acked: AtomicBool,
+    /// Terminal ack state for ack/nack/term transitions.
+    ack_state: AtomicU8,
 }
 
 impl fmt::Debug for JsMessage {
@@ -642,7 +713,7 @@ impl fmt::Debug for JsMessage {
             .field("delivered", &self.delivered)
             .field("payload_len", &self.payload.len())
             .field("reply_subject", &self.reply_subject)
-            .field("acked", &self.acked.load(Ordering::Relaxed))
+            .field("acked", &self.is_acked())
             .finish()
     }
 }
@@ -650,13 +721,13 @@ impl fmt::Debug for JsMessage {
 impl JsMessage {
     /// Check if the message has been acknowledged.
     pub fn is_acked(&self) -> bool {
-        self.acked.load(Ordering::Acquire)
+        self.ack_state.load(Ordering::Acquire) != ACK_STATE_PENDING
     }
 }
 
 impl Drop for JsMessage {
     fn drop(&mut self) {
-        if !self.acked.load(Ordering::Acquire) {
+        if self.ack_state.load(Ordering::Acquire) == ACK_STATE_PENDING {
             warn!(
                 subject = %self.subject,
                 sequence = self.sequence,
@@ -705,6 +776,14 @@ impl JetStreamContext {
     ) -> Result<StreamInfo, JsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
+        // br-asupersync-w7n2qx: validate at the API boundary. The
+        // server enforces its own cap, but a megabyte-long name lands
+        // in the JSON body and the format!()-built subject before any
+        // server response — turn that into a typed InvalidConfig at
+        // the natural callsite instead of waiting for a confusing
+        // -ERR several layers down.
+        ConsumerConfig::validate_stream_name(&config.name)?;
+
         let subject = format!("{}.STREAM.CREATE.{}", self.prefix, config.name);
         let payload = config.to_json();
 
@@ -720,6 +799,7 @@ impl JetStreamContext {
     pub async fn get_stream(&mut self, cx: &Cx, name: &str) -> Result<StreamInfo, JsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
+        ConsumerConfig::validate_stream_name(name)?;
         let subject = format!("{}.STREAM.INFO.{}", self.prefix, name);
         let response = self.client.request(cx, &subject, b"").await?;
 
@@ -730,6 +810,7 @@ impl JetStreamContext {
     pub async fn delete_stream(&mut self, cx: &Cx, name: &str) -> Result<(), JsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
+        ConsumerConfig::validate_stream_name(name)?;
         let subject = format!("{}.STREAM.DELETE.{}", self.prefix, name);
         let response = self.client.request(cx, &subject, b"").await?;
 
@@ -1012,6 +1093,25 @@ impl Consumer {
     ) -> Result<Vec<JsMessage>, JsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
+        // br-asupersync-w7n2qx: cap the batch argument client-side.
+        // Vec::with_capacity(batch) below would otherwise allocate
+        // proportional to a caller-controlled value; usize::MAX panics
+        // the allocator and even moderate batches like 1_000_000 commit
+        // multi-megabyte allocations whose backing memory the server's
+        // own max_ack_pending will never let us fill. 1024 matches the
+        // typical batch ceiling in the upstream nats.go pull client.
+        if batch == 0 {
+            return Err(JsError::InvalidConfig(
+                "pull batch size must be > 0".to_string(),
+            ));
+        }
+        if batch > MAX_PULL_BATCH {
+            return Err(JsError::InvalidConfig(format!(
+                "pull batch size {batch} exceeds {MAX_PULL_BATCH}-message cap; \
+                 issue multiple smaller pulls or raise the cap deliberately"
+            )));
+        }
+
         let subject = format!(
             "{}.CONSUMER.MSG.NEXT.{}.{}",
             self.prefix, self.stream, self.name
@@ -1137,8 +1237,45 @@ impl Consumer {
             sequence,
             delivered,
             reply_subject: reply,
-            acked: AtomicBool::new(false),
+            ack_state: AtomicU8::new(ACK_STATE_PENDING),
         })
+    }
+}
+
+const ACK_STATE_PENDING: u8 = 0;
+const ACK_STATE_ACK_IN_FLIGHT: u8 = 1;
+const ACK_STATE_ACKED: u8 = 2;
+const ACK_STATE_NAK_IN_FLIGHT: u8 = 3;
+const ACK_STATE_NAKED: u8 = 4;
+const ACK_STATE_TERM_IN_FLIGHT: u8 = 5;
+const ACK_STATE_TERMED: u8 = 6;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TerminalAckKind {
+    Ack,
+    Nak,
+    Term,
+}
+
+impl TerminalAckKind {
+    const fn in_flight_state(self) -> u8 {
+        match self {
+            Self::Ack => ACK_STATE_ACK_IN_FLIGHT,
+            Self::Nak => ACK_STATE_NAK_IN_FLIGHT,
+            Self::Term => ACK_STATE_TERM_IN_FLIGHT,
+        }
+    }
+
+    const fn committed_state(self) -> u8 {
+        match self {
+            Self::Ack => ACK_STATE_ACKED,
+            Self::Nak => ACK_STATE_NAKED,
+            Self::Term => ACK_STATE_TERMED,
+        }
+    }
+
+    const fn is_idempotent(self) -> bool {
+        matches!(self, Self::Ack)
     }
 }
 
@@ -1237,12 +1374,13 @@ pub fn fuzz_normalize_consumer_identity(
 impl JsMessage {
     /// Acknowledge the message (marks as processed).
     ///
-    /// Returns `Err(JsError::AlreadyAcknowledged)` if the message was
-    /// previously acknowledged, nacked, or terminated. On a transient
+    /// Repeating `ack()` after a successful explicit ack is a no-op:
+    /// JetStream treats `+ACK` as idempotent, so the client returns
+    /// `Ok(())` without sending a second wire frame. On a transient
     /// publish failure the message is **not** marked acknowledged, so
     /// the caller can retry (br-asupersync-vl5agi).
     pub async fn ack(&self, client: &mut NatsClient, cx: &Cx) -> Result<(), JsError> {
-        self.publish_terminal_ack(client, cx, Cow::Borrowed(b"+ACK"))
+        self.publish_terminal_ack(client, cx, Cow::Borrowed(b"+ACK"), TerminalAckKind::Ack)
             .await
     }
 
@@ -1253,8 +1391,13 @@ impl JsMessage {
     /// publish failure the message is **not** marked acknowledged.
     /// (br-asupersync-vl5agi)
     pub async fn nack(&self, client: &mut NatsClient, cx: &Cx) -> Result<(), JsError> {
-        self.publish_terminal_ack(client, cx, build_nak_payload(Duration::ZERO))
-            .await
+        self.publish_terminal_ack(
+            client,
+            cx,
+            build_nak_payload(Duration::ZERO),
+            TerminalAckKind::Nak,
+        )
+        .await
     }
 
     /// Negative acknowledge with a delayed redelivery request.
@@ -1268,7 +1411,7 @@ impl JsMessage {
         cx: &Cx,
         delay: Duration,
     ) -> Result<(), JsError> {
-        self.publish_terminal_ack(client, cx, build_nak_payload(delay))
+        self.publish_terminal_ack(client, cx, build_nak_payload(delay), TerminalAckKind::Nak)
             .await
     }
 
@@ -1290,57 +1433,68 @@ impl JsMessage {
     /// publish failure the message is **not** marked acknowledged.
     /// (br-asupersync-vl5agi)
     pub async fn term(&self, client: &mut NatsClient, cx: &Cx) -> Result<(), JsError> {
-        self.publish_terminal_ack(client, cx, Cow::Borrowed(b"+TERM"))
+        self.publish_terminal_ack(client, cx, Cow::Borrowed(b"+TERM"), TerminalAckKind::Term)
             .await
     }
 
     /// Shared body for `ack` / `nack` / `term`.
     ///
-    /// Reserves the terminal-ack slot via `compare_exchange(false -> true)`,
-    /// publishes the ack frame, and rolls the slot back to `false` on
-    /// publish failure so the caller can retry. Previously the ack flag
-    /// was set unconditionally before publish, which meant a transient
-    /// `client.publish` error left the message permanently \"acked\" with
-    /// no path back. (br-asupersync-vl5agi)
+    /// Reserves the terminal-ack slot via an in-flight state, publishes the
+    /// ack frame, and commits the final terminal state on success. Publish
+    /// failure rolls the state back to pending so the caller can retry.
+    /// Previously the ack flag was set unconditionally before publish, which
+    /// meant a transient `client.publish` error left the message permanently
+    /// \"acked\" with no path back. (br-asupersync-vl5agi)
     ///
     /// Concurrency note: `JsMessage` is not designed for concurrent
-    /// terminal acks from multiple threads. The CAS here makes the
-    /// double-ack diagnostic correct (one of the two callers will see
-    /// `AlreadyAcknowledged`), but in the rare case where a concurrent
-    /// ack observes the optimistic `true` between our CAS and a
-    /// publish-failure rollback, that observer will see
-    /// `AlreadyAcknowledged` even though the slot is rolled back. This
-    /// matches the pre-fix behavior on the success path and is strictly
-    /// better on the failure path.
+    /// terminal acks from multiple threads. Post-success repeated
+    /// `ack()` calls are intentionally idempotent, but a concurrent
+    /// same-ack racing with an in-flight publish still sees
+    /// `AlreadyAcknowledged`. If the first publish later rolls back,
+    /// that racing caller will already have failed.
     async fn publish_terminal_ack(
         &self,
         client: &mut NatsClient,
         cx: &Cx,
         payload: Cow<'_, [u8]>,
+        kind: TerminalAckKind,
     ) -> Result<(), JsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
-        // Reserve the terminal slot. compare_exchange is the right primitive
-        // here — `swap(true)` would clobber a prior terminal-ack and return
-        // it without distinguishing.
-        if self
-            .acked
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Err(JsError::AlreadyAcknowledged);
+        let in_flight = kind.in_flight_state();
+        let committed = kind.committed_state();
+
+        loop {
+            match self.ack_state.load(Ordering::Acquire) {
+                ACK_STATE_PENDING => {
+                    if self
+                        .ack_state
+                        .compare_exchange(
+                            ACK_STATE_PENDING,
+                            in_flight,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_ok()
+                    {
+                        break;
+                    }
+                }
+                state if state == committed && kind.is_idempotent() => return Ok(()),
+                _ => return Err(JsError::AlreadyAcknowledged),
+            }
         }
 
         match client
             .publish(cx, &self.reply_subject, payload.as_ref())
             .await
         {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.ack_state.store(committed, Ordering::Release);
+                Ok(())
+            }
             Err(err) => {
-                // Roll back the optimistic claim so the caller can retry.
-                // Release ordering pairs with the Acquire load on the next
-                // ack/nack/term attempt.
-                self.acked.store(false, Ordering::Release);
+                self.ack_state.store(ACK_STATE_PENDING, Ordering::Release);
                 Err(JsError::Nats(err))
             }
         }
@@ -1553,6 +1707,7 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use crate::test_utils::run_test_with_cx;
     use serde_json::json;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Instant;
@@ -2243,6 +2398,117 @@ mod tests {
             build_nak_payload(Duration::from_millis(1500)).as_ref(),
             br#"-NAK {"delay": 1500000000}"#
         );
+    }
+
+    #[test]
+    fn explicit_ack_repeat_is_idempotent_and_single_publish_tick112() {
+        fn read_crlf_line(stream: &mut std::net::TcpStream) -> Vec<u8> {
+            use std::io::Read;
+
+            let mut line = Vec::new();
+            let mut byte = [0u8; 1];
+            loop {
+                stream.read_exact(&mut byte).expect("read line byte");
+                line.push(byte[0]);
+                if line.ends_with(b"\r\n") {
+                    return line;
+                }
+            }
+        }
+
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind JetStream ack test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let reply_subject = "$JS.ACK.ORDERS.processor.1.42.7.1713790000000000000.0".to_string();
+        let reply_subject_for_server = reply_subject.clone();
+
+        let server = std::thread::spawn(move || {
+            use std::io::{self, Read, Write};
+
+            let (mut stream, _) = listener.accept().expect("accept test client");
+            stream
+                .set_read_timeout(Some(Duration::from_millis(400)))
+                .expect("set read timeout");
+
+            stream
+                .write_all(
+                    b"INFO {\"server_id\":\"test\",\"server_name\":\"test\",\"version\":\"2.9.0\",\"proto\":1,\"max_payload\":1048576,\"tls_required\":false}\r\n",
+                )
+                .expect("write INFO");
+            stream.flush().expect("flush INFO");
+
+            let connect = String::from_utf8(read_crlf_line(&mut stream)).expect("CONNECT utf8");
+            assert!(
+                connect.starts_with("CONNECT "),
+                "expected CONNECT line, got {connect:?}"
+            );
+
+            let publish = String::from_utf8(read_crlf_line(&mut stream)).expect("PUB utf8");
+            assert_eq!(
+                publish,
+                format!("PUB {reply_subject_for_server} 4\r\n"),
+                "first explicit ack must publish exactly one +ACK frame"
+            );
+
+            let mut payload = [0u8; 4];
+            stream.read_exact(&mut payload).expect("read +ACK payload");
+            assert_eq!(&payload, b"+ACK");
+
+            let mut crlf = [0u8; 2];
+            stream
+                .read_exact(&mut crlf)
+                .expect("read payload terminator");
+            assert_eq!(&crlf, b"\r\n");
+
+            let mut extra = [0u8; 1];
+            match stream.read(&mut extra) {
+                Ok(0) => {}
+                Ok(_) => panic!("second explicit ack must be a no-op, not a second PUB"),
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) => {}
+                Err(err) => panic!("unexpected server read error: {err}"),
+            }
+        });
+
+        run_test_with_cx(|cx| async move {
+            let mut client = NatsClient::connect_with_config(
+                &cx,
+                NatsConfig {
+                    host: addr.ip().to_string(),
+                    port: addr.port(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("connect mock NATS server");
+
+            let cfg = ConsumerConfig::new("processor").ack_policy(AckPolicy::Explicit);
+            assert_eq!(cfg.ack_policy, AckPolicy::Explicit);
+
+            let msg = JsMessage {
+                subject: "orders.created".to_string(),
+                payload: br#"{"event":"created"}"#.to_vec(),
+                sequence: 42,
+                delivered: 1,
+                reply_subject,
+                ack_state: AtomicU8::new(ACK_STATE_PENDING),
+            };
+
+            assert!(!msg.is_acked());
+            msg.ack(&mut client, &cx)
+                .await
+                .expect("first explicit ack must succeed");
+            assert!(msg.is_acked());
+            msg.ack(&mut client, &cx)
+                .await
+                .expect("second explicit ack must be a no-op");
+            assert!(msg.is_acked());
+        });
+
+        server.join().expect("server thread join");
     }
 
     // ========================================================================
