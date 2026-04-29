@@ -3697,9 +3697,13 @@ pub mod span_semantics {
             self.tests_failed == 0
         }
 
-        /// Returns a placeholder success rate for the disabled implementation.
+        /// Returns the pass percentage, matching the enabled implementation.
         pub fn success_rate(&self) -> f64 {
-            0.0
+            if self.tests_run == 0 {
+                0.0
+            } else {
+                (self.tests_passed as f64 / self.tests_run as f64) * 100.0
+            }
         }
     }
 
@@ -3707,6 +3711,30 @@ pub mod span_semantics {
     pub fn run_span_conformance_tests() -> Result<SpanConformanceResult, Box<dyn std::error::Error>>
     {
         Err("OpenTelemetry span semantics testing requires 'tracing-integration' feature".into())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::SpanConformanceResult;
+
+        #[test]
+        fn disabled_success_rate_reflects_recorded_counts() {
+            let empty = SpanConformanceResult {
+                tests_run: 0,
+                tests_passed: 0,
+                tests_failed: 0,
+                failures: Vec::new(),
+            };
+            assert_eq!(empty.success_rate(), 0.0);
+
+            let partial = SpanConformanceResult {
+                tests_run: 4,
+                tests_passed: 3,
+                tests_failed: 1,
+                failures: vec!["span-status".to_string()],
+            };
+            assert_eq!(partial.success_rate(), 75.0);
+        }
     }
 }
 
