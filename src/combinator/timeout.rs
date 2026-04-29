@@ -875,6 +875,13 @@ mod tests {
         ]
     }
 
+    fn drop_immediately<T, E>(outcome: Outcome<T, E>, at: Time) -> TimedResult<T, E> {
+        match outcome {
+            Outcome::Cancelled(_) => TimedResult::TimedOut(TimeoutError::new(at)),
+            terminal => TimedResult::Completed(terminal),
+        }
+    }
+
     /// MR1: Timeout idempotence - timeout fires exactly once, never double
     ///
     /// When a timeout deadline is reached, the timeout mechanism should fire
@@ -1016,6 +1023,46 @@ mod tests {
                     crate::types::cancel::CancelKind::Timeout
                 )),
                 other => prop_assert!(false, "transformed outcome was not cancelled: {other:?}"),
+            }
+        });
+    }
+
+    /// MR10: Zero-duration timeout is equivalent to immediate loser drop.
+    ///
+    /// Shrinking the timeout duration to zero should collapse the timeout race
+    /// to the same observable surface as dropping the operation immediately at
+    /// `now`: cancelled losers become TimedOut(now), while terminal non-cancel
+    /// outcomes are preserved.
+    #[test]
+    fn metamorphic_zero_duration_timeout_matches_drop_immediately() {
+        proptest!(|(
+            operation_outcome in mock_operation_strategy(),
+            base_time in 0u64..1_000_000_000,
+        )| {
+            let now = Time::from_nanos(base_time);
+            let zero_timeout = Timeout::<i32>::after(now, Duration::ZERO);
+            prop_assert_eq!(zero_timeout.deadline, now);
+            prop_assert!(zero_timeout.is_expired(now));
+            prop_assert_eq!(zero_timeout.remaining(now), Duration::ZERO);
+
+            let outcome = operation_outcome.into_outcome();
+            let via_timeout = make_timed_result(outcome.clone(), zero_timeout.deadline, false);
+            let immediate_drop = drop_immediately(outcome, now);
+
+            match (via_timeout, immediate_drop) {
+                (TimedResult::TimedOut(lhs), TimedResult::TimedOut(rhs)) => {
+                    prop_assert_eq!(lhs.deadline, rhs.deadline);
+                    prop_assert_eq!(lhs.message, rhs.message);
+                }
+                (TimedResult::Completed(lhs), TimedResult::Completed(rhs)) => {
+                    prop_assert_eq!(format!("{lhs:?}"), format!("{rhs:?}"));
+                }
+                (lhs, rhs) => {
+                    prop_assert!(
+                        false,
+                        "zero-duration timeout diverged from immediate drop: lhs={lhs:?} rhs={rhs:?}"
+                    );
+                }
             }
         });
     }
