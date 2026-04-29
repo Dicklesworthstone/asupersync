@@ -71,7 +71,7 @@ fn fuzz_verbatim_string(case: VerbatimStringCase) {
                     payload: decoded_payload,
                 } => {
                     assert_eq!(format.as_str(), label, "verbatim label must stay exact");
-                    assert_eq!(decoded_payload, payload);
+                    assert_eq!(decoded_payload.as_slice(), payload.as_slice());
                 }
                 other => panic!("expected verbatim decode, got {other:?}"),
             }
