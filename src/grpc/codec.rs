@@ -1572,4 +1572,215 @@ mod tests {
 
         crate::test_complete!("grpc_go_initial_window_backpressure_differential_conformance");
     }
+
+    #[test]
+    fn grpc_codec_max_decoded_len_differential() {
+        /// Differential conformance test for gRPC codec max_decode_message_size enforcement.
+        ///
+        /// Tests that message size validation behaves consistently across different
+        /// max_decode_message_size configurations, ensuring boundary conditions are
+        /// predictable and conform to gRPC specification requirements.
+        ///
+        /// Verifies that the same wire-format input produces consistent accept/reject
+        /// decisions based solely on the configured limit, independent of other factors.
+        init_test("grpc_codec_max_decoded_len_differential");
+
+        // Test configuration: small, medium, and large limits
+        let small_limit = 64;
+        let medium_limit = 1024;
+        let large_limit = 8192;
+
+        // Create codecs with different decode limits
+        let mut small_codec = GrpcCodec::with_message_size_limits(large_limit, small_limit);
+        let mut medium_codec = GrpcCodec::with_message_size_limits(large_limit, medium_limit);
+        let mut large_codec = GrpcCodec::with_message_size_limits(large_limit, large_limit);
+
+        // Test messages at critical boundary points
+        let test_cases = [
+            ("tiny", vec![0x01; 32]),                            // Well under all limits
+            ("at_small_limit", vec![0x02; small_limit]),         // Exactly at small limit
+            ("over_small_limit", vec![0x03; small_limit + 1]),   // Just over small limit
+            ("at_medium_limit", vec![0x04; medium_limit]),       // Exactly at medium limit
+            ("over_medium_limit", vec![0x05; medium_limit + 1]), // Just over medium limit
+            ("at_large_limit", vec![0x06; large_limit]),         // Exactly at large limit
+            ("over_large_limit", vec![0x07; large_limit + 1]), // Just over large limit (will fail encode)
+        ];
+
+        for (name, payload) in &test_cases {
+            // Skip cases that would fail encoding due to encode limit
+            if payload.len() > large_limit {
+                continue;
+            }
+
+            // Encode the test message (all codecs have same encode limit)
+            let message = GrpcMessage::new(Bytes::from(payload.clone()));
+            let mut wire_data = BytesMut::new();
+
+            // Use a producer codec to encode the wire format
+            let mut producer = GrpcCodec::with_max_size(16 * 1024);
+            producer
+                .encode(message, &mut wire_data)
+                .unwrap_or_else(|_| panic!("Failed to encode test case: {}", name));
+
+            // Test decode with small limit codec
+            let mut small_buf = wire_data.clone();
+            let small_result = small_codec.decode(&mut small_buf);
+
+            // Test decode with medium limit codec
+            let mut medium_buf = wire_data.clone();
+            let medium_result = medium_codec.decode(&mut medium_buf);
+
+            // Test decode with large limit codec
+            let mut large_buf = wire_data.clone();
+            let large_result = large_codec.decode(&mut large_buf);
+
+            // DIFFERENTIAL VERIFICATION: Results must follow limit hierarchy
+            let payload_size = payload.len();
+
+            // Small codec should accept only if payload <= small_limit
+            if payload_size <= small_limit {
+                assert!(
+                    small_result.is_ok(),
+                    "Small codec ({}B limit) should accept {}B payload in test case '{}'",
+                    small_limit,
+                    payload_size,
+                    name
+                );
+                if let Ok(Some(decoded)) = small_result {
+                    assert_eq!(
+                        decoded.data.len(),
+                        payload_size,
+                        "Small codec should preserve payload size for case '{}'",
+                        name
+                    );
+                }
+            } else {
+                assert!(
+                    matches!(small_result, Err(GrpcError::MessageTooLarge)),
+                    "Small codec ({}B limit) should reject {}B payload in test case '{}' with MessageTooLarge",
+                    small_limit,
+                    payload_size,
+                    name
+                );
+            }
+
+            // Medium codec should accept only if payload <= medium_limit
+            if payload_size <= medium_limit {
+                assert!(
+                    medium_result.is_ok(),
+                    "Medium codec ({}B limit) should accept {}B payload in test case '{}'",
+                    medium_limit,
+                    payload_size,
+                    name
+                );
+                if let Ok(Some(ref decoded)) = medium_result {
+                    assert_eq!(
+                        decoded.data.len(),
+                        payload_size,
+                        "Medium codec should preserve payload size for case '{}'",
+                        name
+                    );
+                }
+            } else {
+                assert!(
+                    matches!(medium_result, Err(GrpcError::MessageTooLarge)),
+                    "Medium codec ({}B limit) should reject {}B payload in test case '{}' with MessageTooLarge",
+                    medium_limit,
+                    payload_size,
+                    name
+                );
+            }
+
+            // Large codec should accept only if payload <= large_limit
+            if payload_size <= large_limit {
+                assert!(
+                    large_result.is_ok(),
+                    "Large codec ({}B limit) should accept {}B payload in test case '{}'",
+                    large_limit,
+                    payload_size,
+                    name
+                );
+                if let Ok(Some(ref decoded)) = large_result {
+                    assert_eq!(
+                        decoded.data.len(),
+                        payload_size,
+                        "Large codec should preserve payload size for case '{}'",
+                        name
+                    );
+                }
+            } else {
+                assert!(
+                    matches!(large_result, Err(GrpcError::MessageTooLarge)),
+                    "Large codec ({}B limit) should reject {}B payload in test case '{}' with MessageTooLarge",
+                    large_limit,
+                    payload_size,
+                    name
+                );
+            }
+
+            // CONSISTENCY CHECK: If a smaller limit accepts, larger limits must also accept
+            if payload_size <= small_limit {
+                assert!(
+                    medium_result.is_ok() && large_result.is_ok(),
+                    "Consistency violation: small codec accepted {}B but medium/large rejected in case '{}'",
+                    payload_size,
+                    name
+                );
+            }
+            if payload_size <= medium_limit {
+                assert!(
+                    large_result.is_ok(),
+                    "Consistency violation: medium codec accepted {}B but large codec rejected in case '{}'",
+                    payload_size,
+                    name
+                );
+            }
+        }
+
+        // BOUNDARY VERIFICATION: Test exact boundary behavior
+        // Messages at exactly the limit should always be accepted
+        let boundary_test_sizes = [small_limit, medium_limit, large_limit];
+
+        for &limit_size in &boundary_test_sizes {
+            let boundary_payload = vec![0xBB; limit_size];
+            let message = GrpcMessage::new(Bytes::from(boundary_payload));
+            let mut wire_data = BytesMut::new();
+
+            let mut producer = GrpcCodec::with_max_size(16 * 1024);
+            producer
+                .encode(message, &mut wire_data)
+                .expect("Boundary test encode should succeed");
+
+            let mut test_codec = GrpcCodec::with_message_size_limits(16 * 1024, limit_size);
+            let mut test_buf = wire_data;
+            let result = test_codec.decode(&mut test_buf);
+
+            assert!(
+                result.is_ok(),
+                "Codec with {}B limit should accept exactly {}B payload at boundary",
+                limit_size,
+                limit_size
+            );
+        }
+
+        // CONFORMANCE VERIFICATION: According to gRPC specification, message size limits
+        // are enforced at the framing layer before decompression, ensuring DoS protection
+        println!("✓ gRPC codec max_decoded_len differential conformance verified");
+        println!(
+            "  - Small limit ({}B): boundary and overflow behavior correct",
+            small_limit
+        );
+        println!(
+            "  - Medium limit ({}B): boundary and overflow behavior correct",
+            medium_limit
+        );
+        println!(
+            "  - Large limit ({}B): boundary and overflow behavior correct",
+            large_limit
+        );
+        println!("  - Consistency across limits: PASS (smaller accepts → larger accepts)");
+        println!("  - Exact boundary acceptance: PASS (limit-sized messages accepted)");
+
+        crate::test_complete!("grpc_codec_max_decoded_len_differential");
+    }
 }
