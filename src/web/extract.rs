@@ -667,13 +667,17 @@ impl<T: serde::de::DeserializeOwned> FromRequest for Json<T> {
             ));
         }
 
-        if let Some(ct) = header_value_ci(&req, "content-type") {
-            if !matches_json_content_type(ct) {
-                return Err(ExtractionError::new(
-                    super::response::StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                    format!("expected application/json, got {ct}"),
-                ));
-            }
+        let Some(ct) = header_value_ci(&req, "content-type") else {
+            return Err(ExtractionError::new(
+                super::response::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "Json requires Content-Type: application/json",
+            ));
+        };
+        if !matches_json_content_type(ct) {
+            return Err(ExtractionError::new(
+                super::response::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                format!("expected application/json, got {ct}"),
+            ));
         }
 
         // br-asupersync-y4mc96: keep serde error in server-side log only;
@@ -1127,10 +1131,14 @@ mod tests {
     }
 
     #[test]
-    fn json_missing_content_type_still_parses_valid_json() {
+    fn json_missing_content_type_rejects_with_415() {
         let req = Request::new("POST", "/data").with_body(Bytes::from_static(br#"{"ok":true}"#));
-        let Json(value) = Json::<serde_json::Value>::from_request(req).unwrap();
-        assert_eq!(value.get("ok"), Some(&serde_json::Value::Bool(true)));
+        let err = Json::<serde_json::Value>::from_request(req).unwrap_err();
+        assert_eq!(
+            err.status,
+            crate::web::response::StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
+        assert_eq!(err.message, "Json requires Content-Type: application/json");
     }
 
     #[test]

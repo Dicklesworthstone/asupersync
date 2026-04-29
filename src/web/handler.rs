@@ -776,6 +776,35 @@ mod tests {
     }
 
     #[test]
+    fn async_cx_handler_json_body_requires_content_type() {
+        async fn save(
+            cx: Cx,
+            Query(query): Query<HashMap<String, String>>,
+            Json(payload): Json<HashMap<String, String>>,
+        ) -> StatusCode {
+            cx.checkpoint().expect("checkpoint");
+            assert_eq!(query.get("tenant"), Some(&"blue".to_string()));
+            assert_eq!(payload.get("name"), Some(&"alice".to_string()));
+            StatusCode::CREATED
+        }
+
+        let handler = AsyncCxFnHandler2::<
+            _,
+            Query<HashMap<String, String>>,
+            Json<HashMap<String, String>>,
+        >::new(save);
+        let req = Request::new("POST", "/users")
+            .with_query("tenant=blue")
+            .with_body(Bytes::from_static(br#"{"name":"alice"}"#));
+        let resp = handler.call(req);
+        assert_eq!(resp.status, StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(
+            std::str::from_utf8(&resp.body).expect("utf8"),
+            "Json requires Content-Type: application/json"
+        );
+    }
+
+    #[test]
     fn async_cx_handler_four_extractors() {
         async fn audit(
             cx: Cx,
