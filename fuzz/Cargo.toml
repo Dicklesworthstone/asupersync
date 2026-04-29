@@ -1603,6 +1603,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "raptorq_systematic_encoder_payload"
+path = "fuzz_targets/raptorq_systematic_encoder_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "web_multipart"
 path = "fuzz_targets/web_multipart.rs"
 test = false
