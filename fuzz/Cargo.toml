@@ -3088,6 +3088,17 @@ test = false
 doc = false
 bench = false
 
+# Tick #120 — Notify notify-one/notify-waiters interleaving correctness testing
+# Tests arbitrary sequences of notify_one and notify_waiters operations with waiter
+# management to verify all waiters present at notify_waiters wake exactly once.
+# Validates notification state machine and proper waiter synchronization patterns.
+[[bin]]
+name = "notify_interleaving"
+path = "fuzz_targets/notify_interleaving.rs"
+test = false
+doc = false
+bench = false
+
 # GlobalQueue MPMC injector correctness testing for scheduler task distribution
 # Tests arbitrary push/steal sequences across N workers to ensure no task is
 # lost or duplicated in the fetch-and-add based global task queue.
