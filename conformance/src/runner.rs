@@ -534,6 +534,13 @@ pub fn run_conformance_suite<RT: RuntimeInterface + Sync>(
     runner.run_all_with_logs(&tests)
 }
 
+fn failure_message(result: &TestResult) -> String {
+    result
+        .message
+        .clone()
+        .unwrap_or_else(|| "Unknown error".to_string())
+}
+
 /// Compare test results between two runtimes.
 pub fn compare_results(
     runtime_a_name: &str,
@@ -560,14 +567,8 @@ pub fn compare_results(
         }
         (false, false) => {
             // Both failed - check if errors match
-            let error_a = result_a
-                .message
-                .clone()
-                .unwrap_or_else(|| "Unknown error".to_string());
-            let error_b = result_b
-                .message
-                .clone()
-                .unwrap_or_else(|| "Unknown error".to_string());
+            let error_a = failure_message(result_a);
+            let error_b = failure_message(result_b);
 
             if error_a == error_b {
                 ComparisonStatus::BothFailedSame
@@ -576,16 +577,10 @@ pub fn compare_results(
             }
         }
         (true, false) => ComparisonStatus::OnlyAPassed {
-            error_b: result_b
-                .message
-                .clone()
-                .unwrap_or_else(|| "Unknown error".to_string()),
+            error_b: failure_message(result_b),
         },
         (false, true) => ComparisonStatus::OnlyBPassed {
-            error_a: result_a
-                .message
-                .clone()
-                .unwrap_or_else(|| "Unknown error".to_string()),
+            error_a: failure_message(result_a),
         },
     }
 }
