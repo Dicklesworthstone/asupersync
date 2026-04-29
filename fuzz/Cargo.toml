@@ -3347,3 +3347,10 @@ path = "fuzz_targets/grpc_server_trailers_status_mapping.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "grpc_prost_codec_encode_huge"
+path = "fuzz_targets/grpc_prost_codec_encode_huge.rs"
+test = false
+doc = false
+bench = false
