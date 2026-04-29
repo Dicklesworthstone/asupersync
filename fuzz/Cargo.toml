@@ -2658,3 +2658,16 @@ path = "fuzz_targets/cors_origin_parsing.rs"
 test = false
 doc = false
 bench = false
+
+# br-asupersync-gh58ru: Structure-aware JetStream ConsumerInfo API error-response fuzzer.
+# Tests src/messaging/jetstream.rs API error parsing with intelligent input generation for
+# ConsumerInfo-specific error scenarios: consumer not found (10014), stream not found (10059),
+# invalid config (10012), name conflicts (10013), auth errors (10040+), and malformed responses.
+# Exercises error classification, JSON parsing robustness, and edge case handling in JetStream
+# API error responses with structure-aware mutation for ConsumerInfo operation failures.
+[[bin]]
+name = "jetstream_consumer_info_error_response"
+path = "fuzz_targets/jetstream_consumer_info_error_response.rs"
+test = false
+doc = false
+bench = false
