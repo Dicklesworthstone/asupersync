@@ -1312,8 +1312,9 @@ impl ThreeLaneScheduler {
 
     /// Enables/disables adaptive cancel-streak selection for all workers.
     ///
-    /// When enabled, each worker uses a deterministic EXP3 policy over fixed
-    /// candidate streak limits and updates the arm at epoch boundaries.
+    /// When enabled, each worker uses a deterministic discounted-UCB1 policy
+    /// over fixed candidate streak limits and updates the selected arm at epoch
+    /// boundaries.
     pub fn set_adaptive_cancel_streak(&mut self, enable: bool, epoch_steps: u32) {
         let epoch_steps = epoch_steps.max(1);
         for worker in &mut self.workers {
@@ -11029,11 +11030,12 @@ mod tests {
     #[test]
     #[ignore = "Broken by recent changes"]
     fn golden_test_lab_runtime_replay_determinism() {
-        // Golden test: EXP3 algorithm should be deterministic under LabRuntime replay
+        // Golden test: discounted-UCB1 arm selection should be deterministic
+        // under LabRuntime replay.
         let mut trace_a = Vec::new();
         let mut trace_b = Vec::new();
 
-        // Run 1: Collect EXP3 decision trace
+        // Run 1: Collect discounted-UCB1 decision trace
         {
             let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
             let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 4, true, 32);
