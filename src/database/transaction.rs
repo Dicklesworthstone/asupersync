@@ -1407,6 +1407,231 @@ mod tests {
 
     #[cfg(feature = "sqlite")]
     #[test]
+    fn with_sqlite_transaction_savepoint_rollback_removes_marker() {
+        init_test("with_sqlite_transaction_savepoint_rollback_removes_marker");
+
+        let target = ConformanceTarget::lab_runtime();
+        target
+            .run_test(TestConfig::default(), |cx| async move {
+                let conn = match SqliteConnection::open_in_memory(&cx).await {
+                    Outcome::Ok(conn) => conn,
+                    other => panic!("open_in_memory failed: {other:?}"),
+                };
+
+                match conn
+                    .execute(
+                        &cx,
+                        "CREATE TABLE savepoint_marker_items (id INTEGER PRIMARY KEY, name TEXT)",
+                        &[],
+                    )
+                    .await
+                {
+                    Outcome::Ok(_) => {}
+                    other => panic!("schema setup failed: {other:?}"),
+                }
+
+                let tx_outcome = with_sqlite_transaction(&conn, &cx, |tx, cx| {
+                    Box::pin(async move {
+                        let savepoint = match SqliteSavepoint::new(tx, cx, "sp1").await {
+                            Outcome::Ok(savepoint) => savepoint,
+                            other => panic!("savepoint create failed: {other:?}"),
+                        };
+
+                        match savepoint
+                            .transaction()
+                            .execute(
+                                cx,
+                                "INSERT INTO savepoint_marker_items(name) VALUES (?1)",
+                                &[SqliteValue::Text("inner".to_string())],
+                            )
+                            .await
+                        {
+                            Outcome::Ok(_) => {}
+                            other => panic!("inner insert failed: {other:?}"),
+                        }
+
+                        match savepoint.rollback(cx).await {
+                            Outcome::Ok(()) => {}
+                            other => panic!("savepoint rollback failed: {other:?}"),
+                        }
+
+                        match tx.execute_unchecked(cx, "RELEASE SAVEPOINT sp1", &[]).await {
+                            Outcome::Err(SqliteError::Sqlite(msg)) => {
+                                assert!(
+                                    msg.contains("no such savepoint")
+                                        || msg.contains("no such savepoint: sp1"),
+                                    "expected missing-savepoint error, got: {msg}"
+                                );
+                            }
+                            other => panic!(
+                                "helper rollback must remove savepoint marker, got {other:?}"
+                            ),
+                        }
+
+                        match tx
+                            .execute(
+                                cx,
+                                "INSERT INTO savepoint_marker_items(name) VALUES (?1)",
+                                &[SqliteValue::Text("outer".to_string())],
+                            )
+                            .await
+                        {
+                            Outcome::Ok(_) => {}
+                            other => panic!("outer insert failed: {other:?}"),
+                        }
+
+                        Outcome::Ok(())
+                    })
+                })
+                .await;
+
+                match tx_outcome {
+                    Outcome::Ok(()) => {}
+                    other => panic!("expected outer transaction commit, got {other:?}"),
+                }
+
+                let rows = match conn
+                    .query(
+                        &cx,
+                        "SELECT name FROM savepoint_marker_items ORDER BY id",
+                        &[],
+                    )
+                    .await
+                {
+                    Outcome::Ok(rows) => rows,
+                    other => panic!("query after rollback-marker check failed: {other:?}"),
+                };
+
+                let names = rows
+                    .iter()
+                    .map(|row| row.get_str("name").expect("name column").to_string())
+                    .collect::<Vec<_>>();
+                assert_eq!(names, vec!["outer".to_string()]);
+            })
+            .expect("lab runtime test");
+
+        crate::test_complete!("with_sqlite_transaction_savepoint_rollback_removes_marker");
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn with_sqlite_transaction_raw_outer_release_cascades_inner_savepoint() {
+        init_test("with_sqlite_transaction_raw_outer_release_cascades_inner_savepoint");
+
+        let target = ConformanceTarget::lab_runtime();
+        target
+            .run_test(TestConfig::default(), |cx| async move {
+                let conn = match SqliteConnection::open_in_memory(&cx).await {
+                    Outcome::Ok(conn) => conn,
+                    other => panic!("open_in_memory failed: {other:?}"),
+                };
+
+                match conn
+                    .execute(
+                        &cx,
+                        "CREATE TABLE savepoint_cascade_items (id INTEGER PRIMARY KEY, name TEXT)",
+                        &[],
+                    )
+                    .await
+                {
+                    Outcome::Ok(_) => {}
+                    other => panic!("schema setup failed: {other:?}"),
+                }
+
+                let tx_outcome = with_sqlite_transaction(&conn, &cx, |tx, cx| {
+                    Box::pin(async move {
+                        match tx.execute_unchecked(cx, "SAVEPOINT outer_sp", &[]).await {
+                            Outcome::Ok(_) => {}
+                            other => panic!("outer savepoint create failed: {other:?}"),
+                        }
+                        match tx.execute_unchecked(cx, "SAVEPOINT inner_sp", &[]).await {
+                            Outcome::Ok(_) => {}
+                            other => panic!("inner savepoint create failed: {other:?}"),
+                        }
+
+                        match tx
+                            .execute(
+                                cx,
+                                "INSERT INTO savepoint_cascade_items(name) VALUES (?1)",
+                                &[SqliteValue::Text("nested".to_string())],
+                            )
+                            .await
+                        {
+                            Outcome::Ok(_) => {}
+                            other => panic!("nested insert failed: {other:?}"),
+                        }
+
+                        match tx
+                            .execute_unchecked(cx, "RELEASE SAVEPOINT outer_sp", &[])
+                            .await
+                        {
+                            Outcome::Ok(_) => {}
+                            other => panic!("outer release failed: {other:?}"),
+                        }
+
+                        match tx
+                            .execute_unchecked(cx, "ROLLBACK TO SAVEPOINT inner_sp", &[])
+                            .await
+                        {
+                            Outcome::Err(SqliteError::Sqlite(msg)) => {
+                                assert!(
+                                    msg.contains("no such savepoint")
+                                        || msg.contains("no such savepoint: inner_sp"),
+                                    "expected cascaded inner savepoint removal, got: {msg}"
+                                );
+                            }
+                            other => panic!(
+                                "releasing outer savepoint must cascade inner savepoint, got {other:?}"
+                            ),
+                        }
+
+                        match tx
+                            .execute(
+                                cx,
+                                "INSERT INTO savepoint_cascade_items(name) VALUES (?1)",
+                                &[SqliteValue::Text("after".to_string())],
+                            )
+                            .await
+                        {
+                            Outcome::Ok(_) => {}
+                            other => panic!("post-cascade insert failed: {other:?}"),
+                        }
+
+                        Outcome::Ok(())
+                    })
+                })
+                .await;
+
+                match tx_outcome {
+                    Outcome::Ok(()) => {}
+                    other => panic!("expected outer transaction commit, got {other:?}"),
+                }
+
+                let rows = match conn
+                    .query(
+                        &cx,
+                        "SELECT name FROM savepoint_cascade_items ORDER BY id",
+                        &[],
+                    )
+                    .await
+                {
+                    Outcome::Ok(rows) => rows,
+                    other => panic!("query after cascade failed: {other:?}"),
+                };
+
+                let names = rows
+                    .iter()
+                    .map(|row| row.get_str("name").expect("name column").to_string())
+                    .collect::<Vec<_>>();
+                assert_eq!(names, vec!["nested".to_string(), "after".to_string()]);
+            })
+            .expect("lab runtime test");
+
+        crate::test_complete!("with_sqlite_transaction_raw_outer_release_cascades_inner_savepoint");
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
     fn with_sqlite_transaction_cancelled_savepoint_release_poison_commit() {
         init_test("with_sqlite_transaction_cancelled_savepoint_release_poison_commit");
 
