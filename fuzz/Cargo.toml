@@ -1536,6 +1536,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "jetstream_subject_name_parser"
+path = "fuzz_targets/jetstream_subject_name_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "transport_router"
 path = "fuzz_targets/transport_router.rs"
 test = false
@@ -1709,6 +1716,13 @@ bench = false
 [[bin]]
 name = "grpc_streaming_cancel_storm"
 path = "fuzz_targets/grpc_streaming_cancel_storm.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_streaming_server_cancel_timing"
+path = "fuzz_targets/grpc_streaming_server_cancel_timing.rs"
 test = false
 doc = false
 bench = false

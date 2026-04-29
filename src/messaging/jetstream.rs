@@ -1371,6 +1371,20 @@ pub fn fuzz_normalize_consumer_identity(
     Ok(config.name)
 }
 
+/// Fuzz-target re-exporter for the JetStream stream-name length cap.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub const fn fuzz_stream_name_max_bytes() -> usize {
+    MAX_NAME_BYTES
+}
+
+/// Fuzz-target re-exporter for JetStream stream-name validation.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_validate_stream_name(name: &str) -> Result<(), String> {
+    ConsumerConfig::validate_stream_name(name).map_err(|err| err.to_string())
+}
+
 impl JsMessage {
     /// Acknowledge the message (marks as processed).
     ///

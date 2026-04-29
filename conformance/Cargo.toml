@@ -2,6 +2,7 @@
 name = "asupersync-conformance"
 version = "0.3.1"
 edition = "2024"
+autobins = false
 description = "Conformance test suite for async runtime specifications"
 license-file = "../LICENSE"
 repository = "https://github.com/Dicklesworthstone/asupersync"
@@ -34,6 +35,10 @@ name = "mysql_conformance_runner"
 path = "src/bin/mysql_conformance_runner.rs"
 
 [[bin]]
+name = "h2_priority_conformance"
+path = "src/bin/h2_priority_conformance.rs"
+
+[[bin]]
 name = "h2_settings_conformance"
 path = "src/bin/h2_settings_conformance.rs"
 
@@ -58,6 +63,7 @@ env_logger = "0.10"
 h2 = "0.4"
 bytes = "1.11"
 uuid = { version = "1.0", features = ["v4"] }
+prometheus-client = "0.23"
 
 [dev-dependencies]
 # Runtimes can be added here for testing
@@ -68,4 +74,3 @@ redis = "0.26"
 h2 = "0.4"
 tokio-util = { version = "0.7", features = ["codec"] }
 bytes = "1.11"
-prometheus-client = "0.23"

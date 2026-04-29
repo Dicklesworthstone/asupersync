@@ -1,5 +1,4 @@
 #![allow(clippy::similar_names)]
-
 #![no_main]
 
 use arbitrary::{Arbitrary, Unstructured};
@@ -40,6 +39,8 @@ struct FuzzConfig {
     pub source_subset_mask: Vec<bool>,
     /// Repair symbols to drop (for loss simulation)
     pub repair_drop_mask: Vec<bool>,
+    /// Arbitrary source bytes for direct payload-generation checks.
+    pub source_bytes: Vec<u8>,
 }
 
 /// Validate and normalize fuzz configuration
@@ -68,6 +69,7 @@ fn normalize_config(config: &mut FuzzConfig) {
     config
         .repair_drop_mask
         .truncate(config.repair_count as usize);
+    config.source_bytes.truncate(16 * 1024);
 }
 
 fn max_supported_source_block_size() -> usize {
@@ -263,6 +265,22 @@ fn generate_source_data(k: usize, symbol_size: usize, seed: u64) -> Vec<Vec<u8>>
     source
 }
 
+fn build_source_from_bytes(source_bytes: &[u8], k: usize, symbol_size: usize) -> Vec<Vec<u8>> {
+    let mut source = Vec::with_capacity(k);
+    for i in 0..k {
+        let start = i.saturating_mul(symbol_size);
+        let end = start.saturating_add(symbol_size);
+        let mut symbol = vec![0u8; symbol_size];
+        if start < source_bytes.len() {
+            let available_end = end.min(source_bytes.len());
+            let copy_len = available_end - start;
+            symbol[..copy_len].copy_from_slice(&source_bytes[start..available_end]);
+        }
+        source.push(symbol);
+    }
+    source
+}
+
 fn build_encoder_rhs(source: &[Vec<u8>], params: &SystematicParams) -> Vec<Vec<u8>> {
     let mut rhs = Vec::with_capacity(params.s + params.h + params.k_prime);
 
@@ -373,7 +391,10 @@ fn assert_solution_satisfies_rhs(
     }
 
     let symbol_size = rhs.first().map_or(0, Vec::len);
-    if intermediate.iter().any(|symbol| symbol.len() != symbol_size) {
+    if intermediate
+        .iter()
+        .any(|symbol| symbol.len() != symbol_size)
+    {
         return Err("intermediate symbols had inconsistent widths".to_string());
     }
 
@@ -460,7 +481,9 @@ fn test_intermediate_symbol_generation(
     let rhs = build_encoder_rhs(&source, &params);
 
     let solved = catch_unwind(AssertUnwindSafe(|| matrix.solve(&rhs)))
-        .map_err(|_| format!("ConstraintMatrix::solve panicked for K={k}, T={symbol_size}, seed={seed}"))?
+        .map_err(|_| {
+            format!("ConstraintMatrix::solve panicked for K={k}, T={symbol_size}, seed={seed}")
+        })?
         .ok_or_else(|| {
             format!("ConstraintMatrix::solve returned singular matrix for K={k}, T={symbol_size}")
         })?;
@@ -469,7 +492,9 @@ fn test_intermediate_symbol_generation(
     let encoder = catch_unwind(AssertUnwindSafe(|| {
         SystematicEncoder::new(&source, symbol_size, seed)
     }))
-    .map_err(|_| format!("SystematicEncoder::new panicked for K={k}, T={symbol_size}, seed={seed}"))?
+    .map_err(|_| {
+        format!("SystematicEncoder::new panicked for K={k}, T={symbol_size}, seed={seed}")
+    })?
     .ok_or_else(|| {
         format!("SystematicEncoder::new returned None for K={k}, T={symbol_size}, seed={seed}")
     })?;
@@ -776,6 +801,57 @@ fn test_permutation_invariance(
     Ok(())
 }
 
+fn test_payload_generation_size(
+    k: usize,
+    symbol_size: usize,
+    seed: u64,
+    repair_count: usize,
+    source_bytes: &[u8],
+) -> Result<(), String> {
+    let source = build_source_from_bytes(source_bytes, k, symbol_size);
+    let encoder = catch_unwind(AssertUnwindSafe(|| {
+        SystematicEncoder::new(&source, symbol_size, seed)
+    }))
+    .map_err(|_| {
+        format!("SystematicEncoder::new panicked for payload-size check K={k}, T={symbol_size}, seed={seed}")
+    })?;
+    let Some(mut encoder) = encoder else {
+        return Ok(());
+    };
+
+    let emitted = catch_unwind(AssertUnwindSafe(|| encoder.emit_all(repair_count))).map_err(|_| {
+        format!("emit_all panicked for payload-size check K={k}, T={symbol_size}, repairs={repair_count}")
+    })?;
+
+    let expected_symbol_count = k + repair_count;
+    let expected_payload_bytes = expected_symbol_count
+        .checked_mul(symbol_size)
+        .ok_or_else(|| "expected payload size overflowed usize".to_string())?;
+    let actual_payload_bytes: usize = emitted.iter().map(|symbol| symbol.data.len()).sum();
+
+    if emitted.len() != expected_symbol_count {
+        return Err(format!(
+            "emit_all count mismatch: expected {expected_symbol_count}, got {}",
+            emitted.len()
+        ));
+    }
+    if actual_payload_bytes != expected_payload_bytes {
+        return Err(format!(
+            "emit_all payload-size mismatch: expected {expected_payload_bytes}, got {actual_payload_bytes}"
+        ));
+    }
+    if emitted
+        .iter()
+        .any(|symbol| symbol.data.len() != symbol_size)
+    {
+        return Err(format!(
+            "emit_all produced non-uniform symbol width for K={k}, T={symbol_size}"
+        ));
+    }
+
+    Ok(())
+}
+
 /// Main fuzzing function
 fn fuzz_systematic(mut config: FuzzConfig) -> Result<(), String> {
     let raw_k = config.k as usize;
@@ -817,6 +893,9 @@ fn fuzz_systematic(mut config: FuzzConfig) -> Result<(), String> {
     if repair_count > 0 {
         test_proof_consistency(k, symbol_size, seed, repair_count)?;
     }
+
+    // Test 5b: aggregate FEC payload generation for arbitrary source bytes.
+    test_payload_generation_size(k, symbol_size, seed, repair_count, &config.source_bytes)?;
 
     // Test 6: Basic encode/decode round-trip
     let source = generate_source_data(k, symbol_size, seed);

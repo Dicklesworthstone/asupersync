@@ -36,6 +36,7 @@ use std::pin::Pin;
 use std::time::Duration;
 
 pub mod bench;
+pub mod h2_priority_conformance;
 pub mod h2_settings_conformance;
 pub mod hpack_conformance;
 pub mod kafka_record_batch_v2;
@@ -59,6 +60,11 @@ pub use bench::{
     RegressionConfig, RegressionMetric, Stats, StatsError, default_benchmarks,
     run_benchmark_comparison,
 };
+pub use h2_priority_conformance::{
+    PriorityComplianceReport, PriorityComplianceSummary, PriorityConformanceCase,
+    PriorityConformanceResult, PriorityConformanceTester, PriorityTestVerdict, RequirementLevel as PriorityRequirementLevel,
+    StreamPriorityState,
+};
 pub use h2_settings_conformance::{
     ComplianceReport as SettingsComplianceReport, ComplianceSummary as SettingsComplianceSummary,
     ConformanceResult as SettingsConformanceResult, ExpectedOutcome, Setting,
@@ -68,7 +74,7 @@ pub use h2_settings_conformance::{
 pub use hpack_conformance::{
     ComplianceReport as HpackComplianceReport, ComplianceSummary as HpackComplianceSummary,
     ConformanceResult as HpackConformanceResult, ExpectedOutcome as HpackExpectedOutcome,
-    HpackConformanceCase, HpackConformanceTester, RequirementLevel,
+    HpackConformanceCase, HpackConformanceTester, RequirementLevel as HpackRequirementLevel,
     TestVerdict as HpackTestVerdict,
 };
 pub use kafka_record_batch_v2::{

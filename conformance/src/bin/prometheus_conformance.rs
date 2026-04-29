@@ -77,7 +77,10 @@ fn main() {
         "histogram-basic" => run_histogram_basic_test(verbose),
         "comprehensive" => run_comprehensive_test(verbose),
         "edge-cases" => run_edge_cases_test(verbose),
-        "report" => generate_compliance_report(),
+        "report" => {
+            generate_compliance_report();
+            return;
+        },
         "all" => run_all_tests(verbose),
         _ => {
             eprintln!("Unknown test: {}", test_name);

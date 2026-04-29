@@ -2069,24 +2069,26 @@ impl RegionOpenExplanation {
         lines.push(serde_json::json!({
             "type": "region_explanation",
             "region_id": format!("{:?}", self.region_id),
-            "status": format!("{:?}", self.status),
-            "child_count": self.children.len(),
-            "task_count": self.tasks.len()
+            "region_state": format!("{:?}", self.region_state),
+            "reason_count": self.reasons.len(),
+            "recommendation_count": self.recommendations.len()
         }));
 
-        for child_id in &self.children {
+        for (i, reason) in self.reasons.iter().enumerate() {
             lines.push(serde_json::json!({
-                "type": "region_child",
+                "type": "region_reason",
                 "region_id": format!("{:?}", self.region_id),
-                "child_id": format!("{:?}", child_id)
+                "reason_index": i,
+                "reason": format!("{:?}", reason)
             }));
         }
 
-        for task_id in &self.tasks {
+        for (i, rec) in self.recommendations.iter().enumerate() {
             lines.push(serde_json::json!({
-                "type": "region_task",
+                "type": "region_recommendation",
                 "region_id": format!("{:?}", self.region_id),
-                "task_id": format!("{:?}", task_id)
+                "recommendation_index": i,
+                "recommendation": rec
             }));
         }
 
@@ -2106,15 +2108,26 @@ impl TaskBlockedExplanation {
         lines.push(serde_json::json!({
             "type": "task_explanation",
             "task_id": format!("{:?}", self.task_id),
-            "classification": format!("{:?}", self.classification),
-            "detail": self.detail
+            "block_reason": format!("{:?}", self.block_reason),
+            "detail_count": self.details.len(),
+            "recommendation_count": self.recommendations.len()
         }));
 
-        if let Some(ref waiting_on) = self.waiting_on {
+        for (i, detail) in self.details.iter().enumerate() {
             lines.push(serde_json::json!({
-                "type": "task_waiting_on",
+                "type": "task_detail",
                 "task_id": format!("{:?}", self.task_id),
-                "waiting_on": format!("{:?}", waiting_on)
+                "detail_index": i,
+                "detail": detail
+            }));
+        }
+
+        for (i, rec) in self.recommendations.iter().enumerate() {
+            lines.push(serde_json::json!({
+                "type": "task_recommendation",
+                "task_id": format!("{:?}", self.task_id),
+                "recommendation_index": i,
+                "recommendation": rec
             }));
         }
 
