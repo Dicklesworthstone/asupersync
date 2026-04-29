@@ -1652,7 +1652,7 @@ mod differential_harness {
     use raptorq::{
         Decoder as RaptorqRsDecoder, EncodingPacket as RaptorqRsEncodingPacket,
         ObjectTransmissionInformation as RaptorqRsObjectTransmissionInformation,
-        PayloadId as RaptorqRsPayloadId,
+        PayloadId as RaptorqRsPayloadId, SourceBlockEncoder as RaptorqRsSourceBlockEncoder,
     };
 
     const DIFF_REPLAY_REF: &str = "replay:rq-d2-diff-harness-v1";
@@ -1767,6 +1767,12 @@ mod differential_harness {
         }
     }
 
+    fn choose_drop_count(total: usize, min_keep: usize, drop_per_mille: u16) -> usize {
+        let drop_count = total.saturating_mul(usize::from(drop_per_mille)) / 1000;
+        let max_drop = total.saturating_sub(min_keep);
+        drop_count.min(max_drop)
+    }
+
     fn exact_random_drop_indices(k: usize, drop_per_mille: u16, seed: u64) -> Vec<usize> {
         let drop_count = choose_drop_count(k, 1, drop_per_mille);
         let mut indices: Vec<usize> = (0..k).collect();
@@ -1878,6 +1884,101 @@ mod differential_harness {
         }
 
         decoded.expect("raptorq-rs reference decode should succeed")
+    }
+
+    fn reference_source_packets_with_raptorq_rs(
+        case: DifferentialCase,
+        source: &[Vec<u8>],
+    ) -> Vec<RaptorqRsEncodingPacket> {
+        let transfer_length = case
+            .k
+            .checked_mul(case.symbol_size)
+            .expect("transfer length overflow");
+        let symbol_size = u16::try_from(case.symbol_size).expect("symbol size must fit in u16");
+        let config = RaptorqRsObjectTransmissionInformation::new(
+            transfer_length as u64,
+            symbol_size,
+            1,
+            1,
+            1,
+        );
+        let source_bytes = flatten_source_bytes(source);
+        let encoder = RaptorqRsSourceBlockEncoder::new2(0, &config, &source_bytes);
+        encoder.source_packets()
+    }
+
+    #[test]
+    fn differential_systematic_source_packets_match_raptorq_rs_k2() {
+        let case = DifferentialCase {
+            scenario_id: "RQ-D2-SYSTEMATIC-K2-RAPTORQ-RS",
+            k: 2,
+            symbol_size: 64,
+            seed: 0x6330_0002,
+            drop_modulus: None,
+            drop_remainder: 0,
+            repair_budget: RepairBudget::None,
+            expect_success: true,
+            expected_error_kind: None,
+        };
+
+        let source = make_source_data(case.k, case.symbol_size, case.seed.wrapping_mul(17));
+        let mut encoder = SystematicEncoder::new(&source, case.symbol_size, case.seed)
+            .unwrap_or_else(|| panic!("scenario={} failed to build encoder", case.scenario_id));
+        let emitted = encoder.emit_systematic();
+        let reference = reference_source_packets_with_raptorq_rs(case, &source);
+
+        assert_eq!(
+            emitted.len(),
+            case.k,
+            "scenario={} our encoder must emit exactly K source packets",
+            case.scenario_id
+        );
+        assert_eq!(
+            reference.len(),
+            case.k,
+            "scenario={} raptorq-rs must emit exactly K source packets",
+            case.scenario_id
+        );
+
+        for (idx, (our_packet, reference_packet)) in
+            emitted.iter().zip(reference.iter()).enumerate()
+        {
+            let expected = &source[idx];
+            let reference_esi = reference_packet.payload_id().encoding_symbol_id() as usize;
+
+            assert!(
+                our_packet.is_source,
+                "scenario={} packet {idx} must remain systematic",
+                case.scenario_id
+            );
+            assert_eq!(
+                our_packet.esi, idx as u32,
+                "scenario={} our systematic ESI must equal its source index",
+                case.scenario_id
+            );
+            assert_eq!(
+                reference_esi, idx,
+                "scenario={} raptorq-rs systematic ESI must equal its source index",
+                case.scenario_id
+            );
+            assert_eq!(
+                &our_packet.data, expected,
+                "scenario={} our packet {idx} must equal the original source symbol",
+                case.scenario_id
+            );
+            assert_eq!(
+                reference_packet.data(),
+                expected,
+                "scenario={} raptorq-rs packet {idx} must equal the original source symbol",
+                case.scenario_id
+            );
+            assert_eq!(
+                &our_packet.data,
+                reference_packet.data(),
+                "scenario={} our systematic payload must match raptorq-rs at index {idx}",
+                case.scenario_id
+            );
+        }
     }
 
     #[test]
