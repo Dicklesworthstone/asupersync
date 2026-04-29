@@ -1459,6 +1459,17 @@ pub struct CleanupStats {
     pub pending_bytes: usize,
 }
 
+struct ActiveCleanupGuard<'a> {
+    object_id: ObjectId,
+    active: &'a RwLock<HashSet<ObjectId>>,
+}
+
+impl Drop for ActiveCleanupGuard<'_> {
+    fn drop(&mut self) {
+        self.active.write().remove(&self.object_id);
+    }
+}
+
 /// Coordinates cleanup of partial symbol sets.
 pub struct CleanupCoordinator {
     /// Pending symbol sets by object ID.
@@ -1469,6 +1480,8 @@ pub struct CleanupCoordinator {
     completed: RwLock<HashSet<ObjectId>>,
     /// Symbols buffered during cleanup attempts (to prevent drops during retry).
     cleanup_buffer: RwLock<HashMap<ObjectId, Vec<Symbol>>>,
+    /// Object IDs currently executing a cleanup attempt.
+    cleanup_active: RwLock<HashSet<ObjectId>>,
     /// Default cleanup budget.
     default_budget: Budget,
 }
@@ -1482,6 +1495,7 @@ impl CleanupCoordinator {
             handlers: RwLock::new(HashMap::new()),
             completed: RwLock::new(HashSet::new()),
             cleanup_buffer: RwLock::new(HashMap::new()),
+            cleanup_active: RwLock::new(HashSet::new()),
             default_budget: Budget::new().with_poll_quota(1000),
         }
     }
@@ -1577,6 +1591,22 @@ impl CleanupCoordinator {
             completed: true,
             handlers_run: Vec::new(),
             handler_errors: Vec::new(),
+        };
+
+        let _active_guard = {
+            let mut active = self.cleanup_active.write();
+            if !active.insert(object_id) {
+                result.completed = false;
+                result.handler_errors.push(format!(
+                    "cleanup already in progress for object {object_id:?}; \
+                     rejecting reentrant cleanup attempt (br-asupersync-a19xwn)"
+                ));
+                return result;
+            }
+            ActiveCleanupGuard {
+                object_id,
+                active: &self.cleanup_active,
+            }
         };
 
         // Atomically extract the handler and pending symbols. Create a cleanup buffer
@@ -5213,6 +5243,83 @@ mod tests {
             final_stats.pending_symbols >= 4,
             "All symbols including post-retry should be preserved"
         );
+    }
+
+    #[test]
+    fn cleanup_reentrant_attempt_is_rejected_without_stealing_retry_state() {
+        use std::sync::{Arc, Mutex};
+
+        struct ReentrantHandler {
+            coordinator: Arc<CleanupCoordinator>,
+            nested_result: Arc<Mutex<Option<CleanupResult>>>,
+        }
+
+        impl CleanupHandler for ReentrantHandler {
+            fn name(&self) -> &'static str {
+                "reentrant"
+            }
+
+            fn cleanup(
+                &self,
+                object_id: ObjectId,
+                _symbols: Vec<Symbol>,
+            ) -> crate::error::Result<usize> {
+                self.coordinator.register_pending(
+                    object_id,
+                    Symbol::new_for_test(123, 0, 1, b"late-symbol"),
+                    Time::from_millis(101),
+                );
+                let nested = self.coordinator.cleanup(object_id, None);
+                *self.nested_result.lock().unwrap() = Some(nested);
+                Ok(1)
+            }
+        }
+
+        let coordinator = Arc::new(CleanupCoordinator::new());
+        let nested_result = Arc::new(Mutex::new(None));
+        let object_id = ObjectId::new_for_test(123);
+
+        coordinator.register_pending(
+            object_id,
+            Symbol::new_for_test(123, 0, 0, b"initial"),
+            Time::from_millis(100),
+        );
+        coordinator.register_handler(
+            object_id,
+            ReentrantHandler {
+                coordinator: Arc::clone(&coordinator),
+                nested_result: Arc::clone(&nested_result),
+            },
+        );
+
+        let outer = coordinator.cleanup(object_id, None);
+        assert!(outer.completed, "outer cleanup should still complete");
+
+        let nested = nested_result
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("nested cleanup result should be recorded");
+        assert!(
+            !nested.completed,
+            "reentrant cleanup attempt must fail closed"
+        );
+        assert_eq!(nested.symbols_cleaned, 0);
+        assert_eq!(nested.bytes_freed, 0);
+        assert!(
+            nested
+                .handler_errors
+                .iter()
+                .any(|err| err.contains("cleanup already in progress")),
+            "expected reentrant cleanup error, got {:?}",
+            nested.handler_errors
+        );
+
+        let stats = coordinator.stats();
+        assert_eq!(stats.pending_objects, 0);
+        assert_eq!(stats.pending_symbols, 0);
+        assert_eq!(stats.pending_bytes, 0);
+        assert!(coordinator.completed.read().contains(&object_id));
     }
 
     /// Basic integration test for br-asupersync-dm6ci4: CancelBroadcaster retry mechanism.
