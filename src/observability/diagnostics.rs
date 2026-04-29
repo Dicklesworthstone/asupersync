@@ -5477,8 +5477,21 @@ mod tests {
                     "count": leaked_obligations.len()
                 },
                 "health": {
-                    "has_analysis": health_report.classification.is_some(),
-                    "timestamp": health_report.timestamp.as_nanos()
+                    "classification": match health_report.classification {
+                        HealthClassification::Healthy { margin } => json!({
+                            "kind": "healthy",
+                            "margin": margin
+                        }),
+                        HealthClassification::Degraded { fiedler, .. } => json!({
+                            "kind": "degraded",
+                            "fiedler": fiedler
+                        }),
+                        HealthClassification::Deadlocked => json!({
+                            "kind": "deadlocked"
+                        }),
+                    },
+                    "fiedler_value": health_report.decomposition.fiedler_value,
+                    "bottleneck_count": health_report.bottlenecks.len()
                 }
             },
             "meta": {
