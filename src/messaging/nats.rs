@@ -683,6 +683,19 @@ pub const fn fuzz_nats_subject_max_bytes() -> usize {
     MAX_NATS_SUBJECT_BYTES
 }
 
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_encode_nats_headers(
+    headers: &[(String, Vec<u8>)],
+    max_header_bytes: usize,
+) -> Result<Vec<u8>, String> {
+    let borrowed = headers
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_slice()))
+        .collect::<Vec<_>>();
+    encode_nats_headers(&borrowed, max_header_bytes).map_err(|err| err.to_string())
+}
+
 #[cfg(any(test, feature = "test-internals"))]
 fn subscription_matches_subject_impl(pattern: &str, subject: &str) -> bool {
     let Some(pattern_tokens) = parse_subscription_pattern(pattern) else {
