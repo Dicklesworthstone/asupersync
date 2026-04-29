@@ -10,7 +10,9 @@ use asupersync::obligation::lyapunov::{
     LyapunovGovernor, PotentialWeights, SchedulingSuggestion, StateSnapshot,
 };
 use asupersync::record::TaskRecord;
-use asupersync::runtime::scheduler::three_lane::ThreeLaneScheduler;
+use asupersync::runtime::scheduler::three_lane::{
+    AdaptiveCancelStreakPolicyBench, AdaptivePolicyBenchSnapshot, ThreeLaneScheduler,
+};
 use asupersync::runtime::state::RuntimeState;
 use asupersync::sync::ContendedMutex;
 use asupersync::time::{TimerDriverHandle, VirtualClock};
@@ -34,6 +36,8 @@ pub struct DecisionArbiterInput {
     environment: FuzzEnvironment,
     /// Concrete lane mix driven through the real scheduler arbiter.
     workload: FuzzLaneWorkload,
+    /// Adaptive governor workload driven by arrival bursts and Lyapunov state.
+    adaptive_budget: FuzzAdaptiveBudgetScenario,
 }
 
 /// Fuzzable version of PotentialWeights with bounded ranges
@@ -129,6 +133,31 @@ pub struct FuzzLaneWorkload {
     timed_deadline_buckets: Vec<u8>,
 }
 
+#[derive(Debug, Clone, Arbitrary)]
+pub struct FuzzAdaptiveBudgetScenario {
+    /// Number of executed dispatches per adaptive epoch.
+    #[arbitrary(with = bounded_epoch_steps)]
+    epoch_steps: u32,
+    /// Arrival bursts combined with Lyapunov snapshots.
+    #[arbitrary(with = bounded_adaptive_rounds)]
+    rounds: Vec<FuzzAdaptiveBudgetRound>,
+}
+
+#[derive(Debug, Clone, Arbitrary)]
+pub struct FuzzAdaptiveBudgetRound {
+    /// Snapshot used to synthesize a Lyapunov governor state.
+    snapshot: FuzzStateSnapshot,
+    /// New cancel-lane arrivals in this round.
+    #[arbitrary(with = bounded_arrival_count)]
+    cancel_arrivals: u8,
+    /// New ready-lane arrivals in this round.
+    #[arbitrary(with = bounded_arrival_count)]
+    ready_arrivals: u8,
+    /// New timed-lane arrivals in this round.
+    #[arbitrary(with = bounded_arrival_count)]
+    timed_arrivals: u8,
+}
+
 #[derive(Debug, Clone, Copy, Arbitrary)]
 pub enum FuzzSchedulingSuggestion {
     NoPreference,
@@ -168,6 +197,25 @@ fn bounded_cancel_phase_count(u: &mut arbitrary::Unstructured) -> arbitrary::Res
 
 fn bounded_cancel_limit(u: &mut arbitrary::Unstructured) -> arbitrary::Result<usize> {
     Ok(usize::from(u.int_in_range::<u8>(1..=8)?))
+}
+
+fn bounded_epoch_steps(u: &mut arbitrary::Unstructured) -> arbitrary::Result<u32> {
+    Ok(u32::from(u.int_in_range::<u8>(1..=8)?))
+}
+
+fn bounded_arrival_count(u: &mut arbitrary::Unstructured) -> arbitrary::Result<u8> {
+    u.int_in_range(0..=12)
+}
+
+fn bounded_adaptive_rounds(
+    u: &mut arbitrary::Unstructured,
+) -> arbitrary::Result<Vec<FuzzAdaptiveBudgetRound>> {
+    let len = usize::from(u.int_in_range::<u8>(1..=10)?);
+    let mut rounds = Vec::with_capacity(len);
+    for _ in 0..len {
+        rounds.push(u.arbitrary()?);
+    }
+    Ok(rounds)
 }
 
 fn bounded_priority_vec(u: &mut arbitrary::Unstructured) -> arbitrary::Result<Vec<u8>> {
@@ -279,6 +327,18 @@ fn timed_deadline_from_bucket(bucket: u8) -> Time {
 
 fn scheduler_task_id(base: u32, index: usize) -> TaskId {
     TaskId::new_for_test(base + u32::try_from(index).unwrap_or(u32::MAX), 0)
+}
+
+fn burst_task_id(round: usize, lane_offset: u32, index: usize) -> TaskId {
+    let round_base = u32::try_from(round)
+        .unwrap_or(u32::MAX / 100)
+        .saturating_mul(100);
+    scheduler_task_id(
+        70_000u32
+            .saturating_add(round_base)
+            .saturating_add(lane_offset),
+        index,
+    )
 }
 
 fn install_cancel_mask(state: &Arc<ContendedMutex<RuntimeState>>, snapshot: &FuzzStateSnapshot) {
@@ -473,6 +533,142 @@ fn assert_scheduler_fairness(workload: &FuzzLaneWorkload, cancel_mask: &FuzzStat
     }
 }
 
+fn assert_adaptive_budget_governor(
+    scenario: &FuzzAdaptiveBudgetScenario,
+    weights: &PotentialWeights,
+) {
+    if scenario.rounds.is_empty() {
+        return;
+    }
+
+    let governor = LyapunovGovernor::new(weights.clone());
+    let mut policy = AdaptiveCancelStreakPolicyBench::new(scenario.epoch_steps);
+
+    let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(10_000)));
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+    {
+        let mut guard = state.lock().expect("lock runtime state");
+        guard.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
+    }
+
+    let mut scheduler = ThreeLaneScheduler::new_with_options(
+        1,
+        &state,
+        usize::try_from(scenario.epoch_steps).unwrap_or(1),
+        true,
+        1,
+    );
+    scheduler.set_adaptive_cancel_streak(true, scenario.epoch_steps);
+
+    let mut workers = scheduler.take_workers();
+    let worker = &mut workers[0];
+    let mut dispatched = Vec::new();
+    let mut total_injected = 0usize;
+    let mut cumulative_effective_exceedances = 0u64;
+    let mut cumulative_fallback_dispatches = 0u64;
+    let base_time = Time::from_nanos(50_000);
+
+    for (round_index, round) in scenario.rounds.iter().enumerate() {
+        let ready_depth = u32::from(round.ready_arrivals) + u32::from(round.timed_arrivals);
+        let mut snapshot = round.snapshot.to_state_snapshot(base_time, ready_depth);
+        snapshot.time = Time::from_nanos(
+            base_time.as_nanos()
+                + u64::try_from(round_index)
+                    .unwrap_or(0)
+                    .saturating_mul(1_000),
+        );
+
+        let potential = governor.compute_record(&snapshot).total;
+        assert!(
+            potential.is_finite() && potential >= 0.0,
+            "adaptive governor potential must stay finite and non-negative: {potential}"
+        );
+
+        let cancel_pressure =
+            u32::from(round.cancel_arrivals).saturating_add(snapshot.total_cancelling_tasks());
+        let non_cancel_pressure =
+            u32::from(round.ready_arrivals).saturating_add(u32::from(round.timed_arrivals));
+        cumulative_effective_exceedances = cumulative_effective_exceedances.saturating_add(
+            u64::from(cancel_pressure.saturating_sub(non_cancel_pressure).min(4)),
+        );
+        if cancel_pressure > 0 && non_cancel_pressure == 0 {
+            cumulative_fallback_dispatches = cumulative_fallback_dispatches.saturating_add(1);
+        }
+
+        let bench_snapshot = AdaptivePolicyBenchSnapshot::new(
+            potential,
+            snapshot.deadline_pressure,
+            0,
+            cumulative_effective_exceedances,
+            cumulative_fallback_dispatches,
+        );
+        if round_index == 0 {
+            policy.begin_epoch(bench_snapshot);
+        } else {
+            let reward = policy
+                .complete_epoch(bench_snapshot)
+                .expect("adaptive epoch must have a start snapshot");
+            assert!(
+                reward.is_finite() && (0.0..=1.0).contains(&reward),
+                "adaptive reward must stay within [0, 1]: {reward}"
+            );
+        }
+        assert!(
+            policy.select_arm_ucb() < policy.arm_count(),
+            "adaptive governor must always select a valid arm"
+        );
+
+        for idx in 0..usize::from(round.cancel_arrivals) {
+            scheduler.inject_cancel(burst_task_id(round_index, 0, idx), 100);
+            total_injected = total_injected.saturating_add(1);
+        }
+        for idx in 0..usize::from(round.ready_arrivals) {
+            scheduler.inject_ready(burst_task_id(round_index, 20, idx), 50);
+            total_injected = total_injected.saturating_add(1);
+        }
+        for idx in 0..usize::from(round.timed_arrivals) {
+            scheduler.inject_timed(
+                burst_task_id(round_index, 40, idx),
+                timed_deadline_from_bucket(u8::try_from(idx).unwrap_or(u8::MAX)),
+            );
+            total_injected = total_injected.saturating_add(1);
+        }
+
+        while dispatched.len() < total_injected {
+            let Some(task) = worker.next_task() else {
+                break;
+            };
+            assert!(
+                !dispatched.contains(&task),
+                "adaptive governor promoted {task:?} into a duplicate-dispatch loop"
+            );
+            dispatched.push(task);
+        }
+
+        assert!(
+            worker.preemption_metrics().adaptive_current_limit >= 1,
+            "adaptive governor budget must stay positive"
+        );
+    }
+
+    assert_eq!(
+        dispatched.len(),
+        total_injected,
+        "adaptive governor should drain every injected arrival without duplication"
+    );
+    for _ in 0..3 {
+        assert_eq!(
+            worker.next_task(),
+            None,
+            "adaptive governor must terminate after draining arbitrary arrival bursts"
+        );
+    }
+    assert!(
+        worker.preemption_metrics().adaptive_current_limit >= 1,
+        "adaptive governor budget must remain positive after drain"
+    );
+}
+
 // Main fuzzing target for three-lane scheduler decision arbiter.
 fuzz_target!(|input: DecisionArbiterInput| {
     // Convert fuzz inputs to real types
@@ -515,4 +711,7 @@ fuzz_target!(|input: DecisionArbiterInput| {
 
     // Test 3: Real scheduler no-starvation invariant under arbitrary lane mixes.
     assert_scheduler_fairness(&input.workload, &input.state_snapshots[0]);
+
+    // Test 4: Adaptive cancel-streak governor stays bounded and terminates.
+    assert_adaptive_budget_governor(&input.adaptive_budget, &weights);
 });
