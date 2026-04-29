@@ -1547,7 +1547,10 @@ impl CleanupCoordinator {
     ) {
         self.handlers.write().insert(object_id, handler);
 
-        // Replay any symbols that were buffered during cleanup attempt
+        // Keep `pending` held while draining the cleanup buffer and clearing
+        // `completed` so reopening retry state is atomic with respect to
+        // register_pending() and cannot drop symbols in the reopen window.
+        let mut pending = self.pending.write();
         let mut cleanup_buffer = self.cleanup_buffer.write();
         if let Some(buffered_symbols) = cleanup_buffer.remove(&object_id) {
             for symbol in buffered_symbols {
@@ -1555,12 +1558,20 @@ impl CleanupCoordinator {
                 pending_set.symbols.push(symbol);
             }
         }
-        drop(cleanup_buffer); // Release buffer lock before other locks
+        pending.insert(object_id, pending_set);
+        self.completed.write().remove(&object_id);
+    }
 
-        // Keep `pending` held while clearing `completed` so reopening retry
-        // state is atomic with respect to register_pending() and cannot drop
-        // symbols in the reopen window.
+    #[allow(clippy::significant_drop_tightening)]
+    fn restore_pending_only_state(&self, object_id: ObjectId, mut pending_set: PendingSymbolSet) {
         let mut pending = self.pending.write();
+        let mut cleanup_buffer = self.cleanup_buffer.write();
+        if let Some(buffered_symbols) = cleanup_buffer.remove(&object_id) {
+            for symbol in buffered_symbols {
+                pending_set.total_bytes = pending_set.total_bytes.saturating_add(symbol.len());
+                pending_set.symbols.push(symbol);
+            }
+        }
         pending.insert(object_id, pending_set);
         self.completed.write().remove(&object_id);
     }
@@ -1568,6 +1579,15 @@ impl CleanupCoordinator {
     /// Registers a cleanup handler for an object.
     pub fn register_handler(&self, object_id: ObjectId, handler: impl CleanupHandler + 'static) {
         self.handlers.write().insert(object_id, Box::new(handler));
+    }
+
+    #[inline]
+    fn empty_pending_set() -> PendingSymbolSet {
+        PendingSymbolSet {
+            symbols: Vec::new(),
+            total_bytes: 0,
+            _created_at: Time::ZERO,
+        }
     }
 
     /// Clears pending symbols for an object (e.g., after successful decode).
@@ -1609,14 +1629,16 @@ impl CleanupCoordinator {
             }
         };
 
-        // Atomically extract the handler and pending symbols. Create a cleanup buffer
-        // entry to catch symbols arriving during cleanup attempts, preventing drops
-        // during the retry window. Don't mark as completed until handler succeeds.
+        // Create the cleanup buffer entry before extracting pending symbols so
+        // register_pending() callers racing with cleanup() are captured in the
+        // buffer rather than silently repopulating `pending` behind this pass.
+        self.cleanup_buffer.write().entry(object_id).or_default();
+
+        // Atomically extract the handler and pending symbols. Don't mark as
+        // completed until handler succeeds.
         let handler = { self.handlers.write().remove(&object_id) };
         let pending_set = { self.pending.write().remove(&object_id) };
-
-        // Create cleanup buffer entry to catch symbols during cleanup
-        self.cleanup_buffer.write().insert(object_id, Vec::new());
+        let had_handler = handler.is_some();
 
         if let Some(set) = pending_set {
             let symbol_count = set.symbols.len();
@@ -1698,25 +1720,23 @@ impl CleanupCoordinator {
         } else {
             // No pending symbols, but check cleanup buffer for symbols that arrived
             // during a previous cleanup attempt
-            let mut cleanup_buffer = self.cleanup_buffer.write();
-            if let Some(buffered_symbols) = cleanup_buffer.remove(&object_id) {
-                if !buffered_symbols.is_empty() {
-                    // Create a new pending set from buffered symbols
-                    let now = Time::from_nanos(0); // Use zero time for buffered symbols
-                    let mut new_set = PendingSymbolSet {
-                        symbols: Vec::new(),
-                        total_bytes: 0,
-                        _created_at: now,
-                    };
-                    for symbol in buffered_symbols {
-                        new_set.total_bytes = new_set.total_bytes.saturating_add(symbol.len());
-                        new_set.symbols.push(symbol);
-                    }
-                    self.pending.write().insert(object_id, new_set);
-                    result.completed = false; // Can't complete without symbols to clean
+            let buffered_symbol_count = self
+                .cleanup_buffer
+                .read()
+                .get(&object_id)
+                .map_or(0, Vec::len);
+            if buffered_symbol_count > 0 {
+                let new_set = Self::empty_pending_set();
+                if let Some(handler) = handler {
+                    self.restore_retry_state(object_id, handler, new_set);
+                } else {
+                    self.restore_pending_only_state(object_id, new_set);
                 }
+                result.completed = false; // Can't complete without symbols to clean
+            } else {
+                self.cleanup_buffer.write().remove(&object_id);
             }
-            if result.completed && handler.is_some() {
+            if result.completed && had_handler {
                 // A registered handler with no pending or buffered symbols still
                 // represents a fully completed cleanup lifecycle. Record that
                 // completion so late register_pending() calls cannot silently
@@ -5320,6 +5340,41 @@ mod tests {
         assert_eq!(stats.pending_symbols, 0);
         assert_eq!(stats.pending_bytes, 0);
         assert!(coordinator.completed.read().contains(&object_id));
+    }
+
+    #[test]
+    fn cleanup_buffered_only_reopen_restores_handler_for_retry() {
+        let coordinator = CleanupCoordinator::new();
+        let object_id = ObjectId::new_for_test(124);
+
+        coordinator.register_handler(object_id, CountingCleanupHandler);
+        coordinator.cleanup_buffer.write().insert(
+            object_id,
+            vec![Symbol::new_for_test(124, 0, 0, b"buffered-only")],
+        );
+
+        let first = coordinator.cleanup(object_id, None);
+        assert!(
+            !first.completed,
+            "buffered symbols arriving during an otherwise empty cleanup must reopen retry state"
+        );
+        assert!(
+            coordinator.handlers.read().contains_key(&object_id),
+            "buffered-only reopen must restore the per-object handler"
+        );
+
+        let stats = coordinator.stats();
+        assert_eq!(stats.pending_objects, 1);
+        assert_eq!(stats.pending_symbols, 1);
+        assert_eq!(stats.pending_bytes, b"buffered-only".len());
+
+        let second = coordinator.cleanup(object_id, None);
+        assert!(
+            second.completed,
+            "restored handler should allow retry to finish"
+        );
+        assert_eq!(second.symbols_cleaned, 1);
+        assert_eq!(second.bytes_freed, b"buffered-only".len());
     }
 
     /// Basic integration test for br-asupersync-dm6ci4: CancelBroadcaster retry mechanism.
