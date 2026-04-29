@@ -42,10 +42,17 @@ fn mysql_packet(sequence: u8, payload: &[u8]) -> Vec<u8> {
 }
 
 fn mysql_handshake_packet(server_capabilities: u32) -> Vec<u8> {
+    mysql_handshake_packet_with_connection_id(server_capabilities, 42)
+}
+
+fn mysql_handshake_packet_with_connection_id(
+    server_capabilities: u32,
+    connection_id: u32,
+) -> Vec<u8> {
     let mut payload = Vec::new();
     payload.push(10);
     payload.extend_from_slice(b"8.0.0-asupersync-test\0");
-    payload.extend_from_slice(&42_u32.to_le_bytes());
+    payload.extend_from_slice(&connection_id.to_le_bytes());
     payload.extend_from_slice(b"12345678");
     payload.push(0);
     payload.extend_from_slice(&(server_capabilities as u16).to_le_bytes());
@@ -57,6 +64,18 @@ fn mysql_handshake_packet(server_capabilities: u32) -> Vec<u8> {
     payload.extend_from_slice(b"abcdefghijkl\0");
     payload.extend_from_slice(b"caching_sha2_password\0");
     mysql_packet(0, &payload)
+}
+
+fn read_mysql_packet(stream: &mut std::net::TcpStream) -> Vec<u8> {
+    let mut header = [0u8; 4];
+    stream.read_exact(&mut header).expect("read packet header");
+    let payload_len =
+        usize::from(header[0]) | (usize::from(header[1]) << 8) | (usize::from(header[2]) << 16);
+    let mut payload = vec![0u8; payload_len];
+    stream
+        .read_exact(&mut payload)
+        .expect("read packet payload");
+    payload
 }
 
 /// Test SSL mode URL parsing conformance
@@ -330,6 +349,153 @@ fn test_preferred_ssl_falls_back_only_when_server_lacks_ssl_support() {
         0,
         "preferred mode must not set CLIENT_SSL until an SSL Request and TLS upgrade are implemented"
     );
+}
+
+#[test]
+fn test_prepared_statement_rejects_cross_connection_reuse() {
+    init_test_logging();
+
+    let capabilities = mysql_capabilities::CLIENT_PROTOCOL_41
+        | mysql_capabilities::CLIENT_SECURE_CONNECTION
+        | mysql_capabilities::CLIENT_PLUGIN_AUTH;
+
+    let prepare_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind prepare");
+    let prepare_addr = prepare_listener.local_addr().expect("prepare addr");
+    let prepare_server = std::thread::spawn(move || {
+        let (mut stream, _) = prepare_listener.accept().expect("accept prepare client");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set prepare read timeout");
+
+        stream
+            .write_all(&mysql_handshake_packet_with_connection_id(
+                capabilities,
+                101,
+            ))
+            .expect("write prepare handshake");
+        stream.flush().expect("flush prepare handshake");
+
+        let _handshake_response = read_mysql_packet(&mut stream);
+        stream
+            .write_all(&mysql_packet(2, &[0x00]))
+            .expect("write auth ok");
+        stream.flush().expect("flush auth ok");
+
+        let prepare_payload = read_mysql_packet(&mut stream);
+        assert_eq!(prepare_payload[0], 0x16, "expected COM_STMT_PREPARE");
+
+        let mut ok = Vec::new();
+        ok.push(0x00);
+        ok.extend_from_slice(&77_u32.to_le_bytes());
+        ok.extend_from_slice(&0_u16.to_le_bytes());
+        ok.extend_from_slice(&0_u16.to_le_bytes());
+        ok.push(0x00);
+        ok.extend_from_slice(&0_u16.to_le_bytes());
+        stream
+            .write_all(&mysql_packet(1, &ok))
+            .expect("write prepare ok");
+        stream.flush().expect("flush prepare ok");
+    });
+
+    let reject_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind reject");
+    let reject_addr = reject_listener.local_addr().expect("reject addr");
+    let (read_tx, read_rx) = mpsc::channel();
+    let reject_server = std::thread::spawn(move || {
+        let (mut stream, _) = reject_listener.accept().expect("accept reject client");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set reject read timeout");
+
+        stream
+            .write_all(&mysql_handshake_packet_with_connection_id(
+                capabilities,
+                202,
+            ))
+            .expect("write reject handshake");
+        stream.flush().expect("flush reject handshake");
+
+        let _handshake_response = read_mysql_packet(&mut stream);
+        stream
+            .write_all(&mysql_packet(2, &[0x00]))
+            .expect("write reject auth ok");
+        stream.flush().expect("flush reject auth ok");
+
+        let mut header = [0u8; 4];
+        let read = stream.read(&mut header).unwrap_or_else(|err| {
+            assert!(
+                matches!(
+                    err.kind(),
+                    std::io::ErrorKind::UnexpectedEof
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::WouldBlock
+                ),
+                "unexpected reject-server read error: {err}"
+            );
+            0
+        });
+        read_tx.send(read).expect("send reject read count");
+    });
+
+    let cx = Cx::for_testing();
+    let mut prepare_options = MySqlConnectOptions::parse(&format!(
+        "mysql://user@{}:{}/db",
+        prepare_addr.ip(),
+        prepare_addr.port()
+    ))
+    .expect("parse prepare options");
+    prepare_options.connect_timeout = Some(Duration::from_secs(2));
+
+    let stmt = match futures_lite::future::block_on(async {
+        let mut conn = match MySqlConnection::connect_with_options(&cx, prepare_options).await {
+            Outcome::Ok(conn) => conn,
+            other => panic!("expected prepare connection, got {other:?}"),
+        };
+        conn.prepare(&cx, "SELECT 1").await
+    }) {
+        Outcome::Ok(stmt) => stmt,
+        Outcome::Err(err) => panic!("expected prepare ok, got error: {err}"),
+        Outcome::Cancelled(reason) => panic!("expected prepare ok, got cancellation: {reason}"),
+        Outcome::Panicked(_) => panic!("expected prepare ok, got panic"),
+    };
+
+    let mut reject_options = MySqlConnectOptions::parse(&format!(
+        "mysql://user@{}:{}/db",
+        reject_addr.ip(),
+        reject_addr.port()
+    ))
+    .expect("parse reject options");
+    reject_options.connect_timeout = Some(Duration::from_secs(2));
+
+    let mut conn = match futures_lite::future::block_on(async {
+        MySqlConnection::connect_with_options(&cx, reject_options).await
+    }) {
+        Outcome::Ok(conn) => conn,
+        other => panic!("expected reject-side connection, got {other:?}"),
+    };
+
+    let outcome =
+        futures_lite::future::block_on(async { conn.execute_prepared(&cx, &stmt, &[]).await });
+    match outcome {
+        Outcome::Err(MySqlError::InvalidParameter(msg)) => {
+            assert!(msg.contains("belongs to connection 101"));
+            assert!(msg.contains("current connection is 202"));
+        }
+        other => panic!("expected statement/connection mismatch, got {other:?}"),
+    }
+
+    drop(conn);
+
+    let bytes_sent = read_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("reject read result");
+    assert_eq!(
+        bytes_sent, 0,
+        "cross-connection statement reuse must fail before COM_STMT_EXECUTE reaches the server"
+    );
+
+    prepare_server.join().expect("join prepare server");
+    reject_server.join().expect("join reject server");
 }
 
 /// Test conformance gap: Missing server SSL capability validation

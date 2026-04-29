@@ -4344,8 +4344,16 @@ mod tests {
     fn mysql_auth_functions_handle_empty_secret() {
         let empty = SecretString::new("");
         let nonce = *b"0123456789abcdefghij";
-        assert!(mysql_native_auth(empty.as_str(), &nonce).unwrap().is_empty());
-        assert!(caching_sha2_auth(empty.as_str(), &nonce).unwrap().is_empty());
+        assert!(
+            mysql_native_auth(empty.as_str(), &nonce)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            caching_sha2_auth(empty.as_str(), &nonce)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// Debug rendering of `MySqlConnectOptions` must not leak the
@@ -5634,7 +5642,7 @@ mod tests {
         let mut conn = MySqlConnection {
             inner: MySqlConnectionInner {
                 stream,
-                connection_id: 0,
+                connection_id: 41,
                 capabilities: 0,
                 charset: 0,
                 status_flags: 0,
@@ -5917,6 +5925,7 @@ mod tests {
 
         server.join().expect("join server");
         assert_eq!(stmt.statement_id, 99);
+        assert_eq!(stmt.owner_connection_id(), 41);
         assert_eq!(stmt.param_count(), 0);
         assert_eq!(stmt.column_count(), 0);
         assert_eq!(conn.inner.sequence, 2);
@@ -6069,6 +6078,7 @@ mod tests {
         };
         let stmt = MySqlStatement {
             statement_id: 7,
+            owner_connection_id: 0,
             param_count: 0,
             column_count: 1,
             params: Vec::new(),
@@ -6091,6 +6101,35 @@ mod tests {
         assert_eq!(rows[0].get_i32("value").expect("value column"), 123);
         assert_eq!(conn.inner.sequence, 6);
         assert!(!conn.inner.closed);
+    }
+
+    #[test]
+    fn query_prepared_rejects_statement_from_different_connection() {
+        let mut conn = make_test_connection();
+        conn.inner.connection_id = 7;
+        let stmt = MySqlStatement {
+            statement_id: 11,
+            owner_connection_id: 99,
+            param_count: 0,
+            column_count: 0,
+            params: Vec::new(),
+            columns: Vec::new(),
+        };
+        let cx = Cx::for_testing();
+
+        let outcome = run(conn.query_prepared(&cx, &stmt, &[]));
+        match outcome {
+            Outcome::Err(MySqlError::InvalidParameter(msg)) => {
+                assert!(msg.contains("belongs to connection 99"));
+                assert!(msg.contains("current connection is 7"));
+            }
+            other => panic!("expected statement/connection mismatch error, got {other:?}"),
+        }
+
+        assert!(
+            !conn.inner.closed,
+            "mismatch must fail before any protocol I/O marks the connection closed"
+        );
     }
 
     #[test]
@@ -6148,6 +6187,7 @@ mod tests {
         };
         let stmt = MySqlStatement {
             statement_id: 7,
+            owner_connection_id: 0,
             param_count: 0,
             column_count: 0,
             params: Vec::new(),
@@ -6167,6 +6207,35 @@ mod tests {
         assert!(
             conn.inner.closed,
             "empty COM_STMT_EXECUTE response must keep connection fail-closed"
+        );
+    }
+
+    #[test]
+    fn execute_prepared_rejects_statement_from_different_connection() {
+        let mut conn = make_test_connection();
+        conn.inner.connection_id = 17;
+        let stmt = MySqlStatement {
+            statement_id: 23,
+            owner_connection_id: 88,
+            param_count: 0,
+            column_count: 0,
+            params: Vec::new(),
+            columns: Vec::new(),
+        };
+        let cx = Cx::for_testing();
+
+        let outcome = run(conn.execute_prepared(&cx, &stmt, &[]));
+        match outcome {
+            Outcome::Err(MySqlError::InvalidParameter(msg)) => {
+                assert!(msg.contains("belongs to connection 88"));
+                assert!(msg.contains("current connection is 17"));
+            }
+            other => panic!("expected statement/connection mismatch error, got {other:?}"),
+        }
+
+        assert!(
+            !conn.inner.closed,
+            "mismatch must fail before any protocol I/O marks the connection closed"
         );
     }
 
