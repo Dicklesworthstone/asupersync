@@ -325,6 +325,10 @@ impl BlockingPool {
             min_threads <= max_threads,
             "min_threads must be less than or equal to max_threads"
         );
+        assert!(
+            !options.thread_name_prefix.contains('\0'),
+            "thread_name_prefix may not contain interior NUL bytes"
+        );
 
         let inner = Arc::new(BlockingPoolInner {
             min_threads,
@@ -664,6 +668,14 @@ impl fmt::Debug for BlockingPoolOptions {
 
 /// Spawn a new worker thread on the given pool inner.
 fn spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
+    // Build the named thread builder before mutating worker accounting.
+    // `std::thread::Builder::name` panics on interior NUL bytes, so doing
+    // this after incrementing `active_threads` would leak the counter on
+    // panic and strand the pool in an inconsistent state.
+    let thread_id = inner.next_thread_id.fetch_add(1, Ordering::Relaxed);
+    let name = format!("{}-blocking-{}", inner.thread_name_prefix, thread_id);
+    let builder = thread::Builder::new().name(name);
+
     // Enforce max_threads atomically to prevent overshoot during concurrent spawns
     loop {
         let current = inner.active_threads.load(Ordering::Relaxed);
@@ -680,12 +692,7 @@ fn spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
     }
 
     let inner_clone = Arc::clone(inner);
-    // `next_thread_id` is monotonic and decoupled from active-thread accounting,
-    // so names stay unique even as workers retire and respawn.
-    let thread_id = inner.next_thread_id.fetch_add(1, Ordering::Relaxed);
-    let name = format!("{}-blocking-{}", inner.thread_name_prefix, thread_id);
-
-    match thread::Builder::new().name(name).spawn(move || {
+    match builder.spawn(move || {
         struct ThreadExitGuard<'a> {
             inner: &'a Arc<BlockingPoolInner>,
             retired_with_claim: bool,
@@ -1213,6 +1220,19 @@ mod tests {
     #[should_panic(expected = "min_threads must be less than or equal to max_threads")]
     fn with_config_rejects_min_threads_above_max_threads() {
         let _pool = BlockingPool::with_config(2, 1, BlockingPoolOptions::default());
+    }
+
+    #[test]
+    #[should_panic(expected = "thread_name_prefix may not contain interior NUL bytes")]
+    fn with_config_rejects_thread_name_prefix_with_nul() {
+        let _pool = BlockingPool::with_config(
+            0,
+            1,
+            BlockingPoolOptions {
+                thread_name_prefix: "bad\0name".to_string(),
+                ..Default::default()
+            },
+        );
     }
 
     #[test]
