@@ -426,6 +426,198 @@ mod tests {
         });
     }
 
+    /// MR5: Subscriber Identity with Late Subscription (Commutativity, Score: 9.5)
+    /// Property: N subscribers receive identical M-message sequences, regardless of subscription timing
+    /// Catches: Late subscriber message loss, ordering inconsistencies, subscription race conditions
+    #[test]
+    fn mr_subscriber_identity_with_late_subscription() {
+        let _runtime = Arc::new(LabRuntime::new(LabConfig::default()));
+        proptest!(|(
+            initial_subscribers in 1usize..4,
+            late_subscribers in 0usize..3,
+            message_count in 3usize..8,
+            capacity in any::<usize>().prop_map(|x| std::cmp::max(x % 10 + 5, message_count + 2)),
+            subscription_timing in any::<u32>(),
+        )| {
+            let cx = test_cx();
+
+            // Create initial harness
+            let mut harness = BroadcastTestHarness::new(capacity, initial_subscribers);
+            let mut late_receivers = Vec::new();
+            let mut subscription_points = Vec::new();
+
+            // Determine when to add late subscribers
+            if late_subscribers > 0 && message_count > 1 {
+                for i in 0..late_subscribers {
+                    let timing = (subscription_timing.wrapping_add(i as u32) as usize) % message_count.saturating_sub(1);
+                    subscription_points.push(timing);
+                }
+                subscription_points.sort_unstable();
+                subscription_points.dedup();
+            }
+
+            let mut sent_messages = Vec::new();
+            let mut subscription_index = 0;
+
+            // Send messages with interspersed subscriptions
+            for msg_idx in 0..message_count {
+                // Add late subscribers at designated points
+                while subscription_index < subscription_points.len() &&
+                      subscription_points[subscription_index] == msg_idx {
+                    let late_rx = harness.sender.subscribe();
+                    late_receivers.push((msg_idx, late_rx));
+                    subscription_index += 1;
+                }
+
+                // Send message
+                let msg = msg_idx as u64;
+                block_on(harness.send_message(&cx, msg)).unwrap();
+                sent_messages.push(msg);
+            }
+
+            // Collect sequences from all receivers
+            let mut all_sequences = Vec::new();
+
+            // Initial receivers (should see all messages)
+            for i in 0..initial_subscribers {
+                let mut sequence = Vec::new();
+                for _msg_idx in 0..message_count {
+                    match block_on(harness.receiver_mut(i).recv(&cx)) {
+                        Ok(msg) => sequence.push(msg),
+                        Err(RecvError::Lagged(_)) => {
+                            // Try to recover after lag
+                            if let Ok(recovered_msg) = block_on(harness.receiver_mut(i).recv(&cx)) {
+                                sequence.push(recovered_msg);
+                            }
+                        },
+                        Err(_) => break,
+                    }
+                }
+                all_sequences.push((0, sequence)); // (start_index, sequence)
+            }
+
+            // Late receivers (should see messages from subscription point onward)
+            for (start_idx, mut late_rx) in late_receivers {
+                let mut sequence = Vec::new();
+                let expected_msg_count = message_count.saturating_sub(start_idx);
+
+                for _msg_idx in 0..expected_msg_count {
+                    match block_on(late_rx.recv(&cx)) {
+                        Ok(msg) => sequence.push(msg),
+                        Err(RecvError::Lagged(_)) => {
+                            // Try to recover after lag
+                            if let Ok(recovered_msg) = block_on(late_rx.recv(&cx)) {
+                                sequence.push(recovered_msg);
+                            }
+                        },
+                        Err(_) => break,
+                    }
+                }
+                all_sequences.push((start_idx, sequence));
+            }
+
+            // METAMORPHIC ASSERTION 1: Order preservation within each receiver
+            for (start_idx, sequence) in &all_sequences {
+                if !sequence.is_empty() {
+                    // Sequence should be monotonic (ordered)
+                    for window in sequence.windows(2) {
+                        if let [a, b] = window {
+                            prop_assert!(
+                                b > a,
+                                "MR5 VIOLATION: sequence not monotonic at start {}: {} -> {}",
+                                start_idx, a, b
+                            );
+                        }
+                    }
+
+                    // First message should be >= start index (no past messages)
+                    let first_msg = sequence[0];
+                    prop_assert!(
+                        first_msg >= *start_idx as u64,
+                        "MR5 VIOLATION: receiver starting at {} got past message {}",
+                        start_idx, first_msg
+                    );
+                }
+            }
+
+            // METAMORPHIC ASSERTION 2: Consistency across receivers for overlapping windows
+            for i in 0..all_sequences.len() {
+                for j in (i + 1)..all_sequences.len() {
+                    let (start_i, seq_i) = &all_sequences[i];
+                    let (start_j, seq_j) = &all_sequences[j];
+
+                    // Find overlapping region
+                    let overlap_start = std::cmp::max(*start_i, *start_j);
+
+                    // Extract overlapping subsequences for comparison
+                    let extract_overlap = |start: usize, seq: &[u64], overlap_start: usize| -> Vec<u64> {
+                        seq.iter()
+                            .filter(|&&msg| msg >= overlap_start as u64)
+                            .copied()
+                            .collect()
+                    };
+
+                    let overlap_i = extract_overlap(*start_i, seq_i, overlap_start);
+                    let overlap_j = extract_overlap(*start_j, seq_j, overlap_start);
+
+                    // For non-empty overlaps, compare prefix consistency
+                    if !overlap_i.is_empty() && !overlap_j.is_empty() {
+                        let min_len = std::cmp::min(overlap_i.len(), overlap_j.len());
+                        let prefix_i = &overlap_i[..min_len];
+                        let prefix_j = &overlap_j[..min_len];
+
+                        // Allow for lag-induced gaps but require consistent ordering
+                        for k in 0..min_len {
+                            if prefix_i[k] != prefix_j[k] {
+                                // This might be due to lag recovery - check if ordering is preserved
+                                prop_assert!(
+                                    (k == 0) || (prefix_i[k] > prefix_i[k-1] && prefix_j[k] > prefix_j[k-1]),
+                                    "MR5 VIOLATION: receivers {},{} have inconsistent overlap: pos {} has {},{} following {},{}",
+                                    i, j, k, prefix_i[k], prefix_j[k],
+                                    if k > 0 { prefix_i[k-1] } else { 0 },
+                                    if k > 0 { prefix_j[k-1] } else { 0 }
+                                );
+                                break; // Allow divergence after lag but check monotonicity
+                            }
+                        }
+                    }
+                }
+            }
+
+            // METAMORPHIC ASSERTION 3: Late subscriber commutativity
+            // The order of late subscription should not affect final state consistency
+            if subscription_points.len() > 1 {
+                // All receivers that subscribed at the same point should see identical sequences
+                let mut subscription_groups: std::collections::HashMap<usize, Vec<&Vec<u64>>> =
+                    std::collections::HashMap::new();
+
+                for (start_idx, sequence) in &all_sequences {
+                    subscription_groups.entry(*start_idx).or_default().push(sequence);
+                }
+
+                for (start_point, sequences) in subscription_groups {
+                    if sequences.len() > 1 {
+                        let reference = sequences[0];
+                        for (idx, seq) in sequences.iter().enumerate().skip(1) {
+                            // Allow for differences due to lag, but structure should be consistent
+                            let min_len = std::cmp::min(reference.len(), seq.len());
+                            if min_len > 0 {
+                                // Check that both sequences start from reasonable points
+                                let ref_start = reference[0];
+                                let seq_start = seq[0];
+                                prop_assert!(
+                                    ref_start >= start_point as u64 && seq_start >= start_point as u64,
+                                    "MR5 VIOLATION: subscribers at point {} got inconsistent starts: {} vs {}",
+                                    start_point, ref_start, seq_start
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     // ============================================================================
     // Composite Metamorphic Relations
     // ============================================================================

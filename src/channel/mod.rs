@@ -58,6 +58,10 @@ mod deadlock_test;
 mod mpsc_lost_wakeup_test;
 
 #[cfg(test)]
+#[path = "broadcast_metamorphic.rs"]
+mod broadcast_metamorphic;
+
+#[cfg(test)]
 #[path = "atomicity_test.rs"]
 mod atomicity_test;
 
