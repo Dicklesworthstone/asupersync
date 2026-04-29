@@ -4606,6 +4606,17 @@ mod tests {
         buf.buf
     }
 
+    fn error_packet_payload(code: u16, sql_state: &str, message: &str) -> Vec<u8> {
+        assert_eq!(sql_state.len(), 5, "sql_state must be 5 bytes");
+        let mut buf = PacketBuffer::new();
+        buf.write_byte(0xFF);
+        buf.buf.extend_from_slice(&code.to_le_bytes());
+        buf.write_byte(b'#');
+        buf.write_bytes(sql_state.as_bytes());
+        buf.write_bytes(message.as_bytes());
+        buf.buf
+    }
+
     fn eof_packet_payload(status_flags: u16) -> Vec<u8> {
         let mut buf = PacketBuffer::new();
         buf.write_byte(0xFE);
@@ -5750,6 +5761,51 @@ mod tests {
         assert!(
             !conn.in_transaction(),
             "OK packet status flags must clear transaction state after COMMIT/ROLLBACK"
+        );
+    }
+
+    #[test]
+    fn read_only_transaction_write_rejection_surfaces_server_error() {
+        let (mut conn, server) =
+            make_command_connection_with_single_response(error_packet_payload(
+                1792,
+                "25006",
+                "Cannot execute statement in a READ ONLY transaction",
+            ));
+        let cx = Cx::for_testing();
+
+        let outcome = run(async {
+            let mut tx = MySqlTransaction {
+                conn: &mut conn,
+                finished: false,
+                isolation_level: Some(IsolationLevel::Serializable),
+                read_only: true,
+            };
+            assert!(tx.is_read_only(), "transaction must retain READ ONLY mode");
+            tx.execute_unchecked(&cx, "INSERT INTO widgets (id) VALUES (1)")
+                .await
+        });
+
+        match outcome {
+            Outcome::Err(MySqlError::Server {
+                code,
+                sql_state,
+                message,
+            }) => {
+                assert_eq!(code, 1792);
+                assert_eq!(sql_state, "25006");
+                assert!(
+                    message.contains("READ ONLY"),
+                    "server rejection should explain READ ONLY failure: {message}"
+                );
+            }
+            other => panic!("expected READ ONLY server rejection, got {other:?}"),
+        }
+
+        server.join().expect("join server");
+        assert!(
+            !conn.inner.closed,
+            "server-side READ ONLY rejection must not poison the connection"
         );
     }
 

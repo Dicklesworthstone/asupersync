@@ -376,3 +376,105 @@ fn mysql_real_transaction_isolation_and_rollback() {
         log.end("pass");
     });
 }
+
+#[test]
+fn mysql_real_read_only_transaction_rejects_mutation() {
+    let cfg = RealMySqlConfig::from_env();
+    if skip_if_disabled(&cfg, "mysql_real_read_only_transaction_rejects_mutation") {
+        return;
+    }
+
+    let log = MySqlTestLogger::new(
+        "mysql_real",
+        "mysql_real_read_only_transaction_rejects_mutation",
+    );
+
+    run_test_with_cx(|cx| async move {
+        log.phase("connect");
+        let mut conn = unwrap_mysql(
+            MySqlConnection::connect(&cx, &cfg.url).await,
+            "connect",
+            &log,
+        );
+
+        let table_name = format!(
+            "asupersync_real_tx_ro_{}_{}",
+            conn.connection_id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        );
+        let drop_sql = format!("DROP TABLE IF EXISTS {table_name}");
+        let create_sql = format!(
+            "CREATE TABLE {table_name} (id INT PRIMARY KEY, name VARCHAR(64) NOT NULL) ENGINE=InnoDB"
+        );
+        let insert_sql = format!("INSERT INTO {table_name} (id, name) VALUES (7, 'should-fail')");
+        let verify_sql = format!("SELECT COUNT(*) AS cnt FROM {table_name} WHERE id = 7");
+
+        log.phase("drop_before");
+        unwrap_mysql(
+            conn.execute_unchecked(&cx, &drop_sql).await,
+            "drop_before",
+            &log,
+        );
+
+        log.phase("create_table");
+        unwrap_mysql(
+            conn.execute_unchecked(&cx, &create_sql).await,
+            "create_table",
+            &log,
+        );
+
+        log.phase("begin_read_only");
+        let mut tx = unwrap_mysql(
+            conn.begin_with_isolation(&cx, IsolationLevel::ReadCommitted, true)
+                .await,
+            "begin_read_only",
+            &log,
+        );
+        assert!(tx.is_read_only(), "transaction should be read-only");
+
+        log.phase("insert_rejected");
+        match tx.execute_unchecked(&cx, &insert_sql).await {
+            Outcome::Err(MySqlError::Server {
+                code,
+                sql_state,
+                message,
+            }) => {
+                let mentions_read_only = message.to_ascii_uppercase().contains("READ ONLY");
+                assert!(
+                    sql_state == "25006" || mentions_read_only,
+                    "expected READ ONLY rejection, got code={code} state={sql_state} message={message}"
+                );
+            }
+            other => {
+                log.end("fail");
+                panic!("expected READ ONLY mutation rejection, got {other:?}");
+            }
+        }
+
+        log.phase("rollback");
+        unwrap_mysql(tx.rollback(&cx).await, "rollback", &log);
+
+        log.phase("verify_no_row");
+        let rows = unwrap_mysql(
+            conn.query_unchecked(&cx, &verify_sql).await,
+            "verify_no_row",
+            &log,
+        );
+        assert_eq!(rows.len(), 1, "expected count row");
+        assert_eq!(rows[0].get_i64("cnt").expect("cnt"), 0);
+
+        log.phase("drop_after");
+        unwrap_mysql(
+            conn.execute_unchecked(&cx, &drop_sql).await,
+            "drop_after",
+            &log,
+        );
+
+        log.phase("close");
+        conn.close().await.expect("close");
+        log.end("pass");
+    });
+}
