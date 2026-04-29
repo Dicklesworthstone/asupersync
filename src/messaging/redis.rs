@@ -4593,22 +4593,6 @@ mod tests {
             eprintln!("{}", log_entry);
         }
 
-        fn assert_match(&self, field: &str, expected: &str, actual: &str) -> bool {
-            let matches = expected == actual;
-
-            eprintln!(
-                "{{\"test\":\"{}\",\"event\":\"assertion\",\"field\":\"{}\",\"expected\":\"{}\",\"actual\":\"{}\",\"matches\":{},\"ts\":\"{}\"}}",
-                self.test_name,
-                field,
-                expected,
-                actual,
-                matches,
-                chrono::Utc::now().to_rfc3339()
-            );
-
-            matches
-        }
-
         fn test_end(&self, result: &str) {
             let duration_ms = self.start_time.elapsed().as_millis();
 

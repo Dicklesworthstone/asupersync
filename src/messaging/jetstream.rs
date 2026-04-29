@@ -880,12 +880,13 @@ impl JetStreamContext {
     }
 
     fn parse_api_error(json: &str) -> JsError {
-        let code = extract_json_u64(json, "code").unwrap_or(0) as u32;
+        let error_json = extract_json_object(json, "error").unwrap_or(json);
+        let code = extract_json_u64(error_json, "code").unwrap_or(0) as u32;
         // JetStream uses `err_code` for application-level error codes (e.g.,
         // 10059 = stream not found).  The `code` field is the HTTP-style
         // status (404, 500, etc.).
-        let err_code = extract_json_u64(json, "err_code").unwrap_or(0) as u32;
-        let description = extract_json_string_simple(json, "description")
+        let err_code = extract_json_u64(error_json, "err_code").unwrap_or(0) as u32;
+        let description = extract_json_string_simple(error_json, "description")
             .unwrap_or_else(|| "unknown error".to_string());
 
         if err_code == 10059 {
@@ -1276,6 +1277,47 @@ fn json_escape(s: &str) -> String {
         }
     }
     out
+}
+
+fn extract_json_object<'a>(json: &'a str, key: &str) -> Option<&'a str> {
+    let pattern = format!("\"{key}\":");
+    let start = json.find(&pattern)? + pattern.len();
+    let rest = json[start..].trim_start();
+    if !rest.starts_with('{') {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (idx, ch) in rest.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match ch {
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(&rest[..=idx]);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
 }
 
 fn extract_json_string_simple(json: &str, key: &str) -> Option<String> {
@@ -1970,6 +2012,37 @@ mod tests {
     }
 
     #[test]
+    fn parse_api_error_ignores_consumer_info_wrapper_shadow_fields() {
+        let json = r#"{
+            "type":"io.nats.jetstream.api.v1.consumer_info_response",
+            "stream_name":"ORDERS",
+            "name":"worker",
+            "code":200,
+            "description":"outer wrapper description",
+            "state":{"code":201,"description":"nested wrapper description"},
+            "error":{"code":404,"err_code":10059,"description":"stream not found"}
+        }"#;
+        let err = JetStreamContext::parse_api_error(json);
+        assert!(
+            matches!(err, JsError::StreamNotFound(ref d) if d == "stream not found"),
+            "wrapper fields must not override the nested error object, got: {err:?}"
+        );
+
+        let json2 = r#"{
+            "stream_name":"ORDERS",
+            "name":"worker",
+            "code":200,
+            "description":"outer wrapper description",
+            "error":{"code":503,"description":"server busy"}
+        }"#;
+        let err2 = JetStreamContext::parse_api_error(json2);
+        assert!(
+            matches!(err2, JsError::Api { code: 503, description } if description == "server busy"),
+            "API error fields must come from the nested error object, got: {err2:?}"
+        );
+    }
+
+    #[test]
     fn test_extract_json_string_handles_unicode_escape() {
         // BUG-7 regression: \uXXXX should not truncate the extracted string
         let json = r#"{"name":"hello\u0020world","other":"val"}"#;
@@ -2141,7 +2214,7 @@ mod tests {
             std::env::var("NATS_TEST_URL").unwrap_or_else(|_| "nats://localhost:4222".to_string())
         }
 
-        async fn create_test_client(&mut self, cx: &Cx) -> NatsClient {
+        async fn create_test_client(&mut self, _cx: &Cx) -> NatsClient {
             self.logger.phase("nats_connect");
 
             // In a real implementation, this would connect to the actual NATS server
@@ -2232,7 +2305,7 @@ mod tests {
             "TEST_{}_{}_{}",
             test_name.to_uppercase(),
             std::process::id(),
-            std::thread::current().id().as_u64() % 10000
+            fastrand::u32(..10_000)
         );
 
         StreamConfig::new(stream_name)
@@ -2249,7 +2322,7 @@ mod tests {
             "test_consumer_{}_{}_{}",
             test_name,
             std::process::id(),
-            std::thread::current().id().as_u64() % 10000
+            fastrand::u32(..10_000)
         );
 
         ConsumerConfig::new(consumer_name)
@@ -2285,7 +2358,7 @@ mod tests {
         // harness.logger.server_snapshot(&harness.nats_url, 1, 0);
 
         harness.logger.phase("create_consumer");
-        let consumer_config = create_test_consumer_config("consumer_pull");
+        let _consumer_config = create_test_consumer_config("consumer_pull");
         // harness.track_consumer(&stream_info.config.name, consumer_config.name.as_ref().unwrap());
 
         // Would create real consumer:
@@ -2341,7 +2414,7 @@ mod tests {
     #[ignore = "requires real NATS server - run with NATS_TEST_URL"]
     #[test]
     fn test_jetstream_publish_with_deduplication() {
-        let mut harness = JetStreamTestHarness::new("jetstream_integration", "deduplication");
+        let harness = JetStreamTestHarness::new("jetstream_integration", "deduplication");
 
         harness.logger.phase("setup");
         // Would test publish_with_id deduplication:
@@ -2356,7 +2429,7 @@ mod tests {
     #[ignore = "requires real NATS server - run with NATS_TEST_URL"]
     #[test]
     fn test_jetstream_consumer_timeout_behavior() {
-        let mut harness = JetStreamTestHarness::new("jetstream_integration", "consumer_timeout");
+        let harness = JetStreamTestHarness::new("jetstream_integration", "consumer_timeout");
 
         harness.logger.phase("setup");
         // Would test pull timeout behavior:
@@ -2371,7 +2444,7 @@ mod tests {
     #[ignore = "requires real NATS server - run with NATS_TEST_URL"]
     #[test]
     fn test_jetstream_connection_failure_recovery() {
-        let mut harness = JetStreamTestHarness::new("jetstream_integration", "connection_recovery");
+        let harness = JetStreamTestHarness::new("jetstream_integration", "connection_recovery");
 
         harness.logger.phase("setup");
         // Would test connection failure scenarios:

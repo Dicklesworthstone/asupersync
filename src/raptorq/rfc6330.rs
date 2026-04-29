@@ -1847,9 +1847,17 @@ mod tests {
         // Verify we got the expected number of symbols
         assert!(
             symbols.len() >= test_vector.expected_k,
-            "RFC6330-4.4-1 MUST produce at least K={} source symbols, got {}",
+            "{} {} produce at least K={} source symbols, got {}",
+            test_vector.test_id,
+            test_vector.requirement_level,
             test_vector.expected_k,
             symbols.len()
+        );
+
+        assert!(
+            test_vector.systematic_property,
+            "{} {} requires the encoder to preserve the systematic property",
+            test_vector.test_id, test_vector.requirement_level
         );
 
         // RFC 6330 Section 4.4 Conformance Check 1: Systematic Property
@@ -1917,8 +1925,11 @@ mod tests {
         }
 
         println!(
-            "RFC 6330 §4.4 CONFORMANCE: ✅ PASS - Systematic encoder correctly produces \
-             {} source symbols as first K encoding symbols",
+            "RFC 6330 §4.4 CONFORMANCE: ✅ PASS - {} ({}) systematic_property={} and \
+             the encoder correctly produces {} source symbols as first K encoding symbols",
+            test_vector.test_id,
+            test_vector.requirement_level,
+            test_vector.systematic_property,
             test_vector.expected_k
         );
     }
@@ -1988,7 +1999,8 @@ mod tests {
 
         assert_eq!(
             params.k, test_vector.k,
-            "RFC6330-5.1-1: Source block size K must match input"
+            "{} {}: Source block size K must match input",
+            test_vector.test_id, test_vector.requirement_level
         );
 
         assert_eq!(
@@ -2094,9 +2106,16 @@ mod tests {
         }
 
         println!(
-            "RFC 6330 §5 CONFORMANCE: ✅ PASS - Systematic encoder parameters conform to \
+            "RFC 6330 §5 CONFORMANCE: ✅ PASS - {} ({}) parameters conform to \
              §5.3 table (K={}, K'={}, J={}, S={}, H={}, L={}) and preserve systematic property",
-            params.k, params.k_prime, params.j, params.s, params.h, params.l
+            test_vector.test_id,
+            test_vector.requirement_level,
+            params.k,
+            params.k_prime,
+            params.j,
+            params.s,
+            params.h,
+            params.l
         );
     }
 }

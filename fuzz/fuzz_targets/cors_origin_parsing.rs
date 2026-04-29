@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use asupersync::web::{middleware::CorsMiddleware, Request, Response, Handler};
+use asupersync::web::{extract::Request, middleware::CorsMiddleware, Handler, Response};
 
 /// Fuzz input for CORS Origin parsing under multi-Origin headers (RFC 6454)
 #[derive(Arbitrary, Debug)]
@@ -98,22 +98,12 @@ fuzz_target!(|input: CorsOriginFuzzInput| {
     test_header_case_insensitivity(&input);
 });
 
-fn test_multi_origin_rfc6454_compliance(input: &CorsOriginFuzzInput) {
-    let cors_policy = build_cors_policy(&input.cors_policy_type);
-    let middleware = CorsMiddleware::new(TestHandler, cors_policy);
-
+fn request_with_origin_scenario(input: &CorsOriginFuzzInput) -> Request {
     let mut req = Request::new(input.method.as_str(), &input.path);
 
-    // Add Origin headers based on scenario
     match &input.origin_scenario {
         OriginHeaderScenario::MultipleOrigins { origins } => {
-            // RFC 6454 Section 7: "If the request contains multiple Origin header fields,
-            // or if the Origin header field is malformed, then the user agent MUST NOT
-            // include an Origin header field in the request."
-            // Server should handle multiple Origin headers gracefully
-            for origin in origins {
-                req = req.with_header("Origin", origin);
-            }
+            req = req.with_header("Origin", &coalesced_multi_origin_value(origins));
         }
         OriginHeaderScenario::SingleOrigin { origin } => {
             req = req.with_header("Origin", origin);
@@ -138,15 +128,31 @@ fn test_multi_origin_rfc6454_compliance(input: &CorsOriginFuzzInput) {
         OriginHeaderScenario::CaseVariation { origin } => {
             req = req.with_header("Origin", origin);
         }
-        OriginHeaderScenario::NoOrigin => {
-            // No Origin header added
-        }
+        OriginHeaderScenario::NoOrigin => {}
     }
 
-    // Add extra headers
     for (name, value) in &input.extra_headers {
+        if name.eq_ignore_ascii_case("origin") {
+            continue;
+        }
         req = req.with_header(name, value);
     }
+
+    req
+}
+
+fn coalesced_multi_origin_value(origins: &[String]) -> String {
+    match origins {
+        [] => "null, null".to_string(),
+        [origin] => format!("{origin}, {origin}"),
+        _ => origins.join(", "),
+    }
+}
+
+fn test_multi_origin_rfc6454_compliance(input: &CorsOriginFuzzInput) {
+    let cors_policy = build_cors_policy(&input.cors_policy_type);
+    let middleware = CorsMiddleware::new(TestHandler, cors_policy);
+    let req = request_with_origin_scenario(input);
 
     // Call middleware - should never panic
     let response = middleware.call(req);
@@ -157,31 +163,20 @@ fn test_multi_origin_rfc6454_compliance(input: &CorsOriginFuzzInput) {
         asupersync::web::StatusCode::NO_CONTENT |
         asupersync::web::StatusCode::FORBIDDEN
     ), "Response status should be valid HTTP status");
+
+    if let OriginHeaderScenario::MultipleOrigins { .. } = &input.origin_scenario {
+        assert!(
+            !response.headers.contains_key("access-control-allow-origin"),
+            "malformed multi-origin header must fail closed"
+        );
+    }
 }
 
 fn test_origin_parsing_robustness(input: &CorsOriginFuzzInput) {
     // Test that origin parsing doesn't panic on any input
     let cors_policy = build_cors_policy(&input.cors_policy_type);
     let middleware = CorsMiddleware::new(TestHandler, cors_policy);
-
-    let mut req = Request::new(input.method.as_str(), &input.path);
-
-    // Test with potentially malicious origin values
-    match &input.origin_scenario {
-        OriginHeaderScenario::MalformedOrigin { origin } => {
-            req = req.with_header("Origin", origin);
-
-            // Should handle malformed origins gracefully without panicking
-            let _response = middleware.call(req);
-        }
-        _ => {
-            // Test other scenarios for robustness
-            if let Some((_, first_extra)) = input.extra_headers.first() {
-                req = req.with_header("Origin", first_extra);
-                let _response = middleware.call(req);
-            }
-        }
-    }
+    let _response = middleware.call(request_with_origin_scenario(input));
 }
 
 fn test_cors_policy_consistency(input: &CorsOriginFuzzInput) {

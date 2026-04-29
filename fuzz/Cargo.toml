@@ -2599,6 +2599,17 @@ test = false
 doc = false
 bench = false
 
+# Structure-aware JetStream ConsumerInfo error-response fuzzer.
+# Tests src/messaging/jetstream.rs nested `"error"` parsing against
+# ConsumerInfo-shaped wrappers that shadow `code` / `err_code` /
+# `description` outside the real error object.
+[[bin]]
+name = "jetstream_consumer_info_error_responses"
+path = "fuzz_targets/jetstream_consumer_info_error_responses.rs"
+test = false
+doc = false
+bench = false
+
 # Structure-aware JetStream PullSubscribeOpts wire format fuzzer.
 # Tests src/messaging/jetstream.rs pull subscription request encoding with intelligent input
 # generation for batch/expires JSON format: {"batch":N,"expires":NANOS}.

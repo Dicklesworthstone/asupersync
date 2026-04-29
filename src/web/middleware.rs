@@ -232,6 +232,10 @@ impl<H: Handler> CorsMiddleware<H> {
             && header_value(req, "access-control-request-method").is_some()
     }
 
+    fn is_malformed_origin_value(origin: &str) -> bool {
+        origin.contains(',')
+    }
+
     fn allowed_origin_value(&self, origin: &str) -> Option<String> {
         match &self.policy.allow_origin {
             CorsAllowOrigin::Any => {
@@ -300,6 +304,14 @@ impl<H: Handler> Handler for CorsMiddleware<H> {
         let Some(origin) = header_value(&req, "origin") else {
             return self.inner.call(req);
         };
+
+        if Self::is_malformed_origin_value(&origin) {
+            crate::tracing_compat::warn!(
+                origin = %origin,
+                "CorsMiddleware: dropping malformed multi-origin request header"
+            );
+            return self.inner.call(req);
+        }
 
         let Some(allow_origin) = self.allowed_origin_value(&origin) else {
             // Origin not allowed: pass through without CORS headers.
@@ -2812,6 +2824,46 @@ mod tests {
                 .headers
                 .contains_key("access-control-allow-credentials"),
             "non-allowlisted origin must not receive Allow-Credentials"
+        );
+    }
+
+    #[test]
+    fn cors_multi_origin_header_fails_closed_for_exact_allowlist() {
+        let policy = CorsPolicy {
+            allow_credentials: true,
+            ..CorsPolicy::with_exact_origins(vec!["https://allowed.example".to_string()])
+        };
+        let mw = CorsMiddleware::new(FnHandler::new(ok_handler), policy);
+        let resp = mw.call(
+            Request::new("GET", "/cors")
+                .with_header("Origin", "https://allowed.example, https://attacker.example"),
+        );
+
+        assert_eq!(resp.status, StatusCode::OK, "inner handler still runs");
+        assert!(
+            !resp.headers.contains_key("access-control-allow-origin"),
+            "malformed multi-origin header must not be reflected"
+        );
+        assert!(
+            !resp
+                .headers
+                .contains_key("access-control-allow-credentials"),
+            "malformed multi-origin header must not receive Allow-Credentials"
+        );
+    }
+
+    #[test]
+    fn cors_multi_origin_header_fails_closed_for_any_policy() {
+        let mw = CorsMiddleware::new(FnHandler::new(ok_handler), CorsPolicy::default());
+        let resp = mw.call(
+            Request::new("GET", "/cors")
+                .with_header("Origin", "https://allowed.example, https://attacker.example"),
+        );
+
+        assert_eq!(resp.status, StatusCode::OK, "inner handler still runs");
+        assert!(
+            !resp.headers.contains_key("access-control-allow-origin"),
+            "malformed multi-origin header must not receive wildcard Allow-Origin"
         );
     }
 

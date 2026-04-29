@@ -203,8 +203,7 @@ impl Response {
         let value = self.headers
             .iter()
             .find(|(key, _)| key.eq_ignore_ascii_case(&normalized))
-            .map(|(_, value)| value.clone())
-            .unwrap_or_else(|| default_value.into());
+            .map_or_else(|| default_value.into(), |(_, value)| value.clone());
 
         // Remove all case variants atomically
         self.headers.retain(|key, _| !key.eq_ignore_ascii_case(&normalized));
