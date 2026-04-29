@@ -1,6 +1,7 @@
 #![no_main]
 
-//! Structure-aware fuzz target for PostgreSQL ParameterDescription and ParameterStatus messages.
+//! Structure-aware fuzz target for PostgreSQL ParameterDescription, ParameterStatus,
+//! and adjacent bind-format metadata parsing.
 //!
 //! This target tests the parsing logic in postgres.rs:
 //! - ParameterDescription: parse_parameter_description() lines 4947-4963
@@ -18,6 +19,7 @@
 //! - Valid parameter descriptions with various OID values
 //! - Edge cases: zero parameters, maximum parameters, negative counts
 //! - Parameter status with common and edge-case parameter names/values
+//! - Correlated arbitrary OID vectors + bind/result format-code vectors
 //! - Encoding attacks: embedded nulls, non-UTF8, oversized inputs
 //! - Wire-format corruption: truncated messages, malformed length headers
 
@@ -28,6 +30,10 @@ use libfuzzer_sys::fuzz_target;
 const MAX_MESSAGE_SIZE: usize = 65536;
 /// Maximum number of parameters to avoid excessive memory usage
 const MAX_PARAMETER_COUNT: u16 = 1024;
+/// Smaller cap for the correlated Bind/ParameterDescription fuzz case.
+const MAX_BIND_PARAMETER_COUNT: usize = 64;
+/// Maximum byte length for a single fuzzed bind parameter value
+const MAX_BIND_VALUE_BYTES: usize = 256;
 
 /// Structure-aware generator for PostgreSQL parameter messages
 #[derive(Arbitrary, Debug, Clone)]
@@ -36,6 +42,17 @@ struct ParameterMessage {
     variant: MessageVariant,
     /// Corruption parameters for robustness testing
     corruption: MessageCorruption,
+}
+
+/// Correlated ParameterDescription + Bind metadata case.
+#[derive(Arbitrary, Debug, Clone)]
+struct ParameterTypeBindingCase {
+    statement_name: String,
+    portal_name: String,
+    parameters: Vec<ParameterOid>,
+    param_format_codes: Vec<i16>,
+    result_format_codes: Vec<i16>,
+    parameter_values: Vec<Option<Vec<u8>>>,
 }
 
 /// Different PostgreSQL parameter message types
@@ -296,6 +313,100 @@ impl ParameterDescription {
     }
 }
 
+impl ParameterTypeBindingCase {
+    fn sanitized_cstring(input: &str) -> String {
+        input.chars().filter(|&ch| ch != '\0').collect()
+    }
+
+    fn truncated_parameters(&self) -> Vec<u32> {
+        self.parameters
+            .iter()
+            .take(MAX_BIND_PARAMETER_COUNT)
+            .map(ParameterOid::to_oid)
+            .collect()
+    }
+
+    fn truncated_param_format_codes(&self) -> Vec<i16> {
+        self.param_format_codes
+            .iter()
+            .copied()
+            .take(MAX_BIND_PARAMETER_COUNT)
+            .collect()
+    }
+
+    fn truncated_result_format_codes(&self) -> Vec<i16> {
+        self.result_format_codes
+            .iter()
+            .copied()
+            .take(MAX_BIND_PARAMETER_COUNT)
+            .collect()
+    }
+
+    fn truncated_parameter_values(&self) -> Vec<Option<Vec<u8>>> {
+        self.parameter_values
+            .iter()
+            .take(MAX_BIND_PARAMETER_COUNT)
+            .map(|value| {
+                value
+                    .as_ref()
+                    .map(|bytes| bytes.iter().copied().take(MAX_BIND_VALUE_BYTES).collect())
+            })
+            .collect()
+    }
+
+    fn generate_parameter_description_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let parameters = self.truncated_parameters();
+        let count = parameters.len() as i16;
+        bytes.extend_from_slice(&count.to_be_bytes());
+        for oid in parameters {
+            bytes.extend_from_slice(&(oid as i32).to_be_bytes());
+        }
+        bytes
+    }
+
+    fn generate_bind_frame(&self) -> Vec<u8> {
+        let mut body = Vec::new();
+        let portal_name = Self::sanitized_cstring(&self.portal_name);
+        let statement_name = Self::sanitized_cstring(&self.statement_name);
+        body.extend_from_slice(portal_name.as_bytes());
+        body.push(0);
+        body.extend_from_slice(statement_name.as_bytes());
+        body.push(0);
+
+        let param_format_codes = self.truncated_param_format_codes();
+        body.extend_from_slice(&(param_format_codes.len() as i16).to_be_bytes());
+        for code in &param_format_codes {
+            body.extend_from_slice(&code.to_be_bytes());
+        }
+
+        let parameter_values = self.truncated_parameter_values();
+        body.extend_from_slice(&(parameter_values.len() as i16).to_be_bytes());
+        for value in &parameter_values {
+            match value {
+                None => body.extend_from_slice(&(-1i32).to_be_bytes()),
+                Some(bytes) => {
+                    body.extend_from_slice(&(bytes.len() as i32).to_be_bytes());
+                    body.extend_from_slice(bytes);
+                }
+            }
+        }
+
+        let result_format_codes = self.truncated_result_format_codes();
+        body.extend_from_slice(&(result_format_codes.len() as i16).to_be_bytes());
+        for code in &result_format_codes {
+            body.extend_from_slice(&code.to_be_bytes());
+        }
+
+        let len = i32::try_from(body.len() + 4).expect("bind frame length fits in i32");
+        let mut frame = Vec::with_capacity(1 + 4 + body.len());
+        frame.push(b'B');
+        frame.extend_from_slice(&len.to_be_bytes());
+        frame.extend_from_slice(&body);
+        frame
+    }
+}
+
 impl ParameterOid {
     fn to_oid(&self) -> u32 {
         match self {
@@ -526,23 +637,22 @@ fn test_parameter_description_parsing(data: &[u8]) {
         return;
     }
 
-    // Call the actual parser function from postgres.rs
-    #[cfg(feature = "test-internals")]
-    {
-        // This should never panic - only return errors for invalid data
-        let _result = asupersync::database::postgres::fuzz_parse_parameter_description(data);
+    // This should never panic - only return errors for invalid data.
+    let _result = asupersync::database::postgres::fuzz_parse_parameter_description(data);
 
-        // Additional invariants we can check:
-        if let Ok(oids) = asupersync::database::postgres::fuzz_parse_parameter_description(data) {
-            // If parsing succeeds, the OID vector should be finite
-            assert!(oids.len() < MAX_PARAMETER_COUNT as usize,
-                "Parameter count exceeds reasonable bounds: {}", oids.len());
+    // Additional invariants we can check:
+    if let Ok(oids) = asupersync::database::postgres::fuzz_parse_parameter_description(data) {
+        // If parsing succeeds, the OID vector should be finite
+        assert!(
+            oids.len() < MAX_PARAMETER_COUNT as usize,
+            "Parameter count exceeds reasonable bounds: {}",
+            oids.len()
+        );
 
-            // No OID should be a special sentinel value that might indicate parsing errors
-            for &oid in &oids {
-                // This is a heuristic - we don't expect these specific values in normal operation
-                assert_ne!(oid, u32::MAX, "Suspicious OID value: {}", oid);
-            }
+        // No OID should be a special sentinel value that might indicate parsing errors
+        for &oid in &oids {
+            // This is a heuristic - we don't expect these specific values in normal operation
+            assert_ne!(oid, u32::MAX, "Suspicious OID value: {}", oid);
         }
     }
 }
@@ -554,14 +664,37 @@ fn test_parameter_status_parsing(data: &[u8]) {
         return;
     }
 
-    // Call the actual parser function from postgres.rs
-    #[cfg(feature = "test-internals")]
-    {
-        // This should never panic - only return errors for invalid data
-        let _result = asupersync::database::postgres::fuzz_parse_parameter_status(data);
+    // This should never panic - only return errors for invalid data.
+    let _result = asupersync::database::postgres::fuzz_parse_parameter_status(data);
 
-        // The function doesn't return parsed values, but we can verify it doesn't crash
-        // and handles edge cases gracefully
+    // The function doesn't return parsed values, but we can verify it doesn't crash
+    // and handles edge cases gracefully.
+}
+
+fn test_parameter_type_binding_case(case: &ParameterTypeBindingCase) {
+    let parameter_description = case.generate_parameter_description_bytes();
+    let bind_frame = case.generate_bind_frame();
+
+    let parsed_oids =
+        asupersync::database::postgres::fuzz_parse_parameter_description(&parameter_description);
+    let parsed_bind = asupersync::database::postgres::fuzz_parse_bind_message(&bind_frame);
+
+    if let Ok(oids) = parsed_oids {
+        assert_eq!(oids, case.truncated_parameters());
+    }
+
+    if let Ok(bind) = parsed_bind {
+        assert_eq!(
+            bind.statement_name,
+            ParameterTypeBindingCase::sanitized_cstring(&case.statement_name)
+        );
+        assert_eq!(
+            bind.portal,
+            ParameterTypeBindingCase::sanitized_cstring(&case.portal_name)
+        );
+        assert_eq!(bind.param_format_codes, case.truncated_param_format_codes());
+        assert_eq!(bind.result_format_codes, case.truncated_result_format_codes());
+        assert_eq!(bind.parameter_values, case.truncated_parameter_values());
     }
 }
 
@@ -589,6 +722,13 @@ fuzz_target!(|data: &[u8]| {
             // ParameterDescription parser and vice versa
             test_parameter_description_parsing(&generated_bytes);
             test_parameter_status_parsing(&generated_bytes);
+        }
+    }
+
+    if data.len() >= std::mem::size_of::<ParameterTypeBindingCase>() {
+        let mut u = Unstructured::new(data);
+        if let Ok(case) = ParameterTypeBindingCase::arbitrary(&mut u) {
+            test_parameter_type_binding_case(&case);
         }
     }
 });
