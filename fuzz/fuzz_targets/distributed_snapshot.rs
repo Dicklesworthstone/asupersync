@@ -33,6 +33,22 @@ use libfuzzer_sys::fuzz_target;
 
 /// Maximum input size to prevent memory exhaustion during fuzzing
 const MAX_INPUT_SIZE: usize = 1024 * 1024; // 1MB
+const SNAP_MAGIC_LEN: usize = 4;
+const SNAP_VERSION_LEN: usize = 1;
+const REGION_ID_LEN: usize = 8;
+const TASK_ID_LEN: usize = 8;
+const REGION_STATE_LEN: usize = 1;
+const U32_LEN: usize = 4;
+const U64_LEN: usize = 8;
+const TASK_ENTRY_LEN: usize = TASK_ID_LEN + 2;
+const MAX_STRING_BYTES: usize = 256;
+const REGION_ID_OFFSET: usize = SNAP_MAGIC_LEN + SNAP_VERSION_LEN;
+const REGION_STATE_OFFSET: usize = REGION_ID_OFFSET + REGION_ID_LEN;
+const TIMESTAMP_OFFSET: usize = REGION_STATE_OFFSET + REGION_STATE_LEN;
+const SEQUENCE_OFFSET: usize = TIMESTAMP_OFFSET + U64_LEN;
+const ORIGIN_ID_OFFSET: usize = SEQUENCE_OFFSET + U64_LEN;
+const EPOCH_OFFSET: usize = ORIGIN_ID_OFFSET + U64_LEN;
+const TASK_COUNT_OFFSET: usize = EPOCH_OFFSET + U64_LEN;
 
 /// Snapshot fuzzing configuration
 #[derive(Arbitrary, Debug)]
@@ -58,6 +74,10 @@ struct SnapshotConfig {
     timestamp: u64,
     /// Sequence number
     sequence: u64,
+    /// Origin authority identifier
+    origin_id: u64,
+    /// Provenance epoch
+    epoch: u64,
     /// Task configurations
     tasks: Vec<TaskConfig>,
     /// Child region IDs
@@ -318,6 +338,8 @@ enum FieldType {
     TaskId,
     Timestamp,
     Sequence,
+    OriginId,
+    Epoch,
     Priority,
     FinalizerCount,
 }
@@ -356,7 +378,14 @@ fn build_base_snapshot(config: &SnapshotConfig) -> RegionSnapshot {
     snapshot.state = state;
     snapshot.timestamp = Time::from_nanos(config.timestamp);
     snapshot.sequence = config.sequence;
+    snapshot.origin_id = config.origin_id;
+    snapshot.epoch = config.epoch;
     snapshot.finalizer_count = config.finalizer_count;
+    snapshot.budget.deadline_nanos = optional_u64_value(&config.budget.deadline);
+    snapshot.budget.polls_remaining = optional_u32_value(&config.budget.polls_remaining);
+    snapshot.budget.cost_remaining = optional_u64_value(&config.budget.cost_remaining);
+    snapshot.cancel_reason = optional_string_value(&config.cancel_reason);
+    snapshot.parent = optional_region_id(&config.parent);
 
     // Limit metadata size to prevent OOM
     let limited_metadata = config
@@ -533,16 +562,20 @@ fn apply_operation(
             };
 
             // Inject boundary values into various numeric fields
-            inject_boundary_value_at_offset(snapshot_bytes, 14, value); // timestamp
-            inject_boundary_value_at_offset(snapshot_bytes, 22, value); // sequence
+            inject_boundary_value_at_offset(snapshot_bytes, TIMESTAMP_OFFSET, value); // timestamp
+            inject_boundary_value_at_offset(snapshot_bytes, SEQUENCE_OFFSET, value); // sequence
+            inject_boundary_value_at_offset(snapshot_bytes, ORIGIN_ID_OFFSET, value); // origin_id
+            inject_boundary_value_at_offset(snapshot_bytes, EPOCH_OFFSET, value); // epoch
         }
 
         SnapshotOperation::PartialFieldCorruption { field, corruption } => {
             let offset = match field {
-                FieldType::RegionId => Some(5), // After magic + version
+                FieldType::RegionId => Some(REGION_ID_OFFSET),
                 FieldType::TaskId => find_task_id_offset(snapshot_bytes),
-                FieldType::Timestamp => Some(14),
-                FieldType::Sequence => Some(22),
+                FieldType::Timestamp => Some(TIMESTAMP_OFFSET),
+                FieldType::Sequence => Some(SEQUENCE_OFFSET),
+                FieldType::OriginId => Some(ORIGIN_ID_OFFSET),
+                FieldType::Epoch => Some(EPOCH_OFFSET),
                 FieldType::Priority => find_task_priority_offset(snapshot_bytes),
                 FieldType::FinalizerCount => find_finalizer_count_offset(snapshot_bytes),
             };
@@ -586,96 +619,220 @@ fn test_snapshot_deserializer(data: &[u8], _config: &ParserConfig) {
 
 // Helper functions for finding field offsets in the binary format
 
-fn find_task_state_offset(data: &[u8]) -> Option<usize> {
-    // Task states start after: magic(4) + version(1) + region_id(8) + state(1)
-    // + timestamp(8) + sequence(8) + task_count(4) + task_id(8)
-    let base_offset = 4 + 1 + 8 + 1 + 8 + 8 + 4 + 8; // = 42
-    if data.len() > base_offset {
-        Some(base_offset)
-    } else {
-        None
+#[derive(Debug, Clone, Copy)]
+struct SnapshotLayout {
+    task_count: u32,
+    first_task_offset: usize,
+    children_count_offset: usize,
+    finalizer_count_offset: usize,
+    deadline_presence_offset: usize,
+    polls_presence_offset: usize,
+    cost_presence_offset: usize,
+    cancel_reason_presence_offset: usize,
+    cancel_reason_length_offset: Option<usize>,
+    cancel_reason_data_offset: Option<usize>,
+    parent_presence_offset: usize,
+    metadata_length_offset: usize,
+}
+
+fn optional_u64_value(config: &OptionalU64Config) -> Option<u64> {
+    match config {
+        OptionalU64Config::None => None,
+        OptionalU64Config::Some { value } | OptionalU64Config::Invalid { value, .. } => {
+            Some(*value)
+        }
     }
+}
+
+fn optional_u32_value(config: &OptionalU32Config) -> Option<u32> {
+    match config {
+        OptionalU32Config::None => None,
+        OptionalU32Config::Some { value } | OptionalU32Config::Invalid { value, .. } => {
+            Some(*value)
+        }
+    }
+}
+
+fn optional_string_value(config: &OptionalStringConfig) -> Option<String> {
+    match config {
+        OptionalStringConfig::None => None,
+        OptionalStringConfig::Some { content }
+        | OptionalStringConfig::InvalidFlag { content, .. } => {
+            Some(content.chars().take(MAX_STRING_BYTES).collect())
+        }
+        OptionalStringConfig::InvalidUtf8 { bytes, .. } => {
+            let sanitized: Vec<u8> = bytes.iter().take(MAX_STRING_BYTES).copied().collect();
+            Some(String::from_utf8_lossy(&sanitized).into_owned())
+        }
+    }
+}
+
+fn optional_region_id(config: &OptionalIdConfig) -> Option<RegionId> {
+    match config {
+        OptionalIdConfig::None => None,
+        OptionalIdConfig::Some { id } | OptionalIdConfig::Invalid { id, .. } => {
+            Some(id.to_region_id())
+        }
+    }
+}
+
+fn read_u32_at(data: &[u8], offset: usize) -> Option<u32> {
+    let end = offset.checked_add(U32_LEN)?;
+    let bytes = data.get(offset..end)?;
+    Some(u32::from_le_bytes(bytes.try_into().ok()?))
+}
+
+fn advance_optional_u64(data: &[u8], flag_offset: usize) -> Option<usize> {
+    match *data.get(flag_offset)? {
+        0 => flag_offset.checked_add(1),
+        1 => flag_offset
+            .checked_add(1 + U64_LEN)
+            .filter(|end| *end <= data.len()),
+        _ => None,
+    }
+}
+
+fn advance_optional_u32(data: &[u8], flag_offset: usize) -> Option<usize> {
+    match *data.get(flag_offset)? {
+        0 => flag_offset.checked_add(1),
+        1 => flag_offset
+            .checked_add(1 + U32_LEN)
+            .filter(|end| *end <= data.len()),
+        _ => None,
+    }
+}
+
+fn advance_optional_string(
+    data: &[u8],
+    flag_offset: usize,
+) -> Option<(Option<usize>, Option<usize>, usize)> {
+    match *data.get(flag_offset)? {
+        0 => Some((None, None, flag_offset.checked_add(1)?)),
+        1 => {
+            let len_offset = flag_offset.checked_add(1)?;
+            let len = usize::try_from(read_u32_at(data, len_offset)?).ok()?;
+            let data_offset = len_offset.checked_add(U32_LEN)?;
+            let next = data_offset.checked_add(len)?;
+            if next > data.len() {
+                return None;
+            }
+            Some((Some(len_offset), Some(data_offset), next))
+        }
+        _ => None,
+    }
+}
+
+fn advance_optional_parent(data: &[u8], flag_offset: usize) -> Option<usize> {
+    match *data.get(flag_offset)? {
+        0 => flag_offset.checked_add(1),
+        1 => flag_offset
+            .checked_add(1 + REGION_ID_LEN)
+            .filter(|end| *end <= data.len()),
+        _ => None,
+    }
+}
+
+fn derive_snapshot_layout(data: &[u8]) -> Option<SnapshotLayout> {
+    let task_count = read_u32_at(data, TASK_COUNT_OFFSET)?;
+    let first_task_offset = TASK_COUNT_OFFSET.checked_add(U32_LEN)?;
+    let task_bytes = usize::try_from(task_count)
+        .ok()?
+        .checked_mul(TASK_ENTRY_LEN)?;
+    let children_count_offset = first_task_offset.checked_add(task_bytes)?;
+    let children_count = read_u32_at(data, children_count_offset)?;
+    let first_child_offset = children_count_offset.checked_add(U32_LEN)?;
+    let child_bytes = usize::try_from(children_count)
+        .ok()?
+        .checked_mul(REGION_ID_LEN)?;
+    let finalizer_count_offset = first_child_offset.checked_add(child_bytes)?;
+    if data.len() < finalizer_count_offset.checked_add(U32_LEN)? {
+        return None;
+    }
+
+    let deadline_presence_offset = finalizer_count_offset.checked_add(U32_LEN)?;
+    let polls_presence_offset = advance_optional_u64(data, deadline_presence_offset)?;
+    let cost_presence_offset = advance_optional_u32(data, polls_presence_offset)?;
+    let cancel_reason_presence_offset = advance_optional_u64(data, cost_presence_offset)?;
+    let (
+        cancel_reason_length_offset,
+        cancel_reason_data_offset,
+        parent_presence_offset,
+    ) = advance_optional_string(data, cancel_reason_presence_offset)?;
+    let metadata_length_offset = advance_optional_parent(data, parent_presence_offset)?;
+    if data.len() < metadata_length_offset.checked_add(U32_LEN)? {
+        return None;
+    }
+
+    Some(SnapshotLayout {
+        task_count,
+        first_task_offset,
+        children_count_offset,
+        finalizer_count_offset,
+        deadline_presence_offset,
+        polls_presence_offset,
+        cost_presence_offset,
+        cancel_reason_presence_offset,
+        cancel_reason_length_offset,
+        cancel_reason_data_offset,
+        parent_presence_offset,
+        metadata_length_offset,
+    })
+}
+
+fn find_task_state_offset(data: &[u8]) -> Option<usize> {
+    let layout = derive_snapshot_layout(data)?;
+    if layout.task_count == 0 {
+        return None;
+    }
+    layout.first_task_offset.checked_add(TASK_ID_LEN)
 }
 
 fn find_task_count_offset() -> Option<usize> {
-    // Task count comes after: magic(4) + version(1) + region_id(8) + state(1) + timestamp(8) + sequence(8)
-    Some(4 + 1 + 8 + 1 + 8 + 8) // = 30
+    Some(TASK_COUNT_OFFSET)
 }
 
 fn find_children_count_offset(data: &[u8]) -> Option<usize> {
-    // Children count comes after tasks, need to calculate dynamically
-    let task_count_offset = 30;
-    if data.len() > task_count_offset + 4 {
-        let task_count_bytes = &data[task_count_offset..task_count_offset + 4];
-        let task_count = u32::from_le_bytes([
-            task_count_bytes[0],
-            task_count_bytes[1],
-            task_count_bytes[2],
-            task_count_bytes[3],
-        ]);
-        let tasks_size = (task_count as usize).saturating_mul(10); // Each task is 10 bytes
-        Some(task_count_offset + 4 + tasks_size)
-    } else {
-        None
+    derive_snapshot_layout(data).map(|layout| layout.children_count_offset)
+}
+
+fn find_metadata_length_offset(data: &[u8]) -> Option<usize> {
+    derive_snapshot_layout(data).map(|layout| layout.metadata_length_offset)
+}
+
+fn find_presence_flag_offset(data: &[u8], flag_index: usize) -> Option<usize> {
+    let layout = derive_snapshot_layout(data)?;
+    match flag_index {
+        0 => Some(layout.deadline_presence_offset),
+        1 => Some(layout.polls_presence_offset),
+        2 => Some(layout.cost_presence_offset),
+        3 => Some(layout.cancel_reason_presence_offset),
+        4 => Some(layout.parent_presence_offset),
+        _ => None,
     }
 }
 
-fn find_metadata_length_offset(_data: &[u8]) -> Option<usize> {
-    // Metadata length is near the end, after all other fields
-    // This is a simplified heuristic
-    None // Skip for now due to complexity
+fn find_string_data_offset(data: &[u8]) -> Option<usize> {
+    derive_snapshot_layout(data).and_then(|layout| layout.cancel_reason_data_offset)
 }
 
-fn find_presence_flag_offset(_data: &[u8], _flag_index: usize) -> Option<usize> {
-    // Find presence flags for optional fields (budget, parent, etc.)
-    // This would need more sophisticated parsing
-    None // Simplified for now
-}
-
-fn find_string_data_offset(_data: &[u8]) -> Option<usize> {
-    // Find string data for cancel reason
-    None // Simplified for now
-}
-
-fn find_string_length_offset(_data: &[u8]) -> Option<usize> {
-    // Find string length field
-    None // Simplified for now
+fn find_string_length_offset(data: &[u8]) -> Option<usize> {
+    derive_snapshot_layout(data).and_then(|layout| layout.cancel_reason_length_offset)
 }
 
 fn find_task_id_offset(data: &[u8]) -> Option<usize> {
-    // First task ID comes after task count
-    let task_count_offset = 30;
-    if data.len() > task_count_offset + 4 {
-        Some(task_count_offset + 4)
-    } else {
-        None
+    let layout = derive_snapshot_layout(data)?;
+    if layout.task_count == 0 {
+        return None;
     }
+    Some(layout.first_task_offset)
 }
 
 fn find_task_priority_offset(data: &[u8]) -> Option<usize> {
-    // Task priority is 9 bytes after task ID (8 bytes task ID + 1 byte state)
-    find_task_id_offset(data).map(|task_id_offset| task_id_offset + 8 + 1)
+    find_task_id_offset(data).and_then(|task_id_offset| task_id_offset.checked_add(TASK_ID_LEN + 1))
 }
 
 fn find_finalizer_count_offset(data: &[u8]) -> Option<usize> {
-    // Finalizer count comes after children
-    if let Some(children_offset) = find_children_count_offset(data) {
-        if data.len() > children_offset + 4 {
-            let children_count_bytes = &data[children_offset..children_offset + 4];
-            let children_count = u32::from_le_bytes([
-                children_count_bytes[0],
-                children_count_bytes[1],
-                children_count_bytes[2],
-                children_count_bytes[3],
-            ]);
-            let children_size = (children_count as usize).saturating_mul(8); // Each child is 8 bytes
-            Some(children_offset + 4 + children_size)
-        } else {
-            None
-        }
-    } else {
-        None
-    }
+    derive_snapshot_layout(data).map(|layout| layout.finalizer_count_offset)
 }
 
 fn write_u32_at(data: &mut [u8], offset: usize, value: u32) {
