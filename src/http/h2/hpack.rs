@@ -3828,18 +3828,18 @@ mod tests {
 
         // Test headers that exercise various static table entries
         let test_headers = vec![
-            Header::new(":method", "GET"),        // Static table index 2
-            Header::new(":method", "POST"),       // Static table index 3
-            Header::new(":path", "/"),            // Static table index 4
-            Header::new(":path", "/index.html"),  // Static table index 5
-            Header::new(":scheme", "https"),      // Static table index 7
-            Header::new(":status", "200"),        // Static table index 8
-            Header::new(":status", "404"),        // Static table index 13
+            Header::new(":method", "GET"),                   // Static table index 2
+            Header::new(":method", "POST"),                  // Static table index 3
+            Header::new(":path", "/"),                       // Static table index 4
+            Header::new(":path", "/index.html"),             // Static table index 5
+            Header::new(":scheme", "https"),                 // Static table index 7
+            Header::new(":status", "200"),                   // Static table index 8
+            Header::new(":status", "404"),                   // Static table index 13
             Header::new("accept-encoding", "gzip, deflate"), // Static table index 16
-            Header::new("cache-control", ""),     // Static table index 24
-            Header::new("content-type", ""),      // Static table index 31
-            Header::new("host", ""),              // Static table index 38
-            Header::new("user-agent", "custom"), // Not in static table - literal
+            Header::new("cache-control", ""),                // Static table index 24
+            Header::new("content-type", ""),                 // Static table index 31
+            Header::new("host", ""),                         // Static table index 38
+            Header::new("user-agent", "custom"),             // Not in static table - literal
         ];
 
         // Encode the headers
@@ -3851,7 +3851,9 @@ mod tests {
 
         // Decode back to verify round-trip
         let mut encoded_bytes = encoded.freeze();
-        let decoded_headers = decoder.decode(&mut encoded_bytes).expect("decode should succeed");
+        let decoded_headers = decoder
+            .decode(&mut encoded_bytes)
+            .expect("decode should succeed");
 
         // Golden snapshot of decoded headers to verify structure stability
         assert_debug_snapshot!("hpack_static_table_decoded", decoded_headers);
@@ -3871,7 +3873,6 @@ mod tests {
         ///
         /// This test verifies our encoder produces the exact wire format specified
         /// in RFC 7541 §B.3 response example, ensuring full specification compliance.
-
         // RFC 7541 §B.3 response headers as specified
         let headers = vec![
             Header::new(":status", "302"),
@@ -3915,18 +3916,30 @@ mod tests {
         // Verify decoder can parse our output (round-trip conformance)
         let mut decoder = Decoder::new();
         let mut encoded_bytes = encoded.freeze();
-        let decoded = decoder.decode(&mut encoded_bytes).expect(
-            "RFC 7541 §B.3 conformance: decoder must parse encoder output"
-        );
+        let decoded = decoder
+            .decode(&mut encoded_bytes)
+            .expect("RFC 7541 §B.3 conformance: decoder must parse encoder output");
 
         // Verify header semantic correctness
-        assert_eq!(decoded, headers,
-            "RFC 7541 §B.3 round-trip conformance: decoded headers must match original");
+        assert_eq!(
+            decoded, headers,
+            "RFC 7541 §B.3 round-trip conformance: decoded headers must match original"
+        );
 
         // Additional conformance checks
-        assert_eq!(decoded.len(), 4, "RFC 7541 §B.3: must encode exactly 4 headers");
-        assert_eq!(decoded[0].name, ":status", "RFC 7541 §B.3: first header must be :status");
-        assert_eq!(decoded[0].value, "302", "RFC 7541 §B.3: status value must be 302");
+        assert_eq!(
+            decoded.len(),
+            4,
+            "RFC 7541 §B.3: must encode exactly 4 headers"
+        );
+        assert_eq!(
+            decoded[0].name, ":status",
+            "RFC 7541 §B.3: first header must be :status"
+        );
+        assert_eq!(
+            decoded[0].value, "302",
+            "RFC 7541 §B.3: status value must be 302"
+        );
     }
 
     // ========== RFC 7541 HPACK CONFORMANCE TESTING ==========
@@ -3954,10 +3967,8 @@ mod tests {
                     value: "custom-header".to_string(),
                 }],
                 expected_encoding: &[
-                    0x40, 0x0a, 0x63, 0x75, 0x73, 0x74, 0x6f, 0x6d,
-                    0x2d, 0x6b, 0x65, 0x79, 0x0d, 0x63, 0x75, 0x73,
-                    0x74, 0x6f, 0x6d, 0x2d, 0x68, 0x65, 0x61, 0x64,
-                    0x65, 0x72
+                    0x40, 0x0a, 0x63, 0x75, 0x73, 0x74, 0x6f, 0x6d, 0x2d, 0x6b, 0x65, 0x79, 0x0d,
+                    0x63, 0x75, 0x73, 0x74, 0x6f, 0x6d, 0x2d, 0x68, 0x65, 0x61, 0x64, 0x65, 0x72,
                 ],
                 requirement_level: "MUST",
             },
@@ -3968,7 +3979,10 @@ mod tests {
                     name: ":path".to_string(),
                     value: "/sample/path".to_string(),
                 }],
-                expected_encoding: &[0x04, 0x0c, 0x2f, 0x73, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x2f, 0x70, 0x61, 0x74, 0x68],
+                expected_encoding: &[
+                    0x04, 0x0c, 0x2f, 0x73, 0x61, 0x6d, 0x70, 0x6c, 0x65, 0x2f, 0x70, 0x61, 0x74,
+                    0x68,
+                ],
                 requirement_level: "MUST",
             },
             // RFC 7541 Appendix C.3: Dynamic Table Size Update
@@ -3988,10 +4002,8 @@ mod tests {
                     value: "custom-header".to_string(),
                 }],
                 expected_encoding: &[
-                    0x00, 0x0a, 0x63, 0x75, 0x73, 0x74, 0x6f, 0x6d,
-                    0x2d, 0x6b, 0x65, 0x79, 0x0d, 0x63, 0x75, 0x73,
-                    0x74, 0x6f, 0x6d, 0x2d, 0x68, 0x65, 0x61, 0x64,
-                    0x65, 0x72
+                    0x00, 0x0a, 0x63, 0x75, 0x73, 0x74, 0x6f, 0x6d, 0x2d, 0x6b, 0x65, 0x79, 0x0d,
+                    0x63, 0x75, 0x73, 0x74, 0x6f, 0x6d, 0x2d, 0x68, 0x65, 0x61, 0x64, 0x65, 0x72,
                 ],
                 requirement_level: "MUST",
             },
@@ -4023,6 +4035,7 @@ mod tests {
             }
 
             let encoded = output.freeze();
+            let exact_encoding_match = encoded.as_ref() == test_case.expected_encoding;
 
             // For now, we verify round-trip correctness rather than exact byte matching
             // since our implementation may make different but valid encoding choices
@@ -4032,27 +4045,56 @@ mod tests {
                     Ok(decoded_headers) => {
                         if decoded_headers == test_case.headers {
                             pass_count += 1;
-                            eprintln!("✓ {}: {}", test_case.id, test_case.description);
+                            eprintln!(
+                                "✓ {} [{}]: {} (exact_encoding_match={})",
+                                test_case.id,
+                                test_case.requirement_level,
+                                test_case.description,
+                                exact_encoding_match
+                            );
                         } else {
                             fail_count += 1;
-                            eprintln!("✗ {}: Header mismatch\n  Expected: {:?}\n  Got: {:?}",
-                                test_case.id, test_case.headers, decoded_headers);
+                            eprintln!(
+                                "✗ {} [{}]: Header mismatch\n  Expected: {:?}\n  Got: {:?}\n  Exact encoding match: {}",
+                                test_case.id,
+                                test_case.requirement_level,
+                                test_case.headers,
+                                decoded_headers,
+                                exact_encoding_match
+                            );
                         }
                     }
                     Err(e) => {
                         fail_count += 1;
-                        eprintln!("✗ {}: Decode error: {}", test_case.id, e);
+                        eprintln!(
+                            "✗ {} [{}]: Decode error: {}",
+                            test_case.id, test_case.requirement_level, e
+                        );
                     }
                 }
             } else {
                 // For table size updates, just verify no error occurred
                 pass_count += 1;
-                eprintln!("✓ {}: {}", test_case.id, test_case.description);
+                eprintln!(
+                    "✓ {} [{}]: {} (exact_encoding_match={})",
+                    test_case.id,
+                    test_case.requirement_level,
+                    test_case.description,
+                    exact_encoding_match
+                );
             }
         }
 
-        eprintln!("RFC 7541 Conformance: {}/{} tests passed", pass_count, pass_count + fail_count);
-        assert_eq!(fail_count, 0, "{} RFC 7541 conformance tests failed", fail_count);
+        eprintln!(
+            "RFC 7541 Conformance: {}/{} tests passed",
+            pass_count,
+            pass_count + fail_count
+        );
+        assert_eq!(
+            fail_count, 0,
+            "{} RFC 7541 conformance tests failed",
+            fail_count
+        );
     }
 
     #[test]
@@ -4066,10 +4108,12 @@ mod tests {
         encoder.set_max_table_size(small_table_size);
         decoder.set_allowed_table_size(small_table_size);
 
-        let large_headers = (0..10).map(|i| Header {
-            name: format!("x-large-header-{i}"),
-            value: "x".repeat(200), // Large enough to fill the table
-        }).collect::<Vec<_>>();
+        let large_headers = (0..10)
+            .map(|i| Header {
+                name: format!("x-large-header-{i}"),
+                value: "x".repeat(200), // Large enough to fill the table
+            })
+            .collect::<Vec<_>>();
 
         // Encode headers in batches to observe eviction behavior
         let mut all_encoded = Vec::new();
@@ -4084,9 +4128,12 @@ mod tests {
             let mut bytes = encoded_chunk.clone();
             match decoder.decode(&mut bytes) {
                 Ok(decoded) => {
-                    let expected_chunk = &large_headers[i * 2..(i * 2 + 2).min(large_headers.len())];
-                    assert_eq!(decoded, expected_chunk,
-                        "Dynamic table eviction test failed at chunk {i}");
+                    let expected_chunk =
+                        &large_headers[i * 2..(i * 2 + 2).min(large_headers.len())];
+                    assert_eq!(
+                        decoded, expected_chunk,
+                        "Dynamic table eviction test failed at chunk {i}"
+                    );
                 }
                 Err(e) => panic!("Dynamic table eviction decode failed at chunk {i}: {e}"),
             }
@@ -4099,13 +4146,13 @@ mod tests {
     fn hpack_huffman_encoding_round_trip_conformance() {
         // Test Huffman encoding round-trip for various string lengths and patterns
         let test_strings = vec![
-            "", // Empty string
-            "a", // Single character
-            "GET", // Short string
-            "/very/long/path/with/many/segments", // Path-like string
+            "",                                                                // Empty string
+            "a",                                                               // Single character
+            "GET",                                                             // Short string
+            "/very/long/path/with/many/segments",                              // Path-like string
             "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", // Accept header
-            "Mozilla/5.0 (compatible; asupersync/0.3.1)", // User agent
-            "Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9", // JWT token
+            "Mozilla/5.0 (compatible; asupersync/0.3.1)",                      // User agent
+            "Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9",                     // JWT token
         ];
 
         let mut encoder = Encoder::new();
@@ -4122,11 +4169,15 @@ mod tests {
             let encoded = output.freeze();
 
             let mut bytes = encoded;
-            let decoded = decoder.decode(&mut bytes)
+            let decoded = decoder
+                .decode(&mut bytes)
                 .expect("Huffman encoding round-trip must succeed");
 
-            assert_eq!(decoded, headers,
-                "Huffman encoding round-trip failed for string: {:?}", test_value);
+            assert_eq!(
+                decoded, headers,
+                "Huffman encoding round-trip failed for string: {:?}",
+                test_value
+            );
         }
 
         eprintln!("✓ Huffman encoding round-trip conformance test passed");
@@ -4213,11 +4264,15 @@ mod tests {
             let encoded = output.freeze();
 
             let mut bytes = encoded;
-            let decoded = decoder.decode(&mut bytes)
+            let decoded = decoder
+                .decode(&mut bytes)
                 .expect("Static table entry encoding must succeed");
 
-            assert_eq!(decoded, headers,
-                "Static table conformance failed for entry: {}:{}", name, value);
+            assert_eq!(
+                decoded, headers,
+                "Static table conformance failed for entry: {}:{}",
+                name, value
+            );
         }
 
         eprintln!("✓ Static table conformance test passed");

@@ -2053,7 +2053,8 @@ impl DirectionalDeadlockReport {
             }));
         }
 
-        lines.into_iter()
+        lines
+            .into_iter()
             .map(|line| line.to_string())
             .collect::<Vec<_>>()
             .join("\n")
@@ -2092,7 +2093,8 @@ impl RegionOpenExplanation {
             }));
         }
 
-        lines.into_iter()
+        lines
+            .into_iter()
             .map(|line| line.to_string())
             .collect::<Vec<_>>()
             .join("\n")
@@ -2131,7 +2133,8 @@ impl TaskBlockedExplanation {
             }));
         }
 
-        lines.into_iter()
+        lines
+            .into_iter()
             .map(|line| line.to_string())
             .collect::<Vec<_>>()
             .join("\n")
@@ -2149,7 +2152,8 @@ impl ObligationLeak {
             "holder_task": self.holder_task.map(|id| format!("{:?}", id)),
             "region_id": format!("{:?}", self.region_id),
             "age_ms": self.age.as_millis()
-        }).to_string()
+        })
+        .to_string()
     }
 }
 
@@ -5525,14 +5529,16 @@ mod tests {
         init_test("diagnostic_runtime_state_dump_golden");
 
         let mut state = RuntimeState::new();
-        let root_region = state.root_region();
+        let root_region = state.create_root_region(Budget::INFINITE);
 
         // Create known-state runtime: 3 tasks, 1 obligation, 1 cancel
         let task1 = insert_task(&mut state, root_region, TaskState::Running);
-        let task2 = insert_task(&mut state, root_region, TaskState::Blocked);
-        let task3 = insert_task(&mut state, root_region, TaskState::Completed {
-            outcome: Outcome::Cancelled,
-        });
+        let task2 = insert_task(&mut state, root_region, TaskState::Running);
+        let task3 = insert_task(
+            &mut state,
+            root_region,
+            TaskState::Completed(Outcome::Cancelled(CancelReason::timeout())),
+        );
 
         // Add 1 obligation held by task1
         let obligation = insert_obligation(
@@ -5542,11 +5548,6 @@ mod tests {
             ObligationKind::SendPermit,
             Time::from_nanos(10_000),
         );
-
-        // Mark task3 as cancelled with a test reason
-        if let Some(record) = state.task_mut(task3) {
-            record.cancel_reason = Some(CancelReason::timeout());
-        }
 
         let diagnostics = Diagnostics::new(Arc::new(state));
 
@@ -5566,7 +5567,7 @@ mod tests {
                     },
                     "task2": {
                         "id": task2.to_string(),
-                        "state": "Blocked",
+                        "state": "Running",
                         "region": root_region.to_string()
                     },
                     "task3": {
@@ -5587,7 +5588,7 @@ mod tests {
                     "root": {
                         "id": root_region.to_string(),
                         "explanation": {
-                            "can_close": region_explanation.can_close,
+                            "can_close": region_explanation.reasons.is_empty(),
                             "reasons_count": region_explanation.reasons.len()
                         }
                     }
@@ -5596,7 +5597,8 @@ mod tests {
             "diagnostics": {
                 "task_blocked": {
                     "task_id": task2.to_string(),
-                    "has_explanation": !task_explanation.reasons.is_empty()
+                    "has_explanation": !task_explanation.details.is_empty()
+                        || !task_explanation.recommendations.is_empty()
                 },
                 "leaked_obligations": {
                     "count": leaked_obligations.len()
@@ -5610,6 +5612,18 @@ mod tests {
                         HealthClassification::Degraded { fiedler, .. } => json!({
                             "kind": "degraded",
                             "fiedler": fiedler
+                        }),
+                        HealthClassification::Critical {
+                            fiedler,
+                            approaching_disconnect,
+                        } => json!({
+                            "kind": "critical",
+                            "fiedler": fiedler,
+                            "approaching_disconnect": approaching_disconnect
+                        }),
+                        HealthClassification::Fragmented { components } => json!({
+                            "kind": "fragmented",
+                            "components": components
                         }),
                         HealthClassification::Deadlocked => json!({
                             "kind": "deadlocked"

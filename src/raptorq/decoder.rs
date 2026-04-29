@@ -4309,8 +4309,7 @@ mod tests {
             "our decoder must match raptorq-rs for the degenerate K=1 single-repair case"
         );
         assert_eq!(
-            ours.source,
-            source,
+            ours.source, source,
             "a single repair packet must recover the original K=1 source symbol"
         );
     }
@@ -6976,7 +6975,7 @@ mod tests {
             let mut rng_state = seed;
             for _ in 0..count {
                 rng_state = rng_state.wrapping_mul(214013).wrapping_add(2531011);
-                coefficients.push(Gf256::from_u8((rng_state >> 16) as u8));
+                coefficients.push(Gf256::new((rng_state >> 16) as u8));
             }
             coefficients
         }
@@ -7039,7 +7038,7 @@ mod tests {
                         if expect_error && (rng_state % 10) < 2 {
                             // Create malformed source symbol with wrong equation
                             let wrong_columns = vec![((rng_state as usize) % (l * 2)) + l];
-                            let wrong_coefficients = vec![Gf256::from_u8((rng_state >> 8) as u8)];
+                            let wrong_coefficients = vec![Gf256::new((rng_state >> 8) as u8)];
                             symbols.push(ReceivedSymbol::repair(
                                 esi,
                                 wrong_columns,
@@ -7078,7 +7077,9 @@ mod tests {
                 }
 
                 // CRITICAL: Decoder must never panic, only return proper errors
-                let result = std::panic::catch_unwind(|| decoder.decode(&symbols));
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    decoder.decode(&symbols)
+                }));
 
                 match result {
                     Ok(decode_result) => {
@@ -7232,7 +7233,9 @@ mod tests {
                 }
 
                 // CRITICAL: Must not panic
-                let result = std::panic::catch_unwind(|| decoder.decode(&symbols));
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    decoder.decode(&symbols)
+                }));
 
                 assert!(
                     result.is_ok(),
@@ -7294,7 +7297,9 @@ mod tests {
                 }
 
                 // CRITICAL: Must not panic even with extreme parameters
-                let result = std::panic::catch_unwind(|| decoder.decode(&symbols));
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    decoder.decode(&symbols)
+                }));
 
                 assert!(
                     result.is_ok(),
@@ -7349,10 +7354,12 @@ mod tests {
             ));
 
             // Test both sequential and wavefront decoders - neither must panic
-            let sequential_result = std::panic::catch_unwind(|| decoder.decode(&symbols));
+            let sequential_result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| decoder.decode(&symbols)));
 
-            let wavefront_result =
-                std::panic::catch_unwind(|| decoder.decode_wavefront(&symbols, 2));
+            let wavefront_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                decoder.decode_wavefront(&symbols, 2)
+            }));
 
             assert!(
                 sequential_result.is_ok(),

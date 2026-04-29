@@ -726,8 +726,8 @@ mod tests {
                 "all-injected baseline should drain in FIFO order",
             );
             prop_assert_eq!(
-                observed[..stolen_prefix],
-                expected_stolen,
+                &observed[..stolen_prefix],
+                expected_stolen.as_slice(),
                 "stealing before later injections must still observe the FIFO head",
             );
             prop_assert_eq!(

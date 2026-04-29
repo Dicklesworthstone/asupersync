@@ -977,7 +977,10 @@ mod tests {
             // MR6.1: All parties always released
             crate::assert_with_log!(
                 baseline.released_parties.len() == transformed.released_parties.len(),
-                format!("MR6.1 permutation {} should release same number of parties", i),
+                format!(
+                    "MR6.1 permutation {} should release same number of parties",
+                    i
+                ),
                 baseline.released_parties.len(),
                 transformed.released_parties.len()
             );
@@ -993,7 +996,10 @@ mod tests {
             // MR6.3: Generation advances consistently
             crate::assert_with_log!(
                 baseline.generation == transformed.generation,
-                format!("MR6.3 permutation {} should advance generation consistently", i),
+                format!(
+                    "MR6.3 permutation {} should advance generation consistently",
+                    i
+                ),
                 baseline.generation,
                 transformed.generation
             );
@@ -1012,7 +1018,8 @@ mod tests {
 
         for (i, &parties) in party_counts.iter().enumerate() {
             let delays: Vec<usize> = (0..parties).collect(); // 0, 1, 2, ..., parties-1
-            let outcome = run_deterministic_barrier_generation(parties, &delays, base_seed + i as u64);
+            let outcome =
+                run_deterministic_barrier_generation(parties, &delays, base_seed + i as u64);
 
             // MR7.1: All parties released regardless of count
             crate::assert_with_log!(
@@ -1066,6 +1073,7 @@ mod tests {
             parties,
             "arrival delays must match party count"
         );
+        let arrival_delays = arrival_delays.to_vec();
 
         let test_config = TestConfig::new()
             .with_seed(seed)
@@ -1123,16 +1131,14 @@ mod tests {
                 .filter_map(|(party, is_leader)| is_leader.then_some(*party))
                 .collect();
 
-            let mut released_parties: Vec<_> = release_log
-                .iter()
-                .map(|(party, _)| *party)
-                .collect();
+            let mut released_parties: Vec<_> =
+                release_log.iter().map(|(party, _)| *party).collect();
             released_parties.sort_unstable();
 
-            let state = barrier.state.lock();
+            let (_arrived, generation, _waiter_count) = barrier.state_snapshot_for_test();
             DeterministicBarrierOutcome {
                 released_parties,
-                generation: state.generation,
+                generation,
                 has_exactly_one_leader: leaders.len() == 1,
             }
         });

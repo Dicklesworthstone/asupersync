@@ -2285,8 +2285,6 @@ mod tests {
     /// testing-conformance-harnesses methodology.
     #[test]
     fn http1_codec_conformance_against_httparse() {
-        use std::collections::HashMap;
-
         /// Canonical HTTP request for conformance testing.
         #[derive(Debug, Clone)]
         struct CanonicalRequest {
@@ -2403,24 +2401,37 @@ mod tests {
 
         /// Parse request with httparse reference implementation.
         fn parse_with_httparse_reference(raw_bytes: &[u8]) -> Result<ParsedRequest, String> {
-            let mut headers = [httparse::Header { name: "", value: &[] }; 64];
+            let mut headers = [httparse::Header {
+                name: "",
+                value: &[],
+            }; 64];
             let mut req = httparse::Request::new(&mut headers);
 
             match req.parse(raw_bytes) {
                 Ok(httparse::Status::Complete(_)) => {
                     let method = req.method.ok_or("Missing method")?.to_string();
                     let uri = req.path.ok_or("Missing path")?.to_string();
-                    let version = req.version
-                        .map(|v| if v == 1 { "Http11".to_string() } else { "Http10".to_string() })
+                    let version = req
+                        .version
+                        .map(|v| {
+                            if v == 1 {
+                                "Http11".to_string()
+                            } else {
+                                "Http10".to_string()
+                            }
+                        })
                         .unwrap_or_else(|| "Http11".to_string());
 
-                    let headers: Vec<(String, String)> = req.headers
+                    let headers: Vec<(String, String)> = req
+                        .headers
                         .iter()
                         .filter(|h| !h.name.is_empty())
-                        .map(|h| (
-                            h.name.to_string(),
-                            String::from_utf8_lossy(h.value).to_string(),
-                        ))
+                        .map(|h| {
+                            (
+                                h.name.to_string(),
+                                String::from_utf8_lossy(h.value).to_string(),
+                            )
+                        })
                         .collect();
 
                     Ok(ParsedRequest {
@@ -2518,6 +2529,18 @@ mod tests {
                         String::from_utf8_lossy(&test_case.raw_bytes)
                     ));
                 }
+                (Err(our_err), Err(ref_err), false) => {
+                    conformance_failures.push(format!(
+                        "BOTH ERRORED but expected success: {}\n\
+                         Our error:  {}\n\
+                         Ref error:  {}\n\
+                         Raw bytes:  {:?}",
+                        test_case.description,
+                        our_err,
+                        ref_err,
+                        String::from_utf8_lossy(&test_case.raw_bytes)
+                    ));
+                }
 
                 // Both succeeded but we expected error
                 (Ok(our_parsed), Ok(ref_parsed), true) => {
@@ -2537,7 +2560,8 @@ mod tests {
 
         // Generate conformance report
         let total_tests = test_cases.len();
-        let success_rate = (both_success_count + both_error_count) as f64 / total_tests as f64 * 100.0;
+        let success_rate =
+            (both_success_count + both_error_count) as f64 / total_tests as f64 * 100.0;
 
         eprintln!(
             "HTTP/1.1 Codec Conformance Report:\n\
@@ -2578,6 +2602,9 @@ mod tests {
         }
 
         // Success: perfect conformance with httparse reference
-        eprintln!("✅ HTTP/1.1 codec conformance test passed: {:.1}% compliance with httparse reference", success_rate);
+        eprintln!(
+            "✅ HTTP/1.1 codec conformance test passed: {:.1}% compliance with httparse reference",
+            success_rate
+        );
     }
 }

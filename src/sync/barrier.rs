@@ -80,6 +80,12 @@ impl Barrier {
         self.parties
     }
 
+    #[cfg(test)]
+    pub(crate) fn state_snapshot_for_test(&self) -> (usize, u64, usize) {
+        let state = self.state.lock();
+        (state.arrived, state.generation, state.waiters.len())
+    }
+
     /// Waits for the barrier to trip.
     ///
     /// If cancelled while waiting, returns `BarrierWaitError::Cancelled` and
@@ -368,7 +374,10 @@ mod tests {
             "metamorphic barrier run requires at least one generation"
         );
         let parties = staggered_generations[0].len();
-        assert!(parties > 0, "metamorphic barrier run requires at least one party");
+        assert!(
+            parties > 0,
+            "metamorphic barrier run requires at least one party"
+        );
         for generation in staggered_generations {
             assert_eq!(
                 generation.len(),
@@ -440,8 +449,10 @@ mod tests {
                     "exactly one leader should be recorded per generation"
                 );
 
-                let mut released_parties =
-                    release_log.iter().map(|(party, _)| *party).collect::<Vec<_>>();
+                let mut released_parties = release_log
+                    .iter()
+                    .map(|(party, _)| *party)
+                    .collect::<Vec<_>>();
                 released_parties.sort_unstable();
 
                 let state = barrier.state.lock();
@@ -604,8 +615,7 @@ mod tests {
     fn metamorphic_completed_generation_preserves_next_generation_rendezvous() {
         init_test("metamorphic_completed_generation_preserves_next_generation_rendezvous");
 
-        let baseline =
-            run_barrier_generations_under_lab_runtime(&[vec![0, 1, 2]]);
+        let baseline = run_barrier_generations_under_lab_runtime(&[vec![0, 1, 2]]);
         let transformed =
             run_barrier_generations_under_lab_runtime(&[vec![2, 0, 1], vec![0, 1, 2]]);
 
@@ -613,13 +623,11 @@ mod tests {
         let transformed_target = &transformed[1];
 
         assert_eq!(
-            baseline_target.leader_party,
-            transformed_target.leader_party,
+            baseline_target.leader_party, transformed_target.leader_party,
             "replaying the same target rendezvous after a completed prior generation must preserve leader identity"
         );
         assert_eq!(
-            baseline_target.released_parties,
-            transformed_target.released_parties,
+            baseline_target.released_parties, transformed_target.released_parties,
             "completed prior generations must not change which parties release in the target rendezvous"
         );
         assert_eq!(

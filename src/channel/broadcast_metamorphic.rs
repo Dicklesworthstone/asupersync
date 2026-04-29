@@ -552,7 +552,7 @@ mod tests {
                     let overlap_start = std::cmp::max(*start_i, *start_j);
 
                     // Extract overlapping subsequences for comparison
-                    let extract_overlap = |start: usize, seq: &[u64], overlap_start: usize| -> Vec<u64> {
+                    let extract_overlap = |_start: usize, seq: &[u64], overlap_start: usize| -> Vec<u64> {
                         seq.iter()
                             .filter(|&&msg| msg >= overlap_start as u64)
                             .copied()
@@ -600,7 +600,7 @@ mod tests {
                 for (start_point, sequences) in subscription_groups {
                     if sequences.len() > 1 {
                         let reference = sequences[0];
-                        for (idx, seq) in sequences.iter().enumerate().skip(1) {
+                        for (_idx, seq) in sequences.iter().enumerate().skip(1) {
                             // Allow for differences due to lag, but structure should be consistent
                             let min_len = std::cmp::min(reference.len(), seq.len());
                             if min_len > 0 {

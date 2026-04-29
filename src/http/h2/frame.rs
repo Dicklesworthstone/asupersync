@@ -2383,7 +2383,9 @@ mod tests {
         match ContinuationFrame::parse(&header, payload) {
             Err(err) if err.code == crate::http::h2::error::ErrorCode::ProtocolError => Ok(()),
             Err(other) => Err(other),
-            Ok(_) => Err(H2Error::protocol("CONTINUATION with stream ID 0 should be rejected")),
+            Ok(_) => Err(H2Error::protocol(
+                "CONTINUATION with stream ID 0 should be rejected",
+            )),
         }
     }
 
@@ -2507,7 +2509,10 @@ mod tests {
             ("x-very-long-header-name-2", "y".repeat(5000)),
             ("x-very-long-header-name-3", "z".repeat(5000)),
             ("authorization", "Bearer ".to_string() + &"t".repeat(2000)),
-            ("user-agent", "Mozilla/5.0 ".to_string() + &"(details; ".repeat(500) + ")"),
+            (
+                "user-agent",
+                "Mozilla/5.0 ".to_string() + &"(details; ".repeat(500) + ")",
+            ),
         ];
 
         // Simulate encoding large headers that require CONTINUATION frames
@@ -2523,7 +2528,10 @@ mod tests {
         let chunk_size = DEFAULT_MAX_FRAME_SIZE as usize;
         let chunks_needed = (total_size + chunk_size - 1) / chunk_size;
 
-        assert!(chunks_needed >= 2, "Large header set should require at least 2 frames");
+        assert!(
+            chunks_needed >= 2,
+            "Large header set should require at least 2 frames"
+        );
 
         // Create HEADERS frame for first chunk
         let headers_frame = HeadersFrame {
@@ -2561,8 +2569,10 @@ mod tests {
             assert_eq!(frame.stream_id, headers_frame.stream_id);
         }
 
-        eprintln!("✓ Large header block CONTINUATION scenario: {} chunks for {} bytes",
-                 chunks_needed, total_size);
+        eprintln!(
+            "✓ Large header block CONTINUATION scenario: {} chunks for {} bytes",
+            chunks_needed, total_size
+        );
     }
 
     #[test]
@@ -2575,18 +2585,31 @@ mod tests {
             match (test_case.test_fn)() {
                 Ok(()) => {
                     pass_count += 1;
-                    eprintln!("✓ {}: {}", test_case.id, test_case.description);
+                    eprintln!(
+                        "✓ {} [{}]: {}",
+                        test_case.id, test_case.requirement_level, test_case.description
+                    );
                 }
                 Err(e) => {
                     fail_count += 1;
-                    eprintln!("✗ {}: {} - Error: {}", test_case.id, test_case.description, e);
+                    eprintln!(
+                        "✗ {} [{}]: {} - Error: {}",
+                        test_case.id, test_case.requirement_level, test_case.description, e
+                    );
                 }
             }
         }
 
-        eprintln!("RFC 7540 CONTINUATION Conformance: {}/{} tests passed",
-                 pass_count, pass_count + fail_count);
-        assert_eq!(fail_count, 0, "{} CONTINUATION conformance tests failed", fail_count);
+        eprintln!(
+            "RFC 7540 CONTINUATION Conformance: {}/{} tests passed",
+            pass_count,
+            pass_count + fail_count
+        );
+        assert_eq!(
+            fail_count, 0,
+            "{} CONTINUATION conformance tests failed",
+            fail_count
+        );
     }
 
     #[test]

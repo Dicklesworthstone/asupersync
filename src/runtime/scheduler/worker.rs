@@ -1605,7 +1605,7 @@ mod tests {
         use crate::runtime::RuntimeState;
         use crate::runtime::stored_task::StoredTask;
         use crate::sync::ContendedMutex;
-        use crate::types::{Budget, RegionId};
+        use crate::types::Budget;
 
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let global = Arc::new(GlobalQueue::new());
@@ -1629,7 +1629,7 @@ mod tests {
                 .expect("region should exist");
             region_record.begin_close(None);
             region_record.begin_finalize();
-            guard.finalizing_regions.push(region);
+            guard.enqueue_finalizing_region_for_test(region);
             guard.store_spawned_task(
                 panicking_task,
                 StoredTask::new_with_id(

@@ -22,8 +22,13 @@ fn arb_budget() -> impl Strategy<Value = Budget> {
 /// Generate sequences of close operations for testing idempotence
 fn arb_close_sequence() -> impl Strategy<Value = Vec<&'static str>> {
     prop::collection::vec(
-        prop::sample::select(&["begin_close", "begin_drain", "begin_finalize", "complete_close"]),
-        1..=10
+        prop::sample::select(&[
+            "begin_close",
+            "begin_drain",
+            "begin_finalize",
+            "complete_close",
+        ]),
+        1..=10,
     )
 }
 
@@ -44,7 +49,7 @@ fn mr_close_operation_idempotence() {
         let region = table.get(region_id.arena_index()).unwrap();
 
         // Primary close operation
-        let result1 = region.begin_close(None);
+        let _result1 = region.begin_close(None);
 
         // MR: Second close should not panic and return false (already closing/closed)
         let result2 = region.begin_close(None);
@@ -55,9 +60,9 @@ fn mr_close_operation_idempotence() {
         prop_assert!(!result3, "Third close should return false (idempotent)");
 
         // Additional idempotence: other close operations should also be safe
-        let drain_result = region.begin_drain();
-        let finalize_result = region.begin_finalize();
-        let complete_result = region.complete_close();
+        let _drain_result = region.begin_drain();
+        let _finalize_result = region.begin_finalize();
+        let _complete_result = region.complete_close();
 
         // All should be safe (not panic) regardless of return values
         // This is the key property - NO PANICS
@@ -168,7 +173,7 @@ fn mr_state_preservation_on_failure() {
         let region = table.get(region_id.arena_index()).unwrap();
 
         // Start with open state
-        let initial_state = table.state(region_id).unwrap();
+        let _initial_state = table.state(region_id).unwrap();
 
         // Try operations that should fail on open region
         let state_before = table.state(region_id).unwrap();
@@ -215,7 +220,7 @@ fn mr_full_close_chain_idempotence() {
 
         // MR: First application of close sequence
         close_sequence();
-        let state_after_first = table.state(region_id);
+        let _state_after_first = table.state(region_id);
 
         // MR: Second application should be safe (idempotent)
         close_sequence();
@@ -281,11 +286,19 @@ fn mr_cross_operation_safety() {
 fn apply_operation_sequence(region: &crate::record::RegionRecord, ops: &[&str]) {
     for op in ops {
         match *op {
-            "begin_close" => { region.begin_close(None); },
-            "begin_drain" => { region.begin_drain(); },
-            "begin_finalize" => { region.begin_finalize(); },
-            "complete_close" => { region.complete_close(); },
-            _ => {},
+            "begin_close" => {
+                region.begin_close(None);
+            }
+            "begin_drain" => {
+                region.begin_drain();
+            }
+            "begin_finalize" => {
+                region.begin_finalize();
+            }
+            "complete_close" => {
+                region.complete_close();
+            }
+            _ => {}
         }
     }
 }
@@ -355,10 +368,10 @@ mod mutation_tests {
         let mut call_count = 0;
 
         // Our MRs should catch this via panic detection
-        let result = std::panic::catch_unwind(|| {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             mutated_close_operation(&mut call_count); // First call - OK
             mutated_close_operation(&mut call_count); // Second call - PANIC!
-        });
+        }));
 
         assert!(result.is_err(), "MR suite should detect panic mutation");
     }
@@ -367,14 +380,22 @@ mod mutation_tests {
     #[test]
     fn mr_suite_catches_state_corruption_mutation() {
         #[derive(Debug, Clone, Copy, PartialEq)]
-        enum MockState { Open, Closing, Closed }
+        enum MockState {
+            Open,
+            Closing,
+        }
 
         // Simulated mutation: corrupt state on repeated operations
         fn mutated_state_transition(state: &mut MockState) -> bool {
             match *state {
-                MockState::Open => { *state = MockState::Closing; true },
-                MockState::Closing => { *state = MockState::Open; false }, // BUG: goes backward!
-                MockState::Closed => false,
+                MockState::Open => {
+                    *state = MockState::Closing;
+                    true
+                }
+                MockState::Closing => {
+                    *state = MockState::Open;
+                    false
+                } // BUG: goes backward!
             }
         }
 
@@ -384,7 +405,7 @@ mod mutation_tests {
         assert_eq!(state, MockState::Closing);
 
         mutated_state_transition(&mut state); // Closing -> Open (BUG!)
-        assert_eq!(state, MockState::Open);   // This violates monotonicity MR!
+        assert_eq!(state, MockState::Open); // This violates monotonicity MR!
 
         // Our monotonicity MR would catch this regression
     }

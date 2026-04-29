@@ -3824,7 +3824,7 @@ mod metamorphic_tests {
 
             // Queue writers beyond the fairness threshold
             let mut writer_futures = Vec::new();
-            for i in 0..total_writers {
+            for _i in 0..total_writers {
                 let writer_lock = lock.clone();
                 let write_fut = OwnedRwLockWriteGuard::write(writer_lock, &cx);
 

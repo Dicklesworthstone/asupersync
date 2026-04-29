@@ -1998,8 +1998,8 @@ mod tests {
             let baseline_decoded = decode_emitted_symbols(&systematic, k, symbol_size, seed)
                 .expect("full systematic emission must decode");
             prop_assert_eq!(
-                baseline_decoded,
-                source,
+                &baseline_decoded,
+                &source,
                 "MR baseline violated: full systematic emission must preserve identity"
             );
 
@@ -2016,8 +2016,8 @@ mod tests {
             let substituted_decoded = decode_emitted_symbols(&substituted, k, symbol_size, seed)
                 .expect("repair-backed transformed emission must decode");
             prop_assert_eq!(
-                substituted_decoded,
-                source,
+                &substituted_decoded,
+                &source,
                 "MR violated: repair-backed transformed emission must preserve identity \
                  for k={}, symbol_size={}, withheld={}, seed={:#x}",
                 k,
@@ -2026,8 +2026,8 @@ mod tests {
                 seed
             );
             prop_assert_eq!(
-                substituted_decoded,
-                baseline_decoded,
+                &substituted_decoded,
+                &baseline_decoded,
                 "MR violated: withholding systematic symbols and substituting repairs \
                  changed the decoded source for k={}, symbol_size={}, \
                  withheld={}, seed={:#x}",

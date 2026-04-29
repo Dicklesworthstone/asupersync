@@ -1344,7 +1344,9 @@ mod tests {
 
         let mut drain_counts = vec![0usize; task_count as usize];
         for task_id in &actual {
-            drain_counts[task_id.arena_index().index()] += 1;
+            let task_index =
+                usize::try_from(task_id.arena_index().index()).expect("task index fits usize");
+            drain_counts[task_index] += 1;
         }
         assert!(
             drain_counts.iter().all(|count| *count == 1),

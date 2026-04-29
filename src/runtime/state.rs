@@ -3674,6 +3674,17 @@ impl RuntimeState {
         self.record_finalizer_close(region);
     }
 
+    #[cfg(test)]
+    pub(crate) fn enqueue_finalizing_region_for_test(&mut self, region: RegionId) {
+        if !self
+            .finalizing_regions
+            .iter()
+            .any(|&queued| queued == region)
+        {
+            self.finalizing_regions.push(region);
+        }
+    }
+
     /// Returns a reference to the resource monitor for graceful degradation.
     ///
     /// The resource monitor tracks memory, file descriptors, CPU load, and network
@@ -9941,7 +9952,7 @@ mod tests {
                     "order-respecting acquisition should not panic for {:?}",
                     sequence
                         .iter()
-                        .map(|shard| shard.label())
+                        .map(std::string::ToString::to_string)
                         .collect::<Vec<_>>()
                 )
             })

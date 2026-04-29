@@ -30,13 +30,19 @@ mod tests {
         // THIS MUST NOT PANIC and should return false (already closed)
         let close_result_2 = region.begin_close(None);
         println!("Second close result: {} (should be false)", close_result_2);
-        assert!(!close_result_2, "Second close should return false - already closing");
+        assert!(
+            !close_result_2,
+            "Second close should return false - already closing"
+        );
 
         // Third close: close(R) → close(R) → close(R)
         // Also must not panic
         let close_result_3 = region.begin_close(None);
         println!("Third close result: {} (should be false)", close_result_3);
-        assert!(!close_result_3, "Third close should return false - idempotent");
+        assert!(
+            !close_result_3,
+            "Third close should return false - idempotent"
+        );
 
         // Verify state is stable
         assert_eq!(table.state(region_id), Some(RegionState::Closing));
@@ -61,24 +67,33 @@ mod tests {
 
         println!("Performing first close sequence...");
         let (begin1, fin1, comp1) = perform_full_close();
-        println!("Results: begin={}, finalize={}, complete={}", begin1, fin1, comp1);
+        println!(
+            "Results: begin={}, finalize={}, complete={}",
+            begin1, fin1, comp1
+        );
 
         let state_after_first = table.state(region_id);
         println!("State after first sequence: {:?}", state_after_first);
 
         println!("Performing second close sequence (idempotence test)...");
         let (begin2, fin2, comp2) = perform_full_close();
-        println!("Results: begin={}, finalize={}, complete={}", begin2, fin2, comp2);
+        println!(
+            "Results: begin={}, finalize={}, complete={}",
+            begin2, fin2, comp2
+        );
 
         // Key property: second sequence should not panic and should return false
         assert!(!begin2, "Second begin_close should return false");
-        assert!(!comp2, "Second complete_close should return false (region may not be ready)");
+        assert!(
+            !comp2,
+            "Second complete_close should return false (region may not be ready)"
+        );
 
         let state_after_second = table.state(region_id);
         println!("State after second sequence: {:?}", state_after_second);
 
         println!("Performing third close sequence (extended idempotence)...");
-        let (begin3, fin3, comp3) = perform_full_close();
+        let (begin3, _fin3, _comp3) = perform_full_close();
         assert!(!begin3, "Third begin_close should return false");
 
         println!("✓ Full sequence idempotence verified: no panics on repeated close sequences");
@@ -90,9 +105,6 @@ mod tests {
         let mut table = RegionTable::new();
         let region_id = table.create_root(Budget::default(), Time::ZERO);
 
-        // Get reference before removal
-        let region = table.get(region_id.arena_index()).unwrap().clone();
-
         // Remove the region from table
         let removed_region = table.remove(region_id.arena_index()).unwrap();
         assert_eq!(removed_region.id, region_id);
@@ -101,16 +113,19 @@ mod tests {
         // Close operations should still be idempotent and not panic
 
         println!("Testing close idempotence on removed region...");
-        let close1 = region.begin_close(None);
-        let close2 = region.begin_close(None);
-        let close3 = region.begin_close(None);
+        let close1 = removed_region.begin_close(None);
+        let close2 = removed_region.begin_close(None);
+        let close3 = removed_region.begin_close(None);
 
         // All should be safe (not panic)
-        println!("Close results on removed region: {}, {}, {}", close1, close2, close3);
+        println!(
+            "Close results on removed region: {}, {}, {}",
+            close1, close2, close3
+        );
 
         // Further operations should also be safe
-        let _ = region.begin_finalize();
-        let _ = region.complete_close();
+        let _ = removed_region.begin_finalize();
+        let _ = removed_region.complete_close();
 
         println!("✓ Close idempotence verified even on removed regions");
     }
