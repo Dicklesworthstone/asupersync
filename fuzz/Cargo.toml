@@ -1197,6 +1197,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "length_delimited_frame"
+path = "fuzz_targets/length_delimited_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "length_delimited_decoder_boundary"
 path = "fuzz_targets/length_delimited_decoder_boundary.rs"
 test = false
