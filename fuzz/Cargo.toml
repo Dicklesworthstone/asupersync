@@ -114,6 +114,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_h1_response_parser"
+path = "fuzz_targets/h1_response_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_hpack_decode"
 path = "fuzz_targets/hpack_decode.rs"
 test = false
@@ -1297,6 +1304,13 @@ bench = false
 [[bin]]
 name = "nats_publish_subject_parser"
 path = "fuzz_targets/nats_publish_subject_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "nats_hpub_headers"
+path = "fuzz_targets/nats_hpub_headers.rs"
 test = false
 doc = false
 bench = false
@@ -3154,3 +3168,10 @@ name = "ndjson_diagnostics"
 path = "fuzz_targets/ndjson_diagnostics.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "grpc_gzip_decompress"
+path = "fuzz_targets/grpc_gzip_decompress.rs"
+test = false
+doc = false
+bench = false
