@@ -313,6 +313,8 @@ httparse = "1.8"
 tokio-util = { version = "0.7", features = ["codec"] }
 # External RFC 6330 decoder for byte-level RaptorQ interoperability checks
 raptorq = "1.7.0"
+# Tokio for differential semaphore fairness conformance testing
+tokio = { version = "1.0", features = ["rt", "sync", "time"] }
 
 [[test]]
 name = "kafka_real_broker"

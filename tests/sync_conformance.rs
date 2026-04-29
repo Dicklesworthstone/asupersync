@@ -767,3 +767,162 @@ fn sync_007_notify_notification() {
 
     test_complete!("sync_007_notify_notification");
 }
+
+/// SYNC-005c: Semaphore Fairness Ordering Conformance vs tokio::sync::Semaphore
+///
+/// Verifies that asupersync::sync::Semaphore and tokio::sync::Semaphore produce
+/// identical fairness ordering when given:
+/// - Same N permits
+/// - Same K acquirers in same order
+/// - Same permit request sizes
+///
+/// This is a differential conformance test ensuring FIFO fairness compatibility.
+#[test]
+fn sync_005c_semaphore_fairness_conformance() {
+    init_test("sync_005c_semaphore_fairness_conformance");
+
+    // Test case: 3 permits, 5 acquirers (2 oversubscribed)
+    let permit_count = 3;
+    let acquirer_requests = vec![(0, 1), (1, 1), (2, 1), (3, 1), (4, 1)];
+
+    // Run asupersync test
+    let asupersync_results = run_asupersync_semaphore_test(permit_count, &acquirer_requests);
+
+    // Run tokio test
+    let tokio_results = run_tokio_semaphore_test(permit_count, &acquirer_requests);
+
+    // Compare fairness ordering
+    assert_with_log!(
+        asupersync_results.len() == tokio_results.len(),
+        "result count should match",
+        tokio_results.len(),
+        asupersync_results.len()
+    );
+
+    // Verify grant ordering matches (FIFO fairness)
+    for (i, (asup, tokio)) in asupersync_results.iter().zip(tokio_results.iter()).enumerate() {
+        assert_with_log!(
+            asup.0 == tokio.0,
+            format!("fairness ordering should match at position {}", i),
+            tokio.0,
+            asup.0
+        );
+    }
+
+    // Test oversubscribed scenario (more requests than permits)
+    let permit_count = 2;
+    let acquirer_requests = vec![(0, 1), (1, 2), (2, 1)]; // 4 permits requested, 2 available
+
+    let asupersync_results = run_asupersync_semaphore_test(permit_count, &acquirer_requests);
+    let tokio_results = run_tokio_semaphore_test(permit_count, &acquirer_requests);
+
+    // First two acquirers should get permits in FIFO order
+    assert_with_log!(
+        asupersync_results.len() >= 2,
+        "should have at least 2 grants in oversubscribed test",
+        ">= 2",
+        asupersync_results.len()
+    );
+
+    for (i, (asup, tokio)) in asupersync_results.iter().zip(tokio_results.iter()).enumerate().take(2) {
+        assert_with_log!(
+            asup.0 == tokio.0,
+            format!("oversubscribed fairness should match at position {}", i),
+            tokio.0,
+            asup.0
+        );
+    }
+
+    test_complete!("sync_005c_semaphore_fairness_conformance");
+}
+
+/// Run asupersync semaphore test and return (acquirer_id, grant_order) pairs.
+fn run_asupersync_semaphore_test(permit_count: usize, requests: &[(usize, usize)]) -> Vec<(usize, usize)> {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread;
+    use futures_lite::future::block_on;
+
+    let sem = Arc::new(Semaphore::new(permit_count));
+    let grant_counter = Arc::new(AtomicUsize::new(0));
+    let results = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    let handles: Vec<_> = requests
+        .iter()
+        .map(|&(acquirer_id, permit_count)| {
+            let sem = sem.clone();
+            let grant_counter = grant_counter.clone();
+            let results = results.clone();
+
+            thread::spawn(move || {
+                let cx = Cx::for_testing();
+
+                // Small delay to ensure deterministic ordering
+                thread::sleep(std::time::Duration::from_millis(acquirer_id as u64 * 10));
+
+                if let Ok(_permit) = block_on(sem.acquire(&cx, permit_count)) {
+                    let grant_order = grant_counter.fetch_add(1, Ordering::SeqCst);
+                    results.lock().unwrap().push((acquirer_id, grant_order));
+
+                    // Hold permit briefly to ensure ordering is observable
+                    thread::sleep(std::time::Duration::from_millis(50));
+                }
+            })
+        })
+        .collect();
+
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
+    let mut results = results.lock().unwrap().clone();
+    results.sort_by_key(|&(_, grant_order)| grant_order);
+    results
+}
+
+/// Run tokio semaphore test and return (acquirer_id, grant_order) pairs.
+fn run_tokio_semaphore_test(permit_count: usize, requests: &[(usize, usize)]) -> Vec<(usize, usize)> {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread;
+
+    // Use basic tokio runtime for this test
+    let rt = tokio::runtime::Runtime::new().unwrap();
+
+    rt.block_on(async {
+        let sem = Arc::new(tokio::sync::Semaphore::new(permit_count));
+        let grant_counter = Arc::new(AtomicUsize::new(0));
+        let results = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+
+        let mut handles = Vec::new();
+
+        for &(acquirer_id, permit_count) in requests {
+            let sem = sem.clone();
+            let grant_counter = grant_counter.clone();
+            let results = results.clone();
+
+            let handle = tokio::spawn(async move {
+                // Small delay to ensure deterministic ordering
+                tokio::time::sleep(std::time::Duration::from_millis(acquirer_id as u64 * 10)).await;
+
+                if let Ok(_permit) = sem.acquire_many(permit_count as u32).await {
+                    let grant_order = grant_counter.fetch_add(1, Ordering::SeqCst);
+                    results.lock().await.push((acquirer_id, grant_order));
+
+                    // Hold permit briefly to ensure ordering is observable
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            });
+
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        let mut results = results.lock().await.clone();
+        results.sort_by_key(|&(_, grant_order)| grant_order);
+        results
+    })
+}
