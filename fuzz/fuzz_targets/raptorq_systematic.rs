@@ -14,6 +14,10 @@ use asupersync::types::ObjectId;
 use std::collections::{BTreeSet, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
+const LARGE_FEC_K: usize = 842;
+const LARGE_FEC_MAX_SYMBOL_SIZE: usize = 16;
+const LARGE_FEC_MAX_REPAIR_COUNT: usize = 8;
+
 /// Fuzzing parameters for RaptorQ systematic encoding/decoding.
 #[derive(Debug, Clone, Arbitrary)]
 struct FuzzConfig {
@@ -852,6 +856,67 @@ fn test_payload_generation_size(
     Ok(())
 }
 
+fn test_large_k_payload_generation_size(
+    symbol_size: usize,
+    seed: u64,
+    repair_count: usize,
+    source_bytes: &[u8],
+) -> Result<(), String> {
+    let bounded_symbol_size = symbol_size.clamp(1, LARGE_FEC_MAX_SYMBOL_SIZE);
+    let bounded_repair_count = repair_count.min(LARGE_FEC_MAX_REPAIR_COUNT);
+    let source = build_source_from_bytes(source_bytes, LARGE_FEC_K, bounded_symbol_size);
+
+    let encoder = catch_unwind(AssertUnwindSafe(|| {
+        SystematicEncoder::new(&source, bounded_symbol_size, seed)
+    }))
+    .map_err(|_| {
+        format!(
+            "SystematicEncoder::new panicked for large-K payload check K={LARGE_FEC_K}, T={bounded_symbol_size}, seed={seed}"
+        )
+    })?
+    .ok_or_else(|| {
+        format!(
+            "SystematicEncoder::new returned None for large-K payload check K={LARGE_FEC_K}, T={bounded_symbol_size}, seed={seed}"
+        )
+    })?;
+    let mut encoder = encoder;
+
+    let emitted = catch_unwind(AssertUnwindSafe(|| encoder.emit_all(bounded_repair_count)))
+        .map_err(|_| {
+            format!(
+                "emit_all panicked for large-K payload check K={LARGE_FEC_K}, T={bounded_symbol_size}, repairs={bounded_repair_count}"
+            )
+        })?;
+
+    let expected_symbol_count = LARGE_FEC_K + bounded_repair_count;
+    let expected_payload_bytes = expected_symbol_count
+        .checked_mul(bounded_symbol_size)
+        .ok_or_else(|| "expected large-K payload size overflowed usize".to_string())?;
+    let actual_payload_bytes: usize = emitted.iter().map(|symbol| symbol.data.len()).sum();
+
+    if emitted.len() != expected_symbol_count {
+        return Err(format!(
+            "large-K emit_all count mismatch: expected {expected_symbol_count}, got {}",
+            emitted.len()
+        ));
+    }
+    if actual_payload_bytes != expected_payload_bytes {
+        return Err(format!(
+            "large-K emit_all payload-size mismatch: expected {expected_payload_bytes}, got {actual_payload_bytes}"
+        ));
+    }
+    if emitted
+        .iter()
+        .any(|symbol| symbol.data.len() != bounded_symbol_size)
+    {
+        return Err(format!(
+            "large-K emit_all produced non-uniform symbol width for K={LARGE_FEC_K}, T={bounded_symbol_size}"
+        ));
+    }
+
+    Ok(())
+}
+
 /// Main fuzzing function
 fn fuzz_systematic(mut config: FuzzConfig) -> Result<(), String> {
     let raw_k = config.k as usize;
@@ -896,6 +961,9 @@ fn fuzz_systematic(mut config: FuzzConfig) -> Result<(), String> {
 
     // Test 5b: aggregate FEC payload generation for arbitrary source bytes.
     test_payload_generation_size(k, symbol_size, seed, repair_count, &config.source_bytes)?;
+
+    // Test 5c: bounded large-K FEC payload generation at K=842.
+    test_large_k_payload_generation_size(symbol_size, seed, repair_count, &config.source_bytes)?;
 
     // Test 6: Basic encode/decode round-trip
     let source = generate_source_data(k, symbol_size, seed);
