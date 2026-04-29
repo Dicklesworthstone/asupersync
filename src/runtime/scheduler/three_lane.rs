@@ -3429,8 +3429,6 @@ impl ThreeLaneWorker {
 
     #[inline]
     fn finish_dispatch(&mut self, task: TaskId) -> TaskId {
-        self.adaptive_on_dispatch();
-
         // Record task dispatch for fairness monitoring
         let current_time = self.current_time_ns();
         self.fairness_monitor
@@ -4112,7 +4110,7 @@ impl ThreeLaneWorker {
     }
 
     #[allow(clippy::too_many_lines)]
-    pub(crate) fn execute(&self, task_id: TaskId) {
+    pub(crate) fn execute(&mut self, task_id: TaskId) {
         // Guard to handle unwinds that escape the explicit poll isolation below
         // before the runtime clears the current task context.
         struct TaskExecutionGuard<'a> {
@@ -4580,7 +4578,8 @@ impl ThreeLaneWorker {
                 wake_state.clear();
             }
         }
-        let _ = guard.completed;
+        drop(guard);
+        self.adaptive_on_dispatch();
     }
 
     fn schedule_ready_finalizers(&self) -> bool {
@@ -11260,6 +11259,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn adaptive_epoch_credit_waits_for_task_execution() {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 4);
+        scheduler.set_adaptive_cancel_streak(true, 1);
+
+        let task_id = {
+            let mut runtime_state = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let root = runtime_state.create_root_region(Budget::INFINITE);
+            let (task_id, _handle) = runtime_state
+                .create_task(root, Budget::INFINITE, async {})
+                .expect("task create");
+            task_id
+        };
+        scheduler.inject_ready(task_id, 50);
+
+        let worker = scheduler.workers.first_mut().expect("worker");
+        assert_eq!(worker.next_task(), Some(task_id));
+        let policy = worker
+            .adaptive_cancel_policy
+            .as_ref()
+            .expect("adaptive policy");
+        assert_eq!(
+            policy.epoch_count, 0,
+            "dequeue alone must not advance the adaptive epoch"
+        );
+        assert_eq!(
+            worker.preemption_metrics().adaptive_epochs,
+            0,
+            "metrics must not expose an adaptive epoch before the task runs"
+        );
+
+        worker.execute(task_id);
+
+        let policy = worker
+            .adaptive_cancel_policy
+            .as_ref()
+            .expect("adaptive policy");
+        assert_eq!(
+            policy.epoch_count, 1,
+            "the adaptive epoch should complete after the dispatched task executes"
+        );
+        assert_eq!(
+            worker.preemption_metrics().adaptive_epochs,
+            1,
+            "metrics should publish the completed epoch after execution"
+        );
+    }
+
     fn first_adaptive_epoch_metrics_after_optional_idle_probe(
         idle_probe: bool,
     ) -> (f64, f64, usize, u64) {
@@ -11281,21 +11331,21 @@ mod tests {
             );
         }
 
-        {
+        let ready_task = {
             let mut runtime_state = state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let root = runtime_state.create_root_region(Budget::INFINITE);
-            let _ = runtime_state
+            let (task_id, _handle) = runtime_state
                 .create_task(root, Budget::INFINITE, async {})
                 .expect("task create");
-        }
-
-        let ready_task = TaskId::new_for_test(9300, 1);
+            task_id
+        };
         scheduler.inject_ready(ready_task, 50);
 
         let worker = scheduler.workers.first_mut().expect("worker");
         assert_eq!(worker.next_task(), Some(ready_task));
+        worker.execute(ready_task);
         let policy = worker
             .adaptive_cancel_policy
             .as_ref()
@@ -11324,11 +11374,22 @@ mod tests {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, 4);
         scheduler.set_adaptive_cancel_streak(true, 1);
-        scheduler.inject_ready(TaskId::new_for_test(9200, 1), 50);
+        let task_id = {
+            let mut runtime_state = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let root = runtime_state.create_root_region(Budget::INFINITE);
+            let (task_id, _handle) = runtime_state
+                .create_task(root, Budget::INFINITE, async {})
+                .expect("task create");
+            task_id
+        };
+        scheduler.inject_ready(task_id, 50);
 
         {
             let worker = scheduler.workers.first_mut().expect("worker");
-            assert_eq!(worker.next_task(), Some(TaskId::new_for_test(9200, 1)));
+            assert_eq!(worker.next_task(), Some(task_id));
+            worker.execute(task_id);
             assert!(
                 worker.preemption_metrics().adaptive_epochs > 0,
                 "dispatch should complete at least one adaptive epoch before disable"
