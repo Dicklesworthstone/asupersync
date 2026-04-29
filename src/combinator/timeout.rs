@@ -882,6 +882,14 @@ mod tests {
         }
     }
 
+    fn modeled_timeout_outcome(
+        outcome: Outcome<i32, &'static str>,
+        deadline: Time,
+        completion_at: Time,
+    ) -> Outcome<i32, &'static str> {
+        make_timed_result(outcome, deadline, completion_at < deadline).into_outcome()
+    }
+
     /// MR1: Timeout idempotence - timeout fires exactly once, never double
     ///
     /// When a timeout deadline is reached, the timeout mechanism should fire
@@ -1027,7 +1035,7 @@ mod tests {
         });
     }
 
-    /// MR10: Zero-duration timeout is equivalent to immediate loser drop.
+    /// MR4: Zero-duration timeout is equivalent to immediate loser drop.
     ///
     /// Shrinking the timeout duration to zero should collapse the timeout race
     /// to the same observable surface as dropping the operation immediately at
@@ -1067,7 +1075,7 @@ mod tests {
         });
     }
 
-    /// MR4: Concurrent timeout race determinism
+    /// MR5: Concurrent timeout race determinism
     ///
     /// When multiple timeouts race, the earliest deadline should always win.
     /// The effective_deadline function implements this min() semantics.
@@ -1110,7 +1118,7 @@ mod tests {
         });
     }
 
-    /// MR5: Nested timeout composition law (LAW-TIMEOUT-MIN)
+    /// MR6: Nested timeout composition law (LAW-TIMEOUT-MIN)
     ///
     /// timeout(d1, timeout(d2, f)) ≃ timeout(min(d1, d2), f)
     /// This should hold regardless of which timeout is outer/inner.
@@ -1153,7 +1161,45 @@ mod tests {
         });
     }
 
-    /// MR6: Operation completion vs timeout race correctness
+    /// MR7: Shaving the timeout by `eps` and then sleeping `eps` preserves the
+    /// observable outcome whenever the operation does not resolve with
+    /// cancellation inside the shaved interval `(d-eps, d)`.
+    #[test]
+    fn metamorphic_timeout_shave_then_sleep_preserves_outcome() {
+        proptest!(|(
+            base_time in 0u64..1_000_000_000,
+            (timeout_duration, epsilon) in (2u64..100_000_000)
+                .prop_flat_map(|duration| (Just(duration), 1u64..duration)),
+            completion_offset in 0u64..150_000_000,
+            operation in mock_operation_strategy(),
+        )| {
+            let start = Time::from_nanos(base_time);
+            let full_deadline = start.saturating_add_nanos(timeout_duration);
+            let shaved_deadline = start.saturating_add_nanos(timeout_duration - epsilon);
+            let completion_at = start.saturating_add_nanos(completion_offset);
+
+            let transformed_source = operation.clone().into_outcome();
+            let baseline_source = operation.into_outcome();
+            let cancelled_inside_shaved_window =
+                matches!(&baseline_source, Outcome::Cancelled(_))
+                    && completion_at >= shaved_deadline
+                    && completion_at < full_deadline;
+            prop_assume!(!cancelled_inside_shaved_window);
+
+            let baseline_outcome =
+                modeled_timeout_outcome(baseline_source, full_deadline, completion_at);
+            let shaved_then_sleep_outcome =
+                modeled_timeout_outcome(transformed_source, shaved_deadline, completion_at);
+
+            prop_assert_eq!(
+                format!("{baseline_outcome:?}"),
+                format!("{shaved_then_sleep_outcome:?}"),
+                "timeout(d) and timeout(d-eps)+sleep(eps) should preserve outcome outside the cancel-only shaved window"
+            );
+        });
+    }
+
+    /// MR8: Operation completion vs timeout race correctness
     ///
     /// When operation and timeout race, the first to complete should win.
     /// Make_timed_result should preserve this race outcome correctly.
@@ -1206,7 +1252,7 @@ mod tests {
         });
     }
 
-    /// MR7: Timeout drain invariant preservation
+    /// MR9: Timeout drain invariant preservation
     ///
     /// TimedOut results always convert to Cancelled outcomes, preserving
     /// the timeout→cancellation semantic mapping for downstream drain logic.
@@ -1256,7 +1302,7 @@ mod tests {
         });
     }
 
-    /// MR8: Timeout expiration boundary consistency
+    /// MR10: Timeout expiration boundary consistency
     ///
     /// The transition from not-expired to expired should be deterministic
     /// and happen exactly at the deadline boundary.
@@ -1295,7 +1341,7 @@ mod tests {
         });
     }
 
-    /// MR9: TimeoutConfig resolution invariants
+    /// MR11: TimeoutConfig resolution invariants
     ///
     /// TimeoutConfig resolution should respect the use_effective flag consistently
     /// and always return deadlines that make logical sense.
