@@ -2966,3 +2966,13 @@ path = "fuzz_targets/macaroon_attenuation_associativity.rs"
 test = false
 doc = false
 bench = false
+
+# Intrusive priority heap invariant fuzzing for scheduler hot paths
+# Tests heap property maintenance, index consistency, and double-free safety
+# through arbitrary sequences of push/pop/remove/clear operations.
+[[bin]]
+name = "intrusive_heap_invariants"
+path = "fuzz_targets/intrusive_heap_invariants.rs"
+test = false
+doc = false
+bench = false
