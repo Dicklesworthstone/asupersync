@@ -2960,17 +2960,6 @@ test = false
 doc = false
 bench = false
 
-# Structure-aware fuzzer for RESP3 client-tracking push parsing.
-# Drives `invalidate` and `tracking` push frames through RespValue::try_decode,
-# asserting valid frames preserve kind/payload shape byte-for-byte and malformed
-# frames fail closed without panicking.
-[[bin]]
-name = "redis_client_tracking_push"
-path = "fuzz_targets/redis_client_tracking_push.rs"
-test = false
-doc = false
-bench = false
-
 # Structure-aware fuzz target for codec/framed.rs decoder reset-and-reuse cycle testing.
 # Tests state consistency across Framed::into_parts() -> reconstruct cycles where decoders
 # must maintain parsing context across transport reconstruction. Exercises buffer migration,
@@ -3142,6 +3131,17 @@ bench = false
 [[bin]]
 name = "intrusive_heap_invariants"
 path = "fuzz_targets/intrusive_heap_invariants.rs"
+test = false
+doc = false
+bench = false
+
+# Intrusive scheduled-set dedup fuzzing for scheduler ring queues.
+# Tests arbitrary same-handle schedule/remove/dispatch cycles across ready and
+# cancel rings, asserting duplicate schedule attempts are idempotent, wrong-queue
+# removals fail closed, and each schedule epoch can dispatch at most once.
+[[bin]]
+name = "intrusive_scheduled_set_dedup"
+path = "fuzz_targets/intrusive_scheduled_set_dedup.rs"
 test = false
 doc = false
 bench = false
@@ -3319,6 +3319,20 @@ bench = false
 [[bin]]
 name = "grpc_streaming_client_half_close"
 path = "fuzz_targets/grpc_streaming_client_half_close.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "resource_attribute_merging"
+path = "fuzz_targets/resource_attribute_merging.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_server_trailers_status_mapping"
+path = "fuzz_targets/grpc_server_trailers_status_mapping.rs"
 test = false
 doc = false
 bench = false
