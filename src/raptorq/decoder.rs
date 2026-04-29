@@ -474,6 +474,23 @@ struct Equation {
 
 impl Equation {
     fn new(columns: Vec<usize>, coefficients: Vec<Gf256>) -> Self {
+        let canonical = columns
+            .iter()
+            .zip(coefficients.iter())
+            .scan(None, |prev, (&col, &coef)| {
+                let ordered = prev.is_none_or(|last| last < col);
+                *prev = Some(col);
+                Some(ordered && !coef.is_zero())
+            })
+            .all(|term_ok| term_ok);
+
+        if canonical {
+            return Self {
+                terms: columns.into_iter().zip(coefficients).collect(),
+                used: false,
+            };
+        }
+
         let mut terms: Vec<_> = columns.into_iter().zip(coefficients).collect();
         // Sort by column index for deterministic ordering
         terms.sort_by_key(|(col, _)| *col);
@@ -2855,6 +2872,29 @@ mod tests {
             }
         }
         cols
+    }
+
+    #[test]
+    fn equation_new_keeps_canonical_rows_in_place() {
+        let equation = Equation::new(
+            vec![1, 4, 9],
+            vec![Gf256::new(2), Gf256::ONE, Gf256::new(7)],
+        );
+
+        assert_eq!(
+            equation.terms,
+            vec![(1, Gf256::new(2)), (4, Gf256::ONE), (9, Gf256::new(7)),]
+        );
+    }
+
+    #[test]
+    fn equation_new_fallback_merges_duplicate_and_zero_terms() {
+        let equation = Equation::new(
+            vec![5, 2, 5, 8],
+            vec![Gf256::new(3), Gf256::ZERO, Gf256::new(3), Gf256::ONE],
+        );
+
+        assert_eq!(equation.terms, vec![(8, Gf256::ONE)]);
     }
 
     use crate::raptorq::systematic::SystematicEncoder;
