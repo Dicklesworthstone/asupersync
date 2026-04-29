@@ -74,6 +74,31 @@ fn timeout_remaining(deadline: Instant, time_getter: TimeGetter) -> Duration {
     deadline.saturating_duration_since(time_getter())
 }
 
+fn drain_thread_handles(handles: &mut Vec<ThreadJoinHandle<()>>) -> Vec<ThreadJoinHandle<()>> {
+    std::mem::take(handles)
+}
+
+fn drain_finished_thread_handles(
+    handles: &mut Vec<ThreadJoinHandle<()>>,
+) -> Vec<ThreadJoinHandle<()>> {
+    let mut finished = Vec::new();
+    let mut index = 0;
+    while index < handles.len() {
+        if handles[index].is_finished() {
+            finished.push(handles.swap_remove(index));
+        } else {
+            index += 1;
+        }
+    }
+    finished
+}
+
+fn join_thread_handles(handles: Vec<ThreadJoinHandle<()>>) {
+    for handle in handles {
+        let _ = handle.join();
+    }
+}
+
 /// A handle to the blocking pool that can be cloned and shared.
 #[derive(Clone)]
 pub struct BlockingPoolHandle {
@@ -491,13 +516,13 @@ impl BlockingPool {
         }
 
         // All threads have exited, now join the handles to clean up
-        {
+        let handles = {
             let mut handles = self.inner.thread_handles.lock();
-            for handle in handles.drain(..) {
-                // Threads have already exited, so join returns immediately
-                let _ = handle.join();
-            }
-        }
+            drain_thread_handles(&mut handles)
+        };
+        // Join outside the mutex so exiting workers can still publish
+        // replacement handles during shutdown-drain races.
+        join_thread_handles(handles);
 
         true
     }
@@ -737,20 +762,16 @@ fn spawn_thread_on_inner(inner: &Arc<BlockingPoolInner>) {
         let _ = guard.retired_with_claim;
     }) {
         Ok(handle) => {
-            let mut handles = inner.thread_handles.lock();
-            handles.push(handle);
+            let finished_handles = {
+                let mut handles = inner.thread_handles.lock();
+                handles.push(handle);
 
-            // Clean up finished thread handles to prevent unbounded memory growth
-            // during workload bursts where threads frequently spawn and retire.
-            let mut i = 0;
-            while i < handles.len() {
-                if handles[i].is_finished() {
-                    let _ = handles.swap_remove(i).join();
-                } else {
-                    i += 1;
-                }
-            }
-            drop(handles);
+                // Clean up finished thread handles to prevent unbounded memory
+                // growth during workload bursts where threads frequently spawn
+                // and retire.
+                drain_finished_thread_handles(&mut handles)
+            };
+            join_thread_handles(finished_handles);
         }
         Err(_) => {
             // Spawn failed — roll back the counter so active_threads
@@ -1814,6 +1835,65 @@ mod tests {
 
         // Prevent Drop from treating the synthetic active thread count as a live worker.
         pool.inner.active_threads.store(0, Ordering::Release);
+    }
+
+    #[test]
+    fn shutdown_and_wait_does_not_hold_thread_handles_mutex_while_joining() {
+        let pool = Arc::new(BlockingPool::new(0, 1));
+        pool.inner.shutdown.store(true, Ordering::Release);
+        pool.inner.active_threads.store(0, Ordering::Release);
+
+        let release = Arc::new((StdMutex::new(false), StdCondvar::new()));
+        let release_clone = Arc::clone(&release);
+        let join_target = thread::spawn(move || {
+            let (lock, condvar) = &*release_clone;
+            let mut released = lock.lock().expect("release gate poisoned");
+            while !*released {
+                released = condvar.wait(released).expect("release gate poisoned");
+            }
+        });
+
+        let mut thread_handles = pool.inner.thread_handles.lock();
+        thread_handles.push(join_target);
+
+        let waiter_pool = Arc::clone(&pool);
+        let shutdown_waiter =
+            thread::spawn(move || waiter_pool.shutdown_and_wait(Duration::from_secs(1)));
+
+        // Keep the mutex held long enough for shutdown_and_wait() to queue on it.
+        thread::sleep(Duration::from_millis(20));
+        drop(thread_handles);
+
+        let (lock_acquired_tx, lock_acquired_rx) = std::sync::mpsc::channel();
+        let contender_pool = Arc::clone(&pool);
+        let contender = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_millis(200);
+            loop {
+                if let Some(guard) = contender_pool.inner.thread_handles.try_lock() {
+                    drop(guard);
+                    let _ = lock_acquired_tx.send(());
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+        });
+
+        lock_acquired_rx
+            .recv_timeout(Duration::from_millis(100))
+            .expect("shutdown waiter should release thread_handles before blocking on join");
+
+        let (release_lock, release_condvar) = &*release;
+        {
+            let mut released = release_lock.lock().expect("release gate poisoned");
+            *released = true;
+        }
+        release_condvar.notify_all();
+
+        contender.join().expect("contender panicked");
+        assert!(shutdown_waiter.join().expect("shutdown waiter panicked"));
     }
 
     #[test]
