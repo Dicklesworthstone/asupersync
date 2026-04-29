@@ -307,6 +307,8 @@ flate2 = "1.1"
 insta = { version = "1.40", features = ["json"] }
 # Lightweight deterministic RNG for randomized test harnesses
 fastrand = "2.3"
+# HTTP/1.1 reference implementation for conformance testing
+httparse = "1.8"
 # tokio-util for differential conformance testing of LengthDelimitedCodec
 tokio-util = { version = "0.7", features = ["codec"] }
 # External RFC 6330 decoder for byte-level RaptorQ interoperability checks

@@ -2276,4 +2276,308 @@ mod tests {
             let _ = codec.decode(&mut buf);
         }
     }
+
+    /// HTTP/1.1 request parsing conformance test against httparse reference implementation.
+    ///
+    /// This test ensures that the same byte stream produces identical (method, uri, version,
+    /// headers) tuples between our implementation and the httparse reference implementation.
+    /// This is Pattern 1: Differential Testing (Reference Implementation) from the
+    /// testing-conformance-harnesses methodology.
+    #[test]
+    fn http1_codec_conformance_against_httparse() {
+        use std::collections::HashMap;
+
+        /// Canonical HTTP request for conformance testing.
+        #[derive(Debug, Clone)]
+        struct CanonicalRequest {
+            raw_bytes: Vec<u8>,
+            description: String,
+            expect_error: bool,
+        }
+
+        /// Parsed request tuple for comparison.
+        #[derive(Debug, PartialEq, Eq)]
+        struct ParsedRequest {
+            method: String,
+            uri: String,
+            version: String,
+            headers: Vec<(String, String)>,
+        }
+
+        // Test cases covering various HTTP/1.1 scenarios including chunked encoding edge cases
+        let test_cases = vec![
+            // Basic GET request
+            CanonicalRequest {
+                raw_bytes: b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n".to_vec(),
+                description: "Basic GET request".to_string(),
+                expect_error: false,
+            },
+
+            // POST with Content-Length
+            CanonicalRequest {
+                raw_bytes: b"POST /api/v1/data HTTP/1.1\r\nHost: api.example.com\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n{\"test\":\"data\"}".to_vec(),
+                description: "POST with Content-Length body".to_string(),
+                expect_error: false,
+            },
+
+            // Chunked encoding - basic
+            CanonicalRequest {
+                raw_bytes: b"POST /upload HTTP/1.1\r\nHost: example.com\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n".to_vec(),
+                description: "Basic chunked encoding".to_string(),
+                expect_error: false,
+            },
+
+            // Chunked encoding edge case: chunk extensions
+            CanonicalRequest {
+                raw_bytes: b"POST /upload HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5;ext=value\r\nhello\r\n0\r\n\r\n".to_vec(),
+                description: "Chunked encoding with extensions".to_string(),
+                expect_error: false,
+            },
+
+            // Chunked encoding edge case: zero-length chunks in middle
+            CanonicalRequest {
+                raw_bytes: b"POST /stream HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nfoo\r\n0\r\n\r\n3\r\nbar\r\n0\r\n\r\n".to_vec(),
+                description: "Chunked encoding with zero-length chunks".to_string(),
+                expect_error: false,
+            },
+
+            // Complex headers with multiple values
+            CanonicalRequest {
+                raw_bytes: b"PUT /resource HTTP/1.1\r\nHost: example.com\r\nUser-Agent: test-client/1.0\r\nAccept: application/json, text/plain\r\nAuthorization: Bearer token123\r\nContent-Length: 0\r\n\r\n".to_vec(),
+                description: "Complex headers with multiple values".to_string(),
+                expect_error: false,
+            },
+
+            // HTTP/1.0 version
+            CanonicalRequest {
+                raw_bytes: b"GET /legacy HTTP/1.0\r\nHost: old.example.com\r\n\r\n".to_vec(),
+                description: "HTTP/1.0 request".to_string(),
+                expect_error: false,
+            },
+
+            // Edge case: method with unusual but valid characters
+            CanonicalRequest {
+                raw_bytes: b"OPTIONS * HTTP/1.1\r\nHost: example.com\r\n\r\n".to_vec(),
+                description: "OPTIONS with asterisk URI".to_string(),
+                expect_error: false,
+            },
+
+            // Edge case: chunked with trailers
+            CanonicalRequest {
+                raw_bytes: b"POST /data HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n4\r\ntest\r\n0\r\nX-Checksum: abc123\r\n\r\n".to_vec(),
+                description: "Chunked encoding with trailers".to_string(),
+                expect_error: false,
+            },
+
+            // Error case: malformed request line
+            CanonicalRequest {
+                raw_bytes: b"GET\r\n\r\n".to_vec(),
+                description: "Malformed request line".to_string(),
+                expect_error: true,
+            },
+
+            // Error case: chunked encoding with invalid chunk size
+            CanonicalRequest {
+                raw_bytes: b"POST /bad HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\nZZ\r\ndata\r\n".to_vec(),
+                description: "Invalid chunk size".to_string(),
+                expect_error: true,
+            },
+        ];
+
+        /// Parse request with our implementation.
+        fn parse_with_our_codec(raw_bytes: &[u8]) -> Result<ParsedRequest, String> {
+            let mut codec = Http1Codec::new();
+            let mut buf = BytesMut::from(raw_bytes);
+
+            match codec.decode(&mut buf) {
+                Ok(Some(req)) => Ok(ParsedRequest {
+                    method: format!("{:?}", req.method),
+                    uri: req.uri,
+                    version: format!("{:?}", req.version),
+                    headers: req.headers.into_iter().collect(),
+                }),
+                Ok(None) => Err("Incomplete request".to_string()),
+                Err(e) => Err(format!("{:?}", e)),
+            }
+        }
+
+        /// Parse request with httparse reference implementation.
+        fn parse_with_httparse_reference(raw_bytes: &[u8]) -> Result<ParsedRequest, String> {
+            let mut headers = [httparse::Header { name: "", value: &[] }; 64];
+            let mut req = httparse::Request::new(&mut headers);
+
+            match req.parse(raw_bytes) {
+                Ok(httparse::Status::Complete(_)) => {
+                    let method = req.method.ok_or("Missing method")?.to_string();
+                    let uri = req.path.ok_or("Missing path")?.to_string();
+                    let version = req.version
+                        .map(|v| if v == 1 { "Http11".to_string() } else { "Http10".to_string() })
+                        .unwrap_or_else(|| "Http11".to_string());
+
+                    let headers: Vec<(String, String)> = req.headers
+                        .iter()
+                        .filter(|h| !h.name.is_empty())
+                        .map(|h| (
+                            h.name.to_string(),
+                            String::from_utf8_lossy(h.value).to_string(),
+                        ))
+                        .collect();
+
+                    Ok(ParsedRequest {
+                        method,
+                        uri,
+                        version,
+                        headers,
+                    })
+                }
+                Ok(httparse::Status::Partial) => Err("Partial request".to_string()),
+                Err(e) => Err(format!("httparse error: {:?}", e)),
+            }
+        }
+
+        let mut conformance_failures = Vec::new();
+        let mut both_error_count = 0;
+        let mut both_success_count = 0;
+
+        for test_case in &test_cases {
+            let our_result = parse_with_our_codec(&test_case.raw_bytes);
+            let ref_result = parse_with_httparse_reference(&test_case.raw_bytes);
+
+            match (&our_result, &ref_result, test_case.expect_error) {
+                // Both implementations succeeded - compare results
+                (Ok(our_parsed), Ok(ref_parsed), false) => {
+                    if our_parsed == ref_parsed {
+                        both_success_count += 1;
+                    } else {
+                        conformance_failures.push(format!(
+                            "CONFORMANCE MISMATCH: {}\n\
+                             Our result:  {:?}\n\
+                             Ref result:  {:?}\n\
+                             Raw bytes:   {:?}",
+                            test_case.description,
+                            our_parsed,
+                            ref_parsed,
+                            String::from_utf8_lossy(&test_case.raw_bytes)
+                        ));
+                    }
+                }
+
+                // Both implementations failed (expected for error cases)
+                (Err(_), Err(_), true) => {
+                    both_error_count += 1;
+                }
+
+                // Expected error but one succeeded
+                (Ok(parsed), Err(err), true) => {
+                    conformance_failures.push(format!(
+                        "EXPECTED ERROR but our implementation succeeded: {}\n\
+                         Our result: {:?}\n\
+                         Ref error:  {}\n\
+                         Raw bytes:  {:?}",
+                        test_case.description,
+                        parsed,
+                        err,
+                        String::from_utf8_lossy(&test_case.raw_bytes)
+                    ));
+                }
+                (Err(err), Ok(parsed), true) => {
+                    conformance_failures.push(format!(
+                        "EXPECTED ERROR but reference succeeded: {}\n\
+                         Our error:  {}\n\
+                         Ref result: {:?}\n\
+                         Raw bytes:  {:?}",
+                        test_case.description,
+                        err,
+                        parsed,
+                        String::from_utf8_lossy(&test_case.raw_bytes)
+                    ));
+                }
+
+                // Unexpected success/error mismatch
+                (Ok(our_parsed), Err(ref_err), false) => {
+                    conformance_failures.push(format!(
+                        "SUCCESS/ERROR MISMATCH: {}\n\
+                         Our success: {:?}\n\
+                         Ref error:   {}\n\
+                         Raw bytes:   {:?}",
+                        test_case.description,
+                        our_parsed,
+                        ref_err,
+                        String::from_utf8_lossy(&test_case.raw_bytes)
+                    ));
+                }
+                (Err(our_err), Ok(ref_parsed), false) => {
+                    conformance_failures.push(format!(
+                        "ERROR/SUCCESS MISMATCH: {}\n\
+                         Our error:   {}\n\
+                         Ref success: {:?}\n\
+                         Raw bytes:   {:?}",
+                        test_case.description,
+                        our_err,
+                        ref_parsed,
+                        String::from_utf8_lossy(&test_case.raw_bytes)
+                    ));
+                }
+
+                // Both succeeded but we expected error
+                (Ok(our_parsed), Ok(ref_parsed), true) => {
+                    conformance_failures.push(format!(
+                        "BOTH SUCCEEDED but expected error: {}\n\
+                         Our result: {:?}\n\
+                         Ref result: {:?}\n\
+                         Raw bytes:  {:?}",
+                        test_case.description,
+                        our_parsed,
+                        ref_parsed,
+                        String::from_utf8_lossy(&test_case.raw_bytes)
+                    ));
+                }
+            }
+        }
+
+        // Generate conformance report
+        let total_tests = test_cases.len();
+        let success_rate = (both_success_count + both_error_count) as f64 / total_tests as f64 * 100.0;
+
+        eprintln!(
+            "HTTP/1.1 Codec Conformance Report:\n\
+             - Total tests: {}\n\
+             - Both succeeded: {}\n\
+             - Both failed (expected): {}\n\
+             - Conformance rate: {:.1}%\n\
+             - Failures: {}",
+            total_tests,
+            both_success_count,
+            both_error_count,
+            success_rate,
+            conformance_failures.len()
+        );
+
+        // If there are failures, create insta snapshots for debugging
+        if !conformance_failures.is_empty() {
+            use std::collections::BTreeMap;
+
+            let failure_report = conformance_failures
+                .into_iter()
+                .enumerate()
+                .map(|(i, failure)| (format!("failure_{}", i), failure))
+                .collect::<BTreeMap<String, String>>();
+
+            insta::with_settings!({
+                snapshot_path => "../../tests/snapshots",
+                prepend_module_to_snapshot => false,
+            }, {
+                insta::assert_yaml_snapshot!("http1_codec_conformance_failures", failure_report);
+            });
+
+            panic!(
+                "HTTP/1.1 codec conformance test failed: {} mismatches against httparse reference.\n\
+                 Check snapshot file for detailed comparison.",
+                failure_report.len()
+            );
+        }
+
+        // Success: perfect conformance with httparse reference
+        eprintln!("✅ HTTP/1.1 codec conformance test passed: {:.1}% compliance with httparse reference", success_rate);
+    }
 }
