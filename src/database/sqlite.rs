@@ -131,7 +131,26 @@ fn skip_sql_trivia(sql: &str, mut index: usize) -> usize {
     index
 }
 
-fn checked_sql_surface_violation(sql: &str) -> Option<&'static str> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SqlSurfaceViolation {
+    Pragma,
+    TransactionControl,
+    AttachDetach,
+}
+
+impl SqlSurfaceViolation {
+    fn checked_surface_message(self) -> &'static str {
+        match self {
+            Self::Pragma => "PRAGMA statements require the explicit *_unchecked SQLite APIs",
+            Self::TransactionControl => {
+                "transaction or connection control statements require the explicit *_unchecked SQLite APIs"
+            }
+            Self::AttachDetach => "ATTACH and DETACH are disabled on the checked SQLite APIs",
+        }
+    }
+}
+
+fn classify_sql_surface_violation(sql: &str) -> Option<SqlSurfaceViolation> {
     let bytes = sql.as_bytes();
     let mut index = 0usize;
     let mut statement_start = true;
@@ -159,7 +178,11 @@ fn checked_sql_surface_violation(sql: &str) -> Option<&'static str> {
                 }
                 let keyword = &sql[start..index];
                 if keyword.eq_ignore_ascii_case("PRAGMA") {
-                    return Some("PRAGMA");
+                    return Some(SqlSurfaceViolation::Pragma);
+                }
+                if keyword.eq_ignore_ascii_case("ATTACH") || keyword.eq_ignore_ascii_case("DETACH")
+                {
+                    return Some(SqlSurfaceViolation::AttachDetach);
                 }
                 if keyword.eq_ignore_ascii_case("BEGIN")
                     || keyword.eq_ignore_ascii_case("COMMIT")
@@ -167,10 +190,8 @@ fn checked_sql_surface_violation(sql: &str) -> Option<&'static str> {
                     || keyword.eq_ignore_ascii_case("ROLLBACK")
                     || keyword.eq_ignore_ascii_case("SAVEPOINT")
                     || keyword.eq_ignore_ascii_case("RELEASE")
-                    || keyword.eq_ignore_ascii_case("ATTACH")
-                    || keyword.eq_ignore_ascii_case("DETACH")
                 {
-                    return Some("transaction or connection control");
+                    return Some(SqlSurfaceViolation::TransactionControl);
                 }
             }
             statement_start = false;
@@ -183,10 +204,23 @@ fn checked_sql_surface_violation(sql: &str) -> Option<&'static str> {
 }
 
 fn ensure_checked_sql_surface(sql: &str) -> Result<(), SqliteError> {
-    if let Some(kind) = checked_sql_surface_violation(sql) {
-        return Err(SqliteError::UnsafeSql(format!(
-            "{kind} statements require the explicit *_unchecked SQLite APIs"
-        )));
+    if let Some(violation) = classify_sql_surface_violation(sql) {
+        return Err(SqliteError::UnsafeSql(
+            violation.checked_surface_message().to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_unchecked_sql_surface(sql: &str) -> Result<(), SqliteError> {
+    if matches!(
+        classify_sql_surface_violation(sql),
+        Some(SqlSurfaceViolation::AttachDetach)
+    ) {
+        return Err(SqliteError::UnsafeSql(
+            "ATTACH and DETACH are disabled on SQLite connections; open a separate validated connection instead"
+                .to_string(),
+        ));
     }
     Ok(())
 }
@@ -217,8 +251,15 @@ pub enum SqliteError {
     TransactionFinished,
     /// Lock poisoned.
     LockPoisoned,
-    /// Raw engine-control SQL hit a checked surface.
+    /// Raw engine-control SQL hit a restricted binding surface.
     UnsafeSql(String),
+    /// TEXT value was not valid UTF-8.
+    InvalidTextEncoding {
+        /// Column name or index.
+        column: String,
+        /// UTF-8 decoding error.
+        source: std::str::Utf8Error,
+    },
 }
 
 impl SqliteError {
@@ -338,7 +379,16 @@ impl fmt::Display for SqliteError {
             Self::TransactionFinished => write!(f, "Transaction already finished"),
             Self::LockPoisoned => write!(f, "SQLite connection lock poisoned"),
             Self::UnsafeSql(msg) => {
-                write!(f, "Unsafe SQLite control SQL on checked surface: {msg}")
+                write!(
+                    f,
+                    "Unsafe SQLite control SQL on SQLite binding surface: {msg}"
+                )
+            }
+            Self::InvalidTextEncoding { column, source } => {
+                write!(
+                    f,
+                    "SQLite text column {column} contained invalid UTF-8: {source}"
+                )
             }
         }
     }
@@ -348,6 +398,7 @@ impl std::error::Error for SqliteError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Io(e) => Some(e),
+            Self::InvalidTextEncoding { source, .. } => Some(source),
             _ => None,
         }
     }
@@ -775,14 +826,19 @@ impl SqliteConnection {
     /// # Security
     ///
     /// This bypasses the checked surface and therefore permits engine-control
-    /// statements such as `BEGIN`, `ROLLBACK`, and `PRAGMA`. Use it only for
-    /// static literals or version-controlled migration/control SQL.
+    /// statements such as `BEGIN`, `ROLLBACK`, and `PRAGMA`. `ATTACH`/`DETACH`
+    /// remain disabled on this binding surface and should use separate
+    /// validated connections instead. Use this only for static literals or
+    /// version-controlled migration/control SQL.
     pub async fn execute_unchecked(
         &self,
         cx: &Cx,
         sql: &str,
         params: &[SqliteValue],
     ) -> Outcome<u64, SqliteError> {
+        if let Err(err) = ensure_unchecked_sql_surface(sql) {
+            return Outcome::Err(err);
+        }
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
@@ -830,6 +886,9 @@ impl SqliteConnection {
     /// Execute a trusted batch of SQL statements without checked-surface
     /// validation.
     pub async fn execute_batch_unchecked(&self, cx: &Cx, sql: &str) -> Outcome<(), SqliteError> {
+        if let Err(err) = ensure_unchecked_sql_surface(sql) {
+            return Outcome::Err(err);
+        }
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
@@ -881,6 +940,9 @@ impl SqliteConnection {
         sql: &str,
         params: &[SqliteValue],
     ) -> Outcome<Vec<SqliteRow>, SqliteError> {
+        if let Err(err) = ensure_unchecked_sql_surface(sql) {
+            return Outcome::Err(err);
+        }
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
@@ -937,7 +999,8 @@ impl SqliteConnection {
                     let value = row
                         .get_ref(i)
                         .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
-                    values.push(convert_value(value));
+                    let column = column_name_or_index(&column_names, i);
+                    values.push(convert_value(value, &column)?);
                 }
                 result.push(SqliteRow::new(Arc::clone(&columns), values));
             }
@@ -972,6 +1035,9 @@ impl SqliteConnection {
         sql: &str,
         params: &[SqliteValue],
     ) -> Outcome<Option<SqliteRow>, SqliteError> {
+        if let Err(err) = ensure_unchecked_sql_surface(sql) {
+            return Outcome::Err(err);
+        }
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
                 cx.cancel_reason()
@@ -1029,7 +1095,8 @@ impl SqliteConnection {
                     let value = row
                         .get_ref(i)
                         .map_err(|e| SqliteError::Sqlite(e.to_string()))?;
-                    values.push(convert_value(value));
+                    let column = column_name_or_index(&column_names, i);
+                    values.push(convert_value(value, &column)?);
                 }
                 Some(SqliteRow::new(columns, values))
             } else {
@@ -1237,15 +1304,30 @@ impl Drop for SqliteTransaction<'_> {
 }
 
 /// Converts a rusqlite value reference to our SqliteValue.
-fn convert_value(value: rusqlite::types::ValueRef<'_>) -> SqliteValue {
+fn column_name_or_index(column_names: &[String], idx: usize) -> String {
+    column_names
+        .get(idx)
+        .cloned()
+        .unwrap_or_else(|| format!("index {idx}"))
+}
+
+fn convert_value(
+    value: rusqlite::types::ValueRef<'_>,
+    column: &str,
+) -> Result<SqliteValue, SqliteError> {
     match value {
-        rusqlite::types::ValueRef::Null => SqliteValue::Null,
-        rusqlite::types::ValueRef::Integer(v) => SqliteValue::Integer(v),
-        rusqlite::types::ValueRef::Real(v) => SqliteValue::Real(v),
+        rusqlite::types::ValueRef::Null => Ok(SqliteValue::Null),
+        rusqlite::types::ValueRef::Integer(v) => Ok(SqliteValue::Integer(v)),
+        rusqlite::types::ValueRef::Real(v) => Ok(SqliteValue::Real(v)),
         rusqlite::types::ValueRef::Text(v) => {
-            SqliteValue::Text(String::from_utf8_lossy(v).to_string())
+            let text =
+                std::str::from_utf8(v).map_err(|source| SqliteError::InvalidTextEncoding {
+                    column: column.to_string(),
+                    source,
+                })?;
+            Ok(SqliteValue::Text(text.to_string()))
         }
-        rusqlite::types::ValueRef::Blob(v) => SqliteValue::Blob(v.to_vec()),
+        rusqlite::types::ValueRef::Blob(v) => Ok(SqliteValue::Blob(v.to_vec())),
     }
 }
 
@@ -1417,7 +1499,19 @@ mod tests {
         let err = SqliteError::UnsafeSql("PRAGMA statements require *_unchecked".into());
         assert_eq!(
             err.to_string(),
-            "Unsafe SQLite control SQL on checked surface: PRAGMA statements require *_unchecked"
+            "Unsafe SQLite control SQL on SQLite binding surface: PRAGMA statements require *_unchecked"
+        );
+    }
+
+    #[test]
+    fn sqlite_error_display_invalid_text_encoding() {
+        let err = SqliteError::InvalidTextEncoding {
+            column: "payload".into(),
+            source: std::str::from_utf8(&[0x80]).unwrap_err(),
+        };
+        assert!(
+            err.to_string()
+                .starts_with("SQLite text column payload contained invalid UTF-8:")
         );
     }
 
@@ -1440,6 +1534,16 @@ mod tests {
         assert!(SqliteError::TransactionFinished.source().is_none());
         assert!(SqliteError::UnsafeSql("oops".into()).source().is_none());
         assert!(SqliteError::ColumnNotFound("x".into()).source().is_none());
+    }
+
+    #[test]
+    fn sqlite_error_source_invalid_text_encoding_returns_some() {
+        use std::error::Error;
+        let err = SqliteError::InvalidTextEncoding {
+            column: "payload".into(),
+            source: std::str::from_utf8(&[0x80]).unwrap_err(),
+        };
+        assert!(err.source().is_some());
     }
 
     #[test]
@@ -1469,6 +1573,25 @@ mod tests {
                 matches!(err, SqliteError::UnsafeSql(_)),
                 "expected unsafe SQL rejection for {sql:?}, got {err:?}"
             );
+        }
+    }
+
+    #[test]
+    fn unchecked_sql_surface_rejects_attach_detach_keywords() {
+        for sql in ["ATTACH 'tenant.db' AS tenant", "DETACH tenant"] {
+            let err = ensure_unchecked_sql_surface(sql).unwrap_err();
+            assert!(
+                matches!(err, SqliteError::UnsafeSql(_)),
+                "expected unsafe SQL rejection for {sql:?}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unchecked_sql_surface_allows_pragma_and_transaction_control() {
+        for sql in ["PRAGMA journal_mode", "BEGIN IMMEDIATE", "ROLLBACK"] {
+            ensure_unchecked_sql_surface(sql)
+                .unwrap_or_else(|err| panic!("unchecked surface should allow {sql:?}: {err:?}"));
         }
     }
 
@@ -2002,6 +2125,131 @@ mod tests {
                 .unwrap()
                 .to_ascii_lowercase();
             assert_eq!(mode, "wal");
+        });
+    }
+
+    #[test]
+    fn query_rejects_invalid_utf8_text() {
+        let cx = create_test_cx();
+
+        block_on(async {
+            let conn = match SqliteConnection::open_in_memory(&cx).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open_in_memory failed: {other:?}"),
+            };
+
+            match conn
+                .query_unchecked(&cx, "SELECT CAST(X'80' AS TEXT) AS bad_text", &[])
+                .await
+            {
+                Outcome::Err(SqliteError::InvalidTextEncoding { column, .. }) => {
+                    assert_eq!(column, "bad_text");
+                }
+                other => panic!("expected invalid UTF-8 rejection, got: {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn unchecked_execute_rejects_attach_database() {
+        let cx = create_test_cx();
+
+        block_on(async {
+            let conn = match SqliteConnection::open_in_memory(&cx).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open_in_memory failed: {other:?}"),
+            };
+
+            match conn
+                .execute_unchecked(&cx, "ATTACH ':memory:' AS audit", &[])
+                .await
+            {
+                Outcome::Err(SqliteError::UnsafeSql(msg)) => {
+                    assert!(msg.contains("ATTACH and DETACH"));
+                }
+                other => panic!("expected ATTACH rejection, got: {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn sqlite_rowid_max_round_trips_without_overflow() {
+        let cx = create_test_cx();
+
+        block_on(async {
+            let conn = match SqliteConnection::open_in_memory(&cx).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open_in_memory failed: {other:?}"),
+            };
+
+            match conn
+                .execute_batch(&cx, "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT);")
+                .await
+            {
+                Outcome::Ok(()) => {}
+                other => panic!("create table failed: {other:?}"),
+            }
+
+            match conn
+                .execute(
+                    &cx,
+                    "INSERT INTO t(id, name) VALUES (?1, ?2)",
+                    &[
+                        SqliteValue::Integer(i64::MAX),
+                        SqliteValue::Text("max-rowid".to_string()),
+                    ],
+                )
+                .await
+            {
+                Outcome::Ok(1) => {}
+                other => panic!("insert failed: {other:?}"),
+            }
+
+            let rows = match conn.query(&cx, "SELECT rowid, id, name FROM t", &[]).await {
+                Outcome::Ok(rows) => rows,
+                other => panic!("query failed: {other:?}"),
+            };
+
+            assert_eq!(rows[0].get_i64("rowid").unwrap(), i64::MAX);
+            assert_eq!(rows[0].get_i64("id").unwrap(), i64::MAX);
+            assert_eq!(rows[0].get_str("name").unwrap(), "max-rowid");
+        });
+    }
+
+    #[test]
+    fn sqlite_rowid_overflow_literal_is_rejected() {
+        let cx = create_test_cx();
+
+        block_on(async {
+            let conn = match SqliteConnection::open_in_memory(&cx).await {
+                Outcome::Ok(conn) => conn,
+                other => panic!("open_in_memory failed: {other:?}"),
+            };
+
+            match conn
+                .execute_batch(&cx, "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT);")
+                .await
+            {
+                Outcome::Ok(()) => {}
+                other => panic!("create table failed: {other:?}"),
+            }
+
+            match conn
+                .execute_unchecked(
+                    &cx,
+                    "INSERT INTO t(id, name) VALUES(9223372036854775808, 'overflow')",
+                    &[],
+                )
+                .await
+            {
+                Outcome::Err(SqliteError::Sqlite(msg)) => {
+                    assert!(
+                        msg.to_ascii_lowercase().contains("datatype mismatch"),
+                        "unexpected rowid overflow error: {msg}"
+                    );
+                }
+                other => panic!("expected rowid overflow rejection, got: {other:?}"),
+            }
         });
     }
 
