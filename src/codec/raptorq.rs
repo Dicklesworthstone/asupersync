@@ -495,4 +495,396 @@ mod golden_tests {
         println!("  - Inactivation decoder successfully handled high-loss scenario");
         println!("  - Differential test: all recovered symbols match RFC 6330 reference exactly");
     }
+
+    // br-asupersync-t36ete: metamorphic testing for RaptorQ round-trip invariants.
+    //
+    // Metamorphic testing verifies relationships between outputs under known
+    // transformations when we cannot compute expected outputs for arbitrary
+    // inputs. For RaptorQ, the key property is encode-decode-encode identity:
+    // encode(decode(encode(x))) == encode(x) for any valid input x.
+
+    #[cfg(test)]
+    mod metamorphic_tests {
+        use super::*;
+        use crate::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
+        use crate::raptorq::systematic::SystematicEncoder;
+        use crate::util::DetRng;
+        use proptest::prelude::*;
+
+        /// Metamorphic Relation 1: Invertive Round-Trip Identity
+        /// Property: encode(decode(encode(x))) == encode(x)
+        ///
+        /// This is the fundamental correctness property for any error-correcting
+        /// code: encoding data, successfully decoding it, then re-encoding must
+        /// produce identical symbols. Violations indicate data corruption or
+        /// algorithmic bugs in the encode/decode pipeline.
+        #[test]
+        fn mr_raptorq_encode_decode_encode_identity() {
+            let k = 6; // Source symbols
+            let symbol_size = 12;
+            let seed = 0x1234ABCD;
+
+            // Generate test data
+            let source_data: Vec<Vec<u8>> = (0..k)
+                .map(|i| {
+                    (0..symbol_size)
+                        .map(|j| ((i * 37 + j * 19 + 73) % 256) as u8)
+                        .collect()
+                })
+                .collect();
+
+            // ENCODE phase: Generate symbols from source data
+            let encoder = SystematicEncoder::new(&source_data, symbol_size, seed)
+                .expect("Encoder construction must succeed for MR test");
+
+            // Collect encoded symbols (source + repair)
+            let mut encoded_symbols = Vec::new();
+
+            // Add source symbols
+            for (esi, data) in source_data.iter().enumerate() {
+                encoded_symbols.push(ReceivedSymbol::source(esi as u32, data.clone()));
+            }
+
+            // Add some repair symbols for decoding redundancy
+            let repair_count = 2;
+            for repair_esi in (k as u32)..(k as u32 + repair_count) {
+                let decoder = InactivationDecoder::new(k, symbol_size, seed);
+                let (columns, coefficients) = decoder
+                    .repair_equation(repair_esi)
+                    .expect("Repair equation generation must succeed");
+                let repair_data = encoder.repair_symbol(repair_esi);
+                encoded_symbols.push(ReceivedSymbol::repair(
+                    repair_esi,
+                    columns,
+                    coefficients,
+                    repair_data,
+                ));
+            }
+
+            // DECODE phase: Recover source data from symbols
+            let decoder = InactivationDecoder::new(k, symbol_size, seed);
+            let mut all_symbols = decoder.constraint_symbols();
+            all_symbols.extend(encoded_symbols);
+
+            let decode_result = decoder
+                .decode(&all_symbols)
+                .expect("Decoding must succeed for round-trip MR test");
+
+            // RE-ENCODE phase: Generate symbols from decoded data
+            let re_encoder = SystematicEncoder::new(&decode_result.source, symbol_size, seed)
+                .expect("Re-encoder construction must succeed");
+
+            // METAMORPHIC VERIFICATION: Original and re-encoded symbols must match
+            for esi in 0..(k as u32) {
+                let original_source = &source_data[esi as usize];
+                let re_encoded_source = &decode_result.source[esi as usize];
+                assert_eq!(
+                    original_source, re_encoded_source,
+                    "MR1 violation: source symbol {esi} differs after round-trip"
+                );
+            }
+
+            // Verify repair symbols also match (encode determinism)
+            for repair_esi in (k as u32)..(k as u32 + repair_count) {
+                let original_repair = encoder.repair_symbol(repair_esi);
+                let re_encoded_repair = re_encoder.repair_symbol(repair_esi);
+                assert_eq!(
+                    original_repair, re_encoded_repair,
+                    "MR1 violation: repair symbol {repair_esi} differs after round-trip"
+                );
+            }
+        }
+
+        /// Metamorphic Relation 2: Additive Zero-Padding Invariance
+        /// Property: decode(encode(x)) == decode(encode(zero_pad(x)))
+        ///
+        /// Adding trailing zeros to source data should not affect the ability
+        /// to decode and recover the original content. This tests padding
+        /// handling in the encoder/decoder pipeline.
+        #[test]
+        fn mr_raptorq_zero_padding_invariance() {
+            let k = 4;
+            let symbol_size = 16;
+            let seed = 0x5678DCBA;
+
+            // Original data (short)
+            let original_data: Vec<Vec<u8>> = (0..k)
+                .map(|i| {
+                    let len = 8 + (i % 4); // Variable length 8-11 bytes
+                    (0..len).map(|j| ((i * 23 + j * 41 + 89) % 256) as u8).collect()
+                })
+                .collect();
+
+            // Zero-padded data (extended to full symbol_size)
+            let padded_data: Vec<Vec<u8>> = original_data
+                .iter()
+                .map(|data| {
+                    let mut padded = data.clone();
+                    padded.resize(symbol_size, 0); // Zero-pad to symbol_size
+                    padded
+                })
+                .collect();
+
+            // Encode original data
+            let original_encoder = SystematicEncoder::new(&original_data, symbol_size, seed)
+                .expect("Original encoder must construct");
+
+            // Encode zero-padded data
+            let padded_encoder = SystematicEncoder::new(&padded_data, symbol_size, seed)
+                .expect("Padded encoder must construct");
+
+            // Generate symbols for both variants
+            let mut original_symbols = Vec::new();
+            let mut padded_symbols = Vec::new();
+
+            for esi in 0..(k as u32 + 2) {
+                if (esi as usize) < k {
+                    // Source symbols: original should match padded after truncation
+                    original_symbols.push(ReceivedSymbol::source(esi, original_data[esi as usize].clone()));
+                    padded_symbols.push(ReceivedSymbol::source(esi, padded_data[esi as usize].clone()));
+                } else {
+                    // Repair symbols: should be deterministically related
+                    let decoder = InactivationDecoder::new(k, symbol_size, seed);
+                    let (columns, coefficients) = decoder
+                        .repair_equation(esi)
+                        .expect("Repair equation must be valid");
+
+                    let original_repair = original_encoder.repair_symbol(esi);
+                    let padded_repair = padded_encoder.repair_symbol(esi);
+
+                    original_symbols.push(ReceivedSymbol::repair(
+                        esi, columns.clone(), coefficients.clone(), original_repair
+                    ));
+                    padded_symbols.push(ReceivedSymbol::repair(
+                        esi, columns, coefficients, padded_repair
+                    ));
+                }
+            }
+
+            // Decode both variants
+            let decoder = InactivationDecoder::new(k, symbol_size, seed);
+
+            let original_constraints = decoder.constraint_symbols();
+            let mut original_all = original_constraints.clone();
+            original_all.extend(original_symbols);
+
+            let mut padded_all = original_constraints;
+            padded_all.extend(padded_symbols);
+
+            let original_result = decoder
+                .decode(&original_all)
+                .expect("Original data decode must succeed");
+            let padded_result = decoder
+                .decode(&padded_all)
+                .expect("Padded data decode must succeed");
+
+            // METAMORPHIC VERIFICATION: After truncating padding, results must match
+            assert_eq!(
+                original_result.source.len(),
+                padded_result.source.len(),
+                "MR2 violation: decoded symbol counts differ with zero-padding"
+            );
+
+            for (i, (orig, padded)) in original_result.source
+                .iter()
+                .zip(padded_result.source.iter())
+                .enumerate()
+            {
+                // Compare up to original data length (before padding)
+                let orig_len = original_data[i].len();
+                assert_eq!(
+                    &orig[..orig_len],
+                    &original_data[i],
+                    "MR2 violation: original data mismatch at symbol {i}"
+                );
+
+                // Padded version should match after truncation
+                assert_eq!(
+                    &padded[..orig_len],
+                    &original_data[i],
+                    "MR2 violation: zero-padding changes recovered data at symbol {i}"
+                );
+            }
+        }
+
+        /// Metamorphic Relation 3: Permutative Symbol-Order Invariance
+        /// Property: decode(shuffle(symbols)) == decode(symbols)
+        ///
+        /// Reordering the received symbols should not affect decoding results
+        /// since the decoder should identify symbols by their ESI, not position.
+        /// This tests the robustness of symbol identification in the decoder.
+        #[test]
+        fn mr_raptorq_symbol_order_invariance() {
+            let k = 5;
+            let symbol_size = 14;
+            let seed = 0x9ABC_DEF0;
+
+            let source_data: Vec<Vec<u8>> = (0..k)
+                .map(|i| {
+                    (0..symbol_size)
+                        .map(|j| ((i * 13 + j * 29 + 67) % 256) as u8)
+                        .collect()
+                })
+                .collect();
+
+            let encoder = SystematicEncoder::new(&source_data, symbol_size, seed)
+                .expect("Encoder must construct for permutation test");
+            let decoder = InactivationDecoder::new(k, symbol_size, seed);
+
+            // Create a full set of symbols
+            let mut original_order_symbols = decoder.constraint_symbols();
+
+            // Add source symbols
+            for (esi, data) in source_data.iter().enumerate() {
+                original_order_symbols.push(ReceivedSymbol::source(esi as u32, data.clone()));
+            }
+
+            // Add repair symbols
+            let repair_count = 3;
+            for repair_esi in (k as u32)..(k as u32 + repair_count) {
+                let (columns, coefficients) = decoder
+                    .repair_equation(repair_esi)
+                    .expect("Repair equation must be valid");
+                let repair_data = encoder.repair_symbol(repair_esi);
+                original_order_symbols.push(ReceivedSymbol::repair(
+                    repair_esi,
+                    columns,
+                    coefficients,
+                    repair_data,
+                ));
+            }
+
+            // Decode in original order
+            let original_result = decoder
+                .decode(&original_order_symbols)
+                .expect("Original order decode must succeed");
+
+            // Create permuted symbol order (reverse order)
+            let mut permuted_symbols = original_order_symbols.clone();
+            permuted_symbols.reverse();
+
+            // Decode in permuted order
+            let permuted_result = decoder
+                .decode(&permuted_symbols)
+                .expect("Permuted order decode must succeed");
+
+            // METAMORPHIC VERIFICATION: Results must be identical regardless of symbol order
+            assert_eq!(
+                original_result.source.len(),
+                permuted_result.source.len(),
+                "MR3 violation: symbol permutation changed result count"
+            );
+
+            for (i, (orig, perm)) in original_result.source
+                .iter()
+                .zip(permuted_result.source.iter())
+                .enumerate()
+            {
+                assert_eq!(
+                    orig, perm,
+                    "MR3 violation: symbol permutation changed decoded data at position {i}"
+                );
+            }
+
+            // Additional permutation: shuffle with deterministic seed
+            let mut rng = DetRng::new(0x2468_ACE0);
+            let mut shuffled_symbols = original_order_symbols;
+            for i in (1..shuffled_symbols.len()).rev() {
+                let j = (rng.next_u64() as usize) % (i + 1);
+                shuffled_symbols.swap(i, j);
+            }
+
+            let shuffled_result = decoder
+                .decode(&shuffled_symbols)
+                .expect("Shuffled order decode must succeed");
+
+            // Verify shuffled result also matches
+            assert_eq!(
+                original_result.source, shuffled_result.source,
+                "MR3 violation: random symbol shuffle changed decoded data"
+            );
+        }
+
+        /// Property-based metamorphic testing using proptest
+        ///
+        /// This test generates random valid inputs and verifies the round-trip
+        /// property holds across a wide range of parameters and data patterns.
+        proptest! {
+            #[test]
+            fn proptest_mr_raptorq_round_trip_identity(
+                k in 2u32..8u32,
+                symbol_size in 8u16..20u16,
+                seed in 0x1000u64..0xFFFFu64,
+                data_pattern in 0u8..255u8,
+            ) {
+                // Generate deterministic source data based on properties
+                let source_data: Vec<Vec<u8>> = (0..k)
+                    .map(|i| {
+                        (0..symbol_size)
+                            .map(|j| data_pattern.wrapping_add((i * 7 + j * 11) as u8))
+                            .collect()
+                    })
+                    .collect();
+
+                // Encode-decode-encode round trip
+                let encoder1 = SystematicEncoder::new(&source_data, symbol_size, seed)
+                    .expect("Property test encoder must construct");
+
+                // Create sufficient symbols for successful decode
+                let decoder = InactivationDecoder::new(k as usize, symbol_size as usize, seed);
+                let mut symbols = decoder.constraint_symbols();
+
+                // Add source symbols
+                for (esi, data) in source_data.iter().enumerate() {
+                    symbols.push(ReceivedSymbol::source(esi as u32, data.clone()));
+                }
+
+                // Add minimal repair symbols
+                let repair_esi = k;
+                let (columns, coefficients) = decoder
+                    .repair_equation(repair_esi)
+                    .expect("Property test repair equation must be valid");
+                let repair_data = encoder1.repair_symbol(repair_esi);
+                symbols.push(ReceivedSymbol::repair(
+                    repair_esi,
+                    columns,
+                    coefficients,
+                    repair_data,
+                ));
+
+                let decode_result = decoder
+                    .decode(&symbols)
+                    .expect("Property test decode must succeed");
+
+                let encoder2 = SystematicEncoder::new(&decode_result.source, symbol_size, seed)
+                    .expect("Property test re-encoder must construct");
+
+                // PROPERTY VERIFICATION: Round-trip must preserve all source symbols
+                prop_assert_eq!(
+                    source_data.len(),
+                    decode_result.source.len(),
+                    "Property test: round-trip changed symbol count"
+                );
+
+                for (i, (original, recovered)) in source_data
+                    .iter()
+                    .zip(decode_result.source.iter())
+                    .enumerate()
+                {
+                    prop_assert_eq!(
+                        original, recovered,
+                        "Property test: round-trip changed symbol {} data", i
+                    );
+                }
+
+                // Verify repair symbol determinism
+                let original_repair = encoder1.repair_symbol(repair_esi);
+                let recovered_repair = encoder2.repair_symbol(repair_esi);
+                prop_assert_eq!(
+                    original_repair, recovered_repair,
+                    "Property test: round-trip changed repair symbol determinism"
+                );
+            }
+        }
+    }
 }

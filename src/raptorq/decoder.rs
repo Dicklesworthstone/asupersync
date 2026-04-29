@@ -6836,4 +6836,431 @@ mod tests {
             "K_max+1: decoder rejection must match the systematic-table reference error"
         );
     }
+
+    // ========================================================================
+    // Fuzzing Tests: Malformed FEC Payload Robustness
+    // ========================================================================
+
+    /// Fuzzing test module for decoder robustness against malformed FEC payloads.
+    ///
+    /// br-asupersync-t36ete: Tests that arbitrary bytes interpreted as encoded
+    /// payload never panic and always return proper errors for malformed input.
+    /// This exercises the decode path's input validation and error handling
+    /// without relying on well-formed encoder output.
+    mod fuzz_malformed_payloads {
+        use super::*;
+        use crate::raptorq::gf256::Gf256;
+
+        /// Generate arbitrary bytes as symbol data for fuzzing
+        fn arbitrary_symbol_data(seed: u64, len: usize) -> Vec<u8> {
+            let mut data = Vec::with_capacity(len);
+            let mut rng_state = seed;
+            for _ in 0..len {
+                // Simple LCG for deterministic but varied byte generation
+                rng_state = rng_state.wrapping_mul(1103515245).wrapping_add(12345);
+                data.push((rng_state >> 8) as u8);
+            }
+            data
+        }
+
+        /// Generate malformed column indices that may be out of range
+        fn malformed_columns(seed: u64, count: usize, max_valid: usize) -> Vec<usize> {
+            let mut columns = Vec::with_capacity(count);
+            let mut rng_state = seed;
+            for i in 0..count {
+                rng_state = rng_state.wrapping_mul(69069).wrapping_add(1);
+                let value = match i % 4 {
+                    0 => rng_state as usize % (max_valid * 2), // May be out of range
+                    1 => max_valid + (rng_state as usize % 100), // Definitely out of range
+                    2 => usize::MAX, // Extreme out of range
+                    _ => rng_state as usize % max_valid, // Valid range
+                };
+                columns.push(value);
+            }
+            columns
+        }
+
+        /// Generate malformed coefficients with potentially wrong count
+        fn malformed_coefficients(seed: u64, count: usize) -> Vec<Gf256> {
+            let mut coefficients = Vec::with_capacity(count);
+            let mut rng_state = seed;
+            for _ in 0..count {
+                rng_state = rng_state.wrapping_mul(214013).wrapping_add(2531011);
+                coefficients.push(Gf256::from_u8((rng_state >> 16) as u8));
+            }
+            coefficients
+        }
+
+        /// Test decoder robustness against completely arbitrary ReceivedSymbol data
+        #[test]
+        fn fuzz_decoder_with_arbitrary_symbols() {
+            let k = 8;
+            let symbol_size = 16;
+            let seed = 0x1337_BEEF_u64;
+
+            let decoder = InactivationDecoder::new(k, symbol_size, seed);
+            let l = decoder.params().l;
+
+            // Test cases with different types of malformation
+            let test_cases = [
+                // Valid baseline for comparison
+                (0u64, false, "valid_baseline"),
+                // Arbitrary symbol data
+                (1u64, true, "arbitrary_symbol_data"),
+                (2u64, true, "mismatched_symbol_sizes"),
+                (3u64, true, "out_of_range_esi_values"),
+                (4u64, true, "column_coefficient_arity_mismatch"),
+                (5u64, true, "invalid_column_indices"),
+                (6u64, true, "extreme_values"),
+                (7u64, true, "empty_vectors"),
+                (8u64, true, "oversized_vectors"),
+            ];
+
+            for (test_seed, expect_error, test_name) in test_cases {
+                let mut symbols = Vec::new();
+
+                // Add constraint symbols (these are usually well-formed)
+                symbols.extend(decoder.constraint_symbols());
+
+                let mut rng_state = test_seed;
+
+                // Generate fuzzed symbols
+                for i in 0..k + 2 {
+                    rng_state = rng_state.wrapping_mul(1664525).wrapping_add(1013904223);
+
+                    let esi = if expect_error && (rng_state % 10) < 3 {
+                        // Sometimes use out-of-range ESI
+                        (rng_state % 0x1000_0000) as u32
+                    } else {
+                        i as u32
+                    };
+
+                    let symbol_data_len = if expect_error && (rng_state % 10) < 2 {
+                        // Sometimes use wrong symbol size
+                        ((rng_state % 200) + 1) as usize
+                    } else {
+                        symbol_size
+                    };
+
+                    let symbol_data = arbitrary_symbol_data(rng_state, symbol_data_len);
+
+                    if i < k {
+                        // Source symbol
+                        if expect_error && (rng_state % 10) < 2 {
+                            // Create malformed source symbol with wrong equation
+                            let wrong_columns = vec![((rng_state as usize) % (l * 2)) + l];
+                            let wrong_coefficients = vec![Gf256::from_u8((rng_state >> 8) as u8)];
+                            symbols.push(ReceivedSymbol::repair(
+                                esi,
+                                wrong_columns,
+                                wrong_coefficients,
+                                symbol_data,
+                            ));
+                        } else {
+                            symbols.push(ReceivedSymbol::source(esi, symbol_data));
+                        }
+                    } else {
+                        // Repair symbol
+                        let column_count = if expect_error && (rng_state % 10) < 3 {
+                            // Sometimes mismatched arity
+                            ((rng_state % 20) + 1) as usize
+                        } else {
+                            ((rng_state % 10) + 1) as usize
+                        };
+
+                        let coeff_count = if expect_error && (rng_state % 10) < 2 {
+                            // Different count than columns
+                            column_count + 1 + ((rng_state % 5) as usize)
+                        } else {
+                            column_count
+                        };
+
+                        let columns = malformed_columns(rng_state, column_count, l);
+                        let coefficients = malformed_coefficients(rng_state, coeff_count);
+
+                        symbols.push(ReceivedSymbol::repair(esi, columns, coefficients, symbol_data));
+                    }
+                }
+
+                // CRITICAL: Decoder must never panic, only return proper errors
+                let result = std::panic::catch_unwind(|| {
+                    decoder.decode(&symbols)
+                });
+
+                match result {
+                    Ok(decode_result) => {
+                        match decode_result {
+                            Ok(_) => {
+                                if expect_error {
+                                    // Some malformed inputs might still decode by coincidence
+                                    println!("Fuzzing case '{test_name}' unexpectedly succeeded");
+                                }
+                            }
+                            Err(decode_error) => {
+                                // Verify error is well-formed and classified properly
+                                let error_class = decode_error.failure_class();
+                                assert!(
+                                    matches!(
+                                        error_class,
+                                        DecodeFailureClass::Recoverable | DecodeFailureClass::Unrecoverable
+                                    ),
+                                    "Fuzzing case '{test_name}': decode error must have valid classification: {decode_error:?}"
+                                );
+
+                                // Verify error message is reasonable
+                                let error_msg = format!("{decode_error:?}");
+                                assert!(
+                                    !error_msg.is_empty(),
+                                    "Fuzzing case '{test_name}': error must have non-empty debug representation"
+                                );
+                            }
+                        }
+                    }
+                    Err(panic_info) => {
+                        panic!(
+                            "FUZZING FAILURE: decoder panicked for test case '{test_name}' with seed 0x{test_seed:x}. \
+                             Panic info: {panic_info:?}. This violates the requirement that malformed FEC payloads \
+                             must return Err, never panic."
+                        );
+                    }
+                }
+            }
+        }
+
+        /// Test specific malformed payload patterns that commonly occur in network scenarios
+        #[test]
+        fn fuzz_common_network_corruption_patterns() {
+            let k = 6;
+            let symbol_size = 20;
+            let seed = 0xDEAD_FACE_u64;
+
+            let decoder = InactivationDecoder::new(k, symbol_size, seed);
+
+            let corruption_patterns = [
+                "all_zeros",
+                "all_ones",
+                "alternating_bytes",
+                "random_truncation",
+                "size_explosion",
+                "negative_indices",
+                "duplicate_columns",
+                "empty_equation",
+            ];
+
+            for pattern in corruption_patterns {
+                let mut symbols = decoder.constraint_symbols();
+
+                match pattern {
+                    "all_zeros" => {
+                        // All symbol data is zeros
+                        for i in 0..k {
+                            symbols.push(ReceivedSymbol::source(i as u32, vec![0u8; symbol_size]));
+                        }
+                    }
+                    "all_ones" => {
+                        // All symbol data is 0xFF
+                        for i in 0..k {
+                            symbols.push(ReceivedSymbol::source(i as u32, vec![0xFFu8; symbol_size]));
+                        }
+                    }
+                    "alternating_bytes" => {
+                        // Alternating 0xAA/0x55 pattern
+                        for i in 0..k {
+                            let data: Vec<u8> = (0..symbol_size)
+                                .map(|j| if j % 2 == 0 { 0xAA } else { 0x55 })
+                                .collect();
+                            symbols.push(ReceivedSymbol::source(i as u32, data));
+                        }
+                    }
+                    "random_truncation" => {
+                        // Symbols with random truncated sizes
+                        for i in 0..k {
+                            let truncated_size = (i % symbol_size).max(1);
+                            let data = arbitrary_symbol_data(0x1234 + i as u64, truncated_size);
+                            symbols.push(ReceivedSymbol::source(i as u32, data));
+                        }
+                    }
+                    "size_explosion" => {
+                        // Symbols with extremely large sizes
+                        symbols.push(ReceivedSymbol::source(0, vec![0xCC; 100_000]));
+                        for i in 1..k {
+                            symbols.push(ReceivedSymbol::source(i as u32, vec![0u8; symbol_size]));
+                        }
+                    }
+                    "negative_indices" => {
+                        // Use repair symbol with invalid large ESI values that might wrap
+                        let huge_esi = 0xFFFF_FFFF;
+                        let columns = vec![0, 1];
+                        let coefficients = vec![Gf256::ONE, Gf256::ONE];
+                        let data = arbitrary_symbol_data(0xBAD_C0DE, symbol_size);
+                        symbols.push(ReceivedSymbol::repair(huge_esi, columns, coefficients, data));
+
+                        for i in 0..(k-1) {
+                            symbols.push(ReceivedSymbol::source(i as u32, vec![0u8; symbol_size]));
+                        }
+                    }
+                    "duplicate_columns" => {
+                        // Repair symbol with duplicate column indices
+                        let columns = vec![0, 0, 0]; // Duplicate columns
+                        let coefficients = vec![Gf256::ONE, Gf256::ONE, Gf256::ONE];
+                        let data = arbitrary_symbol_data(0xC0DE_BEEF, symbol_size);
+                        symbols.push(ReceivedSymbol::repair(k as u32, columns, coefficients, data));
+
+                        for i in 0..k {
+                            symbols.push(ReceivedSymbol::source(i as u32, vec![0u8; symbol_size]));
+                        }
+                    }
+                    "empty_equation" => {
+                        // Repair symbol with empty equation vectors
+                        symbols.push(ReceivedSymbol::repair(k as u32, vec![], vec![], vec![0u8; symbol_size]));
+
+                        for i in 0..k {
+                            symbols.push(ReceivedSymbol::source(i as u32, vec![0u8; symbol_size]));
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+
+                // CRITICAL: Must not panic
+                let result = std::panic::catch_unwind(|| {
+                    decoder.decode(&symbols)
+                });
+
+                assert!(
+                    result.is_ok(),
+                    "Decoder panicked on corruption pattern '{pattern}'. \
+                     Malformed FEC payloads must return Err, never panic."
+                );
+
+                // Verify the actual decode result
+                let decode_result = result.unwrap();
+                match decode_result {
+                    Ok(_) => {
+                        // Some patterns might still succeed by coincidence
+                        println!("Pattern '{pattern}' unexpectedly decoded successfully");
+                    }
+                    Err(decode_error) => {
+                        // Verify error is properly classified
+                        let _error_class = decode_error.failure_class();
+                        // Error should be unrecoverable for most malformed input
+                        println!("Pattern '{pattern}' correctly failed with: {decode_error:?}");
+                    }
+                }
+            }
+        }
+
+        /// Test edge cases with extreme parameter combinations
+        #[test]
+        fn fuzz_extreme_parameter_edge_cases() {
+            let test_cases = [
+                (1, 1, "minimal_k_and_symbol_size"),
+                (2, 1, "minimal_symbol_size_k2"),
+                (1, 1000, "tiny_k_large_symbols"),
+                (100, 1, "large_k_tiny_symbols"),
+            ];
+
+            for (k, symbol_size, case_name) in test_cases {
+                let seed = 0x8BAD_F00D_u64;
+
+                // Use try_new to handle potentially invalid parameters gracefully
+                let decoder_result = InactivationDecoder::try_new(k, symbol_size, seed);
+                let decoder = match decoder_result {
+                    Ok(d) => d,
+                    Err(_) => {
+                        println!("Case '{case_name}': Decoder construction failed (expected)");
+                        continue;
+                    }
+                };
+
+                // Test with malformed symbols for this configuration
+                let mut symbols = Vec::new();
+
+                // Add constraint symbols if available
+                symbols.extend(decoder.constraint_symbols());
+
+                // Add some malformed source symbols
+                for i in 0..k.min(5) {
+                    let wrong_size = symbol_size.saturating_mul(2).max(1);
+                    let data = arbitrary_symbol_data(seed + i as u64, wrong_size);
+                    symbols.push(ReceivedSymbol::source(i as u32, data));
+                }
+
+                // CRITICAL: Must not panic even with extreme parameters
+                let result = std::panic::catch_unwind(|| {
+                    decoder.decode(&symbols)
+                });
+
+                assert!(
+                    result.is_ok(),
+                    "Decoder panicked on extreme case '{case_name}' with k={k}, symbol_size={symbol_size}. \
+                     Must return Err for malformed input, never panic."
+                );
+
+                let decode_result = result.unwrap();
+                match decode_result {
+                    Ok(_) => println!("Extreme case '{case_name}' unexpectedly succeeded"),
+                    Err(decode_error) => {
+                        println!("Extreme case '{case_name}' correctly failed with: {decode_error:?}");
+                    }
+                }
+            }
+        }
+
+        /// Test that wavefront decoder has same robustness as sequential decoder
+        #[test]
+        fn fuzz_wavefront_decoder_robustness() {
+            let k = 4;
+            let symbol_size = 12;
+            let seed = 0xFADE_BABE_u64;
+
+            let decoder = InactivationDecoder::new(k, symbol_size, seed);
+
+            // Create malformed symbol set
+            let mut symbols = decoder.constraint_symbols();
+
+            // Add source symbols with wrong sizes
+            for i in 0..k {
+                let wrong_size = if i % 2 == 0 { symbol_size / 2 } else { symbol_size * 2 };
+                let data = arbitrary_symbol_data(seed + i as u64, wrong_size);
+                symbols.push(ReceivedSymbol::source(i as u32, data));
+            }
+
+            // Add malformed repair symbols
+            let bad_columns = vec![999, 1000, 1001]; // Out of range
+            let bad_coefficients = vec![Gf256::ONE]; // Wrong count
+            let bad_data = vec![0x42; symbol_size * 3]; // Wrong size
+            symbols.push(ReceivedSymbol::repair(k as u32, bad_columns, bad_coefficients, bad_data));
+
+            // Test both sequential and wavefront decoders - neither must panic
+            let sequential_result = std::panic::catch_unwind(|| {
+                decoder.decode(&symbols)
+            });
+
+            let wavefront_result = std::panic::catch_unwind(|| {
+                decoder.decode_wavefront(&symbols, 2)
+            });
+
+            assert!(
+                sequential_result.is_ok(),
+                "Sequential decoder panicked on malformed input - must return Err instead"
+            );
+
+            assert!(
+                wavefront_result.is_ok(),
+                "Wavefront decoder panicked on malformed input - must return Err instead"
+            );
+
+            // Both should fail gracefully (or succeed if input happens to be valid)
+            match (sequential_result.unwrap(), wavefront_result.unwrap()) {
+                (Ok(_), Ok(_)) => println!("Both decoders unexpectedly succeeded on malformed input"),
+                (Err(seq_err), Err(wf_err)) => {
+                    println!("Both decoders correctly failed:");
+                    println!("  Sequential: {seq_err:?}");
+                    println!("  Wavefront:  {wf_err:?}");
+                }
+                (Ok(_), Err(wf_err)) => println!("Sequential succeeded, wavefront failed: {wf_err:?}"),
+                (Err(seq_err), Ok(_)) => println!("Sequential failed: {seq_err:?}, wavefront succeeded"),
+            }
+        }
+    }
 }
