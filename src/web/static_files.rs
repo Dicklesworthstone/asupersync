@@ -261,6 +261,9 @@ impl Handler for StaticFilesHandler {
             |file_path| self.config.serve_file(&file_path, if_none_match.as_deref()),
         );
         if head_only {
+            if !response.body.is_empty() && !response.has_header("content-length") {
+                response.set_header("content-length", response.body.len().to_string());
+            }
             response.body = Bytes::new();
         }
         response
@@ -845,6 +848,10 @@ mod tests {
         assert_eq!(
             head_resp.headers.get("content-type"),
             get_resp.headers.get("content-type")
+        );
+        assert_eq!(
+            head_resp.headers.get("content-length"),
+            Some(&get_resp.body.len().to_string())
         );
         assert_eq!(head_resp.headers.get("etag"), get_resp.headers.get("etag"));
         assert_eq!(
