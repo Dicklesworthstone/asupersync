@@ -702,6 +702,8 @@ pub struct ResponseStream<T> {
     items: VecDeque<Result<T, Status>>,
     /// Whether the stream is terminal.
     closed: bool,
+    /// Whether the stream was closed gracefully before any error terminal.
+    graceful_terminal: bool,
     /// Terminal status for cancelled/errored streams (fail-closed).
     terminal_status: Option<Status>,
     /// Last pending poll waker.
@@ -716,6 +718,7 @@ impl<T> ResponseStream<T> {
         Self {
             items: VecDeque::new(),
             closed: true,
+            graceful_terminal: false,
             waiter: None,
             terminal_status: None,
         }
@@ -727,6 +730,7 @@ impl<T> ResponseStream<T> {
         Self {
             items: VecDeque::new(),
             closed: false,
+            graceful_terminal: false,
             waiter: None,
             terminal_status: None,
         }
@@ -753,6 +757,7 @@ impl<T> ResponseStream<T> {
     /// Mark stream completion.
     pub fn close(&mut self) {
         self.closed = true;
+        self.graceful_terminal = true;
         wake_waiter(&mut self.waiter);
     }
 
@@ -761,6 +766,11 @@ impl<T> ResponseStream<T> {
     /// Used for fail-closed cancellation where the stream should propagate
     /// the cancellation reason rather than appearing normally completed.
     pub fn cancel_with_error(&mut self, status: Status) {
+        if self.graceful_terminal && self.terminal_status.is_none() {
+            self.closed = true;
+            wake_waiter(&mut self.waiter);
+            return;
+        }
         if self.terminal_status.is_none() {
             self.terminal_status = Some(status);
         }
@@ -1783,6 +1793,52 @@ mod tests {
         }
 
         crate::test_complete!("conformance_server_streaming_completion_idempotence");
+    }
+
+    /// GRPC-DIFF-GRACEFUL-STOP: grpc-go GracefulStop lets already-buffered
+    /// stream messages drain to EOF; a later transport-shutdown signal must not
+    /// rewrite that graceful completion into an error status.
+    #[test]
+    fn differential_graceful_close_beats_late_shutdown_status_vs_grpc_go() {
+        init_test("differential_graceful_close_beats_late_shutdown_status_vs_grpc_go");
+
+        let mut stream = ResponseStream::<&'static str>::open();
+        stream
+            .push(Ok("buffered-1"))
+            .expect("first buffered response");
+        stream
+            .push(Ok("buffered-2"))
+            .expect("second buffered response");
+        stream.close();
+        stream.cancel_with_error(Status::unavailable("server shutdown after graceful-stop"));
+
+        let waker = noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let mut pinned = Pin::new(&mut stream);
+
+        assert!(
+            matches!(
+                pinned.as_mut().poll_next(&mut cx),
+                Poll::Ready(Some(Ok("buffered-1")))
+            ),
+            "grpc-go GracefulStop: first buffered response must still drain"
+        );
+        assert!(
+            matches!(
+                pinned.as_mut().poll_next(&mut cx),
+                Poll::Ready(Some(Ok("buffered-2")))
+            ),
+            "grpc-go GracefulStop: second buffered response must still drain"
+        );
+
+        for attempt in 0..2 {
+            assert!(
+                matches!(pinned.as_mut().poll_next(&mut cx), Poll::Ready(None)),
+                "grpc-go GracefulStop: late shutdown must preserve EOF on attempt {attempt}"
+            );
+        }
+
+        crate::test_complete!("differential_graceful_close_beats_late_shutdown_status_vs_grpc_go");
     }
 
     /// GRPC-CONF-009: Metadata preservation throughout streaming lifecycle
