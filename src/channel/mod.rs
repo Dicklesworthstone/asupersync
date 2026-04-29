@@ -77,6 +77,10 @@ mod broadcast_metamorphic;
 #[path = "oneshot_metamorphic.rs"]
 mod oneshot_metamorphic;
 
+#[cfg(test)]
+#[path = "mpsc_metamorphic.rs"]
+mod mpsc_metamorphic;
+
 // Re-export commonly used types from mpsc (the default channel)
 pub use mpsc::{Receiver, SendPermit, Sender, channel};
 pub use session::{TrackedOneshotSender, TrackedSender, tracked_channel, tracked_oneshot};
