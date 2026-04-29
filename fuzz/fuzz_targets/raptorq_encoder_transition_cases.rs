@@ -2,17 +2,21 @@
 
 //! Cargo-fuzz target for low-K RaptorQ encoder transition cases.
 //!
-//! Focuses on the smallest valid source-block sizes (`K=1`, `K=2`, `K=3`),
-//! where the encoder crosses from the degenerate single-symbol lane into the
-//! first multi-symbol ladder entries. For arbitrary source bytes and repair
-//! counts we assert:
+//! Focuses on the smallest valid source-block sizes (`K=1`, `K=2`, `K=3`,
+//! `K=4`), where the encoder crosses from the degenerate single-symbol lane
+//! into the first genuinely non-degenerate multi-symbol ladder entries. For
+//! arbitrary source bytes and repair counts we assert:
 //!
 //! 1. `SystematicEncoder::new` never panics and succeeds for valid low-K
 //!    source blocks.
 //! 2. `emit_all(repair_count)` returns exactly `K + repair_count` symbols.
-//! 3. The emitted source prefix stays contiguous at ESIs `0..K-1`.
+//! 3. The emitted source prefix stays contiguous at ESIs `0..K-1` and
+//!    preserves the original source payload bytes.
 //! 4. The emitted repair suffix stays contiguous at ESIs `K..K+repair_count-1`.
-//! 5. Every emitted payload stays exactly `symbol_size` bytes wide.
+//! 5. Every emitted repair payload matches `repair_symbol(esi)` exactly, so
+//!    `emit_all` and the on-demand repair lane stay coherent.
+//! 6. Every emitted payload stays exactly `symbol_size` bytes wide and the
+//!    repair cursor advances by exactly `repair_count`.
 
 use arbitrary::Arbitrary;
 use asupersync::raptorq::systematic::SystematicEncoder;
@@ -26,6 +30,7 @@ enum TransitionK {
     K1,
     K2,
     K3,
+    K4,
 }
 
 #[derive(Arbitrary, Debug)]
@@ -58,6 +63,7 @@ fuzz_target!(|input: TransitionInput| {
         TransitionK::K1 => 1,
         TransitionK::K2 => 2,
         TransitionK::K3 => 3,
+        TransitionK::K4 => 4,
     };
     let symbol_size = (usize::from(input.symbol_size) % MAX_SYMBOL_SIZE) + 1;
     let repair_count = usize::from(input.repair_count) % (MAX_REPAIR_COUNT + 1);
@@ -89,6 +95,14 @@ fuzz_target!(|input: TransitionInput| {
             symbol_size,
             "systematic payload width must stay equal to symbol_size"
         );
+        assert_eq!(
+            symbol.data, source_symbols[expected_esi],
+            "systematic prefix must preserve original source bytes for K={k}"
+        );
+        assert_eq!(
+            symbol.degree, 1,
+            "systematic symbols must retain degree=1 identity equations"
+        );
     }
 
     for (offset, symbol) in emitted.iter().skip(k).enumerate() {
@@ -106,5 +120,20 @@ fuzz_target!(|input: TransitionInput| {
             symbol_size,
             "repair payload width must stay equal to symbol_size"
         );
+        assert!(
+            symbol.degree > 0,
+            "repair suffix must expose a non-zero LT degree for K={k}"
+        );
+        assert_eq!(
+            symbol.data,
+            encoder.repair_symbol(expected_esi),
+            "emit_all repair payload must match repair_symbol(esi) for K={k}, esi={expected_esi}"
+        );
     }
+
+    assert_eq!(
+        encoder.next_repair_esi(),
+        (k + repair_count) as u32,
+        "repair cursor must advance by the emitted repair count for K={k}"
+    );
 });
