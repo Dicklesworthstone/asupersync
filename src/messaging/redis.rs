@@ -3193,6 +3193,32 @@ mod tests {
     }
 
     #[test]
+    fn resp3_verbatim_string_roundtrip_matches_redis_rs_value_model() {
+        // redis-rs exposes RESP3 verbatim strings as a 3-byte format tag plus
+        // the exact payload bytes after the ':' separator. Lock that wire form
+        // here, including CRLF bytes embedded inside the payload body.
+        let value = RespValue::Verbatim {
+            format: "txt".to_string(),
+            payload: b"hello\r\nworld".to_vec(),
+        };
+
+        let expected = b"=16\r\ntxt:hello\r\nworld\r\n";
+
+        assert_eq!(
+            value.encode(),
+            expected,
+            "RESP3 verbatim encoding must stay byte-compatible with redis-rs's \
+             low-level verbatim string model"
+        );
+
+        let (decoded, consumed) = RespValue::try_decode(expected)
+            .unwrap()
+            .expect("RESP3 verbatim string should decode");
+        assert_eq!(decoded, value);
+        assert_eq!(consumed, expected.len());
+    }
+
+    #[test]
     fn test_resp_decode_partial_needs_more() {
         assert!(RespValue::try_decode(b"$3\r\nfo").unwrap().is_none());
     }
@@ -5305,16 +5331,13 @@ mod tests {
             // i64::MAX boundary
             (i64::MAX, b":9223372036854775807\r\n", true),
             (i64::MAX - 1, b":9223372036854775806\r\n", true),
-
             // i64::MIN boundary
             (i64::MIN, b":-9223372036854775808\r\n", true),
             (i64::MIN + 1, b":-9223372036854775807\r\n", true),
-
             // Zero and small values
             (0, b":0\r\n", true),
             (-1, b":-1\r\n", true),
             (1, b":1\r\n", true),
-
             // Typical negative values
             (-42, b":-42\r\n", true),
             (-1000000, b":-1000000\r\n", true),
@@ -5327,7 +5350,8 @@ mod tests {
 
             if should_succeed {
                 assert_eq!(
-                    encoded, expected_wire,
+                    encoded,
+                    expected_wire,
                     "RESP3 encoding mismatch for i64 value {value}\n\
                      Expected: {:?}\n\
                      Actual:   {:?}",
@@ -5341,20 +5365,26 @@ mod tests {
                     .expect("should have complete value");
 
                 assert_eq!(consumed, encoded.len(), "should consume entire input");
-                assert_eq!(decoded_value, RespValue::Integer(value),
-                          "round-trip failed for value {value}");
+                assert_eq!(
+                    decoded_value,
+                    RespValue::Integer(value),
+                    "round-trip failed for value {value}"
+                );
 
                 // Test integer extraction
-                assert_eq!(decoded_value.as_integer(), Some(value),
-                          "as_integer() failed for value {value}");
+                assert_eq!(
+                    decoded_value.as_integer(),
+                    Some(value),
+                    "as_integer() failed for value {value}"
+                );
             }
         }
 
         // Test overflow cases - values outside i64 range should fail gracefully
         let overflow_cases: &[&[u8]] = &[
-            b":9223372036854775808\r\n",  // i64::MAX + 1
-            b":-9223372036854775809\r\n", // i64::MIN - 1
-            b":99999999999999999999\r\n", // Way beyond i64::MAX
+            b":9223372036854775808\r\n",   // i64::MAX + 1
+            b":-9223372036854775809\r\n",  // i64::MIN - 1
+            b":99999999999999999999\r\n",  // Way beyond i64::MAX
             b":-99999999999999999999\r\n", // Way beyond i64::MIN
         ];
 
@@ -5366,13 +5396,18 @@ mod tests {
                     // Incomplete parse - this is OK for malformed input
                 }
                 Ok(Some(_)) => {
-                    panic!("Expected overflow error for input: {:?}",
-                           std::str::from_utf8(overflow_wire).unwrap_or("<invalid utf8>"));
+                    panic!(
+                        "Expected overflow error for input: {:?}",
+                        std::str::from_utf8(overflow_wire).unwrap_or("<invalid utf8>")
+                    );
                 }
                 Err(RedisError::Protocol(msg)) => {
                     // Expected: protocol error for overflow
-                    assert!(msg.contains("overflow") || msg.contains("integer"),
-                           "Error message should mention overflow/integer, got: {}", msg);
+                    assert!(
+                        msg.contains("overflow") || msg.contains("integer"),
+                        "Error message should mention overflow/integer, got: {}",
+                        msg
+                    );
                 }
                 Err(other) => {
                     panic!("Expected protocol error for overflow, got: {:?}", other);
@@ -5382,11 +5417,11 @@ mod tests {
 
         // Test malformed integer cases
         let malformed_cases: &[&[u8]] = &[
-            b":abc\r\n",      // Non-numeric
-            b":\r\n",         // Empty
-            b":-\r\n",        // Just minus sign
-            b":12x34\r\n",    // Mixed numeric/alpha
-            b":0x42\r\n",     // Hex format (not allowed in RESP)
+            b":abc\r\n",   // Non-numeric
+            b":\r\n",      // Empty
+            b":-\r\n",     // Just minus sign
+            b":12x34\r\n", // Mixed numeric/alpha
+            b":0x42\r\n",  // Hex format (not allowed in RESP)
         ];
 
         for &malformed_wire in malformed_cases {
@@ -5397,14 +5432,19 @@ mod tests {
                     // Incomplete parse - acceptable
                 }
                 Ok(Some(_)) => {
-                    panic!("Expected parse error for malformed input: {:?}",
-                           std::str::from_utf8(malformed_wire).unwrap_or("<invalid utf8>"));
+                    panic!(
+                        "Expected parse error for malformed input: {:?}",
+                        std::str::from_utf8(malformed_wire).unwrap_or("<invalid utf8>")
+                    );
                 }
                 Err(RedisError::Protocol(_)) => {
                     // Expected: protocol error for malformed input
                 }
                 Err(other) => {
-                    panic!("Expected protocol error for malformed input, got: {:?}", other);
+                    panic!(
+                        "Expected protocol error for malformed input, got: {:?}",
+                        other
+                    );
                 }
             }
         }
@@ -5412,8 +5452,17 @@ mod tests {
         // Differential verification: our encoder output should be parseable by our decoder
         // This verifies internal consistency of our RESP3 integer implementation
         let test_values = [
-            i64::MIN, i64::MIN + 1, -1000000, -42, -1, 0, 1, 42, 1000000,
-            i64::MAX - 1, i64::MAX
+            i64::MIN,
+            i64::MIN + 1,
+            -1000000,
+            -42,
+            -1,
+            0,
+            1,
+            42,
+            1000000,
+            i64::MAX - 1,
+            i64::MAX,
         ];
 
         for &value in &test_values {
@@ -5422,8 +5471,11 @@ mod tests {
                 .expect("should parse")
                 .expect("should be complete");
 
-            assert_eq!(decoded, RespValue::Integer(value),
-                      "Self-consistency check failed for value {value}");
+            assert_eq!(
+                decoded,
+                RespValue::Integer(value),
+                "Self-consistency check failed for value {value}"
+            );
         }
     }
 }
