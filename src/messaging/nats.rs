@@ -439,10 +439,25 @@ fn extract_json_string(json: &str, key: &str) -> Option<String> {
 /// Header keys must be ASCII and contain no `:` `\r` `\n`. Values may
 /// be arbitrary bytes but MUST NOT contain `\r` or `\n` (NATS does not
 /// support multi-line header values).
-fn encode_nats_headers(headers: &[(&str, &[u8])]) -> Result<Vec<u8>, NatsError> {
+///
+/// `max_header_bytes` caps the fully encoded `NATS/1.0\r\n...\r\n\r\n`
+/// block before allocation so oversized attacker-controlled header sets
+/// fail closed before building a large intermediate buffer
+/// (br-asupersync-uu9ayc).
+fn encode_nats_headers(
+    headers: &[(&str, &[u8])],
+    max_header_bytes: usize,
+) -> Result<Vec<u8>, NatsError> {
     let mut estimated = b"NATS/1.0\r\n\r\n".len();
     for (k, v) in headers {
-        estimated = estimated.saturating_add(k.len() + v.len() + 4);
+        estimated = estimated
+            .checked_add(k.len() + v.len() + 4)
+            .ok_or_else(|| NatsError::Protocol("NATS header block length overflow".to_string()))?;
+        if estimated > max_header_bytes {
+            return Err(NatsError::Protocol(format!(
+                "NATS header block too large: {estimated} > {max_header_bytes}"
+            )));
+        }
     }
     let mut out = Vec::with_capacity(estimated);
     out.extend_from_slice(b"NATS/1.0\r\n");
@@ -1361,15 +1376,17 @@ impl NatsClient {
             ));
         }
 
-        let header_block = encode_nats_headers(headers)?;
-        let header_len = header_block.len();
-        let total_len = header_len.saturating_add(payload.len());
-        if total_len > self.config.max_payload {
+        if payload.len() > self.config.max_payload {
             return Err(NatsError::Protocol(format!(
-                "headers+payload too large: {total_len} > {}",
+                "headers+payload too large: {} > {}",
+                payload.len(),
                 self.config.max_payload
             )));
         }
+        let max_header_bytes = self.config.max_payload - payload.len();
+        let header_block = encode_nats_headers(headers, max_header_bytes)?;
+        let header_len = header_block.len();
+        let total_len = header_len + payload.len();
 
         // Mark disconnected before the multi-part write so that if this
         // future is dropped mid-write, the connection is not reused in a
@@ -1999,6 +2016,21 @@ mod tests {
         assert_eq!(parts.first().copied(), Some("PUB"));
         assert_eq!(parts.len(), 4, "request publish must include reply-to");
         parts[3].parse().expect("parse PUB payload length")
+    }
+
+    #[test]
+    fn encode_nats_headers_rejects_oversize_block_before_allocation_uu9ayc() {
+        let err = encode_nats_headers(&[("Nats-Msg-Id", b"1234567890")], 16)
+            .expect_err("oversize header block must fail closed");
+        match err {
+            NatsError::Protocol(msg) => {
+                assert!(
+                    msg.contains("NATS header block too large"),
+                    "unexpected error: {msg}"
+                );
+            }
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
     }
 
     fn read_optional_protocol_line(reader: &mut BufReader<std::net::TcpStream>) -> Option<String> {
@@ -2675,6 +2707,69 @@ mod tests {
         assert!(
             unsubscribe.starts_with("UNSUB "),
             "timeout cleanup must unsubscribe, got {unsubscribe:?}"
+        );
+    }
+
+    #[test]
+    fn publish_request_with_headers_rejects_oversize_headers_before_wire_write_uu9ayc() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(Duration::from_millis(250)))
+                .expect("set read timeout");
+            let mut reader = BufReader::new(stream);
+            read_optional_protocol_line(&mut reader)
+        });
+
+        run_test_with_cx(|cx| async move {
+            let stream = TcpStream::connect(format!("{addr}"))
+                .await
+                .expect("connect client");
+            let state = Arc::new(SharedState::new());
+            *state.server_info.lock() = Some(ServerInfo {
+                headers: true,
+                max_payload: 32,
+                ..ServerInfo::default()
+            });
+            let mut client = NatsClient {
+                config: NatsConfig {
+                    max_payload: 32,
+                    ..Default::default()
+                },
+                stream,
+                read_buf: NatsReadBuffer::new(),
+                state,
+                next_sid: AtomicU64::new(1),
+                connected: true,
+            };
+
+            let err = client
+                .publish_request_with_headers(
+                    &cx,
+                    "svc.echo",
+                    "_INBOX.reply",
+                    &[("Nats-Msg-Id", b"1234567890abcdef")],
+                    b"",
+                )
+                .await
+                .expect_err("oversize headers must fail closed");
+            match err {
+                NatsError::Protocol(msg) => {
+                    assert!(
+                        msg.contains("NATS header block too large"),
+                        "unexpected error: {msg}"
+                    );
+                }
+                other => panic!("expected Protocol error, got {other:?}"),
+            }
+        });
+
+        let wire = server.join().expect("server join");
+        assert!(
+            wire.is_none(),
+            "oversize headers must not emit HPUB bytes, got {wire:?}"
         );
     }
 
