@@ -23,12 +23,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use asupersync::record::task::TaskRecord;
 use asupersync::runtime::RuntimeState;
 use asupersync::runtime::scheduler::local_queue::Stealer;
+use asupersync::runtime::scheduler::stealing::steal_task;
 use asupersync::runtime::scheduler::{
     GlobalQueue, IntrusiveRing, IntrusiveStack, LocalQueue, Parker, QUEUE_TAG_READY, Scheduler,
 };
 use asupersync::sync::ContendedMutex;
 use asupersync::types::{Budget, RegionId, TaskId, Time};
-use asupersync::util::Arena;
+use asupersync::util::{Arena, DetRng};
 use std::collections::{BinaryHeap, VecDeque};
 use std::sync::Arc;
 use std::thread;
@@ -179,16 +180,20 @@ fn bench_local_queue_push_many(c: &mut Criterion) {
         let task_ids = tasks(count);
         let max_id = count as u32 - 1;
 
-        group.bench_with_input(BenchmarkId::new("push_many", count), &count, |b, &_count| {
-            b.iter_batched(
-                || (local_queue(max_id), task_ids.clone()),
-                |(queue, task_ids)| {
-                    queue.push_many(black_box(&task_ids));
-                    black_box(queue.len())
-                },
-                BatchSize::SmallInput,
-            )
-        });
+        group.bench_with_input(
+            BenchmarkId::new("push_many", count),
+            &count,
+            |b, &_count| {
+                b.iter_batched(
+                    || (local_queue(max_id), task_ids.clone()),
+                    |(queue, task_ids)| {
+                        queue.push_many(black_box(&task_ids));
+                        black_box(queue.len())
+                    },
+                    BatchSize::SmallInput,
+                )
+            },
+        );
     }
 
     group.finish();
@@ -673,6 +678,34 @@ fn bench_work_stealing(c: &mut Criterion) {
             });
         },
     );
+
+    group.finish();
+}
+
+fn bench_steal_task(c: &mut Criterion) {
+    let mut group = c.benchmark_group("scheduler/steal_task");
+    group.warm_up_time(Duration::from_millis(200));
+    group.measurement_time(Duration::from_millis(600));
+    group.sample_size(30);
+
+    for &stealer_count in &[2usize, 8] {
+        group.bench_with_input(
+            BenchmarkId::new("empty_queues", stealer_count),
+            &stealer_count,
+            |b, &stealer_count| {
+                b.iter_batched(
+                    || {
+                        let stealers = (0..stealer_count)
+                            .map(|_| LocalQueue::new(setup_runtime_state(0)).stealer())
+                            .collect::<Vec<_>>();
+                        (stealers, DetRng::new(42))
+                    },
+                    |(stealers, mut rng)| black_box(steal_task(&stealers, &mut rng)),
+                    BatchSize::SmallInput,
+                )
+            },
+        );
+    }
 
     group.finish();
 }
@@ -1632,6 +1665,7 @@ criterion_group!(
     bench_priority_observability,
     bench_lane_priority,
     bench_work_stealing,
+    bench_steal_task,
     bench_scheduler_throughput,
     bench_scheduler_capacity_profiles,
     bench_parker,

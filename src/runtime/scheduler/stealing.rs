@@ -34,19 +34,24 @@ pub fn steal_task(stealers: &[Stealer], rng: &mut DetRng) -> Option<TaskId> {
     let len2 = stealers[idx2].stealable_len_hint();
 
     // Prefer the queue that appears to have more work.
-    let (primary, secondary) = if len1 >= len2 {
-        (idx1, idx2)
+    let (primary, primary_hint, secondary, secondary_hint) = if len1 >= len2 {
+        (idx1, len1, idx2, len2)
     } else {
-        (idx2, idx1)
+        (idx2, len2, idx1, len1)
     };
 
-    // Attempt steal from primary choice
-    if let Some(task) = stealers[primary].steal() {
+    // `stealable_len_hint()` and `steal()` inspect the same bounded frontier.
+    // When the hint is zero, an immediate steal would just rescan that same
+    // prefix and return `None` unless the queue mutates concurrently.
+    if primary_hint > 0
+        && let Some(task) = stealers[primary].steal()
+    {
         return Some(task);
     }
 
-    // Fallback to secondary if primary was empty/unstealable
-    if let Some(task) = stealers[secondary].steal() {
+    if secondary_hint > 0
+        && let Some(task) = stealers[secondary].steal()
+    {
         return Some(task);
     }
 

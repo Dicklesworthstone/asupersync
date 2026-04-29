@@ -43,6 +43,9 @@ parking_lot = "0.12"
 # For path-traversal fuzz target's tempdir doc-root
 tempfile = "3.25"
 
+# For RwLock fuzzing async operations
+futures-executor = "0.3"
+
 [dev-dependencies]
 # For seed generation and corpus management
 rand = "0.9"
@@ -3021,6 +3024,16 @@ bench = false
 [[bin]]
 name = "cx_scope_nesting"
 path = "fuzz_targets/cx_scope_nesting.rs"
+test = false
+doc = false
+bench = false
+
+# RwLock reader-writer queue starvation testing for fairness verification
+# Tests arbitrary acquire-shared/exclusive sequences to ensure no reader or writer
+# starvation under writer-preference fairness with bounded consecutive writer limits.
+[[bin]]
+name = "rwlock_reader_writer_queue"
+path = "fuzz_targets/rwlock_reader_writer_queue.rs"
 test = false
 doc = false
 bench = false
