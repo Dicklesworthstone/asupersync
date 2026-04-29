@@ -1753,6 +1753,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "grpc_server_unary_metadata"
+path = "fuzz_targets/grpc_server_unary_metadata.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_grpc_client_streaming_flow_control"
 path = "fuzz_targets/fuzz_grpc_client_streaming_flow_control.rs"
 test = false
