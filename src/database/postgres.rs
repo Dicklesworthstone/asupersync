@@ -2451,6 +2451,7 @@ fn cancelled_error(cx: &Cx) -> PgError {
 }
 
 const MAX_BACKEND_MESSAGE_LEN: i32 = 64 * 1024 * 1024;
+const MAX_NOTIFICATION_CHANNEL_NAME_BYTES: usize = 63;
 
 fn backend_message_body_len(len_i32: i32) -> Result<usize, PgError> {
     // Practical PostgreSQL message limit. The protocol allows up to 2 GiB
@@ -2464,6 +2465,50 @@ fn backend_message_body_len(len_i32: i32) -> Result<usize, PgError> {
         )));
     }
     Ok(len_i32 as usize - 4)
+}
+
+fn validate_notification_channel_name(channel: &str) -> Result<(), PgError> {
+    if channel.is_empty() {
+        return Err(PgError::Protocol(
+            "notification channel name cannot be empty".to_string(),
+        ));
+    }
+    if channel.len() > MAX_NOTIFICATION_CHANNEL_NAME_BYTES {
+        return Err(PgError::Protocol(format!(
+            "notification channel name exceeds PostgreSQL {}-byte limit: {} bytes",
+            MAX_NOTIFICATION_CHANNEL_NAME_BYTES,
+            channel.len()
+        )));
+    }
+    if channel.contains('\0') {
+        return Err(PgError::Protocol(
+            "notification channel name cannot contain NUL bytes".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn quote_postgres_identifier(identifier: &str) -> String {
+    let mut quoted = String::with_capacity(identifier.len() + 2);
+    quoted.push('"');
+    for ch in identifier.chars() {
+        if ch == '"' {
+            quoted.push('"');
+        }
+        quoted.push(ch);
+    }
+    quoted.push('"');
+    quoted
+}
+
+fn build_listen_sql(channel: &str) -> Result<String, PgError> {
+    validate_notification_channel_name(channel)?;
+    Ok(format!("LISTEN {}", quote_postgres_identifier(channel)))
+}
+
+fn build_unlisten_sql(channel: &str) -> Result<String, PgError> {
+    validate_notification_channel_name(channel)?;
+    Ok(format!("UNLISTEN {}", quote_postgres_identifier(channel)))
 }
 
 #[inline]
@@ -3279,7 +3324,10 @@ impl PgConnection {
     ///
     /// For any value derived from a user, request body, URL parameter,
     /// header, file content, environment variable, or other external source,
-    /// use [`Self::query_params`] instead.
+    /// use [`Self::query_params`] instead. LISTEN / UNLISTEN notification
+    /// channel names are SQL identifiers rather than values; use
+    /// [`Self::listen`] / [`Self::unlisten`] instead of interpolating them into
+    /// raw SQL.
     ///
     /// # Cancellation
     ///
@@ -3466,7 +3514,10 @@ impl PgConnection {
     /// Use this only for static literals (`"BEGIN"`, `"COMMIT"`,
     /// `"ROLLBACK"`, `"VACUUM"`, schema migrations from version-controlled
     /// files, etc.) or values you fully control. For anything derived from
-    /// external input, use [`Self::execute_params`] instead.
+    /// external input, use [`Self::execute_params`] instead. LISTEN / UNLISTEN
+    /// notification channel names are identifiers, not bind parameters; use
+    /// [`Self::listen`] / [`Self::unlisten`] / [`Self::notify`] instead of
+    /// constructing raw SQL around them.
     pub async fn execute_unchecked(&mut self, cx: &Cx, sql: &str) -> Outcome<u64, PgError> {
         if cx.checkpoint().is_err() {
             return Outcome::Cancelled(
@@ -3576,6 +3627,54 @@ impl PgConnection {
         }
 
         Outcome::Ok(affected_rows)
+    }
+
+    /// Register a PostgreSQL LISTEN channel with identifier quoting and
+    /// explicit length validation.
+    pub async fn listen(&mut self, cx: &Cx, channel: &str) -> Outcome<(), PgError> {
+        let sql = match build_listen_sql(channel) {
+            Ok(sql) => sql,
+            Err(err) => return Outcome::Err(err),
+        };
+        match self.execute_unchecked(cx, &sql).await {
+            Outcome::Ok(_) => Outcome::Ok(()),
+            Outcome::Err(err) => Outcome::Err(err),
+            Outcome::Cancelled(reason) => Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => Outcome::Panicked(payload),
+        }
+    }
+
+    /// Stop listening on a PostgreSQL notification channel with the same
+    /// validation rules as [`Self::listen`].
+    pub async fn unlisten(&mut self, cx: &Cx, channel: &str) -> Outcome<(), PgError> {
+        let sql = match build_unlisten_sql(channel) {
+            Ok(sql) => sql,
+            Err(err) => return Outcome::Err(err),
+        };
+        match self.execute_unchecked(cx, &sql).await {
+            Outcome::Ok(_) => Outcome::Ok(()),
+            Outcome::Err(err) => Outcome::Err(err),
+            Outcome::Cancelled(reason) => Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => Outcome::Panicked(payload),
+        }
+    }
+
+    /// Send a PostgreSQL notification without exposing callers to raw NOTIFY
+    /// channel-name interpolation.
+    pub async fn notify(&mut self, cx: &Cx, channel: &str, payload: &str) -> Outcome<(), PgError> {
+        if let Err(err) = validate_notification_channel_name(channel) {
+            return Outcome::Err(err);
+        }
+        let params = [channel as &dyn ToSql, payload as &dyn ToSql];
+        match self
+            .query_one_params(cx, "SELECT pg_catalog.pg_notify($1, $2)", &params)
+            .await
+        {
+            Outcome::Ok(_) => Outcome::Ok(()),
+            Outcome::Err(err) => Outcome::Err(err),
+            Outcome::Cancelled(reason) => Outcome::Cancelled(reason),
+            Outcome::Panicked(payload) => Outcome::Panicked(payload),
+        }
     }
 
     /// Begin a transaction.
@@ -6395,6 +6494,56 @@ mod tests {
         body.extend_from_slice(payload.as_bytes());
         body.push(0);
         backend_message(b'A', &body)
+    }
+
+    #[test]
+    fn listen_quotes_channel_names_before_simple_query_write() {
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        std::io::Write::write_all(&mut peer, &backend_message(b'C', b"LISTEN\0")).unwrap();
+        std::io::Write::write_all(&mut peer, &ready_for_query(b'I')).unwrap();
+
+        let cx = crate::cx::Cx::for_testing();
+        match run(conn.listen(&cx, "jobs\";UNLISTEN *;--")) {
+            Outcome::Ok(()) => {}
+            other => panic!("expected successful LISTEN, got {other:?}"),
+        }
+
+        let written = read_until_contains(&mut peer, b"LISTEN \"jobs\"\";UNLISTEN *;--\"\0");
+        assert!(
+            written
+                .windows(b"LISTEN \"jobs\"\";UNLISTEN *;--\"\0".len())
+                .any(|window| window == b"LISTEN \"jobs\"\";UNLISTEN *;--\"\0")
+        );
+    }
+
+    #[test]
+    fn listen_rejects_overlong_channel_name_before_writing() {
+        let mut conn = make_test_connection();
+        let cx = crate::cx::Cx::for_testing();
+        let channel = "a".repeat(MAX_NOTIFICATION_CHANNEL_NAME_BYTES + 1);
+
+        match run(conn.listen(&cx, &channel)) {
+            Outcome::Err(PgError::Protocol(msg)) => {
+                assert!(msg.contains("63-byte limit"), "got: {msg}");
+            }
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
+        assert!(!conn.inner.closed);
+    }
+
+    #[test]
+    fn notify_rejects_overlong_channel_name_before_query_message() {
+        let mut conn = make_test_connection();
+        let cx = crate::cx::Cx::for_testing();
+        let channel = "b".repeat(MAX_NOTIFICATION_CHANNEL_NAME_BYTES + 1);
+
+        match run(conn.notify(&cx, &channel, "payload")) {
+            Outcome::Err(PgError::Protocol(msg)) => {
+                assert!(msg.contains("63-byte limit"), "got: {msg}");
+            }
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
+        assert!(!conn.inner.closed);
     }
 
     fn error_response_message(code: &str, message: &str) -> Vec<u8> {
