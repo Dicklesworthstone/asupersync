@@ -307,7 +307,7 @@ impl BlockingPool {
     ///
     /// # Panics
     ///
-    /// Panics if `max_threads` is 0.
+    /// Panics if `max_threads` is 0 or `min_threads > max_threads`.
     #[must_use]
     pub fn new(min_threads: usize, max_threads: usize) -> Self {
         Self::with_config(min_threads, max_threads, BlockingPoolOptions::default())
@@ -321,7 +321,10 @@ impl BlockingPool {
         options: BlockingPoolOptions,
     ) -> Self {
         assert!(max_threads > 0, "max_threads must be at least 1");
-        let max_threads = max_threads.max(min_threads);
+        assert!(
+            min_threads <= max_threads,
+            "min_threads must be less than or equal to max_threads"
+        );
 
         let inner = Arc::new(BlockingPoolInner {
             min_threads,
@@ -1204,6 +1207,12 @@ mod tests {
 
         assert!(handle.wait_timeout(Duration::from_secs(2)));
         assert_eq!(counter.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "min_threads must be less than or equal to max_threads")]
+    fn with_config_rejects_min_threads_above_max_threads() {
+        let _pool = BlockingPool::with_config(2, 1, BlockingPoolOptions::default());
     }
 
     #[test]
