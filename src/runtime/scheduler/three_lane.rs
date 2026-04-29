@@ -1163,7 +1163,10 @@ impl ThreeLaneScheduler {
                     None
                 },
                 cached_suggestion: SchedulingSuggestion::NoPreference,
-                steps_since_snapshot: 0,
+                // Prime the counter so the very first governor consultation
+                // snapshots live state instead of replaying the default
+                // `NoPreference` cache for `governor_interval - 1` steps.
+                steps_since_snapshot: governor_interval.saturating_sub(1),
                 governor_interval,
                 preemption_metrics: PreemptionMetrics {
                     adaptive_current_limit: cancel_streak_limit,
@@ -7285,20 +7288,59 @@ mod tests {
         let mut workers = scheduler.take_workers();
         let worker = &mut workers[0];
 
-        assert_eq!(worker.steps_since_snapshot, 0);
+        assert_eq!(worker.steps_since_snapshot, 3);
         assert_eq!(worker.cached_suggestion, SchedulingSuggestion::NoPreference);
 
-        // Calls 1–3 return cached suggestion without snapshotting.
+        // Call 1 takes the initial snapshot immediately.
+        let s = worker.governor_suggest();
+        assert_eq!(s, SchedulingSuggestion::NoPreference); // quiescent
+        assert_eq!(worker.steps_since_snapshot, 0);
+
+        // Calls 2–4 return the cached suggestion without snapshotting.
         for i in 1..=3u32 {
             let s = worker.governor_suggest();
             assert_eq!(s, SchedulingSuggestion::NoPreference);
             assert_eq!(worker.steps_since_snapshot, i);
         }
 
-        // Call 4 takes a snapshot and resets counter.
+        // Call 5 takes the next snapshot and resets the counter.
         let s = worker.governor_suggest();
         assert_eq!(s, SchedulingSuggestion::NoPreference); // quiescent
         assert_eq!(worker.steps_since_snapshot, 0);
+    }
+
+    #[test]
+    fn test_governor_interval_snapshots_before_first_deadline_dispatch() {
+        use crate::time::{TimerDriverHandle, VirtualClock};
+
+        let clock = Arc::new(VirtualClock::starting_at(Time::from_nanos(999_000_000)));
+        let mut state = RuntimeState::new();
+        state.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock));
+        state.now = Time::from_nanos(999_000_000);
+        let root = state.create_root_region(Budget::unlimited());
+        let (_task_id, _handle) = state
+            .create_task(root, Budget::with_deadline_ns(1_000_000_000), async {})
+            .expect("create task");
+        let state = Arc::new(ContendedMutex::new("runtime_state", state));
+
+        // Interval>1 previously deferred the very first snapshot and let the
+        // default cached `NoPreference` route cancel work ahead of due timers.
+        let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 16, true, 4);
+
+        let cancel_task = TaskId::new_for_test(1, 30);
+        let timed_task = TaskId::new_for_test(1, 31);
+        scheduler.inject_cancel(cancel_task, 100);
+        scheduler.inject_timed(timed_task, Time::from_nanos(500_000_000));
+
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
+
+        assert_eq!(
+            worker.next_task(),
+            Some(timed_task),
+            "the first intervalled governor call must snapshot deadline pressure before dispatch"
+        );
+        assert_eq!(worker.next_task(), Some(cancel_task));
     }
 
     #[test]
