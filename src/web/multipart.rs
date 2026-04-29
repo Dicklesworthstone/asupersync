@@ -303,13 +303,25 @@ impl FromRequest for Multipart {
 /// body — see br-asupersync-tamnew.
 pub const MAX_BOUNDARY_LEN: usize = 70;
 
-/// Returns `true` when the media type is exactly `multipart/form-data`.
-fn is_multipart_form_data(content_type: &str) -> bool {
+fn content_type_media_type(content_type: &str) -> Option<&str> {
     content_type
         .split(';')
         .next()
         .map(str::trim)
+        .filter(|media_type| !media_type.is_empty())
+}
+
+/// Returns `true` when the media type is exactly `multipart/form-data`.
+fn is_multipart_form_data(content_type: &str) -> bool {
+    content_type_media_type(content_type)
         .is_some_and(|media_type| media_type.eq_ignore_ascii_case("multipart/form-data"))
+}
+
+/// Returns `true` when the media type is any `multipart/*` value.
+fn is_multipart_media_type(content_type: &str) -> bool {
+    content_type_media_type(content_type)
+        .and_then(|media_type| media_type.split_once('/'))
+        .is_some_and(|(type_name, _)| type_name.eq_ignore_ascii_case("multipart"))
 }
 
 /// Extract the boundary parameter from a Content-Type header value.
@@ -531,6 +543,11 @@ fn parse_multipart(
         let name = parse_disposition_param(&disposition, "name").unwrap_or_default();
         let filename = parse_disposition_param(&disposition, "filename");
         let content_type = part_headers.get("content-type").cloned();
+        if content_type.as_deref().is_some_and(is_multipart_media_type) {
+            return Err(ExtractionError::bad_request(
+                "nested multipart parts are not supported",
+            ));
+        }
 
         fields.push(MultipartField {
             name,
@@ -1098,6 +1115,24 @@ mod tests {
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].name(), "payload");
         assert_eq!(fields[0].body().as_ref(), b"value--BOUNDARYstill-body");
+    }
+
+    #[test]
+    fn parse_rejects_nested_multipart_part() {
+        let nested = b"--INNER\r\nContent-Disposition: form-data; name=\"inner\"\r\n\r\nvalue\r\n--INNER--\r\n";
+        let body = make_multipart_body(
+            "OUTER",
+            &[(
+                "Content-Disposition: form-data; name=\"payload\"\r\nContent-Type: multipart/mixed; boundary=INNER",
+                nested,
+            )],
+        );
+
+        let err =
+            parse_multipart(&body, "OUTER", &MultipartLimits::default(), wall_now()).unwrap_err();
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert_eq!(err.message, "nested multipart parts are not supported");
     }
 
     #[test]
