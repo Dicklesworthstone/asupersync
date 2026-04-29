@@ -472,6 +472,59 @@ impl ConsumerConfig {
         self
     }
 
+    /// Canonicalize the deprecated durable alias into one validated consumer identity.
+    fn normalize_identity(&mut self) -> Result<(), JsError> {
+        let name = Self::validate_consumer_name("name", self.name.as_deref())?;
+        let durable_name =
+            Self::validate_consumer_name("durable_name", self.durable_name.as_deref())?;
+
+        let canonical_name = match (name, durable_name) {
+            (Some(name), Some(durable_name)) if name != durable_name => {
+                return Err(JsError::InvalidConfig(format!(
+                    "consumer name mismatch: name '{name}' != durable_name '{durable_name}'"
+                )));
+            }
+            (Some(name), _) => Some(name.to_string()),
+            (None, Some(durable_name)) => Some(durable_name.to_string()),
+            (None, None) => None,
+        };
+
+        self.name = canonical_name;
+        self.durable_name = None;
+        Ok(())
+    }
+
+    fn validate_consumer_name<'a>(
+        field: &str,
+        value: Option<&'a str>,
+    ) -> Result<Option<&'a str>, JsError> {
+        let Some(value) = value else {
+            return Ok(None);
+        };
+
+        if value.is_empty() {
+            return Err(JsError::InvalidConfig(format!(
+                "consumer {field} must be non-empty when set"
+            )));
+        }
+
+        if value.chars().any(|ch| {
+            ch.is_whitespace()
+                || ch == '.'
+                || ch == '*'
+                || ch == '>'
+                || ch == '/'
+                || ch == '\\'
+                || ch.is_control()
+        }) {
+            return Err(JsError::InvalidConfig(format!(
+                "consumer {field} contains prohibited characters"
+            )));
+        }
+
+        Ok(Some(value))
+    }
+
     /// Encode to JSON for API request.
     fn to_json(&self) -> String {
         let mut json = String::from("{");
@@ -744,10 +797,11 @@ impl JetStreamContext {
         &mut self,
         cx: &Cx,
         stream: &str,
-        config: ConsumerConfig,
+        mut config: ConsumerConfig,
     ) -> Result<Consumer, JsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
+        config.normalize_identity()?;
         let consumer_name = config.name.clone().unwrap_or_default();
         let subject = if consumer_name.is_empty() {
             format!("{}.CONSUMER.CREATE.{}", self.prefix, stream)
@@ -1564,6 +1618,39 @@ mod tests {
         assert!(!json.contains("{,"));
         assert!(json.contains("\"deliver_policy\":\"all\""));
         assert!(json.contains("\"ack_policy\":\"explicit\""));
+    }
+
+    #[test]
+    fn consumer_config_normalizes_deprecated_durable_alias() {
+        let mut cfg = ConsumerConfig::ephemeral();
+        cfg.durable_name = Some("worker_1".into());
+
+        cfg.normalize_identity().unwrap();
+
+        assert_eq!(cfg.name.as_deref(), Some("worker_1"));
+        assert!(cfg.durable_name.is_none());
+        assert!(cfg.to_json().contains("\"name\":\"worker_1\""));
+        assert!(!cfg.to_json().contains("durable_name"));
+    }
+
+    #[test]
+    fn consumer_config_rejects_mismatched_durable_alias() {
+        let mut cfg = ConsumerConfig::new("worker_1");
+        cfg.durable_name = Some("worker_2".into());
+
+        let err = cfg.normalize_identity().unwrap_err();
+        assert!(matches!(err, JsError::InvalidConfig(_)));
+        assert!(err.to_string().contains("consumer name mismatch"));
+    }
+
+    #[test]
+    fn consumer_config_rejects_subject_injecting_names() {
+        let mut cfg = ConsumerConfig::new("worker.bad");
+        let err = cfg.normalize_identity().unwrap_err();
+        assert!(matches!(err, JsError::InvalidConfig(_)));
+        assert!(err
+            .to_string()
+            .contains("consumer name contains prohibited characters"));
     }
 
     #[test]
