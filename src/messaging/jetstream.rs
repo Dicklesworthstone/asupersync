@@ -1716,6 +1716,7 @@ mod tests {
         clippy::future_not_send
     )]
     use super::*;
+    use crate::messaging::NatsConfig;
     use crate::test_utils::run_test_with_cx;
     use serde_json::json;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -2419,6 +2420,322 @@ mod tests {
         assert_eq!(
             build_nak_payload(Duration::from_millis(1500)).as_ref(),
             br#"-NAK {"delay": 1500000000}"#
+        );
+    }
+
+    enum MockServerReply {
+        None,
+        Request(Vec<u8>),
+        Pull {
+            reply_subject: String,
+            payload: Vec<u8>,
+        },
+    }
+
+    fn read_crlf_line(stream: &mut std::net::TcpStream) -> Vec<u8> {
+        use std::io::Read;
+
+        let mut line = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            stream.read_exact(&mut byte).expect("read line byte");
+            line.push(byte[0]);
+            if line.ends_with(b"\r\n") {
+                return line;
+            }
+        }
+    }
+
+    fn parse_pub_payload_len(header: &str) -> usize {
+        let parts: Vec<_> = header.split_whitespace().collect();
+        assert_eq!(parts.first().copied(), Some("PUB"));
+        assert_eq!(parts.len(), 4, "request publish must include reply-to");
+        parts[3].parse().expect("parse PUB payload length")
+    }
+
+    fn capture_wire_transcript<F, Fut>(reply: MockServerReply, action: F) -> String
+    where
+        F: FnOnce(Cx, std::net::SocketAddr) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind JetStream wire listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+
+            let (mut stream, _) = listener.accept().expect("accept test client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+            stream
+                .write_all(
+                    b"INFO {\"server_id\":\"test\",\"server_name\":\"test\",\"version\":\"2.9.0\",\"proto\":1,\"max_payload\":1048576,\"tls_required\":false}\r\n",
+                )
+                .expect("write INFO");
+            stream.flush().expect("flush INFO");
+
+            let connect = String::from_utf8(read_crlf_line(&mut stream)).expect("CONNECT utf8");
+            let subscribe = String::from_utf8(read_crlf_line(&mut stream)).expect("SUB utf8");
+            let publish = String::from_utf8(read_crlf_line(&mut stream)).expect("PUB utf8");
+            let payload_len = parse_pub_payload_len(&publish);
+            let mut payload = vec![0_u8; payload_len + 2];
+            stream.read_exact(&mut payload).expect("read PUB payload");
+
+            let mut subscribe_parts = subscribe.split_whitespace();
+            assert_eq!(subscribe_parts.next(), Some("SUB"));
+            let inbox = subscribe_parts.next().expect("SUB subject").to_string();
+            let sid = subscribe_parts.next().expect("SUB sid").to_string();
+
+            match reply {
+                MockServerReply::None => {}
+                MockServerReply::Request(response_payload) => {
+                    let response_header =
+                        format!("MSG {inbox} {sid} {}\r\n", response_payload.len());
+                    stream
+                        .write_all(response_header.as_bytes())
+                        .expect("write response header");
+                    stream
+                        .write_all(&response_payload)
+                        .expect("write response payload");
+                    stream
+                        .write_all(b"\r\n")
+                        .expect("write response terminator");
+                    stream.flush().expect("flush response");
+                }
+                MockServerReply::Pull {
+                    reply_subject,
+                    payload: response_payload,
+                } => {
+                    let response_header = format!(
+                        "MSG {inbox} {sid} {reply_subject} {}\r\n",
+                        response_payload.len()
+                    );
+                    stream
+                        .write_all(response_header.as_bytes())
+                        .expect("write pull response header");
+                    stream
+                        .write_all(&response_payload)
+                        .expect("write pull response payload");
+                    stream
+                        .write_all(b"\r\n")
+                        .expect("write pull response terminator");
+                    stream.flush().expect("flush pull response");
+                }
+            }
+
+            let unsubscribe = String::from_utf8(read_crlf_line(&mut stream)).expect("UNSUB utf8");
+            [
+                connect,
+                subscribe,
+                publish,
+                String::from_utf8(payload).expect("payload utf8"),
+                unsubscribe,
+            ]
+            .into_iter()
+            .map(|frame| frame.replace(&inbox, "[INBOX]"))
+            .collect::<String>()
+        });
+
+        run_test_with_cx(|cx| action(cx, addr));
+
+        server.join().expect("server thread join")
+    }
+
+    #[test]
+    fn jetstream_api_pub_sub_consume_match_raw_nats_wire_tick122() {
+        let publish_reply = br#"{"stream":"ORDERS","seq":7}"#.to_vec();
+        let publish_wire = capture_wire_transcript(
+            MockServerReply::Request(publish_reply.clone()),
+            |cx, addr| async move {
+                let mut js = JetStreamContext::new(
+                    NatsClient::connect_with_config(
+                        &cx,
+                        NatsConfig {
+                            host: addr.ip().to_string(),
+                            port: addr.port(),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .expect("connect publish mock server"),
+                );
+
+                let ack = js
+                    .publish(&cx, "orders.created", b"ping")
+                    .await
+                    .expect("JetStream publish");
+                assert_eq!(ack.stream, "ORDERS");
+                assert_eq!(ack.seq, 7);
+            },
+        );
+        let raw_publish_wire = capture_wire_transcript(
+            MockServerReply::Request(publish_reply.clone()),
+            move |cx, addr| {
+                let publish_reply = publish_reply.clone();
+                async move {
+                    let mut client = NatsClient::connect_with_config(
+                        &cx,
+                        NatsConfig {
+                            host: addr.ip().to_string(),
+                            port: addr.port(),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .expect("connect raw publish mock server");
+
+                    let response = client
+                        .request(&cx, "orders.created", b"ping")
+                        .await
+                        .expect("raw publish request");
+                    assert_eq!(response.payload, publish_reply);
+                }
+            },
+        );
+        assert_eq!(
+            publish_wire, raw_publish_wire,
+            "JetStream publish must emit the same NATS wire bytes as raw request"
+        );
+
+        let create_reply = br#"{"name":"processor"}"#.to_vec();
+        let create_wire = capture_wire_transcript(
+            MockServerReply::Request(create_reply.clone()),
+            |cx, addr| async move {
+                let mut js = JetStreamContext::new(
+                    NatsClient::connect_with_config(
+                        &cx,
+                        NatsConfig {
+                            host: addr.ip().to_string(),
+                            port: addr.port(),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .expect("connect create-consumer mock server"),
+                );
+
+                let consumer = js
+                    .create_consumer(&cx, "ORDERS", ConsumerConfig::new("processor"))
+                    .await
+                    .expect("JetStream create_consumer");
+                assert_eq!(consumer.stream(), "ORDERS");
+                assert_eq!(consumer.name(), "processor");
+            },
+        );
+        let raw_create_wire = capture_wire_transcript(
+            MockServerReply::Request(create_reply.clone()),
+            move |cx, addr| {
+                let create_reply = create_reply.clone();
+                async move {
+                    let mut client = NatsClient::connect_with_config(
+                        &cx,
+                        NatsConfig {
+                            host: addr.ip().to_string(),
+                            port: addr.port(),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .expect("connect raw create-consumer mock server");
+                    let config = ConsumerConfig::new("processor");
+                    let payload = format!(
+                        "{{\"stream_name\":\"{}\",\"config\":{}}}",
+                        json_escape("ORDERS"),
+                        config.to_json()
+                    );
+                    let response = client
+                        .request(
+                            &cx,
+                            "$JS.API.CONSUMER.CREATE.ORDERS.processor",
+                            payload.as_bytes(),
+                        )
+                        .await
+                        .expect("raw create-consumer request");
+                    assert_eq!(response.payload, create_reply);
+                }
+            },
+        );
+        assert_eq!(
+            create_wire, raw_create_wire,
+            "JetStream create_consumer must emit the same NATS wire bytes as raw request"
+        );
+
+        let pull_reply_subject =
+            "$JS.ACK.ORDERS.processor.1.42.7.1713790000000000000.0".to_string();
+        let pull_payload = b"msg".to_vec();
+        let pull_wire = capture_wire_transcript(
+            MockServerReply::Pull {
+                reply_subject: pull_reply_subject.clone(),
+                payload: pull_payload.clone(),
+            },
+            move |cx, addr| {
+                let pull_reply_subject = pull_reply_subject.clone();
+                let pull_payload = pull_payload.clone();
+                async move {
+                    let mut client = NatsClient::connect_with_config(
+                        &cx,
+                        NatsConfig {
+                            host: addr.ip().to_string(),
+                            port: addr.port(),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .expect("connect pull mock server");
+                    let consumer = Consumer {
+                        stream: "ORDERS".to_string(),
+                        name: "processor".to_string(),
+                        prefix: "$JS.API".to_string(),
+                    };
+
+                    let messages = consumer
+                        .pull(&mut client, &cx, 1)
+                        .await
+                        .expect("JetStream pull");
+                    assert_eq!(messages.len(), 1);
+                    assert_eq!(messages[0].payload, pull_payload);
+                    assert_eq!(messages[0].reply_subject, pull_reply_subject);
+                }
+            },
+        );
+        let raw_pull_wire = capture_wire_transcript(MockServerReply::None, |cx, addr| async move {
+            let mut client = NatsClient::connect_with_config(
+                &cx,
+                NatsConfig {
+                    host: addr.ip().to_string(),
+                    port: addr.port(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("connect raw pull mock server");
+
+            let inbox = format!("_INBOX.{}", random_id(&cx));
+            let sub = client
+                .subscribe(&cx, &inbox)
+                .await
+                .expect("raw pull subscribe");
+            let expires = duration_to_nanos_saturating(Consumer::DEFAULT_PULL_TIMEOUT);
+            let request = build_pull_request_json(1, expires as i64, None);
+
+            client
+                .publish_request(
+                    &cx,
+                    "$JS.API.CONSUMER.MSG.NEXT.ORDERS.processor",
+                    &inbox,
+                    request.as_bytes(),
+                )
+                .await
+                .expect("raw pull publish_request");
+            client
+                .unsubscribe(&cx, sub.sid())
+                .await
+                .expect("raw pull unsubscribe");
+        });
+        assert_eq!(
+            pull_wire, raw_pull_wire,
+            "JetStream pull must emit the same NATS wire bytes as the raw subscribe/publish_request sequence"
         );
     }
 
