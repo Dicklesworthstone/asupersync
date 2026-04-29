@@ -1274,6 +1274,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "nats_subject_name_parser"
+path = "fuzz_targets/nats_subject_name_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "unix_stream"
 path = "fuzz_targets/unix_stream.rs"
 test = false
