@@ -1135,12 +1135,12 @@ impl Consumer {
         }
 
         let mut messages = Vec::with_capacity(batch);
+        let mut pull_state = PullSubscriberState::new(batch);
         let now = cx
             .timer_driver()
             .map_or_else(wall_now, |driver| driver.now());
         let client_deadline =
             compute_client_deadline(now, pull_timeout, Self::CLIENT_TIMEOUT_SLACK);
-        let mut result: Result<(), JsError> = Ok(());
 
         // Collect messages until we get batch or timeout.
         // A live JetStream broker only delivers pull responses once the
@@ -1148,23 +1148,24 @@ impl Consumer {
         // alone is insufficient because nothing reads frames off the wire.
         // Keep driving the client via `process()` and only break on timeout,
         // connection close, or a real protocol/server error.
-        let mut received = 0usize;
         loop {
-            if received >= batch {
+            if !pull_state.is_active() {
                 break;
             }
 
-            while received < batch {
+            while pull_state.is_active() && pull_state.received() < batch {
                 let Some(msg) = sub.try_next() else {
                     break;
                 };
                 if let Some(js_msg) = Self::parse_js_message(msg) {
                     messages.push(js_msg);
-                    received += 1;
+                    pull_state.observe_parsed_message();
+                } else {
+                    pull_state.observe_ignored_message();
                 }
             }
 
-            if received >= batch {
+            if !pull_state.is_active() {
                 break;
             }
 
@@ -1176,12 +1177,10 @@ impl Consumer {
             };
 
             match process_result {
-                Ok(Ok(())) => {}
-                Ok(Err(NatsError::Closed)) | Err(_) => break,
-                Ok(Err(err)) => {
-                    result = Err(err.into());
-                    break;
-                }
+                Ok(Ok(())) => pull_state.observe_process_ready(),
+                Ok(Err(NatsError::Closed)) => pull_state.observe_closed(),
+                Err(_) => pull_state.observe_timeout(),
+                Ok(Err(err)) => pull_state.observe_error(err.into()),
             }
         }
 
@@ -1197,7 +1196,7 @@ impl Consumer {
             let _ = &err;
         }
 
-        result.map(|()| messages)
+        pull_state.result().map(|()| messages)
     }
 
     fn parse_js_message(msg: Message) -> Option<JsMessage> {
@@ -1234,6 +1233,87 @@ impl Consumer {
             reply_subject: reply,
             ack_state: AtomicU8::new(ACK_STATE_PENDING),
         })
+    }
+}
+
+#[derive(Debug)]
+struct PullSubscriberState {
+    batch: usize,
+    received: usize,
+    termination: PullSubscriberTermination,
+    error: Option<JsError>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PullSubscriberTermination {
+    Active,
+    Completed,
+    Closed,
+    TimedOut,
+    Error,
+}
+
+impl PullSubscriberState {
+    fn new(batch: usize) -> Self {
+        debug_assert!(batch > 0);
+        Self {
+            batch,
+            received: 0,
+            termination: PullSubscriberTermination::Active,
+            error: None,
+        }
+    }
+
+    fn received(&self) -> usize {
+        self.received
+    }
+
+    fn is_active(&self) -> bool {
+        matches!(self.termination, PullSubscriberTermination::Active)
+    }
+
+    fn termination(&self) -> PullSubscriberTermination {
+        self.termination
+    }
+
+    fn observe_parsed_message(&mut self) {
+        if !self.is_active() {
+            return;
+        }
+        self.received = self.received.saturating_add(1).min(self.batch);
+        if self.received >= self.batch {
+            self.termination = PullSubscriberTermination::Completed;
+        }
+    }
+
+    fn observe_ignored_message(&mut self) {}
+
+    fn observe_process_ready(&mut self) {}
+
+    fn observe_closed(&mut self) {
+        if self.is_active() {
+            self.termination = PullSubscriberTermination::Closed;
+        }
+    }
+
+    fn observe_timeout(&mut self) {
+        if self.is_active() {
+            self.termination = PullSubscriberTermination::TimedOut;
+        }
+    }
+
+    fn observe_error(&mut self, err: JsError) {
+        if self.is_active() {
+            self.termination = PullSubscriberTermination::Error;
+            self.error = Some(err);
+        }
+    }
+
+    fn result(self) -> Result<(), JsError> {
+        match self.error {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 }
 
@@ -1378,6 +1458,90 @@ pub const fn fuzz_stream_name_max_bytes() -> usize {
 #[doc(hidden)]
 pub fn fuzz_validate_stream_name(name: &str) -> Result<(), String> {
     ConsumerConfig::validate_stream_name(name).map_err(|err| err.to_string())
+}
+
+/// Compact termination classes for the pull-subscriber loop state machine.
+#[cfg(feature = "test-internals")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum FuzzPullSubscriberTerminal {
+    Active,
+    Completed,
+    Closed,
+    TimedOut,
+    Error,
+}
+
+/// Step kinds accepted by the pull-subscriber loop reducer.
+#[cfg(feature = "test-internals")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum FuzzPullSubscriberStep {
+    ParsedMessage,
+    IgnoredMessage,
+    ProcessReady,
+    ProcessClosed,
+    ProcessTimedOut,
+    ProcessError,
+}
+
+/// Snapshot of the pull-subscriber loop state for fuzzing.
+#[cfg(feature = "test-internals")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct FuzzPullSubscriberState {
+    pub batch: usize,
+    pub received: usize,
+    pub ignored: usize,
+    pub terminal: FuzzPullSubscriberTerminal,
+}
+
+/// Fuzz-target reducer for the JetStream pull-subscriber loop state machine.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_apply_pull_subscriber_step(
+    state: &mut FuzzPullSubscriberState,
+    step: FuzzPullSubscriberStep,
+) {
+    let batch = state.batch.max(1);
+    let mut inner = PullSubscriberState {
+        batch,
+        received: state.received.min(batch),
+        termination: match state.terminal {
+            FuzzPullSubscriberTerminal::Active => PullSubscriberTermination::Active,
+            FuzzPullSubscriberTerminal::Completed => PullSubscriberTermination::Completed,
+            FuzzPullSubscriberTerminal::Closed => PullSubscriberTermination::Closed,
+            FuzzPullSubscriberTerminal::TimedOut => PullSubscriberTermination::TimedOut,
+            FuzzPullSubscriberTerminal::Error => PullSubscriberTermination::Error,
+        },
+        error: None,
+    };
+
+    match step {
+        FuzzPullSubscriberStep::ParsedMessage => inner.observe_parsed_message(),
+        FuzzPullSubscriberStep::IgnoredMessage => {
+            if inner.is_active() {
+                state.ignored = state.ignored.saturating_add(1);
+            }
+            inner.observe_ignored_message();
+        }
+        FuzzPullSubscriberStep::ProcessReady => inner.observe_process_ready(),
+        FuzzPullSubscriberStep::ProcessClosed => inner.observe_closed(),
+        FuzzPullSubscriberStep::ProcessTimedOut => inner.observe_timeout(),
+        FuzzPullSubscriberStep::ProcessError => {
+            inner.observe_error(JsError::InvalidConfig("fuzz-process-error".to_string()));
+        }
+    }
+
+    state.batch = batch;
+    state.received = inner.received();
+    state.terminal = match inner.termination() {
+        PullSubscriberTermination::Active => FuzzPullSubscriberTerminal::Active,
+        PullSubscriberTermination::Completed => FuzzPullSubscriberTerminal::Completed,
+        PullSubscriberTermination::Closed => FuzzPullSubscriberTerminal::Closed,
+        PullSubscriberTermination::TimedOut => FuzzPullSubscriberTerminal::TimedOut,
+        PullSubscriberTermination::Error => FuzzPullSubscriberTerminal::Error,
+    };
 }
 
 impl JsMessage {
@@ -1935,6 +2099,39 @@ mod tests {
             request,
             r#"{"batch":2,"expires":50000000,"max_bytes":1024}"#
         );
+    }
+
+    #[test]
+    fn pull_subscriber_state_completes_at_batch_and_ignores_late_terminal_tick126() {
+        let mut state = PullSubscriberState::new(2);
+
+        state.observe_parsed_message();
+        assert_eq!(state.termination(), PullSubscriberTermination::Active);
+
+        state.observe_parsed_message();
+        assert_eq!(state.termination(), PullSubscriberTermination::Completed);
+        assert_eq!(state.received(), 2);
+
+        state.observe_timeout();
+        state.observe_closed();
+        state.observe_error(JsError::InvalidConfig("late".to_string()));
+
+        assert_eq!(state.termination(), PullSubscriberTermination::Completed);
+        assert!(state.result().is_ok());
+    }
+
+    #[test]
+    fn pull_subscriber_state_error_is_sticky_tick126() {
+        let mut state = PullSubscriberState::new(3);
+
+        state.observe_parsed_message();
+        state.observe_error(JsError::InvalidConfig("boom".to_string()));
+        state.observe_parsed_message();
+        state.observe_closed();
+
+        assert_eq!(state.termination(), PullSubscriberTermination::Error);
+        assert_eq!(state.received(), 1);
+        assert!(matches!(state.result(), Err(JsError::InvalidConfig(msg)) if msg == "boom"));
     }
 
     // Pure data-type tests (wave 13 – CyanBarn)
