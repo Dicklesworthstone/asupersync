@@ -1429,6 +1429,19 @@ impl SqliteTransaction<'_> {
         self.conn.execute(cx, sql, params).await
     }
 
+    /// Executes trusted transaction-control SQL within this transaction.
+    pub(crate) async fn execute_unchecked(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        params: &[SqliteValue],
+    ) -> Outcome<u64, SqliteError> {
+        if self.finished {
+            return Outcome::Err(SqliteError::TransactionFinished);
+        }
+        self.conn.execute_unchecked(cx, sql, params).await
+    }
+
     /// Executes a query within this transaction.
     pub async fn query(
         &self,
