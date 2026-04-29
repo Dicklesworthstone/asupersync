@@ -5380,4 +5380,113 @@ mod tests {
         let display = format!("{info}");
         assert!(!display.contains('('));
     }
+
+    fn assert_diagnostic_yaml_snapshot(snapshot_name: &str, value: &Value) {
+        insta::with_settings!({
+            snapshot_path => "../../tests/snapshots",
+            prepend_module_to_snapshot => false,
+        }, {
+            insta::assert_yaml_snapshot!(snapshot_name, value);
+        });
+    }
+
+    /// Golden test for canonical diagnostic runtime state dump.
+    ///
+    /// This test pins a known runtime state (3 tasks, 1 obligation, 1 cancel)
+    /// and creates a comprehensive diagnostic dump as YAML. The snapshot ensures
+    /// diagnostic output format stability across runtime versions.
+    #[test]
+    fn diagnostic_runtime_state_dump_golden() {
+        init_test("diagnostic_runtime_state_dump_golden");
+
+        let mut state = RuntimeState::new();
+        let root_region = state.root_region();
+
+        // Create known-state runtime: 3 tasks, 1 obligation, 1 cancel
+        let task1 = insert_task(&mut state, root_region, TaskState::Running);
+        let task2 = insert_task(&mut state, root_region, TaskState::Blocked);
+        let task3 = insert_task(&mut state, root_region, TaskState::Completed {
+            outcome: Outcome::Cancelled,
+        });
+
+        // Add 1 obligation held by task1
+        let obligation = insert_obligation(
+            &mut state,
+            root_region,
+            task1,
+            ObligationKind::SendPermit,
+            Time::from_nanos(10_000),
+        );
+
+        // Mark task3 as cancelled with a test reason
+        if let Some(record) = state.task_mut(task3) {
+            record.cancel_reason = Some(CancelReason::timeout());
+        }
+
+        let diagnostics = Diagnostics::new(Arc::new(state));
+
+        // Generate comprehensive diagnostic dump
+        let region_explanation = diagnostics.explain_region_open(root_region);
+        let task_explanation = diagnostics.explain_task_blocked(task2);
+        let leaked_obligations = diagnostics.find_leaked_obligations();
+        let health_report = diagnostics.analyze_structural_health();
+
+        let diagnostic_dump = json!({
+            "runtime_state": {
+                "tasks": {
+                    "task1": {
+                        "id": task1.to_string(),
+                        "state": "Running",
+                        "region": root_region.to_string()
+                    },
+                    "task2": {
+                        "id": task2.to_string(),
+                        "state": "Blocked",
+                        "region": root_region.to_string()
+                    },
+                    "task3": {
+                        "id": task3.to_string(),
+                        "state": "Cancelled",
+                        "region": root_region.to_string()
+                    }
+                },
+                "obligations": {
+                    "obligation1": {
+                        "id": obligation.to_string(),
+                        "kind": "SendPermit",
+                        "holder": task1.to_string(),
+                        "region": root_region.to_string()
+                    }
+                },
+                "regions": {
+                    "root": {
+                        "id": root_region.to_string(),
+                        "explanation": {
+                            "can_close": region_explanation.can_close,
+                            "reasons_count": region_explanation.reasons.len()
+                        }
+                    }
+                }
+            },
+            "diagnostics": {
+                "task_blocked": {
+                    "task_id": task2.to_string(),
+                    "has_explanation": !task_explanation.reasons.is_empty()
+                },
+                "leaked_obligations": {
+                    "count": leaked_obligations.len()
+                },
+                "health": {
+                    "has_analysis": health_report.classification.is_some(),
+                    "timestamp": health_report.timestamp.as_nanos()
+                }
+            },
+            "meta": {
+                "test_scenario": "3_tasks_1_obligation_1_cancel",
+                "snapshot_version": "v1"
+            }
+        });
+
+        assert_diagnostic_yaml_snapshot("diagnostic_runtime_state_dump_golden", &diagnostic_dump);
+    }
 }

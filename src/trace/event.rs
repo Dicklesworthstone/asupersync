@@ -4174,4 +4174,60 @@ mod tests {
 
         insta::assert_json_snapshot!("otel_span_golden_tests", span_events);
     }
+
+    /// Serialize trace events to canonical NDJSON format.
+    ///
+    /// Each event becomes a single JSON object on its own line, suitable for
+    /// streaming trace ingestion and line-by-line processing pipelines.
+    fn trace_events_to_ndjson(events: &[TraceEvent]) -> Result<String, serde_json::Error> {
+        let mut ndjson = String::new();
+        for event in events {
+            let json_line = serde_json::to_string(event)?;
+            ndjson.push_str(&json_line);
+            ndjson.push('\n');
+        }
+        Ok(ndjson)
+    }
+
+    /// Golden test for canonical NDJSON trace event serialization.
+    ///
+    /// This test pins the NDJSON (Newline Delimited JSON) serialization format
+    /// for trace events. Each event becomes a single JSON object per line,
+    /// ensuring compatibility with streaming ingestion pipelines and
+    /// line-oriented processing tools.
+    #[test]
+    fn trace_event_canonical_ndjson_serialization() {
+        let ndjson_events = vec![
+            // Simple task lifecycle for NDJSON streaming
+            TraceEvent::spawn(1, Time::from_nanos(5000), task(20), region(10)),
+            TraceEvent::schedule(2, Time::from_nanos(5100), task(20), region(10)),
+            TraceEvent::poll(3, Time::from_nanos(5200), task(20), region(10)),
+            TraceEvent::user_trace(4, Time::from_nanos(5250), "ndjson-stream-marker"),
+            TraceEvent::complete(5, Time::from_nanos(5300), task(20), region(10)),
+        ];
+
+        // Generate canonical NDJSON format
+        let ndjson_output = trace_events_to_ndjson(&ndjson_events)
+            .expect("NDJSON serialization should succeed");
+
+        // Verify each line is valid JSON
+        for (i, line) in ndjson_output.lines().enumerate() {
+            if !line.is_empty() {
+                let parsed: serde_json::Value = serde_json::from_str(line)
+                    .unwrap_or_else(|e| panic!("Line {i} is not valid JSON: {e}"));
+                assert!(parsed.is_object(), "Line {i} should be a JSON object");
+            }
+        }
+
+        // Verify round-trip through NDJSON parsing
+        let parsed_events: Result<Vec<TraceEvent>, _> = ndjson_output
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(serde_json::from_str)
+            .collect();
+        let decoded_events = parsed_events.expect("NDJSON round-trip should succeed");
+        assert_eq!(ndjson_events, decoded_events, "NDJSON round-trip mismatch");
+
+        insta::assert_snapshot!("trace_event_canonical_ndjson_serialization", ndjson_output);
+    }
 }
