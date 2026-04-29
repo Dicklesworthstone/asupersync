@@ -3,10 +3,11 @@
 //! Cargo-fuzz target for low-K RaptorQ encoder transition cases.
 //!
 //! Focuses on the smallest valid source-block sizes (`K=1`, `K=2`, `K=3`,
-//! `K=4`, `K=8`), where the encoder crosses from the degenerate single-symbol
-//! lane into the first genuinely non-degenerate multi-symbol ladder entries
-//! and the first padded low-intermediate case (`K=8 -> K'=10`). For arbitrary
-//! source bytes and repair counts we assert:
+//! `K=4`, `K=8`, `K=16`), where the encoder crosses from the degenerate
+//! single-symbol lane into the first genuinely non-degenerate multi-symbol
+//! ladder entries and the first padded low-intermediate cases (`K=8 -> K'=10`
+//! and `K=16 -> K'=18`). For arbitrary source bytes and repair counts we
+//! assert:
 //!
 //! 1. `SystematicEncoder::new` never panics and succeeds for valid low-K
 //!    source blocks.
@@ -17,7 +18,8 @@
 //! 5. Every emitted repair payload matches `repair_symbol(esi)` exactly, so
 //!    `emit_all` and the on-demand repair lane stay coherent.
 //! 6. The derived parameter ladder stays coherent (`K' >= K`, `L = K' + S + H`);
-//!    at `K=8` the encoder must round up to the first RFC row (`K'=10`).
+//!    at `K=8` and `K=16` the encoder must hit the pinned RFC rows
+//!    (`K'=10` and `K'=18`).
 //! 7. Every emitted payload stays exactly `symbol_size` bytes wide and the
 //!    repair cursor advances by exactly `repair_count`.
 
@@ -35,6 +37,7 @@ enum TransitionK {
     K3,
     K4,
     K8,
+    K16,
 }
 
 #[derive(Arbitrary, Debug)]
@@ -69,6 +72,7 @@ fuzz_target!(|input: TransitionInput| {
         TransitionK::K3 => 3,
         TransitionK::K4 => 4,
         TransitionK::K8 => 8,
+        TransitionK::K16 => 16,
     };
     let symbol_size = (usize::from(input.symbol_size) % MAX_SYMBOL_SIZE) + 1;
     let repair_count = usize::from(input.repair_count) % (MAX_REPAIR_COUNT + 1);
@@ -78,7 +82,7 @@ fuzz_target!(|input: TransitionInput| {
         .unwrap_or_else(|| {
             panic!("low-K encoder construction must succeed for K={k}, T={symbol_size}")
         });
-    let params = encoder.params();
+    let params = encoder.params().clone();
     assert_eq!(params.k, k, "encoder params must preserve the public K");
     assert!(
         params.k_prime >= k,
@@ -98,6 +102,22 @@ fuzz_target!(|input: TransitionInput| {
         assert!(
             params.k_prime > params.k,
             "K=8 low-intermediate case must exercise padded source rows"
+        );
+    }
+    if k == 16 {
+        assert_eq!(
+            params.k_prime, 18,
+            "K=16 must round up to the next low-intermediate RFC row"
+        );
+        assert_eq!(params.j, 682, "K=16 must pin the RFC J(K') value");
+        assert_eq!(params.s, 11, "K=16 must pin the RFC S(K') value");
+        assert_eq!(params.h, 10, "K=16 must pin the RFC H(K') value");
+        assert_eq!(params.w, 29, "K=16 must pin the RFC W(K') value");
+        assert_eq!(params.l, 39, "K=16 must pin the RFC L value");
+        assert_eq!(params.b, 18, "K=16 must pin the RFC B value");
+        assert!(
+            params.k_prime > params.k,
+            "K=16 low-intermediate case must exercise padded source rows"
         );
     }
 
