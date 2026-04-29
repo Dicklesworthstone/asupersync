@@ -383,8 +383,7 @@ impl TraceabilityMatrix {
             let tests = self
                 .coverage_cache
                 .get(&req.section)
-                .map(|t| t.join(", "))
-                .unwrap_or_else(|| "-".to_string());
+                .map_or_else(|| "-".to_string(), |t| t.join(", "));
             let status = if self.coverage_cache.contains_key(&req.section) {
                 "Covered"
             } else {

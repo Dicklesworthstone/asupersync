@@ -23,8 +23,7 @@ pub fn render_console_summary(summary: &SuiteResult) -> String {
         let duration = result
             .result
             .duration_ms
-            .map(|ms| format!("{ms}ms"))
-            .unwrap_or_else(|| "n/a".to_string());
+            .map_or_else(|| "n/a".to_string(), |ms| format!("{ms}ms"));
         out.push_str(&format!(
             "- {} ({}) [{}] {}\n",
             result.test_id, result.test_name, status, duration
