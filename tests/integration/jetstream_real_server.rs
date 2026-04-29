@@ -22,11 +22,12 @@
 
 use asupersync::cx::Cx;
 use asupersync::messaging::jetstream::{
-    AckPolicy, ConsumerConfig, JetStreamContext, StorageType, StreamConfig,
+    AckPolicy, ConsumerConfig, DeliverPolicy, JetStreamContext, StorageType, StreamConfig,
 };
 use asupersync::messaging::nats::NatsClient;
 use asupersync::runtime::RuntimeBuilder;
 
+use serde_json::Value;
 use std::fs;
 use std::future::Future;
 use std::io::Read;
@@ -325,6 +326,51 @@ where
     spawn_runtime_task(name, task)
         .join()
         .expect("runtime thread join")
+}
+
+fn raw_stream_create_payload(stream: &str, subject: &str, duplicate_window: Duration) -> String {
+    format!(
+        "{{\"name\":\"{stream}\",\"subjects\":[\"{subject}\"],\"retention\":\"limits\",\"storage\":\"memory\",\"discard\":\"old\",\"num_replicas\":1,\"max_msgs\":64,\"duplicate_window\":{}}}",
+        duplicate_window.as_nanos()
+    )
+}
+
+fn raw_consumer_create_payload(
+    stream: &str,
+    consumer: &str,
+    subject: &str,
+    start_sequence: u64,
+    ack_wait: Duration,
+) -> String {
+    format!(
+        "{{\"stream_name\":\"{stream}\",\"config\":{{\"name\":\"{consumer}\",\"deliver_policy\":\"by_start_sequence\",\"opt_start_seq\":{start_sequence},\"ack_policy\":\"explicit\",\"ack_wait\":{},\"max_deliver\":4,\"max_ack_pending\":1000,\"filter_subject\":\"{subject}\"}}}}",
+        ack_wait.as_nanos()
+    )
+}
+
+fn raw_pull_request_payload(batch: usize, expires: Duration) -> String {
+    format!("{{\"batch\":{batch},\"expires\":{}}}", expires.as_nanos())
+}
+
+fn parse_pub_ack(payload: &[u8]) -> (u64, bool) {
+    let json: Value = serde_json::from_slice(payload).expect("parse JetStream PubAck JSON");
+    let seq = json.get("seq").and_then(Value::as_u64).expect("PubAck seq");
+    let duplicate = json
+        .get("duplicate")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    (seq, duplicate)
+}
+
+fn parse_ack_reply_sequence(reply_subject: &str) -> u64 {
+    let parts: Vec<_> = reply_subject.split('.').collect();
+    assert!(
+        parts.len() >= 9 && parts[0] == "$JS" && parts[1] == "ACK",
+        "expected JetStream ACK reply subject, got {reply_subject:?}"
+    );
+    parts[parts.len() - 4]
+        .parse()
+        .expect("parse stream sequence")
 }
 
 #[test]
@@ -629,6 +675,243 @@ fn jetstream_real_durable_consumer_redelivers_after_reconnect_without_ack() {
             .await
             .expect("delete stream");
         js.client().close(&cx).await.expect("close second client");
+    });
+
+    log.end("pass");
+}
+
+#[test]
+fn jetstream_real_deliver_by_start_sequence_matches_raw_nats_first_delivery_tick135() {
+    let cfg = RealJetStreamConfig::from_env();
+    if skip_if_disabled(
+        &cfg,
+        "jetstream_real_deliver_by_start_sequence_matches_raw_nats_first_delivery_tick135",
+    ) {
+        return;
+    }
+
+    let log = Arc::new(JetStreamTestLogger::new(
+        "jetstream_real",
+        "jetstream_real_deliver_by_start_sequence_matches_raw_nats_first_delivery_tick135",
+    ));
+
+    let local_server = cfg
+        .external_url
+        .is_none()
+        .then(|| {
+            let bin = cfg
+                .nats_server_bin
+                .as_deref()
+                .expect("enabled config without nats-server binary");
+            LocalJetStreamServer::start(bin, &log)
+        })
+        .transpose()
+        .expect("start local nats-server");
+    let url = local_server.as_ref().map_or_else(
+        || cfg.external_url.clone().unwrap(),
+        |server| server.url.clone(),
+    );
+
+    let js_stream = unique_stream_name("jetstream_start_seq_js");
+    let raw_stream = unique_stream_name("jetstream_start_seq_raw");
+    let js_subject = unique_subject("start_seq_js");
+    let raw_subject = unique_subject("start_seq_raw");
+    let js_consumer = unique_name("start_seq_js");
+    let raw_consumer = unique_name("start_seq_raw");
+    let duplicate_window = Duration::from_secs(60);
+    let ack_wait = Duration::from_secs(2);
+    let pull_timeout = Duration::from_secs(2);
+    let start_sequence = 2_u64;
+    let message_ids = [
+        ("msg-1", b"first".as_slice()),
+        ("msg-2", b"second".as_slice()),
+        ("msg-2", b"second-duplicate".as_slice()),
+        ("msg-3", b"third".as_slice()),
+    ];
+
+    log.line(
+        "fixture",
+        &[
+            ("url", url.clone()),
+            ("js_stream", js_stream.clone()),
+            ("raw_stream", raw_stream.clone()),
+            ("js_subject", js_subject.clone()),
+            ("raw_subject", raw_subject.clone()),
+            ("start_sequence", start_sequence.to_string()),
+        ],
+    );
+
+    let log_for_runtime = Arc::clone(&log);
+    run_runtime("jetstream-real-start-sequence-parity", async move {
+        let cx = Cx::current().expect("runtime task context");
+        let client = NatsClient::connect(&cx, &url)
+            .await
+            .expect("connect JetStream client");
+        let mut js = JetStreamContext::new(client);
+        let mut raw = NatsClient::connect(&cx, &url)
+            .await
+            .expect("connect raw NATS client");
+
+        js.create_stream(
+            &cx,
+            StreamConfig::new(&js_stream)
+                .subjects(&[js_subject.as_str()])
+                .storage(StorageType::Memory)
+                .max_messages(64)
+                .duplicate_window(duplicate_window),
+        )
+        .await
+        .expect("create JetStream-managed stream");
+
+        let raw_stream_payload =
+            raw_stream_create_payload(&raw_stream, &raw_subject, duplicate_window);
+        raw.request(
+            &cx,
+            &format!("$JS.API.STREAM.CREATE.{raw_stream}"),
+            raw_stream_payload.as_bytes(),
+        )
+        .await
+        .expect("create raw-reference stream");
+
+        let mut js_pub_acks = Vec::new();
+        let mut raw_pub_acks = Vec::new();
+        for (msg_id, payload) in message_ids {
+            let js_ack = js
+                .publish_with_id(&cx, &js_subject, msg_id, payload)
+                .await
+                .expect("publish_with_id via JetStreamContext");
+            js_pub_acks.push((js_ack.seq, js_ack.duplicate));
+
+            let raw_ack = raw
+                .request_with_headers(
+                    &cx,
+                    &raw_subject,
+                    &[("Nats-Msg-Id", msg_id.as_bytes())],
+                    payload,
+                )
+                .await
+                .expect("publish_with_id via raw NATS request_with_headers");
+            raw_pub_acks.push(parse_pub_ack(&raw_ack.payload));
+        }
+        assert_eq!(
+            js_pub_acks,
+            vec![(1, false), (2, false), (2, true), (3, false)],
+            "JetStream publish_with_id dedup sequence drifted"
+        );
+        assert_eq!(
+            raw_pub_acks, js_pub_acks,
+            "raw NATS publish_with_id reference must observe the same dedup sequence ordering"
+        );
+        log_for_runtime.phase("messages_published");
+
+        let consumer = js
+            .create_consumer(
+                &cx,
+                &js_stream,
+                ConsumerConfig::new(&js_consumer)
+                    .deliver_policy(DeliverPolicy::ByStartSequence(start_sequence))
+                    .ack_policy(AckPolicy::Explicit)
+                    .ack_wait(ack_wait)
+                    .filter_subject(&js_subject)
+                    .max_deliver(4),
+            )
+            .await
+            .expect("create JetStream consumer");
+
+        let raw_consumer_payload = raw_consumer_create_payload(
+            &raw_stream,
+            &raw_consumer,
+            &raw_subject,
+            start_sequence,
+            ack_wait,
+        );
+        raw.request(
+            &cx,
+            &format!("$JS.API.CONSUMER.CREATE.{raw_stream}.{raw_consumer}"),
+            raw_consumer_payload.as_bytes(),
+        )
+        .await
+        .expect("create raw-reference consumer");
+
+        let mut js_messages = consumer
+            .pull_with_timeout(js.client(), &cx, 1, pull_timeout)
+            .await
+            .expect("pull JetStream first message");
+        assert_eq!(js_messages.len(), 1, "expected one JetStream message");
+        let js_message = js_messages.pop().expect("JetStream first message");
+
+        let raw_reply = raw
+            .request(
+                &cx,
+                &format!("$JS.API.CONSUMER.MSG.NEXT.{raw_stream}.{raw_consumer}"),
+                raw_pull_request_payload(1, pull_timeout).as_bytes(),
+            )
+            .await
+            .expect("pull raw-reference first message");
+        let raw_reply_subject = raw_reply
+            .reply_to
+            .clone()
+            .expect("raw reference pull reply subject");
+        let raw_first_sequence = parse_ack_reply_sequence(&raw_reply_subject);
+
+        assert_eq!(
+            js_message.sequence, raw_first_sequence,
+            "DeliverByStartSequence must select the same first stream sequence as the raw NATS JetStream API"
+        );
+        assert_eq!(
+            js_message.payload, raw_reply.payload,
+            "DeliverByStartSequence must select the same first payload as the raw NATS JetStream API"
+        );
+        assert_eq!(
+            js_message.sequence, start_sequence,
+            "DeliverByStartSequence(2) must start with stream sequence 2 after msg-id dedup"
+        );
+        assert_eq!(
+            js_message.payload,
+            b"second".to_vec(),
+            "duplicate msg-id publish must not shift first delivered ordering"
+        );
+        log_for_runtime.line(
+            "first_delivery",
+            &[
+                ("sequence", js_message.sequence.to_string()),
+                (
+                    "payload",
+                    String::from_utf8_lossy(&js_message.payload).into_owned(),
+                ),
+            ],
+        );
+
+        js_message
+            .ack(js.client(), &cx)
+            .await
+            .expect("ack JetStream first message");
+        raw.publish(&cx, &raw_reply_subject, b"+ACK")
+            .await
+            .expect("ack raw-reference first message");
+
+        js.delete_consumer(&cx, &js_stream, &js_consumer)
+            .await
+            .expect("delete JetStream consumer");
+        js.delete_stream(&cx, &js_stream)
+            .await
+            .expect("delete JetStream stream");
+        raw.request(
+            &cx,
+            &format!("$JS.API.CONSUMER.DELETE.{raw_stream}.{raw_consumer}"),
+            b"",
+        )
+        .await
+        .expect("delete raw-reference consumer");
+        raw.request(&cx, &format!("$JS.API.STREAM.DELETE.{raw_stream}"), b"")
+            .await
+            .expect("delete raw-reference stream");
+
+        raw.close(&cx).await.expect("close raw client");
+        js.client()
+            .close(&cx)
+            .await
+            .expect("close JetStream client");
     });
 
     log.end("pass");
