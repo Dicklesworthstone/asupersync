@@ -353,6 +353,7 @@ mod tests {
     )]
     use super::*;
     use crate::types::symbol::{ObjectParams, Symbol};
+    use serde_json::json;
 
     fn create_test_replicas(count: usize) -> Vec<ReplicaInfo> {
         (0..count)
@@ -375,6 +376,34 @@ mod tests {
             original_size: 1000,
             encoded_at: Time::ZERO,
         }
+    }
+
+    fn canonical_assignment_mapping_snapshot() -> serde_json::Value {
+        let replicas = create_test_replicas(4);
+        let encoded = EncodedState {
+            params: ObjectParams::new_for_test(9, 2048),
+            symbols: create_test_symbols(6),
+            source_count: 4,
+            repair_count: 2,
+            original_size: 1536,
+            encoded_at: Time::ZERO,
+        };
+        let assignments = SymbolDistributor::compute_assignments(&encoded, &replicas);
+
+        json!({
+            "consistency": "quorum",
+            "required_acks": SymbolDistributor::required_acks(ConsistencyLevel::Quorum, replicas.len()),
+            "source_count": encoded.source_count,
+            "repair_count": encoded.repair_count,
+            "replica_count": replicas.len(),
+            "assignments": assignments.iter().map(|assignment| {
+                json!({
+                    "replica_id": assignment.replica_id,
+                    "symbol_indices": assignment.symbol_indices,
+                    "can_decode": assignment.can_decode,
+                })
+            }).collect::<Vec<_>>(),
+        })
     }
 
     fn make_ack(replica_id: &str, count: u32) -> ReplicaAck {
@@ -971,6 +1000,11 @@ mod tests {
         assert!(dbg.contains("DistributionConfig"), "{dbg}");
         let cloned = cfg.clone();
         assert_eq!(cfg.max_concurrent, cloned.max_concurrent);
+    }
+
+    #[test]
+    fn canonical_assignment_mapping() {
+        insta::assert_json_snapshot!(canonical_assignment_mapping_snapshot());
     }
 
     #[test]
