@@ -174,8 +174,44 @@ fn reparse_canonical(canonical: &Option<String>) -> Option<String> {
     })
 }
 
+fn assert_single_field_round_trip(value: Option<&str>, durable_alias: bool) {
+    let expected = model_validate(value);
+    let actual = if durable_alias {
+        fuzz_normalize_consumer_identity(None, value)
+    } else {
+        fuzz_normalize_consumer_identity(value, None)
+    };
+
+    match (actual, expected) {
+        (Ok(actual), Ok(expected)) => {
+            assert_eq!(actual, expected);
+
+            if let Some(canonical) = actual {
+                let reparsed = fuzz_normalize_consumer_identity(Some(canonical.as_str()), None)
+                    .expect("canonical durable consumer name should parse");
+                let stringified = canonical.to_string();
+                assert_eq!(reparsed, Some(stringified));
+            }
+        }
+        (Err(_), Err(())) => {}
+        (Ok(actual), Err(())) => {
+            panic!(
+                "unexpected unary success for durable_alias={durable_alias} value={value:?}: {actual:?}"
+            );
+        }
+        (Err(err), Ok(expected)) => {
+            panic!(
+                "unexpected unary error for durable_alias={durable_alias} value={value:?}: expected {expected:?}, got {err:?}"
+            );
+        }
+    }
+}
+
 fuzz_target!(|input: DurableIdentityInput| {
     let (name, durable_name) = input.materialize();
+    assert_single_field_round_trip(name.as_deref(), false);
+    assert_single_field_round_trip(durable_name.as_deref(), true);
+
     let expected = model_canonical(name.as_deref(), durable_name.as_deref());
     let actual = fuzz_normalize_consumer_identity(name.as_deref(), durable_name.as_deref());
 

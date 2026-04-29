@@ -5204,6 +5204,29 @@ mod tests {
         worker_state_dump_scrubbed("cancel_streak", worker, &dispatch_sequence)
     }
 
+    fn deadline_ordering_scheduler_state_dump() -> Value {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
+        let worker = &mut scheduler.workers[0];
+
+        // Create specific deadline-ordering scenario: 3-lane / 5-task / 1-cancel state
+        // 4 non-cancel tasks with different priorities and 1 cancel task
+        worker.schedule_local(TaskId::new_for_test(300, 1), 10);  // High priority ready task
+        worker.schedule_local(TaskId::new_for_test(301, 1), 50);  // Lower priority ready task
+        worker.schedule_local_timed(TaskId::new_for_test(302, 1), Time::from_nanos(10_000)); // Timed task
+        worker.schedule_local_timed(TaskId::new_for_test(303, 1), Time::from_nanos(20_000)); // Another timed task
+        worker.schedule_local_cancel(TaskId::new_for_test(304, 1), 95); // Cancel task
+
+        // Execute one dispatch cycle to establish some state
+        let mut dispatch_sequence = Vec::new();
+        if let Some(task_id) = worker.next_task() {
+            dispatch_sequence.push(task_id);
+        }
+        worker.verify_scheduler_invariants();
+
+        worker_state_dump_scrubbed("deadline_ordering", worker, &dispatch_sequence)
+    }
+
     #[test]
     fn test_three_lane_scheduler_creation() {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
@@ -11870,6 +11893,7 @@ mod tests {
                 "empty": empty_scheduler_state_dump(),
                 "loaded": loaded_scheduler_state_dump(),
                 "cancel_streak": cancel_streak_scheduler_state_dump(),
+                "deadline_ordering": deadline_ordering_scheduler_state_dump(),
             })
         );
     }
