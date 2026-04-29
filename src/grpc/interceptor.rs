@@ -912,9 +912,19 @@ impl TimeoutInterceptor {
 
 impl Interceptor for TimeoutInterceptor {
     fn intercept_request(&self, request: &mut Request<Bytes>) -> Result<(), Status> {
+        // br-asupersync-wvn2dm: Sanitize timeout value to prevent header injection
         let timeout_value = match request.metadata().get("grpc-timeout") {
-            Some(MetadataValue::Ascii(value)) if parse_grpc_timeout(value).is_some() => {
-                value.clone()
+            Some(MetadataValue::Ascii(value)) => {
+                match parse_grpc_timeout(value) {
+                    Some(_parsed_duration) => {
+                        // Sanitize the original value by removing CRLF characters
+                        let sanitized = value.chars()
+                            .filter(|&c| c != '\r' && c != '\n')
+                            .collect::<String>();
+                        sanitized
+                    }
+                    None => format_grpc_timeout(Duration::from_millis(self.timeout_ms)),
+                }
             }
             _ => format_grpc_timeout(Duration::from_millis(self.timeout_ms)),
         };
