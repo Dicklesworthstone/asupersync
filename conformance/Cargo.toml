@@ -78,6 +78,10 @@ path = "src/bin/metric_aggregator_conformance.rs"
 name = "cross_process_trace_conformance"
 path = "src/bin/cross_process_trace_conformance.rs"
 
+[[bin]]
+name = "prometheus_histogram_conformance"
+path = "src/bin/prometheus_histogram_conformance.rs"
+
 [dependencies]
 asupersync = { path = ".." }
 serde = { version = "1", features = ["derive"] }
