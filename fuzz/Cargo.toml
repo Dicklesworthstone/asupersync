@@ -1833,6 +1833,17 @@ test = false
 doc = false
 bench = false
 
+# br-asupersync-1cavuk — structure-aware frontend Parse/Bind extended-query
+# message fuzzer. Uses Arbitrary-derived parameter format codes, parameter
+# values, and result format codes to exercise canonical and malformed frames
+# against postgres.rs test-internals Parse/Bind decoders.
+[[bin]]
+name = "postgres_extended_query"
+path = "fuzz_targets/postgres_extended_query.rs"
+test = false
+doc = false
+bench = false
+
 [[bin]]
 name = "h2_connection_window_update"
 path = "fuzz_targets/h2_connection_window_update.rs"

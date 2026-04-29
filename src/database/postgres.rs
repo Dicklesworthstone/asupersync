@@ -3716,7 +3716,7 @@ impl PgConnection {
         if let Err(err) = validate_notification_channel_name(channel) {
             return Outcome::Err(err);
         }
-        let params = [channel as &dyn ToSql, payload as &dyn ToSql];
+        let params = [&channel as &dyn ToSql, &payload as &dyn ToSql];
         match self
             .query_one_params(cx, "SELECT pg_catalog.pg_notify($1, $2)", &params)
             .await
@@ -5994,6 +5994,161 @@ pub fn fuzz_parse_parameter_status(data: &[u8]) -> Result<(), PgError> {
 pub fn fuzz_parse_notice_response(data: &[u8]) -> Result<PgError, PgError> {
     let (conn, _peer) = fuzz_test_connection_with_peer();
     conn.parse_notice_response(data)
+}
+
+/// Fuzz-target summary for a frontend Parse message.
+#[cfg(feature = "test-internals")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct FuzzParseMessage {
+    pub statement_name: String,
+    pub sql: String,
+    pub param_oids: Vec<u32>,
+}
+
+/// Fuzz-target summary for a frontend Bind message.
+#[cfg(feature = "test-internals")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct FuzzBindMessage {
+    pub portal: String,
+    pub statement_name: String,
+    pub param_format_codes: Vec<i16>,
+    pub parameter_values: Vec<Option<Vec<u8>>>,
+    pub result_format_codes: Vec<i16>,
+}
+
+#[cfg(feature = "test-internals")]
+fn fuzz_frontend_message_body(frame: &[u8], expected_type: u8) -> Result<&[u8], PgError> {
+    if frame.len() < 5 {
+        return Err(PgError::Protocol(
+            "frontend message too short".to_string(),
+        ));
+    }
+    if frame[0] != expected_type {
+        return Err(PgError::Protocol(format!(
+            "expected frontend message type {}, got {}",
+            expected_type as char, frame[0] as char
+        )));
+    }
+
+    let len_i32 = i32::from_be_bytes([frame[1], frame[2], frame[3], frame[4]]);
+    let body_len = backend_message_body_len(len_i32)?;
+    let body_end = 5usize
+        .checked_add(body_len)
+        .ok_or_else(|| PgError::Protocol("message length overflow".to_string()))?;
+
+    if frame.len() < body_end {
+        return Err(PgError::Protocol("unexpected end of message".to_string()));
+    }
+    if frame.len() > body_end {
+        return Err(PgError::Protocol(format!(
+            "frontend message has {} trailing byte(s)",
+            frame.len() - body_end
+        )));
+    }
+
+    Ok(&frame[5..body_end])
+}
+
+/// Fuzz-target re-exporter for frontend Parse message decoding.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_build_parse_msg(
+    stmt_name: &str,
+    sql: &str,
+    param_oids: &[u32],
+) -> Result<Vec<u8>, PgError> {
+    build_parse_msg(stmt_name, sql, param_oids)
+}
+
+/// Fuzz-target re-exporter for frontend Parse message decoding.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_parse_parse_message(frame: &[u8]) -> Result<FuzzParseMessage, PgError> {
+    let body = fuzz_frontend_message_body(frame, FrontendMessage::Parse as u8)?;
+    let mut reader = MessageReader::new(body);
+    let statement_name = reader.read_cstring()?.to_string();
+    let sql = reader.read_cstring()?.to_string();
+    let param_count = reader.read_i16()?;
+    if param_count < 0 {
+        return Err(PgError::Protocol(format!(
+            "invalid parse parameter count: {param_count}"
+        )));
+    }
+    let mut param_oids = Vec::with_capacity(param_count as usize);
+    for _ in 0..param_count {
+        param_oids.push(reader.read_i32()? as u32);
+    }
+    reader.ensure_consumed("Parse")?;
+
+    Ok(FuzzParseMessage {
+        statement_name,
+        sql,
+        param_oids,
+    })
+}
+
+/// Fuzz-target re-exporter for frontend Bind message decoding.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_parse_bind_message(frame: &[u8]) -> Result<FuzzBindMessage, PgError> {
+    let body = fuzz_frontend_message_body(frame, FrontendMessage::Bind as u8)?;
+    let mut reader = MessageReader::new(body);
+    let portal = reader.read_cstring()?.to_string();
+    let statement_name = reader.read_cstring()?.to_string();
+
+    let format_count = reader.read_i16()?;
+    if format_count < 0 {
+        return Err(PgError::Protocol(format!(
+            "invalid bind format count: {format_count}"
+        )));
+    }
+    let mut param_format_codes = Vec::with_capacity(format_count as usize);
+    for _ in 0..format_count {
+        param_format_codes.push(reader.read_i16()?);
+    }
+
+    let value_count = reader.read_i16()?;
+    if value_count < 0 {
+        return Err(PgError::Protocol(format!(
+            "invalid bind value count: {value_count}"
+        )));
+    }
+    let mut parameter_values = Vec::with_capacity(value_count as usize);
+    for _ in 0..value_count {
+        let len = reader.read_i32()?;
+        if len == -1 {
+            parameter_values.push(None);
+            continue;
+        }
+        if len < -1 {
+            return Err(PgError::Protocol(format!(
+                "invalid bind value length: {len}"
+            )));
+        }
+        parameter_values.push(Some(reader.read_bytes(len as usize)?.to_vec()));
+    }
+
+    let result_count = reader.read_i16()?;
+    if result_count < 0 {
+        return Err(PgError::Protocol(format!(
+            "invalid bind result format count: {result_count}"
+        )));
+    }
+    let mut result_format_codes = Vec::with_capacity(result_count as usize);
+    for _ in 0..result_count {
+        result_format_codes.push(reader.read_i16()?);
+    }
+    reader.ensure_consumed("Bind")?;
+
+    Ok(FuzzBindMessage {
+        portal,
+        statement_name,
+        param_format_codes,
+        parameter_values,
+        result_format_codes,
+    })
 }
 
 #[cfg(test)]
