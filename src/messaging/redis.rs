@@ -2660,6 +2660,20 @@ impl RedisPubSub {
         list.retain(|existing| existing != value);
     }
 
+    fn acknowledge_subscription_target(
+        expected: &mut Vec<String>,
+        received: &str,
+        command: &str,
+    ) -> Result<(), RedisError> {
+        let Some(index) = expected.iter().position(|candidate| candidate == received) else {
+            return Err(RedisError::Protocol(format!(
+                "{command} received unexpected acknowledgement target: {received}"
+            )));
+        };
+        expected.remove(index);
+        Ok(())
+    }
+
     async fn read_next_event(&mut self, cx: &Cx) -> Result<PubSubEvent, RedisError> {
         let response = self.conn.read_response(cx).await?;
         Self::parse_event(response)
@@ -2681,8 +2695,11 @@ impl RedisPubSub {
         }
         guard.write_command(cx, &args).await?;
 
-        let mut acks_remaining = channels.len();
-        while acks_remaining > 0 {
+        let mut expected_acks: Vec<String> = channels
+            .iter()
+            .map(|channel| (*channel).to_string())
+            .collect();
+        while !expected_acks.is_empty() {
             let event = guard.read_next_event(cx).await?;
             match event {
                 PubSubEvent::Subscription {
@@ -2690,8 +2707,12 @@ impl RedisPubSub {
                     channel,
                     ..
                 } => {
+                    Self::acknowledge_subscription_target(
+                        &mut expected_acks,
+                        &channel,
+                        "SUBSCRIBE",
+                    )?;
                     guard.track_channel(&channel);
-                    acks_remaining -= 1;
                 }
                 // Buffer interleaved messages from existing subscriptions
                 // so they aren't silently dropped while waiting for acks.
@@ -2719,8 +2740,11 @@ impl RedisPubSub {
         }
         guard.write_command(cx, &args).await?;
 
-        let mut acks_remaining = patterns.len();
-        while acks_remaining > 0 {
+        let mut expected_acks: Vec<String> = patterns
+            .iter()
+            .map(|pattern| (*pattern).to_string())
+            .collect();
+        while !expected_acks.is_empty() {
             let event = guard.read_next_event(cx).await?;
             match event {
                 PubSubEvent::Subscription {
@@ -2728,8 +2752,12 @@ impl RedisPubSub {
                     channel,
                     ..
                 } => {
+                    Self::acknowledge_subscription_target(
+                        &mut expected_acks,
+                        &channel,
+                        "PSUBSCRIBE",
+                    )?;
                     guard.track_pattern(&channel);
-                    acks_remaining -= 1;
                 }
                 other => guard.push_pending_event(other),
             }
@@ -2756,12 +2784,15 @@ impl RedisPubSub {
         }
         guard.write_command(cx, &args).await?;
 
-        let mut acks_remaining = if channels.is_empty() {
-            guard.pubsub.channels.len()
+        let mut expected_acks = if channels.is_empty() {
+            guard.pubsub.channels.clone()
         } else {
-            channels.len()
+            channels
+                .iter()
+                .map(|channel| (*channel).to_string())
+                .collect()
         };
-        while acks_remaining > 0 {
+        while !expected_acks.is_empty() {
             let event = guard.read_next_event(cx).await?;
             match event {
                 PubSubEvent::Subscription {
@@ -2769,8 +2800,12 @@ impl RedisPubSub {
                     channel,
                     ..
                 } => {
+                    Self::acknowledge_subscription_target(
+                        &mut expected_acks,
+                        &channel,
+                        "UNSUBSCRIBE",
+                    )?;
                     guard.untrack_channel(&channel);
-                    acks_remaining -= 1;
                 }
                 other => guard.push_pending_event(other),
             }
@@ -2796,12 +2831,15 @@ impl RedisPubSub {
         }
         guard.write_command(cx, &args).await?;
 
-        let mut acks_remaining = if patterns.is_empty() {
-            guard.pubsub.patterns.len()
+        let mut expected_acks = if patterns.is_empty() {
+            guard.pubsub.patterns.clone()
         } else {
-            patterns.len()
+            patterns
+                .iter()
+                .map(|pattern| (*pattern).to_string())
+                .collect()
         };
-        while acks_remaining > 0 {
+        while !expected_acks.is_empty() {
             let event = guard.read_next_event(cx).await?;
             match event {
                 PubSubEvent::Subscription {
@@ -2809,8 +2847,12 @@ impl RedisPubSub {
                     channel,
                     ..
                 } => {
+                    Self::acknowledge_subscription_target(
+                        &mut expected_acks,
+                        &channel,
+                        "PUNSUBSCRIBE",
+                    )?;
                     guard.untrack_pattern(&channel);
-                    acks_remaining -= 1;
                 }
                 other => guard.push_pending_event(other),
             }
@@ -3816,6 +3858,59 @@ mod tests {
         .expect_err("unknown event should fail");
 
         assert!(matches!(err, RedisError::Protocol(_)));
+    }
+
+    #[test]
+    fn pubsub_psubscribe_rejects_unrequested_ack_pattern() {
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+
+            let psubscribe = read_resp_frame(&mut stream);
+            assert_resp_command(psubscribe, &[b"PSUBSCRIBE", b"safe.*"]);
+            let injected_ack = RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(b"psubscribe".to_vec())),
+                RespValue::BulkString(Some(b"*".to_vec())),
+                RespValue::Integer(1),
+            ]))
+            .encode();
+            stream
+                .write_all(&injected_ack)
+                .expect("write injected psubscribe ack");
+            stream.flush().expect("flush injected psubscribe ack");
+        });
+
+        run_test_with_cx(|cx| async move {
+            let config = RedisConfig {
+                host: addr.ip().to_string(),
+                port: addr.port(),
+                ..Default::default()
+            };
+            let mut pubsub = RedisPubSub::connect(&cx, config)
+                .await
+                .expect("connect pubsub client");
+
+            let err = pubsub
+                .psubscribe(&cx, &["safe.*"])
+                .await
+                .expect_err("unexpected wildcard ack must fail closed");
+            assert!(
+                matches!(err, RedisError::Protocol(msg) if msg.contains("PSUBSCRIBE received unexpected acknowledgement target"))
+            );
+            assert!(pubsub.patterns().is_empty());
+
+            let err = pubsub
+                .next_event(&cx)
+                .await
+                .expect_err("failed control exchange should poison connection");
+            assert!(matches!(err, RedisError::Protocol(msg) if msg.contains("invalidated")));
+        });
+
+        server.join().expect("server join");
     }
 
     #[test]
