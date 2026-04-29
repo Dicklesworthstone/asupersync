@@ -973,6 +973,24 @@ mod tests {
         popped
     }
 
+    fn pop_all_ring_round_robin(
+        ring: &mut IntrusiveRing,
+        arena: &mut Arena<TaskRecord>,
+        worker_count: usize,
+    ) -> Vec<Vec<TaskId>> {
+        assert!(worker_count > 0);
+
+        let mut drained_by_worker = vec![Vec::new(); worker_count];
+        let mut next_worker = 0usize;
+
+        while let Some(task_id) = ring.pop_front(arena) {
+            drained_by_worker[next_worker].push(task_id);
+            next_worker = (next_worker + 1) % worker_count;
+        }
+
+        drained_by_worker
+    }
+
     fn pop_all_stack(stack: &mut IntrusiveStack, arena: &mut Arena<TaskRecord>) -> Vec<TaskId> {
         let mut popped = Vec::new();
         while let Some(task_id) = stack.pop(arena) {
@@ -1298,6 +1316,56 @@ mod tests {
             let record = filtered_arena
                 .get(task_id.arena_index())
                 .expect("removed task missing");
+            assert!(!record.is_in_queue());
+        }
+    }
+
+    #[test]
+    fn metamorphic_round_robin_ring_drain_preserves_fifo_and_cardinality() {
+        let task_count = 12u32;
+        let worker_count = 4usize;
+        let mut baseline_arena = setup_arena(task_count);
+        let mut distributed_arena = setup_arena(task_count);
+        let mut baseline = IntrusiveRing::new(QUEUE_TAG_READY);
+        let mut distributed = IntrusiveRing::new(QUEUE_TAG_READY);
+
+        for i in 0..task_count {
+            baseline.push_back(task(i), &mut baseline_arena);
+            distributed.push_back(task(i), &mut distributed_arena);
+        }
+
+        let expected = pop_all_ring(&mut baseline, &mut baseline_arena);
+        let drained_by_worker =
+            pop_all_ring_round_robin(&mut distributed, &mut distributed_arena, worker_count);
+        let actual: Vec<_> = drained_by_worker.iter().flatten().copied().collect();
+
+        assert_eq!(actual, expected);
+        assert_eq!(actual.len(), task_count as usize);
+
+        let mut drain_counts = vec![0usize; task_count as usize];
+        for task_id in &actual {
+            drain_counts[task_id.arena_index().index()] += 1;
+        }
+        assert!(
+            drain_counts.iter().all(|count| *count == 1),
+            "expected every injected task to drain exactly once"
+        );
+
+        for (worker_index, worker_drained) in drained_by_worker.iter().enumerate() {
+            let expected_worker: Vec<_> = expected
+                .iter()
+                .copied()
+                .skip(worker_index)
+                .step_by(worker_count)
+                .collect();
+            assert_eq!(*worker_drained, expected_worker);
+        }
+
+        assert!(distributed.is_empty());
+        for i in 0..task_count {
+            let record = distributed_arena
+                .get(task(i).arena_index())
+                .expect("drained task missing");
             assert!(!record.is_in_queue());
         }
     }

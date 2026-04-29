@@ -237,8 +237,11 @@ impl LocalQueue {
         // repeated SmallVec / HashSet growth while inserting the slice.
         inner.queue.reserve(tasks.len());
         inner.presence.reserve(tasks.len());
-        inner.queue.extend_from_slice(tasks);
-        inner.presence.extend(tasks.iter().copied());
+        for task in tasks {
+            if inner.presence.insert(*task) {
+                inner.queue.push(*task);
+            }
+        }
         let new_len = inner.queue.len();
         drop(inner);
         self.cached_len.store(new_len, Ordering::Release);
@@ -1565,6 +1568,34 @@ mod tests {
 
         assert_eq!(queue.pop(), Some(task(4)));
         assert_eq!(queue.pop(), Some(task(3)));
+        assert_eq!(queue.pop(), Some(task(2)));
+        assert_eq!(queue.pop(), Some(task(1)));
+        assert_eq!(queue.pop(), None);
+    }
+
+    #[test]
+    fn test_local_queue_push_many_dedups_batch_duplicates() {
+        let queue = queue(3);
+        queue.push_many(&[task(1), task(2), task(1), task(3), task(2)]);
+
+        assert_eq!(queue.pop(), Some(task(3)));
+        assert_eq!(queue.pop(), Some(task(2)));
+        assert_eq!(queue.pop(), Some(task(1)));
+        assert_eq!(queue.pop(), None);
+    }
+
+    #[test]
+    fn test_local_queue_push_many_dedups_against_existing_presence() {
+        let queue = queue(2);
+        queue.push(task(1));
+        queue.push_many(&[task(1), task(2), task(2)]);
+
+        let _guard = LocalQueue::set_current(queue.clone());
+        assert!(
+            LocalQueue::schedule_local(task(2)),
+            "schedule_local should still report success for already-queued tasks"
+        );
+
         assert_eq!(queue.pop(), Some(task(2)));
         assert_eq!(queue.pop(), Some(task(1)));
         assert_eq!(queue.pop(), None);

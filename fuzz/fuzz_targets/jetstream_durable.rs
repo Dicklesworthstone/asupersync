@@ -4,7 +4,8 @@ use arbitrary::Arbitrary;
 use asupersync::messaging::jetstream::fuzz_normalize_consumer_identity;
 use libfuzzer_sys::fuzz_target;
 
-const MAX_NAME_CHARS: usize = 64;
+const MAX_CONSUMER_NAME_BYTES: usize = 256;
+const MAX_FUZZ_INPUT_BYTES: usize = MAX_CONSUMER_NAME_BYTES + 64;
 
 #[derive(Arbitrary, Debug, Clone)]
 struct DurableIdentityInput {
@@ -16,7 +17,8 @@ struct DurableIdentityInput {
 #[derive(Arbitrary, Debug, Clone)]
 struct NameField {
     present: bool,
-    raw: String,
+    raw: Vec<u8>,
+    extra: u8,
     mutation: NameMutation,
 }
 
@@ -34,7 +36,7 @@ enum AliasRelation {
 #[derive(Arbitrary, Debug, Clone)]
 enum NameMutation {
     None,
-    ValidAlnum,
+    ValidCharset,
     Empty,
     AppendSpace,
     AppendDot,
@@ -43,6 +45,8 @@ enum NameMutation {
     AppendSlash,
     AppendBackslash,
     AppendControl,
+    OversizedAscii,
+    OversizedMultibyte,
 }
 
 impl DurableIdentityInput {
@@ -105,11 +109,24 @@ impl NameField {
             return None;
         }
 
-        let mut value = truncate_chars(&self.raw, MAX_NAME_CHARS);
+        let mut value = match self.mutation {
+            NameMutation::OversizedAscii => {
+                "a".repeat(MAX_CONSUMER_NAME_BYTES + usize::from(self.extra) + 1)
+            }
+            NameMutation::OversizedMultibyte => {
+                let count =
+                    (MAX_CONSUMER_NAME_BYTES / 'é'.len_utf8()) + usize::from(self.extra) + 1;
+                "é".repeat(count)
+            }
+            _ => String::from_utf8_lossy(&self.raw[..self.raw.len().min(MAX_FUZZ_INPUT_BYTES)])
+                .into_owned(),
+        };
 
         match self.mutation {
-            NameMutation::None => {}
-            NameMutation::ValidAlnum => {
+            NameMutation::None
+            | NameMutation::OversizedAscii
+            | NameMutation::OversizedMultibyte => {}
+            NameMutation::ValidCharset => {
                 value = value
                     .chars()
                     .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '-' || *ch == '_')
@@ -132,8 +149,10 @@ impl NameField {
     }
 }
 
-fn truncate_chars(input: &str, max_chars: usize) -> String {
-    input.chars().take(max_chars).collect()
+fn contains_surrogate_code_points(value: &str) -> bool {
+    value
+        .chars()
+        .any(|ch| (0xD800..=0xDFFF).contains(&(ch as u32)))
 }
 
 fn model_validate(value: Option<&str>) -> Result<Option<String>, ()> {
@@ -141,7 +160,15 @@ fn model_validate(value: Option<&str>) -> Result<Option<String>, ()> {
         return Ok(None);
     };
 
+    if contains_surrogate_code_points(value) {
+        return Err(());
+    }
+
     if value.is_empty() {
+        return Err(());
+    }
+
+    if value.len() > MAX_CONSUMER_NAME_BYTES {
         return Err(());
     }
 
@@ -187,6 +214,8 @@ fn assert_single_field_round_trip(value: Option<&str>, durable_alias: bool) {
             assert_eq!(actual, expected);
 
             if let Some(canonical) = actual {
+                assert!(canonical.len() <= MAX_CONSUMER_NAME_BYTES);
+                assert!(!contains_surrogate_code_points(&canonical));
                 let reparsed = fuzz_normalize_consumer_identity(Some(canonical.as_str()), None)
                     .expect("canonical durable consumer name should parse");
                 let stringified = canonical.to_string();
@@ -209,6 +238,12 @@ fn assert_single_field_round_trip(value: Option<&str>, durable_alias: bool) {
 
 fuzz_target!(|input: DurableIdentityInput| {
     let (name, durable_name) = input.materialize();
+    if let Some(value) = name.as_deref() {
+        assert!(!contains_surrogate_code_points(value));
+    }
+    if let Some(value) = durable_name.as_deref() {
+        assert!(!contains_surrogate_code_points(value));
+    }
     assert_single_field_round_trip(name.as_deref(), false);
     assert_single_field_round_trip(durable_name.as_deref(), true);
 
@@ -225,6 +260,8 @@ fuzz_target!(|input: DurableIdentityInput| {
             assert_eq!(reparse_canonical(&stringified), stringified);
 
             if let Some(canonical) = stringified {
+                assert!(canonical.len() <= MAX_CONSUMER_NAME_BYTES);
+                assert!(!contains_surrogate_code_points(&canonical));
                 let deprecated_alias = fuzz_normalize_consumer_identity(None, Some(&canonical))
                     .expect("canonical durable alias should remain valid");
                 assert_eq!(deprecated_alias, Some(canonical));

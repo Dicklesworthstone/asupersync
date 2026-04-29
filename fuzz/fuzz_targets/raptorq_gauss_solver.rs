@@ -1,172 +1,258 @@
 #![no_main]
 
-//! Cargo-fuzz target for the END-TO-END Gaussian-elimination SOLVER in
-//! src/raptorq/linalg.rs (`GaussianSolver`), feeding random GF(256)
-//! systems and asserting:
+//! Structure-aware fuzz target for the Gaussian-elimination solver in
+//! `src/raptorq/linalg.rs`.
 //!
-//!   1. **No panic on any input.** Random matrix sizes (capped at
-//!      MAX_ROWS×MAX_COLS to keep iters sub-second), random GF(256)
-//!      coefficients, random RHS bytes — none of these MUST trigger a
-//!      Rust panic. Allocation overflow is bounded by explicit caps.
+//! The harness feeds arbitrary k×n BIT matrices (coefficients restricted to
+//! `{0, 1}`) into the solver with a zero RHS and asserts:
 //!
-//!   2. **Result is one of three documented kinds.** Every solve() /
-//!      solve_markowitz() call MUST return `GaussianResult::{Solved,
-//!      Singular, Inconsistent}`. Stack overflow on recursive
-//!      elimination, silent hang, etc. are bugs.
-//!
-//!   3. **Solved-result actually satisfies A · x ≡ b.** For square
-//!      systems where solve returns Solved(x), the fuzzer multiplies
-//!      the original matrix times the solution and compares to the
-//!      original RHS. Mismatch = solver bug — the most important
-//!      correctness invariant for the FEC encoder built on this solver.
-//!
-//!   4. **Pivot-strategy consistency.** `solve()` and `solve_markowitz()`
-//!      use different pivot heuristics but solve the same system. Both
-//!      MUST return the same VARIETY of result on identical input
-//!      (Solved/Solved, Singular/Singular, Inconsistent/Inconsistent).
-//!      Disagreement = real correctness gap in one of the strategies.
-//!
-//! Relationship to the existing `raptorq_linalg.rs` fuzz target: that
-//! target exercises PRIMITIVES (row_xor, row_scale_add, row_swap,
-//! select_pivot_basic/markowitz, DenseRow/SparseRow round-trip). This
-//! one exercises the COMPOSED SOLVER end-to-end with the A·x=b
-//! correctness oracle. They share GF(256) arithmetic but cover
-//! different bug surfaces.
+//! 1. `select_pivot_basic` matches a simple reference pivot scan at every
+//!    elimination step.
+//! 2. `select_pivot_markowitz` matches a reference "fewest nonzeros from the
+//!    active column onward" candidate at every elimination step.
+//! 3. `solve()` and `solve_markowitz()` agree with the reference on whether the
+//!    matrix can sustain pivots through the solver's elimination path or must
+//!    terminate as rank-deficient.
+//! 4. Any `Solved` result actually satisfies `A · x = 0`.
 
+use arbitrary::Arbitrary;
 use asupersync::raptorq::gf256::Gf256;
-use asupersync::raptorq::linalg::{DenseRow, GaussianResult, GaussianSolver};
+use asupersync::raptorq::linalg::{
+    DenseRow, GaussianResult, GaussianSolver, select_pivot_basic, select_pivot_markowitz,
+};
 use libfuzzer_sys::fuzz_target;
 
 const MAX_ROWS: usize = 24;
 const MAX_COLS: usize = 24;
-const RHS_LEN: usize = 8;
+const ZERO_RHS_LEN: usize = 1;
 
-fuzz_target!(|data: &[u8]| {
-    if data.len() < 4 {
-        return;
-    }
+#[derive(Debug, Clone, Arbitrary)]
+struct GaussSolverInput {
+    rows: u8,
+    cols: u8,
+    matrix: Vec<Vec<bool>>,
+}
 
-    let rows = (data[0] as usize % MAX_ROWS) + 1;
-    let cols = (data[1] as usize % MAX_COLS) + 1;
-    let payload = &data[2..];
-    let coef_count = rows * cols;
-    if payload.len() < coef_count {
-        return;
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ReferenceElimination {
+    stalled_at: Option<usize>,
+}
 
-    let coef_bytes = &payload[..coef_count];
-    let rhs_seed = &payload[coef_count..];
+fuzz_target!(|input: GaussSolverInput| {
+    let (rows, cols, coeffs) = normalize_matrix(&input);
+    let reference = reference_elimination_and_pivot_checks(&coeffs, rows, cols);
+    let expected_singular_row = reference.stalled_at.unwrap_or(rows.min(cols));
+    let expected_solved = reference.stalled_at.is_none() && rows >= cols;
 
-    let mut coeff_matrix: Vec<Vec<u8>> = Vec::with_capacity(rows);
-    for r in 0..rows {
-        coeff_matrix.push(coef_bytes[r * cols..(r + 1) * cols].to_vec());
-    }
-    let rhs_snapshot: Vec<DenseRow> = (0..rows).map(|r| build_rhs(rhs_seed, r)).collect();
+    let mut solver_basic = build_zero_rhs_solver(&coeffs, rows, cols);
+    let basic_result = solver_basic.solve();
 
-    // ── solve() ─────────────────────────────────────────────────────────
-    let mut solver_a = build_solver(&coeff_matrix, &rhs_snapshot, rows, cols);
-    let res_a = solver_a.solve();
-    assert_documented_kind(&res_a);
+    let mut solver_markowitz = build_zero_rhs_solver(&coeffs, rows, cols);
+    let markowitz_result = solver_markowitz.solve_markowitz();
 
-    // ── solve_markowitz() ───────────────────────────────────────────────
-    let mut solver_b = build_solver(&coeff_matrix, &rhs_snapshot, rows, cols);
-    let res_b = solver_b.solve_markowitz();
-    assert_documented_kind(&res_b);
-
-    // ── Pivot-strategy consistency ──────────────────────────────────────
     assert_eq!(
-        result_kind(&res_a),
-        result_kind(&res_b),
-        "solve() and solve_markowitz() disagree on input rows={rows} cols={cols}: \
-         basic={:?} markowitz={:?}",
-        result_kind(&res_a),
-        result_kind(&res_b)
+        result_kind(&basic_result),
+        result_kind(&markowitz_result),
+        "pivot strategies disagree for rows={rows} cols={cols}: basic={:?} markowitz={:?}",
+        basic_result,
+        markowitz_result
     );
 
-    // ── Round-trip verification on square systems with a Solved result ─
-    if rows == cols {
-        if let GaussianResult::Solved(solution) = &res_a {
-            verify_solution(&coeff_matrix, solution, &rhs_snapshot, rows, cols);
-        }
-        if let GaussianResult::Solved(solution) = &res_b {
-            verify_solution(&coeff_matrix, solution, &rhs_snapshot, rows, cols);
-        }
-    }
+    assert_solver_result(
+        &basic_result,
+        &coeffs,
+        rows,
+        cols,
+        expected_solved,
+        expected_singular_row,
+    );
+    assert_solver_result(
+        &markowitz_result,
+        &coeffs,
+        rows,
+        cols,
+        expected_solved,
+        expected_singular_row,
+    );
 });
 
-fn build_rhs(seed: &[u8], row: usize) -> DenseRow {
-    let mut bytes = vec![0u8; RHS_LEN];
-    let n = seed.len().max(1);
-    for i in 0..RHS_LEN {
-        let idx = (row.wrapping_mul(31).wrapping_add(i)) % n;
-        bytes[i] = seed.get(idx).copied().unwrap_or(0);
+fn normalize_matrix(input: &GaussSolverInput) -> (usize, usize, Vec<Vec<u8>>) {
+    let rows = usize::from(input.rows % MAX_ROWS as u8) + 1;
+    let cols = usize::from(input.cols % MAX_COLS as u8) + 1;
+    let mut coeffs = vec![vec![0u8; cols]; rows];
+
+    for (row_idx, row) in input.matrix.iter().take(rows).enumerate() {
+        for (col_idx, &bit) in row.iter().take(cols).enumerate() {
+            coeffs[row_idx][col_idx] = u8::from(bit);
+        }
     }
-    DenseRow::new(bytes)
+
+    (rows, cols, coeffs)
 }
 
-fn build_solver(coeffs: &[Vec<u8>], rhs: &[DenseRow], rows: usize, cols: usize) -> GaussianSolver {
-    let mut s = GaussianSolver::new(rows, cols);
-    for r in 0..rows {
-        let r_bytes: Vec<u8> = rhs[r].as_slice().to_vec();
-        s.set_row(r, &coeffs[r], DenseRow::new(r_bytes));
+fn reference_elimination_and_pivot_checks(
+    coeffs: &[Vec<u8>],
+    rows: usize,
+    cols: usize,
+) -> ReferenceElimination {
+    let mut work = coeffs.to_vec();
+    let mut pivot_row = 0usize;
+    let pivot_cols = rows.min(cols);
+
+    for pivot_col in 0..pivot_cols {
+        let matrix_refs: Vec<&[u8]> = work.iter().map(Vec::as_slice).collect();
+        let expected_basic = reference_basic_pivot(&work, pivot_row, rows, pivot_col);
+        let expected_markowitz = reference_markowitz_pivot(&work, pivot_row, rows, pivot_col);
+
+        assert_eq!(
+            select_pivot_basic(&matrix_refs, pivot_row, rows, pivot_col),
+            expected_basic,
+            "basic pivot mismatch at row={pivot_row} col={pivot_col}"
+        );
+        assert_eq!(
+            select_pivot_markowitz(&matrix_refs, pivot_row, rows, pivot_col),
+            expected_markowitz,
+            "markowitz pivot mismatch at row={pivot_row} col={pivot_col}"
+        );
+
+        let Some(found_pivot) = expected_basic else {
+            return ReferenceElimination {
+                stalled_at: Some(pivot_col),
+            };
+        };
+
+        if found_pivot != pivot_row {
+            work.swap(pivot_row, found_pivot);
+        }
+
+        for row in (pivot_row + 1)..rows {
+            if work[row][pivot_col] == 0 {
+                continue;
+            }
+            for col in pivot_col..cols {
+                work[row][col] ^= work[pivot_row][col];
+            }
+        }
+
+        pivot_row += 1;
+        if pivot_row == rows {
+            break;
+        }
     }
-    s
+
+    ReferenceElimination {
+        stalled_at: None,
+    }
 }
 
-fn result_kind(r: &GaussianResult) -> &'static str {
-    match r {
+fn reference_basic_pivot(
+    matrix: &[Vec<u8>],
+    start_row: usize,
+    end_row: usize,
+    col: usize,
+) -> Option<usize> {
+    (start_row..end_row).find(|&row| matrix[row][col] != 0)
+}
+
+fn reference_markowitz_pivot(
+    matrix: &[Vec<u8>],
+    start_row: usize,
+    end_row: usize,
+    col: usize,
+) -> Option<(usize, usize)> {
+    let mut best: Option<(usize, usize)> = None;
+
+    for row in start_row..end_row {
+        if matrix[row][col] == 0 {
+            continue;
+        }
+
+        let nnz = matrix[row][col..].iter().filter(|&&value| value != 0).count();
+        match best {
+            None => best = Some((row, nnz)),
+            Some((_best_row, best_nnz)) if nnz < best_nnz => best = Some((row, nnz)),
+            Some((best_row, best_nnz)) if nnz == best_nnz && row < best_row => {
+                best = Some((row, nnz));
+            }
+            _ => {}
+        }
+    }
+
+    best
+}
+
+fn build_zero_rhs_solver(coeffs: &[Vec<u8>], rows: usize, cols: usize) -> GaussianSolver {
+    let mut solver = GaussianSolver::new(rows, cols);
+    for row in 0..rows {
+        solver.set_row(row, &coeffs[row], DenseRow::new(vec![0u8; ZERO_RHS_LEN]));
+    }
+    solver
+}
+
+fn result_kind(result: &GaussianResult) -> &'static str {
+    match result {
         GaussianResult::Solved(_) => "Solved",
         GaussianResult::Singular { .. } => "Singular",
         GaussianResult::Inconsistent { .. } => "Inconsistent",
     }
 }
 
-fn assert_documented_kind(r: &GaussianResult) {
-    match r {
-        GaussianResult::Solved(_)
-        | GaussianResult::Singular { .. }
-        | GaussianResult::Inconsistent { .. } => {}
+fn assert_solver_result(
+    result: &GaussianResult,
+    coeffs: &[Vec<u8>],
+    rows: usize,
+    cols: usize,
+    expected_solved: bool,
+    expected_singular_row: usize,
+) {
+    match result {
+        GaussianResult::Solved(solution) => {
+            assert!(
+                expected_solved,
+                "solver unexpectedly solved rank-deficient system rows={rows} cols={cols}"
+            );
+            verify_zero_rhs_solution(coeffs, solution, rows, cols);
+        }
+        GaussianResult::Singular { row } => {
+            assert!(
+                !expected_solved,
+                "solver reported singular despite full pivot coverage rows={rows} cols={cols}"
+            );
+            assert_eq!(
+                *row, expected_singular_row,
+                "solver singular row mismatch for rows={rows} cols={cols}"
+            );
+        }
+        GaussianResult::Inconsistent { row } => {
+            panic!(
+                "zero-RHS bit matrix should not be inconsistent (row={row}, rows={rows}, cols={cols})"
+            );
+        }
     }
 }
 
-/// Verify A · x ≡ b in GF(256) byte-by-byte. The solution vector has
-/// `cols` entries (one DenseRow per unknown), each carrying RHS_LEN
-/// payload bytes. For each output row r, compute Σ_c (A[r][c] · x[c])
-/// and compare to b[r].
-fn verify_solution(
-    coeffs: &[Vec<u8>],
-    solution: &[DenseRow],
-    rhs: &[DenseRow],
-    rows: usize,
-    cols: usize,
-) {
+fn verify_zero_rhs_solution(coeffs: &[Vec<u8>], solution: &[DenseRow], rows: usize, cols: usize) {
     assert_eq!(
         solution.len(),
         cols,
         "Solved variant must return one DenseRow per column, got {} for cols={cols}",
         solution.len()
     );
-    let payload_len = rhs.first().map(|r| r.as_slice().len()).unwrap_or(RHS_LEN);
 
-    for r in 0..rows {
-        let mut acc = vec![0u8; payload_len];
-        for c in 0..cols {
-            let coef = Gf256::new(coeffs[r][c]);
+    for row in 0..rows {
+        let mut acc = 0u8;
+        for col in 0..cols {
+            let coef = Gf256::new(coeffs[row][col]);
             if coef.is_zero() {
                 continue;
             }
-            let xc = solution[c].as_slice();
-            for i in 0..payload_len {
-                let prod = coef.mul_field(Gf256::new(xc[i])).raw();
-                acc[i] ^= prod;
-            }
+            let value = solution[col].as_slice().first().copied().unwrap_or(0);
+            acc ^= coef.mul_field(Gf256::new(value)).raw();
         }
-        let expected = rhs[r].as_slice();
+
         assert_eq!(
-            &acc[..payload_len],
-            expected,
-            "A·x ≠ b at row {r}: got {acc:?}, expected {expected:?} \
-             (rows={rows} cols={cols})"
+            acc, 0,
+            "A·x != 0 at row {row} for rows={rows} cols={cols}: got {acc:#04x}"
         );
     }
 }

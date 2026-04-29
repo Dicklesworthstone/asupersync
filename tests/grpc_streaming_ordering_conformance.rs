@@ -45,6 +45,7 @@ struct StreamItem {
 }
 
 const STREAM_LEN: u32 = 100;
+type StreamCodec = FramedCodec<ProstCodec<StreamItem, StreamItem>>;
 
 fn build_fixture_stream() -> Vec<StreamItem> {
     (0..STREAM_LEN)
@@ -60,6 +61,15 @@ fn build_fixture_stream() -> Vec<StreamItem> {
         .collect()
 }
 
+fn encode_fixture_stream(send: &[StreamItem], encode_error: &str) -> BytesMut {
+    let mut wire = BytesMut::with_capacity(8 * 1024);
+    let mut encoder = StreamCodec::new(ProstCodec::new());
+    for item in send {
+        encoder.encode_message(item, &mut wire).expect(encode_error);
+    }
+    wire
+}
+
 #[test]
 fn server_streaming_round_trip_preserves_order_for_100_messages() {
     let send: Vec<StreamItem> = build_fixture_stream();
@@ -67,18 +77,15 @@ fn server_streaming_round_trip_preserves_order_for_100_messages() {
     // Encode all messages back-to-back into a single buffer — the
     // way an HTTP/2 DATA-frame body would carry a server-streaming
     // response.
-    let mut wire = BytesMut::with_capacity(8 * 1024);
-    let mut encoder = FramedCodec::<ProstCodec<StreamItem, StreamItem>>::new(ProstCodec::new());
-    for item in &send {
-        encoder
-            .encode_message(item, &mut wire)
-            .expect("encode_message must succeed for fixture-sized payload");
-    }
+    let mut wire = encode_fixture_stream(
+        &send,
+        "encode_message must succeed for fixture-sized payload",
+    );
 
     // Decode the buffer one message at a time. The decoder MUST
     // return the messages in the SAME order they were encoded.
     let mut received: Vec<StreamItem> = Vec::with_capacity(send.len());
-    let mut decoder = FramedCodec::<ProstCodec<StreamItem, StreamItem>>::new(ProstCodec::new());
+    let mut decoder = StreamCodec::new(ProstCodec::new());
     while !wire.is_empty() {
         match decoder
             .decode_message(&mut wire)
@@ -114,16 +121,7 @@ fn server_streaming_partial_buffer_decodes_remaining_after_more_arrives() {
     // NOT cause re-order or message loss. Encode 100 messages, decode
     // the first ~half, append the rest, decode the rest.
     let send = build_fixture_stream();
-    let mut full_wire = BytesMut::with_capacity(8 * 1024);
-    {
-        let mut encoder =
-            FramedCodec::<ProstCodec<StreamItem, StreamItem>>::new(ProstCodec::new());
-        for item in &send {
-            encoder
-                .encode_message(item, &mut full_wire)
-                .expect("encode");
-        }
-    }
+    let full_wire = encode_fixture_stream(&send, "encode");
 
     // Split the buffer somewhere mid-stream that's NOT on a frame
     // boundary — pick a byte offset that we know is in the middle of
@@ -133,11 +131,14 @@ fn server_streaming_partial_buffer_decodes_remaining_after_more_arrives() {
     let tail = full_wire[mid..].to_vec();
 
     let mut received: Vec<StreamItem> = Vec::with_capacity(send.len());
-    let mut decoder = FramedCodec::<ProstCodec<StreamItem, StreamItem>>::new(ProstCodec::new());
+    let mut decoder = StreamCodec::new(ProstCodec::new());
 
     // Drain whatever frames are completable from the partial buffer.
     loop {
-        match decoder.decode_message(&mut partial).expect("partial decode") {
+        match decoder
+            .decode_message(&mut partial)
+            .expect("partial decode")
+        {
             Some(msg) => received.push(msg),
             None => break,
         }

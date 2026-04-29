@@ -36,7 +36,8 @@ use std::pin::Pin;
 use std::time::Duration;
 
 pub mod bench;
-// pub mod h2_settings_conformance; // Temporarily disabled due to missing h2 dependency
+pub mod h2_settings_conformance;
+pub mod hpack_conformance;
 pub mod kafka_record_batch_v2;
 pub mod lean_coverage_matrix;
 pub mod lean_frontier;
@@ -58,11 +59,16 @@ pub use bench::{
     RegressionConfig, RegressionMetric, Stats, StatsError, default_benchmarks,
     run_benchmark_comparison,
 };
-// pub use h2_settings_conformance::{
-//     SettingsConformanceTester, SettingsSnapshot, SettingsConformanceCase, SettingsFrame,
-//     Setting, ExpectedOutcome, ConformanceResult, TestVerdict, ComplianceReport,
-//     ComplianceSummary,
-// };
+pub use h2_settings_conformance::{
+    SettingsConformanceTester, SettingsSnapshot, SettingsConformanceCase, SettingsFrame,
+    Setting, ExpectedOutcome, ConformanceResult as SettingsConformanceResult, TestVerdict as SettingsTestVerdict, ComplianceReport as SettingsComplianceReport,
+    ComplianceSummary as SettingsComplianceSummary,
+};
+pub use hpack_conformance::{
+    HpackConformanceTester, HpackConformanceCase, RequirementLevel,
+    ConformanceResult as HpackConformanceResult, TestVerdict as HpackTestVerdict,
+    ComplianceReport as HpackComplianceReport, ComplianceSummary as HpackComplianceSummary,
+};
 pub use kafka_record_batch_v2::{
     ConformanceTestResult, Header, KafkaConformanceHarness, RecordAttribute, RecordBatchV2,
     RecordV2, TimestampType,

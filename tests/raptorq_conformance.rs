@@ -1767,6 +1767,16 @@ mod differential_harness {
         }
     }
 
+    fn exact_random_drop_indices(k: usize, drop_per_mille: u16, seed: u64) -> Vec<usize> {
+        let drop_count = choose_drop_count(k, 1, drop_per_mille);
+        let mut indices: Vec<usize> = (0..k).collect();
+        let mut rng = DetRng::new(seed);
+        rng.shuffle(&mut indices);
+        indices.truncate(drop_count);
+        indices.sort_unstable();
+        indices
+    }
+
     fn reference_decode(
         decoder: &InactivationDecoder,
         symbols: &[ReceivedSymbol],
@@ -1904,8 +1914,13 @@ mod differential_harness {
             .decode(&received)
             .unwrap_or_else(|err| panic!("scenario={} decoder failed: {err:?}", case.scenario_id));
         let our_bytes = flatten_source_bytes(&our_decoded.source);
-        let reference_bytes =
-            reference_decode_with_raptorq_rs(case, &encoder, &source, &drop_indices, repair_esi_upper);
+        let reference_bytes = reference_decode_with_raptorq_rs(
+            case,
+            &encoder,
+            &source,
+            &drop_indices,
+            repair_esi_upper,
+        );
         let expected_bytes = flatten_source_bytes(&source);
 
         assert_eq!(
@@ -1923,6 +1938,98 @@ mod differential_harness {
             "scenario={} decoders must emit byte-identical output for the pinned K=10 slice",
             case.scenario_id
         );
+    }
+
+    #[test]
+    fn differential_loss_matrix_matches_raptorq_rs() {
+        for &(case, drop_seed) in &[
+            (
+                DifferentialCase {
+                    scenario_id: "RQ-D2-DIFF-K10-LOSS30-RAPTORQ-RS",
+                    k: 10,
+                    symbol_size: 64,
+                    seed: 0x6330_0010,
+                    drop_modulus: None,
+                    drop_remainder: 0,
+                    repair_budget: RepairBudget::ByDropped { extra: 4 },
+                    expect_success: true,
+                    expected_error_kind: None,
+                },
+                0xA1B2_C310_u64,
+            ),
+            (
+                DifferentialCase {
+                    scenario_id: "RQ-D2-DIFF-K42-LOSS30-RAPTORQ-RS",
+                    k: 42,
+                    symbol_size: 64,
+                    seed: 0x6330_042A,
+                    drop_modulus: None,
+                    drop_remainder: 0,
+                    repair_budget: RepairBudget::ByDropped { extra: 4 },
+                    expect_success: true,
+                    expected_error_kind: None,
+                },
+                0xA1B2_C342_u64,
+            ),
+            (
+                DifferentialCase {
+                    scenario_id: "RQ-D2-DIFF-K842-LOSS30-RAPTORQ-RS",
+                    k: 842,
+                    symbol_size: 32,
+                    seed: 0x6330_0842,
+                    drop_modulus: None,
+                    drop_remainder: 0,
+                    repair_budget: RepairBudget::ByDropped { extra: 4 },
+                    expect_success: true,
+                    expected_error_kind: None,
+                },
+                0xA1B2_C842_u64,
+            ),
+        ] {
+            let source = make_source_data(case.k, case.symbol_size, case.seed.wrapping_mul(17));
+            let encoder = SystematicEncoder::new(&source, case.symbol_size, case.seed)
+                .unwrap_or_else(|| panic!("scenario={} failed to build encoder", case.scenario_id));
+            let decoder = InactivationDecoder::new(case.k, case.symbol_size, case.seed);
+            let drop_indices = exact_random_drop_indices(case.k, 300, drop_seed);
+            let repair_esi_upper = max_repair_esi(case, decoder.params().l, drop_indices.len());
+            let received = build_received_symbols(
+                &encoder,
+                &decoder,
+                &source,
+                &drop_indices,
+                repair_esi_upper,
+                case.seed,
+            );
+
+            let our_decoded = decoder.decode(&received).unwrap_or_else(|err| {
+                panic!("scenario={} decoder failed: {err:?}", case.scenario_id)
+            });
+            let our_bytes = flatten_source_bytes(&our_decoded.source);
+            let reference_bytes = reference_decode_with_raptorq_rs(
+                case,
+                &encoder,
+                &source,
+                &drop_indices,
+                repair_esi_upper,
+            );
+            let expected_bytes = flatten_source_bytes(&source);
+
+            assert_eq!(
+                our_bytes, expected_bytes,
+                "scenario={} our decoder must recover the exact source block at 30% loss",
+                case.scenario_id
+            );
+            assert_eq!(
+                reference_bytes, expected_bytes,
+                "scenario={} raptorq-rs must recover the exact source block at 30% loss",
+                case.scenario_id
+            );
+            assert_eq!(
+                our_bytes, reference_bytes,
+                "scenario={} decoders must emit byte-identical output at 30% loss",
+                case.scenario_id
+            );
+        }
     }
 
     #[test]

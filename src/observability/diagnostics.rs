@@ -2028,6 +2028,118 @@ fn kind_semantics(
     }
 }
 
+// br-asupersync-t36ete: NDJSON serialization support for diagnostic types
+impl DirectionalDeadlockReport {
+    /// Serialize to NDJSON (newline-delimited JSON) format.
+    ///
+    /// Returns a string where each diagnostic field is on its own line as valid JSON.
+    /// This format is commonly used for log aggregation and streaming analytics.
+    #[must_use]
+    pub fn to_ndjson(&self) -> String {
+        let mut lines = Vec::new();
+
+        lines.push(serde_json::json!({
+            "type": "deadlock_report",
+            "severity": format!("{:?}", self.severity),
+            "risk_score": self.risk_score
+        }));
+
+        for (i, cycle) in self.cycles.iter().enumerate() {
+            lines.push(serde_json::json!({
+                "type": "deadlock_cycle",
+                "cycle_index": i,
+                "cycle_length": cycle.len(),
+                "task_ids": cycle.iter().map(|&id| format!("{:?}", id)).collect::<Vec<_>>()
+            }));
+        }
+
+        lines.into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+impl RegionOpenExplanation {
+    /// Serialize to NDJSON format.
+    #[must_use]
+    pub fn to_ndjson(&self) -> String {
+        let mut lines = Vec::new();
+
+        lines.push(serde_json::json!({
+            "type": "region_explanation",
+            "region_id": format!("{:?}", self.region_id),
+            "status": format!("{:?}", self.status),
+            "child_count": self.children.len(),
+            "task_count": self.tasks.len()
+        }));
+
+        for child_id in &self.children {
+            lines.push(serde_json::json!({
+                "type": "region_child",
+                "region_id": format!("{:?}", self.region_id),
+                "child_id": format!("{:?}", child_id)
+            }));
+        }
+
+        for task_id in &self.tasks {
+            lines.push(serde_json::json!({
+                "type": "region_task",
+                "region_id": format!("{:?}", self.region_id),
+                "task_id": format!("{:?}", task_id)
+            }));
+        }
+
+        lines.into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+impl TaskBlockedExplanation {
+    /// Serialize to NDJSON format.
+    #[must_use]
+    pub fn to_ndjson(&self) -> String {
+        let mut lines = Vec::new();
+
+        lines.push(serde_json::json!({
+            "type": "task_explanation",
+            "task_id": format!("{:?}", self.task_id),
+            "classification": format!("{:?}", self.classification),
+            "detail": self.detail
+        }));
+
+        if let Some(ref waiting_on) = self.waiting_on {
+            lines.push(serde_json::json!({
+                "type": "task_waiting_on",
+                "task_id": format!("{:?}", self.task_id),
+                "waiting_on": format!("{:?}", waiting_on)
+            }));
+        }
+
+        lines.into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+impl ObligationLeak {
+    /// Serialize to NDJSON format.
+    #[must_use]
+    pub fn to_ndjson(&self) -> String {
+        serde_json::json!({
+            "type": "obligation_leak",
+            "obligation_id": format!("{:?}", self.obligation_id),
+            "obligation_type": self.obligation_type,
+            "holder_task": self.holder_task.map(|id| format!("{:?}", id)),
+            "region_id": format!("{:?}", self.region_id),
+            "age_ms": self.age.as_millis()
+        }).to_string()
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::arc_with_non_send_sync)]
 mod tests {

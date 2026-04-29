@@ -21,6 +21,11 @@ use asupersync::Cx;
 use asupersync::sync::{Barrier, LockError, Mutex, Notify, OnceCell, RwLock, Semaphore};
 use asupersync::codec::{Decoder, Encoder, LengthDelimitedCodec as AsupersyncCodec};
 use asupersync::bytes::{BufMut, Bytes, BytesMut};
+use asupersync::runtime::scheduler::intrusive_heap::IntrusivePriorityHeap;
+use asupersync::record::task::TaskRecord;
+use asupersync::types::{Budget, RegionId, TaskId};
+use asupersync::util::{Arena, ArenaIndex};
+use std::collections::BinaryHeap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
@@ -1131,4 +1136,171 @@ fn create_multiple_frames() -> Vec<u8> {
     }
 
     buf
+}
+
+/// HEAP-001: IntrusivePriorityHeap vs BinaryHeap Pop Order Conformance
+///
+/// Verifies that our IntrusivePriorityHeap produces identical popping order
+/// compared to std::collections::BinaryHeap when given the same insert/pop
+/// sequence.
+#[test]
+fn heap_001_intrusive_heap_vs_binary_heap_conformance() {
+    init_test("heap_001_intrusive_heap_vs_binary_heap_conformance");
+
+    // Test case 1: Simple priority sequence
+    let test_sequence = vec![
+        HeapOperation::Insert(10),
+        HeapOperation::Insert(5),
+        HeapOperation::Insert(15),
+        HeapOperation::Insert(3),
+        HeapOperation::Pop,
+        HeapOperation::Pop,
+        HeapOperation::Insert(12),
+        HeapOperation::Pop,
+        HeapOperation::Pop,
+        HeapOperation::Pop,
+    ];
+    test_heap_conformance(&test_sequence, "simple_priority");
+
+    // Test case 2: Reverse order inserts
+    let test_sequence = vec![
+        HeapOperation::Insert(1),
+        HeapOperation::Insert(2),
+        HeapOperation::Insert(3),
+        HeapOperation::Insert(4),
+        HeapOperation::Insert(5),
+        HeapOperation::Pop,
+        HeapOperation::Pop,
+        HeapOperation::Pop,
+        HeapOperation::Pop,
+        HeapOperation::Pop,
+    ];
+    test_heap_conformance(&test_sequence, "reverse_order");
+
+    // Test case 3: Mixed operations
+    let test_sequence = vec![
+        HeapOperation::Insert(8),
+        HeapOperation::Pop,
+        HeapOperation::Insert(4),
+        HeapOperation::Insert(12),
+        HeapOperation::Insert(6),
+        HeapOperation::Pop,
+        HeapOperation::Insert(2),
+        HeapOperation::Pop,
+        HeapOperation::Pop,
+        HeapOperation::Pop,
+    ];
+    test_heap_conformance(&test_sequence, "mixed_operations");
+
+    // Test case 4: Duplicate priorities
+    let test_sequence = vec![
+        HeapOperation::Insert(7),
+        HeapOperation::Insert(7),
+        HeapOperation::Insert(7),
+        HeapOperation::Insert(3),
+        HeapOperation::Insert(11),
+        HeapOperation::Insert(7),
+        HeapOperation::Pop,
+        HeapOperation::Pop,
+        HeapOperation::Pop,
+        HeapOperation::Pop,
+        HeapOperation::Pop,
+        HeapOperation::Pop,
+    ];
+    test_heap_conformance(&test_sequence, "duplicate_priorities");
+
+    test_complete!("heap_001_intrusive_heap_vs_binary_heap_conformance");
+}
+
+#[derive(Debug, Clone)]
+enum HeapOperation {
+    Insert(u8), // Priority value
+    Pop,
+}
+
+/// Test heap conformance between intrusive heap and std BinaryHeap
+fn test_heap_conformance(operations: &[HeapOperation], test_name: &str) {
+    // Set up intrusive heap
+    let mut arena = setup_heap_arena();
+    let mut intrusive_heap = IntrusivePriorityHeap::new();
+
+    // Set up standard library heap (max heap like intrusive heap)
+    let mut std_heap = BinaryHeap::new();
+
+    let mut task_counter = 0u32;
+
+    // Execute operations on both heaps
+    let mut intrusive_results = Vec::new();
+    let mut std_results = Vec::new();
+
+    for operation in operations {
+        match operation {
+            HeapOperation::Insert(priority) => {
+                let task_id = TaskId::from_arena(ArenaIndex::new(task_counter, 0));
+
+                // Ensure arena has enough capacity
+                while arena.len() <= task_counter as usize {
+                    let new_task_id = TaskId::from_arena(ArenaIndex::new(arena.len() as u32, 0));
+                    let region_id = RegionId::from_arena(ArenaIndex::new(0, 0));
+                    let record = TaskRecord::new(new_task_id, region_id, Budget::INFINITE);
+                    arena.insert(record);
+                }
+
+                // Insert into both heaps
+                intrusive_heap.push(task_id, *priority, &mut arena);
+                std_heap.push(*priority);
+
+                task_counter += 1;
+            }
+            HeapOperation::Pop => {
+                // Pop from intrusive heap
+                let intrusive_result = intrusive_heap.pop(&mut arena);
+                let intrusive_priority = intrusive_result.and_then(|task_id| {
+                    arena.get(task_id.arena_index())
+                        .map(|record| record.sched_priority)
+                });
+
+                // Pop from std heap
+                let std_priority = std_heap.pop();
+
+                intrusive_results.push(intrusive_priority);
+                std_results.push(std_priority);
+            }
+        }
+    }
+
+    // Compare results
+    assert_with_log!(
+        intrusive_results.len() == std_results.len(),
+        format!("[{}] result count should match", test_name),
+        std_results.len(),
+        intrusive_results.len()
+    );
+
+    for (i, (intrusive_opt, std_opt)) in intrusive_results.iter().zip(std_results.iter()).enumerate() {
+        match (intrusive_opt, std_opt) {
+            (Some(intrusive_priority), Some(std_priority)) => {
+                assert_with_log!(
+                    intrusive_priority == std_priority,
+                    format!("[{}] priority should match at pop {}", test_name, i),
+                    std_priority,
+                    intrusive_priority
+                );
+            }
+            (None, None) => {
+                // Both heaps are empty - this is correct
+            }
+            (intrusive_opt, std_opt) => {
+                panic!(
+                    "[{}] pop {} mismatch: intrusive={:?}, std={:?}",
+                    test_name, i, intrusive_opt, std_opt
+                );
+            }
+        }
+    }
+}
+
+/// Set up arena for heap testing
+fn setup_heap_arena() -> Arena<TaskRecord> {
+    Arena::new()
 }
