@@ -35,6 +35,10 @@ name = "mysql_conformance_runner"
 path = "src/bin/mysql_conformance_runner.rs"
 
 [[bin]]
+name = "h2_data_end_stream_conformance"
+path = "src/bin/h2_data_end_stream_conformance.rs"
+
+[[bin]]
 name = "h2_goaway_conformance"
 path = "src/bin/h2_goaway_conformance.rs"
 
@@ -65,6 +69,14 @@ path = "src/bin/otel_resource_conformance.rs"
 [[bin]]
 name = "trace_context_conformance"
 path = "src/bin/trace_context_conformance.rs"
+
+[[bin]]
+name = "metric_aggregator_conformance"
+path = "src/bin/metric_aggregator_conformance.rs"
+
+[[bin]]
+name = "cross_process_trace_conformance"
+path = "src/bin/cross_process_trace_conformance.rs"
 
 [dependencies]
 asupersync = { path = ".." }

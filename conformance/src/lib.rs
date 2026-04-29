@@ -36,6 +36,7 @@ use std::pin::Pin;
 use std::time::Duration;
 
 pub mod bench;
+pub mod h2_data_end_stream_conformance;
 pub mod h2_goaway_conformance;
 pub mod h2_ping_conformance;
 pub mod h2_priority_conformance;
@@ -61,6 +62,11 @@ pub use bench::{
     BenchThresholds, Benchmark, Comparison, ComparisonConfidence, RegressionCheck,
     RegressionConfig, RegressionMetric, Stats, StatsError, default_benchmarks,
     run_benchmark_comparison,
+};
+pub use h2_data_end_stream_conformance::{
+    DataEndStreamComplianceReport, DataEndStreamComplianceSummary, DataEndStreamConformanceCase,
+    DataEndStreamConformanceResult, DataEndStreamConformanceTester, DataEndStreamTestVerdict, RequirementLevel as DataEndStreamRequirementLevel,
+    DataEndStreamConnectionState, StreamEndStreamState, SerializableDataFrame,
 };
 pub use h2_goaway_conformance::{
     GoAwayComplianceReport, GoAwayComplianceSummary, GoAwayConformanceCase,
