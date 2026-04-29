@@ -3128,6 +3128,17 @@ test = false
 doc = false
 bench = false
 
+# Tick #121 — Semaphore permit acquire/forget/drop equivalence testing
+# Tests arbitrary sequences of acquire, forget, drop, and commit operations to verify
+# total permits remain stable with no leaks and proper conservation laws.
+# Validates permit lifecycle RAII semantics and obligation tracking correctness.
+[[bin]]
+name = "semaphore_permit_lifecycle"
+path = "fuzz_targets/semaphore_permit_lifecycle.rs"
+test = false
+doc = false
+bench = false
+
 # GlobalQueue MPMC injector correctness testing for scheduler task distribution
 # Tests arbitrary push/steal sequences across N workers to ensure no task is
 # lost or duplicated in the fetch-and-add based global task queue.
