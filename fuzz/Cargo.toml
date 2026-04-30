@@ -1459,6 +1459,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h2_max_concurrent_streams"
+path = "fuzz_targets/h2_max_concurrent_streams.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "symbol_auth"
 path = "fuzz_targets/symbol_auth.rs"
 test = false
@@ -1643,6 +1650,13 @@ bench = false
 [[bin]]
 name = "jetstream_deliver_by_start_time_skew"
 path = "fuzz_targets/jetstream_deliver_by_start_time_skew.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jetstream_max_deliver_per_message"
+path = "fuzz_targets/jetstream_max_deliver_per_message.rs"
 test = false
 doc = false
 bench = false
@@ -3442,6 +3456,28 @@ bench = false
 [[bin]]
 name = "semaphore_forget_reacquire"
 path = "fuzz_targets/semaphore_forget_reacquire.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #153 — Notify spurious wakeup fuzzer
+# Tests arbitrary spurious wake patterns to ensure Notified futures
+# only complete when actually notified, not from spurious wakes.
+# Validates proper wake filtering and state tracking.
+[[bin]]
+name = "notify_spurious_wakeup"
+path = "fuzz_targets/notify_spurious_wakeup.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #154 — Barrier reset+wait race condition fuzzer
+# Tests arbitrary reset+wait interleavings to ensure pre-reset waiters
+# either complete or get reset-cleared cleanly. Validates generation
+# advancement and leader election consistency across reset cycles.
+[[bin]]
+name = "barrier_reset_wait_race"
+path = "fuzz_targets/barrier_reset_wait_race.rs"
 test = false
 doc = false
 bench = false
