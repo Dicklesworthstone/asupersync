@@ -392,11 +392,13 @@ mod tests {
             .header("content-encoding", "gzip")
     }
 
+    #[cfg(feature = "compression")]
     fn set_cookie_handler() -> Response {
         Response::new(StatusCode::OK, "Hello, World! ".repeat(100).into_bytes())
             .header("set-cookie", "session=secret; HttpOnly; Secure")
     }
 
+    #[cfg(feature = "compression")]
     fn private_cache_control_handler() -> Response {
         Response::new(StatusCode::OK, "Hello, World! ".repeat(100).into_bytes())
             .header("cache-control", "private, max-age=0")
@@ -417,6 +419,7 @@ mod tests {
         resp
     }
 
+    #[cfg(feature = "compression")]
     fn vary_contains(resp: &Response, token: &str) -> bool {
         resp.headers
             .get("vary")
