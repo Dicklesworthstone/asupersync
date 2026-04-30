@@ -132,36 +132,37 @@ fn x_user_agent_is_not_a_smuggling_vector_here() {
 }
 
 #[test]
-fn negotiation_is_case_sensitive_per_http_media_type_spec() {
-    // RFC 9110 §8.3: media types ARE case-insensitive on the
-    // type/subtype, but parameters can be case-sensitive. Pin
-    // the asupersync behavior so a future loosening doesn't
-    // open a smuggling vector via case-confusion.
+fn negotiation_is_case_insensitive_per_rfc9110_media_type_match() {
+    // Pinned current behavior: ContentType::from_header_value is
+    // case-INSENSITIVE on the type/subtype, matching RFC 9110
+    // §8.3 ('media types are case-insensitive on the type and
+    // subtype'). This is the correct interop posture — a peer
+    // sending 'Application/Grpc-Web' is RFC-conformant and the
+    // server should accept it.
     //
-    // Empirically, ContentType::from_header_value is currently
-    // case-sensitive ('Application/Grpc-Web' fails). Pin that
-    // behavior — operators who want case-insensitive matching
-    // would need to lowercase before calling.
+    // The audit relevance: case-insensitivity does NOT introduce
+    // a smuggling vector here because the negotiation has no
+    // User-Agent / Sec-Fetch input that could be bypassed via
+    // case-confusion. The case-insensitivity is purely on the
+    // content-type whitelist, which case-folds to the same
+    // canonical ContentType variant.
+    //
+    // Pinned so a future TIGHTENING to strict-case (which would
+    // break interop with RFC-conformant peers) forces an
+    // intentional re-baseline.
     let canonical = "application/grpc-web";
     let mixed_case = "Application/Grpc-Web";
     let upper = "APPLICATION/GRPC-WEB";
 
     assert!(is_grpc_web_request(canonical));
-    let mixed_accepted = is_grpc_web_request(mixed_case);
-    let upper_accepted = is_grpc_web_request(upper);
-
-    // Pin whichever behavior is current; if the negotiation is
-    // tightened or loosened later, this assertion forces an
-    // intentional re-baseline of the case-sensitivity contract.
-    if !mixed_accepted && !upper_accepted {
-        // Current strict-case behavior. Documented in the
-        // assertion message.
-    } else {
-        panic!(
-            "Negotiation case-sensitivity has changed (mixed={mixed_accepted}, \
-             upper={upper_accepted}). Re-baseline this test against the new contract \
-             and audit whether the loosening introduces a User-Agent / Sec-Fetch \
-             smuggling vector via header-case bypass.",
-        );
-    }
+    assert!(
+        is_grpc_web_request(mixed_case),
+        "RFC 9110 §8.3: case-insensitive type/subtype match is the \
+         correct posture; mixed-case rejection would break interop",
+    );
+    assert!(
+        is_grpc_web_request(upper),
+        "uppercase content-type must match the gRPC-Web family per \
+         RFC 9110 §8.3 case-insensitive media-type rules",
+    );
 }
