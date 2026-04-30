@@ -17,6 +17,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 const LARGE_FEC_K: usize = 10_000;
 const LARGE_FEC_MAX_SYMBOL_SIZE: usize = 16;
 const LARGE_FEC_MAX_REPAIR_COUNT: usize = 8;
+const MID_LARGE_FEC_K: usize = 8_000;
 const MID_RANGE_FEC_K: usize = 200;
 const MID_RANGE_FEC_SYMBOL_SIZE: usize = 512;
 const MID_RANGE_FEC_MAX_REPAIR_COUNT: usize = 16;
@@ -1081,6 +1082,112 @@ fn test_mid_range_fixed_payload_generation_size(
     Ok(())
 }
 
+fn test_mid_large_k_payload_generation_size(
+    symbol_size: usize,
+    seed: u64,
+    repair_count: usize,
+    source_bytes: &[u8],
+) -> Result<(), String> {
+    let bounded_symbol_size = symbol_size.clamp(1, LARGE_FEC_MAX_SYMBOL_SIZE);
+    let bounded_repair_count = repair_count.min(LARGE_FEC_MAX_REPAIR_COUNT);
+    let source = build_source_from_bytes(source_bytes, MID_LARGE_FEC_K, bounded_symbol_size);
+    let source_replay = source.clone();
+
+    let encoder = catch_unwind(AssertUnwindSafe(|| {
+        SystematicEncoder::new(&source, bounded_symbol_size, seed)
+    }))
+    .map_err(|_| {
+        format!(
+            "SystematicEncoder::new panicked for mid-large payload check K={MID_LARGE_FEC_K}, T={bounded_symbol_size}, seed={seed}"
+        )
+    })?
+    .ok_or_else(|| {
+        format!(
+            "SystematicEncoder::new returned None for mid-large payload check K={MID_LARGE_FEC_K}, T={bounded_symbol_size}, seed={seed}"
+        )
+    })?;
+    let mut encoder = encoder;
+
+    let emitted = catch_unwind(AssertUnwindSafe(|| encoder.emit_all(bounded_repair_count)))
+        .map_err(|_| {
+            format!(
+                "emit_all panicked for mid-large payload check K={MID_LARGE_FEC_K}, T={bounded_symbol_size}, repairs={bounded_repair_count}"
+            )
+        })?;
+    let replay_encoder = catch_unwind(AssertUnwindSafe(|| {
+        SystematicEncoder::new(&source_replay, bounded_symbol_size, seed)
+    }))
+    .map_err(|_| {
+        format!(
+            "SystematicEncoder::new panicked during mid-large replay check K={MID_LARGE_FEC_K}, T={bounded_symbol_size}, seed={seed}"
+        )
+    })?
+    .ok_or_else(|| {
+        format!(
+            "SystematicEncoder::new returned None during mid-large replay check K={MID_LARGE_FEC_K}, T={bounded_symbol_size}, seed={seed}"
+        )
+    })?;
+    let mut replay_encoder = replay_encoder;
+    let replay_emitted = catch_unwind(AssertUnwindSafe(|| replay_encoder.emit_all(bounded_repair_count)))
+        .map_err(|_| {
+            format!(
+                "emit_all panicked during mid-large replay check K={MID_LARGE_FEC_K}, T={bounded_symbol_size}, repairs={bounded_repair_count}"
+            )
+        })?;
+
+    let expected_symbol_count = MID_LARGE_FEC_K + bounded_repair_count;
+    let expected_payload_bytes = expected_symbol_count
+        .checked_mul(bounded_symbol_size)
+        .ok_or_else(|| "expected mid-large payload size overflowed usize".to_string())?;
+    let actual_payload_bytes: usize = emitted.iter().map(|symbol| symbol.data.len()).sum();
+
+    if emitted.len() != expected_symbol_count {
+        return Err(format!(
+            "mid-large emit_all count mismatch: expected {expected_symbol_count}, got {}",
+            emitted.len()
+        ));
+    }
+    if actual_payload_bytes != expected_payload_bytes {
+        return Err(format!(
+            "mid-large emit_all payload-size mismatch: expected {expected_payload_bytes}, got {actual_payload_bytes}"
+        ));
+    }
+    if emitted
+        .iter()
+        .any(|symbol| symbol.data.len() != bounded_symbol_size)
+    {
+        return Err(format!(
+            "mid-large emit_all produced non-uniform symbol width for K={MID_LARGE_FEC_K}, T={bounded_symbol_size}"
+        ));
+    }
+    if replay_emitted.len() != emitted.len() {
+        return Err(format!(
+            "mid-large deterministic replay count mismatch: first={}, second={}",
+            emitted.len(),
+            replay_emitted.len()
+        ));
+    }
+    for (idx, (first, second)) in emitted.iter().zip(replay_emitted.iter()).enumerate() {
+        if first.esi != second.esi
+            || first.is_source != second.is_source
+            || first.data != second.data
+        {
+            return Err(format!(
+                "mid-large deterministic replay mismatch at symbol {idx}: \
+                 first=(esi={}, source={}, len={}), second=(esi={}, source={}, len={})",
+                first.esi,
+                first.is_source,
+                first.data.len(),
+                second.esi,
+                second.is_source,
+                second.data.len()
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn test_large_k_edge_byte_patterns(
     symbol_size: usize,
     seed: u64,
@@ -1617,21 +1724,29 @@ fn fuzz_systematic(mut config: FuzzConfig) -> Result<(), String> {
     // Test 5c: bounded large-K FEC payload generation at K=10000.
     test_large_k_payload_generation_size(symbol_size, seed, repair_count, &config.source_bytes)?;
 
-    // Test 5d: fixed mid-range payload generation at K=200, T=512.
+    // Test 5d: bounded mid-large FEC payload generation at K=8000.
+    test_mid_large_k_payload_generation_size(
+        symbol_size,
+        seed,
+        repair_count,
+        &config.source_bytes,
+    )?;
+
+    // Test 5e: fixed mid-range payload generation at K=200, T=512.
     test_mid_range_fixed_payload_generation_size(seed, repair_count, &config.source_bytes)?;
 
-    // Test 5e: adversarial K=10000 edge-byte source blocks.
+    // Test 5f: adversarial K=10000 edge-byte source blocks.
     test_large_k_edge_byte_patterns(symbol_size, seed, repair_count)?;
 
-    // Test 5f: all-zero source blocks at K=42 and K=10000 still emit valid
+    // Test 5g: all-zero source blocks at K=42 and K=10000 still emit valid
     // repair packets with zero payloads.
     test_extreme_zero_source_repair_packets(symbol_size, seed, repair_count)?;
 
-    // Test 5g: repair-symbol APIs stay byte-identical across payload sizes
+    // Test 5h: repair-symbol APIs stay byte-identical across payload sizes
     // from 8 bytes up through the RFC u16 maximum.
     test_repair_symbol_size_variation(raw_symbol_size, seed, &config.source_bytes)?;
 
-    // Test 5h: degenerate one-byte symbols must still produce valid encoder
+    // Test 5i: degenerate one-byte symbols must still produce valid encoder
     // output for arbitrary K and repair counts.
     test_single_byte_symbol_output(k, seed, repair_count, &config.source_bytes)?;
 
