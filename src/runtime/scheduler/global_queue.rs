@@ -188,6 +188,34 @@ impl GlobalQueue {
     }
 }
 
+#[doc(hidden)]
+#[cfg(any(test, feature = "test-internals"))]
+pub struct TestBatchReservation<'a> {
+    queue: &'a GlobalQueue,
+    reservation: CountReservation<'a, TaskId>,
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+impl TestBatchReservation<'_> {
+    #[inline]
+    pub fn publish_one(&mut self, task: TaskId) {
+        self.queue.inner.push_uncounted(task);
+        self.reservation.publish_one();
+    }
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+impl GlobalQueue {
+    #[doc(hidden)]
+    #[must_use]
+    pub fn reserve_batch_for_test(&self, count: usize) -> TestBatchReservation<'_> {
+        TestBatchReservation {
+            queue: self,
+            reservation: self.inner.reserve_count(count),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(

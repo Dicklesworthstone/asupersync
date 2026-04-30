@@ -5,7 +5,7 @@ use asupersync::runtime::scheduler::GlobalQueue;
 use asupersync::types::TaskId;
 use asupersync::util::ArenaIndex;
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -24,6 +24,9 @@ struct GlobalQueueMpmcFuzz {
     operations: Vec<QueueOperation>,
     /// Test configuration parameters
     config: TestConfig,
+    /// Adaptive batch reservation / drain epochs over the real pre-accounted
+    /// global queue publish path.
+    adaptive_batching: AdaptiveBatchingScenario,
 }
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -69,14 +72,40 @@ struct TestConfig {
     timeout_seconds: u8,
 }
 
+#[derive(Arbitrary, Debug)]
+struct AdaptiveBatchingScenario {
+    /// Adaptive publish/drain epochs.
+    epochs: Vec<AdaptiveBatchEpoch>,
+    /// Initial controller batch size.
+    initial_batch: u8,
+    /// Maximum batch size the controller may reserve.
+    max_batch: u8,
+}
+
+#[derive(Arbitrary, Debug, Clone)]
+struct AdaptiveBatchEpoch {
+    /// New producer arrivals made available this epoch.
+    push_rate: u8,
+    /// Maximum consumer drain budget this epoch.
+    drain_rate: u8,
+    /// Unpublished suffix to leave behind so the reservation rollback path
+    /// gets exercised.
+    publish_slack: u8,
+}
+
 // Resource limits to prevent fuzzer timeouts
 const MAX_OPERATIONS: usize = 500;
 const MAX_WORKERS: usize = 16;
 const MAX_BURST_SIZE: usize = 32;
+const MAX_ADAPTIVE_EPOCHS: usize = 64;
+const MAX_ADAPTIVE_RATE: usize = 32;
+const MAX_ADAPTIVE_BATCH: usize = 32;
 const MAX_DELAY_MS: u64 = 10;
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(15);
 
 fuzz_target!(|input: GlobalQueueMpmcFuzz| {
+    assert_adaptive_batching_bounds(&input.adaptive_batching);
+
     // Apply resource limits
     let max_ops = (input.config.max_operations as usize)
         .min(MAX_OPERATIONS)
@@ -403,6 +432,153 @@ fn execute_and_verify_mpmc_correctness(
     // Verify MPMC correctness properties
     let tracker_guard = tracker.lock();
     tracker_guard.verify_correctness(&remaining_tasks, final_advisory_len);
+}
+
+fn assert_adaptive_batching_bounds(scenario: &AdaptiveBatchingScenario) {
+    let queue = GlobalQueue::new();
+    let max_batch = usize::from(scenario.max_batch).clamp(1, MAX_ADAPTIVE_BATCH);
+    let mut current_batch = usize::from(scenario.initial_batch).clamp(1, max_batch);
+    let mut pending = VecDeque::new();
+    let mut visible = VecDeque::new();
+    let mut next_task_value = 1_000_000u32;
+
+    for epoch in scenario.epochs.iter().take(MAX_ADAPTIVE_EPOCHS) {
+        let push_rate = usize::from(epoch.push_rate).min(MAX_ADAPTIVE_RATE);
+        let drain_rate = usize::from(epoch.drain_rate).min(MAX_ADAPTIVE_RATE);
+
+        for _ in 0..push_rate {
+            pending.push_back(create_task_id(next_task_value));
+            next_task_value = next_task_value.wrapping_add(1);
+        }
+
+        let pending_before = pending.len();
+        let visible_before = visible.len();
+        let previous_batch = current_batch;
+        let reserved_batch = next_adaptive_batch_size(
+            previous_batch,
+            pending_before,
+            visible_before,
+            drain_rate,
+            max_batch,
+        );
+
+        if pending_before == 0 {
+            assert_eq!(
+                reserved_batch, 0,
+                "adaptive batcher must idle when no producer backlog exists"
+            );
+        } else {
+            assert!(
+                reserved_batch >= 1 && reserved_batch <= max_batch,
+                "adaptive batch size must stay within configured bounds"
+            );
+            assert!(
+                reserved_batch <= pending_before,
+                "adaptive batch size must never reserve more tasks than are pending"
+            );
+            if pending_before + visible_before > drain_rate
+                && previous_batch < max_batch
+                && previous_batch < pending_before
+            {
+                assert!(
+                    reserved_batch >= previous_batch,
+                    "producer pressure should not shrink the reserved batch"
+                );
+            }
+            if drain_rate > pending_before + visible_before && previous_batch > 1 {
+                assert!(
+                    reserved_batch <= previous_batch,
+                    "drain pressure should not grow the reserved batch"
+                );
+            }
+        }
+
+        current_batch = reserved_batch.max(1);
+
+        if reserved_batch > 0 {
+            let publish_slack = usize::from(epoch.publish_slack).min(reserved_batch);
+            let publish_count = reserved_batch
+                .saturating_sub(publish_slack)
+                .min(pending_before);
+            let mut reservation = queue.reserve_batch_for_test(reserved_batch);
+
+            for _ in 0..publish_count {
+                let task = pending
+                    .pop_front()
+                    .expect("publish count must not exceed pending backlog");
+                reservation.publish_one(task);
+                visible.push_back(task);
+            }
+            drop(reservation);
+
+            assert_eq!(
+                queue.len(),
+                visible.len(),
+                "dropping an adaptive reservation must roll back any unpublished count credit"
+            );
+        } else {
+            assert_eq!(queue.len(), visible.len());
+        }
+
+        let drain_count = drain_rate.min(visible.len());
+        for _ in 0..drain_count {
+            let expected = visible
+                .pop_front()
+                .expect("drain count must not exceed visible queue contents");
+            assert_eq!(
+                queue.pop(),
+                Some(expected),
+                "adaptive batch publication must preserve FIFO order under drain pressure"
+            );
+        }
+
+        assert_eq!(
+            queue.len(),
+            visible.len(),
+            "advisory count must match the visible queue depth after each adaptive epoch"
+        );
+    }
+
+    while let Some(expected) = visible.pop_front() {
+        assert_eq!(
+            queue.pop(),
+            Some(expected),
+            "post-epoch residue drain must preserve FIFO order"
+        );
+    }
+
+    assert_eq!(
+        queue.len(),
+        0,
+        "adaptive batch accounting must converge to zero after the final drain"
+    );
+    assert!(
+        queue.is_empty(),
+        "global queue should report empty after adaptive batch residue drain"
+    );
+}
+
+fn next_adaptive_batch_size(
+    previous_batch: usize,
+    pending_backlog: usize,
+    visible_backlog: usize,
+    drain_rate: usize,
+    max_batch: usize,
+) -> usize {
+    if pending_backlog == 0 {
+        return 0;
+    }
+
+    let producer_pressure = pending_backlog.saturating_add(visible_backlog);
+    let next = if producer_pressure > drain_rate {
+        previous_batch.saturating_add((producer_pressure - drain_rate).min(2))
+    } else if drain_rate > producer_pressure {
+        previous_batch.saturating_sub((drain_rate - producer_pressure).min(2))
+    } else {
+        previous_batch
+    };
+
+    next.clamp(1, max_batch).min(pending_backlog)
 }
 
 /// Simple timeout wrapper for thread join
