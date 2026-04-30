@@ -6264,6 +6264,82 @@ mod tests {
     }
 
     #[test]
+    fn connect_ignores_charset_query_param_without_post_auth_set_names_query() {
+        use std::io::ErrorKind;
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let handshake = handshake_packet_bytes(
+            capability::CLIENT_PROTOCOL_41
+                | capability::CLIENT_SECURE_CONNECTION
+                | capability::CLIENT_PLUGIN_AUTH,
+        );
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(Duration::from_millis(300)))
+                .expect("set read timeout");
+
+            stream
+                .write_all(&handshake)
+                .expect("write handshake packet");
+            stream.flush().expect("flush handshake packet");
+
+            let mut header = [0u8; 4];
+            stream
+                .read_exact(&mut header)
+                .expect("read handshake response header");
+            let payload_len = usize::from(header[0])
+                | (usize::from(header[1]) << 8)
+                | (usize::from(header[2]) << 16);
+            let mut payload = vec![0u8; payload_len];
+            stream
+                .read_exact(&mut payload)
+                .expect("read handshake response payload");
+
+            assert_ne!(
+                payload[0],
+                command::COM_QUERY,
+                "handshake response must not be a startup SET NAMES/SET CHARACTER SET query"
+            );
+
+            let mut ok = PacketBuffer::new();
+            ok.set_sequence(2);
+            ok.buf = ok_packet_payload(0, 0);
+            let ok = ok.build_packet();
+            stream.write_all(&ok.bytes).expect("write auth OK packet");
+            stream.flush().expect("flush auth OK packet");
+
+            let err = stream
+                .read_exact(&mut header)
+                .expect_err("charset query param must not trigger post-auth COM_QUERY");
+            assert!(
+                matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut),
+                "expected timeout waiting for forbidden post-auth query, got {err:?}"
+            );
+        });
+
+        let cx = Cx::for_testing();
+        let outcome = run(MySqlConnection::connect(
+            &cx,
+            &format!(
+                "mysql://user:p%C3%A4ss@127.0.0.1:{}/db?charset=utf8mb4%27%3BSELECT%201--",
+                addr.port()
+            ),
+        ));
+
+        match outcome {
+            Outcome::Ok(_conn) => {}
+            other => {
+                panic!("expected connect success without charset startup query, got {other:?}")
+            }
+        }
+
+        server.join().expect("join server");
+    }
+
+    #[test]
     fn dropped_result_set_query_keeps_connection_closed() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
         let addr = listener.local_addr().expect("listener addr");
