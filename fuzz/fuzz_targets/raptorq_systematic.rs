@@ -988,6 +988,133 @@ fn test_large_k_edge_byte_patterns(
     Ok(())
 }
 
+fn test_zero_source_repair_packets(
+    k: usize,
+    symbol_size: usize,
+    seed: u64,
+    repair_count: usize,
+) -> Result<(), String> {
+    let bounded_repair_count = repair_count.clamp(1, LARGE_FEC_MAX_REPAIR_COUNT);
+    let source = vec![vec![0u8; symbol_size]; k];
+    let replay_source = source.clone();
+
+    let encoder = catch_unwind(AssertUnwindSafe(|| {
+        SystematicEncoder::new(&source, symbol_size, seed)
+    }))
+    .map_err(|_| {
+        format!("SystematicEncoder::new panicked for zero-source repair check K={k}, T={symbol_size}, seed={seed}")
+    })?
+    .ok_or_else(|| {
+        format!("SystematicEncoder::new returned None for zero-source repair check K={k}, T={symbol_size}, seed={seed}")
+    })?;
+    let mut encoder = encoder;
+    let repairs = catch_unwind(AssertUnwindSafe(|| encoder.emit_repair(bounded_repair_count)))
+        .map_err(|_| {
+            format!(
+                "emit_repair panicked for zero-source repair check K={k}, T={symbol_size}, repairs={bounded_repair_count}"
+            )
+        })?;
+
+    if repairs.len() != bounded_repair_count {
+        return Err(format!(
+            "zero-source repair count mismatch for K={k}: expected {bounded_repair_count}, got {}",
+            repairs.len()
+        ));
+    }
+
+    let replay_encoder = catch_unwind(AssertUnwindSafe(|| {
+        SystematicEncoder::new(&replay_source, symbol_size, seed)
+    }))
+    .map_err(|_| {
+        format!(
+            "SystematicEncoder::new panicked during zero-source replay check K={k}, T={symbol_size}, seed={seed}"
+        )
+    })?
+    .ok_or_else(|| {
+        format!(
+            "SystematicEncoder::new returned None during zero-source replay check K={k}, T={symbol_size}, seed={seed}"
+        )
+    })?;
+    let mut replay_encoder = replay_encoder;
+    let replay_repairs = catch_unwind(AssertUnwindSafe(|| {
+        replay_encoder.emit_repair(bounded_repair_count)
+    }))
+    .map_err(|_| {
+        format!(
+            "emit_repair panicked during zero-source replay check K={k}, T={symbol_size}, repairs={bounded_repair_count}"
+        )
+    })?;
+
+    if replay_repairs.len() != repairs.len() {
+        return Err(format!(
+            "zero-source repair replay count mismatch for K={k}: first={}, second={}",
+            repairs.len(),
+            replay_repairs.len()
+        ));
+    }
+
+    let base_esi = u32::try_from(k).expect("K must fit in u32 for zero-source repair check");
+    for (idx, (first, second)) in repairs.iter().zip(replay_repairs.iter()).enumerate() {
+        let idx_u32 = u32::try_from(idx).expect("repair index must fit in u32");
+        let expected_esi = base_esi + idx_u32;
+
+        if first.is_source || second.is_source {
+            return Err(format!(
+                "zero-source repair packet mislabeled as source for K={k}, repair_index={idx}"
+            ));
+        }
+        if first.esi != expected_esi || second.esi != expected_esi {
+            return Err(format!(
+                "zero-source repair ESI mismatch for K={k}, repair_index={idx}: \
+                 expected {expected_esi}, first={}, second={}",
+                first.esi, second.esi
+            ));
+        }
+        if first.data.len() != symbol_size || second.data.len() != symbol_size {
+            return Err(format!(
+                "zero-source repair width mismatch for K={k}, repair_index={idx}: \
+                 expected {symbol_size}, first={}, second={}",
+                first.data.len(),
+                second.data.len()
+            ));
+        }
+        if first.data.iter().any(|&byte| byte != 0) || second.data.iter().any(|&byte| byte != 0) {
+            return Err(format!(
+                "zero-source repair payload was non-zero for K={k}, repair_index={idx}"
+            ));
+        }
+        if first.data != second.data {
+            return Err(format!(
+                "zero-source repair replay payload mismatch for K={k}, repair_index={idx}"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn test_extreme_zero_source_repair_packets(
+    symbol_size: usize,
+    seed: u64,
+    repair_count: usize,
+) -> Result<(), String> {
+    let bounded_mid_symbol_size = symbol_size.clamp(1, 64);
+    let bounded_large_symbol_size = symbol_size.clamp(1, LARGE_FEC_MAX_SYMBOL_SIZE);
+    let bounded_repair_count = repair_count.clamp(1, LARGE_FEC_MAX_REPAIR_COUNT);
+
+    test_zero_source_repair_packets(42, bounded_mid_symbol_size, seed, bounded_repair_count)
+        .map_err(|err| format!("K=42 zero-source repair packet check failed: {err}"))?;
+    test_zero_source_repair_packets(
+        LARGE_FEC_K,
+        bounded_large_symbol_size,
+        seed,
+        bounded_repair_count,
+    )
+    .map_err(|err| format!("K={LARGE_FEC_K} zero-source repair packet check failed: {err}"))?;
+
+    Ok(())
+}
+
 /// Main fuzzing function
 fn fuzz_systematic(mut config: FuzzConfig) -> Result<(), String> {
     let raw_k = config.k as usize;
@@ -1038,6 +1165,10 @@ fn fuzz_systematic(mut config: FuzzConfig) -> Result<(), String> {
 
     // Test 5d: adversarial K=10000 edge-byte source blocks.
     test_large_k_edge_byte_patterns(symbol_size, seed, repair_count)?;
+
+    // Test 5e: all-zero source blocks at K=42 and K=10000 still emit valid
+    // repair packets with zero payloads.
+    test_extreme_zero_source_repair_packets(symbol_size, seed, repair_count)?;
 
     // Test 6: Basic encode/decode round-trip
     let source = generate_source_data(k, symbol_size, seed);
