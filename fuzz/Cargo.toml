@@ -1529,6 +1529,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h2_priority_frame_idle_stream"
+path = "fuzz_targets/h2_priority_frame_idle_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "symbol_auth"
 path = "fuzz_targets/symbol_auth.rs"
 test = false
@@ -3940,6 +3947,18 @@ bench = false
 [[bin]]
 name = "oneshot_send_after_receiver_drop"
 path = "fuzz_targets/oneshot_send_after_receiver_drop.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #167 — Mutex lock_owned with future cancellation fuzzer
+# Tests OwnedMutexGuard::lock() with arbitrary cancellation during await.
+# Validates lock state correctness after cancel, ensures no leaks, and verifies
+# other waiters can acquire lock. Patterns: cancel during poll, before poll,
+# rapid cancel/poll cycles, multi-operation cancel, delayed cancel, interleaved.
+[[bin]]
+name = "mutex_lock_owned_cancel"
+path = "fuzz_targets/mutex_lock_owned_cancel.rs"
 test = false
 doc = false
 bench = false
