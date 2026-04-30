@@ -656,6 +656,88 @@ fn assert_k42_burst_loss_recovers(
     }
 }
 
+fn assert_k4096_burst_loss_recovers(
+    decoder: &InactivationDecoder,
+    encoder: &SystematicEncoder,
+    source: &[Vec<u8>],
+    seed: u64,
+    wavefront_batch: usize,
+    object_id: ObjectId,
+) {
+    if source.len() != 4096 {
+        return;
+    }
+
+    let params = decoder.params();
+    assert_eq!(params.k, 4096, "K=4096 burst oracle must preserve the public K");
+    assert_eq!(
+        params.k_prime, 4112,
+        "K=4096 burst oracle must pin the rounded RFC row"
+    );
+    assert_eq!(params.j, 726, "K=4096 burst oracle must pin the RFC J(K') value");
+    assert_eq!(params.s, 137, "K=4096 burst oracle must pin the RFC S(K') value");
+    assert_eq!(params.h, 11, "K=4096 burst oracle must pin the RFC H(K') value");
+    assert_eq!(params.w, 4159, "K=4096 burst oracle must pin the RFC W(K') value");
+    assert_eq!(params.l, 4260, "K=4096 burst oracle must pin the RFC L value");
+    assert_eq!(params.b, 4022, "K=4096 burst oracle must pin the RFC B value");
+
+    let scenarios = [
+        (
+            vec![LossWindow {
+                start: seed as u16,
+                len: 0,
+            }],
+            2usize,
+        ),
+        (
+            vec![LossWindow {
+                start: seed.rotate_left(5) as u16,
+                len: 31,
+            }],
+            6usize,
+        ),
+        (
+            vec![LossWindow {
+                start: seed.rotate_left(11) as u16,
+                len: 255,
+            }],
+            12usize,
+        ),
+        (
+            vec![LossWindow {
+                start: seed.rotate_left(17) as u16,
+                len: 511,
+            }],
+            20usize,
+        ),
+        (
+            vec![
+                LossWindow {
+                    start: seed.rotate_left(23) as u16,
+                    len: 383,
+                },
+                LossWindow {
+                    start: seed.rotate_left(29) as u16,
+                    len: 191,
+                },
+            ],
+            24usize,
+        ),
+    ];
+
+    for (loss_windows, extra_repairs) in scenarios {
+        assert_burst_loss_recovers_when_received_at_least_k(
+            decoder,
+            encoder,
+            source,
+            &loss_windows,
+            extra_repairs,
+            wavefront_batch,
+            object_id,
+        );
+    }
+}
+
 fn assert_k842_sparse_vs_dense_repairs_recover(
     decoder: &InactivationDecoder,
     encoder: &SystematicEncoder,
@@ -1095,6 +1177,15 @@ fuzz_target!(|data: &[u8]| {
         object_id,
     );
 
+    assert_k4096_burst_loss_recovers(
+        &decoder,
+        &encoder,
+        &source,
+        input.seed,
+        input.wavefront_batch as usize,
+        object_id,
+    );
+
     assert_k4_transition_sparse_vs_dense_repairs_recover(
         &decoder,
         &encoder,
@@ -1369,6 +1460,19 @@ mod tests {
             842,
         );
         assert_eq!(repair_count, 845);
+    }
+
+    #[test]
+    fn burst_repair_budget_scales_to_k4096_windows() {
+        let repair_count = burst_repair_count(
+            &[
+                LossWindow { start: 0, len: 511 },
+                LossWindow { start: 17, len: 255 },
+            ],
+            12,
+            4096,
+        );
+        assert_eq!(repair_count, 780);
     }
 
     #[test]
