@@ -197,14 +197,17 @@ fn mr3_fifo_waker_ordering_preservation() {
         // Path 1: Fill capacity, queue waiters, then abort first permit
         let (tx1, _rx1) = mpsc::channel::<TestMessage>(capacity);
 
-        // Fill the channel capacity
-        let first_permit1 = tx1.try_reserve().expect("first reserve should succeed");
+        // Fill the channel capacity with outstanding permits.
+        let mut permits1 = Vec::with_capacity(capacity);
+        for _ in 0..capacity {
+            permits1.push(tx1.try_reserve().expect("reserve should succeed"));
+        }
 
-        // This will succeed since capacity=1 and we have 1 reserved
+        // A bounded channel is full when queued + reserved == capacity.
         prop_assert!(tx1.try_reserve().is_err(), "second reserve should fail when at capacity");
 
-        // Abort the first permit, which should allow one new reservation
-        first_permit1.abort();
+        // Abort the first permit, which should allow one new reservation.
+        permits1.pop().expect("filled permits").abort();
 
         // Now we should be able to reserve again
         let second_permit1 = tx1.try_reserve().expect("reserve after abort should succeed");
@@ -213,14 +216,17 @@ fn mr3_fifo_waker_ordering_preservation() {
         // Path 2: Same setup but drop instead of abort
         let (tx2, _rx2) = mpsc::channel::<TestMessage>(capacity);
 
-        // Fill the channel capacity
-        let first_permit2 = tx2.try_reserve().expect("first reserve should succeed");
+        // Fill the channel capacity with outstanding permits.
+        let mut permits2 = Vec::with_capacity(capacity);
+        for _ in 0..capacity {
+            permits2.push(tx2.try_reserve().expect("reserve should succeed"));
+        }
 
-        // This will succeed since capacity=1 and we have 1 reserved
+        // A bounded channel is full when queued + reserved == capacity.
         prop_assert!(tx2.try_reserve().is_err(), "second reserve should fail when at capacity");
 
         // Drop the first permit instead of abort
-        drop(first_permit2);
+        drop(permits2.pop().expect("filled permits"));
 
         // Now we should be able to reserve again
         let second_permit2 = tx2.try_reserve().expect("reserve after drop should succeed");
@@ -230,9 +236,13 @@ fn mr3_fifo_waker_ordering_preservation() {
         prop_assert_eq!(counts_after_abort, counts_after_drop,
             "Abort and drop should result in identical channel state");
 
-        // Cleanup
+        // Cleanup outstanding permits before the proptest case exits.
         second_permit1.abort();
         second_permit2.abort();
+        for permit in permits1 {
+            permit.abort();
+        }
+        drop(permits2);
     });
 }
 
@@ -313,17 +323,14 @@ fn mr4_receiver_state_independence() {
 /// and there are waiting senders.
 #[test]
 fn mr_composite_full_channel_abort_vs_drop() {
-    let capacity = 2;
+    let capacity = 3;
     // Path 1: Fill channel, abort permits
     let (tx1, mut rx1) = mpsc::channel::<u32>(capacity);
 
-    // Fill to capacity with actual messages
+    // Mix one queued message with reserved slots until the channel is full.
     tx1.try_send(1).expect("first send");
-    tx1.try_send(2).expect("second send");
-
-    // Reserve permits (these will be in reserved state, not queued yet)
-    let permit1a = tx1.try_reserve().expect("should still be able to reserve");
-    let permit1b = tx1.try_reserve().expect("should still be able to reserve");
+    let permit1a = tx1.try_reserve().expect("reserve second logical slot");
+    let permit1b = tx1.try_reserve().expect("reserve third logical slot");
 
     // Now channel is at logical capacity (queue full + reserved slots)
     assert!(tx1.try_send(5).is_err(), "channel should be full now");
@@ -333,19 +340,17 @@ fn mr_composite_full_channel_abort_vs_drop() {
     permit1b.abort();
 
     // Should be able to send again after aborts
-    let after_abort_result1 = tx1.try_send(3);
+    let after_abort_result1 = tx1.try_send(2);
+    let after_abort_result2 = tx1.try_send(3);
     let counts_after_abort = tx1.debug_counts();
 
     // Path 2: Same scenario but with drops
     let (tx2, mut rx2) = mpsc::channel::<u32>(capacity);
 
-    // Fill to capacity with actual messages
+    // Mix one queued message with reserved slots until the channel is full.
     tx2.try_send(1).expect("first send");
-    tx2.try_send(2).expect("second send");
-
-    // Reserve permits
-    let permit2a = tx2.try_reserve().expect("should still be able to reserve");
-    let permit2b = tx2.try_reserve().expect("should still be able to reserve");
+    let permit2a = tx2.try_reserve().expect("reserve second logical slot");
+    let permit2b = tx2.try_reserve().expect("reserve third logical slot");
 
     // Now channel is at logical capacity
     assert!(tx2.try_send(5).is_err(), "channel should be full now");
@@ -355,14 +360,20 @@ fn mr_composite_full_channel_abort_vs_drop() {
     drop(permit2b);
 
     // Should be able to send again after drops
+    let after_drop_result1 = tx2.try_send(2);
     let after_drop_result2 = tx2.try_send(3);
     let counts_after_drop = tx2.debug_counts();
 
     // Verify abort vs drop equivalence
     assert_eq!(
         after_abort_result1.is_ok(),
+        after_drop_result1.is_ok(),
+        "First send results should be equivalent after abort vs drop"
+    );
+    assert_eq!(
+        after_abort_result2.is_ok(),
         after_drop_result2.is_ok(),
-        "Send results should be equivalent after abort vs drop"
+        "Second send results should be equivalent after abort vs drop"
     );
     assert_eq!(
         counts_after_abort, counts_after_drop,
