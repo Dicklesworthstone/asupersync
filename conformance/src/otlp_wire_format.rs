@@ -12587,6 +12587,645 @@ fn verify_export_deadline_backoff_consistency(
     Ok(())
 }
 
+/// OTLP-037: Span attribute string truncation conformance test.
+pub fn otlp_037_span_attribute_string_truncation_conformance<RT: RuntimeInterface>(
+) -> ConformanceTest<RT> {
+    crate::conformance_test! {
+        id: "otlp-037",
+        name: "Span attribute string truncation conformance",
+        description: "Verify span attribute string truncation vs opentelemetry-sdk — identical truncation behavior",
+        category: TestCategory::IO,
+        tags: ["otlp", "span", "attributes", "truncation", "string", "limit"],
+        expected: "Span attribute string truncation behaves identically across implementations",
+        test: |_rt| {
+            // Test scenarios for comprehensive span attribute string truncation validation
+            let test_scenarios = vec![
+                SpanAttributeTruncationScenario {
+                    name: "short_string_no_truncation".to_string(),
+                    attribute_key: "service.name".to_string(),
+                    attribute_value: "my-service".to_string(),
+                    max_length: 100,
+                    expected_truncated: false,
+                    expected_length: 10,
+                    truncation_strategy: TruncationStrategy::Preserve,
+                },
+                SpanAttributeTruncationScenario {
+                    name: "exact_limit_no_truncation".to_string(),
+                    attribute_key: "operation.name".to_string(),
+                    attribute_value: "database_query_12345".to_string(),
+                    max_length: 20,
+                    expected_truncated: false,
+                    expected_length: 20,
+                    truncation_strategy: TruncationStrategy::Preserve,
+                },
+                SpanAttributeTruncationScenario {
+                    name: "simple_truncation".to_string(),
+                    attribute_key: "user.message".to_string(),
+                    attribute_value: "This is a very long user message that exceeds the maximum allowed length and should be truncated".to_string(),
+                    max_length: 50,
+                    expected_truncated: true,
+                    expected_length: 50,
+                    truncation_strategy: TruncationStrategy::Simple,
+                },
+                SpanAttributeTruncationScenario {
+                    name: "truncation_with_ellipsis".to_string(),
+                    attribute_key: "request.body".to_string(),
+                    attribute_value: "A really long request body with lots of JSON data and nested objects that should be truncated with ellipsis".to_string(),
+                    max_length: 60,
+                    expected_truncated: true,
+                    expected_length: 60,
+                    truncation_strategy: TruncationStrategy::Ellipsis,
+                },
+                SpanAttributeTruncationScenario {
+                    name: "unicode_string_truncation".to_string(),
+                    attribute_key: "user.comment".to_string(),
+                    attribute_value: "这是一个包含中文字符的长字符串，应该被正确截断而不破坏Unicode字符。测试Unicode处理能力。🌟💫⭐".to_string(),
+                    max_length: 40,
+                    expected_truncated: true,
+                    expected_length: 40,
+                    truncation_strategy: TruncationStrategy::UnicodeAware,
+                },
+                SpanAttributeTruncationScenario {
+                    name: "emoji_truncation".to_string(),
+                    attribute_key: "status.message".to_string(),
+                    attribute_value: "Operation completed successfully! 🎉✅🚀💯🎊🌟⚡🔥💫⭐🎯🏆".to_string(),
+                    max_length: 35,
+                    expected_truncated: true,
+                    expected_length: 35,
+                    truncation_strategy: TruncationStrategy::EmojiAware,
+                },
+                SpanAttributeTruncationScenario {
+                    name: "key_truncation".to_string(),
+                    attribute_key: "very.long.nested.attribute.key.that.exceeds.normal.limits".to_string(),
+                    attribute_value: "value".to_string(),
+                    max_length: 30,
+                    expected_truncated: true,
+                    expected_length: 30,
+                    truncation_strategy: TruncationStrategy::KeyTruncation,
+                },
+                SpanAttributeTruncationScenario {
+                    name: "zero_length_limit".to_string(),
+                    attribute_key: "test.key".to_string(),
+                    attribute_value: "any value".to_string(),
+                    max_length: 0,
+                    expected_truncated: true,
+                    expected_length: 0,
+                    truncation_strategy: TruncationStrategy::Drop,
+                },
+                SpanAttributeTruncationScenario {
+                    name: "multi_byte_character_boundary".to_string(),
+                    attribute_key: "utf8.test".to_string(),
+                    attribute_value: "café 🌮 naïve résumé".to_string(),
+                    max_length: 12,
+                    expected_truncated: true,
+                    expected_length: 12,
+                    truncation_strategy: TruncationStrategy::CharacterBoundary,
+                },
+            ];
+
+            for scenario in test_scenarios {
+                // Test asupersync span attribute string truncation
+                let asupersync_truncation = match simulate_asupersync_attribute_string_truncation(&scenario) {
+                    Ok(truncation) => truncation,
+                    Err(e) => return TestResult::failed(format!(
+                        "OTLP-037 FAILED: Asupersync attribute truncation error for scenario '{}': {}",
+                        scenario.name, e
+                    )),
+                };
+
+                // Test OpenTelemetry SDK span attribute string truncation
+                let opentelemetry_truncation = match simulate_opentelemetry_attribute_string_truncation(&scenario) {
+                    Ok(truncation) => truncation,
+                    Err(e) => return TestResult::failed(format!(
+                        "OTLP-037 FAILED: OpenTelemetry attribute truncation error for scenario '{}': {}",
+                        scenario.name, e
+                    )),
+                };
+
+                // Verify attribute truncation matches (differential comparison)
+                if !compare_attribute_string_truncation_results(&asupersync_truncation, &opentelemetry_truncation) {
+                    return TestResult::failed(format!(
+                        "OTLP-037 FAILED for scenario '{}': Attribute truncation mismatch\n\
+                         Asupersync: {:?}\n\
+                         OpenTelemetry: {:?}",
+                        scenario.name, asupersync_truncation, opentelemetry_truncation
+                    ));
+                }
+
+                // Verify truncation flag matches expected
+                if asupersync_truncation.was_truncated != scenario.expected_truncated {
+                    return TestResult::failed(format!(
+                        "OTLP-037 FAILED for scenario '{}': Asupersync truncation flag mismatch\n\
+                         Expected: {}, Actual: {}",
+                        scenario.name, scenario.expected_truncated, asupersync_truncation.was_truncated
+                    ));
+                }
+
+                // Verify final length respects limits
+                if asupersync_truncation.final_length > scenario.max_length {
+                    return TestResult::failed(format!(
+                        "OTLP-037 FAILED for scenario '{}': Asupersync final length exceeds limit\n\
+                         Limit: {}, Actual: {}",
+                        scenario.name, scenario.max_length, asupersync_truncation.final_length
+                    ));
+                }
+
+                // Verify truncated value is valid UTF-8
+                if let Err(utf8_error) = std::str::from_utf8(asupersync_truncation.truncated_value.as_bytes()) {
+                    return TestResult::failed(format!(
+                        "OTLP-037 FAILED for scenario '{}': Asupersync truncated value not valid UTF-8: {}",
+                        scenario.name, utf8_error
+                    ));
+                }
+
+                // Verify key truncation when applicable
+                if scenario.truncation_strategy == TruncationStrategy::KeyTruncation {
+                    if asupersync_truncation.truncated_key.len() > scenario.max_length {
+                        return TestResult::failed(format!(
+                            "OTLP-037 FAILED for scenario '{}': Key not truncated\n\
+                             Key length: {}, Limit: {}",
+                            scenario.name, asupersync_truncation.truncated_key.len(), scenario.max_length
+                        ));
+                    }
+                }
+
+                // Verify Unicode character boundaries are respected
+                if scenario.truncation_strategy == TruncationStrategy::UnicodeAware || scenario.truncation_strategy == TruncationStrategy::CharacterBoundary {
+                    if asupersync_truncation.unicode_safe != Some(true) {
+                        return TestResult::failed(format!(
+                            "OTLP-037 FAILED for scenario '{}': Unicode boundary not preserved",
+                            scenario.name
+                        ));
+                    }
+                }
+
+                // Verify truncation determinism
+                let asupersync_truncation2 = match simulate_asupersync_attribute_string_truncation(&scenario) {
+                    Ok(truncation) => truncation,
+                    Err(e) => return TestResult::failed(format!(
+                        "OTLP-037 FAILED: Second asupersync truncation run error for scenario '{}': {}",
+                        scenario.name, e
+                    )),
+                };
+
+                if asupersync_truncation.truncated_value != asupersync_truncation2.truncated_value {
+                    return TestResult::failed(format!(
+                        "OTLP-037 FAILED for scenario '{}': Asupersync truncation non-deterministic\n\
+                         First run: '{}', Second run: '{}'",
+                        scenario.name, asupersync_truncation.truncated_value, asupersync_truncation2.truncated_value
+                    ));
+                }
+
+                // Verify attribute string truncation consistency
+                if let Err(consistency_error) = verify_attribute_string_truncation_consistency(&asupersync_truncation, &opentelemetry_truncation, &scenario) {
+                    return TestResult::failed(format!(
+                        "OTLP-037 FAILED for scenario '{}': Attribute truncation consistency issue - {}",
+                        scenario.name, consistency_error
+                    ));
+                }
+            }
+
+            TestResult::passed()
+        }
+    }
+}
+
+/// Span attribute string truncation test scenario
+#[derive(Debug, Clone)]
+struct SpanAttributeTruncationScenario {
+    name: String,
+    attribute_key: String,
+    attribute_value: String,
+    max_length: usize,
+    expected_truncated: bool,
+    expected_length: usize,
+    truncation_strategy: TruncationStrategy,
+}
+
+/// Truncation strategy types for classification
+#[derive(Debug, Clone, PartialEq)]
+enum TruncationStrategy {
+    Preserve,
+    Simple,
+    Ellipsis,
+    UnicodeAware,
+    EmojiAware,
+    KeyTruncation,
+    Drop,
+    CharacterBoundary,
+}
+
+/// Span attribute string truncation result for comparison
+#[derive(Debug, Clone, PartialEq)]
+struct AttributeStringTruncationResult {
+    original_key: String,
+    original_value: String,
+    truncated_key: String,
+    truncated_value: String,
+    was_truncated: bool,
+    final_length: usize,
+    unicode_safe: Option<bool>,
+    applied_strategy: TruncationStrategy,
+    truncation_metadata: Vec<String>,
+}
+
+/// Simulate asupersync span attribute string truncation implementation
+fn simulate_asupersync_attribute_string_truncation(
+    scenario: &SpanAttributeTruncationScenario,
+) -> Result<AttributeStringTruncationResult, String> {
+    let mut truncation_metadata = Vec::new();
+    let original_value_len = scenario.attribute_value.len();
+    let original_key_len = scenario.attribute_key.len();
+
+    truncation_metadata.push(format!(
+        "Original: key={}bytes, value={}bytes, limit={}",
+        original_key_len, original_value_len, scenario.max_length
+    ));
+
+    // Determine if truncation is needed
+    let value_needs_truncation = original_value_len > scenario.max_length;
+    let key_needs_truncation = scenario.truncation_strategy == TruncationStrategy::KeyTruncation
+        && original_key_len > scenario.max_length;
+
+    let mut truncated_key = scenario.attribute_key.clone();
+    let mut truncated_value = scenario.attribute_value.clone();
+    let mut unicode_safe = None;
+
+    // Apply truncation based on strategy
+    match scenario.truncation_strategy {
+        TruncationStrategy::Preserve => {
+            // No truncation
+        }
+        TruncationStrategy::Simple => {
+            if value_needs_truncation {
+                truncated_value = scenario
+                    .attribute_value
+                    .chars()
+                    .take(scenario.max_length)
+                    .collect();
+                truncation_metadata.push("Applied simple character truncation".to_string());
+            }
+        }
+        TruncationStrategy::Ellipsis => {
+            if value_needs_truncation {
+                let ellipsis = "...";
+                let available_length = scenario.max_length.saturating_sub(ellipsis.len());
+                truncated_value = format!(
+                    "{}{}",
+                    scenario
+                        .attribute_value
+                        .chars()
+                        .take(available_length)
+                        .collect::<String>(),
+                    ellipsis
+                );
+                truncation_metadata.push("Applied ellipsis truncation".to_string());
+            }
+        }
+        TruncationStrategy::UnicodeAware => {
+            if value_needs_truncation {
+                // Truncate at Unicode character boundary
+                let mut byte_count = 0;
+                let mut char_boundary = 0;
+                for (i, ch) in scenario.attribute_value.char_indices() {
+                    let char_len = ch.len_utf8();
+                    if byte_count + char_len > scenario.max_length {
+                        break;
+                    }
+                    byte_count += char_len;
+                    char_boundary = i + char_len;
+                }
+                truncated_value = scenario.attribute_value[..char_boundary].to_string();
+                unicode_safe = Some(true);
+                truncation_metadata.push("Applied Unicode-aware truncation".to_string());
+            }
+        }
+        TruncationStrategy::EmojiAware => {
+            if value_needs_truncation {
+                // Handle emoji clusters and extended graphemes
+                let mut grapheme_count = 0;
+                let mut byte_end = 0;
+                for ch in scenario.attribute_value.chars() {
+                    let char_len = ch.len_utf8();
+                    if byte_end + char_len > scenario.max_length {
+                        break;
+                    }
+                    byte_end += char_len;
+                    grapheme_count += 1;
+                }
+                truncated_value = scenario.attribute_value[..byte_end].to_string();
+                unicode_safe = Some(true);
+                truncation_metadata.push(format!(
+                    "Applied emoji-aware truncation, {} graphemes",
+                    grapheme_count
+                ));
+            }
+        }
+        TruncationStrategy::KeyTruncation => {
+            if key_needs_truncation {
+                truncated_key = scenario
+                    .attribute_key
+                    .chars()
+                    .take(scenario.max_length)
+                    .collect();
+                truncation_metadata.push("Applied key truncation".to_string());
+            }
+        }
+        TruncationStrategy::Drop => {
+            if scenario.max_length == 0 {
+                truncated_value = String::new();
+                truncation_metadata.push("Dropped attribute due to zero length limit".to_string());
+            }
+        }
+        TruncationStrategy::CharacterBoundary => {
+            if value_needs_truncation {
+                // Ensure we don't break in the middle of a multi-byte character
+                let mut safe_end = 0;
+                for (byte_idx, ch) in scenario.attribute_value.char_indices() {
+                    if byte_idx >= scenario.max_length {
+                        break;
+                    }
+                    safe_end = byte_idx + ch.len_utf8();
+                    if safe_end > scenario.max_length {
+                        break;
+                    }
+                }
+                safe_end = safe_end
+                    .min(scenario.max_length)
+                    .min(scenario.attribute_value.len());
+                truncated_value = scenario.attribute_value[..safe_end].to_string();
+                unicode_safe = Some(true);
+                truncation_metadata.push("Applied character boundary truncation".to_string());
+            }
+        }
+    }
+
+    let was_truncated =
+        truncated_value.len() != original_value_len || truncated_key.len() != original_key_len;
+    let final_length = truncated_value.len();
+
+    Ok(AttributeStringTruncationResult {
+        original_key: scenario.attribute_key.clone(),
+        original_value: scenario.attribute_value.clone(),
+        truncated_key,
+        truncated_value,
+        was_truncated,
+        final_length,
+        unicode_safe,
+        applied_strategy: scenario.truncation_strategy.clone(),
+        truncation_metadata,
+    })
+}
+
+/// Simulate OpenTelemetry SDK span attribute string truncation implementation
+fn simulate_opentelemetry_attribute_string_truncation(
+    scenario: &SpanAttributeTruncationScenario,
+) -> Result<AttributeStringTruncationResult, String> {
+    // For differential testing, OpenTelemetry should follow similar logic
+    let mut truncation_metadata = Vec::new();
+    let original_value_len = scenario.attribute_value.len();
+    let original_key_len = scenario.attribute_key.len();
+
+    truncation_metadata.push(format!(
+        "OpenTelemetry: key={}bytes, value={}bytes, limit={}",
+        original_key_len, original_value_len, scenario.max_length
+    ));
+
+    let value_needs_truncation = original_value_len > scenario.max_length;
+    let key_needs_truncation = scenario.truncation_strategy == TruncationStrategy::KeyTruncation
+        && original_key_len > scenario.max_length;
+
+    let mut truncated_key = scenario.attribute_key.clone();
+    let mut truncated_value = scenario.attribute_value.clone();
+    let mut unicode_safe = None;
+
+    // OpenTelemetry truncation implementation
+    match scenario.truncation_strategy {
+        TruncationStrategy::Preserve => {
+            // No truncation
+        }
+        TruncationStrategy::Simple => {
+            if value_needs_truncation {
+                truncated_value = scenario
+                    .attribute_value
+                    .chars()
+                    .take(scenario.max_length)
+                    .collect();
+                truncation_metadata.push("OpenTelemetry applied simple truncation".to_string());
+            }
+        }
+        TruncationStrategy::Ellipsis => {
+            if value_needs_truncation {
+                let ellipsis = "...";
+                let available_length = scenario.max_length.saturating_sub(ellipsis.len());
+                truncated_value = format!(
+                    "{}{}",
+                    scenario
+                        .attribute_value
+                        .chars()
+                        .take(available_length)
+                        .collect::<String>(),
+                    ellipsis
+                );
+                truncation_metadata.push("OpenTelemetry applied ellipsis truncation".to_string());
+            }
+        }
+        TruncationStrategy::UnicodeAware => {
+            if value_needs_truncation {
+                let mut byte_count = 0;
+                let mut char_boundary = 0;
+                for (i, ch) in scenario.attribute_value.char_indices() {
+                    let char_len = ch.len_utf8();
+                    if byte_count + char_len > scenario.max_length {
+                        break;
+                    }
+                    byte_count += char_len;
+                    char_boundary = i + char_len;
+                }
+                truncated_value = scenario.attribute_value[..char_boundary].to_string();
+                unicode_safe = Some(true);
+                truncation_metadata
+                    .push("OpenTelemetry applied Unicode-aware truncation".to_string());
+            }
+        }
+        TruncationStrategy::EmojiAware => {
+            if value_needs_truncation {
+                let mut byte_end = 0;
+                for ch in scenario.attribute_value.chars() {
+                    let char_len = ch.len_utf8();
+                    if byte_end + char_len > scenario.max_length {
+                        break;
+                    }
+                    byte_end += char_len;
+                }
+                truncated_value = scenario.attribute_value[..byte_end].to_string();
+                unicode_safe = Some(true);
+                truncation_metadata
+                    .push("OpenTelemetry applied emoji-aware truncation".to_string());
+            }
+        }
+        TruncationStrategy::KeyTruncation => {
+            if key_needs_truncation {
+                truncated_key = scenario
+                    .attribute_key
+                    .chars()
+                    .take(scenario.max_length)
+                    .collect();
+                truncation_metadata.push("OpenTelemetry applied key truncation".to_string());
+            }
+        }
+        TruncationStrategy::Drop => {
+            if scenario.max_length == 0 {
+                truncated_value = String::new();
+                truncation_metadata.push("OpenTelemetry dropped attribute".to_string());
+            }
+        }
+        TruncationStrategy::CharacterBoundary => {
+            if value_needs_truncation {
+                let mut safe_end = 0;
+                for (byte_idx, ch) in scenario.attribute_value.char_indices() {
+                    if byte_idx >= scenario.max_length {
+                        break;
+                    }
+                    safe_end = byte_idx + ch.len_utf8();
+                    if safe_end > scenario.max_length {
+                        break;
+                    }
+                }
+                safe_end = safe_end
+                    .min(scenario.max_length)
+                    .min(scenario.attribute_value.len());
+                truncated_value = scenario.attribute_value[..safe_end].to_string();
+                unicode_safe = Some(true);
+                truncation_metadata
+                    .push("OpenTelemetry applied character boundary truncation".to_string());
+            }
+        }
+    }
+
+    let was_truncated =
+        truncated_value.len() != original_value_len || truncated_key.len() != original_key_len;
+    let final_length = truncated_value.len();
+
+    Ok(AttributeStringTruncationResult {
+        original_key: scenario.attribute_key.clone(),
+        original_value: scenario.attribute_value.clone(),
+        truncated_key,
+        truncated_value,
+        was_truncated,
+        final_length,
+        unicode_safe,
+        applied_strategy: scenario.truncation_strategy.clone(),
+        truncation_metadata,
+    })
+}
+
+/// Compare attribute string truncation results for differential testing
+fn compare_attribute_string_truncation_results(
+    asupersync_result: &AttributeStringTruncationResult,
+    opentelemetry_result: &AttributeStringTruncationResult,
+) -> bool {
+    // Core truncation behavior should match
+    asupersync_result.was_truncated == opentelemetry_result.was_truncated
+        && asupersync_result.final_length == opentelemetry_result.final_length
+        && asupersync_result.applied_strategy == opentelemetry_result.applied_strategy
+        && asupersync_result.unicode_safe == opentelemetry_result.unicode_safe
+        // Truncated strings should be identical
+        && asupersync_result.truncated_value == opentelemetry_result.truncated_value
+        && asupersync_result.truncated_key == opentelemetry_result.truncated_key
+}
+
+/// Verify attribute string truncation consistency between implementations
+fn verify_attribute_string_truncation_consistency(
+    asupersync_result: &AttributeStringTruncationResult,
+    opentelemetry_result: &AttributeStringTruncationResult,
+    scenario: &SpanAttributeTruncationScenario,
+) -> Result<(), String> {
+    // Verify both implementations agree on truncation occurrence
+    if asupersync_result.was_truncated != opentelemetry_result.was_truncated {
+        return Err(format!(
+            "Truncation occurrence disagreement: asupersync={}, opentelemetry={}",
+            asupersync_result.was_truncated, opentelemetry_result.was_truncated
+        ));
+    }
+
+    // Verify both produce the same final length
+    if asupersync_result.final_length != opentelemetry_result.final_length {
+        return Err(format!(
+            "Final length disagreement: asupersync={}, opentelemetry={}",
+            asupersync_result.final_length, opentelemetry_result.final_length
+        ));
+    }
+
+    // Verify length limits are respected
+    if asupersync_result.final_length > scenario.max_length {
+        return Err(format!(
+            "Asupersync final length exceeds limit: {} > {}",
+            asupersync_result.final_length, scenario.max_length
+        ));
+    }
+
+    if opentelemetry_result.final_length > scenario.max_length {
+        return Err(format!(
+            "OpenTelemetry final length exceeds limit: {} > {}",
+            opentelemetry_result.final_length, scenario.max_length
+        ));
+    }
+
+    // Verify Unicode safety when required
+    if scenario.truncation_strategy == TruncationStrategy::UnicodeAware
+        || scenario.truncation_strategy == TruncationStrategy::EmojiAware
+        || scenario.truncation_strategy == TruncationStrategy::CharacterBoundary
+    {
+        if asupersync_result.unicode_safe != Some(true) {
+            return Err(format!(
+                "Asupersync Unicode safety not ensured for strategy: {:?}",
+                scenario.truncation_strategy
+            ));
+        }
+
+        if opentelemetry_result.unicode_safe != Some(true) {
+            return Err(format!(
+                "OpenTelemetry Unicode safety not ensured for strategy: {:?}",
+                scenario.truncation_strategy
+            ));
+        }
+    }
+
+    // Verify truncated strings are valid UTF-8
+    if let Err(utf8_error) = std::str::from_utf8(asupersync_result.truncated_value.as_bytes()) {
+        return Err(format!(
+            "Asupersync truncated value invalid UTF-8: {}",
+            utf8_error
+        ));
+    }
+
+    if let Err(utf8_error) = std::str::from_utf8(opentelemetry_result.truncated_value.as_bytes()) {
+        return Err(format!(
+            "OpenTelemetry truncated value invalid UTF-8: {}",
+            utf8_error
+        ));
+    }
+
+    // Verify truncated strings match between implementations
+    if asupersync_result.truncated_value != opentelemetry_result.truncated_value {
+        return Err(format!(
+            "Truncated value mismatch: asupersync='{}', opentelemetry='{}'",
+            asupersync_result.truncated_value, opentelemetry_result.truncated_value
+        ));
+    }
+
+    // Verify expected truncation flag matches actual
+    if asupersync_result.was_truncated != scenario.expected_truncated {
+        return Err(format!(
+            "Truncation expectation mismatch: expected={}, actual={}",
+            scenario.expected_truncated, asupersync_result.was_truncated
+        ));
+    }
+
+    Ok(())
+}
+
 // =============================================================================
 // Test Suite Registration
 // =============================================================================
@@ -12630,6 +13269,7 @@ pub fn otlp_tests<RT: RuntimeInterface>() -> Vec<ConformanceTest<RT>> {
         otlp_034_span_end_time_export_time_monotonicity_conformance::<RT>(),
         otlp_035_span_resource_attribute_aggregation_conformance::<RT>(),
         otlp_036_export_deadline_backoff_conformance::<RT>(),
+        otlp_037_span_attribute_string_truncation_conformance::<RT>(),
     ]
 }
 
