@@ -3591,6 +3591,17 @@ test = false
 doc = false
 bench = false
 
+# Tick #146 — HTTP/2 HEADERS frame fragmentation fuzzer
+# Targets src/http/h2/connection.rs HEADERS frame handling to test
+# fragmentation protocol violations: HEADERS + END_HEADERS without proper CONTINUATION,
+# orphaned CONTINUATION frames, interleaved streams. Asserts PROTOCOL_ERROR per RFC 9113.
+[[bin]]
+name = "h2_headers_fragmentation"
+path = "fuzz_targets/h2_headers_fragmentation.rs"
+test = false
+doc = false
+bench = false
+
 # Targets src/observability/metrics.rs Counter.add() to test OTLP monotonic counter
 # specification compliance. Verifies counters never decrease, handles overflow
 # correctly, and maintains atomicity in concurrent scenarios per OTLP requirements.
@@ -3611,6 +3622,17 @@ bench = false
 [[bin]]
 name = "grpc_codec_lpm_stream_boundary"
 path = "fuzz_targets/grpc_codec_lpm_stream_boundary.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #145 — Oneshot poll-after-await Future contract fuzzer
+# Tests arbitrary post-await poll patterns to ensure poll after Ready returns
+# Pending or panic per std::future contract. Validates proper Future state
+# management and PolledAfterCompletion handling.
+[[bin]]
+name = "oneshot_poll_after_await"
+path = "fuzz_targets/oneshot_poll_after_await.rs"
 test = false
 doc = false
 bench = false

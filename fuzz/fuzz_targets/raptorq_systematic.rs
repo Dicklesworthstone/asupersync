@@ -17,6 +17,9 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 const LARGE_FEC_K: usize = 10_000;
 const LARGE_FEC_MAX_SYMBOL_SIZE: usize = 16;
 const LARGE_FEC_MAX_REPAIR_COUNT: usize = 8;
+const REPAIR_SYMBOL_VARIATION_K: usize = 4;
+const REPAIR_SYMBOL_VARIATION_REPAIR_COUNT: usize = 3;
+const MAX_RAPTORQ_SYMBOL_SIZE: usize = u16::MAX as usize;
 
 /// Fuzzing parameters for RaptorQ systematic encoding/decoding.
 #[derive(Debug, Clone, Arbitrary)]
@@ -1115,9 +1118,151 @@ fn test_extreme_zero_source_repair_packets(
     Ok(())
 }
 
+fn build_symbol_size_variation_candidates(raw_symbol_size: usize) -> Vec<usize> {
+    let mut candidates = BTreeSet::new();
+    candidates.insert(8usize);
+    candidates.insert(257usize);
+    candidates.insert(MAX_RAPTORQ_SYMBOL_SIZE);
+    candidates.insert(raw_symbol_size.clamp(8, MAX_RAPTORQ_SYMBOL_SIZE));
+    candidates.into_iter().collect()
+}
+
+fn test_repair_symbol_size_variation(
+    raw_symbol_size: usize,
+    seed: u64,
+    source_bytes: &[u8],
+) -> Result<(), String> {
+    let symbol_sizes = build_symbol_size_variation_candidates(raw_symbol_size);
+
+    for symbol_size in symbol_sizes {
+        let source = build_source_from_bytes(source_bytes, REPAIR_SYMBOL_VARIATION_K, symbol_size);
+        let replay_source = source.clone();
+        let direct_source = source.clone();
+
+        let encoder = catch_unwind(AssertUnwindSafe(|| {
+            SystematicEncoder::new(&source, symbol_size, seed)
+        }))
+        .map_err(|_| {
+            format!(
+                "SystematicEncoder::new panicked for symbol-size variation K={REPAIR_SYMBOL_VARIATION_K}, T={symbol_size}, seed={seed}"
+            )
+        })?
+        .ok_or_else(|| {
+            format!(
+                "SystematicEncoder::new returned None for symbol-size variation K={REPAIR_SYMBOL_VARIATION_K}, T={symbol_size}, seed={seed}"
+            )
+        })?;
+        let mut encoder = encoder;
+        let repairs = catch_unwind(AssertUnwindSafe(|| {
+            encoder.emit_repair(REPAIR_SYMBOL_VARIATION_REPAIR_COUNT)
+        }))
+        .map_err(|_| {
+            format!(
+                "emit_repair panicked for symbol-size variation K={REPAIR_SYMBOL_VARIATION_K}, T={symbol_size}, repairs={REPAIR_SYMBOL_VARIATION_REPAIR_COUNT}"
+            )
+        })?;
+
+        if repairs.len() != REPAIR_SYMBOL_VARIATION_REPAIR_COUNT {
+            return Err(format!(
+                "symbol-size variation repair count mismatch for T={symbol_size}: expected {REPAIR_SYMBOL_VARIATION_REPAIR_COUNT}, got {}",
+                repairs.len()
+            ));
+        }
+
+        let replay_encoder = catch_unwind(AssertUnwindSafe(|| {
+            SystematicEncoder::new(&replay_source, symbol_size, seed)
+        }))
+        .map_err(|_| {
+            format!(
+                "SystematicEncoder::new panicked during replay for symbol-size variation K={REPAIR_SYMBOL_VARIATION_K}, T={symbol_size}, seed={seed}"
+            )
+        })?
+        .ok_or_else(|| {
+            format!(
+                "SystematicEncoder::new returned None during replay for symbol-size variation K={REPAIR_SYMBOL_VARIATION_K}, T={symbol_size}, seed={seed}"
+            )
+        })?;
+        let mut replay_encoder = replay_encoder;
+        let replay_repairs = catch_unwind(AssertUnwindSafe(|| {
+            replay_encoder.emit_repair(REPAIR_SYMBOL_VARIATION_REPAIR_COUNT)
+        }))
+        .map_err(|_| {
+            format!(
+                "emit_repair panicked during replay for symbol-size variation K={REPAIR_SYMBOL_VARIATION_K}, T={symbol_size}, repairs={REPAIR_SYMBOL_VARIATION_REPAIR_COUNT}"
+            )
+        })?;
+
+        let direct_encoder = catch_unwind(AssertUnwindSafe(|| {
+            SystematicEncoder::new(&direct_source, symbol_size, seed)
+        }))
+        .map_err(|_| {
+            format!(
+                "SystematicEncoder::new panicked during direct repair_symbol check K={REPAIR_SYMBOL_VARIATION_K}, T={symbol_size}, seed={seed}"
+            )
+        })?
+        .ok_or_else(|| {
+            format!(
+                "SystematicEncoder::new returned None during direct repair_symbol check K={REPAIR_SYMBOL_VARIATION_K}, T={symbol_size}, seed={seed}"
+            )
+        })?;
+
+        if replay_repairs.len() != repairs.len() {
+            return Err(format!(
+                "symbol-size variation replay count mismatch for T={symbol_size}: first={}, second={}",
+                repairs.len(),
+                replay_repairs.len()
+            ));
+        }
+
+        let base_esi = u32::try_from(REPAIR_SYMBOL_VARIATION_K)
+            .expect("variation K must fit in u32 for repair_symbol check");
+        for (idx, (first, second)) in repairs.iter().zip(replay_repairs.iter()).enumerate() {
+            let idx_u32 = u32::try_from(idx).expect("repair index must fit in u32");
+            let expected_esi = base_esi + idx_u32;
+            let direct = catch_unwind(AssertUnwindSafe(|| direct_encoder.repair_symbol(expected_esi)))
+                .map_err(|_| {
+                    format!(
+                        "repair_symbol panicked for symbol-size variation K={REPAIR_SYMBOL_VARIATION_K}, T={symbol_size}, esi={expected_esi}"
+                    )
+                })?;
+
+            if first.is_source || second.is_source {
+                return Err(format!(
+                    "symbol-size variation mislabeled repair packet as source for T={symbol_size}, repair_index={idx}"
+                ));
+            }
+            if first.esi != expected_esi || second.esi != expected_esi {
+                return Err(format!(
+                    "symbol-size variation ESI mismatch for T={symbol_size}, repair_index={idx}: expected {expected_esi}, first={}, second={}",
+                    first.esi, second.esi
+                ));
+            }
+            if first.data.len() != symbol_size
+                || second.data.len() != symbol_size
+                || direct.len() != symbol_size
+            {
+                return Err(format!(
+                    "symbol-size variation repair width mismatch for T={symbol_size}, repair_index={idx}: first={}, second={}, direct={}",
+                    first.data.len(),
+                    second.data.len(),
+                    direct.len()
+                ));
+            }
+            if first.data != second.data || first.data != direct {
+                return Err(format!(
+                    "symbol-size variation repair payload mismatch for T={symbol_size}, repair_index={idx}"
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Main fuzzing function
 fn fuzz_systematic(mut config: FuzzConfig) -> Result<(), String> {
     let raw_k = config.k as usize;
+    let raw_symbol_size = config.symbol_size as usize;
     normalize_config(&mut config);
 
     let k = config.k as usize;
@@ -1169,6 +1314,10 @@ fn fuzz_systematic(mut config: FuzzConfig) -> Result<(), String> {
     // Test 5e: all-zero source blocks at K=42 and K=10000 still emit valid
     // repair packets with zero payloads.
     test_extreme_zero_source_repair_packets(symbol_size, seed, repair_count)?;
+
+    // Test 5f: repair-symbol APIs stay byte-identical across payload sizes
+    // from 8 bytes up through the RFC u16 maximum.
+    test_repair_symbol_size_variation(raw_symbol_size, seed, &config.source_bytes)?;
 
     // Test 6: Basic encode/decode round-trip
     let source = generate_source_data(k, symbol_size, seed);
