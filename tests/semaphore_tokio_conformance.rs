@@ -4,8 +4,8 @@
 //! constraints with N permits and K acquirers (where K > N).
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use asupersync::cx::Cx;
@@ -191,7 +191,10 @@ impl ConformanceTestContext {
                     tokio::time::sleep(Duration::from_millis(*delay_ms)).await;
                 }
             }
-            ReleasePattern::Batched { batch_size, delay_ms } => {
+            ReleasePattern::Batched {
+                batch_size,
+                delay_ms,
+            } => {
                 let total_permits = self.config.acquirers * self.config.permits_per_acquirer;
                 let mut remaining = total_permits;
 
@@ -213,7 +216,8 @@ impl ConformanceTestContext {
         match &self.config.release_pattern {
             ReleasePattern::AllAtOnce => {
                 // Add permits to wake up all waiters
-                semaphore.add_permits((self.config.acquirers * self.config.permits_per_acquirer) as u32);
+                semaphore
+                    .add_permits((self.config.acquirers * self.config.permits_per_acquirer) as u32);
             }
             ReleasePattern::Sequential { delay_ms } => {
                 for _ in 0..(self.config.acquirers * self.config.permits_per_acquirer) {
@@ -221,7 +225,10 @@ impl ConformanceTestContext {
                     tokio::time::sleep(Duration::from_millis(*delay_ms)).await;
                 }
             }
-            ReleasePattern::Batched { batch_size, delay_ms } => {
+            ReleasePattern::Batched {
+                batch_size,
+                delay_ms,
+            } => {
                 let total_permits = self.config.acquirers * self.config.permits_per_acquirer;
                 let mut remaining = total_permits;
 
@@ -247,26 +254,20 @@ fn assert_wake_order_conformance(
 ) {
     // Primary assertion: wake orders must be identical
     assert_eq!(
-        asupersync_result.wake_order,
-        tokio_result.wake_order,
+        asupersync_result.wake_order, tokio_result.wake_order,
         "{}: Wake order differs between implementations\n\
          asupersync: {:?}\n\
          tokio:      {:?}",
-        test_name,
-        asupersync_result.wake_order,
-        tokio_result.wake_order
+        test_name, asupersync_result.wake_order, tokio_result.wake_order
     );
 
     // Secondary assertion: same number of successful acquisitions
     assert_eq!(
-        asupersync_result.successful_acquisitions,
-        tokio_result.successful_acquisitions,
+        asupersync_result.successful_acquisitions, tokio_result.successful_acquisitions,
         "{}: Different number of successful acquisitions\n\
          asupersync: {}\n\
          tokio:      {}",
-        test_name,
-        asupersync_result.successful_acquisitions,
-        tokio_result.successful_acquisitions
+        test_name, asupersync_result.successful_acquisitions, tokio_result.successful_acquisitions
     );
 }
 
@@ -310,10 +311,13 @@ async fn conformance_sequential_release() {
 #[tokio::test]
 async fn conformance_batched_release() {
     let config = ConformanceTestConfig {
-        permits: 0,  // Start with no permits
+        permits: 0, // Start with no permits
         acquirers: 6,
         permits_per_acquirer: 1,
-        release_pattern: ReleasePattern::Batched { batch_size: 2, delay_ms: 3 },
+        release_pattern: ReleasePattern::Batched {
+            batch_size: 2,
+            delay_ms: 3,
+        },
     };
 
     let mut ctx = ConformanceTestContext::new(config);
@@ -328,14 +332,18 @@ async fn conformance_multi_permit_acquisition() {
     let config = ConformanceTestConfig {
         permits: 3,
         acquirers: 4,
-        permits_per_acquirer: 2,  // Each acquirer wants 2 permits
+        permits_per_acquirer: 2, // Each acquirer wants 2 permits
         release_pattern: ReleasePattern::AllAtOnce,
     };
 
     let mut ctx = ConformanceTestContext::new(config);
     let (asupersync_result, tokio_result) = ctx.run_differential_test().await;
 
-    assert_wake_order_conformance(&asupersync_result, &tokio_result, "multi_permit_acquisition");
+    assert_wake_order_conformance(
+        &asupersync_result,
+        &tokio_result,
+        "multi_permit_acquisition",
+    );
 }
 
 /// Test high contention: many acquirers, few permits
@@ -397,18 +405,26 @@ async fn conformance_comprehensive_matrix() {
         // Basic scenarios
         (1, 3, 1, ReleasePattern::AllAtOnce),
         (2, 4, 1, ReleasePattern::Sequential { delay_ms: 1 }),
-        (3, 6, 1, ReleasePattern::Batched { batch_size: 2, delay_ms: 1 }),
-
+        (
+            3,
+            6,
+            1,
+            ReleasePattern::Batched {
+                batch_size: 2,
+                delay_ms: 1,
+            },
+        ),
         // Multi-permit scenarios
         (4, 3, 2, ReleasePattern::AllAtOnce),
         (2, 4, 3, ReleasePattern::Sequential { delay_ms: 2 }),
-
         // Edge cases
-        (0, 3, 1, ReleasePattern::AllAtOnce),  // Zero permits
-        (5, 2, 1, ReleasePattern::AllAtOnce),  // More permits than acquirers
+        (0, 3, 1, ReleasePattern::AllAtOnce), // Zero permits
+        (5, 2, 1, ReleasePattern::AllAtOnce), // More permits than acquirers
     ];
 
-    for (i, (permits, acquirers, permits_per_acquirer, release_pattern)) in test_cases.into_iter().enumerate() {
+    for (i, (permits, acquirers, permits_per_acquirer, release_pattern)) in
+        test_cases.into_iter().enumerate()
+    {
         let config = ConformanceTestConfig {
             permits,
             acquirers,
@@ -422,7 +438,7 @@ async fn conformance_comprehensive_matrix() {
         assert_wake_order_conformance(
             &asupersync_result,
             &tokio_result,
-            &format!("comprehensive_matrix_case_{}", i)
+            &format!("comprehensive_matrix_case_{}", i),
         );
     }
 }
@@ -446,7 +462,10 @@ async fn generate_conformance_report() {
     ];
 
     for (name, permits, acquirers, pattern) in test_cases {
-        println!("| {} | {} | {} | {} | ✅ PASS |", name, permits, acquirers, pattern);
+        println!(
+            "| {} | {} | {} | {} | ✅ PASS |",
+            name, permits, acquirers, pattern
+        );
     }
 
     println!("\n✅ All conformance tests passing");

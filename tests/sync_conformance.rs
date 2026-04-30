@@ -18,18 +18,18 @@
 #![allow(clippy::significant_drop_tightening)]
 
 use asupersync::Cx;
-use asupersync::sync::{Barrier, LockError, Mutex, Notify, OnceCell, RwLock, Semaphore};
-use asupersync::codec::{Decoder, Encoder, LengthDelimitedCodec as AsupersyncCodec};
 use asupersync::bytes::{BufMut, Bytes, BytesMut};
-use asupersync::runtime::scheduler::intrusive_heap::IntrusivePriorityHeap;
+use asupersync::codec::{Decoder, Encoder, LengthDelimitedCodec as AsupersyncCodec};
 use asupersync::record::task::TaskRecord;
+use asupersync::runtime::scheduler::intrusive_heap::IntrusivePriorityHeap;
+use asupersync::sync::{Barrier, LockError, Mutex, Notify, OnceCell, RwLock, Semaphore};
 use asupersync::types::{Budget, RegionId, TaskId};
 use asupersync::util::{Arena, ArenaIndex};
 use std::collections::BinaryHeap;
+use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
-use std::io;
 #[macro_use]
 mod common;
 
@@ -808,7 +808,11 @@ fn sync_005c_semaphore_fairness_conformance() {
     );
 
     // Verify grant ordering matches (FIFO fairness)
-    for (i, (asup, tokio)) in asupersync_results.iter().zip(tokio_results.iter()).enumerate() {
+    for (i, (asup, tokio)) in asupersync_results
+        .iter()
+        .zip(tokio_results.iter())
+        .enumerate()
+    {
         assert_with_log!(
             asup.0 == tokio.0,
             format!("fairness ordering should match at position {}", i),
@@ -832,7 +836,12 @@ fn sync_005c_semaphore_fairness_conformance() {
         asupersync_results.len()
     );
 
-    for (i, (asup, tokio)) in asupersync_results.iter().zip(tokio_results.iter()).enumerate().take(2) {
+    for (i, (asup, tokio)) in asupersync_results
+        .iter()
+        .zip(tokio_results.iter())
+        .enumerate()
+        .take(2)
+    {
         assert_with_log!(
             asup.0 == tokio.0,
             format!("oversubscribed fairness should match at position {}", i),
@@ -845,11 +854,14 @@ fn sync_005c_semaphore_fairness_conformance() {
 }
 
 /// Run asupersync semaphore test and return (acquirer_id, grant_order) pairs.
-fn run_asupersync_semaphore_test(permit_count: usize, requests: &[(usize, usize)]) -> Vec<(usize, usize)> {
+fn run_asupersync_semaphore_test(
+    permit_count: usize,
+    requests: &[(usize, usize)],
+) -> Vec<(usize, usize)> {
+    use futures_lite::future::block_on;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
-    use futures_lite::future::block_on;
 
     let sem = Arc::new(Semaphore::new(permit_count));
     let grant_counter = Arc::new(AtomicUsize::new(0));
@@ -889,7 +901,10 @@ fn run_asupersync_semaphore_test(permit_count: usize, requests: &[(usize, usize)
 }
 
 /// Run tokio semaphore test and return (acquirer_id, grant_order) pairs.
-fn run_tokio_semaphore_test(permit_count: usize, requests: &[(usize, usize)]) -> Vec<(usize, usize)> {
+fn run_tokio_semaphore_test(
+    permit_count: usize,
+    requests: &[(usize, usize)],
+) -> Vec<(usize, usize)> {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
@@ -992,7 +1007,11 @@ fn test_codec_differential(test_data: &[u8], config_name: &str) {
     );
 
     // Compare each frame byte-for-byte
-    for (i, (asup_result, tokio_result)) in asupersync_frames.iter().zip(tokio_frames.iter()).enumerate() {
+    for (i, (asup_result, tokio_result)) in asupersync_frames
+        .iter()
+        .zip(tokio_frames.iter())
+        .enumerate()
+    {
         match (asup_result, tokio_result) {
             (Ok(asup_frame), Ok(tokio_frame)) => {
                 let asup_bytes = asup_frame.clone().freeze();
@@ -1013,19 +1032,26 @@ fn test_codec_differential(test_data: &[u8], config_name: &str) {
                 );
             }
             (Ok(_), Err(tokio_err)) => {
-                panic!("[{}] frame {}: asupersync succeeded but tokio failed with {:?}",
-                       config_name, i, tokio_err);
+                panic!(
+                    "[{}] frame {}: asupersync succeeded but tokio failed with {:?}",
+                    config_name, i, tokio_err
+                );
             }
             (Err(asup_err), Ok(_)) => {
-                panic!("[{}] frame {}: tokio succeeded but asupersync failed with {:?}",
-                       config_name, i, asup_err);
+                panic!(
+                    "[{}] frame {}: tokio succeeded but asupersync failed with {:?}",
+                    config_name, i, asup_err
+                );
             }
         }
     }
 }
 
 /// Decode all frames using asupersync codec
-fn decode_all_frames_asupersync(codec: &mut AsupersyncCodec, data: Vec<u8>) -> Vec<Result<BytesMut, io::Error>> {
+fn decode_all_frames_asupersync(
+    codec: &mut AsupersyncCodec,
+    data: Vec<u8>,
+) -> Vec<Result<BytesMut, io::Error>> {
     let mut frames = Vec::new();
     let mut buf = BytesMut::from(&data[..]);
 
@@ -1056,7 +1082,10 @@ fn decode_all_frames_asupersync(codec: &mut AsupersyncCodec, data: Vec<u8>) -> V
 }
 
 /// Decode all frames using tokio codec
-fn decode_all_frames_tokio(codec: &mut tokio_util::codec::LengthDelimitedCodec, data: Vec<u8>) -> Vec<Result<Bytes, io::Error>> {
+fn decode_all_frames_tokio(
+    codec: &mut tokio_util::codec::LengthDelimitedCodec,
+    data: Vec<u8>,
+) -> Vec<Result<Bytes, io::Error>> {
     use tokio_util::codec::Decoder as TokioDecoder;
 
     let mut frames = Vec::new();
@@ -1256,7 +1285,8 @@ fn test_heap_conformance(operations: &[HeapOperation], test_name: &str) {
                 // Pop from intrusive heap
                 let intrusive_result = intrusive_heap.pop(&mut arena);
                 let intrusive_priority = intrusive_result.and_then(|task_id| {
-                    arena.get(task_id.arena_index())
+                    arena
+                        .get(task_id.arena_index())
                         .map(|record| record.sched_priority)
                 });
 
@@ -1277,7 +1307,9 @@ fn test_heap_conformance(operations: &[HeapOperation], test_name: &str) {
         intrusive_results.len()
     );
 
-    for (i, (intrusive_opt, std_opt)) in intrusive_results.iter().zip(std_results.iter()).enumerate() {
+    for (i, (intrusive_opt, std_opt)) in
+        intrusive_results.iter().zip(std_results.iter()).enumerate()
+    {
         match (intrusive_opt, std_opt) {
             (Some(intrusive_priority), Some(std_priority)) => {
                 assert_with_log!(
