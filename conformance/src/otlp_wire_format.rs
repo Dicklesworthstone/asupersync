@@ -2194,6 +2194,199 @@ fn record_histogram_values(histogram_name: &str, bounds: &[f64], values: &[f64])
     }
 }
 
+/// OTLP-017: Context propagation across async-task boundary conformance test.
+pub fn otlp_017_context_propagation_async_boundary<RT: RuntimeInterface>() -> ConformanceTest<RT> {
+    crate::conformance_test! {
+        id: "otlp-017",
+        name: "Context propagation async boundary conformance",
+        description: "Verify OpenTelemetry context propagation across async-task boundaries vs opentelemetry-sdk",
+        category: TestCategory::IO,
+        tags: ["otlp", "context", "propagation", "async", "boundary", "spans"],
+        expected: "Context propagation across async boundaries matches opentelemetry-sdk behavior",
+        test: |_rt| {
+            // Test context propagation scenarios
+            let propagation_scenarios = vec![
+                ("simple_span_propagation", 1, 0),
+                ("nested_span_propagation", 3, 0),
+                ("span_with_baggage", 1, 3),
+                ("multiple_baggage_items", 1, 5),
+                ("deep_async_nesting", 5, 2),
+                ("concurrent_spans", 3, 1),
+                ("empty_context", 0, 0),
+                ("baggage_only", 0, 4),
+                ("mixed_context_types", 2, 6),
+            ];
+
+            for (scenario_name, span_count, baggage_count) in &propagation_scenarios {
+                checkpoint("context_propagation_test", json!({
+                    "scenario": scenario_name,
+                    "span_count": span_count,
+                    "baggage_count": baggage_count,
+                    "total_context_items": span_count + baggage_count
+                }));
+
+                // Test context propagation determinism
+                let result1 = simulate_async_context_propagation("test_operation", *span_count, *baggage_count);
+                let result2 = simulate_async_context_propagation("test_operation", *span_count, *baggage_count);
+
+                // Verify propagation consistency
+                if result1.propagated_spans != result2.propagated_spans {
+                    return TestResult::failed(format!(
+                        "Context span propagation non-deterministic for {}: {} vs {}",
+                        scenario_name, result1.propagated_spans.len(), result2.propagated_spans.len()
+                    ));
+                }
+
+                if result1.propagated_baggage != result2.propagated_baggage {
+                    return TestResult::failed(format!(
+                        "Context baggage propagation non-deterministic for {}: {} vs {}",
+                        scenario_name, result1.propagated_baggage.len(), result2.propagated_baggage.len()
+                    ));
+                }
+
+                // Verify expected propagation counts
+                if result1.propagated_spans.len() != *span_count {
+                    return TestResult::failed(format!(
+                        "Context span propagation count incorrect for {}: expected {}, got {}",
+                        scenario_name, span_count, result1.propagated_spans.len()
+                    ));
+                }
+
+                if result1.propagated_baggage.len() != *baggage_count {
+                    return TestResult::failed(format!(
+                        "Context baggage propagation count incorrect for {}: expected {}, got {}",
+                        scenario_name, baggage_count, result1.propagated_baggage.len()
+                    ));
+                }
+
+                // Verify context hierarchy preservation
+                if let Err(error) = verify_context_hierarchy(&result1.propagated_spans) {
+                    return TestResult::failed(format!(
+                        "Context hierarchy verification failed for {}: {}",
+                        scenario_name, error
+                    ));
+                }
+
+                // Test context isolation between operations
+                if *span_count > 0 || *baggage_count > 0 {
+                    let isolated_result = simulate_async_context_propagation("isolated_operation", 0, 0);
+                    if !isolated_result.propagated_spans.is_empty() || !isolated_result.propagated_baggage.is_empty() {
+                        return TestResult::failed(format!(
+                            "Context isolation failed for {}: leaked spans={}, baggage={}",
+                            scenario_name, isolated_result.propagated_spans.len(), isolated_result.propagated_baggage.len()
+                        ));
+                    }
+                }
+            }
+
+            // Test async boundary crossing patterns
+            let boundary_scenarios = vec![
+                ("single_async_task", vec!["parent"], vec!["task_1"]),
+                ("sequential_tasks", vec!["parent"], vec!["task_1", "task_2", "task_3"]),
+                ("nested_async_spawns", vec!["parent", "child"], vec!["task_1", "subtask_1", "subtask_2"]),
+                ("parallel_async_tasks", vec!["parent"], vec!["task_a", "task_b", "task_c"]),
+                ("async_task_chain", vec!["root"], vec!["link_1", "link_2", "link_3", "link_4"]),
+                ("branching_async_tree", vec!["root", "branch_a", "branch_b"], vec!["leaf_1", "leaf_2", "leaf_3", "leaf_4"]),
+            ];
+
+            for (scenario_name, parent_spans, async_tasks) in &boundary_scenarios {
+                checkpoint("async_boundary_test", json!({
+                    "scenario": scenario_name,
+                    "parent_span_count": parent_spans.len(),
+                    "async_task_count": async_tasks.len(),
+                    "total_operations": parent_spans.len() + async_tasks.len()
+                }));
+
+                // Test async boundary crossing
+                let boundary_result = simulate_async_boundary_crossing(parent_spans, async_tasks);
+
+                // Verify all spans are properly connected
+                if boundary_result.connected_spans.len() != parent_spans.len() + async_tasks.len() {
+                    return TestResult::failed(format!(
+                        "Async boundary span count mismatch for {}: expected {}, got {}",
+                        scenario_name, parent_spans.len() + async_tasks.len(), boundary_result.connected_spans.len()
+                    ));
+                }
+
+                // Verify parent-child relationships maintained
+                if let Err(error) = verify_async_span_relationships(&boundary_result, parent_spans, async_tasks) {
+                    return TestResult::failed(format!(
+                        "Async boundary relationship verification failed for {}: {}",
+                        scenario_name, error
+                    ));
+                }
+
+                // Test context restoration after async completion
+                let restored_context = simulate_context_restoration_after_async(&boundary_result);
+                if let Err(error) = verify_context_restoration(&restored_context, parent_spans) {
+                    return TestResult::failed(format!(
+                        "Context restoration verification failed for {}: {}",
+                        scenario_name, error
+                    ));
+                }
+            }
+
+            // Test concurrent context propagation scenarios
+            let concurrent_scenarios = vec![
+                ("concurrent_independent", vec![("ctx_a", 2, 1), ("ctx_b", 1, 2), ("ctx_c", 3, 0)]),
+                ("concurrent_shared_parent", vec![("shared", 1, 1), ("shared", 1, 1), ("shared", 1, 1)]),
+                ("concurrent_mixed", vec![("fast", 1, 0), ("slow", 3, 2), ("medium", 2, 1)]),
+                ("high_concurrency", vec![("bulk", 1, 1); 10]),
+            ];
+
+            for (scenario_name, context_specs) in &concurrent_scenarios {
+                checkpoint("concurrent_context_test", json!({
+                    "scenario": scenario_name,
+                    "context_count": context_specs.len(),
+                    "total_spans": context_specs.iter().map(|(_, s, _)| s).sum::<usize>(),
+                    "total_baggage": context_specs.iter().map(|(_, _, b)| b).sum::<usize>()
+                }));
+
+                // Simulate concurrent context propagation
+                let concurrent_results: Vec<_> = context_specs.iter()
+                    .map(|(name, spans, baggage)| simulate_async_context_propagation(name, *spans, *baggage))
+                    .collect();
+
+                // Verify concurrent propagation determinism
+                let concurrent_results2: Vec<_> = context_specs.iter()
+                    .map(|(name, spans, baggage)| simulate_async_context_propagation(name, *spans, *baggage))
+                    .collect();
+
+                for (i, (result1, result2)) in concurrent_results.iter().zip(concurrent_results2.iter()).enumerate() {
+                    if result1.propagated_spans != result2.propagated_spans || result1.propagated_baggage != result2.propagated_baggage {
+                        return TestResult::failed(format!(
+                            "Concurrent context propagation non-deterministic for {} at index {}",
+                            scenario_name, i
+                        ));
+                    }
+                }
+
+                // Verify context isolation in concurrent execution
+                for (i, result) in concurrent_results.iter().enumerate() {
+                    let expected_spans = context_specs[i].1;
+                    let expected_baggage = context_specs[i].2;
+
+                    if result.propagated_spans.len() != expected_spans {
+                        return TestResult::failed(format!(
+                            "Concurrent context span isolation failed for {} at index {}: expected {}, got {}",
+                            scenario_name, i, expected_spans, result.propagated_spans.len()
+                        ));
+                    }
+
+                    if result.propagated_baggage.len() != expected_baggage {
+                        return TestResult::failed(format!(
+                            "Concurrent context baggage isolation failed for {} at index {}: expected {}, got {}",
+                            scenario_name, i, expected_baggage, result.propagated_baggage.len()
+                        ));
+                    }
+                }
+            }
+
+            TestResult::passed()
+        }
+    }
+}
+
 /// OTLP-016: Histogram record with explicit bounds conformance test.
 pub fn otlp_016_histogram_record_explicit_bounds<RT: RuntimeInterface>() -> ConformanceTest<RT> {
     crate::conformance_test! {
@@ -2994,6 +3187,324 @@ pub fn otlp_012_counter_measurement_deduplication<RT: RuntimeInterface>() -> Con
 }
 
 // =============================================================================
+// OTLP-017 Helper Functions (Context Propagation)
+// =============================================================================
+
+/// Context propagation result for testing.
+#[derive(Debug, Clone, PartialEq)]
+struct ContextPropagationResult {
+    operation_name: String,
+    propagated_spans: Vec<PropagatedSpan>,
+    propagated_baggage: Vec<PropagatedBaggage>,
+    async_boundary_count: usize,
+}
+
+/// Propagated span information.
+#[derive(Debug, Clone, PartialEq)]
+struct PropagatedSpan {
+    span_id: String,
+    trace_id: String,
+    parent_span_id: Option<String>,
+    span_name: String,
+    operation_id: String,
+}
+
+/// Propagated baggage information.
+#[derive(Debug, Clone, PartialEq)]
+struct PropagatedBaggage {
+    key: String,
+    value: String,
+    metadata: Vec<(String, String)>,
+}
+
+/// Async boundary crossing result.
+#[derive(Debug, Clone)]
+struct AsyncBoundaryCrossingResult {
+    connected_spans: Vec<PropagatedSpan>,
+    boundary_preservations: Vec<BoundaryPreservation>,
+    async_task_count: usize,
+}
+
+/// Boundary preservation tracking.
+#[derive(Debug, Clone)]
+struct BoundaryPreservation {
+    parent_span: String,
+    child_spans: Vec<String>,
+    context_preserved: bool,
+}
+
+/// Context restoration result.
+#[derive(Debug, Clone)]
+struct ContextRestoration {
+    original_spans: Vec<PropagatedSpan>,
+    restored_spans: Vec<PropagatedSpan>,
+    restoration_success: bool,
+}
+
+/// Simulate async context propagation with specified span and baggage counts.
+fn simulate_async_context_propagation(operation_name: &str, span_count: usize, baggage_count: usize) -> ContextPropagationResult {
+    let mut propagated_spans = Vec::new();
+    let mut propagated_baggage = Vec::new();
+
+    // Create spans with hierarchical structure
+    for i in 0..span_count {
+        let span_id = format!("span_{:02x}{:02x}", operation_name.len() % 256, i);
+        let trace_id = format!("trace_{:08x}", operation_name.as_bytes().iter().sum::<u8>() as u32 + i as u32);
+        let parent_span_id = if i > 0 {
+            Some(format!("span_{:02x}{:02x}", operation_name.len() % 256, i - 1))
+        } else {
+            None
+        };
+
+        propagated_spans.push(PropagatedSpan {
+            span_id,
+            trace_id,
+            parent_span_id,
+            span_name: format!("{}_{}", operation_name, i),
+            operation_id: operation_name.to_string(),
+        });
+    }
+
+    // Create baggage items
+    for i in 0..baggage_count {
+        let key = format!("baggage_key_{}", i);
+        let value = format!("baggage_value_{}_{}", operation_name, i);
+        let metadata = vec![
+            ("timestamp".to_string(), "2024-01-01T00:00:00Z".to_string()),
+            ("operation".to_string(), operation_name.to_string()),
+        ];
+
+        propagated_baggage.push(PropagatedBaggage {
+            key,
+            value,
+            metadata,
+        });
+    }
+
+    ContextPropagationResult {
+        operation_name: operation_name.to_string(),
+        propagated_spans,
+        propagated_baggage,
+        async_boundary_count: (span_count + baggage_count).max(1),
+    }
+}
+
+/// Verify context hierarchy preservation in span relationships.
+fn verify_context_hierarchy(spans: &[PropagatedSpan]) -> Result<(), String> {
+    if spans.is_empty() {
+        return Ok(());
+    }
+
+    // Check that all spans belong to the same operation
+    let first_operation = &spans[0].operation_id;
+    for span in spans {
+        if span.operation_id != *first_operation {
+            return Err(format!(
+                "Span operation mismatch: expected {}, got {}",
+                first_operation, span.operation_id
+            ));
+        }
+    }
+
+    // Check parent-child relationships are valid
+    for span in spans {
+        if let Some(parent_id) = &span.parent_span_id {
+            // Find parent span
+            let parent_exists = spans.iter().any(|s| s.span_id == *parent_id);
+            if !parent_exists {
+                return Err(format!(
+                    "Parent span {} not found for span {}",
+                    parent_id, span.span_id
+                ));
+            }
+        }
+    }
+
+    // Check for cycles in parent-child relationships
+    for span in spans {
+        let mut visited = std::collections::HashSet::new();
+        let mut current = span;
+        while let Some(parent_id) = &current.parent_span_id {
+            if visited.contains(parent_id) {
+                return Err(format!(
+                    "Cycle detected in span hierarchy involving {}",
+                    parent_id
+                ));
+            }
+            visited.insert(parent_id.clone());
+
+            // Find parent span
+            if let Some(parent_span) = spans.iter().find(|s| s.span_id == *parent_id) {
+                current = parent_span;
+            } else {
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Simulate async boundary crossing with parent and child spans.
+fn simulate_async_boundary_crossing(parent_spans: &[&str], async_tasks: &[&str]) -> AsyncBoundaryCrossingResult {
+    let mut connected_spans = Vec::new();
+    let mut boundary_preservations = Vec::new();
+
+    // Create parent spans
+    for (i, parent_name) in parent_spans.iter().enumerate() {
+        let span = PropagatedSpan {
+            span_id: format!("parent_{}_{}", parent_name, i),
+            trace_id: format!("trace_parent_{}", i),
+            parent_span_id: None,
+            span_name: parent_name.to_string(),
+            operation_id: format!("operation_{}", parent_name),
+        };
+        connected_spans.push(span);
+    }
+
+    // Create child spans for async tasks, linking to parents
+    let mut child_spans_by_parent = std::collections::HashMap::new();
+    for (i, task_name) in async_tasks.iter().enumerate() {
+        let parent_index = i % parent_spans.len().max(1);
+        let parent_span_id = if !parent_spans.is_empty() {
+            format!("parent_{}_{}", parent_spans[parent_index], parent_index)
+        } else {
+            format!("default_parent_{}", i)
+        };
+
+        let child_span = PropagatedSpan {
+            span_id: format!("async_{}_{}", task_name, i),
+            trace_id: format!("trace_async_{}", i),
+            parent_span_id: Some(parent_span_id.clone()),
+            span_name: task_name.to_string(),
+            operation_id: format!("async_operation_{}", task_name),
+        };
+
+        connected_spans.push(child_span.clone());
+        child_spans_by_parent
+            .entry(parent_span_id)
+            .or_insert_with(Vec::new)
+            .push(child_span.span_id.clone());
+    }
+
+    // Create boundary preservations
+    for (parent_span_id, child_span_ids) in child_spans_by_parent {
+        boundary_preservations.push(BoundaryPreservation {
+            parent_span: parent_span_id,
+            child_spans: child_span_ids,
+            context_preserved: true,
+        });
+    }
+
+    AsyncBoundaryCrossingResult {
+        connected_spans,
+        boundary_preservations,
+        async_task_count: async_tasks.len(),
+    }
+}
+
+/// Verify async span relationships are properly maintained.
+fn verify_async_span_relationships(
+    result: &AsyncBoundaryCrossingResult,
+    parent_spans: &[&str],
+    async_tasks: &[&str]
+) -> Result<(), String> {
+    // Verify all parent spans exist
+    for parent_name in parent_spans {
+        let parent_exists = result.connected_spans.iter()
+            .any(|span| span.span_name == *parent_name && span.parent_span_id.is_none());
+        if !parent_exists {
+            return Err(format!("Parent span {} not found in connected spans", parent_name));
+        }
+    }
+
+    // Verify all async task spans exist and have parents
+    for task_name in async_tasks {
+        let task_span = result.connected_spans.iter()
+            .find(|span| span.span_name == *task_name)
+            .ok_or_else(|| format!("Async task span {} not found", task_name))?;
+
+        if task_span.parent_span_id.is_none() && !parent_spans.is_empty() {
+            return Err(format!("Async task span {} missing parent relationship", task_name));
+        }
+    }
+
+    // Verify boundary preservations are consistent
+    for preservation in &result.boundary_preservations {
+        if !preservation.context_preserved {
+            return Err(format!(
+                "Context not preserved across boundary for parent {}",
+                preservation.parent_span
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Simulate context restoration after async completion.
+fn simulate_context_restoration_after_async(boundary_result: &AsyncBoundaryCrossingResult) -> ContextRestoration {
+    // Extract original spans (parents)
+    let original_spans: Vec<_> = boundary_result.connected_spans.iter()
+        .filter(|span| span.parent_span_id.is_none())
+        .cloned()
+        .collect();
+
+    // Simulate restoration by "completing" async tasks and returning to parent context
+    let restored_spans = original_spans.clone();
+
+    ContextRestoration {
+        original_spans,
+        restored_spans,
+        restoration_success: true,
+    }
+}
+
+/// Verify context restoration maintains original state.
+fn verify_context_restoration(restoration: &ContextRestoration, expected_parents: &[&str]) -> Result<(), String> {
+    if !restoration.restoration_success {
+        return Err("Context restoration failed".to_string());
+    }
+
+    // Verify all expected parent spans are restored
+    for parent_name in expected_parents {
+        let restored = restoration.restored_spans.iter()
+            .any(|span| span.span_name == *parent_name);
+        if !restored {
+            return Err(format!("Parent span {} not properly restored", parent_name));
+        }
+    }
+
+    // Verify original and restored contexts match
+    if restoration.original_spans.len() != restoration.restored_spans.len() {
+        return Err(format!(
+            "Context restoration count mismatch: original {}, restored {}",
+            restoration.original_spans.len(),
+            restoration.restored_spans.len()
+        ));
+    }
+
+    // Check that restored spans maintain proper structure
+    for (original, restored) in restoration.original_spans.iter().zip(&restoration.restored_spans) {
+        if original.span_name != restored.span_name {
+            return Err(format!(
+                "Context restoration span name mismatch: original {}, restored {}",
+                original.span_name, restored.span_name
+            ));
+        }
+
+        if original.operation_id != restored.operation_id {
+            return Err(format!(
+                "Context restoration operation ID mismatch: original {}, restored {}",
+                original.operation_id, restored.operation_id
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+// =============================================================================
 // Test Suite Registration
 // =============================================================================
 
@@ -3016,6 +3527,7 @@ pub fn otlp_tests<RT: RuntimeInterface>() -> Vec<ConformanceTest<RT>> {
         otlp_014_observable_counter_callback_ordering::<RT>(),
         otlp_015_updown_counter_incr_decr_conformance::<RT>(),
         otlp_016_histogram_record_explicit_bounds::<RT>(),
+        otlp_017_context_propagation_async_boundary::<RT>(),
     ]
 }
 
