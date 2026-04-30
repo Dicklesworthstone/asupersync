@@ -5,7 +5,6 @@
 //! borrow_and_update() and changed() maintain proper synchronization.
 
 use crate::channel::watch::{RecvError, channel};
-use crate::test_utils::{init_test, test_cx};
 use proptest::prelude::*;
 use std::future::Future;
 use std::sync::Arc;
@@ -55,7 +54,7 @@ impl Arbitrary for OrderingTestConfig {
 
     fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
         (
-            1usize..=3,    // sender_count
+            1usize..=3,    // send_batch_count
             1usize..=4,    // borrow_receiver_count
             1usize..=4,    // changed_receiver_count
             3usize..=8,    // value_count
