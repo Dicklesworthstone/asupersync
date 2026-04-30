@@ -846,7 +846,7 @@ mod golden_tests {
                     .expect("Property test encoder must construct");
 
                 // Create sufficient symbols for successful decode
-                let decoder = InactivationDecoder::new(k as usize, symbol_size as usize, seed);
+                let decoder = InactivationDecoder::new(k, symbol_size, seed);
                 let mut symbols = decoder.constraint_symbols();
 
                 // Add source symbols
