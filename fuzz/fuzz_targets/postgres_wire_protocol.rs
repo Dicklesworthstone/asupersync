@@ -19,9 +19,9 @@ use arbitrary::Arbitrary;
 use asupersync::Cx;
 use asupersync::database::PgColumn;
 use asupersync::database::postgres::{
-    Format, IsNull, PgError, ToSql, build_bind_msg, fuzz_apply_ready_for_query,
+    Format, FromSql, IsNull, PgError, ToSql, build_bind_msg, fuzz_apply_ready_for_query,
     fuzz_parse_bind_message, fuzz_parse_data_row, fuzz_parse_error_response,
-    fuzz_parse_parameter_description, fuzz_parse_row_description, fuzz_read_backend_message,
+    fuzz_parse_parameter_description, fuzz_parse_row_description, fuzz_read_backend_message, oid,
 };
 use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
@@ -342,12 +342,26 @@ struct BindFormatParameter {
     format: BindWireFormat,
     is_null: bool,
     value: Vec<u8>,
+    decode_as: BindDecodeType,
 }
 
 #[derive(Arbitrary, Debug, Clone, Copy)]
 enum BindWireFormat {
     Text,
     Binary,
+}
+
+#[derive(Arbitrary, Debug, Clone, Copy)]
+enum BindDecodeType {
+    Bool,
+    Int2,
+    Int4,
+    Int8,
+    Float4,
+    Float8,
+    Text,
+    Bytea,
+    Jsonb,
 }
 
 #[derive(Arbitrary, Debug)]
@@ -1034,6 +1048,7 @@ fn fuzz_bind_parameter_formats(parameters: Vec<BindFormatParameter>) {
                     actual, &expected.value,
                     "Bind payload bytes must be preserved exactly per parameter"
                 );
+                assert_clean_bind_coercion_result(actual, expected);
             }
             (other, is_null) => {
                 panic!("unexpected bind parameter state {other:?} for is_null={is_null}")
@@ -1118,6 +1133,7 @@ struct FuzzBindValue {
     format: BindWireFormat,
     is_null: bool,
     value: Vec<u8>,
+    decode_as: BindDecodeType,
 }
 
 impl From<BindFormatParameter> for FuzzBindValue {
@@ -1130,6 +1146,7 @@ impl From<BindFormatParameter> for FuzzBindValue {
                 .into_iter()
                 .take(MAX_STRING_LENGTH)
                 .collect::<Vec<_>>(),
+            decode_as: param.decode_as,
         }
     }
 }
@@ -1148,9 +1165,15 @@ impl ToSql for FuzzBindValue {
     }
 
     fn format(&self) -> Format {
-        match self.format {
-            BindWireFormat::Text => Format::Text,
-            BindWireFormat::Binary => Format::Binary,
+        self.format.as_pg_format()
+    }
+}
+
+impl BindWireFormat {
+    fn as_pg_format(self) -> Format {
+        match self {
+            Self::Text => Format::Text,
+            Self::Binary => Format::Binary,
         }
     }
 }
@@ -1177,6 +1200,89 @@ fn expected_bind_format_codes(parameters: &[FuzzBindValue]) -> Vec<i16> {
                 BindWireFormat::Binary => 1,
             })
             .collect()
+    }
+}
+
+fn assert_clean_bind_coercion_result(data: &[u8], value: &FuzzBindValue) {
+    let format = value.format.as_pg_format();
+    let result = decode_bind_value(data, value.decode_as, format);
+
+    if bind_decode_must_fail(data, value.decode_as, format) {
+        match result {
+            Err(PgError::Protocol(_)) => {}
+            other => panic!(
+                "bind parameter-format mismatch must be rejected with Protocol error, got {other:?}"
+            ),
+        }
+    } else if let Err(err) = result {
+        assert!(
+            matches!(err, PgError::Protocol(_)),
+            "bind parameter coercion must return clean Protocol errors, got {err:?}"
+        );
+    }
+}
+
+fn decode_bind_value(
+    data: &[u8],
+    decode_as: BindDecodeType,
+    format: Format,
+) -> Result<(), PgError> {
+    match decode_as {
+        BindDecodeType::Bool => bool::from_sql(data, oid::BOOL, format).map(|_| ()),
+        BindDecodeType::Int2 => i16::from_sql(data, oid::INT2, format).map(|_| ()),
+        BindDecodeType::Int4 => i32::from_sql(data, oid::INT4, format).map(|_| ()),
+        BindDecodeType::Int8 => i64::from_sql(data, oid::INT8, format).map(|_| ()),
+        BindDecodeType::Float4 => f32::from_sql(data, oid::FLOAT4, format).map(|_| ()),
+        BindDecodeType::Float8 => f64::from_sql(data, oid::FLOAT8, format).map(|_| ()),
+        BindDecodeType::Text => String::from_sql(data, oid::TEXT, format).map(|_| ()),
+        BindDecodeType::Bytea => Vec::<u8>::from_sql(data, oid::BYTEA, format).map(|_| ()),
+        BindDecodeType::Jsonb => String::from_sql(data, oid::JSONB, format).map(|_| ()),
+    }
+}
+
+fn bind_decode_must_fail(data: &[u8], decode_as: BindDecodeType, format: Format) -> bool {
+    match (decode_as, format) {
+        (BindDecodeType::Bool, Format::Binary) => !matches!(data, [0] | [1]),
+        (BindDecodeType::Bool, Format::Text) => std::str::from_utf8(data).map_or(true, |text| {
+            !matches!(
+                text,
+                "t" | "true" | "1" | "yes" | "on" | "f" | "false" | "0" | "no" | "off"
+            )
+        }),
+        (BindDecodeType::Int2, Format::Binary) => data.len() < 2,
+        (BindDecodeType::Int2, Format::Text) => {
+            std::str::from_utf8(data).map_or(true, |text| text.parse::<i16>().is_err())
+        }
+        (BindDecodeType::Int4, Format::Binary) => data.len() < 4,
+        (BindDecodeType::Int4, Format::Text) => {
+            std::str::from_utf8(data).map_or(true, |text| text.parse::<i32>().is_err())
+        }
+        (BindDecodeType::Int8, Format::Binary) => data.len() < 8,
+        (BindDecodeType::Int8, Format::Text) => {
+            std::str::from_utf8(data).map_or(true, |text| text.parse::<i64>().is_err())
+        }
+        (BindDecodeType::Float4, Format::Binary) => data.len() < 4,
+        (BindDecodeType::Float4, Format::Text) => {
+            std::str::from_utf8(data).map_or(true, |text| text.parse::<f32>().is_err())
+        }
+        (BindDecodeType::Float8, Format::Binary) => data.len() < 8,
+        (BindDecodeType::Float8, Format::Text) => {
+            std::str::from_utf8(data).map_or(true, |text| text.parse::<f64>().is_err())
+        }
+        (BindDecodeType::Text, _) => std::str::from_utf8(data).is_err(),
+        (BindDecodeType::Bytea, Format::Binary) => false,
+        (BindDecodeType::Bytea, Format::Text) => std::str::from_utf8(data).map_or(true, |text| {
+            text.strip_prefix("\\x")
+                .is_some_and(|hex_str| hex::decode(hex_str).is_err())
+        }),
+        (BindDecodeType::Jsonb, Format::Binary) => {
+            if data.is_empty() {
+                false
+            } else {
+                data[0] != 1 || std::str::from_utf8(&data[1..]).is_err()
+            }
+        }
+        (BindDecodeType::Jsonb, Format::Text) => std::str::from_utf8(data).is_err(),
     }
 }
 
