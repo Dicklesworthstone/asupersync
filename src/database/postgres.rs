@@ -6395,6 +6395,66 @@ pub fn fuzz_apply_ready_for_query(data: &[u8], initial_status: u8) -> (Result<u8
     (result, final_status)
 }
 
+/// Fuzz-target re-exporter for Sync-driven recovery back to ReadyForQuery.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_apply_sync_recovery(stream: &[u8], initial_status: u8) -> (Result<u8, PgError>, u8) {
+    let (mut conn, _peer) = fuzz_test_connection_with_peer();
+    conn.inner.transaction_status = initial_status;
+
+    let result = (|| {
+        let mut cursor = 0usize;
+        while cursor < stream.len() {
+            if stream.len() - cursor < 5 {
+                return Err(PgError::Io(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "unexpected end of stream",
+                )));
+            }
+
+            let msg_type = stream[cursor];
+            let len_i32 = i32::from_be_bytes([
+                stream[cursor + 1],
+                stream[cursor + 2],
+                stream[cursor + 3],
+                stream[cursor + 4],
+            ]);
+            let body_len = backend_message_body_len(len_i32)?;
+            let body_start = cursor + 5;
+            let body_end = body_start
+                .checked_add(body_len)
+                .ok_or_else(|| PgError::Protocol("message length overflow".into()))?;
+            if stream.len() < body_end {
+                return Err(PgError::Io(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "unexpected end of stream",
+                )));
+            }
+
+            let data = &stream[body_start..body_end];
+            cursor = body_end;
+
+            match msg_type {
+                b'1' | b'2' | b'3' | b'C' | b'D' | b'E' | b'N' | b'S' | b'A' | b'T' | b't'
+                | b'n' | b's' => {}
+                b'Z' => {
+                    conn.inner.closed = false;
+                    conn.handle_ready_for_query(data)?;
+                    return Ok(conn.inner.transaction_status);
+                }
+                _ => return Err(unexpected_backend_message("sync recovery", msg_type)),
+            }
+        }
+
+        Err(PgError::Protocol(
+            "sync recovery stream ended before ReadyForQuery".into(),
+        ))
+    })();
+
+    let final_status = conn.inner.transaction_status;
+    (result, final_status)
+}
+
 /// Fuzz-target summary for a frontend Parse message.
 #[cfg(feature = "test-internals")]
 #[derive(Debug, Clone, PartialEq, Eq)]

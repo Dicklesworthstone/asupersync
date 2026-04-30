@@ -20,8 +20,9 @@ use asupersync::Cx;
 use asupersync::database::PgColumn;
 use asupersync::database::postgres::{
     Format, FromSql, IsNull, PgError, ToSql, build_bind_msg, fuzz_apply_ready_for_query,
-    fuzz_parse_bind_message, fuzz_parse_data_row, fuzz_parse_error_response,
-    fuzz_parse_parameter_description, fuzz_parse_row_description, fuzz_read_backend_message, oid,
+    fuzz_apply_sync_recovery, fuzz_parse_bind_message, fuzz_parse_data_row,
+    fuzz_parse_error_response, fuzz_parse_parameter_description, fuzz_parse_row_description,
+    fuzz_read_backend_message, oid,
 };
 use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
@@ -94,6 +95,11 @@ enum FuzzScenario {
     ReadyForQueryState {
         initial_status: ReadyForQueryStatus,
         transitions: Vec<ReadyForQueryInput>,
+    },
+    /// Mid-transaction Sync recovery must stop on the first ReadyForQuery.
+    SyncRecovery {
+        initial_status: ReadyForQueryStatus,
+        frames: Vec<SyncRecoveryFrame>,
     },
 }
 
@@ -424,6 +430,31 @@ enum ReadyForQueryByte {
     Other(u8),
 }
 
+#[derive(Arbitrary, Debug)]
+struct SyncRecoveryFrame {
+    message_type: SyncRecoveryMessageType,
+    body: Vec<u8>,
+}
+
+#[derive(Arbitrary, Debug)]
+enum SyncRecoveryMessageType {
+    ParseComplete,
+    BindComplete,
+    CloseComplete,
+    CommandComplete,
+    ErrorResponse,
+    RowDescription,
+    DataRow,
+    ParameterDescription,
+    NoData,
+    PortalSuspended,
+    NoticeResponse,
+    ParameterStatus,
+    NotificationResponse,
+    ReadyForQuery(ReadyForQueryByte),
+    Unexpected(u8),
+}
+
 fuzz_target!(|scenario: FuzzScenario| match scenario {
     FuzzScenario::MessageFraming {
         message_type,
@@ -493,6 +524,11 @@ fuzz_target!(|scenario: FuzzScenario| match scenario {
         initial_status,
         transitions,
     } => fuzz_ready_for_query_state(initial_status, transitions),
+
+    FuzzScenario::SyncRecovery {
+        initial_status,
+        frames,
+    } => fuzz_sync_recovery(initial_status, frames),
 });
 
 fn fuzz_message_framing(
@@ -1122,10 +1158,124 @@ fn fuzz_ready_for_query_state(
     }
 }
 
+fn fuzz_sync_recovery(initial_status: ReadyForQueryStatus, frames: Vec<SyncRecoveryFrame>) {
+    let initial_status = ready_for_query_status_byte(&initial_status);
+    let mut stream = Vec::new();
+    let mut expected_status = initial_status;
+    let mut saw_terminal = false;
+    let mut expect_success = false;
+
+    for frame in frames.iter().take(64) {
+        let (msg_type, body) = build_sync_recovery_frame(frame);
+        stream.extend_from_slice(&build_backend_frame(msg_type, &body));
+
+        if saw_terminal {
+            continue;
+        }
+
+        match msg_type {
+            b'1' | b'2' | b'3' | b'C' | b'D' | b'E' | b'N' | b'S' | b'A' | b'T' | b't' | b'n'
+            | b's' => {}
+            b'Z' => {
+                saw_terminal = true;
+                if let [status @ (b'I' | b'T' | b'E')] = body.as_slice() {
+                    expect_success = true;
+                    expected_status = *status;
+                }
+            }
+            _ => {
+                saw_terminal = true;
+            }
+        }
+    }
+
+    let (actual_result, final_status) = fuzz_apply_sync_recovery(&stream, initial_status);
+    if expect_success {
+        match actual_result {
+            Ok(status) => assert_eq!(
+                status, expected_status,
+                "Sync recovery must report the first ReadyForQuery transaction status"
+            ),
+            Err(err) => panic!("expected Sync recovery success, got {err:?}"),
+        }
+        assert_eq!(
+            final_status, expected_status,
+            "Sync recovery must publish the ReadyForQuery transaction status"
+        );
+    } else {
+        match actual_result {
+            Err(PgError::Protocol(_)) | Err(PgError::Io(_)) => {}
+            other => {
+                panic!("malformed Sync recovery stream must return clean error, got {other:?}")
+            }
+        }
+        assert_eq!(
+            final_status, initial_status,
+            "failed Sync recovery must preserve the prior transaction status"
+        );
+    }
+}
+
 // Helper functions
 
 fn sanitize_string(input: &str, max_len: usize) -> String {
     input.chars().take(max_len).collect()
+}
+
+fn build_backend_frame(msg_type: u8, body: &[u8]) -> Vec<u8> {
+    let len = u32::try_from(body.len() + 4).unwrap_or(u32::MAX);
+    let mut frame = Vec::with_capacity(1 + 4 + body.len());
+    frame.push(msg_type);
+    frame.extend_from_slice(&len.to_be_bytes());
+    frame.extend_from_slice(body);
+    frame
+}
+
+fn build_sync_recovery_frame(frame: &SyncRecoveryFrame) -> (u8, Vec<u8>) {
+    match frame.message_type {
+        SyncRecoveryMessageType::ParseComplete => (b'1', Vec::new()),
+        SyncRecoveryMessageType::BindComplete => (b'2', Vec::new()),
+        SyncRecoveryMessageType::CloseComplete => (b'3', Vec::new()),
+        SyncRecoveryMessageType::CommandComplete => {
+            (b'C', frame.body[..frame.body.len().min(32)].to_vec())
+        }
+        SyncRecoveryMessageType::ErrorResponse => {
+            (b'E', frame.body[..frame.body.len().min(64)].to_vec())
+        }
+        SyncRecoveryMessageType::RowDescription => {
+            (b'T', frame.body[..frame.body.len().min(64)].to_vec())
+        }
+        SyncRecoveryMessageType::DataRow => (b'D', frame.body[..frame.body.len().min(64)].to_vec()),
+        SyncRecoveryMessageType::ParameterDescription => {
+            (b't', frame.body[..frame.body.len().min(64)].to_vec())
+        }
+        SyncRecoveryMessageType::NoData => (b'n', Vec::new()),
+        SyncRecoveryMessageType::PortalSuspended => (b's', Vec::new()),
+        SyncRecoveryMessageType::NoticeResponse => {
+            (b'N', frame.body[..frame.body.len().min(64)].to_vec())
+        }
+        SyncRecoveryMessageType::ParameterStatus => {
+            (b'S', frame.body[..frame.body.len().min(64)].to_vec())
+        }
+        SyncRecoveryMessageType::NotificationResponse => {
+            (b'A', frame.body[..frame.body.len().min(64)].to_vec())
+        }
+        SyncRecoveryMessageType::ReadyForQuery(state) => {
+            let mut body = Vec::with_capacity(1 + frame.body.len().min(8));
+            match state {
+                ReadyForQueryByte::Empty => {}
+                ReadyForQueryByte::Idle => body.push(b'I'),
+                ReadyForQueryByte::InTransaction => body.push(b'T'),
+                ReadyForQueryByte::FailedTransaction => body.push(b'E'),
+                ReadyForQueryByte::Other(byte) => body.push(byte),
+            }
+            body.extend_from_slice(&frame.body[..frame.body.len().min(8)]);
+            (b'Z', body)
+        }
+        SyncRecoveryMessageType::Unexpected(byte) => {
+            (byte, frame.body[..frame.body.len().min(64)].to_vec())
+        }
+    }
 }
 
 #[derive(Debug)]
