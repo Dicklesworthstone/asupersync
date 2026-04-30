@@ -112,8 +112,9 @@ impl StaticFiles {
         let cleaned = request_path.trim_start_matches('/');
         let decoded = percent_decode(cleaned);
 
-        // Reject path traversal.
-        if has_traversal(&decoded) {
+        // Reject path traversal, including sequences that would become
+        // traversal only if an upstream/downstream hop decodes once more.
+        if has_traversal(&decoded) || has_traversal_after_additional_decoding(&decoded) {
             return None;
         }
 
@@ -383,6 +384,21 @@ fn has_traversal(path: &str) -> bool {
     false
 }
 
+fn has_traversal_after_additional_decoding(path: &str) -> bool {
+    let mut current = path.to_string();
+    for _ in 0..4 {
+        let decoded = percent_decode(&current);
+        if decoded == current {
+            return false;
+        }
+        if has_traversal(&decoded) {
+            return true;
+        }
+        current = decoded;
+    }
+    false
+}
+
 fn is_parent_dir_segment(component: &str) -> bool {
     let mut chars = component.chars();
     let Some(first) = chars.next() else {
@@ -570,6 +586,26 @@ mod tests {
     }
 
     #[test]
+    fn traversal_deferred_percent_decoding() {
+        assert!(has_traversal_after_additional_decoding("%2e%2e/etc/passwd"));
+        assert!(has_traversal_after_additional_decoding(
+            "safe/%2e%2e/secret.txt"
+        ));
+        assert!(has_traversal_after_additional_decoding(
+            "safe%2f..%2fsecret.txt"
+        ));
+        assert!(has_traversal_after_additional_decoding(
+            "safe%5c..%5csecret.txt"
+        ));
+        assert!(has_traversal_after_additional_decoding(
+            "%252e%252e/etc/passwd"
+        ));
+        assert!(!has_traversal_after_additional_decoding(
+            "version%2e1/file.txt"
+        ));
+    }
+
+    #[test]
     fn no_traversal() {
         assert!(!has_traversal("hello.txt"));
         assert!(!has_traversal("sub/page.html"));
@@ -703,6 +739,15 @@ mod tests {
         let dir = setup_dir();
         let sf = StaticFiles::new(dir.path());
         assert!(sf.resolve_path("/hello%2Etxt").is_some());
+    }
+
+    #[test]
+    fn resolve_double_encoded_traversal_blocked() {
+        let dir = setup_dir();
+        let sf = StaticFiles::new(dir.path());
+        assert!(sf.resolve_path("/%252e%252e/etc/passwd").is_none());
+        assert!(sf.resolve_path("/sub%252f..%252fhello.txt").is_none());
+        assert!(sf.resolve_path("/sub%255c..%255chello.txt").is_none());
     }
 
     #[test]
