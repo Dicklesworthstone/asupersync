@@ -8,8 +8,7 @@ use clap::{Arg, Command};
 use prometheus_client::{
     encoding::text::encode,
     metrics::{
-        counter::Counter as PrometheusCounter,
-        gauge::Gauge as PrometheusGauge,
+        counter::Counter as PrometheusCounter, gauge::Gauge as PrometheusGauge,
         histogram::Histogram as PrometheusHistogram,
     },
     registry::Registry as PrometheusRegistry,
@@ -34,9 +33,9 @@ struct ConformanceCase {
 
 #[derive(Debug, PartialEq)]
 enum RequirementLevel {
-    Must,    // Prometheus spec MUST clause
-    Should,  // Prometheus spec SHOULD clause
-    May,     // Prometheus spec MAY clause
+    Must,   // Prometheus spec MUST clause
+    Should, // Prometheus spec SHOULD clause
+    May,    // Prometheus spec MAY clause
 }
 
 fn main() {
@@ -55,16 +54,16 @@ fn main() {
                     "comprehensive",
                     "edge-cases",
                     "report",
-                    "all"
+                    "all",
                 ])
-                .default_value("all")
+                .default_value("all"),
         )
         .arg(
             Arg::new("verbose")
                 .short('v')
                 .long("verbose")
                 .help("Verbose output")
-                .action(clap::ArgAction::SetTrue)
+                .action(clap::ArgAction::SetTrue),
         )
         .get_matches();
 
@@ -80,7 +79,7 @@ fn main() {
         "report" => {
             generate_compliance_report();
             return;
-        },
+        }
         "all" => run_all_tests(verbose),
         _ => {
             eprintln!("Unknown test: {}", test_name);
@@ -125,9 +124,14 @@ fn run_all_tests(verbose: bool) {
     }
 
     println!("\n=== Summary ===");
-    println!("Total: {} | Passed: {} | Failed: {} | Expected Failures: {}",
-             total, passed, failed, xfail);
-    println!("Success Rate: {:.1}%", (passed as f32 / total as f32) * 100.0);
+    println!(
+        "Total: {} | Passed: {} | Failed: {} | Expected Failures: {}",
+        total, passed, failed, xfail
+    );
+    println!(
+        "Success Rate: {:.1}%",
+        (passed as f32 / total as f32) * 100.0
+    );
 
     if failed > 0 {
         println!("\nDifferences documented in DISCREPANCIES.md");
@@ -158,7 +162,11 @@ fn run_counter_basic_test(verbose: bool) -> ConformanceTestResult {
     let requests_counter = PrometheusCounter::<u64, AtomicU64>::default();
     let errors_counter = PrometheusCounter::<u64, AtomicU64>::default();
 
-    registry.register("http_requests_total", "Counter for HTTP requests", requests_counter.clone());
+    registry.register(
+        "http_requests_total",
+        "Counter for HTTP requests",
+        requests_counter.clone(),
+    );
     registry.register("errors_total", "Counter for errors", errors_counter.clone());
 
     requests_counter.inc_by(1247);
@@ -209,8 +217,16 @@ fn run_gauge_basic_test(verbose: bool) -> ConformanceTestResult {
     let memory_gauge = PrometheusGauge::<i64, AtomicI64>::default();
     let connections_gauge = PrometheusGauge::<i64, AtomicI64>::default();
 
-    registry.register("memory_usage_bytes", "Memory usage in bytes", memory_gauge.clone());
-    registry.register("active_connections", "Active connections", connections_gauge.clone());
+    registry.register(
+        "memory_usage_bytes",
+        "Memory usage in bytes",
+        memory_gauge.clone(),
+    );
+    registry.register(
+        "active_connections",
+        "Active connections",
+        connections_gauge.clone(),
+    );
 
     memory_gauge.set(4096);
     connections_gauge.set(-1);
@@ -252,11 +268,11 @@ fn run_histogram_basic_test(verbose: bool) -> ConformanceTestResult {
     // Our implementation
     let mut our_metrics = Metrics::new();
     let our_hist = our_metrics.histogram("request_latency_seconds", vec![0.01, 0.1, 1.0, 10.0]);
-    our_hist.observe(0.005);  // Below first bucket
-    our_hist.observe(0.05);   // Second bucket
-    our_hist.observe(0.5);    // Third bucket
-    our_hist.observe(5.0);    // Fourth bucket
-    our_hist.observe(50.0);   // Above all buckets
+    our_hist.observe(0.005); // Below first bucket
+    our_hist.observe(0.05); // Second bucket
+    our_hist.observe(0.5); // Third bucket
+    our_hist.observe(5.0); // Fourth bucket
+    our_hist.observe(50.0); // Above all buckets
     let our_output = our_metrics.export_prometheus();
 
     // Reference implementation
@@ -264,7 +280,11 @@ fn run_histogram_basic_test(verbose: bool) -> ConformanceTestResult {
     let buckets = vec![0.01, 0.1, 1.0, 10.0];
     let reference_hist = PrometheusHistogram::new(buckets.into_iter());
 
-    registry.register("request_latency_seconds", "Request latency in seconds", reference_hist.clone());
+    registry.register(
+        "request_latency_seconds",
+        "Request latency in seconds",
+        reference_hist.clone(),
+    );
 
     reference_hist.observe(0.005);
     reference_hist.observe(0.05);
@@ -318,20 +338,27 @@ fn run_comprehensive_test(verbose: bool) -> ConformanceTestResult {
     our_metrics.counter("region_closures_total").add(u64::MAX);
 
     // 3 Histograms with observations
-    let request_latency = our_metrics.histogram("request_latency_seconds", vec![0.001, 0.01, 0.1, 1.0]);
+    let request_latency =
+        our_metrics.histogram("request_latency_seconds", vec![0.001, 0.01, 0.1, 1.0]);
     request_latency.observe(0.0005);
     request_latency.observe(0.025);
     request_latency.observe(0.15);
     request_latency.observe(2.5);
 
-    let memory_alloc = our_metrics.histogram("memory_allocation_bytes", vec![1024.0, 4096.0, 16384.0, 65536.0]);
+    let memory_alloc = our_metrics.histogram(
+        "memory_allocation_bytes",
+        vec![1024.0, 4096.0, 16384.0, 65536.0],
+    );
     memory_alloc.observe(512.0);
     memory_alloc.observe(2048.0);
     memory_alloc.observe(8192.0);
     memory_alloc.observe(32768.0);
     memory_alloc.observe(131072.0);
 
-    let task_duration = our_metrics.histogram("task_execution_duration_ms", vec![1.0, 5.0, 10.0, 50.0, 100.0]);
+    let task_duration = our_metrics.histogram(
+        "task_execution_duration_ms",
+        vec![1.0, 5.0, 10.0, 50.0, 100.0],
+    );
     task_duration.observe(0.5);
     task_duration.observe(3.0);
     task_duration.observe(7.5);
@@ -523,14 +550,23 @@ fn compare_prometheus_outputs(our_output: &str, reference_output: &str) -> Confo
         // Line-by-line comparison (limit to first 10 differences)
         for (i, (our_line, ref_line)) in our_lines.iter().zip(ref_lines.iter()).enumerate() {
             if our_line != ref_line && differences.len() < 10 {
-                differences.push(format!("Line {}: ours='{}', reference='{}'", i + 1, our_line, ref_line));
+                differences.push(format!(
+                    "Line {}: ours='{}', reference='{}'",
+                    i + 1,
+                    our_line,
+                    ref_line
+                ));
             }
         }
 
         // Check for extra lines (limit reporting)
         if our_lines.len() > ref_lines.len() {
             for (i, line) in our_lines.iter().skip(ref_lines.len()).take(5).enumerate() {
-                differences.push(format!("Extra our line {}: '{}'", ref_lines.len() + i + 1, line));
+                differences.push(format!(
+                    "Extra our line {}: '{}'",
+                    ref_lines.len() + i + 1,
+                    line
+                ));
             }
         }
         if ref_lines.len() > our_lines.len() {
@@ -591,7 +627,10 @@ fn generate_compliance_report() {
     );
     println!("\nTest cases:");
     for tc in &test_cases {
-        println!("  - {} ({:?}): {}", tc.name, tc.requirement_level, tc.description);
+        println!(
+            "  - {} ({:?}): {}",
+            tc.name, tc.requirement_level, tc.description
+        );
     }
     println!("\nRun 'prometheus_conformance all -v' for detailed test execution.");
     println!("Any differences will be documented in DISCREPANCIES.md");

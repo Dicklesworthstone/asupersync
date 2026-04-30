@@ -1,10 +1,14 @@
-use asupersync::trace::distributed::context::{SymbolTraceContext, TraceFlags as AsuperTraceFlags, RegionTag};
+use asupersync::trace::distributed::context::{
+    RegionTag, SymbolTraceContext, TraceFlags as AsuperTraceFlags,
+};
 use asupersync::trace::distributed::id::{DistTraceId, SymbolSpanId};
 use asupersync::util::DetRng;
 use clap::{Arg, Command};
-use opentelemetry::trace::{SpanContext, SpanId, TraceFlags as OtelTraceFlags, TraceId, TraceState};
-use opentelemetry::{Context, KeyValue, propagation::TextMapPropagator, Baggage};
-use opentelemetry_sdk::trace::{TracerProvider, Config, Sampler};
+use opentelemetry::trace::{
+    SpanContext, SpanId, TraceFlags as OtelTraceFlags, TraceId, TraceState,
+};
+use opentelemetry::{Baggage, Context, KeyValue, propagation::TextMapPropagator};
+use opentelemetry_sdk::trace::{Config, Sampler, TracerProvider};
 use opentelemetry_sdk::{Resource, runtime::Tokio};
 use std::collections::HashMap;
 
@@ -112,19 +116,27 @@ fn to_w3c_headers(ctx: &SymbolTraceContext) -> W3cHeaders {
     let tracestate = if ctx.baggage().is_empty() {
         None
     } else {
-        let entries: Vec<String> = ctx.baggage()
+        let entries: Vec<String> = ctx
+            .baggage()
             .iter()
             .map(|(k, v)| format!("{}={}", k, v))
             .collect();
         Some(entries.join(","))
     };
 
-    W3cHeaders { traceparent, tracestate }
+    W3cHeaders {
+        traceparent,
+        tracestate,
+    }
 }
 
 /// Converts SymbolTraceContext to B3 headers
 fn to_b3_headers(ctx: &SymbolTraceContext) -> B3Headers {
-    let trace_id = format!("{:016x}{:016x}", ctx.trace_id().high(), ctx.trace_id().low());
+    let trace_id = format!(
+        "{:016x}{:016x}",
+        ctx.trace_id().high(),
+        ctx.trace_id().low()
+    );
     let span_id = format!("{:016x}", ctx.span_id().as_u64());
 
     let sampled = if ctx.flags().is_sampled() {
@@ -142,7 +154,9 @@ fn to_b3_headers(ctx: &SymbolTraceContext) -> B3Headers {
 }
 
 /// Parses W3C traceparent header back to components
-fn parse_w3c_traceparent(traceparent: &str) -> Result<(DistTraceId, SymbolSpanId, AsuperTraceFlags), Box<dyn std::error::Error>> {
+fn parse_w3c_traceparent(
+    traceparent: &str,
+) -> Result<(DistTraceId, SymbolSpanId, AsuperTraceFlags), Box<dyn std::error::Error>> {
     let parts: Vec<&str> = traceparent.split('-').collect();
     if parts.len() != 4 || parts[0] != "00" {
         return Err("Invalid traceparent format".into());
@@ -170,11 +184,17 @@ fn parse_w3c_traceparent(traceparent: &str) -> Result<(DistTraceId, SymbolSpanId
 }
 
 /// Creates OpenTelemetry SpanContext for comparison
-fn create_otel_span_context(trace_id: DistTraceId, span_id: SymbolSpanId, flags: AsuperTraceFlags, baggage: &[(String, String)]) -> Result<SpanContext, Box<dyn std::error::Error>> {
+fn create_otel_span_context(
+    trace_id: DistTraceId,
+    span_id: SymbolSpanId,
+    flags: AsuperTraceFlags,
+    baggage: &[(String, String)],
+) -> Result<SpanContext, Box<dyn std::error::Error>> {
     let trace_id_bytes = [
         &trace_id.high().to_be_bytes(),
-        &trace_id.low().to_be_bytes()
-    ].concat();
+        &trace_id.low().to_be_bytes(),
+    ]
+    .concat();
     let otel_trace_id = TraceId::from_bytes(trace_id_bytes.try_into().unwrap());
 
     let span_id_bytes = span_id.as_u64().to_be_bytes();
@@ -191,7 +211,13 @@ fn create_otel_span_context(trace_id: DistTraceId, span_id: SymbolSpanId, flags:
         trace_state = trace_state.with_key_value(key, value)?;
     }
 
-    Ok(SpanContext::new(otel_trace_id, otel_span_id, otel_flags, false, trace_state))
+    Ok(SpanContext::new(
+        otel_trace_id,
+        otel_span_id,
+        otel_flags,
+        false,
+        trace_state,
+    ))
 }
 
 // =============================================================================
@@ -220,9 +246,11 @@ fn test_w3c_roundtrip(verbose: bool) -> TestResult {
     let w3c_headers = to_w3c_headers(&original_ctx);
 
     if verbose {
-        println!("  Original trace: {:016x}{:016x}",
+        println!(
+            "  Original trace: {:016x}{:016x}",
             original_ctx.trace_id().high(),
-            original_ctx.trace_id().low());
+            original_ctx.trace_id().low()
+        );
         println!("  W3C traceparent: {}", w3c_headers.traceparent);
         if let Some(ref tracestate) = w3c_headers.tracestate {
             println!("  W3C tracestate: {}", tracestate);
@@ -230,15 +258,19 @@ fn test_w3c_roundtrip(verbose: bool) -> TestResult {
     }
 
     // Parse headers back (simulate receiving in another process)
-    let (parsed_trace_id, parsed_span_id, parsed_flags) = parse_w3c_traceparent(&w3c_headers.traceparent)?;
+    let (parsed_trace_id, parsed_span_id, parsed_flags) =
+        parse_w3c_traceparent(&w3c_headers.traceparent)?;
 
     // Verify roundtrip accuracy
     if parsed_trace_id != original_ctx.trace_id() {
         return Err(format!(
             "Trace ID roundtrip failed: {:016x}{:016x} != {:016x}{:016x}",
-            parsed_trace_id.high(), parsed_trace_id.low(),
-            original_ctx.trace_id().high(), original_ctx.trace_id().low()
-        ).into());
+            parsed_trace_id.high(),
+            parsed_trace_id.low(),
+            original_ctx.trace_id().high(),
+            original_ctx.trace_id().low()
+        )
+        .into());
     }
 
     if parsed_span_id != original_ctx.span_id() {
@@ -246,7 +278,8 @@ fn test_w3c_roundtrip(verbose: bool) -> TestResult {
             "Span ID roundtrip failed: {:016x} != {:016x}",
             parsed_span_id.as_u64(),
             original_ctx.span_id().as_u64()
-        ).into());
+        )
+        .into());
     }
 
     if parsed_flags.as_byte() != original_ctx.flags().as_byte() {
@@ -254,7 +287,8 @@ fn test_w3c_roundtrip(verbose: bool) -> TestResult {
             "Flags roundtrip failed: {:02x} != {:02x}",
             parsed_flags.as_byte(),
             original_ctx.flags().as_byte()
-        ).into());
+        )
+        .into());
     }
 
     // Test against OpenTelemetry reference
@@ -262,7 +296,7 @@ fn test_w3c_roundtrip(verbose: bool) -> TestResult {
         original_ctx.trace_id(),
         original_ctx.span_id(),
         original_ctx.flags(),
-        original_ctx.baggage()
+        original_ctx.baggage(),
     )?;
 
     let propagator = opentelemetry::propagation::TraceContextPropagator::new();
@@ -270,14 +304,16 @@ fn test_w3c_roundtrip(verbose: bool) -> TestResult {
     let ctx = Context::default().with_span(MockSpan::new(otel_span_context));
     propagator.inject_context(&ctx, &mut HeaderInjector(&mut ref_headers));
 
-    let ref_traceparent = ref_headers.get("traceparent")
+    let ref_traceparent = ref_headers
+        .get("traceparent")
         .ok_or("Reference traceparent missing")?;
 
     if &w3c_headers.traceparent != ref_traceparent {
         return Err(format!(
             "W3C conformance mismatch:\n  Our: {}\n  Ref: {}",
             w3c_headers.traceparent, ref_traceparent
-        ).into());
+        )
+        .into());
     }
 
     if verbose {
@@ -329,7 +365,11 @@ fn test_b3_roundtrip(verbose: bool) -> TestResult {
     }
 
     // Check sampling flag
-    let expected_sampled = if original_ctx.flags().is_sampled() { "1" } else { "0" };
+    let expected_sampled = if original_ctx.flags().is_sampled() {
+        "1"
+    } else {
+        "0"
+    };
     if b3_headers.sampled.as_deref() != Some(expected_sampled) {
         return Err("B3 sampling flag mismatch".into());
     }
@@ -362,7 +402,8 @@ fn test_baggage_roundtrip(verbose: bool) -> TestResult {
     // Convert to W3C format (includes baggage as tracestate)
     let w3c_headers = to_w3c_headers(&original_ctx);
 
-    let tracestate = w3c_headers.tracestate
+    let tracestate = w3c_headers
+        .tracestate
         .ok_or("Tracestate should be present with baggage")?;
 
     if verbose {
@@ -381,8 +422,7 @@ fn test_baggage_roundtrip(verbose: bool) -> TestResult {
 
     // Verify all baggage items preserved
     for (key, value) in original_ctx.baggage() {
-        let found = parsed_baggage.iter()
-            .any(|(k, v)| k == key && v == value);
+        let found = parsed_baggage.iter().any(|(k, v)| k == key && v == value);
 
         if !found {
             return Err(format!("Baggage item lost: {}={}", key, value).into());
@@ -430,8 +470,10 @@ fn test_mixed_headers(verbose: bool) -> TestResult {
 
     if verbose {
         println!("  W3C format: {}", w3c_headers.traceparent);
-        println!("  B3 format: X-B3-TraceId={}, X-B3-SpanId={}",
-            b3_headers.trace_id, b3_headers.span_id);
+        println!(
+            "  B3 format: X-B3-TraceId={}, X-B3-SpanId={}",
+            b3_headers.trace_id, b3_headers.span_id
+        );
         println!("  Cross-format consistency: ✓");
     }
 
@@ -469,8 +511,8 @@ fn test_comprehensive_scenario(verbose: bool) -> TestResult {
         &mut rng,
     )
     .with_baggage("request_id", "req-root-123") // Inherited
-    .with_baggage("user_id", "user-456")       // Inherited
-    .with_baggage("service_b_op", "process");  // Added
+    .with_baggage("user_id", "user-456") // Inherited
+    .with_baggage("service_b_op", "process"); // Added
 
     // Service B -> Service C (B3 headers)
     let b_to_c_headers = to_b3_headers(&service_b_ctx);
@@ -479,8 +521,9 @@ fn test_comprehensive_scenario(verbose: bool) -> TestResult {
     let b3_trace_id = DistTraceId::new(b3_trace_high, b3_trace_low);
 
     // Verify trace ID propagated correctly across all services
-    if service_a_ctx.trace_id() != service_b_ctx.trace_id() ||
-       service_b_ctx.trace_id() != b3_trace_id {
+    if service_a_ctx.trace_id() != service_b_ctx.trace_id()
+        || service_b_ctx.trace_id() != b3_trace_id
+    {
         return Err("Trace ID not preserved across service calls".into());
     }
 
@@ -494,15 +537,21 @@ fn test_comprehensive_scenario(verbose: bool) -> TestResult {
     }
 
     if verbose {
-        println!("  Service A trace: {:016x}{:016x}",
+        println!(
+            "  Service A trace: {:016x}{:016x}",
             service_a_ctx.trace_id().high(),
-            service_a_ctx.trace_id().low());
-        println!("  Service B trace: {:016x}{:016x}",
+            service_a_ctx.trace_id().low()
+        );
+        println!(
+            "  Service B trace: {:016x}{:016x}",
             service_b_ctx.trace_id().high(),
-            service_b_ctx.trace_id().low());
-        println!("  Service C trace: {:016x}{:016x}",
+            service_b_ctx.trace_id().low()
+        );
+        println!(
+            "  Service C trace: {:016x}{:016x}",
             b3_trace_id.high(),
-            b3_trace_id.low());
+            b3_trace_id.low()
+        );
         println!("  A->B headers: W3C");
         println!("  B->C headers: B3");
         println!("  Trace continuity: ✓");
@@ -590,7 +639,11 @@ mod tests {
             ctx.span_id().as_u64()
         );
 
-        assert!(headers.traceparent.starts_with("00-1234567890abcdeffedcba0987654321"));
+        assert!(
+            headers
+                .traceparent
+                .starts_with("00-1234567890abcdeffedcba0987654321")
+        );
         assert!(headers.traceparent.ends_with("-01")); // SAMPLED flag
     }
 

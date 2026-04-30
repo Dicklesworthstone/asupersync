@@ -115,7 +115,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Generate a concise summary output
-fn generate_summary_output(report: &asupersync_conformance::DataEndStreamComplianceReport) -> String {
+fn generate_summary_output(
+    report: &asupersync_conformance::DataEndStreamComplianceReport,
+) -> String {
     let mut output = String::new();
 
     output.push_str("HTTP/2 DATA FRAME END_STREAM CONFORMANCE SUMMARY\n");
@@ -165,14 +167,14 @@ fn generate_summary_output(report: &asupersync_conformance::DataEndStreamComplia
             for stream_state in &state.stream_states {
                 output.push_str(&format!(
                     "  📊 {} Stream {}: state={:?}, can_recv={}, can_send={}\n",
-                    result.case_id, stream_state.stream_id, stream_state.state,
-                    stream_state.can_recv, stream_state.can_send
+                    result.case_id,
+                    stream_state.stream_id,
+                    stream_state.state,
+                    stream_state.can_recv,
+                    stream_state.can_send
                 ));
                 if let Some(error_code) = &stream_state.error_code {
-                    output.push_str(&format!(
-                        "      Error code: {}\n",
-                        error_code
-                    ));
+                    output.push_str(&format!("      Error code: {}\n", error_code));
                 }
             }
         }

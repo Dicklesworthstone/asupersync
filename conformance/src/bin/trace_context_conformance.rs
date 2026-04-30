@@ -1,10 +1,14 @@
-use asupersync::trace::distributed::context::{SymbolTraceContext, TraceFlags as AsuperTraceFlags, RegionTag};
+use asupersync::trace::distributed::context::{
+    RegionTag, SymbolTraceContext, TraceFlags as AsuperTraceFlags,
+};
 use asupersync::trace::distributed::id::{DistTraceId, SymbolSpanId};
 use asupersync::util::DetRng;
 use clap::{Arg, Command};
-use opentelemetry::trace::{SpanContext, SpanId, TraceFlags as OtelTraceFlags, TraceId, TraceState};
+use opentelemetry::trace::{
+    SpanContext, SpanId, TraceFlags as OtelTraceFlags, TraceId, TraceState,
+};
 use opentelemetry::{Context, KeyValue, propagation::TextMapPropagator};
-use opentelemetry_sdk::trace::{TracerProvider, Config, Sampler};
+use opentelemetry_sdk::trace::{Config, Sampler, TracerProvider};
 use opentelemetry_sdk::{Resource, runtime::Tokio};
 use std::collections::HashMap;
 
@@ -86,7 +90,11 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 /// Converts asupersync SymbolTraceContext to W3C traceparent header format.
 /// Format: 00-{trace_id}-{span_id}-{flags}
 fn to_w3c_traceparent(ctx: &SymbolTraceContext) -> String {
-    let trace_id_hex = format!("{:016x}{:016x}", ctx.trace_id().high(), ctx.trace_id().low());
+    let trace_id_hex = format!(
+        "{:016x}{:016x}",
+        ctx.trace_id().high(),
+        ctx.trace_id().low()
+    );
     let span_id_hex = format!("{:016x}", ctx.span_id().as_u64());
     let flags_hex = format!("{:02x}", ctx.flags().as_byte());
 
@@ -100,7 +108,8 @@ fn to_w3c_tracestate(ctx: &SymbolTraceContext) -> Option<String> {
         return None;
     }
 
-    let entries: Vec<String> = ctx.baggage()
+    let entries: Vec<String> = ctx
+        .baggage()
         .iter()
         .map(|(k, v)| format!("{}={}", k, v))
         .collect();
@@ -109,12 +118,15 @@ fn to_w3c_tracestate(ctx: &SymbolTraceContext) -> Option<String> {
 }
 
 /// Creates equivalent OpenTelemetry SpanContext for comparison.
-fn to_otel_span_context(ctx: &SymbolTraceContext) -> Result<SpanContext, Box<dyn std::error::Error>> {
+fn to_otel_span_context(
+    ctx: &SymbolTraceContext,
+) -> Result<SpanContext, Box<dyn std::error::Error>> {
     // Convert trace ID from asupersync format
     let trace_id_bytes = [
         &ctx.trace_id().high().to_be_bytes(),
-        &ctx.trace_id().low().to_be_bytes()
-    ].concat();
+        &ctx.trace_id().low().to_be_bytes(),
+    ]
+    .concat();
     let trace_id = TraceId::from_bytes(trace_id_bytes.try_into().unwrap());
 
     // Convert span ID
@@ -134,7 +146,13 @@ fn to_otel_span_context(ctx: &SymbolTraceContext) -> Result<SpanContext, Box<dyn
         trace_state = trace_state.with_key_value(key, value)?;
     }
 
-    Ok(SpanContext::new(trace_id, span_id, otel_flags, false, trace_state))
+    Ok(SpanContext::new(
+        trace_id,
+        span_id,
+        otel_flags,
+        false,
+        trace_state,
+    ))
 }
 
 /// Creates our TraceContext headers for conformance comparison.
@@ -180,14 +198,19 @@ fn test_basic_propagation(verbose: bool) -> TestResult {
     ref_propagator.inject_context(&ctx, &mut HeaderInjector(&mut ref_headers));
 
     // Compare traceparent headers
-    let our_traceparent = our_headers.get("traceparent").ok_or("Missing traceparent")?;
-    let ref_traceparent = ref_headers.get("traceparent").ok_or("Missing ref traceparent")?;
+    let our_traceparent = our_headers
+        .get("traceparent")
+        .ok_or("Missing traceparent")?;
+    let ref_traceparent = ref_headers
+        .get("traceparent")
+        .ok_or("Missing ref traceparent")?;
 
     if our_traceparent != ref_traceparent {
         return Err(format!(
             "traceparent mismatch:\n  Our: {}\n  Ref: {}",
             our_traceparent, ref_traceparent
-        ).into());
+        )
+        .into());
     }
 
     // Compare tracestate headers
@@ -197,10 +220,9 @@ fn test_basic_propagation(verbose: bool) -> TestResult {
     match (our_tracestate, ref_tracestate) {
         (Some(ours), Some(refs)) => {
             if ours != refs {
-                return Err(format!(
-                    "tracestate mismatch:\n  Our: {}\n  Ref: {}",
-                    ours, refs
-                ).into());
+                return Err(
+                    format!("tracestate mismatch:\n  Our: {}\n  Ref: {}", ours, refs).into(),
+                );
             }
         }
         (None, None) => {
@@ -210,7 +232,8 @@ fn test_basic_propagation(verbose: bool) -> TestResult {
             return Err(format!(
                 "tracestate presence mismatch:\n  Our: {:?}\n  Ref: {:?}",
                 ours, refs
-            ).into());
+            )
+            .into());
         }
     }
 
@@ -243,8 +266,7 @@ fn test_nested_spans(verbose: bool) -> TestResult {
     .with_baggage("parent", "root");
 
     // Child span (inherits trace_id, gets new span_id)
-    let child_ctx = parent_ctx.child(&mut rng)
-        .with_baggage("child", "level1");
+    let child_ctx = parent_ctx.child(&mut rng).with_baggage("child", "level1");
 
     // Generate headers
     let parent_headers = create_our_headers(&parent_ctx);
@@ -310,7 +332,8 @@ fn test_baggage_propagation(verbose: bool) -> TestResult {
     let headers = create_our_headers(&ctx);
 
     // Verify tracestate contains all baggage
-    let tracestate = headers.get("tracestate")
+    let tracestate = headers
+        .get("tracestate")
         .ok_or("tracestate header missing")?;
 
     let required_entries = ["service=api", "version=1.2.3", "datacenter=us-east-1"];
@@ -328,7 +351,8 @@ fn test_baggage_propagation(verbose: bool) -> TestResult {
     ref_propagator.inject_context(&otel_ctx, &mut HeaderInjector(&mut ref_headers));
 
     // Compare tracestate (order may differ, so check individual entries)
-    let ref_tracestate = ref_headers.get("tracestate")
+    let ref_tracestate = ref_headers
+        .get("tracestate")
         .ok_or("Reference tracestate missing")?;
 
     for entry in &required_entries {
@@ -391,7 +415,11 @@ fn test_sampling_decisions(verbose: bool) -> TestResult {
     }
 
     if !unsampled_traceparent.ends_with("-00") {
-        return Err(format!("Unsampled span should end with -00: {}", unsampled_traceparent).into());
+        return Err(format!(
+            "Unsampled span should end with -00: {}",
+            unsampled_traceparent
+        )
+        .into());
     }
 
     // Test against OpenTelemetry reference for sampled case
@@ -406,7 +434,8 @@ fn test_sampling_decisions(verbose: bool) -> TestResult {
         return Err(format!(
             "Sampled traceparent mismatch:\n  Our: {}\n  Ref: {}",
             sampled_traceparent, ref_traceparent
-        ).into());
+        )
+        .into());
     }
 
     if verbose {
@@ -439,11 +468,11 @@ fn test_comprehensive_scenario(verbose: bool) -> TestResult {
     .with_baggage("user_id", "12345");
 
     // Database span (child)
-    let db_ctx = api_ctx.child(&mut rng)
-        .with_baggage("db.name", "users");
+    let db_ctx = api_ctx.child(&mut rng).with_baggage("db.name", "users");
 
     // Cache span (child of API)
-    let cache_ctx = api_ctx.child(&mut rng)
+    let cache_ctx = api_ctx
+        .child(&mut rng)
         .with_baggage("cache.key", "user:12345");
 
     // Generate headers for each span
@@ -452,10 +481,11 @@ fn test_comprehensive_scenario(verbose: bool) -> TestResult {
     let cache_headers = create_our_headers(&cache_ctx);
 
     // Verify all have same trace_id
-    let extract_trace_id = |headers: &HashMap<String, String>| -> Result<String, Box<dyn std::error::Error>> {
-        let traceparent = headers.get("traceparent").ok_or("Missing traceparent")?;
-        Ok(traceparent[3..35].to_string())
-    };
+    let extract_trace_id =
+        |headers: &HashMap<String, String>| -> Result<String, Box<dyn std::error::Error>> {
+            let traceparent = headers.get("traceparent").ok_or("Missing traceparent")?;
+            Ok(traceparent[3..35].to_string())
+        };
 
     let api_trace = extract_trace_id(&api_headers)?;
     let db_trace = extract_trace_id(&db_headers)?;
@@ -466,10 +496,11 @@ fn test_comprehensive_scenario(verbose: bool) -> TestResult {
     }
 
     // Verify different span_ids
-    let extract_span_id = |headers: &HashMap<String, String>| -> Result<String, Box<dyn std::error::Error>> {
-        let traceparent = headers.get("traceparent").ok_or("Missing traceparent")?;
-        Ok(traceparent[36..52].to_string())
-    };
+    let extract_span_id =
+        |headers: &HashMap<String, String>| -> Result<String, Box<dyn std::error::Error>> {
+            let traceparent = headers.get("traceparent").ok_or("Missing traceparent")?;
+            Ok(traceparent[36..52].to_string())
+        };
 
     let api_span = extract_span_id(&api_headers)?;
     let db_span = extract_span_id(&db_headers)?;
@@ -518,7 +549,8 @@ fn test_comprehensive_scenario(verbose: bool) -> TestResult {
         return Err(format!(
             "API traceparent conformance mismatch:\n  Our: {}\n  Ref: {}",
             our_api_traceparent, ref_traceparent
-        ).into());
+        )
+        .into());
     }
 
     if verbose {

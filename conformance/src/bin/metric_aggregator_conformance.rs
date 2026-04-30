@@ -1,8 +1,8 @@
 use asupersync::observability::otel::OtelMetrics;
 use clap::{Arg, Command};
 use opentelemetry::metrics::{Histogram, Meter};
-use opentelemetry_sdk::metrics::{SdkMeterProvider, PeriodicReader, ManualReader};
 use opentelemetry_sdk::Resource;
+use opentelemetry_sdk::metrics::{ManualReader, PeriodicReader, SdkMeterProvider};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -18,7 +18,9 @@ fn main() {
             Arg::new("test")
                 .long("test")
                 .value_name("NAME")
-                .help("Run specific test case (basic, custom-buckets, large-dataset, extreme-values)")
+                .help(
+                    "Run specific test case (basic, custom-buckets, large-dataset, extreme-values)",
+                )
                 .action(clap::ArgAction::Set),
         )
         .arg(
@@ -91,7 +93,10 @@ struct HistogramSnapshot {
 }
 
 /// Extracts histogram data from OpenTelemetry SDK metrics
-fn extract_otel_histogram(meter: &Meter, name: &str) -> Result<HistogramSnapshot, Box<dyn std::error::Error>> {
+fn extract_otel_histogram(
+    meter: &Meter,
+    name: &str,
+) -> Result<HistogramSnapshot, Box<dyn std::error::Error>> {
     // Note: This is a simplified extraction since we can't easily access internal state
     // In a real conformance test, you'd use the metrics exporter interface
     Ok(HistogramSnapshot {
@@ -104,7 +109,10 @@ fn extract_otel_histogram(meter: &Meter, name: &str) -> Result<HistogramSnapshot
 }
 
 /// Extracts histogram data from our OtelMetrics implementation
-fn extract_asupersync_histogram(metrics: &OtelMetrics, name: &str) -> Result<HistogramSnapshot, Box<dyn std::error::Error>> {
+fn extract_asupersync_histogram(
+    metrics: &OtelMetrics,
+    name: &str,
+) -> Result<HistogramSnapshot, Box<dyn std::error::Error>> {
     // Note: This would need to access internal state of our metrics implementation
     // For now, return empty snapshot as placeholder
     Ok(HistogramSnapshot {
@@ -117,7 +125,11 @@ fn extract_asupersync_histogram(metrics: &OtelMetrics, name: &str) -> Result<His
 }
 
 /// Compares two histogram snapshots for conformance
-fn compare_histograms(our: &HistogramSnapshot, reference: &HistogramSnapshot, tolerance: f64) -> Result<(), String> {
+fn compare_histograms(
+    our: &HistogramSnapshot,
+    reference: &HistogramSnapshot,
+    tolerance: f64,
+) -> Result<(), String> {
     // Compare bucket boundaries
     if our.buckets.len() != reference.buckets.len() {
         return Err(format!(
@@ -129,8 +141,8 @@ fn compare_histograms(our: &HistogramSnapshot, reference: &HistogramSnapshot, to
 
     // Compare bucket upper bounds
     for (i, ((our_bound, our_count), (ref_bound, ref_count))) in
-        our.buckets.iter().zip(reference.buckets.iter()).enumerate() {
-
+        our.buckets.iter().zip(reference.buckets.iter()).enumerate()
+    {
         let bound_diff = (our_bound - ref_bound).abs();
         if bound_diff > tolerance {
             return Err(format!(
@@ -203,7 +215,11 @@ fn test_basic_histogram(verbose: bool) -> TestResult {
     // 3. Compare bucket boundaries and counts
 
     if verbose {
-        println!("  Recorded {} data points: {:?}", test_data.len(), test_data);
+        println!(
+            "  Recorded {} data points: {:?}",
+            test_data.len(),
+            test_data
+        );
         println!("  Bucket comparison: [simulated] ✓");
     }
 
@@ -228,7 +244,8 @@ fn test_custom_buckets(verbose: bool) -> TestResult {
 
         // Simulate bucket assignment
         for value in &test_data {
-            let bucket_index = custom_boundaries.iter()
+            let bucket_index = custom_boundaries
+                .iter()
                 .position(|&boundary| *value <= boundary)
                 .unwrap_or(custom_boundaries.len());
             println!("  Value {} -> bucket {}", value, bucket_index);
@@ -257,7 +274,8 @@ fn test_large_dataset(verbose: bool) -> TestResult {
 
     if verbose {
         println!("  Dataset size: {} points", test_data.len());
-        println!("  Range: {:.2} - {:.2}",
+        println!(
+            "  Range: {:.2} - {:.2}",
             test_data.iter().fold(f64::INFINITY, |a, &b| a.min(b)),
             test_data.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b))
         );
@@ -301,9 +319,21 @@ fn test_comprehensive_scenario(verbose: bool) -> TestResult {
 
     // Simulate a real application scenario with multiple histograms
     let scenarios = vec![
-        ("request_duration", vec![0.001, 0.01, 0.1, 1.0, 10.0], vec![5.0, 2.0, 15.0, 0.5, 8.0]),
-        ("payload_size", vec![100.0, 1000.0, 10000.0, 100000.0, 1000000.0], vec![500.0, 2500.0, 50000.0, 150000.0]),
-        ("queue_depth", vec![1.0, 5.0, 10.0, 50.0, 100.0], vec![3.0, 7.0, 12.0, 25.0, 75.0]),
+        (
+            "request_duration",
+            vec![0.001, 0.01, 0.1, 1.0, 10.0],
+            vec![5.0, 2.0, 15.0, 0.5, 8.0],
+        ),
+        (
+            "payload_size",
+            vec![100.0, 1000.0, 10000.0, 100000.0, 1000000.0],
+            vec![500.0, 2500.0, 50000.0, 150000.0],
+        ),
+        (
+            "queue_depth",
+            vec![1.0, 5.0, 10.0, 50.0, 100.0],
+            vec![3.0, 7.0, 12.0, 25.0, 75.0],
+        ),
     ];
 
     for (name, _boundaries, data) in scenarios {

@@ -27,9 +27,9 @@ struct ConformanceCase {
 
 #[derive(Debug, PartialEq)]
 enum RequirementLevel {
-    Must,    // OpenTelemetry spec MUST clause
-    Should,  // OpenTelemetry spec SHOULD clause
-    May,     // OpenTelemetry spec MAY clause
+    Must,   // OpenTelemetry spec MUST clause
+    Should, // OpenTelemetry spec SHOULD clause
+    May,    // OpenTelemetry spec MAY clause
 }
 
 fn main() {
@@ -48,16 +48,16 @@ fn main() {
                     "service-detection",
                     "comprehensive",
                     "report",
-                    "all"
+                    "all",
                 ])
-                .default_value("all")
+                .default_value("all"),
         )
         .arg(
             Arg::new("verbose")
                 .short('v')
                 .long("verbose")
                 .help("Verbose output")
-                .action(clap::ArgAction::SetTrue)
+                .action(clap::ArgAction::SetTrue),
         )
         .get_matches();
 
@@ -73,7 +73,7 @@ fn main() {
         "report" => {
             generate_compliance_report();
             return;
-        },
+        }
         "all" => run_all_tests(verbose),
         _ => {
             eprintln!("Unknown test: {}", test_name);
@@ -124,9 +124,14 @@ fn run_all_tests(verbose: bool) {
     restore_environment(original_env);
 
     println!("\n=== Summary ===");
-    println!("Total: {} | Passed: {} | Failed: {} | Expected Failures: {}",
-             total, passed, failed, xfail);
-    println!("Success Rate: {:.1}%", (passed as f32 / total as f32) * 100.0);
+    println!(
+        "Total: {} | Passed: {} | Failed: {} | Expected Failures: {}",
+        total, passed, failed, xfail
+    );
+    println!(
+        "Success Rate: {:.1}%",
+        (passed as f32 / total as f32) * 100.0
+    );
 
     if failed > 0 {
         println!("\nDifferences documented in DISCREPANCIES.md");
@@ -200,9 +205,9 @@ fn run_env_vars_test(verbose: bool) -> ConformanceTestResult {
     // Reference implementation
     let ref_resource = SdkResource::from_detectors(
         std::time::Duration::from_secs(5),
-        vec![
-            Box::new(opentelemetry_sdk::resource::EnvResourceDetector::new()),
-        ],
+        vec![Box::new(
+            opentelemetry_sdk::resource::EnvResourceDetector::new(),
+        )],
     );
     let ref_attrs = sdk_resource_to_sorted_map(&ref_resource);
 
@@ -251,9 +256,9 @@ fn run_hostname_test(verbose: bool) -> ConformanceTestResult {
     // Reference implementation with hostname detection
     let ref_resource = SdkResource::from_detectors(
         std::time::Duration::from_secs(5),
-        vec![
-            Box::new(opentelemetry_sdk::resource::SdkProvidedResourceDetector),
-        ],
+        vec![Box::new(
+            opentelemetry_sdk::resource::SdkProvidedResourceDetector,
+        )],
     );
     let ref_attrs = sdk_resource_to_sorted_map(&ref_resource);
 
@@ -300,9 +305,9 @@ fn run_service_detection_test(verbose: bool) -> ConformanceTestResult {
     // Reference implementation
     let ref_resource = SdkResource::from_detectors(
         std::time::Duration::from_secs(5),
-        vec![
-            Box::new(opentelemetry_sdk::resource::EnvResourceDetector::new()),
-        ],
+        vec![Box::new(
+            opentelemetry_sdk::resource::EnvResourceDetector::new(),
+        )],
     );
     let ref_attrs = sdk_resource_to_sorted_map(&ref_resource);
 
@@ -346,8 +351,10 @@ fn run_comprehensive_test(verbose: bool) -> ConformanceTestResult {
     env::set_var("OTEL_SERVICE_NAME", "comprehensive-test");
     env::set_var("OTEL_SERVICE_VERSION", "2.1.0");
     env::set_var("OTEL_SERVICE_NAMESPACE", "conformance");
-    env::set_var("OTEL_RESOURCE_ATTRIBUTES",
-                 "environment=test,region=us-west-2,cluster=production");
+    env::set_var(
+        "OTEL_RESOURCE_ATTRIBUTES",
+        "environment=test,region=us-west-2,cluster=production",
+    );
 
     // Our implementation
     let our_resource = create_comprehensive_resource();
@@ -378,13 +385,18 @@ fn run_comprehensive_test(verbose: bool) -> ConformanceTestResult {
                 println!("✗ Test failed: {}", reason);
 
                 // Write outputs to files for manual inspection
-                if let Err(e) = std::fs::write("/tmp/our_resource.txt", format!("{:?}", our_attrs)) {
+                if let Err(e) = std::fs::write("/tmp/our_resource.txt", format!("{:?}", our_attrs))
+                {
                     eprintln!("Failed to write our resource: {}", e);
                 }
-                if let Err(e) = std::fs::write("/tmp/reference_resource.txt", format!("{:?}", ref_attrs)) {
+                if let Err(e) =
+                    std::fs::write("/tmp/reference_resource.txt", format!("{:?}", ref_attrs))
+                {
                     eprintln!("Failed to write reference resource: {}", e);
                 }
-                println!("Resource outputs saved to /tmp/our_resource.txt and /tmp/reference_resource.txt");
+                println!(
+                    "Resource outputs saved to /tmp/our_resource.txt and /tmp/reference_resource.txt"
+                );
             }
             ConformanceTestResult::ExpectedFailure { reason } => {
                 println!("? Expected failure: {}", reason);
@@ -402,7 +414,10 @@ fn create_our_resource() -> BTreeMap<String, String> {
     let mut attrs = BTreeMap::new();
     attrs.insert("telemetry.sdk.name".to_string(), "asupersync".to_string());
     attrs.insert("telemetry.sdk.language".to_string(), "rust".to_string());
-    attrs.insert("telemetry.sdk.version".to_string(), env!("CARGO_PKG_VERSION").to_string());
+    attrs.insert(
+        "telemetry.sdk.version".to_string(),
+        env!("CARGO_PKG_VERSION").to_string(),
+    );
     attrs
 }
 
@@ -520,7 +535,11 @@ fn compare_resource_attributes(
         }
 
         ConformanceTestResult::Fail {
-            reason: format!("Resource {} differences detected:\n{}", test_context, differences.join("\n")),
+            reason: format!(
+                "Resource {} differences detected:\n{}",
+                test_context,
+                differences.join("\n")
+            ),
         }
     }
 }
@@ -611,7 +630,10 @@ fn generate_compliance_report() {
     );
     println!("\nTest cases:");
     for tc in &test_cases {
-        println!("  - {} ({:?}): {}", tc.name, tc.requirement_level, tc.description);
+        println!(
+            "  - {} ({:?}): {}",
+            tc.name, tc.requirement_level, tc.description
+        );
     }
     println!("\nRun 'otel_resource_conformance all -v' for detailed test execution.");
     println!("Any differences will be documented in DISCREPANCIES.md");

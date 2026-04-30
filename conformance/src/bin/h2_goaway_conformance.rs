@@ -183,7 +183,10 @@ fn print_test_summary(report: &asupersync_conformance::GoAwayComplianceReport) {
     }
 
     eprintln!("│                                      │");
-    eprintln!("│  📋 Total: {}                       │", report.total_cases);
+    eprintln!(
+        "│  📋 Total: {}                       │",
+        report.total_cases
+    );
     eprintln!(
         "│  ✅ Passed: {}                      │",
         report.summary.passed

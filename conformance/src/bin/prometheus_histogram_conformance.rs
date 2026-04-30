@@ -1,14 +1,14 @@
 use asupersync::observability::otel::OtelMetrics;
 use clap::{Arg, Command};
-use prometheus_client::metrics::{histogram::Histogram, family::Family};
-use prometheus_client::registry::Registry;
-use prometheus_client::encoding::text::encode;
 use opentelemetry::metrics::{Histogram as OtelHistogram, Meter};
-use opentelemetry_sdk::metrics::{SdkMeterProvider, PeriodicReader, ManualReader};
 use opentelemetry_sdk::Resource;
+use opentelemetry_sdk::metrics::{ManualReader, PeriodicReader, SdkMeterProvider};
+use prometheus_client::encoding::text::encode;
+use prometheus_client::metrics::{family::Family, histogram::Histogram};
+use prometheus_client::registry::Registry;
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::io::Cursor;
+use std::sync::Arc;
 
 /// Prometheus histogram conformance testing.
 /// Compares our histogram implementation against prometheus-client reference
@@ -93,7 +93,10 @@ struct HistogramData {
 }
 
 /// Extracts histogram data from Prometheus text format
-fn extract_prometheus_histogram(prometheus_text: &str, metric_name: &str) -> Result<HistogramData, Box<dyn std::error::Error>> {
+fn extract_prometheus_histogram(
+    prometheus_text: &str,
+    metric_name: &str,
+) -> Result<HistogramData, Box<dyn std::error::Error>> {
     let mut buckets = Vec::new();
     let mut count = 0u64;
     let mut sum = 0f64;
@@ -149,7 +152,11 @@ fn extract_prometheus_histogram(prometheus_text: &str, metric_name: &str) -> Res
 }
 
 /// Compares two histogram data structures for conformance
-fn compare_histograms(our: &HistogramData, reference: &HistogramData, tolerance: f64) -> Result<(), String> {
+fn compare_histograms(
+    our: &HistogramData,
+    reference: &HistogramData,
+    tolerance: f64,
+) -> Result<(), String> {
     // Compare total count
     if our.count != reference.count {
         return Err(format!(
@@ -178,8 +185,8 @@ fn compare_histograms(our: &HistogramData, reference: &HistogramData, tolerance:
     }
 
     for (i, ((our_bound, our_count), (ref_bound, ref_count))) in
-        our.buckets.iter().zip(reference.buckets.iter()).enumerate() {
-
+        our.buckets.iter().zip(reference.buckets.iter()).enumerate()
+    {
         // Compare bucket boundaries with tolerance
         let bound_diff = (our_bound - ref_bound).abs();
         let bound_tolerance = tolerance * ref_bound.abs().max(1e-10);
@@ -262,7 +269,12 @@ fn test_basic_observations(verbose: bool) -> TestResult {
         assert_eq!(ref_data.count, observations.len() as u64);
         let expected_sum: f64 = observations.iter().sum();
         let sum_diff = (ref_data.sum - expected_sum).abs();
-        assert!(sum_diff < 1e-6, "Sum should match observations: {} vs {}", ref_data.sum, expected_sum);
+        assert!(
+            sum_diff < 1e-6,
+            "Sum should match observations: {} vs {}",
+            ref_data.sum,
+            expected_sum
+        );
     }
 
     Ok(())
@@ -295,20 +307,24 @@ fn test_custom_buckets(verbose: bool) -> TestResult {
 
     // Validate bucket assignment logic
     let expected_buckets = vec![
-        (0.1, 1),   // 0.05
-        (0.5, 2),   // 0.05, 0.3
-        (1.0, 3),   // 0.05, 0.3, 0.7
-        (2.5, 4),   // 0.05, 0.3, 0.7, 1.5
-        (5.0, 5),   // 0.05, 0.3, 0.7, 1.5, 3.0
-        (10.0, 6),  // 0.05, 0.3, 0.7, 1.5, 3.0, 7.0
+        (0.1, 1),           // 0.05
+        (0.5, 2),           // 0.05, 0.3
+        (1.0, 3),           // 0.05, 0.3, 0.7
+        (2.5, 4),           // 0.05, 0.3, 0.7, 1.5
+        (5.0, 5),           // 0.05, 0.3, 0.7, 1.5, 3.0
+        (10.0, 6),          // 0.05, 0.3, 0.7, 1.5, 3.0, 7.0
         (f64::INFINITY, 7), // All observations including 15.0
     ];
 
-    for (i, ((actual_bound, actual_count), (expected_bound, expected_count))) in
-        ref_data.buckets.iter().zip(expected_buckets.iter()).enumerate() {
-
-        if (actual_bound.is_infinite() && expected_bound.is_infinite()) ||
-           (actual_bound - expected_bound).abs() < 1e-10 {
+    for (i, ((actual_bound, actual_count), (expected_bound, expected_count))) in ref_data
+        .buckets
+        .iter()
+        .zip(expected_buckets.iter())
+        .enumerate()
+    {
+        if (actual_bound.is_infinite() && expected_bound.is_infinite())
+            || (actual_bound - expected_bound).abs() < 1e-10
+        {
             if *actual_count != *expected_count {
                 return Err(format!(
                     "Bucket {} count mismatch: got {}, expected {}",
@@ -344,17 +360,21 @@ fn test_large_dataset(verbose: bool) -> TestResult {
     let mut observations = Vec::new();
     for i in 0..10_000 {
         let value = match i % 4 {
-            0 => (i as f64 / 1000.0),           // Small values
-            1 => (i as f64 / 100.0),            // Medium values
-            2 => (i as f64 / 10.0),             // Large values
-            _ => (i as f64),                    // Very large values
+            0 => (i as f64 / 1000.0), // Small values
+            1 => (i as f64 / 100.0),  // Medium values
+            2 => (i as f64 / 10.0),   // Large values
+            _ => (i as f64),          // Very large values
         };
         observations.push(value);
     }
 
     let mut registry = Registry::default();
     let histogram: Family<Vec<(String, String)>, Histogram> = Family::default();
-    registry.register("large_histogram", "Large dataset histogram", histogram.clone());
+    registry.register(
+        "large_histogram",
+        "Large dataset histogram",
+        histogram.clone(),
+    );
 
     let ref_metric = histogram.get_or_create(&vec![]);
     for &value in &observations {
@@ -396,11 +416,11 @@ fn test_edge_values(verbose: bool) -> TestResult {
     }
 
     let edge_observations = vec![
-        0.0,                    // Zero
-        f64::MIN_POSITIVE,      // Smallest positive
-        1e-10,                  // Very small
-        1e10,                   // Very large
-        f64::MAX / 2.0,         // Near maximum (avoid overflow)
+        0.0,               // Zero
+        f64::MIN_POSITIVE, // Smallest positive
+        1e-10,             // Very small
+        1e10,              // Very large
+        f64::MAX / 2.0,    // Near maximum (avoid overflow)
     ];
 
     let mut registry = Registry::default();
@@ -421,7 +441,10 @@ fn test_edge_values(verbose: bool) -> TestResult {
     assert!(ref_data.sum.is_finite(), "Sum should be finite");
 
     if verbose {
-        println!("  Edge values processed: {} observations", edge_observations.len());
+        println!(
+            "  Edge values processed: {} observations",
+            edge_observations.len()
+        );
         println!("  All values finite: ✓");
         println!("  Count: {}", ref_data.count);
         println!("  Sum: {:.2e}", ref_data.sum);
@@ -438,9 +461,21 @@ fn test_comprehensive_scenario(verbose: bool) -> TestResult {
 
     // Multiple histograms with different characteristics
     let scenarios = vec![
-        ("request_latency", vec![0.001, 0.01, 0.1, 1.0, 10.0], vec![0.005, 0.02, 0.15, 2.5]),
-        ("payload_size", vec![100.0, 1000.0, 10000.0, 100000.0], vec![500.0, 2500.0, 50000.0]),
-        ("error_rate", vec![0.0, 0.01, 0.05, 0.1], vec![0.005, 0.03, 0.08]),
+        (
+            "request_latency",
+            vec![0.001, 0.01, 0.1, 1.0, 10.0],
+            vec![0.005, 0.02, 0.15, 2.5],
+        ),
+        (
+            "payload_size",
+            vec![100.0, 1000.0, 10000.0, 100000.0],
+            vec![500.0, 2500.0, 50000.0],
+        ),
+        (
+            "error_rate",
+            vec![0.0, 0.01, 0.05, 0.1],
+            vec![0.005, 0.03, 0.08],
+        ),
     ];
 
     let mut registry = Registry::default();
@@ -458,7 +493,12 @@ fn test_comprehensive_scenario(verbose: bool) -> TestResult {
         }
 
         if verbose {
-            println!("    {}: {} observations, {} buckets", name, observations.len(), buckets.len());
+            println!(
+                "    {}: {} observations, {} buckets",
+                name,
+                observations.len(),
+                buckets.len()
+            );
         }
     }
 
@@ -482,7 +522,12 @@ fn test_comprehensive_scenario(verbose: bool) -> TestResult {
     if verbose {
         println!("  All {} histograms validated: ✓", histogram_data.len());
         for (name, data) in &histogram_data {
-            println!("    {}: count={}, buckets={}", name, data.count, data.buckets.len());
+            println!(
+                "    {}: count={}, buckets={}",
+                name,
+                data.count,
+                data.buckets.len()
+            );
         }
     }
 
@@ -535,7 +580,7 @@ test_histogram_count 7
         assert!(compare_histograms(&hist1, &hist2, 1e-6).is_ok());
 
         let hist3 = HistogramData {
-            buckets: vec![(0.1, 1), (1.0, 6), (f64::INFINITY, 10)],  // Different count
+            buckets: vec![(0.1, 1), (1.0, 6), (f64::INFINITY, 10)], // Different count
             count: 10,
             sum: 50.0,
         };
