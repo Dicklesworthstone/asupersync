@@ -1,4 +1,5 @@
 [workspace]
+members = ["conformance"]
 
 [package]
 name = "asupersync-fuzz"
@@ -3428,6 +3429,17 @@ test = false
 doc = false
 bench = false
 
+# Tick #139 — OnceCell lazy initialization panic recovery fuzzer
+# Tests arbitrary panic-during-init sequences to ensure the cell remains
+# uninitialized after panic, next attempts re-try, and no permanent poison
+# occurs. Validates proper panic recovery and retry semantics.
+[[bin]]
+name = "once_cell_lazy_init_panic"
+path = "fuzz_targets/once_cell_lazy_init_panic.rs"
+test = false
+doc = false
+bench = false
+
 # Tick #133 — HTTP/2 PUSH_PROMISE frame handling fuzzer
 # Targets PUSH_PROMISE frame handling logic in src/http/h2/connection.rs
 # to test handling of arbitrary frames including push without ENABLE_PUSH=1,
@@ -3499,16 +3511,6 @@ bench = false
 [[bin]]
 name = "h2_headers_priority_handling"
 path = "fuzz_targets/h2_headers_priority_handling.rs"
-test = false
-doc = false
-bench = false
-
-# Tick #138 — Oneshot conformance test against tokio::sync::oneshot
-# Tests same send/recv ordering with cancel injection to ensure identical
-# observable outcomes between asupersync and tokio oneshot implementations.
-[[bin]]
-name = "oneshot_std_conformance"
-path = "../tests/oneshot_std_conformance.rs"
 test = false
 doc = false
 bench = false

@@ -1,0 +1,37 @@
+[package]
+name = "asupersync-conformance"
+version = "0.1.0"
+edition = "2024"
+authors = ["Automated"]
+
+[dependencies]
+asupersync = { path = "../../", features = ["compression", "tls", "metrics", "tracing-integration", "test-internals", "trace-compression", "io-uring", "simd-intrinsics", "fuzz"] }
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+h2 = "0.4" # Reference implementation for differential testing
+
+# For HTTP/1.1 conformance tests
+reqwest = { version = "0.12", features = ["stream"] }
+hyper = { version = "1.4", features = ["full"] }
+http = "1"
+http-body = "1"
+http-body-util = "0.1"
+
+# For test utilities
+tempfile = "3"
+uuid = { version = "1", features = ["v4"] }
+
+[[bin]]
+name = "h1_expect_continue_conformance"
+path = "src/bin/h1_expect_continue_conformance.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "h2_continuation_ordering_conformance"
+path = "src/bin/h2_continuation_ordering_conformance.rs"
+test = false
+doc = false

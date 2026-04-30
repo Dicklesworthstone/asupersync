@@ -1,7 +1,11 @@
 #![no_main]
 
 use std::cmp;
+use std::io;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::thread;
+use std::time::Duration;
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
@@ -10,6 +14,8 @@ use asupersync::obligation::lyapunov::{
     LyapunovGovernor, PotentialWeights, SchedulingSuggestion, StateSnapshot,
 };
 use asupersync::record::TaskRecord;
+use asupersync::runtime::IoDriverHandle;
+use asupersync::runtime::reactor::{Events, Interest, Reactor, Source, Token};
 use asupersync::runtime::scheduler::three_lane::{
     AdaptiveCancelStreakPolicyBench, AdaptivePolicyBenchSnapshot, ThreeLaneScheduler,
 };
@@ -40,6 +46,8 @@ pub struct DecisionArbiterInput {
     deadline_promotion: FuzzDeadlinePromotionScenario,
     /// Zero-reward adaptive policy trace for discounted arm-mass stability.
     zero_reward_trace: FuzzZeroRewardPolicyTrace,
+    /// Reactor leader shutdown handshake while an I/O poll is in flight.
+    reactor_shutdown: FuzzReactorShutdownScenario,
     /// Adaptive governor workload driven by arrival bursts and Lyapunov state.
     adaptive_budget: FuzzAdaptiveBudgetScenario,
 }
@@ -169,6 +177,19 @@ pub struct FuzzZeroRewardPolicyTrace {
 }
 
 #[derive(Debug, Clone, Arbitrary)]
+pub struct FuzzReactorShutdownScenario {
+    /// Number of worker threads participating in the scheduler.
+    #[arbitrary(with = bounded_worker_count)]
+    worker_count: u8,
+    /// Number of repeated shutdown calls after the leader enters the reactor.
+    #[arbitrary(with = bounded_shutdown_calls)]
+    shutdown_calls: u8,
+    /// Additional wake-all calls after shutdown to verify idempotent handoff.
+    #[arbitrary(with = bounded_post_shutdown_wakes)]
+    post_shutdown_wakes: u8,
+}
+
+#[derive(Debug, Clone, Arbitrary)]
 pub struct FuzzAdaptiveBudgetScenario {
     /// Number of executed dispatches per adaptive epoch.
     #[arbitrary(with = bounded_epoch_steps)]
@@ -293,6 +314,18 @@ fn bounded_zero_reward_arm_trace(u: &mut arbitrary::Unstructured) -> arbitrary::
         trace.push(u.int_in_range(0..=8)?);
     }
     Ok(trace)
+}
+
+fn bounded_worker_count(u: &mut arbitrary::Unstructured) -> arbitrary::Result<u8> {
+    u.int_in_range(1..=4)
+}
+
+fn bounded_shutdown_calls(u: &mut arbitrary::Unstructured) -> arbitrary::Result<u8> {
+    u.int_in_range(1..=4)
+}
+
+fn bounded_post_shutdown_wakes(u: &mut arbitrary::Unstructured) -> arbitrary::Result<u8> {
+    u.int_in_range(0..=4)
 }
 
 impl From<FuzzPotentialWeights> for PotentialWeights {
@@ -929,6 +962,125 @@ fn assert_zero_reward_policy_trace(trace: &FuzzZeroRewardPolicyTrace) {
     }
 }
 
+#[derive(Debug)]
+struct ShutdownHandshakeReactor {
+    poll_started: AtomicBool,
+    release_poll: AtomicBool,
+    wake_calls: AtomicUsize,
+    poll_calls: AtomicUsize,
+}
+
+impl ShutdownHandshakeReactor {
+    fn new() -> Self {
+        Self {
+            poll_started: AtomicBool::new(false),
+            release_poll: AtomicBool::new(false),
+            wake_calls: AtomicUsize::new(0),
+            poll_calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn wait_until_poll_started(&self) {
+        for _ in 0..50_000 {
+            if self.poll_started.load(Ordering::Acquire) {
+                return;
+            }
+            thread::yield_now();
+        }
+        panic!("reactor leader never entered poll");
+    }
+
+    fn wake_calls(&self) -> usize {
+        self.wake_calls.load(Ordering::SeqCst)
+    }
+
+    fn poll_calls(&self) -> usize {
+        self.poll_calls.load(Ordering::SeqCst)
+    }
+}
+
+impl Reactor for ShutdownHandshakeReactor {
+    fn register(&self, _source: &dyn Source, _token: Token, _interest: Interest) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn modify(&self, _token: Token, _interest: Interest) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn deregister(&self, _token: Token) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn registration_count(&self) -> usize {
+        0
+    }
+
+    fn poll(&self, _events: &mut Events, _timeout: Option<Duration>) -> io::Result<usize> {
+        self.poll_calls.fetch_add(1, Ordering::SeqCst);
+        self.poll_started.store(true, Ordering::Release);
+        while !self.release_poll.load(Ordering::Acquire) {
+            thread::yield_now();
+        }
+        Ok(0)
+    }
+
+    fn wake(&self) -> io::Result<()> {
+        self.wake_calls.fetch_add(1, Ordering::SeqCst);
+        self.release_poll.store(true, Ordering::Release);
+        Ok(())
+    }
+}
+
+fn assert_reactor_shutdown_handshake(scenario: &FuzzReactorShutdownScenario) {
+    let reactor = Arc::new(ShutdownHandshakeReactor::new());
+    let reactor_handle: Arc<dyn Reactor> = reactor.clone();
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+    {
+        let mut guard = state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.set_io_driver(IoDriverHandle::new(reactor_handle));
+    }
+
+    let mut scheduler = ThreeLaneScheduler::new(usize::from(scenario.worker_count), &state);
+    let handles: Vec<_> = scheduler
+        .take_workers()
+        .into_iter()
+        .map(|mut worker| thread::spawn(move || worker.run_loop()))
+        .collect();
+
+    reactor.wait_until_poll_started();
+
+    for _ in 0..usize::from(scenario.shutdown_calls) {
+        scheduler.shutdown();
+    }
+    for _ in 0..usize::from(scenario.post_shutdown_wakes) {
+        scheduler.wake_all();
+    }
+
+    assert!(scheduler.is_shutdown(), "shutdown bit must stay set");
+
+    for handle in handles {
+        handle
+            .join()
+            .expect("worker must complete reactor-shutdown handshake");
+    }
+
+    let expected_wakes =
+        usize::from(scenario.shutdown_calls) + usize::from(scenario.post_shutdown_wakes);
+    assert!(
+        reactor.wake_calls() >= expected_wakes,
+        "shutdown handshake must wake the in-flight reactor leader at least once per explicit wake: observed {} expected at least {}",
+        reactor.wake_calls(),
+        expected_wakes
+    );
+    assert!(
+        reactor.poll_calls() >= 1,
+        "at least one worker must enter the reactor leader poll"
+    );
+}
+
 fn assert_adaptive_budget_governor(
     scenario: &FuzzAdaptiveBudgetScenario,
     weights: &PotentialWeights,
@@ -1119,10 +1271,14 @@ fuzz_target!(|input: DecisionArbiterInput| {
     // finite and strictly positive.
     assert_zero_reward_policy_trace(&input.zero_reward_trace);
 
-    // Test 7: Cancel-mask state propagates into scheduler snapshots without
+    // Test 7: Shutdown must wake an in-flight reactor leader and let workers
+    // exit without hanging.
+    assert_reactor_shutdown_handshake(&input.reactor_shutdown);
+
+    // Test 8: Cancel-mask state propagates into scheduler snapshots without
     // becoming runnable phantom work.
     assert_cancel_mask_propagation(&input.workload, &input.state_snapshots[0]);
 
-    // Test 8: Adaptive cancel-streak governor stays bounded and terminates.
+    // Test 9: Adaptive cancel-streak governor stays bounded and terminates.
     assert_adaptive_budget_governor(&input.adaptive_budget, &weights);
 });
