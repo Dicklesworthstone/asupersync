@@ -5607,6 +5607,92 @@ mod tests {
     }
 
     #[test]
+    fn handshake_response_plaintext_auth_packet_never_advertises_client_ssl() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+
+            let mut header = [0u8; 4];
+            stream
+                .read_exact(&mut header)
+                .expect("read handshake response header");
+            let payload_len = usize::from(header[0])
+                | (usize::from(header[1]) << 8)
+                | (usize::from(header[2]) << 16);
+            let mut payload = vec![0u8; payload_len];
+            stream
+                .read_exact(&mut payload)
+                .expect("read handshake response payload");
+
+            let client_caps =
+                u32::from_le_bytes(payload[0..4].try_into().expect("client capability bytes"));
+            assert_eq!(
+                client_caps & capability::CLIENT_SSL,
+                0,
+                "plaintext full handshake must not advertise CLIENT_SSL before a dedicated SSL Request packet exists"
+            );
+            assert_ne!(
+                client_caps & capability::CLIENT_PROTOCOL_41,
+                0,
+                "sanity check: expected normal handshake capabilities"
+            );
+        });
+
+        let stream = run(async {
+            crate::net::TcpStream::connect_socket_addr(addr)
+                .await
+                .expect("connect client")
+        });
+
+        let mut conn = MySqlConnection {
+            inner: MySqlConnectionInner {
+                stream,
+                connection_id: 0,
+                capabilities: 0,
+                charset: 0,
+                status_flags: 0,
+                sequence: 1,
+                closed: false,
+                server_version: String::new(),
+                needs_rollback: false,
+                max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                prepared_statement_epoch: 0,
+                query_in_flight: std::sync::atomic::AtomicBool::new(false),
+            },
+            options: None,
+        };
+
+        let options =
+            MySqlConnectOptions::parse("mysql://user:pass@localhost/testdb?ssl-mode=required")
+                .expect("parse mysql options");
+        let handshake = Handshake {
+            server_version: "8.0.0-test".to_string(),
+            connection_id: 99,
+            auth_plugin_data: b"01234567890123456789".to_vec(),
+            capabilities: capability::CLIENT_PROTOCOL_41
+                | capability::CLIENT_SECURE_CONNECTION
+                | capability::CLIENT_PLUGIN_AUTH
+                | capability::CLIENT_SSL,
+            charset: 45,
+            status_flags: 0,
+            auth_plugin_name: "caching_sha2_password".to_string(),
+        };
+
+        run(conn.send_handshake_response(&options, &handshake)).expect("send handshake response");
+        assert_eq!(
+            conn.inner.capabilities & capability::CLIENT_SSL,
+            0,
+            "negotiated capabilities must keep CLIENT_SSL clear until a TLS upgrade path exists"
+        );
+        server.join().expect("join server");
+    }
+
+    #[test]
     fn test_should_fail_closed_without_tls_required_always_rejects() {
         assert!(MySqlConnection::should_fail_closed_without_tls(
             SslMode::Required,
