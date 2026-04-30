@@ -4234,3 +4234,9 @@ name = "h2_settings_header_table_size_update"
 path = "fuzz_targets/h2_settings_header_table_size_update.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "h1_chunked_split_buffer"
+path = "fuzz_targets/h1_chunked_split_buffer.rs"
+test = false
+doc = false
