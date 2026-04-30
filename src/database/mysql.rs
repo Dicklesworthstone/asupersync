@@ -7220,6 +7220,62 @@ mod tests {
     }
 
     #[test]
+    fn test_send_handshake_response_rejects_arbitrary_auth_plugin() {
+        let mut conn = make_test_connection();
+        let options = MySqlConnectOptions::parse("mysql://user:pass@localhost/db").unwrap();
+        let handshake = Handshake {
+            server_version: "8.0.0-test".to_string(),
+            connection_id: 1,
+            auth_plugin_data: b"01234567890123456789".to_vec(),
+            capabilities: capability::CLIENT_PROTOCOL_41
+                | capability::CLIENT_SECURE_CONNECTION
+                | capability::CLIENT_PLUGIN_AUTH,
+            charset: 45,
+            status_flags: 0,
+            auth_plugin_name: "arbitrary_server_plugin".to_string(),
+        };
+
+        let err = run(conn.send_handshake_response(&options, &handshake)).unwrap_err();
+        assert!(
+            matches!(err, MySqlError::UnsupportedAuthPlugin(plugin) if plugin == "arbitrary_server_plugin"),
+            "unexpected plugin error: {err:?}"
+        );
+        assert_eq!(
+            conn.inner.sequence, 0,
+            "reject unsupported initial plugin before sending any auth bytes"
+        );
+    }
+
+    #[test]
+    fn test_auth_switch_rejects_arbitrary_auth_plugin() {
+        let mut conn = make_test_connection();
+        let options = MySqlConnectOptions::parse("mysql://user:pass@localhost/db").unwrap();
+        let handshake = Handshake {
+            server_version: "8.0.0-test".to_string(),
+            connection_id: 1,
+            auth_plugin_data: b"01234567890123456789".to_vec(),
+            capabilities: capability::CLIENT_PROTOCOL_41
+                | capability::CLIENT_SECURE_CONNECTION
+                | capability::CLIENT_PLUGIN_AUTH,
+            charset: 45,
+            status_flags: 0,
+            auth_plugin_name: "caching_sha2_password".to_string(),
+        };
+        let mut auth_switch = b"arbitrary_server_plugin\0".to_vec();
+        auth_switch.extend_from_slice(b"01234567890123456789\0");
+
+        let err = run(conn.handle_auth_switch(&auth_switch, &options, &handshake)).unwrap_err();
+        assert!(
+            matches!(err, MySqlError::UnsupportedAuthPlugin(plugin) if plugin == "arbitrary_server_plugin"),
+            "unexpected plugin error: {err:?}"
+        );
+        assert_eq!(
+            conn.inner.sequence, 0,
+            "reject unsupported auth switch plugin before sending any response"
+        );
+    }
+
+    #[test]
     fn test_caching_sha2_full_auth_request_fails_closed_without_rsa_path() {
         let mut conn = make_test_connection();
         let options = MySqlConnectOptions::parse("mysql://user:pass@localhost/db").unwrap();
