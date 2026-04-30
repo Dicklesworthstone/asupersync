@@ -128,14 +128,23 @@ impl RegionState {
         matches!(self, Self::Open)
     }
 
-    /// Returns true if the region can admit same-region cleanup work.
+    /// Returns true if the region can admit normal same-region work.
     ///
-    /// This is true for Open (normal execution) and Finalizing (cleanup that
-    /// stays within the region, such as tasks or obligation bookkeeping).
-    /// Child-region creation remains `Open`-only via [`Self::can_spawn`].
-    /// It is false for Closing and Draining phases.
+    /// Finalizing is intentionally excluded: once the region has observed
+    /// quiescence and started finalizers, ordinary task admission would reopen
+    /// the region after close had already committed to cleanup.
     #[must_use]
     pub const fn can_accept_work(self) -> bool {
+        matches!(self, Self::Open)
+    }
+
+    /// Returns true if the region can admit cleanup-only work.
+    ///
+    /// Async finalizer barrier tasks are allowed in `Finalizing` so required
+    /// cleanup can still complete. Child-region creation and obligation
+    /// reservation remain `Open`-only.
+    #[must_use]
+    pub const fn can_accept_cleanup_work(self) -> bool {
         matches!(self, Self::Open | Self::Finalizing)
     }
 
@@ -156,11 +165,13 @@ impl RegionState {
 ///
 /// # Concurrency-Safety Argument
 ///
-/// Every admission path (`add_task`, `add_child`, `try_reserve_obligation`,
-/// `heap_alloc`) follows an optimistic state check before mutating:
+/// Every admission path (`add_task`, `add_cleanup_task`, `add_child`,
+/// `try_reserve_obligation`, `heap_alloc`) follows an optimistic state check
+/// before mutating:
 ///
 /// 1. **Fast-path reject** — atomic `state.load(Acquire)` checks the relevant
-///    admission predicate (`can_accept_work()` for tasks/obligations,
+///    admission predicate (`can_accept_work()` for normal tasks/obligations,
+///    `can_accept_cleanup_work()` for cleanup tasks,
 ///    `can_spawn()` for children). If false, return `Closed` without locking.
 /// 2. **Acquire write lock** — `inner.write()` serialises all mutations.
 /// 3. **Re-check state** — a second `state.load(Acquire)` under the lock
@@ -182,13 +193,14 @@ impl RegionState {
 ///   acquire the write lock before mutating, so removes are sequenced
 ///   with respect to additions.
 /// - **No stale-close admission**: the double-check on the admission
-///   predicate prevents work from being added to a region that has already
-///   begun closing, even if the optimistic read passed before the state
-///   transition. Finalizing only keeps same-region cleanup admission open;
-///   it does not reopen child-region creation.
-/// - **`resolve_obligation` uses `saturating_sub`**: so an unpaired
-///   resolve (e.g. from a double-drop) bottoms out at zero rather
-///   than wrapping.
+///   predicate prevents normal work from being added to a region that has
+///   already begun closing, even if the optimistic read passed before the
+///   state transition. Finalizing only keeps explicit cleanup-task admission
+///   open; it does not reopen normal task, obligation, or child-region
+///   creation.
+/// - **Double-resolve is visible**: `resolve_obligation` asserts in debug
+///   builds and records a per-region counter in release builds, so unpaired
+///   resolves cannot silently wrap or disappear.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RegionLimits {
     /// Maximum number of live child regions.
@@ -581,14 +593,18 @@ impl RegionRecord {
         inner.children.retain(|&c| c != child);
     }
 
-    fn add_task_internal(
-        &self,
-        task: TaskId,
-        bypass_task_limit_in_finalizing: bool,
-    ) -> Result<(), AdmissionError> {
+    fn add_task_internal(&self, task: TaskId, cleanup_task: bool) -> Result<(), AdmissionError> {
+        let can_admit = |state: RegionState| {
+            if cleanup_task {
+                state.can_accept_cleanup_work()
+            } else {
+                state.can_accept_work()
+            }
+        };
+
         // Optimistic check
         let state = self.state.load();
-        if !state.can_accept_work() {
+        if !can_admit(state) {
             return Err(AdmissionError::Closed);
         }
 
@@ -596,7 +612,7 @@ impl RegionRecord {
 
         // Double check
         let state = self.state.load();
-        if !state.can_accept_work() {
+        if !can_admit(state) {
             return Err(AdmissionError::Closed);
         }
 
@@ -604,7 +620,7 @@ impl RegionRecord {
             return Ok(());
         }
 
-        let bypass_limit = bypass_task_limit_in_finalizing && state == RegionState::Finalizing;
+        let bypass_limit = cleanup_task && state == RegionState::Finalizing;
         if !bypass_limit {
             if let Some(limit) = inner.limits.max_tasks {
                 if inner.tasks.len() >= limit {
@@ -1349,7 +1365,6 @@ mod tests {
         region
             .add_task(TaskId::from_arena(ArenaIndex::new(3, 0)))
             .expect("add task");
-        region.resolve_obligation(); // saturating_sub safe; keep obligations at 0
 
         assert!(!region.ready_to_finalize(&|_task| true));
 
@@ -1763,8 +1778,9 @@ mod tests {
 
     // --- Closed-region rejection ---
     // Admission must fail with `AdmissionError::Closed` for Closing,
-    // Draining, and Closed. Finalizing keeps same-region cleanup admission
-    // open for tasks/obligations, but still rejects new child regions.
+    // Draining, Finalizing, and Closed. Finalizing keeps explicit cleanup-task
+    // admission open, but still rejects normal task, obligation, and
+    // child-region admission.
 
     #[test]
     fn admission_rejected_when_closing() {
@@ -1793,16 +1809,16 @@ mod tests {
     }
 
     #[test]
-    fn admission_allowed_when_finalizing() {
-        // Finalizing regions accept same-region cleanup work.
+    fn normal_task_admission_rejected_when_finalizing() {
         let region = RegionRecord::new(test_region_id(), None, Budget::default());
         region.begin_close(None);
         assert!(region.begin_finalize()); // skip Draining
         assert_eq!(region.state(), RegionState::Finalizing);
 
         let task = TaskId::from_arena(ArenaIndex::new(1, 0));
-        assert!(region.add_task(task).is_ok());
-        assert!(region.try_reserve_obligation().is_ok());
+        assert_eq!(region.add_task(task), Err(AdmissionError::Closed));
+        assert!(region.add_cleanup_task(task).is_ok());
+        assert_eq!(region.try_reserve_obligation(), Err(AdmissionError::Closed));
     }
 
     #[test]
@@ -1816,14 +1832,7 @@ mod tests {
         assert!(region.begin_finalize());
 
         let task = TaskId::from_arena(ArenaIndex::new(1, 0));
-        assert_eq!(
-            region.add_task(task),
-            Err(AdmissionError::LimitReached {
-                kind: AdmissionKind::Task,
-                limit: 0,
-                live: 0,
-            })
-        );
+        assert_eq!(region.add_task(task), Err(AdmissionError::Closed));
         assert!(region.add_cleanup_task(task).is_ok());
     }
 
@@ -1951,26 +1960,18 @@ mod tests {
         assert_eq!(region.pending_obligations(), 100);
     }
 
-    // --- resolve_obligation saturating_sub ---
-    // An unpaired resolve (more resolves than reserves) must not wrap
-    // around or panic.  It should bottom out at zero.
+    // --- resolve_obligation double-resolve guard ---
+    // An unpaired resolve (more resolves than reserves) is a protocol bug:
+    // debug builds panic loudly, while release builds keep a diagnostic count.
 
+    #[cfg(debug_assertions)]
     #[test]
-    fn resolve_obligation_saturates_at_zero() {
+    #[should_panic(expected = "double-resolve detected")]
+    fn resolve_obligation_panics_on_unpaired_resolve_in_debug() {
         let region = RegionRecord::new(test_region_id(), None, Budget::default());
         assert_eq!(region.pending_obligations(), 0);
 
-        // Resolve without any reserve — should stay at 0, not underflow.
         region.resolve_obligation();
-        assert_eq!(region.pending_obligations(), 0);
-
-        // Reserve one, resolve two — should be 0.
-        assert!(region.try_reserve_obligation().is_ok());
-        assert_eq!(region.pending_obligations(), 1);
-        region.resolve_obligation();
-        assert_eq!(region.pending_obligations(), 0);
-        region.resolve_obligation();
-        assert_eq!(region.pending_obligations(), 0);
     }
 
     // --- AdmissionError fields ---

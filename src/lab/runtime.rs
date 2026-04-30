@@ -1962,7 +1962,7 @@ impl LabRuntime {
 
         // br-asupersync-7uu7sa: even when SOME region is open, this
         // specific task may belong to a region that has already
-        // transitioned to Closing/Draining/Closed during a different
+        // transitioned to Closing/Draining/Finalizing/Closed during a different
         // chaos action in the same step. Re-polling such a task
         // violates the structured-concurrency contract the oracles
         // assume — it produces a 'cancel-aware future re-polled after
@@ -2256,8 +2256,8 @@ impl LabRuntime {
         // br-asupersync-7uu7sa: defense-in-depth — even when the chaos
         // call site (inject_post_poll_chaos) gates correctly, future
         // callers may invoke this method directly. Refuse to wake a
-        // task whose owning region is no longer accepting work
-        // (Closing / Draining / Closed). This silently no-ops rather
+        // task whose owning region is no longer accepting normal work
+        // (Closing / Draining / Finalizing / Closed). This silently no-ops rather
         // than panicking so chaos campaigns with TaskId selection that
         // races region close don't artificially abort.
         let owner_open = self
