@@ -1,4 +1,4 @@
-//! Conformance test for asupersync::sync::oneshot vs tokio::sync::oneshot.
+//! Conformance test for asupersync::channel::oneshot vs tokio::sync::oneshot.
 //!
 //! Tests that both oneshot implementations exhibit identical behavior for:
 //! - Same send/recv ordering with cancel injection
@@ -6,17 +6,29 @@
 //! - Proper cancel semantics and error propagation
 //! - Send-before-recv vs recv-before-send scenarios
 
-use asupersync::sync::oneshot::{channel as asupersync_channel, RecvError as AsupersyncRecvError};
+use asupersync::channel::oneshot::{
+    Receiver as AsupersyncReceiver, RecvError as AsupersyncRecvError, Sender as AsupersyncSender,
+    channel as asupersync_channel,
+};
 use asupersync::cx::Cx;
-use asupersync::types::{RegionId, TaskId, Budget};
+use asupersync::types::{Budget, RegionId, TaskId};
 use asupersync::util::ArenaIndex;
-use tokio::sync::oneshot::{channel as tokio_channel, error::RecvError as TokioRecvError};
-use futures::task::{noop_waker, Context};
 use std::future::Future;
 use std::pin::Pin;
-use std::task::Poll;
+use std::task::{Context, Poll, Waker};
 use std::thread;
 use std::time::Duration;
+use tokio::sync::oneshot::{
+    Receiver as TokioReceiver, Sender as TokioSender, channel as tokio_channel,
+};
+
+fn test_cx(slot: u32) -> Cx {
+    Cx::new(
+        RegionId::from_arena(ArenaIndex::new(0, slot)),
+        TaskId::from_arena(ArenaIndex::new(0, slot)),
+        Budget::INFINITE,
+    )
+}
 
 /// Result of a oneshot conformance test comparing both implementations.
 #[derive(Debug, Clone, PartialEq)]
@@ -99,7 +111,8 @@ impl OneshotConformanceContext {
             drop(receiver);
             // Try to send to dropped receiver
             thread::sleep(Duration::from_millis(self.config.send_delay_ms));
-            return match sender.send(self.config.send_value) {
+            let cx = test_cx(0);
+            return match sender.send(&cx, self.config.send_value) {
                 Ok(()) => OneshotOutcome::SendSucceeded,
                 Err(_) => OneshotOutcome::SendFailed,
             };
@@ -111,15 +124,9 @@ impl OneshotConformanceContext {
             // Try to receive from dropped sender
             thread::sleep(Duration::from_millis(self.config.recv_delay_ms));
 
-            let cx = Cx::new(
-                RegionId::from_arena(ArenaIndex::new(0, 0)),
-                TaskId::from_arena(ArenaIndex::new(0, 0)),
-                Budget::INFINITE,
-            );
-
+            let cx = test_cx(1);
             let mut recv_future = receiver.recv(&cx);
-            let waker = noop_waker();
-            let mut context = Context::from_waker(&waker);
+            let mut context = Context::from_waker(Waker::noop());
 
             return match Pin::new(&mut recv_future).poll(&mut context) {
                 Poll::Ready(Ok(value)) => OneshotOutcome::ReceivedValue(value),
@@ -135,41 +142,30 @@ impl OneshotConformanceContext {
             // Send first, then receive
             thread::sleep(Duration::from_millis(self.config.send_delay_ms));
 
-            let send_result = sender.send(self.config.send_value);
+            let cx = test_cx(2);
+            let send_result = sender.send(&cx, self.config.send_value);
             if send_result.is_err() {
                 return OneshotOutcome::SendFailed;
             }
 
             thread::sleep(Duration::from_millis(
-                self.config.recv_delay_ms.saturating_sub(self.config.send_delay_ms)
+                self.config
+                    .recv_delay_ms
+                    .saturating_sub(self.config.send_delay_ms),
             ));
 
             // Receive after send
             self.perform_asupersync_recv(receiver)
         } else {
             // Start receive first, then send
-            let (sender, receiver_result) = self.perform_asupersync_recv_with_delayed_send(sender, receiver);
-
-            // If receive completed before send, return that result
-            if let Some(result) = receiver_result {
-                return result;
-            }
-
-            // Otherwise, send was completed, return send result
-            OneshotOutcome::SendSucceeded
+            self.perform_asupersync_recv_with_delayed_send(sender, receiver)
         }
     }
 
-    fn perform_asupersync_recv(&self, mut receiver: asupersync::sync::oneshot::Receiver<u32>) -> OneshotOutcome {
-        let cx = Cx::new(
-            RegionId::from_arena(ArenaIndex::new(0, 1)),
-            TaskId::from_arena(ArenaIndex::new(0, 1)),
-            Budget::INFINITE,
-        );
-
+    fn perform_asupersync_recv(&self, mut receiver: AsupersyncReceiver<u32>) -> OneshotOutcome {
+        let cx = test_cx(3);
         let mut recv_future = receiver.recv(&cx);
-        let waker = noop_waker();
-        let mut context = Context::from_waker(&waker);
+        let mut context = Context::from_waker(Waker::noop());
 
         // Simulate cancellation if requested
         if self.config.cancel_receiver {
@@ -177,11 +173,19 @@ impl OneshotConformanceContext {
         }
 
         // Poll until completion or timeout
-        for _ in 0..100 { // Max 100ms timeout
+        for _ in 0..100 {
+            // Max 100ms timeout
             match Pin::new(&mut recv_future).poll(&mut context) {
                 Poll::Ready(Ok(value)) => return OneshotOutcome::ReceivedValue(value),
-                Poll::Ready(Err(AsupersyncRecvError::Closed)) => return OneshotOutcome::ReceivedError,
-                Poll::Ready(Err(AsupersyncRecvError::Cancelled)) => return OneshotOutcome::Cancelled,
+                Poll::Ready(Err(AsupersyncRecvError::Closed)) => {
+                    return OneshotOutcome::ReceivedError;
+                }
+                Poll::Ready(Err(AsupersyncRecvError::PolledAfterCompletion)) => {
+                    return OneshotOutcome::ReceivedError;
+                }
+                Poll::Ready(Err(AsupersyncRecvError::Cancelled)) => {
+                    return OneshotOutcome::Cancelled;
+                }
                 Poll::Pending => {
                     thread::sleep(Duration::from_millis(1));
                 }
@@ -193,50 +197,53 @@ impl OneshotConformanceContext {
 
     fn perform_asupersync_recv_with_delayed_send(
         &self,
-        sender: asupersync::sync::oneshot::Sender<u32>,
-        mut receiver: asupersync::sync::oneshot::Receiver<u32>
-    ) -> (asupersync::sync::oneshot::Sender<u32>, Option<OneshotOutcome>) {
-        let cx = Cx::new(
-            RegionId::from_arena(ArenaIndex::new(0, 2)),
-            TaskId::from_arena(ArenaIndex::new(0, 2)),
-            Budget::INFINITE,
-        );
-
+        sender: AsupersyncSender<u32>,
+        mut receiver: AsupersyncReceiver<u32>,
+    ) -> OneshotOutcome {
+        let cx = test_cx(4);
         let mut recv_future = receiver.recv(&cx);
-        let waker = noop_waker();
-        let mut context = Context::from_waker(&waker);
+        let mut context = Context::from_waker(Waker::noop());
+        let mut sender = Some(sender);
 
         let recv_delay_ticks = self.config.recv_delay_ms as usize;
         let send_delay_ticks = self.config.send_delay_ms as usize;
 
         // Simulate concurrent recv and delayed send
-        for tick in 0..recv_delay_ticks.max(send_delay_ticks) {
+        for tick in 0..=recv_delay_ticks.max(send_delay_ticks) {
             // Check if it's time to send
             if tick == send_delay_ticks {
-                match sender.send(self.config.send_value) {
-                    Ok(()) => {}, // Send succeeded, continue polling receiver
-                    Err(_) => return (sender, Some(OneshotOutcome::SendFailed)),
+                let sender = sender.take().expect("oneshot sender is sent once");
+                match sender.send(&cx, self.config.send_value) {
+                    Ok(()) => {} // Send succeeded, continue polling receiver
+                    Err(_) => return OneshotOutcome::SendFailed,
                 }
             }
 
             // Check if it's time to start receiving
             if tick >= recv_delay_ticks {
                 if self.config.cancel_receiver {
-                    return (sender, Some(OneshotOutcome::Cancelled));
+                    return OneshotOutcome::Cancelled;
                 }
 
                 match Pin::new(&mut recv_future).poll(&mut context) {
-                    Poll::Ready(Ok(value)) => return (sender, Some(OneshotOutcome::ReceivedValue(value))),
-                    Poll::Ready(Err(AsupersyncRecvError::Closed)) => return (sender, Some(OneshotOutcome::ReceivedError)),
-                    Poll::Ready(Err(AsupersyncRecvError::Cancelled)) => return (sender, Some(OneshotOutcome::Cancelled)),
-                    Poll::Pending => {}, // Continue waiting
+                    Poll::Ready(Ok(value)) => return OneshotOutcome::ReceivedValue(value),
+                    Poll::Ready(Err(AsupersyncRecvError::Closed)) => {
+                        return OneshotOutcome::ReceivedError;
+                    }
+                    Poll::Ready(Err(AsupersyncRecvError::PolledAfterCompletion)) => {
+                        return OneshotOutcome::ReceivedError;
+                    }
+                    Poll::Ready(Err(AsupersyncRecvError::Cancelled)) => {
+                        return OneshotOutcome::Cancelled;
+                    }
+                    Poll::Pending => {} // Continue waiting
                 }
             }
 
             thread::sleep(Duration::from_millis(1));
         }
 
-        (sender, None) // No result yet, operation may still be pending
+        OneshotOutcome::ReceivedError
     }
 
     /// Test tokio oneshot behavior.
@@ -260,8 +267,7 @@ impl OneshotConformanceContext {
             // Try to receive from dropped sender
             thread::sleep(Duration::from_millis(self.config.recv_delay_ms));
 
-            let waker = noop_waker();
-            let mut context = Context::from_waker(&waker);
+            let mut context = Context::from_waker(Waker::noop());
 
             return match Pin::new(&mut receiver).poll(&mut context) {
                 Poll::Ready(Ok(value)) => OneshotOutcome::ReceivedValue(value),
@@ -283,28 +289,21 @@ impl OneshotConformanceContext {
             }
 
             thread::sleep(Duration::from_millis(
-                self.config.recv_delay_ms.saturating_sub(self.config.send_delay_ms)
+                self.config
+                    .recv_delay_ms
+                    .saturating_sub(self.config.send_delay_ms),
             ));
 
             // Receive after send
             self.perform_tokio_recv(receiver)
         } else {
             // Start receive first, then send
-            let (sender, receiver_result) = self.perform_tokio_recv_with_delayed_send(sender, receiver);
-
-            // If receive completed before send, return that result
-            if let Some(result) = receiver_result {
-                return result;
-            }
-
-            // Otherwise, send was completed, return send result
-            OneshotOutcome::SendSucceeded
+            self.perform_tokio_recv_with_delayed_send(sender, receiver)
         }
     }
 
-    fn perform_tokio_recv(&self, mut receiver: tokio::sync::oneshot::Receiver<u32>) -> OneshotOutcome {
-        let waker = noop_waker();
-        let mut context = Context::from_waker(&waker);
+    fn perform_tokio_recv(&self, mut receiver: TokioReceiver<u32>) -> OneshotOutcome {
+        let mut context = Context::from_waker(Waker::noop());
 
         // Simulate cancellation if requested
         if self.config.cancel_receiver {
@@ -312,10 +311,11 @@ impl OneshotConformanceContext {
         }
 
         // Poll until completion or timeout
-        for _ in 0..100 { // Max 100ms timeout
+        for _ in 0..100 {
+            // Max 100ms timeout
             match Pin::new(&mut receiver).poll(&mut context) {
                 Poll::Ready(Ok(value)) => return OneshotOutcome::ReceivedValue(value),
-                Poll::Ready(Err(TokioRecvError { .. })) => return OneshotOutcome::ReceivedError,
+                Poll::Ready(Err(_)) => return OneshotOutcome::ReceivedError,
                 Poll::Pending => {
                     thread::sleep(Duration::from_millis(1));
                 }
@@ -327,42 +327,43 @@ impl OneshotConformanceContext {
 
     fn perform_tokio_recv_with_delayed_send(
         &self,
-        sender: tokio::sync::oneshot::Sender<u32>,
-        mut receiver: tokio::sync::oneshot::Receiver<u32>
-    ) -> (tokio::sync::oneshot::Sender<u32>, Option<OneshotOutcome>) {
-        let waker = noop_waker();
-        let mut context = Context::from_waker(&waker);
+        sender: TokioSender<u32>,
+        mut receiver: TokioReceiver<u32>,
+    ) -> OneshotOutcome {
+        let mut context = Context::from_waker(Waker::noop());
+        let mut sender = Some(sender);
 
         let recv_delay_ticks = self.config.recv_delay_ms as usize;
         let send_delay_ticks = self.config.send_delay_ms as usize;
 
         // Simulate concurrent recv and delayed send
-        for tick in 0..recv_delay_ticks.max(send_delay_ticks) {
+        for tick in 0..=recv_delay_ticks.max(send_delay_ticks) {
             // Check if it's time to send
             if tick == send_delay_ticks {
+                let sender = sender.take().expect("oneshot sender is sent once");
                 match sender.send(self.config.send_value) {
-                    Ok(()) => {}, // Send succeeded, continue polling receiver
-                    Err(_) => return (sender, Some(OneshotOutcome::SendFailed)),
+                    Ok(()) => {} // Send succeeded, continue polling receiver
+                    Err(_) => return OneshotOutcome::SendFailed,
                 }
             }
 
             // Check if it's time to start receiving
             if tick >= recv_delay_ticks {
                 if self.config.cancel_receiver {
-                    return (sender, Some(OneshotOutcome::Cancelled));
+                    return OneshotOutcome::Cancelled;
                 }
 
                 match Pin::new(&mut receiver).poll(&mut context) {
-                    Poll::Ready(Ok(value)) => return (sender, Some(OneshotOutcome::ReceivedValue(value))),
-                    Poll::Ready(Err(TokioRecvError { .. })) => return (sender, Some(OneshotOutcome::ReceivedError)),
-                    Poll::Pending => {}, // Continue waiting
+                    Poll::Ready(Ok(value)) => return OneshotOutcome::ReceivedValue(value),
+                    Poll::Ready(Err(_)) => return OneshotOutcome::ReceivedError,
+                    Poll::Pending => {} // Continue waiting
                 }
             }
 
             thread::sleep(Duration::from_millis(1));
         }
 
-        (sender, None) // No result yet, operation may still be pending
+        OneshotOutcome::ReceivedError
     }
 }
 
@@ -383,15 +384,14 @@ fn outcomes_equivalent(asupersync: &OneshotOutcome, tokio: &OneshotOutcome) -> b
 
 /// Verify that both oneshot implementations have conformant behavior.
 fn assert_oneshot_conformance(result: &OneshotConformanceResult, test_name: &str) {
-    assert!(result.outcomes_match,
+    assert!(
+        result.outcomes_match,
         "{}: Outcomes differ\n\
          Asupersync: {:?}\n\
          Tokio:      {:?}\n\
          Scenario:   {}",
-        test_name,
-        result.asupersync_result,
-        result.tokio_result,
-        result.scenario);
+        test_name, result.asupersync_result, result.tokio_result, result.scenario
+    );
 }
 
 /// Test basic send-then-receive scenario.
@@ -518,7 +518,16 @@ fn conformance_comprehensive_matrix() {
         ("receiver_drop_immediate", 6, false, false, true, 5, 0),
     ];
 
-    for (name, send_value, cancel_receiver, drop_sender_early, drop_receiver_early, send_delay_ms, recv_delay_ms) in test_cases {
+    for (
+        name,
+        send_value,
+        cancel_receiver,
+        drop_sender_early,
+        drop_receiver_early,
+        send_delay_ms,
+        recv_delay_ms,
+    ) in test_cases
+    {
         let config = OneshotTestConfig {
             scenario: name.to_string(),
             send_value,
