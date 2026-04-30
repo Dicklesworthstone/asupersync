@@ -1615,6 +1615,22 @@ pub fn fuzz_validate_stream_config(config: &StreamConfig) -> Result<String, Stri
     Ok(config.to_json())
 }
 
+/// Fuzz-target formatter export for DeliverByStartTime wall-clock serialization.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_format_deliver_by_start_time_rfc3339(time: SystemTime) -> String {
+    format_system_time_rfc3339(time)
+}
+
+/// Fuzz-target JSON export for DeliverByStartTime consumer configuration.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_consumer_config_deliver_by_start_time_json(time: SystemTime) -> String {
+    ConsumerConfig::ephemeral()
+        .deliver_policy(DeliverPolicy::ByStartTime(time))
+        .to_json()
+}
+
 /// Compact termination classes for the pull-subscriber loop state machine.
 #[cfg(feature = "test-internals")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2697,6 +2713,28 @@ mod tests {
             format_system_time_rfc3339(UNIX_EPOCH - Duration::from_secs(1)),
             "1969-12-31T23:59:59.000000000Z"
         );
+    }
+
+    #[test]
+    fn deliver_by_start_time_serialization_survives_cross_epoch_skew_tick150() {
+        let base = UNIX_EPOCH + Duration::new(9, 250_000_000);
+        let skewed = base
+            .checked_sub(Duration::new(10, 500_000_000))
+            .expect("cross-epoch skew should stay representable");
+        let corrected = skewed
+            .checked_add(Duration::new(10, 500_000_000))
+            .expect("inverse skew should restore original timestamp");
+
+        assert_eq!(
+            format_system_time_rfc3339(base),
+            format_system_time_rfc3339(corrected)
+        );
+
+        let json = ConsumerConfig::ephemeral()
+            .deliver_policy(DeliverPolicy::ByStartTime(skewed))
+            .to_json();
+        assert!(json.contains("\"deliver_policy\":\"by_start_time\""));
+        assert!(json.contains("\"opt_start_time\":\"1969-12-31T23:59:58.750000000Z\""));
     }
 
     #[test]

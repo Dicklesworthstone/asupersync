@@ -1627,6 +1627,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "jetstream_deliver_by_start_time_skew"
+path = "fuzz_targets/jetstream_deliver_by_start_time_skew.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "transport_router"
 path = "fuzz_targets/transport_router.rs"
 test = false
