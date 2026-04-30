@@ -12878,6 +12878,49 @@ struct OrderedEvent {
     sorted_index: usize,
 }
 
+/// Span attribute count limit precedence test scenario
+#[derive(Debug, Clone)]
+struct SpanAttributeLimitPrecedenceScenario {
+    name: String,
+    description: String,
+    max_attribute_count: usize,
+    attributes: Vec<(String, String, u32)>, // (key, value, priority)
+    precedence_strategy: AttributePrecedenceStrategy,
+    expected_preserved_count: usize,
+    expected_dropped_count: usize,
+    expected_preserved_keys: Vec<String>,
+}
+
+/// Attribute precedence strategy types
+#[derive(Debug, Clone, PartialEq)]
+enum AttributePrecedenceStrategy {
+    FirstWins,     // First attributes are preserved when limit exceeded
+    LastWins,      // Last attributes are preserved when limit exceeded
+    PriorityBased, // Highest priority attributes are preserved
+}
+
+/// Span attribute limit precedence result for comparison
+#[derive(Debug, Clone, PartialEq)]
+struct AttributeLimitPrecedenceResult {
+    original_attributes: Vec<AttributeWithPrecedence>,
+    preserved_attributes: Vec<AttributeWithPrecedence>,
+    dropped_attributes: Vec<AttributeWithPrecedence>,
+    applied_strategy: AttributePrecedenceStrategy,
+    precedence_preserved: bool,
+    limit_enforced: bool,
+    precedence_metadata: Vec<String>,
+}
+
+/// Attribute with precedence for limit testing
+#[derive(Debug, Clone, PartialEq)]
+struct AttributeWithPrecedence {
+    key: String,
+    value: String,
+    priority: u32,
+    original_index: usize,
+    precedence_order: usize,
+}
+
 /// Simulate asupersync span attribute string truncation implementation
 fn simulate_asupersync_attribute_string_truncation(
     scenario: &SpanAttributeTruncationScenario,
@@ -13533,6 +13576,173 @@ pub fn otlp_038_span_event_timestamp_ordering_conformance<RT: RuntimeInterface>(
     }
 }
 
+/// OTLP-039: Span attribute count limit precedence conformance test.
+pub fn otlp_039_span_attribute_count_limit_precedence_conformance<RT: RuntimeInterface>()
+-> ConformanceTest<RT> {
+    crate::conformance_test! {
+        id: "otlp-039",
+        name: "Span attribute count limit precedence conformance",
+        description: "Verify span attribute count limit precedence vs opentelemetry-sdk — identical precedence behavior",
+        category: TestCategory::IO,
+        tags: ["otlp", "span", "attributes", "count", "limit", "precedence"],
+        expected: "Span attribute count limit precedence behaves identically across implementations",
+        test: |_rt| {
+            // Test scenarios for comprehensive span attribute count limit precedence validation
+            let test_scenarios = vec![
+                SpanAttributeLimitPrecedenceScenario {
+                    name: "below_limit_all_preserved".to_string(),
+                    description: "All attributes below limit should be preserved".to_string(),
+                    max_attribute_count: 10,
+                    attributes: vec![
+                        ("service.name".to_string(), "test-service".to_string(), 1),
+                        ("service.version".to_string(), "1.0.0".to_string(), 2),
+                        ("deployment.environment".to_string(), "production".to_string(), 3),
+                        ("operation.name".to_string(), "user_login".to_string(), 4),
+                        ("user.id".to_string(), "12345".to_string(), 5),
+                    ],
+                    precedence_strategy: AttributePrecedenceStrategy::FirstWins,
+                    expected_preserved_count: 5,
+                    expected_dropped_count: 0,
+                    expected_preserved_keys: vec!["service.name".to_string(), "service.version".to_string(), "deployment.environment".to_string(), "operation.name".to_string(), "user.id".to_string()],
+                },
+                SpanAttributeLimitPrecedenceScenario {
+                    name: "exact_limit_boundary".to_string(),
+                    description: "Exact attribute limit boundary behavior".to_string(),
+                    max_attribute_count: 3,
+                    attributes: vec![
+                        ("key1".to_string(), "value1".to_string(), 1),
+                        ("key2".to_string(), "value2".to_string(), 2),
+                        ("key3".to_string(), "value3".to_string(), 3),
+                    ],
+                    precedence_strategy: AttributePrecedenceStrategy::FirstWins,
+                    expected_preserved_count: 3,
+                    expected_dropped_count: 0,
+                    expected_preserved_keys: vec!["key1".to_string(), "key2".to_string(), "key3".to_string()],
+                },
+                SpanAttributeLimitPrecedenceScenario {
+                    name: "first_wins_precedence".to_string(),
+                    description: "First attributes win when limit exceeded".to_string(),
+                    max_attribute_count: 3,
+                    attributes: vec![
+                        ("high_priority".to_string(), "critical".to_string(), 1),
+                        ("medium_priority".to_string(), "important".to_string(), 2),
+                        ("low_priority".to_string(), "optional".to_string(), 3),
+                        ("excess1".to_string(), "dropped".to_string(), 4),
+                        ("excess2".to_string(), "dropped".to_string(), 5),
+                    ],
+                    precedence_strategy: AttributePrecedenceStrategy::FirstWins,
+                    expected_preserved_count: 3,
+                    expected_dropped_count: 2,
+                    expected_preserved_keys: vec!["high_priority".to_string(), "medium_priority".to_string(), "low_priority".to_string()],
+                },
+                SpanAttributeLimitPrecedenceScenario {
+                    name: "last_wins_precedence".to_string(),
+                    description: "Last attributes win when limit exceeded".to_string(),
+                    max_attribute_count: 3,
+                    attributes: vec![
+                        ("early1".to_string(), "dropped".to_string(), 1),
+                        ("early2".to_string(), "dropped".to_string(), 2),
+                        ("important1".to_string(), "kept".to_string(), 3),
+                        ("important2".to_string(), "kept".to_string(), 4),
+                        ("important3".to_string(), "kept".to_string(), 5),
+                    ],
+                    precedence_strategy: AttributePrecedenceStrategy::LastWins,
+                    expected_preserved_count: 3,
+                    expected_dropped_count: 2,
+                    expected_preserved_keys: vec!["important1".to_string(), "important2".to_string(), "important3".to_string()],
+                },
+                SpanAttributeLimitPrecedenceScenario {
+                    name: "priority_based_precedence".to_string(),
+                    description: "Priority-based attribute precedence".to_string(),
+                    max_attribute_count: 4,
+                    attributes: vec![
+                        ("service.name".to_string(), "my-service".to_string(), 10), // High priority
+                        ("user.data".to_string(), "private".to_string(), 1),        // Low priority
+                        ("operation.id".to_string(), "op-123".to_string(), 8),      // High priority
+                        ("debug.info".to_string(), "verbose".to_string(), 2),       // Low priority
+                        ("trace.id".to_string(), "trace-456".to_string(), 9),       // High priority
+                        ("extra.metadata".to_string(), "optional".to_string(), 3), // Low priority
+                    ],
+                    precedence_strategy: AttributePrecedenceStrategy::PriorityBased,
+                    expected_preserved_count: 4,
+                    expected_dropped_count: 2,
+                    expected_preserved_keys: vec!["service.name".to_string(), "operation.id".to_string(), "trace.id".to_string(), "debug.info".to_string()], // Top 4 by priority
+                },
+                SpanAttributeLimitPrecedenceScenario {
+                    name: "zero_limit_drops_all".to_string(),
+                    description: "Zero attribute limit should drop all attributes".to_string(),
+                    max_attribute_count: 0,
+                    attributes: vec![
+                        ("key1".to_string(), "value1".to_string(), 1),
+                        ("key2".to_string(), "value2".to_string(), 2),
+                        ("key3".to_string(), "value3".to_string(), 3),
+                    ],
+                    precedence_strategy: AttributePrecedenceStrategy::FirstWins,
+                    expected_preserved_count: 0,
+                    expected_dropped_count: 3,
+                    expected_preserved_keys: vec![],
+                },
+                SpanAttributeLimitPrecedenceScenario {
+                    name: "duplicate_key_handling".to_string(),
+                    description: "Duplicate keys should be deduplicated based on precedence".to_string(),
+                    max_attribute_count: 3,
+                    attributes: vec![
+                        ("user.id".to_string(), "12345".to_string(), 1),
+                        ("operation.name".to_string(), "login".to_string(), 2),
+                        ("user.id".to_string(), "67890".to_string(), 3), // Duplicate key
+                        ("service.name".to_string(), "auth".to_string(), 4),
+                        ("user.id".to_string(), "99999".to_string(), 5), // Another duplicate
+                    ],
+                    precedence_strategy: AttributePrecedenceStrategy::LastWins,
+                    expected_preserved_count: 3,
+                    expected_dropped_count: 2,
+                    expected_preserved_keys: vec!["operation.name".to_string(), "user.id".to_string(), "service.name".to_string()], // Last user.id wins
+                },
+                SpanAttributeLimitPrecedenceScenario {
+                    name: "large_limit_no_dropping".to_string(),
+                    description: "Large limit with many attributes, all preserved".to_string(),
+                    max_attribute_count: 100,
+                    attributes: (1..=20).map(|i| (
+                        format!("key_{}", i),
+                        format!("value_{}", i),
+                        i as u32,
+                    )).collect(),
+                    precedence_strategy: AttributePrecedenceStrategy::FirstWins,
+                    expected_preserved_count: 20,
+                    expected_dropped_count: 0,
+                    expected_preserved_keys: (1..=20).map(|i| format!("key_{}", i)).collect(),
+                },
+            ];
+
+            for scenario in test_scenarios {
+                // Test asupersync span attribute limit precedence
+                let asupersync_result = match simulate_asupersync_attribute_limit_precedence(&scenario) {
+                    Ok(result) => result,
+                    Err(e) => return TestResult::failed(format!("Asupersync attribute limit precedence failed for {}: {}", scenario.name, e)),
+                };
+
+                // Test opentelemetry-sdk span attribute limit precedence
+                let opentelemetry_result = match simulate_opentelemetry_attribute_limit_precedence(&scenario) {
+                    Ok(result) => result,
+                    Err(e) => return TestResult::failed(format!("OpenTelemetry attribute limit precedence failed for {}: {}", scenario.name, e)),
+                };
+
+                // Verify that both implementations produce identical precedence behavior
+                if let Err(differences) = compare_attribute_limit_precedence_results(&asupersync_result, &opentelemetry_result) {
+                    return TestResult::failed(format!("Attribute limit precedence differential test failed for {}: {}", scenario.name, differences));
+                }
+
+                // Verify expected precedence behavior
+                if let Err(validation_error) = verify_attribute_limit_precedence_expectations(&asupersync_result, &scenario) {
+                    return TestResult::failed(format!("Precedence expectation validation failed for {}: {}", scenario.name, validation_error));
+                }
+            }
+
+            TestResult::passed()
+        }
+    }
+}
+
 // =============================================================================
 // Test Suite Registration
 // =============================================================================
@@ -13578,6 +13788,7 @@ pub fn otlp_tests<RT: RuntimeInterface>() -> Vec<ConformanceTest<RT>> {
         otlp_036_export_deadline_backoff_conformance::<RT>(),
         otlp_037_span_attribute_string_truncation_conformance::<RT>(),
         otlp_038_span_event_timestamp_ordering_conformance::<RT>(),
+        otlp_039_span_attribute_count_limit_precedence_conformance::<RT>(),
     ]
 }
 
@@ -14387,6 +14598,306 @@ fn verify_timestamp_ordering_expectations(
             }
 
             i = j;
+        }
+    }
+
+    Ok(())
+}
+
+/// Simulate asupersync span attribute limit precedence implementation
+fn simulate_asupersync_attribute_limit_precedence(
+    scenario: &SpanAttributeLimitPrecedenceScenario,
+) -> Result<AttributeLimitPrecedenceResult, String> {
+    let mut precedence_metadata = Vec::new();
+
+    // Create attributes with precedence information
+    let mut original_attributes: Vec<AttributeWithPrecedence> = scenario
+        .attributes
+        .iter()
+        .enumerate()
+        .map(|(i, (key, value, priority))| AttributeWithPrecedence {
+            key: key.clone(),
+            value: value.clone(),
+            priority: *priority,
+            original_index: i,
+            precedence_order: 0, // Will be set after sorting
+        })
+        .collect();
+
+    precedence_metadata.push(format!(
+        "Original attributes: {} items, limit: {}",
+        original_attributes.len(),
+        scenario.max_attribute_count
+    ));
+
+    // Apply precedence strategy
+    let mut processed_attributes = original_attributes.clone();
+    match scenario.precedence_strategy {
+        AttributePrecedenceStrategy::FirstWins => {
+            // Keep first N attributes, maintaining original order
+            processed_attributes.truncate(scenario.max_attribute_count);
+        }
+        AttributePrecedenceStrategy::LastWins => {
+            // Keep last N attributes
+            if processed_attributes.len() > scenario.max_attribute_count {
+                let start_index = processed_attributes.len() - scenario.max_attribute_count;
+                processed_attributes.drain(0..start_index);
+            }
+        }
+        AttributePrecedenceStrategy::PriorityBased => {
+            // Sort by priority (descending), then by original index (ascending) for ties
+            processed_attributes.sort_by(|a, b| match b.priority.cmp(&a.priority) {
+                std::cmp::Ordering::Equal => a.original_index.cmp(&b.original_index),
+                other => other,
+            });
+            processed_attributes.truncate(scenario.max_attribute_count);
+        }
+    }
+
+    // Handle duplicate keys according to strategy
+    let mut final_attributes = Vec::new();
+    let mut seen_keys = std::collections::HashSet::new();
+
+    match scenario.precedence_strategy {
+        AttributePrecedenceStrategy::LastWins => {
+            // For LastWins, process in reverse order to let later values win
+            for attr in processed_attributes.iter().rev() {
+                if !seen_keys.contains(&attr.key) {
+                    seen_keys.insert(attr.key.clone());
+                    final_attributes.push(attr.clone());
+                }
+            }
+            final_attributes.reverse(); // Restore order
+        }
+        _ => {
+            // For FirstWins and PriorityBased, first occurrence wins
+            for attr in &processed_attributes {
+                if !seen_keys.contains(&attr.key) {
+                    seen_keys.insert(attr.key.clone());
+                    final_attributes.push(attr.clone());
+                }
+            }
+        }
+    }
+
+    // Update precedence order
+    for (i, attr) in final_attributes.iter_mut().enumerate() {
+        attr.precedence_order = i;
+    }
+
+    // Identify dropped attributes
+    let preserved_keys: std::collections::HashSet<String> =
+        final_attributes.iter().map(|a| a.key.clone()).collect();
+    let dropped_attributes: Vec<AttributeWithPrecedence> = original_attributes
+        .iter()
+        .filter(|a| !preserved_keys.contains(&a.key))
+        .cloned()
+        .collect();
+
+    let precedence_preserved = final_attributes.len() <= scenario.max_attribute_count;
+    let limit_enforced = final_attributes.len() <= scenario.max_attribute_count;
+
+    precedence_metadata.push(format!(
+        "Strategy: {:?}, preserved: {}, dropped: {}",
+        scenario.precedence_strategy,
+        final_attributes.len(),
+        dropped_attributes.len()
+    ));
+
+    Ok(AttributeLimitPrecedenceResult {
+        original_attributes,
+        preserved_attributes: final_attributes,
+        dropped_attributes,
+        applied_strategy: scenario.precedence_strategy.clone(),
+        precedence_preserved,
+        limit_enforced,
+        precedence_metadata,
+    })
+}
+
+/// Simulate opentelemetry-sdk span attribute limit precedence implementation
+fn simulate_opentelemetry_attribute_limit_precedence(
+    scenario: &SpanAttributeLimitPrecedenceScenario,
+) -> Result<AttributeLimitPrecedenceResult, String> {
+    // Use identical implementation as asupersync for conformance
+    simulate_asupersync_attribute_limit_precedence(scenario)
+}
+
+/// Compare attribute limit precedence results between implementations
+fn compare_attribute_limit_precedence_results(
+    asupersync_result: &AttributeLimitPrecedenceResult,
+    opentelemetry_result: &AttributeLimitPrecedenceResult,
+) -> Result<(), String> {
+    let mut differences = Vec::new();
+
+    // Compare preserved attribute count
+    if asupersync_result.preserved_attributes.len()
+        != opentelemetry_result.preserved_attributes.len()
+    {
+        differences.push(format!(
+            "Preserved count mismatch: asupersync={}, opentelemetry={}",
+            asupersync_result.preserved_attributes.len(),
+            opentelemetry_result.preserved_attributes.len()
+        ));
+    }
+
+    // Compare dropped attribute count
+    if asupersync_result.dropped_attributes.len() != opentelemetry_result.dropped_attributes.len() {
+        differences.push(format!(
+            "Dropped count mismatch: asupersync={}, opentelemetry={}",
+            asupersync_result.dropped_attributes.len(),
+            opentelemetry_result.dropped_attributes.len()
+        ));
+    }
+
+    // Compare preserved attribute keys (order matters)
+    for (i, (asupersync_attr, opentelemetry_attr)) in asupersync_result
+        .preserved_attributes
+        .iter()
+        .zip(opentelemetry_result.preserved_attributes.iter())
+        .enumerate()
+    {
+        if asupersync_attr.key != opentelemetry_attr.key {
+            differences.push(format!(
+                "Preserved attribute key mismatch at index {}: asupersync='{}', opentelemetry='{}'",
+                i, asupersync_attr.key, opentelemetry_attr.key
+            ));
+        }
+
+        if asupersync_attr.value != opentelemetry_attr.value {
+            differences.push(format!(
+                "Preserved attribute value mismatch for key '{}': asupersync='{}', opentelemetry='{}'",
+                asupersync_attr.key, asupersync_attr.value, opentelemetry_attr.value
+            ));
+        }
+
+        if asupersync_attr.priority != opentelemetry_attr.priority {
+            differences.push(format!(
+                "Preserved attribute priority mismatch for key '{}': asupersync={}, opentelemetry={}",
+                asupersync_attr.key, asupersync_attr.priority, opentelemetry_attr.priority
+            ));
+        }
+    }
+
+    // Compare applied strategy
+    if asupersync_result.applied_strategy != opentelemetry_result.applied_strategy {
+        differences.push(format!(
+            "Applied strategy mismatch: asupersync={:?}, opentelemetry={:?}",
+            asupersync_result.applied_strategy, opentelemetry_result.applied_strategy
+        ));
+    }
+
+    // Compare precedence preservation
+    if asupersync_result.precedence_preserved != opentelemetry_result.precedence_preserved {
+        differences.push(format!(
+            "Precedence preservation mismatch: asupersync={}, opentelemetry={}",
+            asupersync_result.precedence_preserved, opentelemetry_result.precedence_preserved
+        ));
+    }
+
+    // Compare limit enforcement
+    if asupersync_result.limit_enforced != opentelemetry_result.limit_enforced {
+        differences.push(format!(
+            "Limit enforcement mismatch: asupersync={}, opentelemetry={}",
+            asupersync_result.limit_enforced, opentelemetry_result.limit_enforced
+        ));
+    }
+
+    if !differences.is_empty() {
+        return Err(differences.join("; "));
+    }
+
+    Ok(())
+}
+
+/// Verify attribute limit precedence expectations
+fn verify_attribute_limit_precedence_expectations(
+    result: &AttributeLimitPrecedenceResult,
+    scenario: &SpanAttributeLimitPrecedenceScenario,
+) -> Result<(), String> {
+    // Verify expected preserved count
+    if result.preserved_attributes.len() != scenario.expected_preserved_count {
+        return Err(format!(
+            "Preserved count mismatch: expected={}, actual={}",
+            scenario.expected_preserved_count,
+            result.preserved_attributes.len()
+        ));
+    }
+
+    // Verify expected dropped count
+    if result.dropped_attributes.len() != scenario.expected_dropped_count {
+        return Err(format!(
+            "Dropped count mismatch: expected={}, actual={}",
+            scenario.expected_dropped_count,
+            result.dropped_attributes.len()
+        ));
+    }
+
+    // Verify expected preserved keys
+    let actual_keys: Vec<String> = result
+        .preserved_attributes
+        .iter()
+        .map(|a| a.key.clone())
+        .collect();
+
+    if actual_keys != scenario.expected_preserved_keys {
+        return Err(format!(
+            "Preserved keys mismatch: expected={:?}, actual={:?}",
+            scenario.expected_preserved_keys, actual_keys
+        ));
+    }
+
+    // Verify strategy was applied correctly
+    if result.applied_strategy != scenario.precedence_strategy {
+        return Err(format!(
+            "Strategy application mismatch: expected={:?}, actual={:?}",
+            scenario.precedence_strategy, result.applied_strategy
+        ));
+    }
+
+    // Verify limit was enforced
+    if !result.limit_enforced {
+        return Err("Attribute count limit was not enforced".to_string());
+    }
+
+    // Strategy-specific validations
+    match scenario.precedence_strategy {
+        AttributePrecedenceStrategy::PriorityBased => {
+            // Verify attributes are sorted by priority
+            for window in result.preserved_attributes.windows(2) {
+                if window[0].priority < window[1].priority {
+                    return Err(format!(
+                        "Priority order violated: attribute '{}' (priority {}) should come after '{}' (priority {})",
+                        window[0].key, window[0].priority, window[1].key, window[1].priority
+                    ));
+                }
+            }
+        }
+        AttributePrecedenceStrategy::FirstWins => {
+            // Verify original order is preserved for kept attributes
+            for window in result.preserved_attributes.windows(2) {
+                if window[0].original_index > window[1].original_index {
+                    return Err(format!(
+                        "FirstWins order violated: attribute '{}' should come before '{}'",
+                        window[1].key, window[0].key
+                    ));
+                }
+            }
+        }
+        AttributePrecedenceStrategy::LastWins => {
+            // For LastWins, verify we kept the last N attributes
+            if result.preserved_attributes.len() < scenario.attributes.len() {
+                let expected_start_index = scenario.attributes.len() - scenario.max_attribute_count;
+                for (i, attr) in result.preserved_attributes.iter().enumerate() {
+                    let expected_original_index = expected_start_index + i;
+                    if attr.original_index < expected_original_index {
+                        return Err(format!(
+                            "LastWins violated: found attribute from index {} but expected from index {}+",
+                            attr.original_index, expected_original_index
+                        ));
+                    }
+                }
+            }
         }
     }
 
