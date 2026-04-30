@@ -1557,6 +1557,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h2_settings_undefined_identifier"
+path = "fuzz_targets/h2_settings_undefined_identifier.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "symbol_auth"
 path = "fuzz_targets/symbol_auth.rs"
 test = false
@@ -3734,6 +3741,17 @@ bench = false
 [[bin]]
 name = "notify_one_multiple_waiters"
 path = "fuzz_targets/notify_one_multiple_waiters.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #172 — Notify race after waiter cancellation fuzzer
+# Tests arbitrary cancel during notify operations, validates that notifications are
+# atomically delivered or skipped with no double-delivery. Includes patterns for
+# notify_one cancellation, baton-passing, broadcast cancellation, and stored notifications.
+[[bin]]
+name = "notify_cancel_race"
+path = "fuzz_targets/notify_cancel_race.rs"
 test = false
 doc = false
 bench = false
