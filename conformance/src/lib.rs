@@ -36,12 +36,16 @@ use std::pin::Pin;
 use std::time::Duration;
 
 pub mod bench;
+pub mod h1_expect_continue_conformance;
+pub mod h1_request_building_conformance;
+pub mod h2_continuation_conformance;
 pub mod h2_data_end_stream_conformance;
 pub mod h2_goaway_conformance;
 pub mod h2_ping_conformance;
 pub mod h2_priority_conformance;
 pub mod h2_settings_conformance;
 pub mod hpack_conformance;
+pub mod hpack_encoder_conformance;
 pub mod kafka_record_batch_v2;
 pub mod lean_coverage_matrix;
 pub mod lean_frontier;
@@ -63,25 +67,41 @@ pub use bench::{
     RegressionConfig, RegressionMetric, Stats, StatsError, default_benchmarks,
     run_benchmark_comparison,
 };
+pub use h1_expect_continue_conformance::{
+    ExpectContinueComplianceReport, ExpectContinueComplianceSummary, ExpectContinueConformanceCase,
+    ExpectContinueConformanceTester, ExpectContinueTestResult, ExpectContinueTestVerdict,
+};
+pub use h1_request_building_conformance::{
+    RequestBuilderOp, RequestBuildingComplianceReport, RequestBuildingComplianceSummary,
+    RequestBuildingConformanceCase, RequestBuildingConformanceTester, RequestBuildingTestResult,
+    RequestBuildingTestVerdict,
+};
+pub use h2_continuation_conformance::{
+    ContinuationComplianceReport, ContinuationComplianceSummary, ContinuationConformanceCase,
+    ContinuationConformanceTester, ContinuationTestResult, ContinuationTestVerdict,
+    ExpectedOutcome as ContinuationExpectedOutcome, FrameSequence,
+    RequirementLevel as ContinuationRequirementLevel, TestFrame, TestFrameResult,
+};
 pub use h2_data_end_stream_conformance::{
     DataEndStreamComplianceReport, DataEndStreamComplianceSummary, DataEndStreamConformanceCase,
-    DataEndStreamConformanceResult, DataEndStreamConformanceTester, DataEndStreamTestVerdict, RequirementLevel as DataEndStreamRequirementLevel,
-    DataEndStreamConnectionState, StreamEndStreamState, SerializableDataFrame,
+    DataEndStreamConformanceResult, DataEndStreamConformanceTester, DataEndStreamConnectionState,
+    DataEndStreamTestVerdict, RequirementLevel as DataEndStreamRequirementLevel,
+    SerializableDataFrame, StreamEndStreamState,
 };
 pub use h2_goaway_conformance::{
     GoAwayComplianceReport, GoAwayComplianceSummary, GoAwayConformanceCase,
-    GoAwayConformanceResult, GoAwayConformanceTester, GoAwayTestVerdict, RequirementLevel as GoAwayRequirementLevel,
-    GoAwayConnectionState, SerializableGoAwayFrame,
+    GoAwayConformanceResult, GoAwayConformanceTester, GoAwayConnectionState, GoAwayTestVerdict,
+    RequirementLevel as GoAwayRequirementLevel, SerializableGoAwayFrame,
 };
 pub use h2_ping_conformance::{
-    PingComplianceReport, PingComplianceSummary, PingConformanceCase,
-    PingConformanceResult, PingConformanceTester, PingTestVerdict, RequirementLevel as PingRequirementLevel,
-    PingConnectionState, PingTiming, SerializablePingFrame,
+    PingComplianceReport, PingComplianceSummary, PingConformanceCase, PingConformanceResult,
+    PingConformanceTester, PingConnectionState, PingTestVerdict, PingTiming,
+    RequirementLevel as PingRequirementLevel, SerializablePingFrame,
 };
 pub use h2_priority_conformance::{
     PriorityComplianceReport, PriorityComplianceSummary, PriorityConformanceCase,
-    PriorityConformanceResult, PriorityConformanceTester, PriorityTestVerdict, RequirementLevel as PriorityRequirementLevel,
-    StreamPriorityState,
+    PriorityConformanceResult, PriorityConformanceTester, PriorityTestVerdict,
+    RequirementLevel as PriorityRequirementLevel, StreamPriorityState,
 };
 pub use h2_settings_conformance::{
     ComplianceReport as SettingsComplianceReport, ComplianceSummary as SettingsComplianceSummary,
@@ -94,6 +114,10 @@ pub use hpack_conformance::{
     ConformanceResult as HpackConformanceResult, ExpectedOutcome as HpackExpectedOutcome,
     HpackConformanceCase, HpackConformanceTester, RequirementLevel as HpackRequirementLevel,
     TestVerdict as HpackTestVerdict,
+};
+pub use hpack_encoder_conformance::{
+    EncoderTestVerdict, HpackEncoderComplianceReport, HpackEncoderComplianceSummary,
+    HpackEncoderConformanceCase, HpackEncoderConformanceTester, HpackEncoderTestResult,
 };
 pub use kafka_record_batch_v2::{
     ConformanceTestResult, Header, KafkaConformanceHarness, RecordAttribute, RecordBatchV2,

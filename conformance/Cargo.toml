@@ -35,6 +35,14 @@ name = "mysql_conformance_runner"
 path = "src/bin/mysql_conformance_runner.rs"
 
 [[bin]]
+name = "h1_request_building_conformance"
+path = "src/bin/h1_request_building_conformance.rs"
+
+[[bin]]
+name = "h2_continuation_conformance"
+path = "src/bin/h2_continuation_conformance.rs"
+
+[[bin]]
 name = "h2_data_end_stream_conformance"
 path = "src/bin/h2_data_end_stream_conformance.rs"
 
@@ -57,6 +65,10 @@ path = "src/bin/h2_settings_conformance.rs"
 [[bin]]
 name = "hpack_conformance"
 path = "src/bin/hpack_conformance.rs"
+
+[[bin]]
+name = "hpack_encoder_conformance"
+path = "src/bin/hpack_encoder_conformance.rs"
 
 [[bin]]
 name = "prometheus_conformance"
@@ -86,6 +98,37 @@ path = "src/bin/prometheus_histogram_conformance.rs"
 name = "otlp_span_attributes_conformance"
 path = "src/bin/otlp_span_attributes_conformance.rs"
 
+[[bin]]
+name = "otel_sum_aggregator_conformance"
+path = "src/bin/otel_sum_aggregator_conformance.rs"
+
+[[bin]]
+name = "otel_histogram_aggregator_conformance"
+path = "src/bin/otel_histogram_aggregator_conformance.rs"
+
+[[bin]]
+name = "otel_logs_exporter_conformance"
+path = "src/bin/otel_logs_exporter_conformance.rs"
+
+[[bin]]
+name = "otel_span_status_conformance"
+path = "src/bin/otel_span_status_conformance.rs"
+
+[[bin]]
+name = "otel_trace_context_propagation_conformance"
+path = "src/bin/otel_trace_context_propagation_conformance.rs"
+
+[[bin]]
+name = "otel_baggage_propagation_conformance"
+path = "src/bin/otel_baggage_propagation_conformance.rs"
+
+[[bin]]
+name = "otel_exponential_histogram_conformance"
+path = "src/bin/otel_exponential_histogram_conformance.rs"
+
+[[bin]]
+name = "h1_expect_continue_conformance"
+path = "src/bin/h1_expect_continue_conformance.rs"
 [dependencies]
 asupersync = { path = "..", features = ["metrics", "test-internals", "tracing-integration"] }
 serde = { version = "1", features = ["derive"] }
@@ -99,6 +142,7 @@ env_logger = "0.10"
 h2 = "0.4"
 bytes = "1.11"
 uuid = { version = "1.0", features = ["v4"] }
+urlencoding = "2.1"
 prometheus-client = "0.23"
 opentelemetry = { version = "0.31", features = ["trace"] }
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "trace", "metrics"] }
