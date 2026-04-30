@@ -3821,6 +3821,17 @@ test = false
 doc = false
 bench = false
 
+# Tick #176 — Notify contention storm fuzzer
+# Tests notify_one() under high-frequency contention with arbitrary thread patterns.
+# Validates at-least-once delivery semantics, no notification leaks, and proper cleanup
+# under heavy load with many competing waiters and notifiers.
+[[bin]]
+name = "notify_contention_storm"
+path = "fuzz_targets/notify_contention_storm.rs"
+test = false
+doc = false
+bench = false
+
 # Tick #161 — Oneshot explicit close operations fuzzer
 # Tests arbitrary close+send/recv interleavings through sender/receiver drops.
 # Validates post-close send returns Disconnected/Cancelled error and post-close
@@ -4085,6 +4096,51 @@ bench = false
 [[bin]]
 name = "mutex_lock_owned_cancel"
 path = "fuzz_targets/mutex_lock_owned_cancel.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #177 — HTTP/2 SETTINGS unsupported value range fuzzer
+# Tests arbitrary u32 setting values exceeding RFC 9113 bounds. Validates
+# PROTOCOL_ERROR for out-of-bounds SETTINGS_ENABLE_PUSH (must be 0-1),
+# SETTINGS_INITIAL_WINDOW_SIZE (must be <= 2^31-1), and SETTINGS_MAX_FRAME_SIZE
+# (must be 16384-16777215), or graceful handling with clamping.
+[[bin]]
+name = "h2_settings_unsupported_value_range"
+path = "fuzz_targets/h2_settings_unsupported_value_range.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #178 — HTTP/2 CONTINUATION frame size limit fuzzer
+# Tests arbitrary continuation byte count sequences to validate aggregate
+# header-list-size limit enforcement. Ensures ENHANCE_YOUR_CALM error for
+# accumulated fragments exceeding max_header_list_size * 4 (capped at 256KB).
+[[bin]]
+name = "h2_continuation_frame_size_limit"
+path = "fuzz_targets/h2_continuation_frame_size_limit.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #179 — Oneshot sender split-and-clone fuzzer
+# Tests robustness when multiple Sender instances are created improperly
+# (by cloning internal Arc). Validates that only first send wins across
+# all concurrent attempts, with no panics or state corruption.
+[[bin]]
+name = "oneshot_sender_clone"
+path = "fuzz_targets/oneshot_sender_clone.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #179 — HTTP/1.1 LWS handling in headers fuzzer
+# Tests arbitrary linear-whitespace patterns in header values to validate
+# proper trimming per RFC 9110. Ensures leading/trailing space/tab removal,
+# internal LWS normalization, and rejection of deprecated line folding.
+[[bin]]
+name = "h1_lws_header_handling"
+path = "fuzz_targets/h1_lws_header_handling.rs"
 test = false
 doc = false
 bench = false
