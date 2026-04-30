@@ -1782,6 +1782,80 @@ pub fn fuzz_apply_ordered_consumer_step(
     }
 }
 
+/// Terminal states for local MaxDeliver-per-message enforcement fuzzing.
+#[cfg(feature = "test-internals")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum FuzzMaxDeliverTerminal {
+    Pending,
+    Acked,
+    DeadLettered,
+}
+
+/// Step kinds accepted by the MaxDeliver enforcement reducer.
+#[cfg(feature = "test-internals")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum FuzzMaxDeliverStep {
+    Redeliver,
+    Ack,
+    ResetMessage,
+}
+
+/// Snapshot of per-message MaxDeliver enforcement state for fuzzing.
+#[cfg(feature = "test-internals")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct FuzzMaxDeliverState {
+    pub max_deliver: i64,
+    pub delivered: u32,
+    pub accepted_deliveries: u32,
+    pub rejected_deliveries: u32,
+    pub dlq_messages: u32,
+    pub terminal: FuzzMaxDeliverTerminal,
+}
+
+/// Fuzz-target reducer for local MaxDeliver-per-message poison routing.
+///
+/// JetStream itself keeps maxed-out messages in the stream and emits an
+/// advisory when `MaxDeliver` is exceeded. This reducer models the runtime's
+/// local policy seam: once a message arrives with `delivered > max_deliver`,
+/// stop surfacing it to worker code and classify it for dead-letter handling.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_apply_max_deliver_step(state: &mut FuzzMaxDeliverState, step: FuzzMaxDeliverStep) {
+    let max_deliver = state.max_deliver.max(-1);
+
+    match step {
+        FuzzMaxDeliverStep::Redeliver => match state.terminal {
+            FuzzMaxDeliverTerminal::Pending => {
+                let delivered = state.delivered.saturating_add(1);
+                state.delivered = delivered;
+
+                if max_deliver >= 0 && i64::from(delivered) > max_deliver {
+                    state.rejected_deliveries = state.rejected_deliveries.saturating_add(1);
+                    state.dlq_messages = state.dlq_messages.saturating_add(1);
+                    state.terminal = FuzzMaxDeliverTerminal::DeadLettered;
+                } else {
+                    state.accepted_deliveries = state.accepted_deliveries.saturating_add(1);
+                }
+            }
+            FuzzMaxDeliverTerminal::Acked | FuzzMaxDeliverTerminal::DeadLettered => {
+                state.rejected_deliveries = state.rejected_deliveries.saturating_add(1);
+            }
+        },
+        FuzzMaxDeliverStep::Ack => {
+            if matches!(state.terminal, FuzzMaxDeliverTerminal::Pending) && state.delivered > 0 {
+                state.terminal = FuzzMaxDeliverTerminal::Acked;
+            }
+        }
+        FuzzMaxDeliverStep::ResetMessage => {
+            state.delivered = 0;
+            state.terminal = FuzzMaxDeliverTerminal::Pending;
+        }
+    }
+}
+
 impl JsMessage {
     /// Acknowledge the message (marks as processed).
     ///
@@ -2571,6 +2645,63 @@ mod tests {
         assert_eq!(state.last_sequence, Some(100));
         assert_eq!(state.accepted_messages, 4);
         assert_eq!(state.reset_count, 1);
+    }
+
+    #[test]
+    fn max_deliver_rejects_after_cap_and_advances_to_dlq_tick153() {
+        let mut state = FuzzMaxDeliverState {
+            max_deliver: 3,
+            delivered: 0,
+            accepted_deliveries: 0,
+            rejected_deliveries: 0,
+            dlq_messages: 0,
+            terminal: FuzzMaxDeliverTerminal::Pending,
+        };
+
+        fuzz_apply_max_deliver_step(&mut state, FuzzMaxDeliverStep::Redeliver);
+        fuzz_apply_max_deliver_step(&mut state, FuzzMaxDeliverStep::Redeliver);
+        fuzz_apply_max_deliver_step(&mut state, FuzzMaxDeliverStep::Redeliver);
+        assert_eq!(state.delivered, 3);
+        assert_eq!(state.accepted_deliveries, 3);
+        assert_eq!(state.rejected_deliveries, 0);
+        assert_eq!(state.dlq_messages, 0);
+        assert_eq!(state.terminal, FuzzMaxDeliverTerminal::Pending);
+
+        fuzz_apply_max_deliver_step(&mut state, FuzzMaxDeliverStep::Redeliver);
+        assert_eq!(state.delivered, 4);
+        assert_eq!(state.accepted_deliveries, 3);
+        assert_eq!(state.rejected_deliveries, 1);
+        assert_eq!(state.dlq_messages, 1);
+        assert_eq!(state.terminal, FuzzMaxDeliverTerminal::DeadLettered);
+
+        fuzz_apply_max_deliver_step(&mut state, FuzzMaxDeliverStep::Redeliver);
+        assert_eq!(state.delivered, 4);
+        assert_eq!(state.accepted_deliveries, 3);
+        assert_eq!(state.rejected_deliveries, 2);
+        assert_eq!(state.dlq_messages, 1);
+        assert_eq!(state.terminal, FuzzMaxDeliverTerminal::DeadLettered);
+    }
+
+    #[test]
+    fn max_deliver_negative_one_keeps_redelivery_unbounded_tick153() {
+        let mut state = FuzzMaxDeliverState {
+            max_deliver: -1,
+            delivered: 0,
+            accepted_deliveries: 0,
+            rejected_deliveries: 0,
+            dlq_messages: 0,
+            terminal: FuzzMaxDeliverTerminal::Pending,
+        };
+
+        for _ in 0..8 {
+            fuzz_apply_max_deliver_step(&mut state, FuzzMaxDeliverStep::Redeliver);
+        }
+
+        assert_eq!(state.delivered, 8);
+        assert_eq!(state.accepted_deliveries, 8);
+        assert_eq!(state.rejected_deliveries, 0);
+        assert_eq!(state.dlq_messages, 0);
+        assert_eq!(state.terminal, FuzzMaxDeliverTerminal::Pending);
     }
 
     // Pure data-type tests (wave 13 – CyanBarn)
