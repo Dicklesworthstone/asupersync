@@ -3734,8 +3734,10 @@ pub mod backpressure_metamorphic {
                                                                 .fetch_add(1, Ordering::SeqCst);
                                                             break;
                                                         }
-                                                        Err(SendError::Cancelled(_))
-                                                        | Err(SendError::Full(_)) => {
+                                                        Err(
+                                                            SendError::Cancelled(_)
+                                                            | SendError::Full(_),
+                                                        ) => {
                                                             // Continue trying if cancelled or full
                                                         }
                                                         Ok(()) => {
@@ -4017,14 +4019,12 @@ pub mod backpressure_metamorphic {
 
         // Verify each producer's sequence is in FIFO order
         for (producer_id, sequence) in producer_sequences.iter().enumerate() {
-            let mut expected_ordinal = 0u32;
-            for &actual_ordinal in sequence {
+            for (expected_ordinal, &actual_ordinal) in (0u32..).zip(sequence.iter()) {
                 assert_eq!(
                     actual_ordinal, expected_ordinal,
                     "FIFO violation for producer {}: expected ordinal {}, got {}",
                     producer_id, expected_ordinal, actual_ordinal
                 );
-                expected_ordinal += 1;
             }
         }
     }
