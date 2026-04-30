@@ -2278,13 +2278,21 @@ pub mod span_semantics {
     /// OTLP attribute value variants for typed span-attribute coverage.
     #[derive(Debug, Clone, PartialEq)]
     pub enum AttributeValue {
+        /// UTF-8 string attribute.
         String(String),
+        /// Signed integer attribute.
         Int(i64),
+        /// Floating-point attribute.
         Float(f64),
+        /// Boolean attribute.
         Bool(bool),
+        /// UTF-8 string array attribute.
         StringArray(Vec<String>),
+        /// Signed integer array attribute.
         IntArray(Vec<i64>),
+        /// Floating-point array attribute.
         FloatArray(Vec<f64>),
+        /// Boolean array attribute.
         BoolArray(Vec<bool>),
     }
 
@@ -3953,6 +3961,7 @@ mod otel_span_golden_tests;
     feature = "metrics",
     feature = "tracing-integration"
 ))]
+/// OTLP request builders used by conformance, fuzz, and regression helpers.
 pub mod otlp_request_builder {
     use super::span_semantics::TestSpan;
     use super::{MetricLabels, MetricsSnapshot};
@@ -3977,28 +3986,44 @@ pub mod otlp_request_builder {
     };
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+    /// Schema URL attached to OTLP resources and scopes in helper requests.
     pub const OTEL_SCHEMA_URL: &str = "https://opentelemetry.io/schemas/1.37.0";
+    /// Default instrumentation scope name emitted by helper requests.
     pub const OTEL_SCOPE_NAME: &str = "asupersync.observability.otel";
+    /// Crate version attached to OTLP instrumentation scopes.
     pub const OTEL_SCOPE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+    /// Fuzzable log-record input used to synthesize OTLP log exports.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct OtlpLogRecordInput {
+        /// Record timestamp in Unix nanoseconds.
         pub time_unix_nano: u64,
+        /// Observation timestamp in Unix nanoseconds.
         pub observed_time_unix_nano: u64,
+        /// OTLP severity number.
         pub severity_number: i32,
+        /// OTLP severity text.
         pub severity_text: String,
+        /// Log body payload.
         pub body: String,
+        /// String key/value attributes attached to the log record.
         pub attributes: Vec<(String, String)>,
     }
 
+    /// Group of log records emitted under one OTLP resource/scope tuple.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct OtlpLogScopeInput {
+        /// Service name exported in the OTLP resource block.
         pub service_name: String,
+        /// Synthetic batch sequence propagated into timestamps and attributes.
         pub batch_sequence: u64,
+        /// Instrumentation scope name exported alongside the records.
         pub scope_name: String,
+        /// Log records contained in this scope.
         pub log_records: Vec<OtlpLogRecordInput>,
     }
 
+    /// Map an arbitrary bucket into one of the coarse OTLP severity levels.
     pub fn severity_number_from_bucket(raw: u8) -> i32 {
         match raw % 6 {
             0 => SeverityNumber::Trace as i32,
@@ -4010,6 +4035,7 @@ pub mod otlp_request_builder {
         }
     }
 
+    /// Map an arbitrary bucket into the matching OTLP severity label.
     pub fn severity_text_from_bucket(raw: u8) -> String {
         match raw % 6 {
             0 => "TRACE",
@@ -4088,6 +4114,7 @@ pub mod otlp_request_builder {
             .as_nanos() as u64
     }
 
+    /// Build a single-scope OTLP metrics export request from a metrics snapshot.
     pub fn metrics_request_from_snapshot(
         snapshot: &MetricsSnapshot,
         service_name: &str,
@@ -4216,6 +4243,7 @@ pub mod otlp_request_builder {
         }
     }
 
+    /// Build a single-scope OTLP trace export request from synthesized spans.
     pub fn traces_request(
         service_name: &str,
         batch_sequence: u64,
@@ -4251,6 +4279,7 @@ pub mod otlp_request_builder {
         }
     }
 
+    /// Build an OTLP logs export request from grouped scope inputs.
     pub fn logs_request(scopes: &[OtlpLogScopeInput]) -> ExportLogsServiceRequest {
         ExportLogsServiceRequest {
             resource_logs: scopes
