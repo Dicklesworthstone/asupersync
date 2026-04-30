@@ -1445,6 +1445,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h2_zero_length_data"
+path = "fuzz_targets/h2_zero_length_data.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "symbol_auth"
 path = "fuzz_targets/symbol_auth.rs"
 test = false
@@ -3627,6 +3634,17 @@ bench = false
 [[bin]]
 name = "h2_settings_header_table_size"
 path = "fuzz_targets/h2_settings_header_table_size.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #148 — HTTP/2 WINDOW_UPDATE underflow fuzzer
+# Targets src/http/h2/connection.rs flow control window management to test
+# arbitrary delta values causing negative-sum-window scenarios. Asserts proper
+# FLOW_CONTROL_ERROR responses per RFC 9113 §6.9 for window underflow conditions.
+[[bin]]
+name = "h2_window_update_underflow"
+path = "fuzz_targets/h2_window_update_underflow.rs"
 test = false
 doc = false
 bench = false
