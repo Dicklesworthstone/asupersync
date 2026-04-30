@@ -1,0 +1,8 @@
+POST /upgrade HTTP/1.1
+Host: localhost
+Connection: Upgrade
+Upgrade: websocket
+Content-Length: 5
+Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+
+hello

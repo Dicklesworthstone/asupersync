@@ -1,0 +1,8 @@
+GET /ws HTTP/1.1
+Host: localhost
+Connection: upgrade
+Connection: keep-alive
+Upgrade: websocket
+Upgrade: h2c
+Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+

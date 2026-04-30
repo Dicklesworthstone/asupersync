@@ -11,7 +11,7 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
-asupersync = { path = "..", features = ["compression", "tls", "postgres", "mysql", "sqlite", "metrics", "tracing-integration", "test-internals", "trace-compression", "io-uring", "simd-intrinsics", "fuzz"] }
+asupersync = { path = "..", features = ["compression", "tls", "metrics", "tracing-integration", "test-internals", "trace-compression", "io-uring", "simd-intrinsics", "fuzz"] }
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 libc = "0.2"
@@ -3399,6 +3399,28 @@ test = false
 doc = false
 bench = false
 
+# Tick #135 — Watch subscriber late-join semantics fuzzer
+# Tests arbitrary update sequence with subscriber added at random point
+# to ensure late subscriber sees latest value (not historical values).
+# Validates new subscriber gets current state immediately.
+[[bin]]
+name = "watch_subscriber_late_join"
+path = "fuzz_targets/watch_subscriber_late_join.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #136 — OnceCell RAII drop ordering fuzzer
+# Tests arbitrary set+drop+set sequences to ensure drop runs before re-set
+# and validates no double-free or use-after-drop issues. Tests proper
+# RAII semantics for complex drop sequences.
+[[bin]]
+name = "once_cell_raii_drop_ordering"
+path = "fuzz_targets/once_cell_raii_drop_ordering.rs"
+test = false
+doc = false
+bench = false
+
 # Tick #133 — HTTP/2 PUSH_PROMISE frame handling fuzzer
 # Targets PUSH_PROMISE frame handling logic in src/http/h2/connection.rs
 # to test handling of arbitrary frames including push without ENABLE_PUSH=1,
@@ -3424,6 +3446,62 @@ bench = false
 [[bin]]
 name = "grpc_server_unary_metadata_isolation"
 path = "fuzz_targets/grpc_server_unary_metadata_isolation.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #131 — Counter/Gauge/Histogram concurrent updates fuzzer
+# Targets src/observability/metrics.rs to test thread safety of atomic operations
+# across multiple concurrent threads with arbitrary operation sequences.
+# Verifies metamorphic properties: Counter totals, Histogram count/sum, Gauge atomics.
+[[bin]]
+name = "metrics_concurrent_updates"
+path = "fuzz_targets/metrics_concurrent_updates.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #136 — HTTP/2 SETTINGS_INITIAL_WINDOW_SIZE retroactive update fuzzer
+# Targets src/http/h2/connection.rs and src/http/h2/stream.rs window size update logic
+# to test retroactive recalculation of existing streams' flow control windows when
+# SETTINGS_INITIAL_WINDOW_SIZE changes. Verifies correct delta math, overflow handling,
+# and RFC 9113 compliance for window size constraints (≤ 2^31-1).
+[[bin]]
+name = "h2_settings_window_size_retroactive"
+path = "fuzz_targets/h2_settings_window_size_retroactive.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #137 — RwLock writer-priority under reader-storm fuzzer
+# Tests arbitrary mix of long-reader + waiting-writer to ensure writers
+# are not starved by sustained reader sequences. Validates writer-preference
+# fairness policy and proper prevention of writer starvation.
+[[bin]]
+name = "rwlock_writer_priority_reader_storm"
+path = "fuzz_targets/rwlock_writer_priority_reader_storm.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #137 — HTTP/2 HEADERS frame Priority field handling fuzzer
+# Targets src/http/h2/frame.rs HEADERS frame priority parsing to test stream dependency
+# tree construction and cycle detection with arbitrary priority weights and dependencies.
+# Verifies self-dependency detection, weight range validation (0-255), exclusive flag
+# handling, and proper PROTOCOL_ERROR responses per RFC 9113 Section 5.3.
+[[bin]]
+name = "h2_headers_priority_handling"
+path = "fuzz_targets/h2_headers_priority_handling.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #138 — Oneshot conformance test against tokio::sync::oneshot
+# Tests same send/recv ordering with cancel injection to ensure identical
+# observable outcomes between asupersync and tokio oneshot implementations.
+[[bin]]
+name = "oneshot_std_conformance"
+path = "../tests/oneshot_std_conformance.rs"
 test = false
 doc = false
 bench = false
