@@ -1419,7 +1419,10 @@ mod tests {
         let mut receiver = RaptorQReceiver::new(
             RaptorQConfig::default(),
             stream,
-            Some(SecurityContext::for_testing(42).with_mode(AuthMode::Permissive)),
+            Some(SecurityContext::for_testing_with_mode(
+                42,
+                AuthMode::Permissive,
+            )),
             None,
         );
 

@@ -70,9 +70,8 @@ fn tampered_symbol_fails_in_strict_mode() {
 fn tampered_symbol_allowed_in_permissive_mode() {
     init_test_logging();
     test_phase!("tampered_symbol_allowed_in_permissive_mode");
-    let key = AuthKey::from_seed(77);
-    let sender = SecurityContext::new(key.clone());
-    let receiver = SecurityContext::new(key).with_mode(AuthMode::Permissive);
+    let sender = SecurityContext::for_testing(77);
+    let receiver = SecurityContext::for_testing_with_mode(77, AuthMode::Permissive);
 
     let symbol = symbol_with(&[1, 2, 3, 4]);
     let signed = sender.sign_symbol(&symbol);

@@ -92,7 +92,7 @@ fn strict_mode_rejects_invalid_tag() {
 fn permissive_mode_allows_invalid_tag() {
     init_test_logging();
     test_phase!("permissive_mode_allows_invalid_tag");
-    let ctx = SecurityContext::for_testing(1).with_mode(AuthMode::Permissive);
+    let ctx = SecurityContext::for_testing_with_mode(1, AuthMode::Permissive);
     let symbol = symbol_with(&[1, 2, 3]);
     let mut auth = AuthenticatedSymbol::from_parts(symbol, AuthenticationTag::zero());
 
@@ -127,7 +127,7 @@ fn permissive_mode_allows_invalid_tag() {
 fn disabled_mode_skips_verification() {
     init_test_logging();
     test_phase!("disabled_mode_skips_verification");
-    let ctx = SecurityContext::for_testing(1).with_mode(AuthMode::Disabled);
+    let ctx = SecurityContext::for_testing_with_mode(1, AuthMode::Disabled);
     let symbol = symbol_with(&[1, 2, 3]);
     let mut auth = AuthenticatedSymbol::from_parts(symbol, AuthenticationTag::zero());
 
@@ -210,7 +210,7 @@ fn derive_context_resets_stats_and_changes_tag() {
 fn derived_context_inherits_mode() {
     init_test_logging();
     test_phase!("derived_context_inherits_mode");
-    let ctx = SecurityContext::for_testing(1).with_mode(AuthMode::Permissive);
+    let ctx = SecurityContext::for_testing_with_mode(1, AuthMode::Permissive);
     let derived = ctx.derive_context(b"child");
     let symbol = symbol_with(&[9, 9, 9]);
     let mut auth = AuthenticatedSymbol::from_parts(symbol, AuthenticationTag::zero());

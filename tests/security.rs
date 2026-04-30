@@ -129,7 +129,7 @@ fn security_verify_invalid_tag_strict_errors_and_counts() {
 #[test]
 fn security_verify_invalid_tag_permissive_allows_and_counts() {
     init_security_test("security_verify_invalid_tag_permissive_allows_and_counts");
-    let ctx = SecurityContext::for_testing(17).with_mode(AuthMode::Permissive);
+    let ctx = SecurityContext::for_testing_with_mode(17, AuthMode::Permissive);
     let symbol = symbol_with(&[2, 2, 2]);
     let mut auth = AuthenticatedSymbol::from_parts(symbol, AuthenticationTag::zero());
 
@@ -156,7 +156,7 @@ fn security_verify_invalid_tag_permissive_allows_and_counts() {
 #[test]
 fn security_verify_invalid_tag_disabled_skips() {
     init_security_test("security_verify_invalid_tag_disabled_skips");
-    let ctx = SecurityContext::for_testing(19).with_mode(AuthMode::Disabled);
+    let ctx = SecurityContext::for_testing_with_mode(19, AuthMode::Disabled);
     let symbol = symbol_with(&[3, 3, 3]);
     let mut auth = AuthenticatedSymbol::from_parts(symbol, AuthenticationTag::zero());
 
@@ -222,7 +222,7 @@ fn security_derive_context_changes_tag() {
 #[test]
 fn security_derive_context_inherits_mode() {
     init_security_test("security_derive_context_inherits_mode");
-    let ctx = SecurityContext::for_testing(41).with_mode(AuthMode::Permissive);
+    let ctx = SecurityContext::for_testing_with_mode(41, AuthMode::Permissive);
     let derived = ctx.derive_context(b"inherit");
     let symbol = symbol_with(&[6, 6, 6]);
     let mut auth = AuthenticatedSymbol::from_parts(symbol, AuthenticationTag::zero());
