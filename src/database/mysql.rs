@@ -6613,6 +6613,141 @@ mod tests {
     }
 
     #[test]
+    fn execute_prepared_rebinding_sends_fresh_type_codes_each_time() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+
+            for (expected_types, expected_values) in [
+                (
+                    [
+                        mysql_type::MYSQL_TYPE_VAR_STRING,
+                        0,
+                        mysql_type::MYSQL_TYPE_LONG,
+                        0,
+                    ],
+                    {
+                        let mut values = vec![3, b'a', b'b', b'c'];
+                        values.extend_from_slice(&(-7_i32).to_le_bytes());
+                        values
+                    },
+                ),
+                (
+                    [
+                        mysql_type::MYSQL_TYPE_BLOB,
+                        0,
+                        mysql_type::MYSQL_TYPE_LONG,
+                        0x80,
+                    ],
+                    {
+                        let mut values = vec![2, 0xFF, 0x00];
+                        values.extend_from_slice(&42_u32.to_le_bytes());
+                        values
+                    },
+                ),
+            ] {
+                let mut header = [0u8; 4];
+                stream.read_exact(&mut header).expect("read execute header");
+                let payload_len = usize::from(header[0])
+                    | (usize::from(header[1]) << 8)
+                    | (usize::from(header[2]) << 16);
+                let mut payload = vec![0u8; payload_len];
+                stream
+                    .read_exact(&mut payload)
+                    .expect("read execute payload");
+
+                assert_eq!(payload[0], command::COM_STMT_EXECUTE);
+                assert_eq!(u32::from_le_bytes(payload[1..5].try_into().unwrap()), 7);
+                assert_eq!(payload[5], 0x00, "execute flags must stay zero");
+                assert_eq!(
+                    u32::from_le_bytes(payload[6..10].try_into().unwrap()),
+                    1,
+                    "iteration count must stay 1"
+                );
+                assert_eq!(payload[10], 0, "no NULL parameters in this regression");
+                assert_eq!(
+                    payload[11], 0x01,
+                    "must send fresh parameter types per execute"
+                );
+                assert_eq!(&payload[12..16], &expected_types);
+                assert_eq!(&payload[16..], expected_values.as_slice());
+
+                let mut response = PacketBuffer::new();
+                response.write_byte(0x00);
+                response.write_lenenc_int(0);
+                response.write_lenenc_int(0);
+                response.buf.extend_from_slice(&0u16.to_le_bytes());
+                response.buf.extend_from_slice(&0u16.to_le_bytes());
+
+                let mut packet = PacketBuffer::new();
+                packet.set_sequence(1);
+                packet.buf = response.buf;
+                let packet = packet.build_packet();
+                stream
+                    .write_all(&packet.bytes)
+                    .expect("write execute OK response");
+                stream.flush().expect("flush execute OK response");
+            }
+        });
+
+        let stream = run(async {
+            crate::net::TcpStream::connect_socket_addr(addr)
+                .await
+                .expect("connect client")
+        });
+
+        let mut conn = MySqlConnection {
+            inner: MySqlConnectionInner {
+                stream,
+                connection_id: 0,
+                capabilities: 0,
+                charset: 0,
+                status_flags: 0,
+                sequence: 0,
+                closed: false,
+                server_version: String::new(),
+                needs_rollback: false,
+                max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                prepared_statement_epoch: 0,
+                query_in_flight: std::sync::atomic::AtomicBool::new(false),
+            },
+            options: None,
+        };
+        let stmt = MySqlStatement {
+            statement_id: 7,
+            owner_connection_id: 0,
+            owner_prepared_statement_epoch: 0,
+            param_count: 2,
+            column_count: 0,
+            params: Vec::new(),
+            columns: Vec::new(),
+        };
+        let cx = Cx::for_testing();
+
+        let text = String::from("abc");
+        let signed = -7_i32;
+        match run(conn.execute_prepared(&cx, &stmt, &[&text, &signed])) {
+            Outcome::Ok(0) => {}
+            other => panic!("expected first execute OK, got {other:?}"),
+        }
+
+        let blob = vec![0xFF, 0x00];
+        let unsigned = 42_u32;
+        match run(conn.execute_prepared(&cx, &stmt, &[&blob, &unsigned])) {
+            Outcome::Ok(0) => {}
+            other => panic!("expected second execute OK, got {other:?}"),
+        }
+
+        server.join().expect("join server");
+        assert!(!conn.inner.closed);
+    }
+
+    #[test]
     fn empty_execute_prepared_response_keeps_connection_closed() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
         let addr = listener.local_addr().expect("listener addr");
