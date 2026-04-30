@@ -236,6 +236,20 @@ pub struct ServerConfig {
     /// Default timeout applied to all calls when the client does not send
     /// a `grpc-timeout` header.
     pub default_timeout: Option<Duration>,
+    /// br-asupersync-9oxmqv-followup (tick #139): server-side maximum
+    /// request deadline. When `Some(cap)`, every peer-supplied
+    /// `grpc-timeout` is clamped to `min(peer_timeout, cap)` so a
+    /// hostile peer cannot pin server resources by requesting
+    /// `grpc-timeout: 99999999H` (≈11,400 years). When `None`, the
+    /// peer's value is used verbatim subject only to the parser's
+    /// 8-digit cap — preserves the pre-fix behavior for operators
+    /// who haven't opted in.
+    ///
+    /// This cap does NOT affect the absent-header fallback to
+    /// [`Self::default_timeout`] — that path still applies the
+    /// configured default. Callers that want a tighter ceiling on
+    /// the default should set `default_timeout` itself.
+    pub max_request_deadline: Option<Duration>,
     /// Compression used for outbound response messages.
     pub send_compression: Option<CompressionEncoding>,
     /// Compression encodings accepted by this server.
@@ -415,6 +429,9 @@ impl Default for ServerConfig {
             keepalive_interval_ms: None,
             keepalive_timeout_ms: None,
             default_timeout: None,
+            // tick #139: opt-in. Default is the historic
+            // pre-fix behavior (no server-side max deadline).
+            max_request_deadline: None,
             send_compression: None,
             accept_compression: vec![CompressionEncoding::Identity],
             // 8 KiB matches the gRPC ecosystem convention (grpc-go
@@ -575,6 +592,24 @@ impl ServerBuilder {
     #[must_use]
     pub fn default_timeout(mut self, timeout: Duration) -> Self {
         self.config.default_timeout = Some(timeout);
+        self
+    }
+
+    /// tick #139: set the server-side maximum request deadline.
+    ///
+    /// When set, every peer-supplied `grpc-timeout` is clamped to
+    /// `min(peer_timeout, cap)`. Without this cap a hostile peer can
+    /// set `grpc-timeout: 99999999H` (≈11,400 years) and pin server
+    /// resources on a long-running call indefinitely.
+    ///
+    /// Recommended value: the longest legitimate RPC the server is
+    /// prepared to host (typically minutes to hours, NOT years).
+    /// Callsites that need a tighter ceiling on the absent-header
+    /// fallback should ALSO set [`Self::default_timeout`] — the cap
+    /// does NOT affect the fallback path.
+    #[must_use]
+    pub fn max_request_deadline(mut self, max: Duration) -> Self {
+        self.config.max_request_deadline = Some(max);
         self
     }
 
@@ -1154,11 +1189,53 @@ impl CallContext {
         peer_addr: Option<String>,
         now: Instant,
     ) -> Self {
+        // Back-compat: no server-side max-deadline cap. Forwards
+        // to the new `_with_max_deadline` variant with cap=None.
+        Self::from_metadata_at_with_max_deadline(
+            metadata,
+            default_timeout,
+            None,
+            peer_addr,
+            now,
+        )
+    }
+
+    /// tick #139: variant of [`Self::from_metadata_at`] that accepts a
+    /// server-side maximum request deadline. When `max_request_deadline`
+    /// is `Some(cap)`, every peer-supplied `grpc-timeout` is clamped
+    /// via `min(peer_timeout, cap)` so a hostile peer cannot pin
+    /// server resources by requesting `grpc-timeout: 99999999H`
+    /// (≈11,400 years).
+    ///
+    /// The cap does NOT affect the absent-header fallback to
+    /// `default_timeout` — that path still applies the configured
+    /// default. Callers that want a tighter ceiling on the default
+    /// should set `default_timeout` itself.
+    ///
+    /// Wired from [`ServerConfig::max_request_deadline`].
+    #[must_use]
+    pub fn from_metadata_at_with_max_deadline(
+        metadata: Metadata,
+        default_timeout: Option<Duration>,
+        max_request_deadline: Option<Duration>,
+        peer_addr: Option<String>,
+        now: Instant,
+    ) -> Self {
         let timeout = match metadata.get("grpc-timeout") {
             Some(super::streaming::MetadataValue::Ascii(s)) => parse_grpc_timeout(s),
             // A present but invalid grpc-timeout must fail closed, not impersonate absence.
             Some(super::streaming::MetadataValue::Binary(_)) => None,
             None => default_timeout,
+        };
+        // tick #139: clamp the peer-supplied timeout against the
+        // server's max_request_deadline cap. The default-fallback
+        // path is intentionally NOT clamped — operators who set
+        // default_timeout already chose that ceiling deliberately.
+        let timeout = match (timeout, max_request_deadline) {
+            (Some(peer), Some(cap)) if metadata.get("grpc-timeout").is_some() => {
+                Some(peer.min(cap))
+            }
+            (other, _) => other,
         };
         let deadline = timeout.and_then(|t| now.checked_add(t));
         Self {
