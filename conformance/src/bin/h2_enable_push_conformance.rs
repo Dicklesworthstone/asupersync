@@ -1,0 +1,219 @@
+//! HTTP/2 SETTINGS_ENABLE_PUSH=0 Enforcement Conformance Test Runner
+//!
+//! Tests RFC 7540 §6.5.2 compliance: when SETTINGS_ENABLE_PUSH=0 is sent,
+//! the server MUST NOT send PUSH_PROMISE frames. This test compares
+//! asupersync HTTP/2 implementation against h2 reference implementation.
+//!
+//! Usage:
+//!   cargo run --bin h2_enable_push_conformance
+//!   cargo run --bin h2_enable_push_conformance -- --format json
+//!   cargo run --bin h2_enable_push_conformance -- --output report.md
+
+use clap::{Parser, ValueEnum};
+use std::path::PathBuf;
+
+#[derive(Parser)]
+#[command(name = "h2_enable_push_conformance")]
+#[command(about = "HTTP/2 SETTINGS_ENABLE_PUSH=0 enforcement conformance tester")]
+struct Args {
+    /// Output format for results
+    #[arg(long, default_value = "markdown")]
+    format: OutputFormat,
+
+    /// Output file path (defaults to stdout)
+    #[arg(long, short)]
+    output: Option<PathBuf>,
+
+    /// Run specific test case by ID
+    #[arg(long)]
+    test_case: Option<String>,
+
+    /// Verbose logging
+    #[arg(long, short)]
+    verbose: bool,
+
+    /// Timeout in seconds for test execution
+    #[arg(long, default_value = "30")]
+    timeout: u64,
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+enum OutputFormat {
+    Json,
+    Markdown,
+    Summary,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
+
+    // Initialize logging
+    if args.verbose {
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
+    }
+
+    println!("🔧 HTTP/2 SETTINGS_ENABLE_PUSH=0 Enforcement Conformance Tester");
+    println!("   Testing asupersync against h2 reference");
+    println!("   Focus: Server must not send PUSH_PROMISE when ENABLE_PUSH=0");
+    println!();
+
+    // Create and configure the tester
+    let mut tester = asupersync_conformance::EnablePushConformanceTester::new();
+
+    // Filter to specific test case if requested
+    if let Some(test_id) = &args.test_case {
+        tester.test_cases.retain(|case| case.id == *test_id);
+        if tester.test_cases.is_empty() {
+            eprintln!("❌ Test case '{}' not found", test_id);
+            std::process::exit(1);
+        }
+        println!("🔍 Running single test case: {}", test_id);
+    } else {
+        println!(
+            "📋 Running {} conformance test cases",
+            tester.test_cases.len()
+        );
+    }
+
+    // Set up timeout
+    let timeout_duration = std::time::Duration::from_secs(args.timeout);
+
+    // Run the conformance tests with timeout
+    let report = match tokio::time::timeout(timeout_duration, tester.run_all_tests()).await {
+        Ok(report) => report,
+        Err(_) => {
+            eprintln!("❌ Tests timed out after {} seconds", args.timeout);
+            std::process::exit(1);
+        }
+    };
+
+    // Generate output based on format
+    let output = match args.format {
+        OutputFormat::Json => serde_json::to_string_pretty(&report)?,
+        OutputFormat::Markdown => tester.generate_markdown_report(&report),
+        OutputFormat::Summary => generate_summary_output(&report),
+    };
+
+    // Write output
+    match args.output {
+        Some(path) => {
+            std::fs::write(&path, &output)?;
+            println!("📝 Report written to: {}", path.display());
+        }
+        None => {
+            println!("{}", output);
+        }
+    }
+
+    // Print final status
+    println!();
+    print_test_summary(&report);
+
+    // Exit with appropriate code
+    let exit_code = if report.summary.failed > 0 { 1 } else { 0 };
+    std::process::exit(exit_code);
+}
+
+/// Generate a concise summary output
+fn generate_summary_output(
+    report: &asupersync_conformance::EnablePushComplianceReport,
+) -> String {
+    let mut output = String::new();
+
+    output.push_str("HTTP/2 SETTINGS_ENABLE_PUSH=0 CONFORMANCE SUMMARY\n");
+    output.push_str("============================================\n\n");
+
+    output.push_str(&format!("Test Run: {}\n", report.test_run_id));
+    output.push_str(&format!("Timestamp: {}\n", report.timestamp));
+    output.push_str(&format!("Total Cases: {}\n\n", report.total_cases));
+
+    output.push_str("RESULTS:\n");
+    output.push_str(&format!("  ✅ Passed: {}\n", report.summary.passed));
+    output.push_str(&format!("  ❌ Failed: {}\n", report.summary.failed));
+    output.push_str(&format!(
+        "  ⚠️  Expected Failures: {}\n",
+        report.summary.expected_failures
+    ));
+    output.push_str(&format!("  ⏭️  Skipped: {}\n\n", report.summary.skipped));
+
+    output.push_str(&format!(
+        "Compliance Score: {:.1}%\n",
+        report.summary.compliance_score * 100.0
+    ));
+
+    if report.summary.failed > 0 {
+        output.push_str("\nFAILURES:\n");
+        for result in &report.results {
+            if result.verdict == asupersync_conformance::EnablePushTestVerdict::Fail {
+                output.push_str(&format!(
+                    "  ❌ {}: {}\n",
+                    result.case_id,
+                    result.error.as_deref().unwrap_or("Unknown error")
+                ));
+                output.push_str(&format!(
+                    "     PUSH_PROMISE sent: asupersync={}, h2={}\n",
+                    result.asupersync_push_promise_count, result.h2_push_promise_count
+                ));
+            }
+        }
+    }
+
+    // Push enforcement analysis
+    output.push_str("\nPUSH_PROMISE ENFORCEMENT ANALYSIS:\n");
+    for result in &report.results {
+        output.push_str(&format!(
+            "  📊 {}: asupersync={} PUSH_PROMISE, h2={} PUSH_PROMISE\n",
+            result.case_id, result.asupersync_push_promise_count, result.h2_push_promise_count
+        ));
+    }
+
+    output
+}
+
+/// Print colorized test summary to stderr
+fn print_test_summary(report: &asupersync_conformance::EnablePushComplianceReport) {
+    eprintln!("╭─ HTTP/2 SETTINGS_ENABLE_PUSH=0 CONFORMANCE RESULTS ─╮");
+    eprintln!("│                                                      │");
+
+    if report.summary.failed == 0 {
+        eprintln!("│  ✅ ALL TESTS PASSED                                 │");
+        eprintln!(
+            "│  🎯 Compliance: {:.1}%                               │",
+            report.summary.compliance_score * 100.0
+        );
+    } else {
+        eprintln!(
+            "│  ❌ {} TESTS FAILED                                  │",
+            report.summary.failed
+        );
+        eprintln!(
+            "│  📊 Compliance: {:.1}%                               │",
+            report.summary.compliance_score * 100.0
+        );
+    }
+
+    eprintln!("│                                                      │");
+    eprintln!(
+        "│  📋 Total: {}                                        │",
+        report.total_cases
+    );
+    eprintln!(
+        "│  ✅ Passed: {}                                      │",
+        report.summary.passed
+    );
+    eprintln!(
+        "│  ❌ Failed: {}                                      │",
+        report.summary.failed
+    );
+    eprintln!(
+        "│  ⚠️  Expected: {}                                    │",
+        report.summary.expected_failures
+    );
+    eprintln!(
+        "│  ⏭️  Skipped: {}                                     │",
+        report.summary.skipped
+    );
+    eprintln!("│                                                      │");
+    eprintln!("╰──────────────────────────────────────────────────────╯");
+}

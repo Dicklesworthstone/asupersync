@@ -39,6 +39,10 @@ name = "h1_request_building_conformance"
 path = "src/bin/h1_request_building_conformance.rs"
 
 [[bin]]
+name = "h1_response_building_conformance"
+path = "src/bin/h1_response_building_conformance.rs"
+
+[[bin]]
 name = "h2_continuation_conformance"
 path = "src/bin/h2_continuation_conformance.rs"
 
@@ -61,6 +65,14 @@ path = "src/bin/h2_priority_conformance.rs"
 [[bin]]
 name = "h2_settings_conformance"
 path = "src/bin/h2_settings_conformance.rs"
+
+[[bin]]
+name = "h2_enable_push_conformance"
+path = "src/bin/h2_enable_push_conformance.rs"
+
+[[bin]]
+name = "h2_connect_method_conformance"
+path = "src/bin/h2_connect_method_conformance.rs"
 
 [[bin]]
 name = "hpack_conformance"
