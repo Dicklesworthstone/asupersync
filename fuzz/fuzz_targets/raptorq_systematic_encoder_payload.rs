@@ -3,8 +3,8 @@
 //! Cargo-fuzz target for RaptorQ systematic-encoder payload edge handling.
 //!
 //! Drives `asupersync::raptorq::systematic::{SystematicEncoder, SystematicParams}`
-//! across three explicit K-edge cases: `K=1`, `K=42`, and `K=8192`.
-//! The first two run the real encoder/emission path; the `K=8192` lane
+//! across four explicit K-edge cases: `K=1`, `K=42`, `K=2048`, and `K=8192`.
+//! The first three run the real encoder/emission path; the `K=8192` lane
 //! stays on parameter / repair-equation math so the fuzzer can keep making
 //! forward progress instead of spending its budget inside the cubic solve.
 //!
@@ -27,10 +27,12 @@
 //!      the encoder is a pure function of (intermediate symbols, esi)
 //!      after `new` returns.
 //!
-//!   5. **Large-K payload math stays valid at K=8192.** The parameter
-//!      ladder, source chunking, and RFC repair-equation generation must
-//!      remain coherent for a realistic high-K edge without relying on the
-//!      full encoder solve on every fuzz iteration.
+//!   5. **Large-K rows stay coherent.** The tractable `K=2048` lane must
+//!      build the real encoder, pin the live RFC row (`K'=2070`), and keep
+//!      emission/order invariants intact. The `K=8192` lane must keep its
+//!      parameter ladder, source chunking, and RFC repair-equation math
+//!      coherent without relying on the full encoder solve on every fuzz
+//!      iteration.
 //!
 //! Existing coverage: `codec_raptorq_roundtrip.rs` exercises the high-
 //! level `EncodingPipeline` round-trip but not the low-level
@@ -43,8 +45,10 @@ use asupersync::raptorq::systematic::{SystematicEncoder, SystematicParams};
 use libfuzzer_sys::fuzz_target;
 
 const SMALL_MEDIUM_MAX_SYMBOL_SIZE: usize = 256;
+const TRACTABLE_LARGE_K_MAX_SYMBOL_SIZE: usize = 16;
 const LARGE_K_MAX_SYMBOL_SIZE: usize = 8;
 const SMALL_MEDIUM_MAX_REPAIR_COUNT: usize = 32;
+const TRACTABLE_LARGE_K_MAX_REPAIR_COUNT: usize = 8;
 const LARGE_K_MAX_REPAIR_COUNT: usize = 4;
 
 /// Structured fuzz input. Derives Arbitrary so libFuzzer can mutate
@@ -53,6 +57,7 @@ const LARGE_K_MAX_REPAIR_COUNT: usize = 4;
 enum KEdge {
     K1,
     K42,
+    K2048,
     K8192,
 }
 
@@ -60,7 +65,7 @@ enum KEdge {
 struct EncoderInput {
     /// Explicit edge-case K selector.
     k_edge: KEdge,
-    /// Symbol size in bytes. Tightened further for K=8192.
+    /// Symbol size in bytes. Tightened further for K=2048 and K=8192.
     symbol_size: u16,
     /// Number of repair symbols to emit and validate.
     repair_count: u8,
@@ -77,15 +82,22 @@ fuzz_target!(|input: EncoderInput| {
     let k = match input.k_edge {
         KEdge::K1 => 1,
         KEdge::K42 => 42,
+        KEdge::K2048 => 2048,
         KEdge::K8192 => 8192,
     };
     let symbol_size = match input.k_edge {
+        KEdge::K2048 => {
+            (usize::from(input.symbol_size) % TRACTABLE_LARGE_K_MAX_SYMBOL_SIZE) + 1
+        }
         KEdge::K8192 => (usize::from(input.symbol_size) % LARGE_K_MAX_SYMBOL_SIZE) + 1,
         KEdge::K1 | KEdge::K42 => {
             (usize::from(input.symbol_size) % SMALL_MEDIUM_MAX_SYMBOL_SIZE) + 1
         }
     };
     let repair_count = match input.k_edge {
+        KEdge::K2048 => {
+            usize::from(input.repair_count) % (TRACTABLE_LARGE_K_MAX_REPAIR_COUNT + 1)
+        }
         KEdge::K8192 => usize::from(input.repair_count) % (LARGE_K_MAX_REPAIR_COUNT + 1),
         KEdge::K1 | KEdge::K42 => {
             usize::from(input.repair_count) % (SMALL_MEDIUM_MAX_REPAIR_COUNT + 1)
@@ -104,6 +116,19 @@ fuzz_target!(|input: EncoderInput| {
         params.k_prime + params.s + params.h,
         "L must equal K' + S + H"
     );
+    if matches!(input.k_edge, KEdge::K2048) {
+        assert_eq!(params.k_prime, 2070, "K=2048 must round up to the live RFC row");
+        assert_eq!(params.j, 506, "K=2048 must pin the RFC J(K') value");
+        assert_eq!(params.s, 89, "K=2048 must pin the RFC S(K') value");
+        assert_eq!(params.h, 11, "K=2048 must pin the RFC H(K') value");
+        assert_eq!(params.w, 2099, "K=2048 must pin the RFC W(K') value");
+        assert_eq!(params.l, 2170, "K=2048 must pin the RFC L value");
+        assert_eq!(params.b, 2010, "K=2048 must pin the RFC B value");
+        assert!(
+            params.k_prime > k,
+            "K=2048 must exercise a rounded-up large-K systematic row"
+        );
+    }
 
     // Assemble exactly K source symbols of exactly `symbol_size` bytes
     // each. Zero-pad on the tail when `input.source` is short; this is
@@ -177,6 +202,11 @@ fuzz_target!(|input: EncoderInput| {
             symbol.data.len(),
             symbol_size,
             "systematic payload length must stay equal to symbol_size"
+        );
+        assert_eq!(
+            symbol.data,
+            source_symbols[esi],
+            "systematic emission must preserve source payload bytes"
         );
     }
 

@@ -2719,6 +2719,24 @@ impl PgConnection {
         Ok(())
     }
 
+    fn handle_ready_for_query(&mut self, data: &[u8]) -> Result<(), PgError> {
+        self.inner.transaction_status = Self::parse_ready_for_query_transaction_status(data)?;
+        Ok(())
+    }
+
+    fn parse_ready_for_query_transaction_status(data: &[u8]) -> Result<u8, PgError> {
+        match data {
+            [status @ (b'I' | b'T' | b'E')] => Ok(*status),
+            [status] => Err(PgError::Protocol(format!(
+                "invalid ReadyForQuery transaction state byte: 0x{status:02X}"
+            ))),
+            _ => Err(PgError::Protocol(format!(
+                "ReadyForQuery requires exactly 1 status byte, got {}",
+                data.len()
+            ))),
+        }
+    }
+
     fn handle_async_backend_message(&mut self, msg_type: u8, data: &[u8]) -> Result<bool, PgError> {
         match msg_type {
             b'N' => {
@@ -3359,9 +3377,7 @@ impl PgConnection {
                 }
                 b'Z' => {
                     // ReadyForQuery
-                    if !data.is_empty() {
-                        self.inner.transaction_status = data[0];
-                    }
+                    self.handle_ready_for_query(&data)?;
                     return Ok(());
                 }
                 b'E' => {
@@ -3526,8 +3542,8 @@ impl PgConnection {
                 b'Z' => {
                     // ReadyForQuery — protocol exchange completed cleanly.
                     self.inner.closed = false;
-                    if !data.is_empty() {
-                        self.inner.transaction_status = data[0];
+                    if let Err(e) = self.handle_ready_for_query(&data) {
+                        return self.fail_in_flight(e);
                     }
                     if invalidate_prepared_cache {
                         self.invalidate_prepared_cache_after_schema_or_session_change();
@@ -3687,8 +3703,8 @@ impl PgConnection {
                 b'Z' => {
                     // ReadyForQuery — protocol exchange completed cleanly.
                     self.inner.closed = false;
-                    if !data.is_empty() {
-                        self.inner.transaction_status = data[0];
+                    if let Err(e) = self.handle_ready_for_query(&data) {
+                        return self.fail_in_flight(e);
                     }
                     if saw_row_response {
                         return Outcome::Err(row_returning_execute_error("execute()", "query()"));
@@ -4263,8 +4279,8 @@ impl PgConnection {
                 b'Z' => {
                     // ReadyForQuery — protocol exchange completed cleanly.
                     self.inner.closed = false;
-                    if !data.is_empty() {
-                        self.inner.transaction_status = data[0];
+                    if let Err(e) = self.handle_ready_for_query(&data) {
+                        return self.fail_in_flight(e);
                     }
                     break;
                 }
@@ -4746,8 +4762,8 @@ impl PgConnection {
                 b'Z' => {
                     // ReadyForQuery — protocol exchange completed cleanly.
                     self.inner.closed = false;
-                    if !data.is_empty() {
-                        self.inner.transaction_status = data[0];
+                    if let Err(e) = self.handle_ready_for_query(&data) {
+                        return self.fail_in_flight(e);
                     }
                     break;
                 }
@@ -5330,8 +5346,8 @@ impl PgConnection {
                 b'Z' => {
                     // ReadyForQuery — protocol exchange completed cleanly.
                     self.inner.closed = false;
-                    if !data.is_empty() {
-                        self.inner.transaction_status = data[0];
+                    if let Err(e) = self.handle_ready_for_query(&data) {
+                        return self.fail_in_flight(e);
                     }
                     if discard_on_pool_return {
                         self.inner.needs_discard = true;
@@ -5396,8 +5412,8 @@ impl PgConnection {
                 b'Z' => {
                     // ReadyForQuery — protocol exchange completed cleanly.
                     self.inner.closed = false;
-                    if !data.is_empty() {
-                        self.inner.transaction_status = data[0];
+                    if let Err(e) = self.handle_ready_for_query(&data) {
+                        return self.fail_in_flight(e);
                     }
                     if saw_row_response {
                         return Outcome::Err(row_returning_execute_error(
@@ -5445,9 +5461,7 @@ impl PgConnection {
             let (msg_type, data) = self.read_message(cx).await?;
             if msg_type == b'Z' {
                 self.inner.closed = false;
-                if !data.is_empty() {
-                    self.inner.transaction_status = data[0];
-                }
+                self.handle_ready_for_query(&data)?;
                 return Ok(());
             }
         }
@@ -6344,6 +6358,19 @@ pub fn fuzz_build_unlisten_sql(channel: &str) -> Result<String, PgError> {
 pub fn fuzz_parse_notification_response(data: &[u8]) -> Result<(), PgError> {
     let (mut conn, _peer) = fuzz_test_connection_with_peer();
     conn.handle_notification_response(data)
+}
+
+/// Fuzz-target re-exporter for ReadyForQuery transaction-state parsing.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_apply_ready_for_query(data: &[u8], initial_status: u8) -> (Result<u8, PgError>, u8) {
+    let (mut conn, _peer) = fuzz_test_connection_with_peer();
+    conn.inner.transaction_status = initial_status;
+    let result = conn
+        .handle_ready_for_query(data)
+        .map(|()| conn.inner.transaction_status);
+    let final_status = conn.inner.transaction_status;
+    (result, final_status)
 }
 
 /// Fuzz-target summary for a frontend Parse message.
@@ -9125,6 +9152,35 @@ mod tests {
                 assert!(msg.contains("unexpected end of message"), "got: {msg}");
             }
             other => panic!("expected truncated bind payload error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fuzz_apply_ready_for_query_accepts_transaction_state_bytes() {
+        for status in [b'I', b'T', b'E'] {
+            let (result, final_status) = fuzz_apply_ready_for_query(&[status], b'I');
+            match result {
+                Ok(parsed) => assert_eq!(parsed, status),
+                Err(err) => panic!("expected valid ReadyForQuery state {status:?}, got {err:?}"),
+            }
+            assert_eq!(final_status, status);
+        }
+    }
+
+    #[test]
+    fn fuzz_apply_ready_for_query_rejects_malformed_state_and_preserves_status() {
+        for payload in [Vec::new(), vec![b'X'], vec![b'I', b'T']] {
+            let (result, final_status) = fuzz_apply_ready_for_query(&payload, b'T');
+            match result {
+                Err(PgError::Protocol(msg)) => {
+                    assert!(
+                        msg.contains("ReadyForQuery"),
+                        "expected ReadyForQuery protocol error, got: {msg}"
+                    );
+                }
+                other => panic!("expected malformed ReadyForQuery error, got {other:?}"),
+            }
+            assert_eq!(final_status, b'T');
         }
     }
 

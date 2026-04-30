@@ -19,8 +19,8 @@ use arbitrary::Arbitrary;
 use asupersync::Cx;
 use asupersync::database::PgColumn;
 use asupersync::database::postgres::{
-    fuzz_parse_data_row, fuzz_parse_error_response, fuzz_parse_parameter_description,
-    fuzz_parse_row_description, fuzz_read_backend_message,
+    fuzz_apply_ready_for_query, fuzz_parse_data_row, fuzz_parse_error_response,
+    fuzz_parse_parameter_description, fuzz_parse_row_description, fuzz_read_backend_message,
 };
 use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
@@ -85,6 +85,11 @@ enum FuzzScenario {
         data_rows: Vec<CopyRow>,
         delimiter_tests: Vec<DelimiterTest>,
     },
+    /// ReadyForQuery transaction-state parsing and transition validation.
+    ReadyForQueryState {
+        initial_status: ReadyForQueryStatus,
+        transitions: Vec<ReadyForQueryInput>,
+    },
 }
 
 #[derive(Arbitrary, Debug)]
@@ -113,8 +118,8 @@ struct ColumnDefinition {
 
 #[derive(Arbitrary, Debug)]
 enum FormatCode {
-    Text = 0,
-    Binary = 1,
+    Text,
+    Binary,
     Invalid(u16),
 }
 
@@ -364,6 +369,29 @@ struct DelimiterTest {
     null_string: String,
 }
 
+#[derive(Arbitrary, Debug)]
+enum ReadyForQueryStatus {
+    Idle,
+    InTransaction,
+    FailedTransaction,
+    Other(u8),
+}
+
+#[derive(Arbitrary, Debug)]
+struct ReadyForQueryInput {
+    state: ReadyForQueryByte,
+    trailing: Vec<u8>,
+}
+
+#[derive(Arbitrary, Debug)]
+enum ReadyForQueryByte {
+    Empty,
+    Idle,
+    InTransaction,
+    FailedTransaction,
+    Other(u8),
+}
+
 fuzz_target!(|scenario: FuzzScenario| match scenario {
     FuzzScenario::MessageFraming {
         message_type,
@@ -426,6 +454,11 @@ fuzz_target!(|scenario: FuzzScenario| match scenario {
         data_rows,
         delimiter_tests,
     } => fuzz_copy_protocol(copy_format, field_count, data_rows, delimiter_tests),
+
+    FuzzScenario::ReadyForQueryState {
+        initial_status,
+        transitions,
+    } => fuzz_ready_for_query_state(initial_status, transitions),
 });
 
 fn fuzz_message_framing(
@@ -938,6 +971,71 @@ fn fuzz_copy_protocol(
     }
 }
 
+fn ready_for_query_status_byte(status: &ReadyForQueryStatus) -> u8 {
+    match status {
+        ReadyForQueryStatus::Idle => b'I',
+        ReadyForQueryStatus::InTransaction => b'T',
+        ReadyForQueryStatus::FailedTransaction => b'E',
+        ReadyForQueryStatus::Other(byte) => *byte,
+    }
+}
+
+fn fuzz_ready_for_query_state(
+    initial_status: ReadyForQueryStatus,
+    transitions: Vec<ReadyForQueryInput>,
+) {
+    let mut expected_status = ready_for_query_status_byte(&initial_status);
+
+    for transition in transitions.iter().take(64) {
+        let mut payload = Vec::with_capacity(1 + transition.trailing.len().min(8));
+        match transition.state {
+            ReadyForQueryByte::Empty => {}
+            ReadyForQueryByte::Idle => payload.push(b'I'),
+            ReadyForQueryByte::InTransaction => payload.push(b'T'),
+            ReadyForQueryByte::FailedTransaction => payload.push(b'E'),
+            ReadyForQueryByte::Other(byte) => payload.push(byte),
+        }
+        payload.extend_from_slice(&transition.trailing[..transition.trailing.len().min(8)]);
+
+        let (actual_result, final_status) = fuzz_apply_ready_for_query(&payload, expected_status);
+        let expected_result = match payload.as_slice() {
+            [status @ (b'I' | b'T' | b'E')] => Ok(*status),
+            _ => Err(()),
+        };
+
+        match expected_result {
+            Ok(next_status) => {
+                match actual_result {
+                    Ok(parsed_status) => assert_eq!(
+                        parsed_status, next_status,
+                        "ReadyForQuery should transition to the exact wire state"
+                    ),
+                    Err(err) => {
+                        panic!("expected valid ReadyForQuery state {next_status:?}, got {err:?}")
+                    }
+                }
+                assert_eq!(
+                    final_status, next_status,
+                    "valid ReadyForQuery must update transaction state"
+                );
+                expected_status = next_status;
+            }
+            Err(()) => {
+                match actual_result {
+                    Err(asupersync::database::postgres::PgError::Protocol(_)) => {}
+                    other => {
+                        panic!("malformed ReadyForQuery must return protocol error, got {other:?}")
+                    }
+                }
+                assert_eq!(
+                    final_status, expected_status,
+                    "malformed ReadyForQuery must preserve prior transaction state"
+                );
+            }
+        }
+    }
+}
+
 // Helper functions
 
 fn sanitize_string(input: &str, max_len: usize) -> String {
@@ -1337,19 +1435,19 @@ fn test_salt_validation(scenario: &SaltScenario) {
     // Test salt length
     if scenario.salt.len() < 16 {
         // Salt should be at least 16 bytes
-        assert!(scenario.salt.len() < 16 == !scenario.expected_valid);
+        assert!((scenario.salt.len() < 16) == !scenario.expected_valid);
     }
 
     // Test iteration count
     if scenario.iteration_count < 4096 {
         // Too few iterations for SCRAM-SHA-256
-        assert!(scenario.iteration_count < 4096 == !scenario.expected_valid);
+        assert!((scenario.iteration_count < 4096) == !scenario.expected_valid);
     }
 
     const MAX_ITERATIONS: u32 = 1_000_000;
     if scenario.iteration_count > MAX_ITERATIONS {
         // Too many iterations (DoS protection)
-        assert!(scenario.iteration_count > MAX_ITERATIONS == !scenario.expected_valid);
+        assert!((scenario.iteration_count > MAX_ITERATIONS) == !scenario.expected_valid);
     }
 }
 
@@ -1539,10 +1637,10 @@ fn test_delimiter_handling(delimiter_test: &DelimiterTest) {
 
 fn base64_decode(data: &[u8]) -> Result<Vec<u8>, String> {
     use base64::Engine as _;
-    let text = std::str::from_utf8(data).map_err(|_| "Invalid UTF-8")?;
+    let text = std::str::from_utf8(data).map_err(|_| "Invalid UTF-8".to_string())?;
     base64::engine::general_purpose::STANDARD
         .decode(text)
-        .map_err(|_| "Invalid base64")
+        .map_err(|_| "Invalid base64".to_string())
 }
 
 fn test_base64_decoding(data: &[u8]) {
