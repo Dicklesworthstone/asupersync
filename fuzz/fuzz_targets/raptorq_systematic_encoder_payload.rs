@@ -39,6 +39,11 @@
 //!      on-demand repair, buffered repair, and cursor-based repair emission all
 //!      preserve the configured `symbol_size` exactly.
 //!
+//!   7. **K=10 all-zero source stays algebraically zero.** The first exact RFC
+//!      row (`K'=10`) gets a dedicated all-zero source block lane. Systematic,
+//!      on-demand repair, buffered repair, and stream repair outputs must all
+//!      stay exactly zero and exactly `symbol_size` bytes wide.
+//!
 //! Existing coverage: `codec_raptorq_roundtrip.rs` exercises the high-
 //! level `EncodingPipeline` round-trip but not the low-level
 //! `SystematicEncoder` API directly. This target locks the lower-level
@@ -60,6 +65,8 @@ const MAX_MALFORMED_SOURCE_SYMBOLS: usize = 32;
 const MAX_MALFORMED_SYMBOL_BYTES: usize = 512;
 const EXTREME_MAX_SYMBOL_SIZE: usize = 4096;
 const EXTREME_REPAIR_PROBES: usize = 3;
+const K10_ALL_ZERO_K: usize = 10;
+const K10_MAX_REPAIR_COUNT: usize = 8;
 
 /// Structured fuzz input. Derives Arbitrary so libFuzzer can mutate
 /// each field independently (better coverage than reading raw bytes).
@@ -117,6 +124,15 @@ struct SymbolSizeExtremeInput {
     repair_offset: u8,
 }
 
+#[derive(Arbitrary, Debug, Clone, Copy)]
+struct K10AllZeroInput {
+    symbol_size: ExtremeSymbolSize,
+    repair_count: u8,
+    seed: u64,
+    repair_offset: u8,
+    emit_all_first: bool,
+}
+
 #[derive(Arbitrary, Debug)]
 struct EncoderInput {
     /// Explicit edge-case K selector.
@@ -136,6 +152,9 @@ struct EncoderInput {
     /// sizes. Kept on small K values so the fuzzer can exercise wide payloads
     /// without spending the whole budget in the matrix solve.
     symbol_size_extreme: SymbolSizeExtremeInput,
+    /// Dedicated valid-input oracle for the first exact RFC row: K=10 with an
+    /// all-zero source block.
+    k10_all_zero: K10AllZeroInput,
     /// Explicit malformed source-block lane. This is independent of the
     /// well-formed source chunker above so fuzzing can hit constructor
     /// precondition failures directly.
@@ -367,6 +386,137 @@ fn assert_symbol_size_extreme_lane(input: SymbolSizeExtremeInput) {
     );
 }
 
+fn assert_all_zero_emitted_symbol(
+    symbol: &asupersync::raptorq::systematic::EmittedSymbol,
+    expected_esi: u32,
+    expected_is_source: bool,
+    symbol_size: usize,
+) {
+    assert_eq!(
+        symbol.is_source, expected_is_source,
+        "K=10 all-zero lane emitted symbol on the wrong source/repair lane"
+    );
+    assert_eq!(
+        symbol.esi, expected_esi,
+        "K=10 all-zero lane emitted unexpected ESI"
+    );
+    assert_eq!(
+        symbol.data.len(),
+        symbol_size,
+        "K=10 all-zero lane emitted wrong payload width"
+    );
+    assert!(
+        symbol.data.iter().all(|&byte| byte == 0),
+        "K=10 all-zero source must only emit all-zero payloads"
+    );
+}
+
+fn assert_k10_all_zero_lane(input: K10AllZeroInput) {
+    let symbol_size = resolve_extreme_symbol_size(input.symbol_size);
+    let repair_count = usize::from(input.repair_count) % (K10_MAX_REPAIR_COUNT + 1);
+    let source_symbols = vec![vec![0u8; symbol_size]; K10_ALL_ZERO_K];
+
+    let constructed = catch_unwind(AssertUnwindSafe(|| {
+        SystematicEncoder::new(&source_symbols, symbol_size, input.seed)
+    }))
+    .unwrap_or_else(|_| {
+        panic!("K=10 all-zero encoder construction panicked for symbol_size={symbol_size}")
+    });
+    let Some(mut encoder) = constructed else {
+        panic!("K=10 all-zero encoder construction must succeed");
+    };
+
+    let params = encoder.params();
+    assert_eq!(params.k, K10_ALL_ZERO_K, "K=10 lane must preserve K");
+    assert_eq!(params.k_prime, 10, "K=10 must pin the first exact RFC row");
+    assert_eq!(params.j, 254, "K=10 must pin the RFC J(K') value");
+    assert_eq!(params.s, 7, "K=10 must pin the RFC S(K') value");
+    assert_eq!(params.h, 10, "K=10 must pin the RFC H(K') value");
+    assert_eq!(params.w, 17, "K=10 must pin the RFC W(K') value");
+    assert_eq!(params.l, 27, "K=10 must pin the RFC L value");
+    assert_eq!(
+        params.symbol_size, symbol_size,
+        "K=10 lane must preserve symbol_size"
+    );
+
+    let k_u32 = u32::try_from(K10_ALL_ZERO_K).expect("K=10 must fit in u32");
+    let repair_start = k_u32.saturating_add(u32::from(input.repair_offset % 4));
+    for offset in 0..EXTREME_REPAIR_PROBES {
+        let esi = repair_start.saturating_add(u32::try_from(offset).expect("offset fits"));
+        let repair = encoder.repair_symbol(esi);
+        assert_eq!(
+            repair.len(),
+            symbol_size,
+            "K=10 all-zero repair_symbol must preserve symbol_size"
+        );
+        assert!(
+            repair.iter().all(|&byte| byte == 0),
+            "K=10 all-zero repair_symbol must remain all-zero"
+        );
+
+        let mut buffered = vec![0x5A; symbol_size];
+        encoder.repair_symbol_into(esi, &mut buffered);
+        assert_eq!(
+            buffered, repair,
+            "K=10 all-zero repair_symbol_into must match repair_symbol"
+        );
+    }
+
+    if input.emit_all_first {
+        let emitted = encoder.emit_all(repair_count);
+        assert_eq!(
+            emitted.len(),
+            K10_ALL_ZERO_K + repair_count,
+            "K=10 all-zero emit_all must return K + repair_count symbols"
+        );
+        for (offset, symbol) in emitted.iter().enumerate() {
+            let expected_esi = u32::try_from(offset).expect("bounded ESI must fit in u32");
+            assert_all_zero_emitted_symbol(
+                symbol,
+                expected_esi,
+                offset < K10_ALL_ZERO_K,
+                symbol_size,
+            );
+        }
+    } else {
+        let systematic = encoder.emit_systematic();
+        assert_eq!(
+            systematic.len(),
+            K10_ALL_ZERO_K,
+            "K=10 all-zero systematic lane must emit all source symbols"
+        );
+        for (offset, symbol) in systematic.iter().enumerate() {
+            assert_all_zero_emitted_symbol(
+                symbol,
+                u32::try_from(offset).expect("bounded ESI must fit in u32"),
+                true,
+                symbol_size,
+            );
+        }
+
+        let repairs = encoder.emit_repair(repair_count);
+        assert_eq!(
+            repairs.len(),
+            repair_count,
+            "K=10 all-zero repair lane must emit requested repairs"
+        );
+        for (offset, symbol) in repairs.iter().enumerate() {
+            assert_all_zero_emitted_symbol(
+                symbol,
+                k_u32.saturating_add(u32::try_from(offset).expect("offset fits")),
+                false,
+                symbol_size,
+            );
+        }
+    }
+
+    assert_eq!(
+        encoder.next_repair_esi(),
+        k_u32.saturating_add(u32::try_from(repair_count).expect("repair count must fit in u32")),
+        "K=10 all-zero repair cursor must advance by emitted repair count"
+    );
+}
+
 fn assert_malformed_source_block_boundary(input: &EncoderInput) {
     let symbol_size = (usize::from(input.malformed_symbol_size) % SMALL_MEDIUM_MAX_SYMBOL_SIZE) + 1;
     let (source_symbols, constructor_symbol_size, is_malformed) = build_malformed_source_block(
@@ -408,6 +558,7 @@ fn assert_malformed_source_block_boundary(input: &EncoderInput) {
 
 fuzz_target!(|input: EncoderInput| {
     assert_symbol_size_extreme_lane(input.symbol_size_extreme);
+    assert_k10_all_zero_lane(input.k10_all_zero);
     assert_malformed_source_block_boundary(&input);
 
     let k = match input.k_edge {
