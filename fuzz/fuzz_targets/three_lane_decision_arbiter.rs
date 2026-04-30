@@ -1,9 +1,10 @@
 #![no_main]
 
 use std::cmp;
+use std::collections::BTreeSet;
 use std::io;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -48,6 +49,8 @@ pub struct DecisionArbiterInput {
     zero_reward_trace: FuzzZeroRewardPolicyTrace,
     /// Reactor leader shutdown handshake while an I/O poll is in flight.
     reactor_shutdown: FuzzReactorShutdownScenario,
+    /// Concurrent steal attempts across multiple victims/workers.
+    concurrent_multi_victim_steal: FuzzConcurrentMultiVictimStealScenario,
     /// Adaptive governor workload driven by arrival bursts and Lyapunov state.
     adaptive_budget: FuzzAdaptiveBudgetScenario,
 }
@@ -190,6 +193,25 @@ pub struct FuzzReactorShutdownScenario {
 }
 
 #[derive(Debug, Clone, Arbitrary)]
+pub struct FuzzConcurrentMultiVictimStealScenario {
+    /// Number of workers participating in the steal graph.
+    #[arbitrary(with = bounded_steal_worker_count)]
+    worker_count: u8,
+    /// Per-worker fast-queue task counts (first `worker_count` entries used).
+    #[arbitrary(with = bounded_steal_task_counts)]
+    fast_task_counts: Vec<u8>,
+    /// Per-worker priority-queue task counts (first `worker_count` entries used).
+    #[arbitrary(with = bounded_steal_task_counts)]
+    heap_task_counts: Vec<u8>,
+    /// Worker IDs selected as stealers (mod `worker_count`, duplicates collapsed).
+    #[arbitrary(with = bounded_thief_indices)]
+    thief_indices: Vec<u8>,
+    /// Steal batch size applied to each thief.
+    #[arbitrary(with = bounded_steal_batch_size)]
+    steal_batch_size: u8,
+}
+
+#[derive(Debug, Clone, Arbitrary)]
 pub struct FuzzAdaptiveBudgetScenario {
     /// Number of executed dispatches per adaptive epoch.
     #[arbitrary(with = bounded_epoch_steps)]
@@ -326,6 +348,32 @@ fn bounded_shutdown_calls(u: &mut arbitrary::Unstructured) -> arbitrary::Result<
 
 fn bounded_post_shutdown_wakes(u: &mut arbitrary::Unstructured) -> arbitrary::Result<u8> {
     u.int_in_range(0..=4)
+}
+
+fn bounded_steal_worker_count(u: &mut arbitrary::Unstructured) -> arbitrary::Result<u8> {
+    u.int_in_range(2..=5)
+}
+
+fn bounded_steal_task_counts(u: &mut arbitrary::Unstructured) -> arbitrary::Result<Vec<u8>> {
+    let len = usize::from(u.int_in_range::<u8>(0..=5)?);
+    let mut counts = Vec::with_capacity(len);
+    for _ in 0..len {
+        counts.push(u.int_in_range(0..=4)?);
+    }
+    Ok(counts)
+}
+
+fn bounded_thief_indices(u: &mut arbitrary::Unstructured) -> arbitrary::Result<Vec<u8>> {
+    let len = usize::from(u.int_in_range::<u8>(0..=5)?);
+    let mut thieves = Vec::with_capacity(len);
+    for _ in 0..len {
+        thieves.push(u.int_in_range(0..=7)?);
+    }
+    Ok(thieves)
+}
+
+fn bounded_steal_batch_size(u: &mut arbitrary::Unstructured) -> arbitrary::Result<u8> {
+    u.int_in_range(1..=4)
 }
 
 impl From<FuzzPotentialWeights> for PotentialWeights {
@@ -1081,6 +1129,106 @@ fn assert_reactor_shutdown_handshake(scenario: &FuzzReactorShutdownScenario) {
     );
 }
 
+fn assert_concurrent_multi_victim_steal_no_double_steal(
+    scenario: &FuzzConcurrentMultiVictimStealScenario,
+) {
+    let worker_count = usize::from(scenario.worker_count.max(2));
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+    let mut scheduler = ThreeLaneScheduler::new(worker_count, &state);
+    scheduler.set_steal_batch_size(usize::from(scenario.steal_batch_size.max(1)));
+
+    let mut next_task_index = 1u32;
+    let mut seeded = BTreeSet::new();
+
+    for worker_id in 0..worker_count {
+        let fast_count = usize::from(
+            scenario
+                .fast_task_counts
+                .get(worker_id)
+                .copied()
+                .unwrap_or_default(),
+        );
+        let heap_count = usize::from(
+            scenario
+                .heap_task_counts
+                .get(worker_id)
+                .copied()
+                .unwrap_or_default(),
+        );
+
+        for _ in 0..fast_count {
+            let task = TaskId::new_for_test(next_task_index, worker_id as u32);
+            next_task_index = next_task_index.saturating_add(1);
+            scheduler.seed_worker_fast_ready_for_test(worker_id, task);
+            seeded.insert(task.as_u64());
+        }
+
+        for offset in 0..heap_count {
+            let task = TaskId::new_for_test(next_task_index, worker_id as u32);
+            next_task_index = next_task_index.saturating_add(1);
+            let priority = 200u8.saturating_sub(offset as u8);
+            scheduler.seed_worker_priority_ready_for_test(worker_id, task, priority);
+            seeded.insert(task.as_u64());
+        }
+    }
+
+    if seeded.is_empty() {
+        let task = TaskId::new_for_test(next_task_index, 0);
+        scheduler.seed_worker_fast_ready_for_test(0, task);
+        seeded.insert(task.as_u64());
+    }
+
+    let mut thief_ids = BTreeSet::new();
+    for &idx in &scenario.thief_indices {
+        thief_ids.insert(usize::from(idx) % worker_count);
+    }
+    if thief_ids.is_empty() {
+        thief_ids.insert(worker_count - 1);
+    }
+
+    let attempts_per_thief = seeded.len().max(1).min(32);
+    let barrier = Arc::new(Barrier::new(thief_ids.len()));
+    let stolen = Arc::new(Mutex::new(Vec::<u64>::new()));
+    let mut workers: Vec<_> = scheduler.take_workers().into_iter().map(Some).collect();
+
+    let handles: Vec<_> = thief_ids
+        .into_iter()
+        .map(|worker_id| {
+            let mut worker = workers[worker_id]
+                .take()
+                .expect("selected thief worker must exist");
+            let barrier = Arc::clone(&barrier);
+            let stolen = Arc::clone(&stolen);
+            thread::spawn(move || {
+                barrier.wait();
+                for _ in 0..attempts_per_thief {
+                    if let Some(task) = worker.steal_once_for_test() {
+                        stolen.lock().expect("stolen lock").push(task.as_u64());
+                    }
+                    thread::yield_now();
+                }
+            })
+        })
+        .collect();
+
+    for handle in handles {
+        handle.join().expect("concurrent steal worker must join");
+    }
+
+    let stolen = stolen.lock().expect("stolen lock");
+    let mut seen = BTreeSet::new();
+    for &task in stolen.iter() {
+        assert!(
+            seeded.contains(&task),
+            "stolen task {task} must come from the seeded victim set"
+        );
+        assert!(
+            seen.insert(task),
+            "same task must not be stolen twice under multi-victim contention: {task}"
+        );
+    }
+}
+
 fn assert_adaptive_budget_governor(
     scenario: &FuzzAdaptiveBudgetScenario,
     weights: &PotentialWeights,
@@ -1275,10 +1423,14 @@ fuzz_target!(|input: DecisionArbiterInput| {
     // exit without hanging.
     assert_reactor_shutdown_handshake(&input.reactor_shutdown);
 
-    // Test 8: Cancel-mask state propagates into scheduler snapshots without
+    // Test 8: Concurrent steals across multiple victims must never surface the
+    // same task twice.
+    assert_concurrent_multi_victim_steal_no_double_steal(&input.concurrent_multi_victim_steal);
+
+    // Test 9: Cancel-mask state propagates into scheduler snapshots without
     // becoming runnable phantom work.
     assert_cancel_mask_propagation(&input.workload, &input.state_snapshots[0]);
 
-    // Test 9: Adaptive cancel-streak governor stays bounded and terminates.
+    // Test 10: Adaptive cancel-streak governor stays bounded and terminates.
     assert_adaptive_budget_governor(&input.adaptive_budget, &weights);
 });

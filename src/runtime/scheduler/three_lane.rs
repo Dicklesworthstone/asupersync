@@ -1321,6 +1321,26 @@ impl ThreeLaneScheduler {
         }
     }
 
+    #[doc(hidden)]
+    #[cfg(feature = "test-internals")]
+    pub fn seed_worker_fast_ready_for_test(&mut self, worker_id: usize, task: TaskId) {
+        self.workers[worker_id].fast_queue.push(task);
+    }
+
+    #[doc(hidden)]
+    #[cfg(feature = "test-internals")]
+    pub fn seed_worker_priority_ready_for_test(
+        &mut self,
+        worker_id: usize,
+        task: TaskId,
+        priority: u8,
+    ) {
+        self.workers[worker_id]
+            .local
+            .lock()
+            .schedule(task, priority);
+    }
+
     /// Enables or disables worker parking when idle.
     pub fn set_enable_parking(&mut self, enable: bool) {
         self.enable_parking = enable;
@@ -4021,6 +4041,12 @@ impl ThreeLaneWorker {
         }
 
         None
+    }
+
+    #[doc(hidden)]
+    #[cfg(feature = "test-internals")]
+    pub fn steal_once_for_test(&mut self) -> Option<TaskId> {
+        self.try_steal()
     }
 
     /// Schedules a task locally in the appropriate lane.
