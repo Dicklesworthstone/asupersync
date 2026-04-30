@@ -40,26 +40,24 @@ async fn create_test_consumer(
     config: ConformanceConfig,
     use_stub: bool,
 ) -> Result<KafkaConsumer, KafkaError> {
-    let consumer_config = ConsumerConfig {
-        group_id: config.group_id.clone(),
-        bootstrap_servers: if use_stub {
-            vec!["stub://localhost".to_string()]
-        } else {
-            vec!["localhost:9092".to_string()]
-        },
-        client_id: None,
-        enable_auto_commit: config.enable_auto_commit,
-        auto_commit_interval: config.auto_commit_interval,
-        session_timeout: Duration::from_secs(10),
-        heartbeat_interval: Duration::from_secs(3),
-        max_poll_records: 500,
-        fetch_min_bytes: 1,
-        fetch_max_bytes: 1024 * 1024,
-        fetch_max_wait: Duration::from_millis(500),
-        auto_offset_reset: Default::default(),
-        isolation_level: Default::default(),
-        force_real_kafka: !use_stub,
+    let bootstrap_servers = if use_stub {
+        vec!["stub://localhost".to_string()]
+    } else {
+        vec!["localhost:9092".to_string()]
     };
+
+    let consumer_config = ConsumerConfig::new(bootstrap_servers, config.group_id.clone())
+        .enable_auto_commit(config.enable_auto_commit)
+        .auto_commit_interval(config.auto_commit_interval)
+        .session_timeout(Duration::from_secs(10))
+        .heartbeat_interval(Duration::from_secs(3))
+        .max_poll_records(500)
+        .fetch_min_bytes(1)
+        .fetch_max_bytes(1024 * 1024)
+        .fetch_max_wait(Duration::from_millis(500))
+        .auto_offset_reset(Default::default())
+        .isolation_level(Default::default())
+        .force_real_kafka(!use_stub);
 
     let _ = config.retention_minutes;
     KafkaConsumer::new(consumer_config)

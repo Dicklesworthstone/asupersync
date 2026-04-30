@@ -866,13 +866,13 @@ pub struct ProducerConfig {
     pub request_timeout: Duration,
     /// Maximum message size in bytes.
     pub max_message_size: usize,
-    /// Scary opt-in for PLAINTEXT / unauthenticated remote brokers.
+    /// Internal test/debug-only opt-in for PLAINTEXT / unauthenticated remote brokers.
     ///
     /// `src/messaging/kafka.rs` does not yet expose TLS or SASL settings, so
     /// the secure default is fail-closed for non-loopback bootstrap servers.
-    /// Set this only for local labs that intentionally exercise an insecure
-    /// broker. Production callers should wait for real TLS/SASL support.
-    pub allow_insecure_transport_for_testing: bool,
+    /// Keep this private so release callers cannot enable the bypass through a
+    /// struct literal.
+    allow_insecure_transport_for_testing: bool,
 }
 
 impl Default for ProducerConfig {
@@ -952,7 +952,11 @@ impl ProducerConfig {
         self
     }
 
-    /// Scary opt-in for remote PLAINTEXT / unauthenticated brokers.
+    /// Scary test/debug-only opt-in for remote PLAINTEXT / unauthenticated brokers.
+    ///
+    /// This setter is intentionally unavailable in release builds so
+    /// production callers cannot compile with a remote plaintext-broker bypass.
+    #[cfg(any(test, debug_assertions))]
     #[must_use]
     pub const fn allow_insecure_transport_for_testing(mut self, allow: bool) -> Self {
         self.allow_insecure_transport_for_testing = allow;
@@ -980,7 +984,8 @@ impl ProducerConfig {
                     return Err(KafkaError::Config(format!(
                         "remote Kafka bootstrap server '{server}' is rejected by default: \
                          src/messaging/kafka.rs has no TLS/SASL knobs yet, so only loopback \
-                         brokers are allowed unless allow_insecure_transport_for_testing(true) is set"
+                         brokers are allowed; test/debug builds may opt in with \
+                         allow_insecure_transport_for_testing(true)"
                     )));
                 }
             }
