@@ -28,7 +28,7 @@ const LARGE_K_THRESHOLD: usize = 842;
 const SMALL_K_CANDIDATES: &[usize] = &[1, 2, 3, 4, 7, 8, 15, 16, 17, 31, 32, 33];
 const MEDIUM_K_CANDIDATES: &[usize] =
     &[42, 63, 64, 65, 127, 128, 129, 255, 256, 257, 511, 512, 513];
-const LARGE_K_CANDIDATES: &[usize] = &[842, 1023, 1024, 1025, 2047, 2048, 2049, 4096];
+const LARGE_K_CANDIDATES: &[usize] = &[842, 1023, 1024, 1025, 2047, 2048, 2049, 4096, 8192];
 const SMALL_SYMBOL_SIZE_CANDIDATES: &[usize] =
     &[1, 2, 3, 4, 7, 8, 15, 16, 31, 32, 63, 64, 127, 128, 255, 256];
 const LARGE_SYMBOL_SIZE_CANDIDATES: &[usize] = &[1, 2, 3, 4, 8, 16, 32];
@@ -738,6 +738,96 @@ fn assert_k4096_burst_loss_recovers(
     }
 }
 
+fn assert_k8192_tail_burst_loss_recovers(
+    decoder: &InactivationDecoder,
+    encoder: &SystematicEncoder,
+    source: &[Vec<u8>],
+    seed: u64,
+    wavefront_batch: usize,
+    object_id: ObjectId,
+) {
+    if source.len() != 8192 {
+        return;
+    }
+
+    let params = decoder.params();
+    assert_eq!(params.k, 8192, "K=8192 burst oracle must preserve the public K");
+    assert_eq!(
+        params.k_prime, 8194,
+        "K=8192 burst oracle must pin the rounded RFC row"
+    );
+    assert_eq!(params.j, 212, "K=8192 burst oracle must pin the RFC J(K') value");
+    assert_eq!(params.s, 211, "K=8192 burst oracle must pin the RFC S(K') value");
+    assert_eq!(params.h, 11, "K=8192 burst oracle must pin the RFC H(K') value");
+    assert_eq!(params.w, 8273, "K=8192 burst oracle must pin the RFC W(K') value");
+    assert_eq!(params.l, 8416, "K=8192 burst oracle must pin the RFC L value");
+    assert_eq!(params.b, 8062, "K=8192 burst oracle must pin the RFC B value");
+
+    let tail_start = |tail_offset: usize, jitter: u16| -> u16 {
+        source
+            .len()
+            .saturating_sub(tail_offset)
+            .saturating_sub(usize::from(jitter))
+            .min(usize::from(u16::MAX)) as u16
+    };
+
+    let scenarios = [
+        (
+            vec![LossWindow {
+                start: tail_start(1, seed as u16 % 32),
+                len: 0,
+            }],
+            2usize,
+        ),
+        (
+            vec![LossWindow {
+                start: tail_start(64, seed.rotate_left(5) as u16 % 32),
+                len: 31,
+            }],
+            6usize,
+        ),
+        (
+            vec![LossWindow {
+                start: tail_start(512, seed.rotate_left(11) as u16 % 64),
+                len: 255,
+            }],
+            12usize,
+        ),
+        (
+            vec![LossWindow {
+                start: tail_start(1024, seed.rotate_left(17) as u16 % 128),
+                len: 511,
+            }],
+            20usize,
+        ),
+        (
+            vec![
+                LossWindow {
+                    start: tail_start(1536, seed.rotate_left(23) as u16 % 128),
+                    len: 767,
+                },
+                LossWindow {
+                    start: tail_start(256, seed.rotate_left(29) as u16 % 64),
+                    len: 127,
+                },
+            ],
+            28usize,
+        ),
+    ];
+
+    for (loss_windows, extra_repairs) in scenarios {
+        assert_burst_loss_recovers_when_received_at_least_k(
+            decoder,
+            encoder,
+            source,
+            &loss_windows,
+            extra_repairs,
+            wavefront_batch,
+            object_id,
+        );
+    }
+}
+
 fn assert_k842_sparse_vs_dense_repairs_recover(
     decoder: &InactivationDecoder,
     encoder: &SystematicEncoder,
@@ -1186,6 +1276,15 @@ fuzz_target!(|data: &[u8]| {
         object_id,
     );
 
+    assert_k8192_tail_burst_loss_recovers(
+        &decoder,
+        &encoder,
+        &source,
+        input.seed,
+        input.wavefront_batch as usize,
+        object_id,
+    );
+
     assert_k4_transition_sparse_vs_dense_repairs_recover(
         &decoder,
         &encoder,
@@ -1394,6 +1493,23 @@ mod tests {
     }
 
     #[test]
+    fn k_selector_includes_large_k_8192_edge_case() {
+        assert!(
+            LARGE_K_CANDIDATES.contains(&8192),
+            "large-K candidate set must include the canonical K=8192 edge"
+        );
+        let selector = 8 * LARGE_K_CANDIDATES
+            .iter()
+            .position(|&candidate| candidate == 8192)
+            .expect("K=8192 must be selectable");
+        assert_eq!(
+            select_k_candidate(selector),
+            8192,
+            "selector normalization must be able to reach K=8192"
+        );
+    }
+
+    #[test]
     fn k_selector_includes_k42_burst_profile() {
         assert!(
             MEDIUM_K_CANDIDATES.contains(&42),
@@ -1425,6 +1541,14 @@ mod tests {
         assert_eq!(symbol_size, 16);
         assert!(LARGE_SYMBOL_SIZE_CANDIDATES.contains(&symbol_size));
         assert!(4096usize.saturating_mul(symbol_size) <= 64 * 1024);
+    }
+
+    #[test]
+    fn symbol_size_selector_keeps_k8192_targets_within_budget() {
+        let symbol_size = select_symbol_size_candidate(4, 8192, 64 * 1024);
+        assert_eq!(symbol_size, 8);
+        assert!(LARGE_SYMBOL_SIZE_CANDIDATES.contains(&symbol_size));
+        assert!(8192usize.saturating_mul(symbol_size) <= 64 * 1024);
     }
 
     #[test]
@@ -1473,6 +1597,19 @@ mod tests {
             4096,
         );
         assert_eq!(repair_count, 780);
+    }
+
+    #[test]
+    fn burst_repair_budget_scales_to_k8192_tail_windows() {
+        let repair_count = burst_repair_count(
+            &[
+                LossWindow { start: 0, len: 767 },
+                LossWindow { start: 31, len: 127 },
+            ],
+            28,
+            8192,
+        );
+        assert_eq!(repair_count, 924);
     }
 
     #[test]
