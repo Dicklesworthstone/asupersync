@@ -1863,13 +1863,15 @@ impl MySqlConnection {
     }
 
     #[inline]
-    const fn should_fail_closed_without_tls(ssl_mode: SslMode, server_caps: u32) -> bool {
+    const fn should_fail_closed_without_tls(ssl_mode: SslMode, _server_caps: u32) -> bool {
         match ssl_mode {
             SslMode::Disabled => false,
             SslMode::Required => true,
-            // Until the TLS upgrade path exists, `Preferred` must not silently
-            // downgrade to cleartext when the server already advertises TLS.
-            SslMode::Preferred => server_caps & capability::CLIENT_SSL != 0,
+            // Until the TLS upgrade path exists, `Preferred` must also fail
+            // closed: the initial handshake is plaintext and unauthenticated,
+            // so an active network attacker could strip CLIENT_SSL and force a
+            // cleartext fallback if we only rejected TLS-capable handshakes.
+            SslMode::Preferred => true,
         }
     }
 
@@ -5617,8 +5619,8 @@ mod tests {
     }
 
     #[test]
-    fn test_should_fail_closed_without_tls_preferred_only_rejects_tls_capable_servers() {
-        assert!(!MySqlConnection::should_fail_closed_without_tls(
+    fn test_should_fail_closed_without_tls_preferred_always_rejects() {
+        assert!(MySqlConnection::should_fail_closed_without_tls(
             SslMode::Preferred,
             0
         ));

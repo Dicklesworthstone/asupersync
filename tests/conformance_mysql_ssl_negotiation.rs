@@ -284,12 +284,12 @@ fn test_preferred_ssl_fails_closed_before_auth_payload_when_server_supports_ssl(
 }
 
 #[test]
-fn test_preferred_ssl_falls_back_only_when_server_lacks_ssl_support() {
+fn test_preferred_ssl_fails_closed_before_auth_payload_when_server_lacks_ssl_support() {
     init_test_logging();
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
     let addr = listener.local_addr().expect("listener addr");
-    let (caps_tx, caps_rx) = mpsc::channel();
+    let (read_tx, read_rx) = mpsc::channel();
 
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("accept client");
@@ -306,22 +306,20 @@ fn test_preferred_ssl_falls_back_only_when_server_lacks_ssl_support() {
         stream.flush().expect("flush handshake");
 
         let mut header = [0; 4];
-        stream
-            .read_exact(&mut header)
-            .expect("read client handshake header");
-        let payload_len =
-            usize::from(header[0]) | (usize::from(header[1]) << 8) | (usize::from(header[2]) << 16);
-        let mut payload = vec![0; payload_len];
-        stream
-            .read_exact(&mut payload)
-            .expect("read client handshake payload");
-        let caps = u32::from_le_bytes(payload[..4].try_into().expect("capability bytes"));
-        caps_tx.send(caps).expect("send capability flags");
-
-        stream
-            .write_all(&mysql_packet(2, &[0x00]))
-            .expect("write auth ok");
-        stream.flush().expect("flush auth ok");
+        let read = stream.read(&mut header).unwrap_or_else(|err| {
+            assert!(
+                matches!(
+                    err.kind(),
+                    std::io::ErrorKind::UnexpectedEof
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::WouldBlock
+                ),
+                "unexpected server read error: {err}"
+            );
+            0
+        });
+        read_tx.send(read).expect("send read count");
     });
 
     let mut options = MySqlConnectOptions::parse(&format!(
@@ -336,18 +334,17 @@ fn test_preferred_ssl_falls_back_only_when_server_lacks_ssl_support() {
         MySqlConnection::connect_with_options(&Cx::for_testing(), options).await
     });
     match outcome {
-        Outcome::Ok(_) => {}
-        other => panic!("expected preferred SSL cleartext fallback, got {other:?}"),
+        Outcome::Err(MySqlError::TlsRequired) => {}
+        other => panic!("expected preferred SSL fail-closed outcome, got {other:?}"),
     }
 
-    let caps = caps_rx
+    let bytes_sent = read_rx
         .recv_timeout(Duration::from_secs(2))
-        .expect("client capability flags");
+        .expect("server read result");
     server.join().expect("join server");
     assert_eq!(
-        caps & mysql_capabilities::CLIENT_SSL,
-        0,
-        "preferred mode must not set CLIENT_SSL until an SSL Request and TLS upgrade are implemented"
+        bytes_sent, 0,
+        "ssl-mode=preferred must fail before sending plaintext auth data even when the server omits CLIENT_SSL"
     );
 }
 
@@ -531,7 +528,6 @@ fn test_conformance_gap_missing_tls_handshake() {
     // - SSL Request packet generation
     // - TLS handshake using asupersync::tls module
     // - Stream wrapper for encrypted communication
-    // - Fallback logic for Preferred mode when server doesn't support SSL
 
     println!("CONFORMANCE GAP: No TLS handshake implementation in MySQL client");
     println!("Missing: SSL Request packet, TLS upgrade, encrypted stream wrapper");
@@ -597,7 +593,7 @@ fn test_required_fixes_documentation() {
     println!("3. Implement SSL Request packet transmission");
     println!("4. Add TLS handshake using asupersync::tls::TlsConnector");
     println!("5. Wrap stream in TLS after successful handshake");
-    println!("6. Implement graceful fallback for Preferred mode");
+    println!("6. If fallback is ever added, gate it behind an explicit insecure opt-in");
     println!("7. Add comprehensive integration tests with real MySQL server");
 
     // These fixes would enable:
