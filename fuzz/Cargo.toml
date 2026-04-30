@@ -1452,6 +1452,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h1_head_response_body_discard"
+path = "fuzz_targets/h1_head_response_body_discard.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "symbol_auth"
 path = "fuzz_targets/symbol_auth.rs"
 test = false
