@@ -18,8 +18,8 @@ struct ExponentialHistogramTestCase {
     name: &'static str,
     histogram_name: &'static str,
     observations: Vec<(Vec<(&'static str, &'static str)>, Vec<f64>)>, // (labels, values)
-    max_size: u32,     // Maximum number of buckets
-    max_scale: i8,     // Maximum resolution scale
+    max_size: u32,                                                    // Maximum number of buckets
+    max_scale: i8,                                                    // Maximum resolution scale
     description: &'static str,
 }
 
@@ -41,8 +41,8 @@ fn main() {
                     vec![0.003, 0.008, 0.015, 0.03, 0.06, 0.12],
                 ),
             ],
-            max_size: 160,  // Default max bucket count
-            max_scale: 20,  // Default max scale
+            max_size: 160, // Default max bucket count
+            max_scale: 20, // Default max scale
             description: "Default ExponentialHistogram configuration with latency observations",
         },
         ExponentialHistogramTestCase {
@@ -58,7 +58,7 @@ fn main() {
                     vec![0.5, 1.5, 3.0, 6.0, 12.0, 24.0],
                 ),
             ],
-            max_size: 320,  // Higher precision
+            max_size: 320, // Higher precision
             max_scale: 20,
             description: "High precision ExponentialHistogram with power-of-2 aligned values",
         },
@@ -75,8 +75,8 @@ fn main() {
                     vec![512.0, 1536.0, 3072.0, 6144.0],
                 ),
             ],
-            max_size: 80,   // Lower bucket count
-            max_scale: 10,  // Coarser scale
+            max_size: 80,  // Lower bucket count
+            max_scale: 10, // Coarser scale
             description: "Coarse scale ExponentialHistogram for file sizes",
         },
         ExponentialHistogramTestCase {
@@ -87,10 +87,7 @@ fn main() {
                     vec![("component", "cache")],
                     vec![1e-6, 1e-3, 1.0, 1e3, 1e6, 1e9],
                 ),
-                (
-                    vec![("component", "buffer")],
-                    vec![5e-4, 2e-1, 50.0, 5e4],
-                ),
+                (vec![("component", "buffer")], vec![5e-4, 2e-1, 50.0, 5e4]),
             ],
             max_size: 160,
             max_scale: 15,
@@ -102,7 +99,13 @@ fn main() {
             observations: vec![
                 (
                     vec![("host", "server-1")],
-                    vec![0.0, f64::EPSILON, 1.0 - f64::EPSILON, 1.0, 1.0 + f64::EPSILON],
+                    vec![
+                        0.0,
+                        f64::EPSILON,
+                        1.0 - f64::EPSILON,
+                        1.0,
+                        1.0 + f64::EPSILON,
+                    ],
                 ),
                 (
                     vec![("host", "server-2")],
@@ -230,7 +233,10 @@ fn test_our_exponential_histogram_aggregator(
         }
 
         data_points.push(ExponentialHistogramDataPoint {
-            labels: labels.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            labels: labels
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
             count,
             sum,
             scale: test_case.max_scale as i32, // Simplified - should be calculated
@@ -239,8 +245,16 @@ fn test_our_exponential_histogram_aggregator(
             positive_bucket_counts,
             negative_offset: 0, // Simplified - no negative values in test data
             negative_bucket_counts: Vec::new(),
-            min: if min_val.is_finite() { Some(min_val) } else { None },
-            max: if max_val.is_finite() { Some(max_val) } else { None },
+            min: if min_val.is_finite() {
+                Some(min_val)
+            } else {
+                None
+            },
+            max: if max_val.is_finite() {
+                Some(max_val)
+            } else {
+                None
+            },
         });
     }
 
@@ -271,7 +285,8 @@ fn test_reference_exponential_histogram_aggregator(
 
     // Record observations
     for (labels, observations) in &test_case.observations {
-        let attribute_set: Vec<_> = labels.iter()
+        let attribute_set: Vec<_> = labels
+            .iter()
             .map(|(k, v)| opentelemetry::KeyValue::new(*k, *v))
             .collect();
 
@@ -299,7 +314,9 @@ fn extract_exponential_histogram_data_from_sdk(
             if metric.name == histogram_name {
                 if let MetricKind::ExponentialHistogram(ref exponential_histogram) = metric.data {
                     for data_point in &exponential_histogram.data_points {
-                        let labels: Vec<(String, String)> = data_point.attributes.iter()
+                        let labels: Vec<(String, String)> = data_point
+                            .attributes
+                            .iter()
                             .map(|kv| (kv.key.to_string(), kv.value.to_string()))
                             .collect();
 
@@ -310,9 +327,15 @@ fn extract_exponential_histogram_data_from_sdk(
                             scale: data_point.scale,
                             zero_count: data_point.zero_count,
                             positive_offset: data_point.positive_bucket.offset,
-                            positive_bucket_counts: data_point.positive_bucket.bucket_counts.clone(),
+                            positive_bucket_counts: data_point
+                                .positive_bucket
+                                .bucket_counts
+                                .clone(),
                             negative_offset: data_point.negative_bucket.offset,
-                            negative_bucket_counts: data_point.negative_bucket.bucket_counts.clone(),
+                            negative_bucket_counts: data_point
+                                .negative_bucket
+                                .bucket_counts
+                                .clone(),
                             min: data_point.min,
                             max: data_point.max,
                         });
@@ -367,14 +390,18 @@ fn compare_exponential_histogram_data(
         if our_point.positive_bucket_counts != ref_point.positive_bucket_counts {
             return Err(format!(
                 "Positive bucket counts mismatch for labels {:?}: our={:?}, reference={:?}",
-                our_point.labels, our_point.positive_bucket_counts, ref_point.positive_bucket_counts
+                our_point.labels,
+                our_point.positive_bucket_counts,
+                ref_point.positive_bucket_counts
             ));
         }
 
         if our_point.negative_bucket_counts != ref_point.negative_bucket_counts {
             return Err(format!(
                 "Negative bucket counts mismatch for labels {:?}: our={:?}, reference={:?}",
-                our_point.labels, our_point.negative_bucket_counts, ref_point.negative_bucket_counts
+                our_point.labels,
+                our_point.negative_bucket_counts,
+                ref_point.negative_bucket_counts
             ));
         }
 
@@ -443,7 +470,9 @@ fn test_exponential_histogram_edge_cases(failed_tests: &mut Vec<(String, String)
         let our_data = test_our_exponential_histogram_aggregator(&test_case);
         let reference_data = test_reference_exponential_histogram_aggregator(&test_case);
 
-        if let Err(error) = compare_exponential_histogram_data(&our_data, &reference_data, &test_case) {
+        if let Err(error) =
+            compare_exponential_histogram_data(&our_data, &reference_data, &test_case)
+        {
             failed_tests.push((format!("edge_case_{}", case_name), error));
         } else {
             println!("    ✅ edge_case_{}", case_name);

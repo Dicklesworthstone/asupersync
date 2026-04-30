@@ -153,10 +153,34 @@ fn run_all_tests(verbose: bool) {
             requirement_level: RequirementLevel::Must,
             propagator_type: PropagatorType::W3CTraceContext,
             span_contexts: vec![
-                create_test_span_context("basic_context", "4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7", TraceFlags::SAMPLED, false),
-                create_test_span_context("unsampled_context", "4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7", TraceFlags::default(), false),
-                create_test_span_context("max_values", "ffffffffffffffffffffffffffffffff", "ffffffffffffffff", TraceFlags::SAMPLED, false),
-                create_test_span_context("min_values", "00000000000000000000000000000001", "0000000000000001", TraceFlags::default(), false),
+                create_test_span_context(
+                    "basic_context",
+                    "4bf92f3577b34da6a3ce929d0e0e4736",
+                    "00f067aa0ba902b7",
+                    TraceFlags::SAMPLED,
+                    false,
+                ),
+                create_test_span_context(
+                    "unsampled_context",
+                    "4bf92f3577b34da6a3ce929d0e0e4736",
+                    "00f067aa0ba902b7",
+                    TraceFlags::default(),
+                    false,
+                ),
+                create_test_span_context(
+                    "max_values",
+                    "ffffffffffffffffffffffffffffffff",
+                    "ffffffffffffffff",
+                    TraceFlags::SAMPLED,
+                    false,
+                ),
+                create_test_span_context(
+                    "min_values",
+                    "00000000000000000000000000000001",
+                    "0000000000000001",
+                    TraceFlags::default(),
+                    false,
+                ),
             ],
         },
         PropagationTestCase {
@@ -165,9 +189,30 @@ fn run_all_tests(verbose: bool) {
             requirement_level: RequirementLevel::Should,
             propagator_type: PropagatorType::W3CTraceContext,
             span_contexts: vec![
-                create_test_span_context_with_state("with_tracestate", "4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7", TraceFlags::SAMPLED, false, "vendor1=value1,vendor2=value2"),
-                create_test_span_context_with_state("complex_tracestate", "4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7", TraceFlags::SAMPLED, false, "rojo=00f067aa0ba902b7,congo=t61rcWkgMzE"),
-                create_test_span_context_with_state("single_vendor", "4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7", TraceFlags::SAMPLED, false, "elasticsearch=t61rcWkgMzE"),
+                create_test_span_context_with_state(
+                    "with_tracestate",
+                    "4bf92f3577b34da6a3ce929d0e0e4736",
+                    "00f067aa0ba902b7",
+                    TraceFlags::SAMPLED,
+                    false,
+                    "vendor1=value1,vendor2=value2",
+                ),
+                create_test_span_context_with_state(
+                    "complex_tracestate",
+                    "4bf92f3577b34da6a3ce929d0e0e4736",
+                    "00f067aa0ba902b7",
+                    TraceFlags::SAMPLED,
+                    false,
+                    "rojo=00f067aa0ba902b7,congo=t61rcWkgMzE",
+                ),
+                create_test_span_context_with_state(
+                    "single_vendor",
+                    "4bf92f3577b34da6a3ce929d0e0e4736",
+                    "00f067aa0ba902b7",
+                    TraceFlags::SAMPLED,
+                    false,
+                    "elasticsearch=t61rcWkgMzE",
+                ),
             ],
         },
         PropagationTestCase {
@@ -175,9 +220,13 @@ fn run_all_tests(verbose: bool) {
             description: "W3C traceparent invalid header handling per spec",
             requirement_level: RequirementLevel::Must,
             propagator_type: PropagatorType::W3CTraceContext,
-            span_contexts: vec![
-                create_test_span_context("invalid_recovery", "4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7", TraceFlags::SAMPLED, false),
-            ],
+            span_contexts: vec![create_test_span_context(
+                "invalid_recovery",
+                "4bf92f3577b34da6a3ce929d0e0e4736",
+                "00f067aa0ba902b7",
+                TraceFlags::SAMPLED,
+                false,
+            )],
         },
         PropagationTestCase {
             name: "b3-single-header-roundtrip",
@@ -185,8 +234,20 @@ fn run_all_tests(verbose: bool) {
             requirement_level: RequirementLevel::Should,
             propagator_type: PropagatorType::B3Single,
             span_contexts: vec![
-                create_test_span_context("b3_basic", "4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7", TraceFlags::SAMPLED, false),
-                create_test_span_context("b3_unsampled", "4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7", TraceFlags::default(), false),
+                create_test_span_context(
+                    "b3_basic",
+                    "4bf92f3577b34da6a3ce929d0e0e4736",
+                    "00f067aa0ba902b7",
+                    TraceFlags::SAMPLED,
+                    false,
+                ),
+                create_test_span_context(
+                    "b3_unsampled",
+                    "4bf92f3577b34da6a3ce929d0e0e4736",
+                    "00f067aa0ba902b7",
+                    TraceFlags::default(),
+                    false,
+                ),
             ],
         },
         PropagationTestCase {
@@ -194,27 +255,41 @@ fn run_all_tests(verbose: bool) {
             description: "B3 multi-header inject→extract roundtrip preserves identity",
             requirement_level: RequirementLevel::Should,
             propagator_type: PropagatorType::B3Multi,
-            span_contexts: vec![
-                create_test_span_context("b3_multi", "4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7", TraceFlags::SAMPLED, false),
-            ],
+            span_contexts: vec![create_test_span_context(
+                "b3_multi",
+                "4bf92f3577b34da6a3ce929d0e0e4736",
+                "00f067aa0ba902b7",
+                TraceFlags::SAMPLED,
+                false,
+            )],
         },
         PropagationTestCase {
             name: "propagator-interoperability",
             description: "Different propagators handle each other's contexts gracefully",
             requirement_level: RequirementLevel::May,
             propagator_type: PropagatorType::W3CTraceContext,
-            span_contexts: vec![
-                create_test_span_context("interop_test", "4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7", TraceFlags::SAMPLED, false),
-            ],
+            span_contexts: vec![create_test_span_context(
+                "interop_test",
+                "4bf92f3577b34da6a3ce929d0e0e4736",
+                "00f067aa0ba902b7",
+                TraceFlags::SAMPLED,
+                false,
+            )],
         },
     ];
 
-    println!("📋 Running {} Trace Context Propagation conformance tests\n", test_cases.len());
+    println!(
+        "📋 Running {} Trace Context Propagation conformance tests\n",
+        test_cases.len()
+    );
 
     for test_case in &test_cases {
         total += 1;
 
-        print!("  Testing {}: {} ... ", test_case.name, test_case.description);
+        print!(
+            "  Testing {}: {} ... ",
+            test_case.name, test_case.description
+        );
 
         let result = run_propagation_conformance_test(test_case, verbose);
 
@@ -262,7 +337,11 @@ fn run_all_tests(verbose: bool) {
     println!("│  ❌ Failed: {}                     │", failed);
     println!("│  ⚠️ Expected: {}                   │", xfail);
     println!("│                                     │");
-    let score = if total > 0 { (passed as f64 / total as f64) * 100.0 } else { 0.0 };
+    let score = if total > 0 {
+        (passed as f64 / total as f64) * 100.0
+    } else {
+        0.0
+    };
     println!("│  🎯 Score: {:.1}%                   │", score);
     println!("└─────────────────────────────────────┘");
 
@@ -291,24 +370,34 @@ fn run_propagation_conformance_test(
         );
 
         // Test round-trip: inject then extract
-        match test_roundtrip_for_propagator(&test_case.propagator_type, &original_context, verbose) {
+        match test_roundtrip_for_propagator(&test_case.propagator_type, &original_context, verbose)
+        {
             Ok(extracted_context) => {
                 // Compare contexts for identity
                 if let Err(reason) = compare_span_contexts(&original_context, &extracted_context) {
-                    return if is_known_propagation_divergence(test_case.name, &span_context_input.name) {
+                    return if is_known_propagation_divergence(
+                        test_case.name,
+                        &span_context_input.name,
+                    ) {
                         ConformanceTestResult::ExpectedFailure {
-                            reason: "Known divergence documented in DISCREPANCIES.md".to_string()
+                            reason: "Known divergence documented in DISCREPANCIES.md".to_string(),
                         }
                     } else {
                         ConformanceTestResult::Fail {
-                            reason: format!("Round-trip failed for '{}': {}", span_context_input.name, reason)
+                            reason: format!(
+                                "Round-trip failed for '{}': {}",
+                                span_context_input.name, reason
+                            ),
                         }
                     };
                 }
             }
             Err(error) => {
                 return ConformanceTestResult::Fail {
-                    reason: format!("Round-trip error for '{}': {}", span_context_input.name, error),
+                    reason: format!(
+                        "Round-trip error for '{}': {}",
+                        span_context_input.name, error
+                    ),
                 };
             }
         }
@@ -329,9 +418,10 @@ fn test_roundtrip_for_propagator(
 
             // Inject into headers
             let mut carrier = HeaderCarrier::default();
-            propagator.inject_context(&opentelemetry::Context::current_with_span(
-                TestSpan::new(original_context.clone())
-            ), &mut carrier);
+            propagator.inject_context(
+                &opentelemetry::Context::current_with_span(TestSpan::new(original_context.clone())),
+                &mut carrier,
+            );
 
             // Extract from headers
             let extracted_context = propagator.extract(&carrier);
@@ -364,28 +454,32 @@ fn compare_span_contexts(original: &SpanContext, extracted: &SpanContext) -> Res
     if original.trace_id() != extracted.trace_id() {
         return Err(format!(
             "TraceId mismatch: original={}, extracted={}",
-            original.trace_id(), extracted.trace_id()
+            original.trace_id(),
+            extracted.trace_id()
         ));
     }
 
     if original.span_id() != extracted.span_id() {
         return Err(format!(
             "SpanId mismatch: original={}, extracted={}",
-            original.span_id(), extracted.span_id()
+            original.span_id(),
+            extracted.span_id()
         ));
     }
 
     if original.trace_flags() != extracted.trace_flags() {
         return Err(format!(
             "TraceFlags mismatch: original={:?}, extracted={:?}",
-            original.trace_flags(), extracted.trace_flags()
+            original.trace_flags(),
+            extracted.trace_flags()
         ));
     }
 
     if original.is_remote() != extracted.is_remote() {
         return Err(format!(
             "Remote flag mismatch: original={}, extracted={}",
-            original.is_remote(), extracted.is_remote()
+            original.is_remote(),
+            extracted.is_remote()
         ));
     }
 
@@ -403,7 +497,13 @@ fn compare_span_contexts(original: &SpanContext, extracted: &SpanContext) -> Res
 }
 
 /// Helper to create test span context
-fn create_test_span_context(name: &str, trace_id_hex: &str, span_id_hex: &str, flags: TraceFlags, is_remote: bool) -> TestSpanContext {
+fn create_test_span_context(
+    name: &str,
+    trace_id_hex: &str,
+    span_id_hex: &str,
+    flags: TraceFlags,
+    is_remote: bool,
+) -> TestSpanContext {
     let trace_id = TraceId::from_hex(trace_id_hex).expect("Valid trace ID");
     let span_id = SpanId::from_hex(span_id_hex).expect("Valid span ID");
     let trace_state = TraceState::default();
@@ -419,19 +519,25 @@ fn create_test_span_context(name: &str, trace_id_hex: &str, span_id_hex: &str, f
 }
 
 /// Helper to create test span context with trace state
-fn create_test_span_context_with_state(name: &str, trace_id_hex: &str, span_id_hex: &str, flags: TraceFlags, is_remote: bool, state: &str) -> TestSpanContext {
+fn create_test_span_context_with_state(
+    name: &str,
+    trace_id_hex: &str,
+    span_id_hex: &str,
+    flags: TraceFlags,
+    is_remote: bool,
+    state: &str,
+) -> TestSpanContext {
     let trace_id = TraceId::from_hex(trace_id_hex).expect("Valid trace ID");
     let span_id = SpanId::from_hex(span_id_hex).expect("Valid span ID");
-    let trace_state = TraceState::from_key_value_pairs(
-        state.split(',').filter_map(|pair| {
-            let mut parts = pair.splitn(2, '=');
-            if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
-                Some((key.to_string(), value.to_string()))
-            } else {
-                None
-            }
-        })
-    ).unwrap_or_default();
+    let trace_state = TraceState::from_key_value_pairs(state.split(',').filter_map(|pair| {
+        let mut parts = pair.splitn(2, '=');
+        if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
+            Some((key.to_string(), value.to_string()))
+        } else {
+            None
+        }
+    }))
+    .unwrap_or_default();
 
     TestSpanContext {
         name: name.to_string(),
@@ -506,9 +612,13 @@ fn run_w3c_traceparent_roundtrip_test(_verbose: bool) -> ConformanceTestResult {
         description: "W3C traceparent roundtrip",
         requirement_level: RequirementLevel::Must,
         propagator_type: PropagatorType::W3CTraceContext,
-        span_contexts: vec![
-            create_test_span_context("basic", "4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7", TraceFlags::SAMPLED, false),
-        ],
+        span_contexts: vec![create_test_span_context(
+            "basic",
+            "4bf92f3577b34da6a3ce929d0e0e4736",
+            "00f067aa0ba902b7",
+            TraceFlags::SAMPLED,
+            false,
+        )],
     };
 
     run_propagation_conformance_test(&test_case, false)
@@ -520,9 +630,14 @@ fn run_w3c_tracestate_roundtrip_test(_verbose: bool) -> ConformanceTestResult {
         description: "W3C tracestate roundtrip",
         requirement_level: RequirementLevel::Should,
         propagator_type: PropagatorType::W3CTraceContext,
-        span_contexts: vec![
-            create_test_span_context_with_state("with_state", "4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7", TraceFlags::SAMPLED, false, "vendor=value"),
-        ],
+        span_contexts: vec![create_test_span_context_with_state(
+            "with_state",
+            "4bf92f3577b34da6a3ce929d0e0e4736",
+            "00f067aa0ba902b7",
+            TraceFlags::SAMPLED,
+            false,
+            "vendor=value",
+        )],
     };
 
     run_propagation_conformance_test(&test_case, false)
@@ -534,9 +649,13 @@ fn run_w3c_invalid_handling_test(_verbose: bool) -> ConformanceTestResult {
         description: "W3C invalid header handling",
         requirement_level: RequirementLevel::Must,
         propagator_type: PropagatorType::W3CTraceContext,
-        span_contexts: vec![
-            create_test_span_context("invalid_test", "4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7", TraceFlags::SAMPLED, false),
-        ],
+        span_contexts: vec![create_test_span_context(
+            "invalid_test",
+            "4bf92f3577b34da6a3ce929d0e0e4736",
+            "00f067aa0ba902b7",
+            TraceFlags::SAMPLED,
+            false,
+        )],
     };
 
     run_propagation_conformance_test(&test_case, false)
@@ -548,9 +667,13 @@ fn run_b3_single_header_roundtrip_test(_verbose: bool) -> ConformanceTestResult 
         description: "B3 single header roundtrip",
         requirement_level: RequirementLevel::Should,
         propagator_type: PropagatorType::B3Single,
-        span_contexts: vec![
-            create_test_span_context("b3_single", "4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7", TraceFlags::SAMPLED, false),
-        ],
+        span_contexts: vec![create_test_span_context(
+            "b3_single",
+            "4bf92f3577b34da6a3ce929d0e0e4736",
+            "00f067aa0ba902b7",
+            TraceFlags::SAMPLED,
+            false,
+        )],
     };
 
     run_propagation_conformance_test(&test_case, false)
@@ -562,9 +685,13 @@ fn run_b3_multi_header_roundtrip_test(_verbose: bool) -> ConformanceTestResult {
         description: "B3 multi-header roundtrip",
         requirement_level: RequirementLevel::Should,
         propagator_type: PropagatorType::B3Multi,
-        span_contexts: vec![
-            create_test_span_context("b3_multi", "4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7", TraceFlags::SAMPLED, false),
-        ],
+        span_contexts: vec![create_test_span_context(
+            "b3_multi",
+            "4bf92f3577b34da6a3ce929d0e0e4736",
+            "00f067aa0ba902b7",
+            TraceFlags::SAMPLED,
+            false,
+        )],
     };
 
     run_propagation_conformance_test(&test_case, false)
@@ -576,9 +703,13 @@ fn run_propagator_interoperability_test(_verbose: bool) -> ConformanceTestResult
         description: "Propagator interoperability",
         requirement_level: RequirementLevel::May,
         propagator_type: PropagatorType::W3CTraceContext,
-        span_contexts: vec![
-            create_test_span_context("interop", "4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7", TraceFlags::SAMPLED, false),
-        ],
+        span_contexts: vec![create_test_span_context(
+            "interop",
+            "4bf92f3577b34da6a3ce929d0e0e4736",
+            "00f067aa0ba902b7",
+            TraceFlags::SAMPLED,
+            false,
+        )],
     };
 
     run_propagation_conformance_test(&test_case, false)
@@ -590,9 +721,13 @@ fn run_edge_case_scenarios_test(_verbose: bool) -> ConformanceTestResult {
         description: "Edge case scenarios",
         requirement_level: RequirementLevel::Should,
         propagator_type: PropagatorType::W3CTraceContext,
-        span_contexts: vec![
-            create_test_span_context("edge_case", "4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7", TraceFlags::SAMPLED, false),
-        ],
+        span_contexts: vec![create_test_span_context(
+            "edge_case",
+            "4bf92f3577b34da6a3ce929d0e0e4736",
+            "00f067aa0ba902b7",
+            TraceFlags::SAMPLED,
+            false,
+        )],
     };
 
     run_propagation_conformance_test(&test_case, false)
@@ -607,10 +742,18 @@ fn generate_compliance_report() {
     println!("| Test Case | Requirement Level | Status | Description |");
     println!("|-----------|--------------------|--------|-------------|");
     println!("| w3c-traceparent-roundtrip | MUST | ✅ | W3C traceparent inject→extract identity |");
-    println!("| w3c-tracestate-roundtrip | SHOULD | ✅ | W3C tracestate vendor data preservation |");
-    println!("| w3c-traceparent-invalid-handling | MUST | ✅ | W3C invalid header handling per spec |");
-    println!("| b3-single-header-roundtrip | SHOULD | ✅ | B3 single header inject→extract identity |");
-    println!("| b3-multi-header-roundtrip | SHOULD | ✅ | B3 multi-header inject→extract identity |");
+    println!(
+        "| w3c-tracestate-roundtrip | SHOULD | ✅ | W3C tracestate vendor data preservation |"
+    );
+    println!(
+        "| w3c-traceparent-invalid-handling | MUST | ✅ | W3C invalid header handling per spec |"
+    );
+    println!(
+        "| b3-single-header-roundtrip | SHOULD | ✅ | B3 single header inject→extract identity |"
+    );
+    println!(
+        "| b3-multi-header-roundtrip | SHOULD | ✅ | B3 multi-header inject→extract identity |"
+    );
     println!("| propagator-interoperability | MAY | ✅ | Cross-propagator graceful handling |");
     println!();
 
@@ -627,5 +770,7 @@ fn generate_compliance_report() {
     println!("None documented.");
     println!();
 
-    println!("✅ **CONFORMANT** - Trace context inject→extract roundtrip preserves SpanContext identity per propagator");
+    println!(
+        "✅ **CONFORMANT** - Trace context inject→extract roundtrip preserves SpanContext identity per propagator"
+    );
 }

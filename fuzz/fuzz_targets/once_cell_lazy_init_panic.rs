@@ -14,7 +14,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
-use asupersync::sync::once_cell::OnceCell;
+use asupersync::sync::OnceCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;

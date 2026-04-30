@@ -136,7 +136,10 @@ struct ResourceData {
 /// Test our Resource detection implementation.
 fn test_our_resource_detection(test_case: &ResourceDetectionTestCase) -> ResourceData {
     // Set the environment variable
-    env::set_var("OTEL_RESOURCE_ATTRIBUTES", test_case.otel_resource_attributes);
+    env::set_var(
+        "OTEL_RESOURCE_ATTRIBUTES",
+        test_case.otel_resource_attributes,
+    );
 
     // TODO: Call our Resource detection implementation
     // This should be replaced with actual asupersync Resource detection code
@@ -158,11 +161,16 @@ fn test_our_resource_detection(test_case: &ResourceDetectionTestCase) -> Resourc
 /// Test the reference opentelemetry-sdk Resource detection.
 fn test_reference_resource_detection(test_case: &ResourceDetectionTestCase) -> ResourceData {
     // Set the environment variable
-    env::set_var("OTEL_RESOURCE_ATTRIBUTES", test_case.otel_resource_attributes);
+    env::set_var(
+        "OTEL_RESOURCE_ATTRIBUTES",
+        test_case.otel_resource_attributes,
+    );
 
     // Use opentelemetry-sdk Resource detection - use the ResourceBuilder approach
     let resource = Resource::builder_empty()
-        .with_detector(Box::new(opentelemetry_sdk::resource::EnvResourceDetector::new()))
+        .with_detector(Box::new(
+            opentelemetry_sdk::resource::EnvResourceDetector::new(),
+        ))
         .build();
 
     // Clean up environment variable
@@ -235,7 +243,8 @@ fn compare_resources(
     if our_resource.attributes != reference_resource.attributes {
         // Find specific differences for better error reporting
         let our_keys: std::collections::BTreeSet<_> = our_resource.attributes.keys().collect();
-        let ref_keys: std::collections::BTreeSet<_> = reference_resource.attributes.keys().collect();
+        let ref_keys: std::collections::BTreeSet<_> =
+            reference_resource.attributes.keys().collect();
 
         let missing_keys: Vec<_> = ref_keys.difference(&our_keys).collect();
         let extra_keys: Vec<_> = our_keys.difference(&ref_keys).collect();
@@ -260,7 +269,10 @@ fn compare_resources(
             error_parts.push(format!("value differences: {:?}", value_diffs));
         }
 
-        return Err(format!("Resource attributes mismatch: {}", error_parts.join(", ")));
+        return Err(format!(
+            "Resource attributes mismatch: {}",
+            error_parts.join(", ")
+        ));
     }
 
     // Schema URL comparison is optional since our implementation may not set it
@@ -280,13 +292,32 @@ fn compare_resources(
 /// Test edge cases for Resource detection.
 fn test_resource_detection_edge_cases(failed_tests: &mut Vec<(String, String)>) {
     let edge_cases = vec![
-        ("malformed_no_equals", "service.name", "Attribute without equals sign"),
+        (
+            "malformed_no_equals",
+            "service.name",
+            "Attribute without equals sign",
+        ),
         ("malformed_empty_key", "=value", "Empty key with value"),
         ("malformed_empty_value", "key=", "Key with empty value"),
         ("malformed_only_equals", "===", "Only equals signs"),
-        ("malformed_unmatched_quotes", "key=\"value", "Unmatched quotes"),
-        ("extremely_long_value", &format!("key={}", "x".repeat(1000)), "Very long attribute value"),
-        ("many_attributes", &(0..50).map(|i| format!("key{}=value{}", i, i)).collect::<Vec<_>>().join(","), "Many attributes"),
+        (
+            "malformed_unmatched_quotes",
+            "key=\"value",
+            "Unmatched quotes",
+        ),
+        (
+            "extremely_long_value",
+            &format!("key={}", "x".repeat(1000)),
+            "Very long attribute value",
+        ),
+        (
+            "many_attributes",
+            &(0..50)
+                .map(|i| format!("key{}=value{}", i, i))
+                .collect::<Vec<_>>()
+                .join(","),
+            "Many attributes",
+        ),
     ];
 
     for (case_name, attributes_str, description) in edge_cases {
@@ -304,7 +335,9 @@ fn test_resource_detection_edge_cases(failed_tests: &mut Vec<(String, String)>) 
         match (our_result, ref_result) {
             (Ok(our_resource), Ok(reference_resource)) => {
                 // Both succeeded, compare if possible
-                if let Err(error) = compare_resources(&our_resource, &reference_resource, &test_case) {
+                if let Err(error) =
+                    compare_resources(&our_resource, &reference_resource, &test_case)
+                {
                     // For edge cases, we're more lenient - only fail if there's a major discrepancy
                     if !error.contains("missing keys") && !error.contains("extra keys") {
                         failed_tests.push((format!("edge_case_{}", case_name), error));
@@ -315,7 +348,10 @@ fn test_resource_detection_edge_cases(failed_tests: &mut Vec<(String, String)>) 
             }
             (Err(_), Err(_)) => {
                 // Both panicked - that's consistent behavior
-                println!("    ✅ edge_case_{} (both panicked consistently)", case_name);
+                println!(
+                    "    ✅ edge_case_{} (both panicked consistently)",
+                    case_name
+                );
             }
             (Ok(_), Err(_)) => {
                 failed_tests.push((

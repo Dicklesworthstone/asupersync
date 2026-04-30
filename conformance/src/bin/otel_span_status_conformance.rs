@@ -4,22 +4,24 @@
 //! Ensures identical OTLP/Trace status field for same status codes
 
 use asupersync::observability::otel::otlp_request_builder::{
-    traces_request, OTEL_SCHEMA_URL, OTEL_SCOPE_NAME, OTEL_SCOPE_VERSION,
+    OTEL_SCHEMA_URL, OTEL_SCOPE_NAME, OTEL_SCOPE_VERSION, traces_request,
 };
-use asupersync::observability::otel::span_semantics::{TestSpan, SpanEvent};
+use asupersync::observability::otel::span_semantics::{SpanEvent, TestSpan};
 use clap::{Arg, Command};
-use opentelemetry::trace::{SpanContext, SpanId, SpanKind, Status, TraceFlags, TraceId, TraceState};
-use std::collections::HashMap;
+use opentelemetry::trace::{
+    SpanContext, SpanId, SpanKind, Status, TraceFlags, TraceId, TraceState,
+};
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
 use opentelemetry_proto::tonic::common::v1::{AnyValue, InstrumentationScope, KeyValue};
 use opentelemetry_proto::tonic::resource::v1::Resource;
 use opentelemetry_proto::tonic::trace::v1::{
-    span::{SpanKind as ProtoSpanKind, Event as SpanEvent},
-    status::{StatusCode as ProtoStatusCode},
     ResourceSpans, ScopeSpans, Span as ProtoSpan, Status as ProtoStatus,
+    span::{Event as SpanEvent, SpanKind as ProtoSpanKind},
+    status::StatusCode as ProtoStatusCode,
 };
 use opentelemetry_sdk::trace::{Config, TracerProvider as SdkTracerProvider};
 use prost::Message;
+use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Conformance test result tracking
@@ -153,8 +155,16 @@ fn run_all_tests(verbose: bool) {
             description: "Status with custom messages serialize correctly",
             requirement_level: RequirementLevel::Must,
             span_inputs: vec![
-                create_test_span_with_status("span_error_with_msg", Status::error("Database connection failed")),
-                create_test_span_with_status("span_error_long_msg", Status::error("A very long error message that should be preserved in the OTLP protobuf serialization exactly as provided without truncation or modification")),
+                create_test_span_with_status(
+                    "span_error_with_msg",
+                    Status::error("Database connection failed"),
+                ),
+                create_test_span_with_status(
+                    "span_error_long_msg",
+                    Status::error(
+                        "A very long error message that should be preserved in the OTLP protobuf serialization exactly as provided without truncation or modification",
+                    ),
+                ),
                 create_test_span_with_status("span_error_empty_msg", Status::error("")),
             ],
         },
@@ -164,7 +174,10 @@ fn run_all_tests(verbose: bool) {
             requirement_level: RequirementLevel::Should,
             span_inputs: vec![
                 create_test_span_with_status("span_final_ok", Status::Ok),
-                create_test_span_with_status("span_final_error", Status::error("Final error state")),
+                create_test_span_with_status(
+                    "span_final_error",
+                    Status::error("Final error state"),
+                ),
             ],
         },
         SpanStatusTestCase {
@@ -173,7 +186,10 @@ fn run_all_tests(verbose: bool) {
             requirement_level: RequirementLevel::Must,
             span_inputs: vec![
                 create_test_span_with_status("timeout_error", Status::error("Operation timed out")),
-                create_test_span_with_status("validation_error", Status::error("Invalid input parameters")),
+                create_test_span_with_status(
+                    "validation_error",
+                    Status::error("Invalid input parameters"),
+                ),
                 create_test_span_with_status("network_error", Status::error("Network unreachable")),
                 create_test_span_with_status("auth_error", Status::error("Authentication failed")),
             ],
@@ -182,18 +198,25 @@ fn run_all_tests(verbose: bool) {
             name: "unset-status-default",
             description: "Default UNSET status behavior",
             requirement_level: RequirementLevel::Must,
-            span_inputs: vec![
-                create_test_span_with_status("default_status", Status::Unset),
-            ],
+            span_inputs: vec![create_test_span_with_status(
+                "default_status",
+                Status::Unset,
+            )],
         },
     ];
 
-    println!("📋 Running {} Span Status conformance tests\n", test_cases.len());
+    println!(
+        "📋 Running {} Span Status conformance tests\n",
+        test_cases.len()
+    );
 
     for test_case in &test_cases {
         total += 1;
 
-        print!("  Testing {}: {} ... ", test_case.name, test_case.description);
+        print!(
+            "  Testing {}: {} ... ",
+            test_case.name, test_case.description
+        );
 
         let result = run_span_status_conformance_test(test_case, verbose);
 
@@ -241,7 +264,11 @@ fn run_all_tests(verbose: bool) {
     println!("│  ❌ Failed: {}                     │", failed);
     println!("│  ⚠️ Expected: {}                   │", xfail);
     println!("│                                     │");
-    let score = if total > 0 { (passed as f64 / total as f64) * 100.0 } else { 0.0 };
+    let score = if total > 0 {
+        (passed as f64 / total as f64) * 100.0
+    } else {
+        0.0
+    };
     println!("│  🎯 Score: {:.1}%                   │", score);
     println!("└─────────────────────────────────────┘");
 
@@ -262,17 +289,21 @@ fn run_span_status_conformance_test(
     // Generate our implementation's OTLP request
     let our_request = match generate_our_otlp_traces_request(test_case) {
         Ok(req) => req,
-        Err(e) => return ConformanceTestResult::Fail {
-            reason: format!("Failed to generate our OTLP request: {}", e)
-        },
+        Err(e) => {
+            return ConformanceTestResult::Fail {
+                reason: format!("Failed to generate our OTLP request: {}", e),
+            };
+        }
     };
 
     // Generate reference implementation's OTLP request
     let reference_request = match generate_reference_otlp_traces_request(test_case) {
         Ok(req) => req,
-        Err(e) => return ConformanceTestResult::Fail {
-            reason: format!("Failed to generate reference OTLP request: {}", e)
-        },
+        Err(e) => {
+            return ConformanceTestResult::Fail {
+                reason: format!("Failed to generate reference OTLP request: {}", e),
+            };
+        }
     };
 
     // Compare specifically the status fields in the protobuf
@@ -282,7 +313,7 @@ fn run_span_status_conformance_test(
             // Check for known divergences
             if is_known_status_divergence(test_case.name) {
                 ConformanceTestResult::ExpectedFailure {
-                    reason: "Known divergence documented in DISCREPANCIES.md".to_string()
+                    reason: "Known divergence documented in DISCREPANCIES.md".to_string(),
                 }
             } else {
                 ConformanceTestResult::Fail { reason }
@@ -296,7 +327,8 @@ fn generate_our_otlp_traces_request(
     test_case: &SpanStatusTestCase,
 ) -> Result<ExportTraceServiceRequest, Box<dyn std::error::Error>> {
     // Convert test spans to our format
-    let our_spans: Vec<TestSpan> = test_case.span_inputs
+    let our_spans: Vec<TestSpan> = test_case
+        .span_inputs
         .iter()
         .map(|input| {
             // Create SpanContext
@@ -309,7 +341,13 @@ fn generate_our_otlp_traces_request(
             // Create parent context if provided
             let parent_context = input.parent_span_id.map(|parent_id| {
                 let parent_span_id = SpanId::from_bytes(parent_id);
-                SpanContext::new(trace_id, parent_span_id, trace_flags, false, trace_state.clone())
+                SpanContext::new(
+                    trace_id,
+                    parent_span_id,
+                    trace_flags,
+                    false,
+                    trace_state.clone(),
+                )
             });
 
             // Convert attributes to HashMap
@@ -317,14 +355,19 @@ fn generate_our_otlp_traces_request(
             let attribute_values = HashMap::new(); // Empty for now
 
             // Convert events
-            let events: Vec<SpanEvent> = input.events.iter().map(|e| {
-                let event_attributes: HashMap<String, String> = e.attributes.iter().cloned().collect();
-                SpanEvent {
-                    name: e.name.clone(),
-                    timestamp: e.timestamp,
-                    attributes: event_attributes,
-                }
-            }).collect();
+            let events: Vec<SpanEvent> = input
+                .events
+                .iter()
+                .map(|e| {
+                    let event_attributes: HashMap<String, String> =
+                        e.attributes.iter().cloned().collect();
+                    SpanEvent {
+                        name: e.name.clone(),
+                        timestamp: e.timestamp,
+                        attributes: event_attributes,
+                    }
+                })
+                .collect();
 
             TestSpan {
                 context: span_context,
@@ -435,25 +478,23 @@ fn generate_reference_otlp_traces_request(
 
     resource_spans.push(ResourceSpans {
         resource: Some(Resource {
-            attributes: vec![
-                KeyValue {
-                    key: "service.name".to_string(),
-                    value: Some(AnyValue {
-                        value: Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(
-                            "test-service".to_string()
-                        )),
-                    }),
-                }
-            ],
+            attributes: vec![KeyValue {
+                key: "service.name".to_string(),
+                value: Some(AnyValue {
+                    value: Some(
+                        opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(
+                            "test-service".to_string(),
+                        ),
+                    ),
+                }),
+            }],
             dropped_attributes_count: 0,
         }),
         scope_spans: vec![scope_spans],
         schema_url: OTEL_SCHEMA_URL.to_string(),
     });
 
-    Ok(ExportTraceServiceRequest {
-        resource_spans,
-    })
+    Ok(ExportTraceServiceRequest { resource_spans })
 }
 
 /// Compare status fields between two OTLP requests
@@ -479,7 +520,8 @@ fn compare_status_fields(
     if our_spans.len() != reference_spans.len() {
         return Err(format!(
             "Span count mismatch: our={}, reference={}",
-            our_spans.len(), reference_spans.len()
+            our_spans.len(),
+            reference_spans.len()
         ));
     }
 
@@ -642,9 +684,7 @@ fn run_unset_status_default_test(_verbose: bool) -> ConformanceTestResult {
         name: "unset-status-default",
         description: "Default UNSET status",
         requirement_level: RequirementLevel::Must,
-        span_inputs: vec![
-            create_test_span_with_status("default", Status::Unset),
-        ],
+        span_inputs: vec![create_test_span_with_status("default", Status::Unset)],
     };
 
     run_span_status_conformance_test(&test_case, false)
@@ -655,9 +695,10 @@ fn run_status_protobuf_serialization_test(_verbose: bool) -> ConformanceTestResu
         name: "status-protobuf-serialization",
         description: "Protobuf serialization",
         requirement_level: RequirementLevel::Must,
-        span_inputs: vec![
-            create_test_span_with_status("serialization", Status::error("Serialization test")),
-        ],
+        span_inputs: vec![create_test_span_with_status(
+            "serialization",
+            Status::error("Serialization test"),
+        )],
     };
 
     run_span_status_conformance_test(&test_case, false)
@@ -672,7 +713,9 @@ fn generate_compliance_report() {
     println!("| Test Case | Requirement Level | Status | Description |");
     println!("|-----------|--------------------|--------|-------------|");
     println!("| basic-status-codes | MUST | ✅ | Basic status codes map correctly to OTLP |");
-    println!("| status-with-messages | MUST | ✅ | Status with custom messages serialize correctly |");
+    println!(
+        "| status-with-messages | MUST | ✅ | Status with custom messages serialize correctly |"
+    );
     println!("| status-transitions | SHOULD | ✅ | Status transitions within span lifecycle |");
     println!("| error-status-scenarios | MUST | ✅ | Various error status scenarios |");
     println!("| unset-status-default | MUST | ✅ | Default UNSET status behavior |");
@@ -691,5 +734,7 @@ fn generate_compliance_report() {
     println!("None documented.");
     println!();
 
-    println!("✅ **CONFORMANT** - Span Status setting produces identical OTLP/Trace status field vs opentelemetry");
+    println!(
+        "✅ **CONFORMANT** - Span Status setting produces identical OTLP/Trace status field vs opentelemetry"
+    );
 }

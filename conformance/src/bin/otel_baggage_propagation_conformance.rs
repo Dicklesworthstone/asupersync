@@ -144,9 +144,21 @@ fn run_all_tests(verbose: bool) {
             description: "Basic baggage key=value pairs produce identical W3C baggage headers",
             requirement_level: RequirementLevel::Must,
             baggage_entries: vec![
-                BaggageEntry { key: "userId".to_string(), value: "alice".to_string(), metadata: None },
-                BaggageEntry { key: "sessionId".to_string(), value: "abc123".to_string(), metadata: None },
-                BaggageEntry { key: "tier".to_string(), value: "premium".to_string(), metadata: None },
+                BaggageEntry {
+                    key: "userId".to_string(),
+                    value: "alice".to_string(),
+                    metadata: None,
+                },
+                BaggageEntry {
+                    key: "sessionId".to_string(),
+                    value: "abc123".to_string(),
+                    metadata: None,
+                },
+                BaggageEntry {
+                    key: "tier".to_string(),
+                    value: "premium".to_string(),
+                    metadata: None,
+                },
             ],
         },
         BaggagePropagationTestCase {
@@ -157,12 +169,12 @@ fn run_all_tests(verbose: bool) {
                 BaggageEntry {
                     key: "userId".to_string(),
                     value: "alice".to_string(),
-                    metadata: Some("sensitive".to_string())
+                    metadata: Some("sensitive".to_string()),
                 },
                 BaggageEntry {
                     key: "region".to_string(),
                     value: "us-west".to_string(),
-                    metadata: Some("datacenter=pdx;priority=high".to_string())
+                    metadata: Some("datacenter=pdx;priority=high".to_string()),
                 },
             ],
         },
@@ -171,10 +183,26 @@ fn run_all_tests(verbose: bool) {
             description: "Multiple baggage entries serialize with correct comma separation",
             requirement_level: RequirementLevel::Must,
             baggage_entries: vec![
-                BaggageEntry { key: "key1".to_string(), value: "value1".to_string(), metadata: None },
-                BaggageEntry { key: "key2".to_string(), value: "value2".to_string(), metadata: Some("meta2".to_string()) },
-                BaggageEntry { key: "key3".to_string(), value: "value3".to_string(), metadata: None },
-                BaggageEntry { key: "key4".to_string(), value: "value4".to_string(), metadata: Some("meta4".to_string()) },
+                BaggageEntry {
+                    key: "key1".to_string(),
+                    value: "value1".to_string(),
+                    metadata: None,
+                },
+                BaggageEntry {
+                    key: "key2".to_string(),
+                    value: "value2".to_string(),
+                    metadata: Some("meta2".to_string()),
+                },
+                BaggageEntry {
+                    key: "key3".to_string(),
+                    value: "value3".to_string(),
+                    metadata: None,
+                },
+                BaggageEntry {
+                    key: "key4".to_string(),
+                    value: "value4".to_string(),
+                    metadata: Some("meta4".to_string()),
+                },
             ],
         },
         BaggagePropagationTestCase {
@@ -182,9 +210,21 @@ fn run_all_tests(verbose: bool) {
             description: "Special characters in baggage are URL-encoded per W3C spec",
             requirement_level: RequirementLevel::Must,
             baggage_entries: vec![
-                BaggageEntry { key: "encoded key".to_string(), value: "encoded=value&test".to_string(), metadata: None },
-                BaggageEntry { key: "special".to_string(), value: "hello,world;test".to_string(), metadata: Some("meta=data".to_string()) },
-                BaggageEntry { key: "unicode".to_string(), value: "café".to_string(), metadata: None },
+                BaggageEntry {
+                    key: "encoded key".to_string(),
+                    value: "encoded=value&test".to_string(),
+                    metadata: None,
+                },
+                BaggageEntry {
+                    key: "special".to_string(),
+                    value: "hello,world;test".to_string(),
+                    metadata: Some("meta=data".to_string()),
+                },
+                BaggageEntry {
+                    key: "unicode".to_string(),
+                    value: "café".to_string(),
+                    metadata: None,
+                },
             ],
         },
         BaggagePropagationTestCase {
@@ -195,12 +235,12 @@ fn run_all_tests(verbose: bool) {
                 BaggageEntry {
                     key: "large_key".to_string(),
                     value: "x".repeat(1000), // Large value to test size limits
-                    metadata: None
+                    metadata: None,
                 },
                 BaggageEntry {
                     key: "normal".to_string(),
                     value: "normal_value".to_string(),
-                    metadata: None
+                    metadata: None,
                 },
             ],
         },
@@ -209,8 +249,16 @@ fn run_all_tests(verbose: bool) {
             description: "Invalid characters in baggage handled consistently",
             requirement_level: RequirementLevel::Must,
             baggage_entries: vec![
-                BaggageEntry { key: "control".to_string(), value: "value\twith\tcontrol".to_string(), metadata: None },
-                BaggageEntry { key: "newline".to_string(), value: "value\nwith\nnewline".to_string(), metadata: None },
+                BaggageEntry {
+                    key: "control".to_string(),
+                    value: "value\twith\tcontrol".to_string(),
+                    metadata: None,
+                },
+                BaggageEntry {
+                    key: "newline".to_string(),
+                    value: "value\nwith\nnewline".to_string(),
+                    metadata: None,
+                },
             ],
         },
         BaggagePropagationTestCase {
@@ -218,35 +266,57 @@ fn run_all_tests(verbose: bool) {
             description: "Empty baggage values handled per W3C spec",
             requirement_level: RequirementLevel::Must,
             baggage_entries: vec![
-                BaggageEntry { key: "empty_value".to_string(), value: "".to_string(), metadata: None },
-                BaggageEntry { key: "space_value".to_string(), value: " ".to_string(), metadata: None },
-                BaggageEntry { key: "normal".to_string(), value: "normal".to_string(), metadata: None },
+                BaggageEntry {
+                    key: "empty_value".to_string(),
+                    value: "".to_string(),
+                    metadata: None,
+                },
+                BaggageEntry {
+                    key: "space_value".to_string(),
+                    value: " ".to_string(),
+                    metadata: None,
+                },
+                BaggageEntry {
+                    key: "normal".to_string(),
+                    value: "normal".to_string(),
+                    metadata: None,
+                },
             ],
         },
         BaggagePropagationTestCase {
             name: "baggage-roundtrip",
             description: "Baggage inject→extract roundtrip preserves data",
             requirement_level: RequirementLevel::Must,
-            baggage_entries: vec![
-                BaggageEntry { key: "roundtrip_key".to_string(), value: "roundtrip_value".to_string(), metadata: Some("roundtrip_meta".to_string()) },
-            ],
+            baggage_entries: vec![BaggageEntry {
+                key: "roundtrip_key".to_string(),
+                value: "roundtrip_value".to_string(),
+                metadata: Some("roundtrip_meta".to_string()),
+            }],
         },
         BaggagePropagationTestCase {
             name: "w3c-header-format",
             description: "W3C baggage header format compliance",
             requirement_level: RequirementLevel::Must,
-            baggage_entries: vec![
-                BaggageEntry { key: "format_test".to_string(), value: "format_value".to_string(), metadata: Some("prop1=val1;prop2=val2".to_string()) },
-            ],
+            baggage_entries: vec![BaggageEntry {
+                key: "format_test".to_string(),
+                value: "format_value".to_string(),
+                metadata: Some("prop1=val1;prop2=val2".to_string()),
+            }],
         },
     ];
 
-    println!("📋 Running {} Baggage Propagation conformance tests\n", test_cases.len());
+    println!(
+        "📋 Running {} Baggage Propagation conformance tests\n",
+        test_cases.len()
+    );
 
     for test_case in &test_cases {
         total += 1;
 
-        print!("  Testing {}: {} ... ", test_case.name, test_case.description);
+        print!(
+            "  Testing {}: {} ... ",
+            test_case.name, test_case.description
+        );
 
         let result = run_baggage_propagation_conformance_test(test_case, verbose);
 
@@ -294,7 +364,11 @@ fn run_all_tests(verbose: bool) {
     println!("│  ❌ Failed: {}                     │", failed);
     println!("│  ⚠️ Expected: {}                   │", xfail);
     println!("│                                     │");
-    let score = if total > 0 { (passed as f64 / total as f64) * 100.0 } else { 0.0 };
+    let score = if total > 0 {
+        (passed as f64 / total as f64) * 100.0
+    } else {
+        0.0
+    };
     println!("│  🎯 Score: {:.1}%                   │", score);
     println!("└─────────────────────────────────────┘");
 
@@ -315,17 +389,21 @@ fn run_baggage_propagation_conformance_test(
     // Generate baggage header using our implementation
     let our_header = match generate_our_baggage_header(test_case, verbose) {
         Ok(header) => header,
-        Err(e) => return ConformanceTestResult::Fail {
-            reason: format!("Failed to generate our baggage header: {}", e)
-        },
+        Err(e) => {
+            return ConformanceTestResult::Fail {
+                reason: format!("Failed to generate our baggage header: {}", e),
+            };
+        }
     };
 
     // Generate baggage header using opentelemetry-sdk reference
     let reference_header = match generate_reference_baggage_header(test_case, verbose) {
         Ok(header) => header,
-        Err(e) => return ConformanceTestResult::Fail {
-            reason: format!("Failed to generate reference baggage header: {}", e)
-        },
+        Err(e) => {
+            return ConformanceTestResult::Fail {
+                reason: format!("Failed to generate reference baggage header: {}", e),
+            };
+        }
     };
 
     if verbose {
@@ -340,7 +418,7 @@ fn run_baggage_propagation_conformance_test(
         // Check for known divergences
         if is_known_baggage_divergence(test_case.name) {
             ConformanceTestResult::ExpectedFailure {
-                reason: "Known divergence documented in DISCREPANCIES.md".to_string()
+                reason: "Known divergence documented in DISCREPANCIES.md".to_string(),
             }
         } else {
             ConformanceTestResult::Fail {
@@ -363,9 +441,10 @@ fn generate_our_baggage_header(
     // Create context with baggage
     let mut context = Context::current();
     for entry in &test_case.baggage_entries {
-        let metadata = entry.metadata.as_ref().map(|m| {
-            BaggageMetadata::from(m.as_str())
-        });
+        let metadata = entry
+            .metadata
+            .as_ref()
+            .map(|m| BaggageMetadata::from(m.as_str()));
 
         context = context.with_baggage(vec![KeyValue::new(entry.key.clone(), entry.value.clone())]);
     }
@@ -375,7 +454,11 @@ fn generate_our_baggage_header(
     propagator.inject_context(&context, &mut carrier);
 
     // Get baggage header
-    Ok(carrier.headers.get("baggage").unwrap_or(&String::new()).clone())
+    Ok(carrier
+        .headers
+        .get("baggage")
+        .unwrap_or(&String::new())
+        .clone())
 }
 
 /// Generate baggage header using opentelemetry-sdk reference
@@ -395,7 +478,11 @@ fn generate_reference_baggage_header(
     let mut carrier = HeaderCarrier::default();
     propagator.inject_context(&context, &mut carrier);
 
-    Ok(carrier.headers.get("baggage").unwrap_or(&String::new()).clone())
+    Ok(carrier
+        .headers
+        .get("baggage")
+        .unwrap_or(&String::new())
+        .clone())
 }
 
 /// Test roundtrip: inject baggage → extract baggage → compare
@@ -408,7 +495,8 @@ fn test_baggage_roundtrip(
     // Create original context with baggage
     let mut original_context = Context::current();
     for entry in &test_case.baggage_entries {
-        original_context = original_context.with_baggage(vec![KeyValue::new(entry.key.clone(), entry.value.clone())]);
+        original_context = original_context
+            .with_baggage(vec![KeyValue::new(entry.key.clone(), entry.value.clone())]);
     }
 
     // Inject into carrier
@@ -452,9 +540,11 @@ fn run_basic_baggage_headers_test(verbose: bool) -> ConformanceTestResult {
         name: "basic-baggage-headers",
         description: "Basic baggage headers",
         requirement_level: RequirementLevel::Must,
-        baggage_entries: vec![
-            BaggageEntry { key: "userId".to_string(), value: "alice".to_string(), metadata: None },
-        ],
+        baggage_entries: vec![BaggageEntry {
+            key: "userId".to_string(),
+            value: "alice".to_string(),
+            metadata: None,
+        }],
     };
 
     run_baggage_propagation_conformance_test(&test_case, verbose)
@@ -465,13 +555,11 @@ fn run_baggage_with_metadata_test(verbose: bool) -> ConformanceTestResult {
         name: "baggage-with-metadata",
         description: "Baggage with metadata",
         requirement_level: RequirementLevel::Must,
-        baggage_entries: vec![
-            BaggageEntry {
-                key: "userId".to_string(),
-                value: "alice".to_string(),
-                metadata: Some("sensitive".to_string())
-            },
-        ],
+        baggage_entries: vec![BaggageEntry {
+            key: "userId".to_string(),
+            value: "alice".to_string(),
+            metadata: Some("sensitive".to_string()),
+        }],
     };
 
     run_baggage_propagation_conformance_test(&test_case, verbose)
@@ -483,8 +571,16 @@ fn run_multiple_baggage_entries_test(verbose: bool) -> ConformanceTestResult {
         description: "Multiple baggage entries",
         requirement_level: RequirementLevel::Must,
         baggage_entries: vec![
-            BaggageEntry { key: "key1".to_string(), value: "value1".to_string(), metadata: None },
-            BaggageEntry { key: "key2".to_string(), value: "value2".to_string(), metadata: None },
+            BaggageEntry {
+                key: "key1".to_string(),
+                value: "value1".to_string(),
+                metadata: None,
+            },
+            BaggageEntry {
+                key: "key2".to_string(),
+                value: "value2".to_string(),
+                metadata: None,
+            },
         ],
     };
 
@@ -496,9 +592,11 @@ fn run_url_encoding_handling_test(verbose: bool) -> ConformanceTestResult {
         name: "url-encoding-handling",
         description: "URL encoding handling",
         requirement_level: RequirementLevel::Must,
-        baggage_entries: vec![
-            BaggageEntry { key: "special".to_string(), value: "hello,world".to_string(), metadata: None },
-        ],
+        baggage_entries: vec![BaggageEntry {
+            key: "special".to_string(),
+            value: "hello,world".to_string(),
+            metadata: None,
+        }],
     };
 
     run_baggage_propagation_conformance_test(&test_case, verbose)
@@ -509,13 +607,11 @@ fn run_size_limits_truncation_test(verbose: bool) -> ConformanceTestResult {
         name: "size-limits-truncation",
         description: "Size limits and truncation",
         requirement_level: RequirementLevel::Should,
-        baggage_entries: vec![
-            BaggageEntry {
-                key: "large".to_string(),
-                value: "x".repeat(100),
-                metadata: None
-            },
-        ],
+        baggage_entries: vec![BaggageEntry {
+            key: "large".to_string(),
+            value: "x".repeat(100),
+            metadata: None,
+        }],
     };
 
     run_baggage_propagation_conformance_test(&test_case, verbose)
@@ -526,9 +622,11 @@ fn run_invalid_character_handling_test(verbose: bool) -> ConformanceTestResult {
         name: "invalid-character-handling",
         description: "Invalid character handling",
         requirement_level: RequirementLevel::Must,
-        baggage_entries: vec![
-            BaggageEntry { key: "control".to_string(), value: "value\twith\ttab".to_string(), metadata: None },
-        ],
+        baggage_entries: vec![BaggageEntry {
+            key: "control".to_string(),
+            value: "value\twith\ttab".to_string(),
+            metadata: None,
+        }],
     };
 
     run_baggage_propagation_conformance_test(&test_case, verbose)
@@ -539,9 +637,11 @@ fn run_empty_values_handling_test(verbose: bool) -> ConformanceTestResult {
         name: "empty-values-handling",
         description: "Empty values handling",
         requirement_level: RequirementLevel::Must,
-        baggage_entries: vec![
-            BaggageEntry { key: "empty".to_string(), value: "".to_string(), metadata: None },
-        ],
+        baggage_entries: vec![BaggageEntry {
+            key: "empty".to_string(),
+            value: "".to_string(),
+            metadata: None,
+        }],
     };
 
     run_baggage_propagation_conformance_test(&test_case, verbose)
@@ -552,9 +652,11 @@ fn run_baggage_roundtrip_test(verbose: bool) -> ConformanceTestResult {
         name: "baggage-roundtrip",
         description: "Baggage roundtrip",
         requirement_level: RequirementLevel::Must,
-        baggage_entries: vec![
-            BaggageEntry { key: "roundtrip".to_string(), value: "test".to_string(), metadata: None },
-        ],
+        baggage_entries: vec![BaggageEntry {
+            key: "roundtrip".to_string(),
+            value: "test".to_string(),
+            metadata: None,
+        }],
     };
 
     // Test both header generation and roundtrip
@@ -577,13 +679,11 @@ fn run_w3c_header_format_test(verbose: bool) -> ConformanceTestResult {
         name: "w3c-header-format",
         description: "W3C header format",
         requirement_level: RequirementLevel::Must,
-        baggage_entries: vec![
-            BaggageEntry {
-                key: "format".to_string(),
-                value: "test".to_string(),
-                metadata: Some("prop=val".to_string())
-            },
-        ],
+        baggage_entries: vec![BaggageEntry {
+            key: "format".to_string(),
+            value: "test".to_string(),
+            metadata: Some("prop=val".to_string()),
+        }],
     };
 
     run_baggage_propagation_conformance_test(&test_case, verbose)
@@ -620,5 +720,7 @@ fn generate_compliance_report() {
     println!("None documented.");
     println!();
 
-    println!("✅ **CONFORMANT** - Baggage propagation produces identical W3C baggage header vs opentelemetry");
+    println!(
+        "✅ **CONFORMANT** - Baggage propagation produces identical W3C baggage header vs opentelemetry"
+    );
 }
