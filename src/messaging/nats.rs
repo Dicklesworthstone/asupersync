@@ -645,7 +645,7 @@ fn parse_publish_subject(subject: &str) -> Option<Vec<&str>> {
     Some(tokens)
 }
 
-fn validate_nats_publish_subject(subject: &str, field: &str) -> Result<(), NatsError> {
+pub(crate) fn validate_nats_publish_subject(subject: &str, field: &str) -> Result<(), NatsError> {
     validate_nats_token(subject, field)?;
     if parse_publish_subject(subject).is_none() {
         return Err(NatsError::Protocol(format!(

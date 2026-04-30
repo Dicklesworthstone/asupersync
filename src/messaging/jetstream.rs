@@ -33,7 +33,10 @@
 //! }
 //! ```
 
-use super::nats::{Message, NatsClient, NatsError, validate_nats_subscription_pattern};
+use super::nats::{
+    Message, NatsClient, NatsError, validate_nats_publish_subject,
+    validate_nats_subscription_pattern,
+};
 use crate::cx::Cx;
 use crate::time::{timeout_at, wall_now};
 use crate::tracing_compat::warn;
@@ -453,6 +456,8 @@ pub struct ConsumerConfig {
     pub name: Option<String>,
     /// Durable name (deprecated, use name).
     pub durable_name: Option<String>,
+    /// Push-consumer delivery subject.
+    pub deliver_subject: Option<String>,
     /// Delivery policy.
     pub deliver_policy: DeliverPolicy,
     /// Ack policy.
@@ -463,6 +468,8 @@ pub struct ConsumerConfig {
     pub max_deliver: i64,
     /// Filter subject.
     pub filter_subject: Option<String>,
+    /// Push-consumer delivery throttle in bits per second.
+    pub rate_limit_bps: Option<u64>,
     /// Max ack pending.
     pub max_ack_pending: i64,
 }
@@ -474,11 +481,13 @@ impl ConsumerConfig {
         Self {
             name: Some(name.into()),
             durable_name: None,
+            deliver_subject: None,
             deliver_policy: DeliverPolicy::All,
             ack_policy: AckPolicy::Explicit,
             ack_wait: Duration::from_secs(30),
             max_deliver: -1,
             filter_subject: None,
+            rate_limit_bps: None,
             max_ack_pending: 1000,
         }
     }
@@ -489,13 +498,22 @@ impl ConsumerConfig {
         Self {
             name: None,
             durable_name: None,
+            deliver_subject: None,
             deliver_policy: DeliverPolicy::All,
             ack_policy: AckPolicy::Explicit,
             ack_wait: Duration::from_secs(30),
             max_deliver: -1,
             filter_subject: None,
+            rate_limit_bps: None,
             max_ack_pending: 1000,
         }
+    }
+
+    /// Set push-consumer delivery subject.
+    #[must_use]
+    pub fn deliver_subject(mut self, subject: impl Into<String>) -> Self {
+        self.deliver_subject = Some(subject.into());
+        self
     }
 
     /// Set delivery policy.
@@ -533,11 +551,27 @@ impl ConsumerConfig {
         self
     }
 
+    /// Set push-consumer delivery throttle in bits per second.
+    #[must_use]
+    pub fn rate_limit_bps(mut self, bits_per_second: u64) -> Self {
+        self.rate_limit_bps = Some(bits_per_second);
+        self
+    }
+
     fn validate(&mut self) -> Result<(), JsError> {
         self.normalize_identity()?;
+        if let Some(deliver_subject) = self.deliver_subject.as_deref() {
+            validate_nats_publish_subject(deliver_subject, "deliver_subject")
+                .map_err(|err| JsError::InvalidConfig(err.to_string()))?;
+        }
         if let Some(filter_subject) = self.filter_subject.as_deref() {
             validate_nats_subscription_pattern(filter_subject, "filter_subject")
                 .map_err(|err| JsError::InvalidConfig(err.to_string()))?;
+        }
+        if self.rate_limit_bps.is_some() && self.deliver_subject.is_none() {
+            return Err(JsError::InvalidConfig(
+                "consumer rate_limit_bps requires deliver_subject for push consumers".to_string(),
+            ));
         }
         Ok(())
     }
@@ -654,6 +688,12 @@ impl ConsumerConfig {
         if let Some(ref durable) = self.durable_name {
             parts.push(format!("\"durable_name\":\"{}\"", json_escape(durable)));
         }
+        if let Some(ref deliver_subject) = self.deliver_subject {
+            parts.push(format!(
+                "\"deliver_subject\":\"{}\"",
+                json_escape(deliver_subject)
+            ));
+        }
         parts.push(format!(
             "\"deliver_policy\":\"{}\"",
             self.deliver_policy.as_str()
@@ -676,6 +716,9 @@ impl ConsumerConfig {
         parts.push(format!("\"ack_policy\":\"{}\"", self.ack_policy.as_str()));
         parts.push(format!("\"ack_wait\":{}", self.ack_wait.as_nanos()));
         parts.push(format!("\"max_deliver\":{}", self.max_deliver));
+        if let Some(rate_limit_bps) = self.rate_limit_bps {
+            parts.push(format!("\"rate_limit_bps\":{rate_limit_bps}"));
+        }
         parts.push(format!("\"max_ack_pending\":{}", self.max_ack_pending));
         if let Some(ref filter) = self.filter_subject {
             parts.push(format!("\"filter_subject\":\"{}\"", json_escape(filter)));
@@ -1523,6 +1566,26 @@ pub fn fuzz_validate_consumer_config(
     Ok(config.name)
 }
 
+/// Conformance-target re-exporter for push-consumer validation boundaries.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_validate_push_consumer_config(
+    name: Option<&str>,
+    durable_name: Option<&str>,
+    deliver_subject: Option<&str>,
+    filter_subject: Option<&str>,
+    rate_limit_bps: Option<u64>,
+) -> Result<Option<String>, String> {
+    let mut config = ConsumerConfig::ephemeral();
+    config.name = name.map(ToOwned::to_owned);
+    config.durable_name = durable_name.map(ToOwned::to_owned);
+    config.deliver_subject = deliver_subject.map(ToOwned::to_owned);
+    config.filter_subject = filter_subject.map(ToOwned::to_owned);
+    config.rate_limit_bps = rate_limit_bps;
+    config.validate().map_err(|err| err.to_string())?;
+    Ok(config.name)
+}
+
 /// Fuzz-target re-exporter for the JetStream stream-name length cap.
 #[cfg(feature = "test-internals")]
 #[doc(hidden)]
@@ -2182,6 +2245,18 @@ mod tests {
     }
 
     #[test]
+    fn consumer_config_to_json_includes_push_rate_limit_tick146() {
+        let config = ConsumerConfig::new("push-consumer")
+            .deliver_subject("deliver.orders")
+            .rate_limit_bps(8192)
+            .ack_policy(AckPolicy::Explicit);
+
+        let json = config.to_json();
+        assert!(json.contains("\"deliver_subject\":\"deliver.orders\""));
+        assert!(json.contains("\"rate_limit_bps\":8192"));
+    }
+
+    #[test]
     fn consumer_config_to_json_includes_start_time_for_deliver_by_start_time_tick137() {
         let config = ConsumerConfig::new("time-consumer")
             .deliver_policy(DeliverPolicy::ByStartTime(
@@ -2250,6 +2325,30 @@ mod tests {
         assert!(matches!(err, JsError::InvalidConfig(_)));
         assert!(err.to_string().contains("filter_subject"));
         assert!(err.to_string().contains("invalid NATS wildcard placement"));
+    }
+
+    #[test]
+    fn consumer_config_validate_rejects_pull_rate_limit_without_deliver_subject_tick146() {
+        let mut cfg = ConsumerConfig::new("push-worker");
+        cfg.rate_limit_bps = Some(4096);
+
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(err, JsError::InvalidConfig(_)));
+        assert!(
+            err.to_string()
+                .contains("rate_limit_bps requires deliver_subject")
+        );
+    }
+
+    #[test]
+    fn consumer_config_validate_rejects_wildcard_deliver_subject_tick146() {
+        let mut cfg = ConsumerConfig::new("push-worker");
+        cfg.deliver_subject = Some("deliver.>".into());
+
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(err, JsError::InvalidConfig(_)));
+        assert!(err.to_string().contains("deliver_subject"));
+        assert!(err.to_string().contains("fully specified NATS subject"));
     }
 
     #[test]
@@ -3425,6 +3524,90 @@ mod tests {
         assert_eq!(
             pull_wire, raw_pull_wire,
             "JetStream pull must emit the same NATS wire bytes as the raw subscribe/publish_request sequence"
+        );
+    }
+
+    #[test]
+    fn push_consumer_rate_limit_matches_raw_nats_reference_tick146() {
+        let create_reply = br#"{"name":"push-rate"}"#.to_vec();
+        let create_wire = capture_wire_transcript(
+            MockServerReply::Request(create_reply.clone()),
+            |cx, addr| async move {
+                let mut js = JetStreamContext::new(
+                    NatsClient::connect_with_config(
+                        &cx,
+                        NatsConfig {
+                            host: addr.ip().to_string(),
+                            port: addr.port(),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .expect("connect JetStream push create-consumer mock server"),
+                );
+
+                let consumer = js
+                    .create_consumer(
+                        &cx,
+                        "ORDERS",
+                        ConsumerConfig::new("push-rate")
+                            .deliver_subject("deliver.orders")
+                            .rate_limit_bps(8192)
+                            .ack_policy(AckPolicy::Explicit),
+                    )
+                    .await
+                    .expect("JetStream push create_consumer");
+                assert_eq!(consumer.stream(), "ORDERS");
+                assert_eq!(consumer.name(), "push-rate");
+            },
+        );
+        let raw_create_wire = capture_wire_transcript(
+            MockServerReply::Request(create_reply.clone()),
+            move |cx, addr| {
+                let create_reply = create_reply.clone();
+                async move {
+                    let mut client = NatsClient::connect_with_config(
+                        &cx,
+                        NatsConfig {
+                            host: addr.ip().to_string(),
+                            port: addr.port(),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .expect("connect raw push create-consumer mock server");
+                    let config = ConsumerConfig::new("push-rate")
+                        .deliver_subject("deliver.orders")
+                        .rate_limit_bps(8192)
+                        .ack_policy(AckPolicy::Explicit);
+                    let payload = format!(
+                        "{{\"stream_name\":\"{}\",\"config\":{}}}",
+                        json_escape("ORDERS"),
+                        config.to_json()
+                    );
+                    let response = client
+                        .request(
+                            &cx,
+                            "$JS.API.CONSUMER.CREATE.ORDERS.push-rate",
+                            payload.as_bytes(),
+                        )
+                        .await
+                        .expect("raw push create-consumer request");
+                    assert_eq!(response.payload, create_reply);
+                }
+            },
+        );
+        assert_eq!(
+            create_wire, raw_create_wire,
+            "JetStream push create_consumer must emit the same NATS wire bytes as raw request when rate limiting is configured"
+        );
+        assert!(
+            create_wire.contains("\"deliver_subject\":\"deliver.orders\""),
+            "push create_consumer wire body must serialize deliver_subject, got: {create_wire}"
+        );
+        assert!(
+            create_wire.contains("\"rate_limit_bps\":8192"),
+            "push create_consumer wire body must serialize rate_limit_bps, got: {create_wire}"
         );
     }
 
