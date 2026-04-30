@@ -243,8 +243,7 @@ impl AuthKey {
 
 impl fmt::Debug for AuthKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Do not leak full key material in debug logs
-        write!(f, "AuthKey({:02x}{:02x}...)", self.bytes[0], self.bytes[1])
+        f.write_str("AuthKey(<redacted>)")
     }
 }
 
@@ -507,10 +506,13 @@ mod tests {
     #[test]
     fn test_debug_does_not_leak_key_material() {
         let key = AuthKey::from_seed(0);
+        let prefix = format!("{:02x}{:02x}", key.bytes[0], key.bytes[1]);
         let debug = format!("{key:?}");
-        assert!(debug.starts_with("AuthKey("));
-        assert!(debug.ends_with("...)"));
-        assert!(debug.len() < 30); // Should be short
+        assert_eq!(debug, "AuthKey(<redacted>)");
+        assert!(
+            !debug.contains(&prefix),
+            "Debug must not expose even a key prefix"
+        );
     }
 
     // =========================================================================

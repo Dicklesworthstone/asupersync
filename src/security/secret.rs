@@ -51,9 +51,9 @@ use core::fmt;
 ///
 /// # Comparison
 ///
-/// `PartialEq` is implemented in constant time over the byte buffers so
-/// that comparing two `SecretString` values does not leak length-prefix
-/// information through early-exit timing.
+/// `PartialEq` compares all bytes up to the longer operand and folds the
+/// length mismatch into the accumulator, so it does not short-circuit on
+/// unequal lengths or the first differing byte.
 ///
 /// # Debug
 ///
@@ -172,17 +172,17 @@ impl Clone for SecretString {
 }
 
 impl PartialEq for SecretString {
-    /// Constant-time byte comparison. Length mismatch is reported, but
-    /// equal-length contents are XOR-folded so the loop runs the same
-    /// number of iterations regardless of where the first differing
-    /// byte lies.
+    /// Byte comparison that avoids early exits on length mismatch or
+    /// first differing byte. Runtime scales with the longer operand,
+    /// which is the best available shape for variable-length secrets
+    /// without padding to a fixed maximum size.
     fn eq(&self, other: &Self) -> bool {
-        if self.bytes.len() != other.bytes.len() {
-            return false;
-        }
-        let mut acc: u8 = 0;
-        for (a, b) in self.bytes.iter().zip(other.bytes.iter()) {
-            acc |= a ^ b;
+        let mut acc = self.bytes.len() ^ other.bytes.len();
+        let max_len = self.bytes.len().max(other.bytes.len());
+        for index in 0..max_len {
+            let a = self.bytes.get(index).copied().unwrap_or(0);
+            let b = other.bytes.get(index).copied().unwrap_or(0);
+            acc |= usize::from(a ^ b);
         }
         acc == 0
     }
