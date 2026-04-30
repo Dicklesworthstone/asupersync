@@ -236,10 +236,10 @@ impl ReadyDispatchInvarianceTest {
         // Verify all results have the same set of dispatched tasks
         if let Some(first_result) = results.first() {
             let expected_set: HashSet<TaskId> =
-                first_result.dispatched_tasks.iter().cloned().collect();
+                first_result.dispatched_tasks.iter().copied().collect();
 
             for (i, result) in results.iter().enumerate() {
-                let actual_set: HashSet<TaskId> = result.dispatched_tasks.iter().cloned().collect();
+                let actual_set: HashSet<TaskId> = result.dispatched_tasks.iter().copied().collect();
 
                 if actual_set != expected_set {
                     return Err(format!(
