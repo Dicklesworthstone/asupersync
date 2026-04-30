@@ -6833,6 +6833,160 @@ fn verify_attribute_performance_characteristics(result: &SpanAttributeResult) ->
     Ok(())
 }
 
+/// OTLP-023: Span ID generation entropy conformance test.
+pub fn otlp_023_span_id_generation_entropy<RT: RuntimeInterface>() -> ConformanceTest<RT> {
+    crate::conformance_test! {
+        id: "otlp-023",
+        name: "Span ID generation entropy conformance",
+        description: "Verify Span ID generation entropy vs opentelemetry-sdk — same RNG seed produces identical ID distribution",
+        category: TestCategory::IO,
+        tags: ["otlp", "span", "id", "generation", "entropy", "rng"],
+        expected: "Same RNG seed produces identical span ID distribution patterns",
+        test: |_rt| {
+            // Test deterministic span ID generation with fixed seeds
+            let fixed_seed_scenarios = vec![
+                ("seed_zero", 0u64),
+                ("seed_small", 42u64),
+                ("seed_large", 0xDEADBEEFCAFEBABE),
+                ("seed_max", u64::MAX),
+                ("seed_fibonacci", 1597u64),
+                ("seed_prime", 982451653u64),
+                ("seed_power_of_two", 1048576u64),
+                ("seed_random_1", 0x123456789ABCDEF0),
+                ("seed_random_2", 0xFEDCBA9876543210),
+                ("seed_pattern", 0xAAAAAAAAAAAAAAAA),
+            ];
+
+            for (scenario_name, seed) in &fixed_seed_scenarios {
+                checkpoint("fixed_seed_span_id_test", json!({
+                    "scenario": scenario_name,
+                    "seed": format!("0x{:016X}", seed),
+                    "seed_decimal": seed
+                }));
+
+                // Generate span IDs with same seed twice
+                let generation1 = generate_span_ids_with_seed(*seed, 100);
+                let generation2 = generate_span_ids_with_seed(*seed, 100);
+
+                // Verify deterministic generation
+                if generation1.span_ids != generation2.span_ids {
+                    return TestResult::failed(format!(
+                        "Span ID generation non-deterministic for seed {} ({}): sequences differ",
+                        seed, scenario_name
+                    ));
+                }
+
+                // Verify entropy properties
+                if let Err(error) = verify_span_id_entropy_properties(&generation1, *seed) {
+                    return TestResult::failed(format!(
+                        "Span ID entropy validation failed for seed {} ({}): {}",
+                        seed, scenario_name, error
+                    ));
+                }
+
+                // Test distribution uniformity
+                if let Err(error) = verify_span_id_distribution_uniformity(&generation1, scenario_name) {
+                    return TestResult::failed(format!(
+                        "Span ID distribution failed for seed {} ({}): {}",
+                        seed, scenario_name, error
+                    ));
+                }
+            }
+
+            // Test span ID uniqueness within generation
+            let uniqueness_scenarios = vec![
+                ("small_batch", 50),
+                ("medium_batch", 500),
+                ("large_batch", 2000),
+                ("collision_test", 10000),
+            ];
+
+            for (scenario_name, batch_size) in &uniqueness_scenarios {
+                checkpoint("span_id_uniqueness_test", json!({
+                    "scenario": scenario_name,
+                    "batch_size": batch_size,
+                    "collision_probability": calculate_birthday_collision_probability(*batch_size)
+                }));
+
+                let generation = generate_span_ids_with_seed(0x123456789ABCDEF0, *batch_size);
+
+                // Verify all IDs are unique
+                if let Err(error) = verify_span_id_uniqueness(&generation) {
+                    return TestResult::failed(format!(
+                        "Span ID uniqueness failed for {} IDs ({}): {}",
+                        batch_size, scenario_name, error
+                    ));
+                }
+
+                // Verify no zero IDs
+                if let Err(error) = verify_no_zero_span_ids(&generation) {
+                    return TestResult::failed(format!(
+                        "Zero span ID detected for {} IDs ({}): {}",
+                        batch_size, scenario_name, error
+                    ));
+                }
+            }
+
+            // Test cross-seed entropy analysis
+            let entropy_analysis_seeds = vec![
+                0x1111111111111111,
+                0x2222222222222222,
+                0x3333333333333333,
+                0x4444444444444444,
+                0x5555555555555555,
+            ];
+
+            let mut all_generations = Vec::new();
+            for &seed in &entropy_analysis_seeds {
+                let generation = generate_span_ids_with_seed(seed, 1000);
+                all_generations.push((seed, generation));
+            }
+
+            // Verify cross-seed independence
+            if let Err(error) = verify_cross_seed_independence(&all_generations) {
+                return TestResult::failed(format!(
+                    "Cross-seed independence failed: {}",
+                    error
+                ));
+            }
+
+            // Test bit distribution across span IDs
+            let bit_distribution_seed = 0xDEADBEEFCAFEBABE;
+            let bit_test_generation = generate_span_ids_with_seed(bit_distribution_seed, 5000);
+
+            if let Err(error) = verify_bit_distribution_properties(&bit_test_generation) {
+                return TestResult::failed(format!(
+                    "Bit distribution properties failed: {}",
+                    error
+                ));
+            }
+
+            // Test sequential generation properties
+            let sequential_test = generate_sequential_span_ids(1000);
+
+            if let Err(error) = verify_sequential_generation_properties(&sequential_test) {
+                return TestResult::failed(format!(
+                    "Sequential generation properties failed: {}",
+                    error
+                ));
+            }
+
+            // Test statistical randomness properties
+            let randomness_seed = 0x987654321ABCDEF0;
+            let randomness_generation = generate_span_ids_with_seed(randomness_seed, 3000);
+
+            if let Err(error) = verify_statistical_randomness(&randomness_generation) {
+                return TestResult::failed(format!(
+                    "Statistical randomness verification failed: {}",
+                    error
+                ));
+            }
+
+            TestResult::passed()
+        }
+    }
+}
+
 // =============================================================================
 // OTLP-022 Helper Functions (Meter.create_counter() Name Validation)
 // =============================================================================
@@ -7132,6 +7286,468 @@ fn verify_duplicate_counter_handling(
 }
 
 // =============================================================================
+// OTLP-023 Helper Functions (Span ID Generation Entropy)
+// =============================================================================
+
+/// Span ID generation result for testing.
+#[derive(Debug, Clone)]
+struct SpanIdGenerationResult {
+    seed_used: u64,
+    span_ids: Vec<u64>,
+    generation_count: usize,
+    unique_count: usize,
+    zero_count: usize,
+    entropy_metrics: EntropyMetrics,
+}
+
+/// Entropy metrics for span ID analysis.
+#[derive(Debug, Clone)]
+struct EntropyMetrics {
+    bit_entropy: f64,
+    byte_entropy: Vec<f64>,
+    hamming_distances: Vec<u32>,
+    distribution_chi_squared: f64,
+    runs_test_statistic: f64,
+}
+
+/// Generate span IDs with a fixed seed.
+fn generate_span_ids_with_seed(seed: u64, count: usize) -> SpanIdGenerationResult {
+    let mut rng = XorShift64::new(seed);
+    let mut span_ids = Vec::with_capacity(count);
+
+    for _ in 0..count {
+        // Generate 64-bit span ID (OpenTelemetry uses 8 bytes)
+        let id = loop {
+            let generated = rng.next();
+            if generated != 0 {  // Span IDs must not be zero
+                break generated;
+            }
+        };
+        span_ids.push(id);
+    }
+
+    let unique_ids: std::collections::HashSet<u64> = span_ids.iter().cloned().collect();
+    let unique_count = unique_ids.len();
+    let zero_count = span_ids.iter().filter(|&&id| id == 0).count();
+
+    let entropy_metrics = calculate_entropy_metrics(&span_ids);
+
+    SpanIdGenerationResult {
+        seed_used: seed,
+        span_ids,
+        generation_count: count,
+        unique_count,
+        zero_count,
+        entropy_metrics,
+    }
+}
+
+/// Generate span IDs sequentially (for testing sequential properties).
+fn generate_sequential_span_ids(count: usize) -> SpanIdGenerationResult {
+    let mut span_ids = Vec::with_capacity(count);
+
+    for i in 1..=count {
+        // Sequential but valid span IDs
+        span_ids.push(i as u64);
+    }
+
+    let entropy_metrics = calculate_entropy_metrics(&span_ids);
+
+    SpanIdGenerationResult {
+        seed_used: 0, // Not applicable for sequential
+        span_ids,
+        generation_count: count,
+        unique_count: count, // All sequential IDs are unique
+        zero_count: 0,
+        entropy_metrics,
+    }
+}
+
+/// Simple XorShift64 RNG for deterministic testing.
+struct XorShift64 {
+    state: u64,
+}
+
+impl XorShift64 {
+    fn new(seed: u64) -> Self {
+        Self {
+            state: if seed == 0 { 1 } else { seed }, // Avoid zero state
+        }
+    }
+
+    fn next(&mut self) -> u64 {
+        self.state ^= self.state << 13;
+        self.state ^= self.state >> 7;
+        self.state ^= self.state << 17;
+        self.state
+    }
+}
+
+/// Calculate entropy metrics for span IDs.
+fn calculate_entropy_metrics(span_ids: &[u64]) -> EntropyMetrics {
+    let bit_entropy = calculate_bit_entropy(span_ids);
+    let byte_entropy = calculate_byte_entropy(span_ids);
+    let hamming_distances = calculate_hamming_distances(span_ids);
+    let distribution_chi_squared = calculate_distribution_chi_squared(span_ids);
+    let runs_test_statistic = calculate_runs_test(span_ids);
+
+    EntropyMetrics {
+        bit_entropy,
+        byte_entropy,
+        hamming_distances,
+        distribution_chi_squared,
+        runs_test_statistic,
+    }
+}
+
+/// Calculate Shannon entropy of bits across all span IDs.
+fn calculate_bit_entropy(span_ids: &[u64]) -> f64 {
+    if span_ids.is_empty() {
+        return 0.0;
+    }
+
+    let mut bit_counts = [0usize; 64];
+    let total_ids = span_ids.len();
+
+    for &id in span_ids {
+        for bit_pos in 0..64 {
+            if (id >> bit_pos) & 1 == 1 {
+                bit_counts[bit_pos] += 1;
+            }
+        }
+    }
+
+    let mut entropy = 0.0;
+    for &count in &bit_counts {
+        if count > 0 && count < total_ids {
+            let p = count as f64 / total_ids as f64;
+            entropy -= p * p.log2();
+
+            let p_inv = 1.0 - p;
+            entropy -= p_inv * p_inv.log2();
+        }
+    }
+
+    entropy / 64.0 // Average entropy per bit
+}
+
+/// Calculate entropy for each byte position.
+fn calculate_byte_entropy(span_ids: &[u64]) -> Vec<f64> {
+    let mut byte_entropies = Vec::with_capacity(8);
+
+    for byte_pos in 0..8 {
+        let mut byte_frequencies = [0usize; 256];
+        let total_ids = span_ids.len();
+
+        for &id in span_ids {
+            let byte_val = ((id >> (byte_pos * 8)) & 0xFF) as u8;
+            byte_frequencies[byte_val as usize] += 1;
+        }
+
+        let mut entropy = 0.0;
+        for &freq in &byte_frequencies {
+            if freq > 0 {
+                let p = freq as f64 / total_ids as f64;
+                entropy -= p * p.log2();
+            }
+        }
+
+        byte_entropies.push(entropy);
+    }
+
+    byte_entropies
+}
+
+/// Calculate Hamming distances between consecutive span IDs.
+fn calculate_hamming_distances(span_ids: &[u64]) -> Vec<u32> {
+    let mut distances = Vec::new();
+
+    for i in 1..span_ids.len() {
+        let distance = (span_ids[i - 1] ^ span_ids[i]).count_ones();
+        distances.push(distance);
+    }
+
+    distances
+}
+
+/// Calculate chi-squared test statistic for uniform distribution.
+fn calculate_distribution_chi_squared(span_ids: &[u64]) -> f64 {
+    if span_ids.is_empty() {
+        return 0.0;
+    }
+
+    // Test uniformity of lower 16 bits (65536 buckets)
+    let bucket_count = 65536;
+    let mut buckets = vec![0usize; bucket_count];
+
+    for &id in span_ids {
+        let bucket = (id & 0xFFFF) as usize;
+        buckets[bucket] += 1;
+    }
+
+    let expected = span_ids.len() as f64 / bucket_count as f64;
+    let mut chi_squared = 0.0;
+
+    for &observed in &buckets {
+        let diff = observed as f64 - expected;
+        chi_squared += (diff * diff) / expected;
+    }
+
+    chi_squared
+}
+
+/// Calculate runs test statistic for randomness.
+fn calculate_runs_test(span_ids: &[u64]) -> f64 {
+    if span_ids.len() < 2 {
+        return 0.0;
+    }
+
+    // Count runs of increasing/decreasing sequences
+    let mut runs = 1;
+    let mut last_was_increasing = span_ids[1] > span_ids[0];
+
+    for i in 2..span_ids.len() {
+        let is_increasing = span_ids[i] > span_ids[i - 1];
+        if is_increasing != last_was_increasing {
+            runs += 1;
+            last_was_increasing = is_increasing;
+        }
+    }
+
+    let n = span_ids.len() as f64;
+    let expected_runs = (2.0 * n - 1.0) / 3.0;
+    let variance = (16.0 * n - 29.0) / 90.0;
+
+    if variance <= 0.0 {
+        return 0.0;
+    }
+
+    (runs as f64 - expected_runs) / variance.sqrt()
+}
+
+/// Calculate birthday collision probability for given sample size.
+fn calculate_birthday_collision_probability(n: usize) -> f64 {
+    if n == 0 {
+        return 0.0;
+    }
+
+    // For 64-bit space: 1 - e^(-n^2 / (2 * 2^64))
+    let n_f64 = n as f64;
+    let space_size = 2_f64.powi(64);
+    let exponent = -(n_f64 * n_f64) / (2.0 * space_size);
+
+    1.0 - exponent.exp()
+}
+
+/// Verify span ID entropy properties.
+fn verify_span_id_entropy_properties(result: &SpanIdGenerationResult, seed: u64) -> Result<(), String> {
+    // Check minimum entropy threshold
+    if result.entropy_metrics.bit_entropy < 0.8 {
+        return Err(format!(
+            "Bit entropy {} too low (expected >= 0.8) for seed {}",
+            result.entropy_metrics.bit_entropy, seed
+        ));
+    }
+
+    // Check byte entropy balance
+    let min_byte_entropy = result.entropy_metrics.byte_entropy.iter()
+        .fold(f64::INFINITY, |acc, &x| acc.min(x));
+    let max_byte_entropy = result.entropy_metrics.byte_entropy.iter()
+        .fold(0.0_f64, |acc, &x| acc.max(x));
+
+    if max_byte_entropy - min_byte_entropy > 2.0 {
+        return Err(format!(
+            "Byte entropy imbalance too large: range {:.2} (max {:.2} - min {:.2})",
+            max_byte_entropy - min_byte_entropy, max_byte_entropy, min_byte_entropy
+        ));
+    }
+
+    // Check Hamming distance distribution
+    if !result.entropy_metrics.hamming_distances.is_empty() {
+        let avg_hamming = result.entropy_metrics.hamming_distances.iter().sum::<u32>() as f64
+            / result.entropy_metrics.hamming_distances.len() as f64;
+
+        // Should average around 32 for good randomness
+        if avg_hamming < 28.0 || avg_hamming > 36.0 {
+            return Err(format!(
+                "Average Hamming distance {:.2} outside expected range [28, 36]",
+                avg_hamming
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Verify span ID distribution uniformity.
+fn verify_span_id_distribution_uniformity(result: &SpanIdGenerationResult, scenario_name: &str) -> Result<(), String> {
+    // Chi-squared test for uniformity (critical value for α=0.001 with large df ≈ 65536)
+    let critical_value = 66000.0; // Conservative threshold
+
+    if result.entropy_metrics.distribution_chi_squared > critical_value {
+        return Err(format!(
+            "Distribution chi-squared {} exceeds critical value {} for scenario '{}'",
+            result.entropy_metrics.distribution_chi_squared, critical_value, scenario_name
+        ));
+    }
+
+    // Runs test for sequence randomness (Z-score should be within [-3, 3])
+    let runs_z_score = result.entropy_metrics.runs_test_statistic;
+    if runs_z_score.abs() > 3.0 {
+        return Err(format!(
+            "Runs test Z-score {:.2} exceeds ±3.0 threshold for scenario '{}'",
+            runs_z_score, scenario_name
+        ));
+    }
+
+    Ok(())
+}
+
+/// Verify all span IDs in generation are unique.
+fn verify_span_id_uniqueness(result: &SpanIdGenerationResult) -> Result<(), String> {
+    if result.unique_count != result.generation_count {
+        let collision_count = result.generation_count - result.unique_count;
+        return Err(format!(
+            "Found {} collisions in {} generated span IDs (expected 0)",
+            collision_count, result.generation_count
+        ));
+    }
+
+    Ok(())
+}
+
+/// Verify no span IDs are zero.
+fn verify_no_zero_span_ids(result: &SpanIdGenerationResult) -> Result<(), String> {
+    if result.zero_count > 0 {
+        return Err(format!(
+            "Found {} zero span IDs (expected 0)",
+            result.zero_count
+        ));
+    }
+
+    Ok(())
+}
+
+/// Verify independence between different seeds.
+fn verify_cross_seed_independence(generations: &[(u64, SpanIdGenerationResult)]) -> Result<(), String> {
+    // Check that different seeds produce different first IDs
+    let mut first_ids = std::collections::HashSet::new();
+
+    for (seed, generation) in generations {
+        if generation.span_ids.is_empty() {
+            return Err(format!("Empty generation for seed {}", seed));
+        }
+
+        let first_id = generation.span_ids[0];
+        if !first_ids.insert(first_id) {
+            return Err(format!(
+                "Seed {} produced same first ID {} as another seed",
+                seed, first_id
+            ));
+        }
+    }
+
+    // Check entropy variation across seeds
+    let entropies: Vec<f64> = generations.iter()
+        .map(|(_, generation)| generation.entropy_metrics.bit_entropy)
+        .collect();
+
+    let min_entropy = entropies.iter().fold(f64::INFINITY, |acc, &x| acc.min(x));
+    let max_entropy = entropies.iter().fold(0.0_f64, |acc, &x| acc.max(x));
+
+    if max_entropy - min_entropy > 0.2 {
+        return Err(format!(
+            "Entropy variation across seeds too large: {:.3} (max {:.3} - min {:.3})",
+            max_entropy - min_entropy, max_entropy, min_entropy
+        ));
+    }
+
+    Ok(())
+}
+
+/// Verify bit distribution properties.
+fn verify_bit_distribution_properties(result: &SpanIdGenerationResult) -> Result<(), String> {
+    // Each bit position should have roughly 50% ones and 50% zeros
+    let total_ids = result.span_ids.len();
+
+    for bit_pos in 0..64 {
+        let ones_count = result.span_ids.iter()
+            .map(|&id| ((id >> bit_pos) & 1) as usize)
+            .sum::<usize>();
+
+        let ones_ratio = ones_count as f64 / total_ids as f64;
+
+        // Should be close to 0.5 (within 5% for large samples)
+        if (ones_ratio - 0.5).abs() > 0.05 {
+            return Err(format!(
+                "Bit {} has ratio {:.3} (expected ~0.5) in {} samples",
+                bit_pos, ones_ratio, total_ids
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Verify sequential generation properties.
+fn verify_sequential_generation_properties(result: &SpanIdGenerationResult) -> Result<(), String> {
+    // Sequential IDs should have very low entropy (high predictability)
+    if result.entropy_metrics.bit_entropy > 0.3 {
+        return Err(format!(
+            "Sequential generation entropy {:.3} too high (expected <= 0.3)",
+            result.entropy_metrics.bit_entropy
+        ));
+    }
+
+    // Hamming distances should be small for sequential IDs
+    if !result.entropy_metrics.hamming_distances.is_empty() {
+        let avg_hamming = result.entropy_metrics.hamming_distances.iter().sum::<u32>() as f64
+            / result.entropy_metrics.hamming_distances.len() as f64;
+
+        if avg_hamming > 10.0 {
+            return Err(format!(
+                "Sequential generation average Hamming distance {:.2} too high (expected <= 10)",
+                avg_hamming
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Verify statistical randomness properties.
+fn verify_statistical_randomness(result: &SpanIdGenerationResult) -> Result<(), String> {
+    // High-quality randomness should pass multiple statistical tests
+
+    // Entropy should be high
+    if result.entropy_metrics.bit_entropy < 0.9 {
+        return Err(format!(
+            "Randomness entropy {:.3} insufficient (expected >= 0.9)",
+            result.entropy_metrics.bit_entropy
+        ));
+    }
+
+    // Chi-squared test for uniform distribution
+    let critical_chi_sq = 66000.0; // Conservative for α=0.001
+    if result.entropy_metrics.distribution_chi_squared > critical_chi_sq {
+        return Err(format!(
+            "Randomness fails chi-squared test: {:.0} > {:.0}",
+            result.entropy_metrics.distribution_chi_squared, critical_chi_sq
+        ));
+    }
+
+    // Runs test for sequence independence
+    if result.entropy_metrics.runs_test_statistic.abs() > 2.5 {
+        return Err(format!(
+            "Randomness fails runs test: |{:.2}| > 2.5",
+            result.entropy_metrics.runs_test_statistic
+        ));
+    }
+
+    Ok(())
+}
+
+// =============================================================================
 // Test Suite Registration
 // =============================================================================
 
@@ -7160,6 +7776,7 @@ pub fn otlp_tests<RT: RuntimeInterface>() -> Vec<ConformanceTest<RT>> {
         otlp_020_http_protobuf_exporter_format::<RT>(),
         otlp_021_span_set_attribute_conformance::<RT>(),
         otlp_022_meter_create_counter_name_validation::<RT>(),
+        otlp_023_span_id_generation_entropy::<RT>(),
     ]
 }
 
