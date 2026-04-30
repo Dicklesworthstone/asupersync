@@ -131,6 +131,10 @@ name = "otel_resource_detection_conformance"
 path = "src/bin/otel_resource_detection_conformance.rs"
 
 [[bin]]
+name = "otel_span_event_timestamps_conformance"
+path = "src/bin/otel_span_event_timestamps_conformance.rs"
+
+[[bin]]
 name = "h1_expect_continue_conformance"
 path = "src/bin/h1_expect_continue_conformance.rs"
 [dependencies]
