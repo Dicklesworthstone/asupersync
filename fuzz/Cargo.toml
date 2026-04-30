@@ -3584,6 +3584,17 @@ test = false
 doc = false
 bench = false
 
+# Tick #157 — Oneshot poll-then-cancel-then-recv fuzzer
+# Tests arbitrary mid-poll cancel behavior to ensure cancellation is observable
+# on the next poll and no use-after-free occurs. Validates proper cleanup of
+# waker state during cancellation sequences.
+[[bin]]
+name = "oneshot_poll_cancel_recv"
+path = "fuzz_targets/oneshot_poll_cancel_recv.rs"
+test = false
+doc = false
+bench = false
+
 # Tick #133 — HTTP/2 PUSH_PROMISE frame handling fuzzer
 # Targets PUSH_PROMISE frame handling logic in src/http/h2/connection.rs
 # to test handling of arbitrary frames including push without ENABLE_PUSH=1,
