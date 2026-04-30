@@ -435,6 +435,7 @@ fn t59_ref_12_compression_middleware() {
         CompressionConfig {
             supported: vec![ContentEncoding::Gzip, ContentEncoding::Identity],
             min_body_size: 10,
+            ..CompressionConfig::default()
         },
     );
 

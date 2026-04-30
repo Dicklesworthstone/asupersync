@@ -57,7 +57,10 @@ use crate::combinator::bulkhead::{Bulkhead, BulkheadPolicy};
 use crate::combinator::circuit_breaker::{CircuitBreaker, CircuitBreakerPolicy};
 use crate::combinator::rate_limit::{RateLimitPolicy, RateLimiter};
 use crate::combinator::retry::RetryPolicy;
-use crate::http::compress::{ContentEncoding, make_compressor, negotiate_encoding};
+use crate::http::compress::{
+    ContentEncoding, DEFAULT_MAX_COMPRESSED_SIZE, make_compressor_with_output_limit,
+    negotiate_encoding,
+};
 use crate::tracing_compat::{debug, warn};
 use crate::types::Time;
 
@@ -799,6 +802,8 @@ pub struct CompressionConfig {
     /// Minimum response body size (bytes) before compression is applied.
     /// Bodies smaller than this threshold are sent uncompressed.
     pub min_body_size: usize,
+    /// Maximum compressed response body size (bytes).
+    pub max_compressed_size: usize,
 }
 
 impl Default for CompressionConfig {
@@ -811,6 +816,7 @@ impl Default for CompressionConfig {
                 ContentEncoding::Identity,
             ],
             min_body_size: 256,
+            max_compressed_size: DEFAULT_MAX_COMPRESSED_SIZE,
         }
     }
 }
@@ -892,7 +898,9 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
             return resp;
         }
 
-        let Some(mut compressor) = make_compressor(encoding) else {
+        let Some(mut compressor) =
+            make_compressor_with_output_limit(encoding, Some(self.config.max_compressed_size))
+        else {
             if !identity_acceptable {
                 return Response::new(
                     StatusCode::from_u16(406),
@@ -910,6 +918,7 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
                     b"No acceptable response encoding".to_vec(),
                 );
             }
+            append_vary_header(&mut resp, "accept-encoding");
             return resp;
         }
         if compressor.finish(&mut compressed).is_err() {
@@ -919,6 +928,7 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
                     b"No acceptable response encoding".to_vec(),
                 );
             }
+            append_vary_header(&mut resp, "accept-encoding");
             return resp;
         }
 
@@ -2363,6 +2373,7 @@ mod tests {
             CompressionConfig {
                 supported: vec![ContentEncoding::Identity],
                 min_body_size: 0,
+                ..CompressionConfig::default()
             },
         );
         let req = Request::new("GET", "/compress").with_header("accept-encoding", "identity");
@@ -2389,6 +2400,7 @@ mod tests {
             CompressionConfig {
                 supported: vec![ContentEncoding::Identity],
                 min_body_size: 0,
+                ..CompressionConfig::default()
             },
         );
         let req = Request::new("GET", "/compress").with_header("accept-encoding", "identity");
@@ -2407,6 +2419,7 @@ mod tests {
             CompressionConfig {
                 supported: vec![ContentEncoding::Identity],
                 min_body_size: 0,
+                ..CompressionConfig::default()
             },
         );
         let req = Request::new("GET", "/compress")
@@ -3107,6 +3120,7 @@ mod tests {
         let config = CompressionConfig {
             min_body_size: 256,
             supported: vec![ContentEncoding::Gzip, ContentEncoding::Identity],
+            ..CompressionConfig::default()
         };
         let mw = CompressionMiddleware::new(FnHandler::new(large_handler), config);
         let req = make_request().with_header("Accept-Encoding", "gzip");
@@ -3137,6 +3151,7 @@ mod tests {
         let config = CompressionConfig {
             min_body_size: 0,
             supported: vec![ContentEncoding::Gzip, ContentEncoding::Identity],
+            ..CompressionConfig::default()
         };
         let mw = CompressionMiddleware::new(FnHandler::new(large_handler), config);
         let req = make_request().with_header("Accept-Encoding", "gzip");
@@ -3153,6 +3168,51 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "compression")]
+    #[test]
+    fn compression_cap_falls_back_to_identity_when_allowed() {
+        fn large_handler() -> Response {
+            Response::new(StatusCode::OK, vec![b'a'; 4096])
+        }
+
+        let config = CompressionConfig {
+            min_body_size: 0,
+            max_compressed_size: 1,
+            supported: vec![ContentEncoding::Gzip, ContentEncoding::Identity],
+        };
+        let mw = CompressionMiddleware::new(FnHandler::new(large_handler), config);
+        let req = make_request().with_header("Accept-Encoding", "gzip");
+        let resp = mw.call(req);
+
+        assert_eq!(resp.status, StatusCode::OK);
+        assert!(!resp.headers.contains_key("content-encoding"));
+        assert_eq!(resp.body.as_ref(), &[b'a'; 4096]);
+        assert_eq!(
+            resp.headers.get("vary"),
+            Some(&"accept-encoding".to_string())
+        );
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn compression_cap_rejects_when_identity_disallowed() {
+        fn large_handler() -> Response {
+            Response::new(StatusCode::OK, vec![b'a'; 4096])
+        }
+
+        let config = CompressionConfig {
+            min_body_size: 0,
+            max_compressed_size: 1,
+            supported: vec![ContentEncoding::Gzip, ContentEncoding::Identity],
+        };
+        let mw = CompressionMiddleware::new(FnHandler::new(large_handler), config);
+        let req = make_request().with_header("Accept-Encoding", "gzip, identity;q=0");
+        let resp = mw.call(req);
+
+        assert_eq!(resp.status.as_u16(), 406);
+        assert_eq!(resp.body.as_ref(), b"No acceptable response encoding");
+    }
+
     #[test]
     fn compression_absent_accept_encoding_remains_permissive() {
         fn large_handler() -> Response {
@@ -3162,6 +3222,7 @@ mod tests {
         let config = CompressionConfig {
             min_body_size: 256,
             supported: vec![ContentEncoding::Gzip, ContentEncoding::Identity],
+            ..CompressionConfig::default()
         };
         let mw = CompressionMiddleware::new(FnHandler::new(large_handler), config);
         let resp = mw.call(make_request());
@@ -3181,6 +3242,7 @@ mod tests {
         let config = CompressionConfig {
             min_body_size: 256,
             supported: vec![ContentEncoding::Gzip],
+            ..CompressionConfig::default()
         };
         let mw = CompressionMiddleware::new(FnHandler::new(large_handler), config);
         let req = make_request().with_header("Accept-Encoding", "");
@@ -3198,6 +3260,7 @@ mod tests {
         let config = CompressionConfig {
             min_body_size: 256,
             supported: vec![ContentEncoding::Identity],
+            ..CompressionConfig::default()
         };
         let mw = CompressionMiddleware::new(FnHandler::new(large_handler), config);
         let req = make_request().with_header("Accept-Encoding", "identity");
@@ -3218,6 +3281,7 @@ mod tests {
         let config = CompressionConfig {
             min_body_size: 0,
             supported: vec![ContentEncoding::Brotli, ContentEncoding::Identity],
+            ..CompressionConfig::default()
         };
         let mw = CompressionMiddleware::new(FnHandler::new(large_handler), config);
         let req = make_request().with_header("Accept-Encoding", "br");

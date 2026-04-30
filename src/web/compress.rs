@@ -23,7 +23,10 @@
 //! - No acceptable encoding is negotiated.
 //! - The negotiated encoding is `identity`.
 
-use crate::http::compress::{ContentEncoding, make_compressor, negotiate_encoding};
+use crate::http::compress::{
+    ContentEncoding, DEFAULT_MAX_COMPRESSED_SIZE, make_compressor_with_output_limit,
+    negotiate_encoding,
+};
 
 use super::extract::Request;
 use super::handler::Handler;
@@ -43,6 +46,12 @@ pub struct CompressionPolicy {
     /// Bodies smaller than this threshold are sent uncompressed because the
     /// compression overhead (headers, framing) may exceed the size savings.
     pub min_body_size: usize,
+
+    /// Maximum compressed response body size (in bytes).
+    ///
+    /// Compression errors once the codec would exceed this cap, before the
+    /// underlying compression buffer grows past it.
+    pub max_compressed_size: usize,
 }
 
 impl Default for CompressionPolicy {
@@ -55,6 +64,7 @@ impl Default for CompressionPolicy {
                 ContentEncoding::Identity,
             ],
             min_body_size: 256,
+            max_compressed_size: DEFAULT_MAX_COMPRESSED_SIZE,
         }
     }
 }
@@ -73,6 +83,13 @@ impl CompressionPolicy {
     #[must_use]
     pub fn with_min_body_size(mut self, size: usize) -> Self {
         self.min_body_size = size;
+        self
+    }
+
+    /// Set the maximum compressed response body size.
+    #[must_use]
+    pub fn with_max_compressed_size(mut self, size: usize) -> Self {
+        self.max_compressed_size = size;
         self
     }
 }
@@ -169,7 +186,9 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
         }
 
         // Get a compressor for the negotiated encoding.
-        let Some(mut compressor) = make_compressor(encoding) else {
+        let Some(mut compressor) =
+            make_compressor_with_output_limit(encoding, Some(self.policy.max_compressed_size))
+        else {
             if !identity_acceptable {
                 return Response::new(
                     StatusCode::from_u16(406),
@@ -188,6 +207,7 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
                     b"No acceptable response encoding".to_vec(),
                 );
             }
+            append_vary_token(&mut resp, "accept-encoding");
             return resp;
         }
         if compressor.finish(&mut compressed).is_err() {
@@ -197,6 +217,7 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
                     b"No acceptable response encoding".to_vec(),
                 );
             }
+            append_vary_token(&mut resp, "accept-encoding");
             return resp;
         }
 
@@ -356,7 +377,7 @@ mod tests {
     fn empty_accept_encoding_header_is_not_treated_as_absent() {
         let policy = CompressionPolicy {
             supported_encodings: vec![ContentEncoding::Gzip],
-            min_body_size: 0,
+            ..CompressionPolicy::default().with_min_body_size(0)
         };
         let mw = CompressionMiddleware::new(FnHandler::new(large_body_handler), policy);
         let req = make_request_with_encoding("");
@@ -488,7 +509,7 @@ mod tests {
     fn deflate_compresses_large_body() {
         let policy = CompressionPolicy {
             supported_encodings: vec![ContentEncoding::Deflate, ContentEncoding::Identity],
-            min_body_size: 0,
+            ..CompressionPolicy::default().with_min_body_size(0)
         };
         let mw = CompressionMiddleware::new(FnHandler::new(large_body_handler), policy);
         let req = make_request_with_encoding("deflate");
@@ -595,8 +616,42 @@ mod tests {
     fn compression_policy_default() {
         let policy = CompressionPolicy::default();
         assert_eq!(policy.min_body_size, 256);
+        assert_eq!(policy.max_compressed_size, DEFAULT_MAX_COMPRESSED_SIZE);
         assert_eq!(policy.supported_encodings.len(), 4);
         assert_eq!(policy.supported_encodings[0], ContentEncoding::Brotli);
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn capped_compressed_output_falls_back_to_identity_when_allowed() {
+        let policy = CompressionPolicy::default()
+            .with_min_body_size(0)
+            .with_max_compressed_size(1);
+        let mw = CompressionMiddleware::new(FnHandler::new(large_body_handler), policy);
+        let req = make_request_with_encoding("gzip");
+        let resp = mw.call(req);
+
+        assert_eq!(resp.status, StatusCode::OK);
+        assert!(!resp.headers.contains_key("content-encoding"));
+        assert_eq!(
+            resp.headers.get("vary"),
+            Some(&"accept-encoding".to_string())
+        );
+        assert_eq!(resp.body.as_ref(), "Hello, World! ".repeat(100).as_bytes());
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn capped_compressed_output_rejects_when_identity_disallowed() {
+        let policy = CompressionPolicy::default()
+            .with_min_body_size(0)
+            .with_max_compressed_size(1);
+        let mw = CompressionMiddleware::new(FnHandler::new(large_body_handler), policy);
+        let req = make_request_with_encoding("gzip, identity;q=0");
+        let resp = mw.call(req);
+
+        assert_eq!(resp.status.as_u16(), 406);
+        assert_eq!(resp.body.as_ref(), b"No acceptable response encoding");
     }
 
     /// Regression: compression must not clobber a pre-existing Vary header

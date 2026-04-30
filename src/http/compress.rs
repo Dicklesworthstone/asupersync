@@ -18,6 +18,13 @@
 use std::fmt;
 use std::io;
 
+/// Default maximum compressed response body size produced by HTTP helpers.
+///
+/// This is intentionally generous for normal web responses while still
+/// preventing unbounded growth when compression is applied to hostile or
+/// unusually expansion-prone payloads.
+pub const DEFAULT_MAX_COMPRESSED_SIZE: usize = 16 * 1024 * 1024;
+
 /// Supported content encodings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ContentEncoding {
@@ -287,24 +294,41 @@ impl Decompressor for IdentityDecompressor {
 }
 
 /// A writer that wraps a `Vec<u8>` and strictly limits its maximum size.
-/// This prevents decompression bomb attacks by returning an error before
-/// unbounded memory allocation occurs.
-#[derive(Debug, Default)]
+/// This prevents compression/decompression bomb attacks by returning an
+/// error before unbounded memory allocation occurs.
+#[derive(Debug)]
 #[cfg(feature = "compression")]
 #[allow(dead_code)]
 struct LimitedWriter {
     inner: Vec<u8>,
     max_size: Option<usize>,
+    limit_error: &'static str,
 }
 
 #[cfg(feature = "compression")]
 #[allow(dead_code)]
 impl LimitedWriter {
     fn new(max_size: Option<usize>) -> Self {
+        Self::with_error(max_size, "decompressed size exceeds limit")
+    }
+
+    fn for_compressed_output(max_size: Option<usize>) -> Self {
+        Self::with_error(max_size, "compressed size exceeds limit")
+    }
+
+    fn with_error(max_size: Option<usize>, limit_error: &'static str) -> Self {
         Self {
             inner: Vec::new(),
             max_size,
+            limit_error,
         }
+    }
+}
+
+#[cfg(feature = "compression")]
+impl Default for LimitedWriter {
+    fn default() -> Self {
+        Self::new(None)
     }
 }
 
@@ -312,11 +336,13 @@ impl LimitedWriter {
 impl io::Write for LimitedWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         if let Some(max) = self.max_size {
-            if self.inner.len().saturating_add(buf.len()) > max {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "decompressed size exceeds limit",
-                ));
+            let next_len = self
+                .inner
+                .len()
+                .checked_add(buf.len())
+                .ok_or_else(|| limit_error(self.limit_error))?;
+            if next_len > max {
+                return Err(limit_error(self.limit_error));
             }
         }
         self.inner.extend_from_slice(buf);
@@ -337,6 +363,36 @@ const BROTLI_DEFAULT_QUALITY: u32 = 5;
 #[cfg(feature = "compression")]
 const BROTLI_DEFAULT_LGWIN: u32 = 22;
 
+#[cfg(feature = "compression")]
+fn limit_error(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
+}
+
+#[cfg(feature = "compression")]
+fn remaining_limit(max_size: Option<usize>, emitted: usize) -> Option<usize> {
+    max_size.map(|max| max.saturating_sub(emitted))
+}
+
+#[cfg(feature = "compression")]
+fn append_limited_output(
+    output: &mut Vec<u8>,
+    chunk: &mut Vec<u8>,
+    emitted: &mut usize,
+    max_size: Option<usize>,
+) -> io::Result<()> {
+    let next_emitted = emitted
+        .checked_add(chunk.len())
+        .ok_or_else(|| limit_error("compressed size exceeds limit"))?;
+    if let Some(max) = max_size {
+        if next_emitted > max {
+            return Err(limit_error("compressed size exceeds limit"));
+        }
+    }
+    output.append(chunk);
+    *emitted = next_emitted;
+    Ok(())
+}
+
 // ─── Gzip Compressor ────────────────────────────────────────────────────────
 
 /// Gzip compressor using the flate2 (miniz_oxide) backend.
@@ -345,7 +401,9 @@ const BROTLI_DEFAULT_LGWIN: u32 = 22;
 /// (default) which provides a good balance of speed and ratio.
 #[cfg(feature = "compression")]
 pub struct GzipCompressor {
-    encoder: flate2::write::GzEncoder<Vec<u8>>,
+    encoder: flate2::write::GzEncoder<LimitedWriter>,
+    max_size: Option<usize>,
+    emitted: usize,
     finished: bool,
 }
 
@@ -357,13 +415,43 @@ impl GzipCompressor {
         Self::with_level(flate2::Compression::default())
     }
 
+    /// Create a new gzip compressor with a compressed output size limit.
+    #[must_use]
+    pub fn with_output_limit(max_size: Option<usize>) -> Self {
+        Self::with_level_and_output_limit(flate2::Compression::default(), max_size)
+    }
+
     /// Create a new gzip compressor with the specified compression level.
     #[must_use]
     pub fn with_level(level: flate2::Compression) -> Self {
+        Self::with_level_and_output_limit(level, None)
+    }
+
+    /// Create a new gzip compressor with the specified compression level and
+    /// compressed output size limit.
+    #[must_use]
+    pub fn with_level_and_output_limit(
+        level: flate2::Compression,
+        max_size: Option<usize>,
+    ) -> Self {
         Self {
-            encoder: flate2::write::GzEncoder::new(Vec::new(), level),
+            encoder: flate2::write::GzEncoder::new(
+                LimitedWriter::for_compressed_output(max_size),
+                level,
+            ),
+            max_size,
+            emitted: 0,
             finished: false,
         }
+    }
+
+    fn refresh_remaining_limit(&mut self) {
+        self.encoder.get_mut().max_size = remaining_limit(self.max_size, self.emitted);
+    }
+
+    fn drain_output_buffer(&mut self, output: &mut Vec<u8>) -> io::Result<()> {
+        let mut buf = std::mem::take(&mut self.encoder.get_mut().inner);
+        append_limited_output(output, &mut buf, &mut self.emitted, self.max_size)
     }
 }
 
@@ -378,13 +466,9 @@ impl Default for GzipCompressor {
 impl Compressor for GzipCompressor {
     fn compress(&mut self, input: &[u8], output: &mut Vec<u8>) -> io::Result<()> {
         use io::Write;
+        self.refresh_remaining_limit();
         self.encoder.write_all(input)?;
-        let buf = self.encoder.get_mut();
-        if !buf.is_empty() {
-            output.extend_from_slice(buf);
-            buf.clear();
-        }
-        Ok(())
+        self.drain_output_buffer(output)
     }
 
     fn finish(&mut self, output: &mut Vec<u8>) -> io::Result<()> {
@@ -392,14 +476,19 @@ impl Compressor for GzipCompressor {
         if self.finished {
             return Ok(());
         }
+        self.refresh_remaining_limit();
         self.encoder.flush()?;
+        self.refresh_remaining_limit();
         // Take the inner buffer, reset encoder with a new empty vec.
         let inner = std::mem::replace(
             &mut self.encoder,
-            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::none()),
+            flate2::write::GzEncoder::new(
+                LimitedWriter::for_compressed_output(None),
+                flate2::Compression::none(),
+            ),
         );
-        let finished = inner.finish()?;
-        output.extend_from_slice(&finished);
+        let mut finished = inner.finish()?.inner;
+        append_limited_output(output, &mut finished, &mut self.emitted, self.max_size)?;
         self.finished = true;
         Ok(())
     }
@@ -506,7 +595,9 @@ impl Decompressor for GzipDecompressor {
 /// HTTP deflate convention).
 #[cfg(feature = "compression")]
 pub struct DeflateCompressor {
-    encoder: flate2::write::DeflateEncoder<Vec<u8>>,
+    encoder: flate2::write::DeflateEncoder<LimitedWriter>,
+    max_size: Option<usize>,
+    emitted: usize,
     finished: bool,
 }
 
@@ -518,13 +609,43 @@ impl DeflateCompressor {
         Self::with_level(flate2::Compression::default())
     }
 
+    /// Create a new deflate compressor with a compressed output size limit.
+    #[must_use]
+    pub fn with_output_limit(max_size: Option<usize>) -> Self {
+        Self::with_level_and_output_limit(flate2::Compression::default(), max_size)
+    }
+
     /// Create a new deflate compressor with the specified compression level.
     #[must_use]
     pub fn with_level(level: flate2::Compression) -> Self {
+        Self::with_level_and_output_limit(level, None)
+    }
+
+    /// Create a new deflate compressor with the specified compression level
+    /// and compressed output size limit.
+    #[must_use]
+    pub fn with_level_and_output_limit(
+        level: flate2::Compression,
+        max_size: Option<usize>,
+    ) -> Self {
         Self {
-            encoder: flate2::write::DeflateEncoder::new(Vec::new(), level),
+            encoder: flate2::write::DeflateEncoder::new(
+                LimitedWriter::for_compressed_output(max_size),
+                level,
+            ),
+            max_size,
+            emitted: 0,
             finished: false,
         }
+    }
+
+    fn refresh_remaining_limit(&mut self) {
+        self.encoder.get_mut().max_size = remaining_limit(self.max_size, self.emitted);
+    }
+
+    fn drain_output_buffer(&mut self, output: &mut Vec<u8>) -> io::Result<()> {
+        let mut buf = std::mem::take(&mut self.encoder.get_mut().inner);
+        append_limited_output(output, &mut buf, &mut self.emitted, self.max_size)
     }
 }
 
@@ -539,25 +660,25 @@ impl Default for DeflateCompressor {
 impl Compressor for DeflateCompressor {
     fn compress(&mut self, input: &[u8], output: &mut Vec<u8>) -> io::Result<()> {
         use io::Write;
+        self.refresh_remaining_limit();
         self.encoder.write_all(input)?;
-        let buf = self.encoder.get_mut();
-        if !buf.is_empty() {
-            output.extend_from_slice(buf);
-            buf.clear();
-        }
-        Ok(())
+        self.drain_output_buffer(output)
     }
 
     fn finish(&mut self, output: &mut Vec<u8>) -> io::Result<()> {
         if self.finished {
             return Ok(());
         }
+        self.refresh_remaining_limit();
         let inner = std::mem::replace(
             &mut self.encoder,
-            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::none()),
+            flate2::write::DeflateEncoder::new(
+                LimitedWriter::for_compressed_output(None),
+                flate2::Compression::none(),
+            ),
         );
-        let finished = inner.finish()?;
-        output.extend_from_slice(&finished);
+        let mut finished = inner.finish()?.inner;
+        append_limited_output(output, &mut finished, &mut self.emitted, self.max_size)?;
         self.finished = true;
         Ok(())
     }
@@ -656,7 +777,9 @@ impl Decompressor for DeflateDecompressor {
 /// maximum offline compression ratio.
 #[cfg(feature = "compression")]
 pub struct BrotliCompressor {
-    encoder: brotli::CompressorWriter<Vec<u8>>,
+    encoder: brotli::CompressorWriter<LimitedWriter>,
+    max_size: Option<usize>,
+    emitted: usize,
     finished: bool,
 }
 
@@ -668,13 +791,42 @@ impl BrotliCompressor {
         Self::with_params(BROTLI_DEFAULT_QUALITY, BROTLI_DEFAULT_LGWIN)
     }
 
+    /// Create a new Brotli compressor with a compressed output size limit.
+    #[must_use]
+    pub fn with_output_limit(max_size: Option<usize>) -> Self {
+        Self::with_params_and_output_limit(BROTLI_DEFAULT_QUALITY, BROTLI_DEFAULT_LGWIN, max_size)
+    }
+
     /// Create a new Brotli compressor with explicit quality and window.
     #[must_use]
     pub fn with_params(quality: u32, lgwin: u32) -> Self {
+        Self::with_params_and_output_limit(quality, lgwin, None)
+    }
+
+    /// Create a new Brotli compressor with explicit quality, window, and
+    /// compressed output size limit.
+    #[must_use]
+    pub fn with_params_and_output_limit(quality: u32, lgwin: u32, max_size: Option<usize>) -> Self {
         Self {
-            encoder: brotli::CompressorWriter::new(Vec::new(), BROTLI_BUFFER_SIZE, quality, lgwin),
+            encoder: brotli::CompressorWriter::new(
+                LimitedWriter::for_compressed_output(max_size),
+                BROTLI_BUFFER_SIZE,
+                quality,
+                lgwin,
+            ),
+            max_size,
+            emitted: 0,
             finished: false,
         }
+    }
+
+    fn refresh_remaining_limit(&mut self) {
+        self.encoder.get_mut().max_size = remaining_limit(self.max_size, self.emitted);
+    }
+
+    fn drain_output_buffer(&mut self, output: &mut Vec<u8>) -> io::Result<()> {
+        let mut buf = std::mem::take(&mut self.encoder.get_mut().inner);
+        append_limited_output(output, &mut buf, &mut self.emitted, self.max_size)
     }
 }
 
@@ -689,14 +841,11 @@ impl Default for BrotliCompressor {
 impl Compressor for BrotliCompressor {
     fn compress(&mut self, input: &[u8], output: &mut Vec<u8>) -> io::Result<()> {
         use io::Write;
+        self.refresh_remaining_limit();
         self.encoder.write_all(input)?;
+        self.refresh_remaining_limit();
         self.encoder.flush()?;
-        let buf = self.encoder.get_mut();
-        if !buf.is_empty() {
-            output.extend_from_slice(buf);
-            buf.clear();
-        }
-        Ok(())
+        self.drain_output_buffer(output)
     }
 
     fn finish(&mut self, output: &mut Vec<u8>) -> io::Result<()> {
@@ -704,18 +853,21 @@ impl Compressor for BrotliCompressor {
         if self.finished {
             return Ok(());
         }
+        self.refresh_remaining_limit();
         self.encoder.flush()?;
+        self.refresh_remaining_limit();
         let finished = std::mem::replace(
             &mut self.encoder,
             brotli::CompressorWriter::new(
-                Vec::new(),
+                LimitedWriter::for_compressed_output(None),
                 BROTLI_BUFFER_SIZE,
                 BROTLI_DEFAULT_QUALITY,
                 BROTLI_DEFAULT_LGWIN,
             ),
         )
         .into_inner();
-        output.extend_from_slice(&finished);
+        let mut finished = finished.inner;
+        append_limited_output(output, &mut finished, &mut self.emitted, self.max_size)?;
         self.finished = true;
         Ok(())
     }
@@ -826,14 +978,26 @@ impl Decompressor for BrotliDecompressor {
 /// Returns `None` for encodings that are unavailable in the current build.
 #[must_use]
 pub fn make_compressor(encoding: ContentEncoding) -> Option<Box<dyn Compressor>> {
+    make_compressor_with_output_limit(encoding, None)
+}
+
+/// Create a compressor for the given encoding with an optional output limit.
+///
+/// The limit is enforced by the codec's underlying writer before its internal
+/// buffer grows past the configured size.
+#[must_use]
+pub fn make_compressor_with_output_limit(
+    encoding: ContentEncoding,
+    max_size: Option<usize>,
+) -> Option<Box<dyn Compressor>> {
     match encoding {
         ContentEncoding::Identity => Some(Box::new(IdentityCompressor)),
         #[cfg(feature = "compression")]
-        ContentEncoding::Gzip => Some(Box::new(GzipCompressor::new())),
+        ContentEncoding::Gzip => Some(Box::new(GzipCompressor::with_output_limit(max_size))),
         #[cfg(feature = "compression")]
-        ContentEncoding::Deflate => Some(Box::new(DeflateCompressor::new())),
+        ContentEncoding::Deflate => Some(Box::new(DeflateCompressor::with_output_limit(max_size))),
         #[cfg(feature = "compression")]
-        ContentEncoding::Brotli => Some(Box::new(BrotliCompressor::new())),
+        ContentEncoding::Brotli => Some(Box::new(BrotliCompressor::with_output_limit(max_size))),
         #[cfg(not(feature = "compression"))]
         ContentEncoding::Gzip | ContentEncoding::Deflate | ContentEncoding::Brotli => None,
     }
@@ -1387,6 +1551,33 @@ mod tests {
         let comp = make_compressor(ContentEncoding::Deflate);
         assert!(comp.is_some());
         assert_eq!(comp.unwrap().encoding(), ContentEncoding::Deflate);
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn make_compressor_with_output_limit_rejects_before_output_growth() {
+        for encoding in [
+            ContentEncoding::Gzip,
+            ContentEncoding::Deflate,
+            ContentEncoding::Brotli,
+        ] {
+            let mut comp = make_compressor_with_output_limit(encoding, Some(1))
+                .expect("feature-gated compressor should be available");
+            let mut output = Vec::new();
+            let result = comp
+                .compress(b"expansion guard payload", &mut output)
+                .and_then(|()| comp.finish(&mut output));
+
+            assert!(
+                result.is_err(),
+                "{encoding} should reject output beyond configured cap"
+            );
+            assert!(
+                output.len() <= 1,
+                "{encoding} wrote {} bytes beyond the cap",
+                output.len()
+            );
+        }
     }
 
     // ====================================================================
