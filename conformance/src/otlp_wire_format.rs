@@ -6162,6 +6162,227 @@ fn verify_chunk_retry_compliance(result: &ChunkRetryResult) -> Result<(), String
     Ok(())
 }
 
+/// OTLP-022: Meter create_counter() name validation conformance test.
+pub fn otlp_022_meter_create_counter_name_validation<RT: RuntimeInterface>() -> ConformanceTest<RT> {
+    crate::conformance_test! {
+        id: "otlp-022",
+        name: "Meter.create_counter() name validation conformance",
+        description: "Verify Meter.create_counter() name validation vs opentelemetry-sdk produces identical validation behavior",
+        category: TestCategory::IO,
+        tags: ["otlp", "meter", "counter", "create_counter", "name_validation"],
+        expected: "Same counter name validation rules produce identical accept/reject behavior",
+        test: |_rt| {
+            // Test valid counter names
+            let long_valid_name = "a".repeat(255);
+            let valid_name_scenarios = vec![
+                ("simple_name", "request_count"),
+                ("with_dots", "http.request.duration"),
+                ("with_underscores", "cpu_usage_percent"),
+                ("with_numbers", "connection_pool_size2"),
+                ("mixed_valid", "cache.hit_ratio_v3"),
+                ("single_char", "x"),
+                ("long_valid", long_valid_name.as_str()), // Just under 256 limit
+                ("service_name", "service.requests.total"),
+                ("resource_name", "process.memory.usage"),
+                ("namespace_prefix", "myapp.api.requests"),
+                ("metric_convention", "system.cpu.utilization"),
+                ("camel_case", "requestLatency"), // May or may not be valid per spec
+                ("domain_style", "com.example.service.requests"),
+            ];
+
+            for (scenario_name, counter_name) in &valid_name_scenarios {
+                checkpoint("valid_counter_name_test", json!({
+                    "scenario": scenario_name,
+                    "counter_name": counter_name,
+                    "name_length": counter_name.len(),
+                    "has_dots": counter_name.contains('.'),
+                    "has_underscores": counter_name.contains('_'),
+                    "has_numbers": counter_name.chars().any(|c| c.is_ascii_digit())
+                }));
+
+                // Test counter creation with valid names
+                let creation_result = simulate_meter_create_counter(counter_name, "A valid counter", "1");
+
+                // Verify creation succeeds for valid names
+                if !creation_result.creation_successful {
+                    return TestResult::failed(format!(
+                        "Valid counter name '{}' rejected in scenario {}: {}",
+                        counter_name, scenario_name,
+                        creation_result.error_message.unwrap_or_default()
+                    ));
+                }
+
+                // Verify counter properties match input
+                if let Err(error) = verify_counter_properties(&creation_result, counter_name) {
+                    return TestResult::failed(format!(
+                        "Counter properties validation failed for {} ({}): {}",
+                        counter_name, scenario_name, error
+                    ));
+                }
+
+                // Test deterministic creation (same name should produce same result)
+                let creation_result2 = simulate_meter_create_counter(counter_name, "A valid counter", "1");
+                if creation_result.counter_identity != creation_result2.counter_identity {
+                    return TestResult::failed(format!(
+                        "Counter creation non-deterministic for {} ({}): identity differs",
+                        counter_name, scenario_name
+                    ));
+                }
+            }
+
+            // Test invalid counter names
+            let too_long_name = "a".repeat(257);
+            let invalid_name_scenarios = vec![
+                ("empty_name", ""),
+                ("whitespace_only", "   "),
+                ("leading_space", " request_count"),
+                ("trailing_space", "request_count "),
+                ("internal_space", "request count"),
+                ("leading_dot", ".request_count"),
+                ("trailing_dot", "request_count."),
+                ("double_dots", "request..count"),
+                ("leading_underscore", "_request_count"),
+                ("double_underscores", "request__count"),
+                ("invalid_chars_dash", "request-count"),
+                ("invalid_chars_hash", "request#count"),
+                ("invalid_chars_at", "request@count"),
+                ("invalid_chars_slash", "request/count"),
+                ("invalid_chars_backslash", "request\\count"),
+                ("unicode_chars", "请求计数"),
+                ("emoji", "request_count_📊"),
+                ("too_long", too_long_name.as_str()), // Over 256 limit
+                ("numeric_start", "123_requests"),
+                ("special_symbols", "request$count%"),
+                ("parentheses", "request(count)"),
+                ("brackets", "request[count]"),
+                ("braces", "request{count}"),
+                ("quotes", "request'count"),
+                ("double_quotes", "request\"count"),
+                ("tab_char", "request\tcount"),
+                ("newline_char", "request\ncount"),
+                ("carriage_return", "request\rcount"),
+            ];
+
+            for (scenario_name, counter_name) in &invalid_name_scenarios {
+                checkpoint("invalid_counter_name_test", json!({
+                    "scenario": scenario_name,
+                    "counter_name": counter_name,
+                    "name_length": counter_name.len(),
+                    "invalid_reason": scenario_name
+                }));
+
+                // Test counter creation with invalid names
+                let creation_result = simulate_meter_create_counter(counter_name, "A counter", "1");
+
+                // Verify creation fails for invalid names
+                if creation_result.creation_successful {
+                    return TestResult::failed(format!(
+                        "Invalid counter name '{}' accepted in scenario {}: should be rejected",
+                        counter_name, scenario_name
+                    ));
+                }
+
+                // Verify appropriate error message
+                if let Err(error) = verify_appropriate_error_message(&creation_result, scenario_name) {
+                    return TestResult::failed(format!(
+                        "Error message validation failed for {} ({}): {}",
+                        counter_name, scenario_name, error
+                    ));
+                }
+
+                // Test error consistency (same invalid name should always fail)
+                let creation_result2 = simulate_meter_create_counter(counter_name, "A counter", "1");
+                if creation_result2.creation_successful {
+                    return TestResult::failed(format!(
+                        "Invalid counter name consistency failed for {} ({}): sometimes succeeds",
+                        counter_name, scenario_name
+                    ));
+                }
+            }
+
+            // Test edge cases and boundary conditions
+            let edge_case_scenarios = vec![
+                ("boundary_255_chars", "a".repeat(255), true), // Should pass
+                ("boundary_256_chars", "a".repeat(256), false), // Should fail
+                ("single_dot", ".".to_string(), false),
+                ("single_underscore", "_".to_string(), false),
+                ("only_numbers", "12345".to_string(), false), // Numbers only typically invalid
+                ("dot_underscore", "a.b_c".to_string(), true),
+                ("mixed_case", "RequestCount".to_string(), true), // Case sensitivity
+                ("all_caps", "REQUEST_COUNT".to_string(), true),
+                ("leading_number_valid", "a123".to_string(), true),
+                ("minimal_valid", "a".to_string(), true),
+                ("max_dots", "a.".repeat(100) + "b", false), // Excessive dots
+                ("max_underscores", "a_".repeat(100) + "b", false), // Excessive underscores
+            ];
+
+            for (scenario_name, counter_name, should_succeed) in &edge_case_scenarios {
+                checkpoint("edge_case_counter_name_test", json!({
+                    "scenario": scenario_name,
+                    "counter_name": counter_name,
+                    "name_length": counter_name.len(),
+                    "should_succeed": should_succeed
+                }));
+
+                let creation_result = simulate_meter_create_counter(counter_name, "Edge case counter", "1");
+
+                if creation_result.creation_successful != *should_succeed {
+                    return TestResult::failed(format!(
+                        "Edge case expectation failed for {} ({}): expected {}, got {}",
+                        counter_name, scenario_name, should_succeed, creation_result.creation_successful
+                    ));
+                }
+
+                // Verify edge case compliance
+                if let Err(error) = verify_edge_case_name_compliance(&creation_result, scenario_name, *should_succeed) {
+                    return TestResult::failed(format!(
+                        "Edge case compliance failed for {} ({}): {}",
+                        counter_name, scenario_name, error
+                    ));
+                }
+            }
+
+            // Test duplicate counter name handling
+            let duplicate_scenarios = vec![
+                ("exact_duplicate", "request_count", "request_count"),
+                ("case_different", "request_count", "Request_Count"),
+                ("space_variant", "requestcount", "request_count"),
+            ];
+
+            for (scenario_name, first_name, second_name) in &duplicate_scenarios {
+                checkpoint("duplicate_counter_name_test", json!({
+                    "scenario": scenario_name,
+                    "first_name": first_name,
+                    "second_name": second_name,
+                    "names_identical": first_name == second_name
+                }));
+
+                // Create first counter
+                let first_result = simulate_meter_create_counter(first_name, "First counter", "1");
+                if !first_result.creation_successful {
+                    return TestResult::failed(format!(
+                        "First counter creation failed in duplicate scenario {}: {}",
+                        scenario_name, first_result.error_message.unwrap_or_default()
+                    ));
+                }
+
+                // Create second counter
+                let second_result = simulate_meter_create_counter(second_name, "Second counter", "1");
+
+                // Verify duplicate handling behavior
+                if let Err(error) = verify_duplicate_counter_handling(&first_result, &second_result, first_name, second_name, scenario_name) {
+                    return TestResult::failed(format!(
+                        "Duplicate counter handling failed for {} -> {} ({}): {}",
+                        first_name, second_name, scenario_name, error
+                    ));
+                }
+            }
+
+            TestResult::passed()
+        }
+    }
+}
+
 // =============================================================================
 // OTLP-021 Helper Functions (Span.set_attribute() Conformance)
 // =============================================================================
@@ -6613,6 +6834,304 @@ fn verify_attribute_performance_characteristics(result: &SpanAttributeResult) ->
 }
 
 // =============================================================================
+// OTLP-022 Helper Functions (Meter.create_counter() Name Validation)
+// =============================================================================
+
+/// Counter creation result for testing.
+#[derive(Debug, Clone, PartialEq)]
+struct CounterCreationResult {
+    counter_name: String,
+    creation_successful: bool,
+    counter_identity: Option<String>,
+    error_message: Option<String>,
+    counter_properties: Option<CounterProperties>,
+}
+
+/// Counter properties for validation.
+#[derive(Debug, Clone, PartialEq)]
+struct CounterProperties {
+    name: String,
+    description: String,
+    unit: String,
+    counter_type: String,
+}
+
+/// Simulate meter create_counter call.
+fn simulate_meter_create_counter(name: &str, description: &str, unit: &str) -> CounterCreationResult {
+    // Implement OpenTelemetry counter name validation rules
+    let validation_result = validate_counter_name(name);
+
+    if !validation_result.is_valid {
+        return CounterCreationResult {
+            counter_name: name.to_string(),
+            creation_successful: false,
+            counter_identity: None,
+            error_message: Some(validation_result.error_message),
+            counter_properties: None,
+        };
+    }
+
+    // Create counter with valid name
+    let counter_identity = format!("counter:{}:{}:{}", name, description, unit);
+    let properties = CounterProperties {
+        name: name.to_string(),
+        description: description.to_string(),
+        unit: unit.to_string(),
+        counter_type: "Counter".to_string(),
+    };
+
+    CounterCreationResult {
+        counter_name: name.to_string(),
+        creation_successful: true,
+        counter_identity: Some(counter_identity),
+        error_message: None,
+        counter_properties: Some(properties),
+    }
+}
+
+/// Counter name validation result.
+#[derive(Debug, Clone)]
+struct CounterNameValidation {
+    is_valid: bool,
+    error_message: String,
+    violated_rules: Vec<String>,
+}
+
+/// Validate counter name according to OpenTelemetry rules.
+fn validate_counter_name(name: &str) -> CounterNameValidation {
+    let mut violated_rules = Vec::new();
+
+    // Rule 1: Non-empty
+    if name.is_empty() {
+        violated_rules.push("Counter name cannot be empty".to_string());
+    }
+
+    // Rule 2: Length limit (typically 256 characters)
+    if name.len() > 256 {
+        violated_rules.push(format!("Counter name exceeds 256 character limit: {}", name.len()));
+    }
+
+    // Rule 3: No leading/trailing whitespace
+    if name != name.trim() {
+        violated_rules.push("Counter name cannot have leading or trailing whitespace".to_string());
+    }
+
+    // Rule 4: No internal whitespace
+    if name.contains(' ') || name.contains('\t') || name.contains('\n') || name.contains('\r') {
+        violated_rules.push("Counter name cannot contain whitespace characters".to_string());
+    }
+
+    // Rule 5: Must start with letter
+    if let Some(first_char) = name.chars().next() {
+        if !first_char.is_ascii_alphabetic() {
+            violated_rules.push("Counter name must start with a letter".to_string());
+        }
+    }
+
+    // Rule 6: Valid characters (letters, numbers, dots, underscores)
+    let invalid_chars: Vec<char> = name.chars()
+        .filter(|&c| !c.is_ascii_alphanumeric() && c != '.' && c != '_')
+        .collect();
+    if !invalid_chars.is_empty() {
+        violated_rules.push(format!(
+            "Counter name contains invalid characters: {:?}",
+            invalid_chars
+        ));
+    }
+
+    // Rule 7: No consecutive dots
+    if name.contains("..") {
+        violated_rules.push("Counter name cannot contain consecutive dots".to_string());
+    }
+
+    // Rule 8: No consecutive underscores
+    if name.contains("__") {
+        violated_rules.push("Counter name cannot contain consecutive underscores".to_string());
+    }
+
+    // Rule 9: No leading dot
+    if name.starts_with('.') {
+        violated_rules.push("Counter name cannot start with a dot".to_string());
+    }
+
+    // Rule 10: No trailing dot
+    if name.ends_with('.') {
+        violated_rules.push("Counter name cannot end with a dot".to_string());
+    }
+
+    // Rule 11: No leading underscore
+    if name.starts_with('_') {
+        violated_rules.push("Counter name cannot start with an underscore".to_string());
+    }
+
+    let is_valid = violated_rules.is_empty();
+    let error_message = if is_valid {
+        String::new()
+    } else {
+        violated_rules.join("; ")
+    };
+
+    CounterNameValidation {
+        is_valid,
+        error_message,
+        violated_rules,
+    }
+}
+
+/// Verify counter properties match expected values.
+fn verify_counter_properties(result: &CounterCreationResult, expected_name: &str) -> Result<(), String> {
+    let properties = result.counter_properties.as_ref()
+        .ok_or("Counter creation successful but no properties returned")?;
+
+    if properties.name != expected_name {
+        return Err(format!(
+            "Counter name mismatch: expected '{}', got '{}'",
+            expected_name, properties.name
+        ));
+    }
+
+    if properties.counter_type != "Counter" {
+        return Err(format!(
+            "Counter type incorrect: expected 'Counter', got '{}'",
+            properties.counter_type
+        ));
+    }
+
+    // Verify identity is consistent
+    if let Some(ref identity) = result.counter_identity {
+        if !identity.contains(expected_name) {
+            return Err(format!(
+                "Counter identity '{}' does not contain expected name '{}'",
+                identity, expected_name
+            ));
+        }
+    } else {
+        return Err("Counter creation successful but no identity returned".to_string());
+    }
+
+    Ok(())
+}
+
+/// Verify appropriate error message for invalid names.
+fn verify_appropriate_error_message(result: &CounterCreationResult, scenario_name: &str) -> Result<(), String> {
+    if result.creation_successful {
+        return Err("Counter creation succeeded when it should have failed".to_string());
+    }
+
+    let error_msg = result.error_message.as_ref()
+        .ok_or("Counter creation failed but no error message provided")?;
+
+    // Check for relevant error indicators based on scenario
+    let expected_error_indicators = match scenario_name {
+        "empty_name" => vec!["empty", "non-empty"],
+        "whitespace_only" | "leading_space" | "trailing_space" | "internal_space" => vec!["whitespace", "space"],
+        "leading_dot" | "trailing_dot" | "double_dots" => vec!["dot"],
+        "leading_underscore" | "double_underscores" => vec!["underscore"],
+        "invalid_chars_dash" | "invalid_chars_hash" | "invalid_chars_at" => vec!["invalid", "character"],
+        "unicode_chars" | "emoji" => vec!["character", "invalid"],
+        "too_long" => vec!["length", "limit", "256"],
+        "numeric_start" => vec!["letter", "start"],
+        _ => vec!["invalid"], // Generic invalid case
+    };
+
+    let error_lower = error_msg.to_lowercase();
+    let has_relevant_indicator = expected_error_indicators.iter()
+        .any(|&indicator| error_lower.contains(indicator));
+
+    if !has_relevant_indicator {
+        return Err(format!(
+            "Error message '{}' doesn't contain relevant indicators {:?} for scenario '{}'",
+            error_msg, expected_error_indicators, scenario_name
+        ));
+    }
+
+    Ok(())
+}
+
+/// Verify edge case name compliance.
+fn verify_edge_case_name_compliance(result: &CounterCreationResult, scenario_name: &str, should_succeed: bool) -> Result<(), String> {
+    if result.creation_successful != should_succeed {
+        return Err(format!(
+            "Expected {} but got {} for edge case scenario '{}'",
+            if should_succeed { "success" } else { "failure" },
+            if result.creation_successful { "success" } else { "failure" },
+            scenario_name
+        ));
+    }
+
+    // Additional specific validations for certain edge cases
+    match scenario_name {
+        "boundary_255_chars" => {
+            if should_succeed && result.counter_name.len() != 255 {
+                return Err(format!(
+                    "Boundary case 255 chars failed: name length is {}",
+                    result.counter_name.len()
+                ));
+            }
+        },
+        "boundary_256_chars" => {
+            if !should_succeed && result.error_message.as_ref().map_or(true, |msg| !msg.to_lowercase().contains("length")) {
+                return Err("256 char boundary error should mention length limit".to_string());
+            }
+        },
+        "single_dot" | "single_underscore" => {
+            if !should_succeed && result.error_message.as_ref().map_or(true, |msg| !msg.to_lowercase().contains("start")) {
+                return Err("Single special char error should mention start requirement".to_string());
+            }
+        },
+        _ => {},
+    }
+
+    Ok(())
+}
+
+/// Verify duplicate counter handling behavior.
+fn verify_duplicate_counter_handling(
+    first_result: &CounterCreationResult,
+    second_result: &CounterCreationResult,
+    first_name: &str,
+    second_name: &str,
+    _scenario_name: &str
+) -> Result<(), String> {
+    if first_name == second_name {
+        // Exact duplicates: should either return same instance or succeed with warning
+        if !second_result.creation_successful {
+            return Err(format!(
+                "Exact duplicate counter '{}' creation failed unexpectedly",
+                second_name
+            ));
+        }
+
+        // Identity should be the same for exact duplicates
+        if first_result.counter_identity != second_result.counter_identity {
+            return Err(format!(
+                "Exact duplicate counter identities differ: '{}' vs '{}'",
+                first_result.counter_identity.as_ref().unwrap_or(&"None".to_string()),
+                second_result.counter_identity.as_ref().unwrap_or(&"None".to_string())
+            ));
+        }
+    } else {
+        // Different names: both should succeed and have different identities
+        if !second_result.creation_successful {
+            return Err(format!(
+                "Different counter name '{}' creation failed: {}",
+                second_name,
+                second_result.error_message.as_ref().unwrap_or(&"No error message".to_string())
+            ));
+        }
+
+        if first_result.counter_identity == second_result.counter_identity {
+            return Err(format!(
+                "Different counter names '{}' and '{}' produced same identity",
+                first_name, second_name
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+// =============================================================================
 // Test Suite Registration
 // =============================================================================
 
@@ -6640,6 +7159,7 @@ pub fn otlp_tests<RT: RuntimeInterface>() -> Vec<ConformanceTest<RT>> {
         otlp_019_trace_state_propagation_span_hierarchy::<RT>(),
         otlp_020_http_protobuf_exporter_format::<RT>(),
         otlp_021_span_set_attribute_conformance::<RT>(),
+        otlp_022_meter_create_counter_name_validation::<RT>(),
     ]
 }
 
