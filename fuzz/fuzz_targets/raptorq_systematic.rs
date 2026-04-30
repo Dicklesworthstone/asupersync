@@ -1259,6 +1259,199 @@ fn test_repair_symbol_size_variation(
     Ok(())
 }
 
+fn test_single_byte_symbol_output(
+    k: usize,
+    seed: u64,
+    repair_count: usize,
+    source_bytes: &[u8],
+) -> Result<(), String> {
+    let symbol_size = 1usize;
+    let bounded_repair_count = repair_count.clamp(1, LARGE_FEC_MAX_REPAIR_COUNT);
+    let source = build_source_from_bytes(source_bytes, k, symbol_size);
+    let source_replay = source.clone();
+    let source_replay_all = source.clone();
+
+    let encoder = catch_unwind(AssertUnwindSafe(|| {
+        SystematicEncoder::new(&source, symbol_size, seed)
+    }))
+    .map_err(|_| {
+        format!("SystematicEncoder::new panicked for single-byte symbol check K={k}, seed={seed}")
+    })?
+    .ok_or_else(|| {
+        format!(
+            "SystematicEncoder::new returned None for single-byte symbol check K={k}, seed={seed}"
+        )
+    })?;
+    let mut encoder = encoder;
+    let systematic = catch_unwind(AssertUnwindSafe(|| encoder.emit_systematic()))
+        .map_err(|_| format!("emit_systematic panicked for single-byte symbol check K={k}"))?;
+    let repairs = catch_unwind(AssertUnwindSafe(|| encoder.emit_repair(bounded_repair_count)))
+        .map_err(|_| {
+            format!(
+                "emit_repair panicked for single-byte symbol check K={k}, repairs={bounded_repair_count}"
+            )
+        })?;
+
+    if systematic.len() != k {
+        return Err(format!(
+            "single-byte systematic count mismatch for K={k}: expected {k}, got {}",
+            systematic.len()
+        ));
+    }
+    if repairs.len() != bounded_repair_count {
+        return Err(format!(
+            "single-byte repair count mismatch for K={k}: expected {bounded_repair_count}, got {}",
+            repairs.len()
+        ));
+    }
+
+    for (idx, symbol) in systematic.iter().enumerate() {
+        if !symbol.is_source {
+            return Err(format!(
+                "single-byte systematic packet mislabeled as repair for K={k}, source_index={idx}"
+            ));
+        }
+        if symbol.esi != idx as u32 {
+            return Err(format!(
+                "single-byte systematic ESI mismatch for K={k}, source_index={idx}: got {}",
+                symbol.esi
+            ));
+        }
+        if symbol.data.len() != symbol_size {
+            return Err(format!(
+                "single-byte systematic width mismatch for K={k}, source_index={idx}: got {}",
+                symbol.data.len()
+            ));
+        }
+        if symbol.data != source[idx] {
+            return Err(format!(
+                "single-byte systematic payload mismatch for K={k}, source_index={idx}"
+            ));
+        }
+    }
+
+    let repair_base_esi = u32::try_from(k).expect("K must fit in u32 for single-byte repair check");
+    for (idx, symbol) in repairs.iter().enumerate() {
+        let expected_esi =
+            repair_base_esi + u32::try_from(idx).expect("repair index must fit in u32");
+        if symbol.is_source {
+            return Err(format!(
+                "single-byte repair packet mislabeled as source for K={k}, repair_index={idx}"
+            ));
+        }
+        if symbol.esi != expected_esi {
+            return Err(format!(
+                "single-byte repair ESI mismatch for K={k}, repair_index={idx}: expected {expected_esi}, got {}",
+                symbol.esi
+            ));
+        }
+        if symbol.data.len() != symbol_size {
+            return Err(format!(
+                "single-byte repair width mismatch for K={k}, repair_index={idx}: got {}",
+                symbol.data.len()
+            ));
+        }
+    }
+
+    let replay_encoder = catch_unwind(AssertUnwindSafe(|| {
+        SystematicEncoder::new(&source_replay, symbol_size, seed)
+    }))
+    .map_err(|_| {
+        format!(
+            "SystematicEncoder::new panicked during single-byte replay check K={k}, seed={seed}"
+        )
+    })?
+    .ok_or_else(|| {
+        format!(
+            "SystematicEncoder::new returned None during single-byte replay check K={k}, seed={seed}"
+        )
+    })?;
+    let mut replay_encoder = replay_encoder;
+    let replay_systematic = catch_unwind(AssertUnwindSafe(|| replay_encoder.emit_systematic()))
+        .map_err(|_| format!("single-byte replay emit_systematic panicked for K={k}"))?;
+    let replay_repairs = catch_unwind(AssertUnwindSafe(|| {
+        replay_encoder.emit_repair(bounded_repair_count)
+    }))
+    .map_err(|_| {
+        format!("single-byte replay emit_repair panicked for K={k}, repairs={bounded_repair_count}")
+    })?;
+
+    let systematic_replay_matches = replay_systematic.len() == systematic.len()
+        && replay_systematic
+            .iter()
+            .zip(systematic.iter())
+            .all(|(replay, original)| {
+                replay.esi == original.esi
+                    && replay.is_source == original.is_source
+                    && replay.degree == original.degree
+                    && replay.data == original.data
+            });
+    let repair_replay_matches = replay_repairs.len() == repairs.len()
+        && replay_repairs
+            .iter()
+            .zip(repairs.iter())
+            .all(|(replay, original)| {
+                replay.esi == original.esi
+                    && replay.is_source == original.is_source
+                    && replay.degree == original.degree
+                    && replay.data == original.data
+            });
+    if !systematic_replay_matches || !repair_replay_matches {
+        return Err(format!(
+            "single-byte replay mismatch for K={k}: systematic or repair packets changed across runs"
+        ));
+    }
+
+    let emit_all_encoder = catch_unwind(AssertUnwindSafe(|| {
+        SystematicEncoder::new(&source_replay_all, symbol_size, seed)
+    }))
+    .map_err(|_| {
+        format!("SystematicEncoder::new panicked during single-byte emit_all check K={k}, seed={seed}")
+    })?
+    .ok_or_else(|| {
+        format!(
+            "SystematicEncoder::new returned None during single-byte emit_all check K={k}, seed={seed}"
+        )
+    })?;
+    let mut emit_all_encoder = emit_all_encoder;
+    let emitted = catch_unwind(AssertUnwindSafe(|| {
+        emit_all_encoder.emit_all(bounded_repair_count)
+    }))
+    .map_err(|_| {
+        format!(
+            "emit_all panicked for single-byte symbol check K={k}, repairs={bounded_repair_count}"
+        )
+    })?;
+
+    let mut expected = systematic.clone();
+    expected.extend(repairs.iter().cloned());
+    let emit_all_matches = emitted.len() == expected.len()
+        && emitted
+            .iter()
+            .zip(expected.iter())
+            .all(|(actual, expected)| {
+                actual.esi == expected.esi
+                    && actual.is_source == expected.is_source
+                    && actual.degree == expected.degree
+                    && actual.data == expected.data
+            });
+    if !emit_all_matches {
+        return Err(format!(
+            "single-byte emit_all mismatch for K={k}: combined systematic+repair output differed"
+        ));
+    }
+    if emitted
+        .iter()
+        .any(|symbol| symbol.data.len() != symbol_size)
+    {
+        return Err(format!(
+            "single-byte emit_all produced non-uniform symbol width for K={k}"
+        ));
+    }
+
+    Ok(())
+}
+
 /// Main fuzzing function
 fn fuzz_systematic(mut config: FuzzConfig) -> Result<(), String> {
     let raw_k = config.k as usize;
@@ -1318,6 +1511,10 @@ fn fuzz_systematic(mut config: FuzzConfig) -> Result<(), String> {
     // Test 5f: repair-symbol APIs stay byte-identical across payload sizes
     // from 8 bytes up through the RFC u16 maximum.
     test_repair_symbol_size_variation(raw_symbol_size, seed, &config.source_bytes)?;
+
+    // Test 5g: degenerate one-byte symbols must still produce valid encoder
+    // output for arbitrary K and repair counts.
+    test_single_byte_symbol_output(k, seed, repair_count, &config.source_bytes)?;
 
     // Test 6: Basic encode/decode round-trip
     let source = generate_source_data(k, symbol_size, seed);
