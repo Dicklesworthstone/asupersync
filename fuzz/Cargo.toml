@@ -1480,6 +1480,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h1_transfer_encoding_identity"
+path = "fuzz_targets/h1_transfer_encoding_identity.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "symbol_auth"
 path = "fuzz_targets/symbol_auth.rs"
 test = false
@@ -3602,6 +3609,17 @@ bench = false
 [[bin]]
 name = "notify_waiters_empty_set"
 path = "fuzz_targets/notify_waiters_empty_set.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #159 — OnceCell take race fuzzer
+# Tests arbitrary take + set + get sequences to ensure take returns Some-then-None
+# and set after take initializes again. Validates proper race condition handling
+# in concurrent take/set/get operations.
+[[bin]]
+name = "once_cell_take_race"
+path = "fuzz_targets/once_cell_take_race.rs"
 test = false
 doc = false
 bench = false
