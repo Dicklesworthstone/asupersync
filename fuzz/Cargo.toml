@@ -1487,6 +1487,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h2_alpn_negotiation"
+path = "fuzz_targets/h2_alpn_negotiation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h1_head_transfer_encoding_chunked"
+path = "fuzz_targets/h1_head_transfer_encoding_chunked.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "symbol_auth"
 path = "fuzz_targets/symbol_auth.rs"
 test = false
@@ -3642,6 +3656,17 @@ bench = false
 [[bin]]
 name = "oneshot_explicit_close"
 path = "fuzz_targets/oneshot_explicit_close.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #162 — Notify waiters drop pending Notified futures fuzzer
+# Tests notify_waiters() combined with dropping pending Notified futures.
+# Validates dropped futures properly release waiter slots with no leaks.
+# Includes comprehensive waiter tracking and slot leak detection.
+[[bin]]
+name = "notify_waiters_drop_pending"
+path = "fuzz_targets/notify_waiters_drop_pending.rs"
 test = false
 doc = false
 bench = false
