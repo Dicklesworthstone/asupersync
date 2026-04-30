@@ -14,7 +14,7 @@ use asupersync::types::ObjectId;
 use std::collections::{BTreeSet, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-const LARGE_FEC_K: usize = 842;
+const LARGE_FEC_K: usize = 10_000;
 const LARGE_FEC_MAX_SYMBOL_SIZE: usize = 16;
 const LARGE_FEC_MAX_REPAIR_COUNT: usize = 8;
 
@@ -865,6 +865,7 @@ fn test_large_k_payload_generation_size(
     let bounded_symbol_size = symbol_size.clamp(1, LARGE_FEC_MAX_SYMBOL_SIZE);
     let bounded_repair_count = repair_count.min(LARGE_FEC_MAX_REPAIR_COUNT);
     let source = build_source_from_bytes(source_bytes, LARGE_FEC_K, bounded_symbol_size);
+    let source_replay = source.clone();
 
     let encoder = catch_unwind(AssertUnwindSafe(|| {
         SystematicEncoder::new(&source, bounded_symbol_size, seed)
@@ -885,6 +886,26 @@ fn test_large_k_payload_generation_size(
         .map_err(|_| {
             format!(
                 "emit_all panicked for large-K payload check K={LARGE_FEC_K}, T={bounded_symbol_size}, repairs={bounded_repair_count}"
+            )
+        })?;
+    let replay_encoder = catch_unwind(AssertUnwindSafe(|| {
+        SystematicEncoder::new(&source_replay, bounded_symbol_size, seed)
+    }))
+    .map_err(|_| {
+        format!(
+            "SystematicEncoder::new panicked during deterministic replay check K={LARGE_FEC_K}, T={bounded_symbol_size}, seed={seed}"
+        )
+    })?
+    .ok_or_else(|| {
+        format!(
+            "SystematicEncoder::new returned None during deterministic replay check K={LARGE_FEC_K}, T={bounded_symbol_size}, seed={seed}"
+        )
+    })?;
+    let mut replay_encoder = replay_encoder;
+    let replay_emitted = catch_unwind(AssertUnwindSafe(|| replay_encoder.emit_all(bounded_repair_count)))
+        .map_err(|_| {
+            format!(
+                "emit_all panicked during deterministic replay check K={LARGE_FEC_K}, T={bounded_symbol_size}, repairs={bounded_repair_count}"
             )
         })?;
 
@@ -912,6 +933,30 @@ fn test_large_k_payload_generation_size(
         return Err(format!(
             "large-K emit_all produced non-uniform symbol width for K={LARGE_FEC_K}, T={bounded_symbol_size}"
         ));
+    }
+    if replay_emitted.len() != emitted.len() {
+        return Err(format!(
+            "large-K deterministic replay count mismatch: first={}, second={}",
+            emitted.len(),
+            replay_emitted.len()
+        ));
+    }
+    for (idx, (first, second)) in emitted.iter().zip(replay_emitted.iter()).enumerate() {
+        if first.esi != second.esi
+            || first.is_source != second.is_source
+            || first.data != second.data
+        {
+            return Err(format!(
+                "large-K deterministic replay mismatch at symbol {idx}: \
+                 first=(esi={}, source={}, len={}), second=(esi={}, source={}, len={})",
+                first.esi,
+                first.is_source,
+                first.data.len(),
+                second.esi,
+                second.is_source,
+                second.data.len()
+            ));
+        }
     }
 
     Ok(())
@@ -988,10 +1033,10 @@ fn fuzz_systematic(mut config: FuzzConfig) -> Result<(), String> {
     // Test 5b: aggregate FEC payload generation for arbitrary source bytes.
     test_payload_generation_size(k, symbol_size, seed, repair_count, &config.source_bytes)?;
 
-    // Test 5c: bounded large-K FEC payload generation at K=842.
+    // Test 5c: bounded large-K FEC payload generation at K=10000.
     test_large_k_payload_generation_size(symbol_size, seed, repair_count, &config.source_bytes)?;
 
-    // Test 5d: adversarial K=842 edge-byte source blocks.
+    // Test 5d: adversarial K=10000 edge-byte source blocks.
     test_large_k_edge_byte_patterns(symbol_size, seed, repair_count)?;
 
     // Test 6: Basic encode/decode round-trip
