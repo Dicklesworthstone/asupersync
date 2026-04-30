@@ -4144,3 +4144,25 @@ path = "fuzz_targets/h1_lws_header_handling.rs"
 test = false
 doc = false
 bench = false
+
+# Tick #180 - Redis CLUSTER SLOTS parser fuzzer
+# Drives raw RESP plus normalized Redis Cluster slot-range replies through the
+# CLUSTER SLOTS parser, including legacy nodes, null/unknown endpoints, metadata,
+# bad ranges, invalid ports, and malformed endpoint strings.
+[[bin]]
+name = "fuzz_redis_cluster_slots"
+path = "fuzz_targets/redis_cluster_slots.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #180 — HTTP/2 HEADERS frame with trailers fuzzer
+# Tests arbitrary trailers validation to ensure they are only allowed after
+# END_STREAM data per RFC 9113 Section 8.1. Validates rejection of pseudo-
+# headers and forbidden headers in trailers, and proper stream state management.
+[[bin]]
+name = "h2_headers_frame_with_trailers"
+path = "fuzz_targets/h2_headers_frame_with_trailers.rs"
+test = false
+doc = false
+bench = false
