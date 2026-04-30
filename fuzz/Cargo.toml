@@ -3440,6 +3440,28 @@ test = false
 doc = false
 bench = false
 
+# Tick #140 — Mutex poison-then-attempt-recovery sequence fuzzer
+# Tests arbitrary panic-mid-lock + subsequent operations to ensure poisoned
+# state persists correctly and all operations handle poison appropriately.
+# Validates poison propagation and persistence semantics.
+[[bin]]
+name = "mutex_poison_persistence"
+path = "fuzz_targets/mutex_poison_persistence.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #143 — Notify notified-future drop while pending fuzzer
+# Tests arbitrary drop-during-await sequences to ensure dropping unwakes
+# notification correctly and prevents resource leaks. Validates proper
+# cleanup of pending notified futures and notification slot management.
+[[bin]]
+name = "notify_drop_pending"
+path = "fuzz_targets/notify_drop_pending.rs"
+test = false
+doc = false
+bench = false
+
 # Tick #133 — HTTP/2 PUSH_PROMISE frame handling fuzzer
 # Targets PUSH_PROMISE frame handling logic in src/http/h2/connection.rs
 # to test handling of arbitrary frames including push without ENABLE_PUSH=1,
@@ -3511,6 +3533,59 @@ bench = false
 [[bin]]
 name = "h2_headers_priority_handling"
 path = "fuzz_targets/h2_headers_priority_handling.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #141 — HTTP/2 Connection Idle Timeout Enforcement fuzzer
+# Targets src/http/h2/connection.rs idle timeout handling to test proper GOAWAY
+# frame transmission before keep-alive expiration with arbitrary idle periods.
+# Verifies timeout calculation, graceful connection closure, GOAWAY timing,
+# and proper error codes per RFC 9113 Section 6.8.
+[[bin]]
+name = "h2_idle_timeout_enforcement"
+path = "fuzz_targets/h2_idle_timeout_enforcement.rs"
+test = false
+doc = false
+bench = false
+
+# Targets src/observability/metrics.rs gauge value tracking to test the 
+# metamorphic property that gauge values match the last set operation.
+# Verifies that set() overwrites (not aggregates), add/sub modify current value,
+# and concurrent operations remain atomic across multiple threads.
+[[bin]]
+name = "gauge_value_tracking"
+path = "fuzz_targets/gauge_value_tracking.rs"
+test = false
+doc = false
+bench = false
+
+
+# Tick #142 — HTTP/2 PRIORITY Frame Cycle Detection fuzzer
+# Targets src/http/h2/connection.rs priority dependency tree management to test
+# cycle detection in stream dependency graphs with arbitrary priority relationships.
+# Verifies self-dependency detection, circular dependency rejection, and proper
+# PROTOCOL_ERROR responses per RFC 9113 Section 5.3.1.
+[[bin]]
+name = "h2_priority_cycle_detection"
+path = "fuzz_targets/h2_priority_cycle_detection.rs"
+test = false
+doc = false
+bench = false
+
+# Targets src/observability/metrics.rs Counter.add() to test OTLP monotonic counter
+# specification compliance. Verifies counters never decrease, handles overflow
+# correctly, and maintains atomicity in concurrent scenarios per OTLP requirements.
+[[bin]]
+name = "counter_monotonic_compliance"
+path = "fuzz_targets/counter_monotonic_compliance.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_server_idle_timeout_state_machine"
+path = "fuzz_targets/grpc_server_idle_timeout_state_machine.rs"
 test = false
 doc = false
 bench = false
