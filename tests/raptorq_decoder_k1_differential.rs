@@ -340,3 +340,21 @@ fn k42_thirty_percent_loss_matches_raptorq_rs() {
         "the canonical K=42 mixed source+repair case at 30% packet loss",
     );
 }
+
+#[test]
+fn k16384_five_percent_loss_matches_raptorq_rs() {
+    let k = 16_384usize;
+    let loss_count = (k * 5).div_ceil(100);
+    let repair_count = loss_count + 24;
+    let draw_count = loss_count.saturating_mul(8);
+    let drop_indices =
+        pick_unique_drop_indices_from_draws(k, draw_count, loss_count, 0xA1B2_C384_u32);
+    assert_case_matches_raptorq_rs(
+        k,
+        4,
+        0x6330_4000_u64,
+        &drop_indices,
+        repair_count,
+        "the extreme K=16384 mixed source+repair case at 5% packet loss",
+    );
+}
