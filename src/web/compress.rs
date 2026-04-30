@@ -20,6 +20,8 @@
 //! - The response already has a `content-encoding` header.
 //! - The response body is empty or below the minimum size threshold.
 //! - The response status is 204 No Content or 304 Not Modified.
+//! - The request or response is credential-bearing/sensitive and the policy
+//!   does not explicitly allow sensitive response compression.
 //! - No acceptable encoding is negotiated.
 //! - The negotiated encoding is `identity`.
 
@@ -52,6 +54,13 @@ pub struct CompressionPolicy {
     /// Compression errors once the codec would exceed this cap, before the
     /// underlying compression buffer grows past it.
     pub max_compressed_size: usize,
+
+    /// Whether to compress responses that could expose secrets through a
+    /// BREACH-style size oracle.
+    ///
+    /// Disabled by default. Operators may opt in for responses whose bodies do
+    /// not reflect attacker-controlled input next to secrets.
+    pub compress_sensitive_responses: bool,
 }
 
 impl Default for CompressionPolicy {
@@ -65,6 +74,7 @@ impl Default for CompressionPolicy {
             ],
             min_body_size: 256,
             max_compressed_size: DEFAULT_MAX_COMPRESSED_SIZE,
+            compress_sensitive_responses: false,
         }
     }
 }
@@ -90,6 +100,13 @@ impl CompressionPolicy {
     #[must_use]
     pub fn with_max_compressed_size(mut self, size: usize) -> Self {
         self.max_compressed_size = size;
+        self
+    }
+
+    /// Allow compression for credentialed or otherwise sensitive responses.
+    #[must_use]
+    pub const fn allow_sensitive_response_compression(mut self) -> Self {
+        self.compress_sensitive_responses = true;
         self
     }
 }
@@ -125,6 +142,7 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
     fn call(&self, req: Request) -> Response {
         // Extract accept-encoding before passing the request.
         let accept_encoding = req.header("accept-encoding").map(str::to_owned);
+        let request_sensitivity = RequestCompressionSensitivity::from_request(&req);
 
         let mut resp = self.inner.call(req);
 
@@ -139,6 +157,24 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
             return resp;
         }
 
+        let identity_acceptable =
+            negotiate_encoding(accept_encoding.as_deref(), &[ContentEncoding::Identity])
+                == Some(ContentEncoding::Identity);
+
+        if !self.policy.compress_sensitive_responses
+            && compression_oracle_sensitive(request_sensitivity, &resp)
+        {
+            if !identity_acceptable {
+                return Response::new(
+                    StatusCode::from_u16(406),
+                    b"No acceptable response encoding".to_vec(),
+                );
+            }
+            append_vary_token(&mut resp, "accept-encoding");
+            request_sensitivity.append_vary_tokens(&mut resp);
+            return resp;
+        }
+
         // Only negotiate encodings we can actually serve in this build.
         let available_encodings: Vec<_> = self
             .policy
@@ -147,10 +183,6 @@ impl<H: Handler> Handler for CompressionMiddleware<H> {
             .copied()
             .filter(|encoding| content_encoding_available(*encoding))
             .collect();
-
-        let identity_acceptable =
-            negotiate_encoding(accept_encoding.as_deref(), &[ContentEncoding::Identity])
-                == Some(ContentEncoding::Identity);
 
         let body_below_minimum = resp.body.len() < self.policy.min_body_size;
         if body_below_minimum && identity_acceptable {
@@ -247,6 +279,65 @@ fn content_encoding_available(encoding: ContentEncoding) -> bool {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RequestCompressionSensitivity {
+    cookie: bool,
+    authorization: bool,
+    csrf_token: bool,
+    xsrf_token: bool,
+}
+
+impl RequestCompressionSensitivity {
+    fn from_request(req: &Request) -> Self {
+        Self {
+            cookie: req.header("cookie").is_some(),
+            authorization: req.header("authorization").is_some(),
+            csrf_token: req.header("x-csrf-token").is_some(),
+            xsrf_token: req.header("x-xsrf-token").is_some(),
+        }
+    }
+
+    const fn any(self) -> bool {
+        self.cookie || self.authorization || self.csrf_token || self.xsrf_token
+    }
+
+    fn append_vary_tokens(self, resp: &mut Response) {
+        if self.cookie {
+            append_vary_token(resp, "cookie");
+        }
+        if self.authorization {
+            append_vary_token(resp, "authorization");
+        }
+        if self.csrf_token {
+            append_vary_token(resp, "x-csrf-token");
+        }
+        if self.xsrf_token {
+            append_vary_token(resp, "x-xsrf-token");
+        }
+    }
+}
+
+fn compression_oracle_sensitive(request: RequestCompressionSensitivity, resp: &Response) -> bool {
+    request.any()
+        || resp.has_header("set-cookie")
+        || resp
+            .header_value("cache-control")
+            .is_some_and(cache_control_marks_sensitive)
+}
+
+fn cache_control_marks_sensitive(value: &str) -> bool {
+    value.split(',').any(|directive| {
+        let directive = directive.trim();
+        let name = directive
+            .split_once('=')
+            .map_or(directive, |(name, _)| name)
+            .trim();
+        name.eq_ignore_ascii_case("private")
+            || name.eq_ignore_ascii_case("no-store")
+            || name.eq_ignore_ascii_case("no-cache")
+    })
+}
+
 /// Appends a token to the Vary header without clobbering existing values.
 fn append_vary_token(resp: &mut Response, token: &str) {
     let existing = resp.header_value("vary").unwrap_or_default().to_string();
@@ -301,6 +392,16 @@ mod tests {
             .header("content-encoding", "gzip")
     }
 
+    fn set_cookie_handler() -> Response {
+        Response::new(StatusCode::OK, "Hello, World! ".repeat(100).into_bytes())
+            .header("set-cookie", "session=secret; HttpOnly; Secure")
+    }
+
+    fn private_cache_control_handler() -> Response {
+        Response::new(StatusCode::OK, "Hello, World! ".repeat(100).into_bytes())
+            .header("cache-control", "private, max-age=0")
+    }
+
     fn mixed_case_already_compressed_handler() -> Response {
         let mut resp = Response::new(StatusCode::OK, b"already-compressed".to_vec());
         resp.headers
@@ -314,6 +415,12 @@ mod tests {
         resp.headers
             .insert("Vary".to_string(), "origin".to_string());
         resp
+    }
+
+    fn vary_contains(resp: &Response, token: &str) -> bool {
+        resp.headers
+            .get("vary")
+            .is_some_and(|vary| vary.split(',').any(|value| value.trim() == token))
     }
 
     // --- Basic behavior ---
@@ -455,6 +562,94 @@ mod tests {
         let req = make_request_with_encoding("identity");
         let resp = mw.call(req);
         assert!(!resp.headers.contains_key("content-encoding"));
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn credentialed_request_skips_compression_by_default() {
+        let policy = CompressionPolicy::default().with_min_body_size(0);
+        let mw = CompressionMiddleware::new(FnHandler::new(large_body_handler), policy);
+        let req = make_request_with_encoding("gzip").with_header("cookie", "session=secret");
+        let resp = mw.call(req);
+
+        assert_eq!(resp.status, StatusCode::OK);
+        assert!(!resp.headers.contains_key("content-encoding"));
+        assert!(vary_contains(&resp, "accept-encoding"));
+        assert!(vary_contains(&resp, "cookie"));
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn xsrf_header_skips_compression_and_varies_on_xsrf() {
+        let policy = CompressionPolicy::default().with_min_body_size(0);
+        let mw = CompressionMiddleware::new(FnHandler::new(large_body_handler), policy);
+        let req = make_request_with_encoding("gzip").with_header("x-xsrf-token", "secret");
+        let resp = mw.call(req);
+
+        assert_eq!(resp.status, StatusCode::OK);
+        assert!(!resp.headers.contains_key("content-encoding"));
+        assert!(vary_contains(&resp, "x-xsrf-token"));
+        assert!(!vary_contains(&resp, "x-csrf-token"));
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn sensitive_response_header_skips_compression_by_default() {
+        let policy = CompressionPolicy::default().with_min_body_size(0);
+        let mw = CompressionMiddleware::new(FnHandler::new(set_cookie_handler), policy);
+        let req = make_request_with_encoding("gzip");
+        let resp = mw.call(req);
+
+        assert_eq!(resp.status, StatusCode::OK);
+        assert!(!resp.headers.contains_key("content-encoding"));
+        assert_eq!(
+            resp.headers.get("set-cookie"),
+            Some(&"session=secret; HttpOnly; Secure".to_string())
+        );
+        assert!(vary_contains(&resp, "accept-encoding"));
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn sensitive_response_rejects_when_identity_disallowed() {
+        let policy = CompressionPolicy::default().with_min_body_size(0);
+        let mw = CompressionMiddleware::new(FnHandler::new(large_body_handler), policy);
+        let req = make_request_with_encoding("gzip, identity;q=0")
+            .with_header("authorization", "Bearer secret");
+        let resp = mw.call(req);
+
+        assert_eq!(resp.status.as_u16(), 406);
+        assert_eq!(resp.body.as_ref(), b"No acceptable response encoding");
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn private_cache_control_skips_compression_by_default() {
+        let policy = CompressionPolicy::default().with_min_body_size(0);
+        let mw = CompressionMiddleware::new(FnHandler::new(private_cache_control_handler), policy);
+        let req = make_request_with_encoding("gzip");
+        let resp = mw.call(req);
+
+        assert_eq!(resp.status, StatusCode::OK);
+        assert!(!resp.headers.contains_key("content-encoding"));
+        assert!(vary_contains(&resp, "accept-encoding"));
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn sensitive_compression_can_be_explicitly_enabled() {
+        let policy = CompressionPolicy::default()
+            .with_min_body_size(0)
+            .allow_sensitive_response_compression();
+        let mw = CompressionMiddleware::new(FnHandler::new(large_body_handler), policy);
+        let req = make_request_with_encoding("gzip").with_header("cookie", "session=secret");
+        let resp = mw.call(req);
+
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(
+            resp.headers.get("content-encoding"),
+            Some(&"gzip".to_string())
+        );
     }
 
     #[test]
@@ -617,6 +812,7 @@ mod tests {
         let policy = CompressionPolicy::default();
         assert_eq!(policy.min_body_size, 256);
         assert_eq!(policy.max_compressed_size, DEFAULT_MAX_COMPRESSED_SIZE);
+        assert!(!policy.compress_sensitive_responses);
         assert_eq!(policy.supported_encodings.len(), 4);
         assert_eq!(policy.supported_encodings[0], ContentEncoding::Brotli);
     }
