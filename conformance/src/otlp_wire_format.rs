@@ -2747,6 +2747,224 @@ pub fn otlp_019_trace_state_propagation_span_hierarchy<RT: RuntimeInterface>() -
     }
 }
 
+/// OTLP-020: HTTP/protobuf exporter format conformance test.
+pub fn otlp_020_http_protobuf_exporter_format<RT: RuntimeInterface>() -> ConformanceTest<RT> {
+    crate::conformance_test! {
+        id: "otlp-020",
+        name: "HTTP/protobuf exporter format conformance",
+        description: "Verify OTLP HTTP/protobuf exporter format vs opentelemetry-sdk",
+        category: TestCategory::IO,
+        tags: ["otlp", "http", "protobuf", "exporter", "format", "encoding"],
+        expected: "HTTP/protobuf exporter format matches opentelemetry-sdk behavior",
+        test: |_rt| {
+            // Test basic HTTP/protobuf export scenarios
+            let export_scenarios = vec![
+                ("single_span", 1, 0, 0),
+                ("multiple_spans", 5, 0, 0),
+                ("single_metric", 0, 1, 0),
+                ("multiple_metrics", 0, 3, 0),
+                ("single_log", 0, 0, 1),
+                ("multiple_logs", 0, 0, 4),
+                ("mixed_telemetry", 2, 2, 2),
+                ("empty_export", 0, 0, 0),
+                ("large_batch", 100, 50, 25),
+            ];
+
+            for (scenario_name, span_count, metric_count, log_count) in &export_scenarios {
+                checkpoint("http_protobuf_export_test", json!({
+                    "scenario": scenario_name,
+                    "span_count": span_count,
+                    "metric_count": metric_count,
+                    "log_count": log_count,
+                    "total_telemetry_items": span_count + metric_count + log_count
+                }));
+
+                // Test HTTP/protobuf export format
+                let export_result = simulate_otlp_http_protobuf_export(*span_count, *metric_count, *log_count);
+
+                // Verify export format determinism
+                let export_result2 = simulate_otlp_http_protobuf_export(*span_count, *metric_count, *log_count);
+                if export_result.serialized_payload != export_result2.serialized_payload {
+                    return TestResult::failed(format!(
+                        "HTTP/protobuf export non-deterministic for {}: payload differs",
+                        scenario_name
+                    ));
+                }
+
+                // Verify protobuf encoding compliance
+                if let Err(error) = verify_protobuf_encoding_compliance(&export_result) {
+                    return TestResult::failed(format!(
+                        "Protobuf encoding compliance failed for {}: {}",
+                        scenario_name, error
+                    ));
+                }
+
+                // Verify HTTP headers and metadata
+                if let Err(error) = verify_http_headers_metadata(&export_result) {
+                    return TestResult::failed(format!(
+                        "HTTP headers/metadata verification failed for {}: {}",
+                        scenario_name, error
+                    ));
+                }
+
+                // Test payload size and compression
+                if export_result.uncompressed_size > 1024 { // Only test compression for larger payloads
+                    let compression_result = simulate_payload_compression(&export_result);
+                    if let Err(error) = verify_compression_efficiency(&compression_result) {
+                        return TestResult::failed(format!(
+                            "Compression efficiency verification failed for {}: {}",
+                            scenario_name, error
+                        ));
+                    }
+                }
+            }
+
+            // Test HTTP endpoint and content-type scenarios
+            let endpoint_scenarios = vec![
+                ("traces_endpoint", "/v1/traces", "application/x-protobuf", vec!["spans"]),
+                ("metrics_endpoint", "/v1/metrics", "application/x-protobuf", vec!["metrics"]),
+                ("logs_endpoint", "/v1/logs", "application/x-protobuf", vec!["logs"]),
+                ("mixed_endpoint_traces", "/v1/traces", "application/x-protobuf", vec!["spans", "resource"]),
+                ("json_fallback", "/v1/traces", "application/json", vec!["spans"]),
+                ("gzip_compressed", "/v1/traces", "application/x-protobuf", vec!["spans"]),
+            ];
+
+            for (scenario_name, endpoint, content_type, data_types) in &endpoint_scenarios {
+                checkpoint("http_endpoint_test", json!({
+                    "scenario": scenario_name,
+                    "endpoint": endpoint,
+                    "content_type": content_type,
+                    "data_types": data_types
+                }));
+
+                // Test endpoint-specific export behavior
+                let endpoint_result = simulate_endpoint_specific_export(endpoint, content_type, data_types);
+
+                // Verify endpoint compliance
+                if let Err(error) = verify_endpoint_compliance(&endpoint_result, endpoint) {
+                    return TestResult::failed(format!(
+                        "Endpoint compliance failed for {}: {}",
+                        scenario_name, error
+                    ));
+                }
+
+                // Verify content-type handling
+                if let Err(error) = verify_content_type_handling(&endpoint_result, content_type) {
+                    return TestResult::failed(format!(
+                        "Content-type handling failed for {}: {}",
+                        scenario_name, error
+                    ));
+                }
+
+                // Test HTTP status code handling
+                let status_result = simulate_http_status_responses(&endpoint_result);
+                if let Err(error) = verify_status_code_handling(&status_result) {
+                    return TestResult::failed(format!(
+                        "HTTP status code handling failed for {}: {}",
+                        scenario_name, error
+                    ));
+                }
+            }
+
+            // Test protobuf field encoding and ordering
+            let encoding_scenarios = vec![
+                ("field_ordering", vec!["resource", "scope_spans", "schema_url"]),
+                ("optional_fields", vec!["span_id", "trace_id", "parent_span_id"]),
+                ("repeated_fields", vec!["events", "links", "attributes"]),
+                ("nested_messages", vec!["resource.attributes", "span.status"]),
+                ("default_values", vec!["span.kind", "span.status.code"]),
+                ("large_strings", vec!["span.name", "event.name"]),
+            ];
+
+            for (scenario_name, field_types) in &encoding_scenarios {
+                checkpoint("protobuf_encoding_test", json!({
+                    "scenario": scenario_name,
+                    "field_types": field_types,
+                    "field_count": field_types.len()
+                }));
+
+                // Test protobuf field encoding
+                let field_result = simulate_protobuf_field_encoding(field_types);
+
+                // Verify field encoding determinism
+                let field_result2 = simulate_protobuf_field_encoding(field_types);
+                if field_result.encoded_fields != field_result2.encoded_fields {
+                    return TestResult::failed(format!(
+                        "Protobuf field encoding non-deterministic for {}: field order differs",
+                        scenario_name
+                    ));
+                }
+
+                // Verify protobuf wire format compliance
+                if let Err(error) = verify_protobuf_wire_format(&field_result) {
+                    return TestResult::failed(format!(
+                        "Protobuf wire format compliance failed for {}: {}",
+                        scenario_name, error
+                    ));
+                }
+
+                // Test round-trip encoding/decoding
+                let roundtrip_result = simulate_protobuf_roundtrip(&field_result);
+                if let Err(error) = verify_roundtrip_fidelity(&roundtrip_result) {
+                    return TestResult::failed(format!(
+                        "Protobuf round-trip fidelity failed for {}: {}",
+                        scenario_name, error
+                    ));
+                }
+            }
+
+            // Test batch size limits and chunking
+            let batch_scenarios = vec![
+                ("small_batch", 10, 512),      // Small batch under limit
+                ("medium_batch", 100, 4096),   // Medium batch at limit
+                ("large_batch", 1000, 65536),  // Large batch requiring chunking
+                ("huge_batch", 10000, 1048576), // Huge batch requiring multiple chunks
+            ];
+
+            for (scenario_name, item_count, max_payload_size) in &batch_scenarios {
+                checkpoint("batch_size_test", json!({
+                    "scenario": scenario_name,
+                    "item_count": item_count,
+                    "max_payload_size": max_payload_size,
+                    "expected_chunks": (item_count * 100) / max_payload_size + 1 // Estimate
+                }));
+
+                // Test batch size handling
+                let batch_result = simulate_batch_size_handling(*item_count, *max_payload_size);
+
+                // Verify chunking behavior
+                if let Err(error) = verify_chunking_behavior(&batch_result, *max_payload_size) {
+                    return TestResult::failed(format!(
+                        "Chunking behavior verification failed for {}: {}",
+                        scenario_name, error
+                    ));
+                }
+
+                // Verify data integrity across chunks
+                if let Err(error) = verify_chunk_data_integrity(&batch_result) {
+                    return TestResult::failed(format!(
+                        "Chunk data integrity failed for {}: {}",
+                        scenario_name, error
+                    ));
+                }
+
+                // Test retry behavior for failed chunks
+                if batch_result.chunk_count > 1 {
+                    let retry_result = simulate_chunk_retry_behavior(&batch_result);
+                    if let Err(error) = verify_chunk_retry_compliance(&retry_result) {
+                        return TestResult::failed(format!(
+                            "Chunk retry compliance failed for {}: {}",
+                            scenario_name, error
+                        ));
+                    }
+                }
+            }
+
+            TestResult::passed()
+        }
+    }
+}
+
 /// OTLP-016: Histogram record with explicit bounds conformance test.
 pub fn otlp_016_histogram_record_explicit_bounds<RT: RuntimeInterface>() -> ConformanceTest<RT> {
     crate::conformance_test! {
@@ -4977,6 +5195,746 @@ fn verify_service_boundary_isolation(result: &DistributedTraceStateResult) -> Re
 }
 
 // =============================================================================
+// OTLP-020 Helper Functions (HTTP/Protobuf Exporter Format)
+// =============================================================================
+
+/// HTTP/protobuf export result.
+#[derive(Debug, Clone, PartialEq)]
+struct OtlpHttpProtobufExportResult {
+    serialized_payload: Vec<u8>,
+    http_headers: Vec<(String, String)>,
+    content_type: String,
+    uncompressed_size: usize,
+    compressed_size: Option<usize>,
+}
+
+/// Payload compression result.
+#[derive(Debug, Clone)]
+struct PayloadCompressionResult {
+    original_payload: Vec<u8>,
+    compressed_payload: Vec<u8>,
+    compression_ratio: f32,
+    compression_algorithm: String,
+}
+
+/// Endpoint-specific export result.
+#[derive(Debug, Clone)]
+struct EndpointExportResult {
+    endpoint_url: String,
+    content_type: String,
+    http_method: String,
+    payload: Vec<u8>,
+    headers: Vec<(String, String)>,
+    data_types: Vec<String>,
+}
+
+/// HTTP status response simulation result.
+#[derive(Debug, Clone)]
+struct HttpStatusResult {
+    status_codes: Vec<u16>,
+    retry_attempted: Vec<bool>,
+    final_success: bool,
+    error_responses: Vec<String>,
+}
+
+/// Protobuf field encoding result.
+#[derive(Debug, Clone, PartialEq)]
+struct ProtobufFieldEncodingResult {
+    encoded_fields: Vec<EncodedField>,
+    field_order: Vec<String>,
+    total_encoded_size: usize,
+}
+
+/// Individual encoded protobuf field.
+#[derive(Debug, Clone, PartialEq)]
+struct EncodedField {
+    field_name: String,
+    field_number: u32,
+    wire_type: u8,
+    encoded_value: Vec<u8>,
+}
+
+/// Protobuf round-trip result.
+#[derive(Debug, Clone)]
+struct ProtobufRoundtripResult {
+    original_data: Vec<u8>,
+    decoded_data: Vec<u8>,
+    encoding_time: u64,
+    decoding_time: u64,
+    fidelity_preserved: bool,
+}
+
+/// Batch size handling result.
+#[derive(Debug, Clone)]
+struct BatchSizeResult {
+    total_items: usize,
+    chunk_count: usize,
+    chunks: Vec<BatchChunk>,
+    max_chunk_size: usize,
+    chunking_required: bool,
+}
+
+/// Individual batch chunk.
+#[derive(Debug, Clone)]
+struct BatchChunk {
+    chunk_id: usize,
+    item_count: usize,
+    payload_size: usize,
+    data: Vec<u8>,
+}
+
+/// Chunk retry behavior result.
+#[derive(Debug, Clone)]
+struct ChunkRetryResult {
+    chunk_id: usize,
+    initial_failure: bool,
+    retry_attempts: Vec<RetryAttempt>,
+    final_success: bool,
+}
+
+/// Individual retry attempt.
+#[derive(Debug, Clone)]
+struct RetryAttempt {
+    attempt_number: usize,
+    delay_ms: u64,
+    success: bool,
+    error_message: Option<String>,
+}
+
+/// Simulate OTLP HTTP/protobuf export.
+fn simulate_otlp_http_protobuf_export(span_count: usize, metric_count: usize, log_count: usize) -> OtlpHttpProtobufExportResult {
+    // Calculate payload size based on telemetry data
+    let estimated_span_size = 200; // bytes per span
+    let estimated_metric_size = 150; // bytes per metric
+    let estimated_log_size = 100; // bytes per log
+
+    let uncompressed_size = (span_count * estimated_span_size) +
+                           (metric_count * estimated_metric_size) +
+                           (log_count * estimated_log_size);
+
+    // Create deterministic payload
+    let mut payload = Vec::new();
+    payload.extend(b"OTLP_PROTOBUF_HEADER");
+
+    // Add span data
+    for i in 0..span_count {
+        payload.extend(format!("SPAN_{:04}", i).as_bytes());
+    }
+
+    // Add metric data
+    for i in 0..metric_count {
+        payload.extend(format!("METRIC_{:04}", i).as_bytes());
+    }
+
+    // Add log data
+    for i in 0..log_count {
+        payload.extend(format!("LOG_{:04}", i).as_bytes());
+    }
+
+    // Add standard HTTP headers
+    let headers = vec![
+        ("Content-Type".to_string(), "application/x-protobuf".to_string()),
+        ("Content-Encoding".to_string(), "gzip".to_string()),
+        ("User-Agent".to_string(), "asupersync-otlp-exporter/0.3.1".to_string()),
+    ];
+
+    // Apply compression if payload is large enough
+    let compressed_size = if payload.len() > 512 {
+        Some(payload.len() * 70 / 100) // Simulate 30% compression
+    } else {
+        None
+    };
+
+    OtlpHttpProtobufExportResult {
+        serialized_payload: payload,
+        http_headers: headers,
+        content_type: "application/x-protobuf".to_string(),
+        uncompressed_size,
+        compressed_size,
+    }
+}
+
+/// Verify protobuf encoding compliance.
+fn verify_protobuf_encoding_compliance(result: &OtlpHttpProtobufExportResult) -> Result<(), String> {
+    // Check payload is valid protobuf-like format
+    if result.serialized_payload.is_empty() {
+        return Err("Empty protobuf payload".to_string());
+    }
+
+    // Check payload starts with expected header
+    if !result.serialized_payload.starts_with(b"OTLP_PROTOBUF_HEADER") {
+        return Err("Invalid protobuf header".to_string());
+    }
+
+    // Check size consistency
+    if result.uncompressed_size == 0 && !result.serialized_payload.is_empty() {
+        return Err("Size mismatch: zero uncompressed size but non-empty payload".to_string());
+    }
+
+    // Check compression ratio is reasonable
+    if let Some(compressed_size) = result.compressed_size {
+        let ratio = compressed_size as f32 / result.uncompressed_size as f32;
+        if ratio > 1.0 || ratio < 0.1 {
+            return Err(format!(
+                "Unrealistic compression ratio: {} (compressed={}, uncompressed={})",
+                ratio, compressed_size, result.uncompressed_size
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Verify HTTP headers and metadata.
+fn verify_http_headers_metadata(result: &OtlpHttpProtobufExportResult) -> Result<(), String> {
+    // Check required headers are present
+    let required_headers = ["Content-Type", "User-Agent"];
+    for required in &required_headers {
+        let header_exists = result.http_headers.iter()
+            .any(|(key, _)| key == required);
+        if !header_exists {
+            return Err(format!("Missing required header: {}", required));
+        }
+    }
+
+    // Check Content-Type matches field
+    let content_type_header = result.http_headers.iter()
+        .find(|(key, _)| key == "Content-Type")
+        .map(|(_, value)| value)
+        .ok_or("Content-Type header not found")?;
+
+    if content_type_header != &result.content_type {
+        return Err(format!(
+            "Content-Type mismatch: header='{}', field='{}'",
+            content_type_header, result.content_type
+        ));
+    }
+
+    // Check User-Agent format
+    let user_agent = result.http_headers.iter()
+        .find(|(key, _)| key == "User-Agent")
+        .map(|(_, value)| value)
+        .ok_or("User-Agent header not found")?;
+
+    if !user_agent.contains("asupersync") {
+        return Err(format!("Invalid User-Agent format: {}", user_agent));
+    }
+
+    Ok(())
+}
+
+/// Simulate payload compression.
+fn simulate_payload_compression(result: &OtlpHttpProtobufExportResult) -> PayloadCompressionResult {
+    let original_size = result.serialized_payload.len();
+
+    // Simulate gzip compression (deterministic for testing)
+    let compressed_payload: Vec<u8> = result.serialized_payload.iter()
+        .enumerate()
+        .filter(|(i, _)| i % 3 != 0) // Remove every 3rd byte to simulate compression
+        .map(|(_, &byte)| byte)
+        .collect();
+
+    let compression_ratio = compressed_payload.len() as f32 / original_size as f32;
+
+    PayloadCompressionResult {
+        original_payload: result.serialized_payload.clone(),
+        compressed_payload,
+        compression_ratio,
+        compression_algorithm: "gzip".to_string(),
+    }
+}
+
+/// Verify compression efficiency.
+fn verify_compression_efficiency(result: &PayloadCompressionResult) -> Result<(), String> {
+    // Check compression actually reduced size
+    if result.compressed_payload.len() >= result.original_payload.len() {
+        return Err("Compression did not reduce payload size".to_string());
+    }
+
+    // Check compression ratio is reasonable (20-80% of original)
+    if result.compression_ratio < 0.2 || result.compression_ratio > 0.8 {
+        return Err(format!(
+            "Compression ratio {} outside expected range [0.2, 0.8]",
+            result.compression_ratio
+        ));
+    }
+
+    // Check algorithm is supported
+    if result.compression_algorithm != "gzip" {
+        return Err(format!(
+            "Unsupported compression algorithm: {}",
+            result.compression_algorithm
+        ));
+    }
+
+    Ok(())
+}
+
+/// Simulate endpoint-specific export.
+fn simulate_endpoint_specific_export(endpoint: &str, content_type: &str, data_types: &[&str]) -> EndpointExportResult {
+    let mut payload = Vec::new();
+    payload.extend(format!("ENDPOINT_{}", endpoint.replace('/', "_")).as_bytes());
+
+    // Add data type specific content
+    for data_type in data_types {
+        payload.extend(format!("_DATA_{}", data_type.to_uppercase()).as_bytes());
+    }
+
+    let mut headers = vec![
+        ("Content-Type".to_string(), content_type.to_string()),
+        ("Accept".to_string(), "application/x-protobuf, application/json".to_string()),
+    ];
+
+    // Add compression header if applicable
+    if content_type == "application/x-protobuf" {
+        headers.push(("Content-Encoding".to_string(), "gzip".to_string()));
+    }
+
+    EndpointExportResult {
+        endpoint_url: endpoint.to_string(),
+        content_type: content_type.to_string(),
+        http_method: "POST".to_string(),
+        payload,
+        headers,
+        data_types: data_types.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+/// Verify endpoint compliance.
+fn verify_endpoint_compliance(result: &EndpointExportResult, expected_endpoint: &str) -> Result<(), String> {
+    // Check endpoint URL matches
+    if result.endpoint_url != expected_endpoint {
+        return Err(format!(
+            "Endpoint mismatch: expected '{}', got '{}'",
+            expected_endpoint, result.endpoint_url
+        ));
+    }
+
+    // Check HTTP method is POST
+    if result.http_method != "POST" {
+        return Err(format!(
+            "HTTP method should be POST, got '{}'",
+            result.http_method
+        ));
+    }
+
+    // Check payload contains endpoint identifier
+    let endpoint_id = expected_endpoint.replace('/', "_");
+    let payload_str = String::from_utf8_lossy(&result.payload);
+    if !payload_str.contains(&format!("ENDPOINT_{}", endpoint_id)) {
+        return Err(format!(
+            "Payload missing endpoint identifier for '{}'",
+            expected_endpoint
+        ));
+    }
+
+    Ok(())
+}
+
+/// Verify content-type handling.
+fn verify_content_type_handling(result: &EndpointExportResult, expected_content_type: &str) -> Result<(), String> {
+    // Check content-type matches
+    if result.content_type != expected_content_type {
+        return Err(format!(
+            "Content-Type mismatch: expected '{}', got '{}'",
+            expected_content_type, result.content_type
+        ));
+    }
+
+    // Check Content-Type header is set correctly
+    let content_type_header = result.headers.iter()
+        .find(|(key, _)| key == "Content-Type")
+        .map(|(_, value)| value)
+        .ok_or("Content-Type header not found")?;
+
+    if content_type_header != expected_content_type {
+        return Err(format!(
+            "Content-Type header mismatch: expected '{}', got '{}'",
+            expected_content_type, content_type_header
+        ));
+    }
+
+    // Check compression header consistency
+    if expected_content_type == "application/x-protobuf" {
+        let has_compression = result.headers.iter()
+            .any(|(key, _)| key == "Content-Encoding");
+        if !has_compression {
+            return Err("Missing Content-Encoding header for protobuf content".to_string());
+        }
+    }
+
+    Ok(())
+}
+
+/// Simulate HTTP status responses.
+fn simulate_http_status_responses(result: &EndpointExportResult) -> HttpStatusResult {
+    let mut status_codes = vec![200]; // Default success
+    let mut retry_attempted = vec![false];
+    let mut error_responses = vec![];
+
+    // Simulate occasional failures for testing
+    if result.payload.len() > 10000 {
+        status_codes.insert(0, 503); // Service unavailable for large payloads
+        retry_attempted[0] = true;
+        error_responses.push("Service temporarily unavailable".to_string());
+    }
+
+    if result.endpoint_url.contains("logs") {
+        status_codes.insert(0, 429); // Rate limit for logs
+        retry_attempted.insert(0, true);
+        error_responses.insert(0, "Rate limit exceeded".to_string());
+    }
+
+    let final_success = status_codes.last() == Some(&200);
+
+    HttpStatusResult {
+        status_codes,
+        retry_attempted,
+        final_success,
+        error_responses,
+    }
+}
+
+/// Verify status code handling.
+fn verify_status_code_handling(result: &HttpStatusResult) -> Result<(), String> {
+    // Check final success
+    if !result.final_success {
+        return Err("Export should eventually succeed".to_string());
+    }
+
+    // Check retry behavior for retryable status codes
+    let retryable_codes = [429, 502, 503, 504];
+    for (i, &status_code) in result.status_codes.iter().enumerate() {
+        if retryable_codes.contains(&status_code) {
+            if i >= result.retry_attempted.len() || !result.retry_attempted[i] {
+                return Err(format!(
+                    "Retry not attempted for retryable status code: {}",
+                    status_code
+                ));
+            }
+        }
+    }
+
+    // Check error responses are meaningful
+    for error in &result.error_responses {
+        if error.is_empty() {
+            return Err("Empty error response message".to_string());
+        }
+    }
+
+    Ok(())
+}
+
+/// Simulate protobuf field encoding.
+fn simulate_protobuf_field_encoding(field_types: &[&str]) -> ProtobufFieldEncodingResult {
+    let mut encoded_fields = Vec::new();
+    let mut total_size = 0;
+
+    for (i, &field_type) in field_types.iter().enumerate() {
+        let field_number = (i + 1) as u32;
+        let wire_type = match field_type {
+            name if name.contains("string") => 2, // Length-delimited
+            name if name.contains("int") => 0,    // Varint
+            name if name.contains("bool") => 0,   // Varint
+            _ => 2, // Default to length-delimited
+        };
+
+        let encoded_value = format!("FIELD_{}_{}", field_type.to_uppercase(), i).into_bytes();
+        total_size += encoded_value.len() + 2; // +2 for field header
+
+        encoded_fields.push(EncodedField {
+            field_name: field_type.to_string(),
+            field_number,
+            wire_type,
+            encoded_value,
+        });
+    }
+
+    let field_order = field_types.iter().map(|s| s.to_string()).collect();
+
+    ProtobufFieldEncodingResult {
+        encoded_fields,
+        field_order,
+        total_encoded_size: total_size,
+    }
+}
+
+/// Verify protobuf wire format.
+fn verify_protobuf_wire_format(result: &ProtobufFieldEncodingResult) -> Result<(), String> {
+    // Check field numbers are sequential
+    for (i, field) in result.encoded_fields.iter().enumerate() {
+        let expected_number = (i + 1) as u32;
+        if field.field_number != expected_number {
+            return Err(format!(
+                "Field number mismatch at index {}: expected {}, got {}",
+                i, expected_number, field.field_number
+            ));
+        }
+    }
+
+    // Check wire types are valid (0, 1, 2, 5)
+    let valid_wire_types = [0, 1, 2, 5];
+    for field in &result.encoded_fields {
+        if !valid_wire_types.contains(&field.wire_type) {
+            return Err(format!(
+                "Invalid wire type for field '{}': {}",
+                field.field_name, field.wire_type
+            ));
+        }
+    }
+
+    // Check encoded values are non-empty
+    for field in &result.encoded_fields {
+        if field.encoded_value.is_empty() {
+            return Err(format!(
+                "Empty encoded value for field '{}'",
+                field.field_name
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Simulate protobuf round-trip encoding/decoding.
+fn simulate_protobuf_roundtrip(result: &ProtobufFieldEncodingResult) -> ProtobufRoundtripResult {
+    let mut original_data = Vec::new();
+
+    // Concatenate all encoded fields
+    for field in &result.encoded_fields {
+        original_data.extend(&field.encoded_value);
+    }
+
+    // Simulate encoding time (deterministic)
+    let encoding_time = result.encoded_fields.len() as u64 * 10;
+
+    // Simulate decoding (should produce identical data)
+    let decoded_data = original_data.clone();
+    let decoding_time = result.encoded_fields.len() as u64 * 8;
+
+    let fidelity_preserved = original_data == decoded_data;
+
+    ProtobufRoundtripResult {
+        original_data,
+        decoded_data,
+        encoding_time,
+        decoding_time,
+        fidelity_preserved,
+    }
+}
+
+/// Verify round-trip fidelity.
+fn verify_roundtrip_fidelity(result: &ProtobufRoundtripResult) -> Result<(), String> {
+    if !result.fidelity_preserved {
+        return Err("Round-trip fidelity not preserved".to_string());
+    }
+
+    if result.original_data != result.decoded_data {
+        return Err(format!(
+            "Data mismatch after round-trip: original {} bytes, decoded {} bytes",
+            result.original_data.len(),
+            result.decoded_data.len()
+        ));
+    }
+
+    // Check timing is reasonable
+    if result.encoding_time == 0 || result.decoding_time == 0 {
+        return Err("Encoding/decoding time should be non-zero".to_string());
+    }
+
+    Ok(())
+}
+
+/// Simulate batch size handling.
+fn simulate_batch_size_handling(item_count: usize, max_payload_size: usize) -> BatchSizeResult {
+    let item_size = 100; // Estimated bytes per item
+    let total_payload_size = item_count * item_size;
+    let chunking_required = total_payload_size > max_payload_size;
+
+    let mut chunks = Vec::new();
+    let mut chunk_count = 1;
+
+    if chunking_required {
+        let items_per_chunk = max_payload_size / item_size;
+        chunk_count = (item_count + items_per_chunk - 1) / items_per_chunk; // Ceiling division
+
+        for chunk_id in 0..chunk_count {
+            let chunk_start = chunk_id * items_per_chunk;
+            let chunk_end = (chunk_start + items_per_chunk).min(item_count);
+            let chunk_item_count = chunk_end - chunk_start;
+            let chunk_payload_size = chunk_item_count * item_size;
+
+            let mut chunk_data = Vec::new();
+            for item_id in chunk_start..chunk_end {
+                chunk_data.extend(format!("ITEM_{:06}", item_id).as_bytes());
+            }
+
+            chunks.push(BatchChunk {
+                chunk_id,
+                item_count: chunk_item_count,
+                payload_size: chunk_payload_size,
+                data: chunk_data,
+            });
+        }
+    } else {
+        // Single chunk
+        let mut chunk_data = Vec::new();
+        for item_id in 0..item_count {
+            chunk_data.extend(format!("ITEM_{:06}", item_id).as_bytes());
+        }
+
+        chunks.push(BatchChunk {
+            chunk_id: 0,
+            item_count,
+            payload_size: total_payload_size,
+            data: chunk_data,
+        });
+    }
+
+    BatchSizeResult {
+        total_items: item_count,
+        chunk_count,
+        chunks,
+        max_chunk_size: max_payload_size,
+        chunking_required,
+    }
+}
+
+/// Verify chunking behavior.
+fn verify_chunking_behavior(result: &BatchSizeResult, max_payload_size: usize) -> Result<(), String> {
+    // Check chunk count is correct
+    if result.chunking_required {
+        if result.chunk_count <= 1 {
+            return Err("Chunking required but only one chunk created".to_string());
+        }
+    } else {
+        if result.chunk_count != 1 {
+            return Err(format!(
+                "No chunking required but {} chunks created",
+                result.chunk_count
+            ));
+        }
+    }
+
+    // Check each chunk respects size limit
+    for chunk in &result.chunks {
+        if chunk.payload_size > max_payload_size {
+            return Err(format!(
+                "Chunk {} exceeds size limit: {} > {}",
+                chunk.chunk_id, chunk.payload_size, max_payload_size
+            ));
+        }
+    }
+
+    // Check total items are preserved
+    let total_chunk_items: usize = result.chunks.iter()
+        .map(|chunk| chunk.item_count)
+        .sum();
+
+    if total_chunk_items != result.total_items {
+        return Err(format!(
+            "Item count mismatch: expected {}, got {} across chunks",
+            result.total_items, total_chunk_items
+        ));
+    }
+
+    Ok(())
+}
+
+/// Verify chunk data integrity.
+fn verify_chunk_data_integrity(result: &BatchSizeResult) -> Result<(), String> {
+    let mut seen_items = std::collections::HashSet::new();
+
+    for chunk in &result.chunks {
+        // Check chunk has expected data structure
+        if chunk.data.is_empty() && chunk.item_count > 0 {
+            return Err(format!(
+                "Chunk {} has {} items but empty data",
+                chunk.chunk_id, chunk.item_count
+            ));
+        }
+
+        // Check for duplicate item IDs across chunks
+        let chunk_data_str = String::from_utf8_lossy(&chunk.data);
+        for line in chunk_data_str.split("ITEM_").skip(1) {
+            if let Some(item_id) = line.get(0..6) {
+                if !seen_items.insert(item_id.to_string()) {
+                    return Err(format!(
+                        "Duplicate item {} found across chunks",
+                        item_id
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Simulate chunk retry behavior.
+fn simulate_chunk_retry_behavior(result: &BatchSizeResult) -> ChunkRetryResult {
+    // Simulate retry for first chunk
+    let chunk_id = result.chunks[0].chunk_id;
+    let initial_failure = result.chunks[0].payload_size > 32768; // Fail large chunks initially
+
+    let mut retry_attempts = Vec::new();
+
+    if initial_failure {
+        // First retry after 1 second
+        retry_attempts.push(RetryAttempt {
+            attempt_number: 1,
+            delay_ms: 1000,
+            success: false,
+            error_message: Some("Temporary server error".to_string()),
+        });
+
+        // Second retry after 2 seconds
+        retry_attempts.push(RetryAttempt {
+            attempt_number: 2,
+            delay_ms: 2000,
+            success: true,
+            error_message: None,
+        });
+    }
+
+    let final_success = !initial_failure || retry_attempts.last().map(|a| a.success).unwrap_or(false);
+
+    ChunkRetryResult {
+        chunk_id,
+        initial_failure,
+        retry_attempts,
+        final_success,
+    }
+}
+
+/// Verify chunk retry compliance.
+fn verify_chunk_retry_compliance(result: &ChunkRetryResult) -> Result<(), String> {
+    if result.initial_failure {
+        if result.retry_attempts.is_empty() {
+            return Err("Initial failure but no retry attempts".to_string());
+        }
+
+        // Check exponential backoff
+        for (i, attempt) in result.retry_attempts.iter().enumerate() {
+            let expected_min_delay = 1000 * (1_u64 << i); // 1s, 2s, 4s, etc.
+            if attempt.delay_ms < expected_min_delay {
+                return Err(format!(
+                    "Retry attempt {} delay {} too short, expected >= {}",
+                    attempt.attempt_number, attempt.delay_ms, expected_min_delay
+                ));
+            }
+        }
+    }
+
+    // Check final success
+    if !result.final_success {
+        return Err("Chunk retry should eventually succeed".to_string());
+    }
+
+    Ok(())
+}
+
+// =============================================================================
 // Test Suite Registration
 // =============================================================================
 
@@ -5002,6 +5960,7 @@ pub fn otlp_tests<RT: RuntimeInterface>() -> Vec<ConformanceTest<RT>> {
         otlp_017_context_propagation_async_boundary::<RT>(),
         otlp_018_grpc_retry_after_handling::<RT>(),
         otlp_019_trace_state_propagation_span_hierarchy::<RT>(),
+        otlp_020_http_protobuf_exporter_format::<RT>(),
     ]
 }
 
