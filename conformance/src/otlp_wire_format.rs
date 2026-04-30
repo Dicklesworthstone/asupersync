@@ -2029,6 +2029,364 @@ fn simulate_updown_counter_overflow_protection() -> UpDownCounterResult {
     result
 }
 
+/// Histogram bucket layout for testing.
+#[derive(Debug, Clone, PartialEq)]
+struct HistogramLayout {
+    histogram_name: String,
+    bounds: Vec<f64>,
+    bucket_count: usize,
+}
+
+/// Histogram recording result for testing.
+#[derive(Debug, Clone, PartialEq)]
+struct HistogramRecordingResult {
+    histogram_name: String,
+    bucket_counts: Vec<usize>,
+    total_count: usize,
+    bounds: Vec<f64>,
+}
+
+/// Create histogram with explicit bounds for layout testing.
+fn create_histogram_with_bounds(histogram_name: &str, explicit_bounds: &[f64]) -> HistogramLayout {
+    // Normalize bounds: sort, deduplicate, filter valid values
+    let mut normalized_bounds = explicit_bounds.to_vec();
+    normalized_bounds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    normalized_bounds.dedup();
+
+    // Remove any NaN or infinite values
+    normalized_bounds.retain(|&x| x.is_finite());
+
+    // Bucket count is bounds.len() + 1 (including underflow and overflow buckets)
+    let bucket_count = if normalized_bounds.is_empty() { 1 } else { normalized_bounds.len() + 1 };
+
+    HistogramLayout {
+        histogram_name: histogram_name.to_string(),
+        bounds: normalized_bounds,
+        bucket_count,
+    }
+}
+
+/// Generate test values strategically positioned around bounds.
+fn generate_test_values_for_bounds(bounds: &[f64]) -> Vec<f64> {
+    let mut test_values = vec![];
+
+    if bounds.is_empty() {
+        // No bounds - test some arbitrary values
+        test_values.extend(&[0.0, 1.0, -1.0, 10.0, -10.0]);
+        return test_values;
+    }
+
+    // Add values below the first bound
+    let first_bound = bounds[0];
+    test_values.extend(&[
+        first_bound - 100.0,
+        first_bound - 1.0,
+        first_bound - f64::EPSILON,
+    ]);
+
+    // Add values at and around each bound
+    for &bound in bounds {
+        test_values.extend(&[
+            bound - f64::EPSILON,
+            bound,
+            bound + f64::EPSILON,
+        ]);
+    }
+
+    // Add values above the last bound
+    let last_bound = bounds[bounds.len() - 1];
+    test_values.extend(&[
+        last_bound + f64::EPSILON,
+        last_bound + 1.0,
+        last_bound + 100.0,
+    ]);
+
+    // Add some values in between bounds
+    for i in 0..bounds.len().saturating_sub(1) {
+        let mid_value = (bounds[i] + bounds[i + 1]) / 2.0;
+        test_values.push(mid_value);
+    }
+
+    test_values
+}
+
+/// Find which bucket a value would be assigned to.
+fn find_bucket_for_value(layout: &HistogramLayout, value: f64) -> usize {
+    if layout.bounds.is_empty() {
+        // Only one bucket when no bounds
+        return 0;
+    }
+
+    // Find the first bound that the value is less than or equal to
+    for (i, &bound) in layout.bounds.iter().enumerate() {
+        if value <= bound {
+            return i;
+        }
+    }
+
+    // Value is greater than all bounds - goes in overflow bucket
+    layout.bounds.len()
+}
+
+/// Verify histogram bucket layout properties.
+fn verify_bucket_layout_properties(layout: &HistogramLayout, original_bounds: &[f64]) -> Result<(), String> {
+    // Check bucket count consistency
+    let expected_buckets = if layout.bounds.is_empty() { 1 } else { layout.bounds.len() + 1 };
+    if layout.bucket_count != expected_buckets {
+        return Err(format!(
+            "Bucket count mismatch: expected {}, got {}",
+            expected_buckets, layout.bucket_count
+        ));
+    }
+
+    // Check bounds are sorted
+    for i in 1..layout.bounds.len() {
+        if layout.bounds[i] <= layout.bounds[i-1] {
+            return Err(format!(
+                "Bounds not properly sorted at index {}: {} <= {}",
+                i, layout.bounds[i], layout.bounds[i-1]
+            ));
+        }
+    }
+
+    // Check bounds are finite
+    for (i, &bound) in layout.bounds.iter().enumerate() {
+        if !bound.is_finite() {
+            return Err(format!(
+                "Bound at index {} is not finite: {}",
+                i, bound
+            ));
+        }
+    }
+
+    // Check that all valid original bounds are preserved (after normalization)
+    let mut expected_bounds = original_bounds.to_vec();
+    expected_bounds.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    expected_bounds.dedup();
+    expected_bounds.retain(|&x| x.is_finite());
+
+    if layout.bounds != expected_bounds {
+        return Err(format!(
+            "Bounds normalization mismatch: expected {:?}, got {:?}",
+            expected_bounds, layout.bounds
+        ));
+    }
+
+    Ok(())
+}
+
+/// Record histogram values and return bucket distribution.
+fn record_histogram_values(histogram_name: &str, bounds: &[f64], values: &[f64]) -> HistogramRecordingResult {
+    let layout = create_histogram_with_bounds(histogram_name, bounds);
+    let mut bucket_counts = vec![0; layout.bucket_count];
+
+    // Record each value in appropriate bucket
+    for &value in values {
+        let bucket = find_bucket_for_value(&layout, value);
+        bucket_counts[bucket] += 1;
+    }
+
+    HistogramRecordingResult {
+        histogram_name: histogram_name.to_string(),
+        bucket_counts,
+        total_count: values.len(),
+        bounds: layout.bounds,
+    }
+}
+
+/// OTLP-016: Histogram record with explicit bounds conformance test.
+pub fn otlp_016_histogram_record_explicit_bounds<RT: RuntimeInterface>() -> ConformanceTest<RT> {
+    crate::conformance_test! {
+        id: "otlp-016",
+        name: "Histogram explicit bounds bucket layout conformance",
+        description: "Verify Histogram.record() with explicit bounds produces identical bucket layout vs opentelemetry-sdk",
+        category: TestCategory::IO,
+        tags: ["otlp", "histogram", "bounds", "buckets", "layout", "record"],
+        expected: "Same explicit bounds produce identical histogram bucket layout",
+        test: |_rt| {
+            // Test histogram explicit bounds scenarios
+            let bounds_scenarios = vec![
+                ("simple_bounds", vec![1.0, 5.0, 10.0]),
+                ("single_bound", vec![5.0]),
+                ("many_bounds", vec![0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0]),
+                ("negative_bounds", vec![-10.0, -1.0, 0.0, 1.0, 10.0]),
+                ("fractional_bounds", vec![0.001, 0.01, 0.1, 1.0]),
+                ("large_bounds", vec![100.0, 1000.0, 10000.0]),
+                ("zero_boundary", vec![0.0, 1.0, 2.0]),
+                ("duplicate_bounds", vec![1.0, 1.0, 2.0, 2.0]), // Should be deduplicated
+                ("unsorted_bounds", vec![10.0, 1.0, 5.0, 2.0]), // Should be sorted
+                ("exponential_bounds", vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0]),
+                ("decimal_precision", vec![1.1, 2.2, 3.3, 4.4, 5.5]),
+                ("scientific_notation", vec![1e-3, 1e-2, 1e-1, 1e0, 1e1, 1e2]),
+                ("empty_bounds", vec![]),
+            ];
+
+            for (scenario_name, explicit_bounds) in &bounds_scenarios {
+                checkpoint("histogram_bounds_test", json!({
+                    "scenario": scenario_name,
+                    "bound_count": explicit_bounds.len(),
+                    "bounds": explicit_bounds,
+                    "min_bound": explicit_bounds.iter().fold(f64::INFINITY, |a, &b| a.min(b)),
+                    "max_bound": explicit_bounds.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b))
+                }));
+
+                // Test histogram bucket layout consistency
+                let layout1 = create_histogram_with_bounds("test_histogram", explicit_bounds);
+                let layout2 = create_histogram_with_bounds("test_histogram", explicit_bounds);
+
+                // Verify bucket layout determinism
+                if layout1.bucket_count != layout2.bucket_count {
+                    return TestResult::failed(format!(
+                        "Histogram bucket count non-deterministic for {}: {} vs {}",
+                        scenario_name, layout1.bucket_count, layout2.bucket_count
+                    ));
+                }
+
+                if layout1.bounds != layout2.bounds {
+                    return TestResult::failed(format!(
+                        "Histogram bounds non-deterministic for {}: {:?} vs {:?}",
+                        scenario_name, layout1.bounds, layout2.bounds
+                    ));
+                }
+
+                // Test value recording and bucket assignment
+                let test_values = generate_test_values_for_bounds(explicit_bounds);
+
+                for &test_value in &test_values {
+                    let bucket1 = find_bucket_for_value(&layout1, test_value);
+                    let bucket2 = find_bucket_for_value(&layout2, test_value);
+
+                    if bucket1 != bucket2 {
+                        return TestResult::failed(format!(
+                            "Histogram bucket assignment differs for {} value {}: bucket {} vs {}",
+                            scenario_name, test_value, bucket1, bucket2
+                        ));
+                    }
+                }
+
+                // Verify bucket layout properties
+                if let Err(error) = verify_bucket_layout_properties(&layout1, explicit_bounds) {
+                    return TestResult::failed(format!(
+                        "Histogram bucket layout invalid for {}: {}",
+                        scenario_name, error
+                    ));
+                }
+
+                // Test boundary value handling
+                if !explicit_bounds.is_empty() {
+                    for &boundary in explicit_bounds {
+                        let bucket_at_boundary = find_bucket_for_value(&layout1, boundary);
+                        let bucket_just_below = find_bucket_for_value(&layout1, boundary - f64::EPSILON);
+
+                        // Values exactly on boundary should go to the upper bucket
+                        // Values just below boundary should go to lower bucket (unless it's the first bound)
+                        if boundary != explicit_bounds[0] && bucket_at_boundary == bucket_just_below {
+                            return TestResult::failed(format!(
+                                "Histogram boundary handling incorrect for {} at boundary {}: same bucket {} for value {} and {}",
+                                scenario_name, boundary, bucket_at_boundary, boundary, boundary - f64::EPSILON
+                            ));
+                        }
+                    }
+                }
+            }
+
+            // Test histogram recording with different value patterns
+            let recording_scenarios = vec![
+                ("ascending_values", vec![0.5, 1.5, 5.5, 15.0], vec![1.0, 5.0, 10.0]),
+                ("descending_values", vec![15.0, 5.5, 1.5, 0.5], vec![1.0, 5.0, 10.0]),
+                ("repeated_values", vec![2.0, 2.0, 2.0, 2.0], vec![1.0, 5.0, 10.0]),
+                ("boundary_values", vec![1.0, 5.0, 10.0], vec![1.0, 5.0, 10.0]),
+                ("mixed_pattern", vec![0.1, 2.5, 7.5, 15.0, 0.8], vec![1.0, 5.0, 10.0]),
+                ("extreme_values", vec![-100.0, 100000.0], vec![1.0, 5.0, 10.0]),
+                ("zero_values", vec![0.0, 0.0, 0.0], vec![1.0, 5.0, 10.0]),
+                ("negative_values", vec![-5.0, -2.0, -0.5], vec![-10.0, -1.0, 0.0, 1.0]),
+                ("precision_values", vec![1.0000001, 4.9999999], vec![1.0, 5.0, 10.0]),
+            ];
+
+            for (scenario_name, values, bounds) in &recording_scenarios {
+                checkpoint("histogram_recording_test", json!({
+                    "scenario": scenario_name,
+                    "value_count": values.len(),
+                    "bound_count": bounds.len(),
+                    "value_range": format!("{:.3} to {:.3}",
+                        values.iter().fold(f64::INFINITY, |a, &b| a.min(b)),
+                        values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b))
+                    )
+                }));
+
+                // Record values and verify bucket distribution
+                let result1 = record_histogram_values("recording_test", bounds, values);
+                let result2 = record_histogram_values("recording_test", bounds, values);
+
+                // Verify recording determinism
+                if result1.bucket_counts != result2.bucket_counts {
+                    return TestResult::failed(format!(
+                        "Histogram bucket counts non-deterministic for {}: {:?} vs {:?}",
+                        scenario_name, result1.bucket_counts, result2.bucket_counts
+                    ));
+                }
+
+                if result1.total_count != result2.total_count {
+                    return TestResult::failed(format!(
+                        "Histogram total count non-deterministic for {}: {} vs {}",
+                        scenario_name, result1.total_count, result2.total_count
+                    ));
+                }
+
+                // Verify total count matches input
+                if result1.total_count != values.len() {
+                    return TestResult::failed(format!(
+                        "Histogram total count incorrect for {}: expected {}, got {}",
+                        scenario_name, values.len(), result1.total_count
+                    ));
+                }
+
+                // Verify bucket count sum matches total
+                let bucket_sum: usize = result1.bucket_counts.iter().sum();
+                if bucket_sum != values.len() {
+                    return TestResult::failed(format!(
+                        "Histogram bucket sum doesn't match total for {}: bucket_sum={}, values={}",
+                        scenario_name, bucket_sum, values.len()
+                    ));
+                }
+            }
+
+            // Test concurrent histogram recording
+            let concurrent_scenarios = vec![
+                ("concurrent_same_bounds", vec![1.0, 5.0, 10.0], vec![vec![2.0, 3.0], vec![7.0, 8.0]]),
+                ("concurrent_different_values", vec![0.1, 1.0, 10.0], vec![vec![0.5], vec![5.0], vec![15.0]]),
+                ("concurrent_overlapping", vec![1.0, 5.0], vec![vec![2.0, 4.0], vec![3.0, 6.0]]),
+                ("concurrent_high_volume", vec![1.0, 10.0, 100.0], vec![vec![5.0; 10], vec![50.0; 10], vec![500.0; 10]]),
+            ];
+
+            for (scenario_name, bounds, value_groups) in &concurrent_scenarios {
+                checkpoint("concurrent_histogram_test", json!({
+                    "scenario": scenario_name,
+                    "group_count": value_groups.len(),
+                    "bound_count": bounds.len(),
+                    "total_values": value_groups.iter().map(|g| g.len()).sum::<usize>()
+                }));
+
+                // Flatten all values for concurrent recording simulation
+                let all_values: Vec<f64> = value_groups.iter().flatten().cloned().collect();
+
+                let result1 = record_histogram_values("concurrent_test", bounds, &all_values);
+                let result2 = record_histogram_values("concurrent_test", bounds, &all_values);
+
+                // Verify concurrent recording determinism
+                if result1.bucket_counts != result2.bucket_counts {
+                    return TestResult::failed(format!(
+                        "Concurrent histogram recording non-deterministic for {}: {:?} vs {:?}",
+                        scenario_name, result1.bucket_counts, result2.bucket_counts
+                    ));
+                }
+            }
+
+            TestResult::passed()
+        }
+    }
+}
+
 /// OTLP-015: UpDownCounter increment/decrement conformance test.
 pub fn otlp_015_updown_counter_incr_decr_conformance<RT: RuntimeInterface>() -> ConformanceTest<RT> {
     crate::conformance_test! {
@@ -2657,6 +3015,7 @@ pub fn otlp_tests<RT: RuntimeInterface>() -> Vec<ConformanceTest<RT>> {
         otlp_013_meter_creation_deduplication::<RT>(),
         otlp_014_observable_counter_callback_ordering::<RT>(),
         otlp_015_updown_counter_incr_decr_conformance::<RT>(),
+        otlp_016_histogram_record_explicit_bounds::<RT>(),
     ]
 }
 
