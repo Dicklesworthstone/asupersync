@@ -1612,6 +1612,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "jetstream_stream_config_validator"
+path = "fuzz_targets/jetstream_stream_config_validator.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "transport_router"
 path = "fuzz_targets/transport_router.rs"
 test = false

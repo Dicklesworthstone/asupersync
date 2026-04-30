@@ -51,6 +51,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// `format!()`-built NATS subject.
 const MAX_NAME_BYTES: usize = 256;
 
+/// JetStream stream subjects are regular NATS subscription patterns and share
+/// the same practical size ceiling as the underlying NATS parser.
+const MAX_STREAM_SUBJECT_BYTES: usize = 4 * 1024;
+
 /// br-asupersync-w7n2qx: client-side cap on the `batch` argument to
 /// pull-consumer requests. The pull path pre-allocates
 /// `Vec::with_capacity(batch)` for received messages; without a cap a
@@ -273,6 +277,45 @@ impl StreamConfig {
     pub fn duplicate_window(mut self, window: Duration) -> Self {
         self.duplicate_window = Some(window);
         self
+    }
+
+    fn validate(&self) -> Result<(), JsError> {
+        ConsumerConfig::validate_stream_name(&self.name)?;
+
+        for (index, subject) in self.subjects.iter().enumerate() {
+            validate_stream_subject_pattern(subject).map_err(|reason| {
+                JsError::InvalidConfig(format!("stream subjects[{index}] {reason}: {subject:?}"))
+            })?;
+        }
+
+        if let Some(max_msgs) = self.max_msgs
+            && max_msgs < 0
+        {
+            return Err(JsError::InvalidConfig(
+                "stream max_msgs must be >= 0 when set".to_string(),
+            ));
+        }
+        if let Some(max_bytes) = self.max_bytes
+            && max_bytes < 0
+        {
+            return Err(JsError::InvalidConfig(
+                "stream max_bytes must be >= 0 when set".to_string(),
+            ));
+        }
+        if let Some(max_msg_size) = self.max_msg_size
+            && max_msg_size < 0
+        {
+            return Err(JsError::InvalidConfig(
+                "stream max_msg_size must be >= 0 when set".to_string(),
+            ));
+        }
+        if self.replicas == 0 {
+            return Err(JsError::InvalidConfig(
+                "stream replicas must be >= 1".to_string(),
+            ));
+        }
+
+        Ok(())
     }
 
     /// Encode to JSON for API request.
@@ -785,14 +828,7 @@ impl JetStreamContext {
         config: StreamConfig,
     ) -> Result<StreamInfo, JsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
-
-        // br-asupersync-w7n2qx: validate at the API boundary. The
-        // server enforces its own cap, but a megabyte-long name lands
-        // in the JSON body and the format!()-built subject before any
-        // server response — turn that into a typed InvalidConfig at
-        // the natural callsite instead of waiting for a confusing
-        // -ERR several layers down.
-        ConsumerConfig::validate_stream_name(&config.name)?;
+        config.validate()?;
 
         let subject = format!("{}.STREAM.CREATE.{}", self.prefix, config.name);
         let payload = config.to_json();
@@ -1475,6 +1511,21 @@ pub fn fuzz_validate_stream_name(name: &str) -> Result<(), String> {
     ConsumerConfig::validate_stream_name(name).map_err(|err| err.to_string())
 }
 
+/// Fuzz-target re-exporter for the JetStream stream subject byte cap.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub const fn fuzz_stream_subject_max_bytes() -> usize {
+    MAX_STREAM_SUBJECT_BYTES
+}
+
+/// Fuzz-target re-exporter for whole-stream configuration validation.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_validate_stream_config(config: &StreamConfig) -> Result<String, String> {
+    config.validate().map_err(|err| err.to_string())?;
+    Ok(config.to_json())
+}
+
 /// Compact termination classes for the pull-subscriber loop state machine.
 #[cfg(feature = "test-internals")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1864,6 +1915,40 @@ fn random_id(cx: &Cx) -> String {
 
 fn duration_to_nanos_saturating(duration: Duration) -> u64 {
     duration.as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
+fn validate_stream_subject_pattern(subject: &str) -> Result<(), &'static str> {
+    if subject.is_empty() {
+        return Err("must be non-empty");
+    }
+    if subject.len() > MAX_STREAM_SUBJECT_BYTES {
+        return Err("exceeds the 4096-byte NATS subject bound");
+    }
+
+    let tokens: Vec<_> = subject.split('.').collect();
+    let token_count = tokens.len();
+    if tokens.iter().any(|token| {
+        token.is_empty()
+            || token
+                .chars()
+                .any(|ch| ch.is_ascii_control() || ch.is_whitespace())
+    }) {
+        return Err("contains empty tokens, whitespace, or control characters");
+    }
+
+    for (index, token) in tokens.into_iter().enumerate() {
+        match token {
+            "*" => {}
+            ">" if index + 1 == token_count => {}
+            ">" => return Err("contains an invalid NATS wildcard placement"),
+            _ if token.contains('*') || token.contains('>') => {
+                return Err("contains an invalid NATS wildcard placement");
+            }
+            _ => {}
+        }
+    }
+
+    Ok(())
 }
 
 fn format_system_time_rfc3339(time: SystemTime) -> String {
@@ -2409,6 +2494,44 @@ mod tests {
         assert_eq!(cfg.max_age, Some(Duration::from_secs(3600)));
         assert_eq!(cfg.replicas, 3);
         assert_eq!(cfg.duplicate_window, Some(Duration::from_secs(120)));
+    }
+
+    #[test]
+    fn stream_config_validate_accepts_valid_subject_patterns_tick138() {
+        let cfg = StreamConfig::new("ORDERS")
+            .subjects(&["orders.*", "returns.>"])
+            .replicas(1);
+
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn stream_config_validate_rejects_invalid_subject_patterns_tick138() {
+        let cfg = StreamConfig::new("ORDERS").subjects(&["orders.>.archived"]);
+
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(err, JsError::InvalidConfig(_)));
+        assert!(err.to_string().contains("subjects[0]"));
+        assert!(err.to_string().contains("invalid NATS wildcard placement"));
+    }
+
+    #[test]
+    fn stream_config_validate_rejects_negative_limits_tick138() {
+        let mut cfg = StreamConfig::new("ORDERS");
+        cfg.max_bytes = Some(-1);
+
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(err, JsError::InvalidConfig(_)));
+        assert!(err.to_string().contains("max_bytes"));
+    }
+
+    #[test]
+    fn stream_config_validate_rejects_zero_replicas_tick138() {
+        let cfg = StreamConfig::new("ORDERS").replicas(0);
+
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(err, JsError::InvalidConfig(_)));
+        assert!(err.to_string().contains("replicas"));
     }
 
     #[test]
