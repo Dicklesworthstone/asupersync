@@ -18,12 +18,9 @@ use asupersync::channel::oneshot;
 use asupersync::cx::Cx;
 use asupersync::util::ArenaIndex;
 use asupersync::types::{RegionId, TaskId, Budget};
-use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::collections::HashMap;
-use std::task::{Context, Poll, Waker};
-use std::pin::Pin;
-use std::future::Future;
+use std::task::Waker;
 
 #[derive(Debug, Clone, Arbitrary)]
 struct OneshotCloseConfig {
@@ -186,8 +183,8 @@ impl TrackedChannel {
     fn new(channel_id: u8) -> Self {
         let (sender, receiver) = oneshot::channel::<i32>();
         let cx = Cx::new(
-            RegionId::from_arena(ArenaIndex::new(0, channel_id as u16)),
-            TaskId::from_arena(ArenaIndex::new(0, channel_id as u16)),
+            RegionId::from_arena(ArenaIndex::new(0, channel_id as u32)),
+            TaskId::from_arena(ArenaIndex::new(0, channel_id as u32)),
             Budget::INFINITE,
         );
 

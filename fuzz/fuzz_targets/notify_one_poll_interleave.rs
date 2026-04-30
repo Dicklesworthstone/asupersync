@@ -314,15 +314,12 @@ fn test_notify_poll_interleave_scenario(
 
                         // Simple spurious check: if this is the first ready poll but no notifications
                         if ready_polls_before_this == 0 && notifications_sent == 0 {
-                            // This could be a stored notification, let's check
-                            let stored_notifications = notify.stored_notifications.load(Ordering::Acquire);
-                            if stored_notifications == 0 {
-                                tracker.record_spurious_readiness();
-                                return Err(format!(
-                                    "Spurious readiness detected on waiter {}: ready with no notifications and no stored notifications",
-                                    id
-                                ));
-                            }
+                            // Spurious readiness: poll returned Ready without any notify_one() calls
+                            tracker.record_spurious_readiness();
+                            return Err(format!(
+                                "Spurious readiness detected on waiter {}: ready with no notifications sent",
+                                id
+                            ));
                         }
                     }
 
@@ -377,10 +374,9 @@ fn test_notify_poll_interleave_scenario(
                             // Check if there were sufficient notifications
                             let notifications_sent = tracker.notifications_sent.load(Ordering::SeqCst);
                             let total_ready_polls = tracker.polls_ready.load(Ordering::SeqCst);
-                            let stored_notifications = notify.stored_notifications.load(Ordering::Acquire);
 
                             // Basic spurious check
-                            if notifications_sent == 0 && stored_notifications == 0 {
+                            if notifications_sent == 0 {
                                 tracker.record_spurious_readiness();
                                 return Err(format!(
                                     "Spurious readiness in rapid poll {}: waiter {} ready with no notifications",
@@ -445,9 +441,8 @@ fn test_notify_poll_interleave_scenario(
                         if poll_result.is_ready() {
                             // Check for spurious readiness
                             let notifications_sent = tracker.notifications_sent.load(Ordering::SeqCst);
-                            let stored_notifications = notify.stored_notifications.load(Ordering::Acquire);
 
-                            if notifications_sent == 0 && stored_notifications == 0 {
+                            if notifications_sent == 0 {
                                 tracker.record_spurious_readiness();
                                 return Err(format!(
                                     "Spurious readiness in polls-then-notify: waiter {} ready before any notify",
