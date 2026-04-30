@@ -4,8 +4,9 @@ use arbitrary::Arbitrary;
 use asupersync::runtime::scheduler::LocalQueue;
 use asupersync::types::TaskId;
 use libfuzzer_sys::fuzz_target;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -25,6 +26,8 @@ struct LocalQueueStealHalfFuzz {
     config: TestConfig,
     /// Deterministic single-steal sizing and FIFO scenario.
     sizing: StealBatchSizingScenario,
+    /// Concurrent owner-push / thief-steal race over one queue.
+    steal_push_race: StealPushRaceScenario,
 }
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -83,10 +86,34 @@ struct StealBatchSizingScenario {
     chunk_split: u16,
 }
 
+#[derive(Arbitrary, Debug)]
+struct StealPushRaceScenario {
+    /// Initial backlog in the queue before the race epochs begin.
+    initial_len: u16,
+    /// Concurrent push/steal epochs.
+    rounds: Vec<StealPushRaceRound>,
+}
+
+#[derive(Arbitrary, Debug, Clone)]
+struct StealPushRaceRound {
+    /// Number of owner pushes during the epoch.
+    push_count: u8,
+    /// Number of thief steal attempts during the epoch.
+    steal_attempts: u8,
+    /// Yield cadence for the owner thread.
+    owner_yield_stride: u8,
+    /// Yield cadence for the thief thread.
+    thief_yield_stride: u8,
+}
+
 // Resource limits to prevent fuzzer timeouts
 const MAX_OPERATIONS: usize = 300;
 const MAX_WORKERS: usize = 8;
 const MAX_BATCH_SIZE: usize = 32;
+const MAX_RACE_ROUNDS: usize = 64;
+const MAX_RACE_PUSHES_PER_ROUND: usize = 16;
+const MAX_RACE_STEAL_ATTEMPTS: usize = 16;
+const MAX_RACE_TASKS: usize = 512;
 const MAX_DELAY_MS: u64 = 5;
 const MAX_TASK_ID: u32 = 10000;
 const OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
@@ -100,11 +127,14 @@ fuzz_target!(|input: LocalQueueStealHalfFuzz| {
     let max_task_id = input.config.max_task_id.min(MAX_TASK_ID).max(100);
     let operations: Vec<_> = input.operations.into_iter().take(max_ops).collect();
 
+    assert_single_steal_batch_sizing_and_fifo(&input.sizing);
+    assert_owner_push_and_thief_steal_race_preserves_total_and_no_double_execution(
+        &input.steal_push_race,
+    );
+
     if operations.is_empty() {
         return; // Skip empty operation sequences
     }
-
-    assert_single_steal_batch_sizing_and_fifo(&input.sizing);
 
     // Create shared queues and tracking structures
     let mut queues = Vec::new();
@@ -135,6 +165,17 @@ fn expected_steal_batch_bound(available: usize) -> usize {
 
     let half_limit = (available / 2).clamp(1, 256);
     half_limit.min(available.min(8))
+}
+
+fn task(id: u32) -> TaskId {
+    create_task_id(id)
+}
+
+fn push_task_chunks(queue: &LocalQueue, split: usize, total: usize) {
+    let prefix: Vec<_> = (0..split).map(|id| task(id as u32)).collect();
+    let suffix: Vec<_> = (split..total).map(|id| task(id as u32)).collect();
+    queue.push_many(&prefix);
+    queue.push_many(&suffix);
 }
 
 fn assert_single_steal_batch_sizing_and_fifo(scenario: &StealBatchSizingScenario) {
@@ -182,6 +223,125 @@ fn assert_single_steal_batch_sizing_and_fifo(scenario: &StealBatchSizingScenario
         remaining_tasks, expected_remaining_tasks,
         "source queue must retain the unstolen suffix in arrival order"
     );
+}
+
+fn assert_owner_push_and_thief_steal_race_preserves_total_and_no_double_execution(
+    scenario: &StealPushRaceScenario,
+) {
+    let initial_len = usize::from(scenario.initial_len).min(MAX_RACE_TASKS);
+    let round_pushes: Vec<_> = scenario
+        .rounds
+        .iter()
+        .take(MAX_RACE_ROUNDS)
+        .map(|round| usize::from(round.push_count).min(MAX_RACE_PUSHES_PER_ROUND))
+        .collect();
+    let total_pushes = initial_len
+        .saturating_add(round_pushes.iter().sum::<usize>())
+        .min(MAX_RACE_TASKS);
+
+    if total_pushes == 0 {
+        return;
+    }
+
+    let max_task_id =
+        u32::try_from(total_pushes.saturating_sub(1)).expect("race task bound fits u32");
+    let state = LocalQueue::test_state(max_task_id);
+    let queue = Arc::new(LocalQueue::new(Arc::clone(&state)));
+    let observed: Arc<Vec<AtomicUsize>> = Arc::new(
+        (0..total_pushes)
+            .map(|_| AtomicUsize::new(0))
+            .collect::<Vec<_>>(),
+    );
+
+    let mut next_task = 0u32;
+    for _ in 0..initial_len {
+        queue.push(create_task_id(next_task));
+        next_task = next_task.wrapping_add(1);
+    }
+
+    for (round, push_budget) in scenario
+        .rounds
+        .iter()
+        .take(MAX_RACE_ROUNDS)
+        .zip(round_pushes)
+    {
+        let remaining_capacity = total_pushes.saturating_sub(next_task as usize);
+        let push_count = push_budget.min(remaining_capacity);
+        let steal_attempts = usize::from(round.steal_attempts).min(MAX_RACE_STEAL_ATTEMPTS);
+        let owner_yield_stride = usize::from(round.owner_yield_stride).clamp(1, usize::MAX);
+        let thief_yield_stride = usize::from(round.thief_yield_stride).clamp(1, usize::MAX);
+
+        let tasks_to_push: Vec<_> = (0..push_count)
+            .map(|_| {
+                let task = create_task_id(next_task);
+                next_task = next_task.wrapping_add(1);
+                task
+            })
+            .collect();
+
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let queue_owner = Arc::clone(&queue);
+        let barrier_owner = Arc::clone(&barrier);
+        let owner = thread::spawn(move || {
+            barrier_owner.wait();
+            for (idx, task) in tasks_to_push.into_iter().enumerate() {
+                queue_owner.push(task);
+                if (idx + 1) % owner_yield_stride == 0 {
+                    thread::yield_now();
+                }
+            }
+        });
+
+        let stealer = queue.stealer();
+        let observed_thief = Arc::clone(&observed);
+        let barrier_thief = Arc::clone(&barrier);
+        let thief = thread::spawn(move || {
+            barrier_thief.wait();
+            for attempt in 0..steal_attempts {
+                if let Some(task_id) = stealer.steal() {
+                    let idx = extract_task_value(task_id) as usize;
+                    let prior = observed_thief[idx].fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(
+                        prior, 0,
+                        "task {idx} executed more than once during steal/push race"
+                    );
+                }
+                if (attempt + 1) % thief_yield_stride == 0 {
+                    thread::yield_now();
+                }
+            }
+        });
+
+        barrier.wait();
+        owner.join().expect("owner push thread should not panic");
+        thief.join().expect("thief steal thread should not panic");
+    }
+
+    while let Some(task_id) = queue.pop() {
+        let idx = extract_task_value(task_id) as usize;
+        let prior = observed[idx].fetch_add(1, Ordering::SeqCst);
+        assert_eq!(
+            prior, 0,
+            "task {idx} executed more than once during final owner drain"
+        );
+    }
+
+    assert!(
+        queue.stealer().steal().is_none(),
+        "queue should not retain stealable residue after the final owner drain"
+    );
+    assert!(
+        queue.is_empty(),
+        "queue should be empty after the final drain"
+    );
+
+    for idx in 0..(next_task as usize) {
+        let seen = observed[idx].load(Ordering::SeqCst);
+        assert_eq!(
+            seen, 1,
+            "task {idx} was lost or duplicated across owner-push / thief-steal race"
+        );
+    }
 }
 
 /// Tracks steal-half correctness properties
@@ -626,7 +786,7 @@ fn execute_worker_operations(
                 if stole {
                     // Capture post-steal state
                     let post_steal_tasks = stealer_queue.snapshot_tasks();
-                    let stolen_count = post_steal_tasks.len() - pre_steal_count;
+                    let _stolen_count = post_steal_tasks.len() - pre_steal_count;
 
                     // Extract newly stolen tasks
                     let mut stolen_task_values = Vec::new();

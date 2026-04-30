@@ -23,6 +23,7 @@ http-body-util = "0.1"
 # For test utilities
 tempfile = "3"
 uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
 
 [[bin]]
 name = "h1_expect_continue_conformance"
@@ -33,5 +34,17 @@ doc = false
 [[bin]]
 name = "h2_continuation_ordering_conformance"
 path = "src/bin/h2_continuation_ordering_conformance.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "h2_rst_stream_error_propagation_conformance"
+path = "src/bin/h2_rst_stream_error_propagation_conformance.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "h2_ping_rtt_measurement_conformance"
+path = "src/bin/h2_ping_rtt_measurement_conformance.rs"
 test = false
 doc = false

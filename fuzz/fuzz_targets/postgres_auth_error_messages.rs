@@ -22,7 +22,8 @@
 
 use arbitrary::Arbitrary;
 use asupersync::database::postgres::{
-    fuzz_parse_error_response, fuzz_parse_notice_response, fuzz_parse_parameter_status,
+    fuzz_parse_command_complete_tag, fuzz_parse_error_response, fuzz_parse_notice_response,
+    fuzz_parse_parameter_status,
 };
 use libfuzzer_sys::fuzz_target;
 
@@ -59,6 +60,59 @@ enum PgMessageScenario {
         message_type: EdgeCaseType,
         payload_modifications: Vec<PayloadModification>,
     },
+    /// CommandComplete tag parsing for affected-row extraction.
+    CommandComplete { tag: CommandCompleteCase },
+}
+
+#[derive(Debug, Clone, Arbitrary)]
+struct CommandCompleteCase {
+    variant: CommandCompleteVariant,
+    trailing_nulls: u8,
+}
+
+#[derive(Debug, Clone, Arbitrary)]
+enum CommandCompleteVariant {
+    Insert { oid: u32, count: u64 },
+    Update { count: u64 },
+    Delete { count: u64 },
+    Select { count: u64 },
+    Copy { count: u64 },
+    Malformed(MalformedCommandComplete),
+}
+
+#[derive(Debug, Clone, Arbitrary)]
+enum CommandCompleteVerb {
+    Insert,
+    Update,
+    Delete,
+    Select,
+    Copy,
+}
+
+#[derive(Debug, Clone, Arbitrary)]
+enum MalformedCommandComplete {
+    Empty,
+    MissingCount {
+        command: CommandCompleteVerb,
+    },
+    NonNumericCount {
+        command: CommandCompleteVerb,
+        suffix: BoundedString,
+    },
+    NumberOnly(u64),
+    InvalidUtf8,
+}
+
+impl CommandCompleteVerb {
+    fn as_str(&self) -> &'static str {
+        match self {
+            CommandCompleteVerb::Insert => "INSERT",
+            CommandCompleteVerb::Update => "UPDATE",
+            CommandCompleteVerb::Delete => "DELETE",
+            CommandCompleteVerb::Select => "SELECT",
+            CommandCompleteVerb::Copy => "COPY",
+        }
+    }
 }
 
 /// PostgreSQL error/notice field with type code and value
@@ -430,6 +484,54 @@ fn apply_modifications(mut data: Vec<u8>, modifications: &[PayloadModification])
     data
 }
 
+fn build_command_complete_message(tag: &CommandCompleteCase) -> Vec<u8> {
+    let mut message = match &tag.variant {
+        CommandCompleteVariant::Insert { oid, count } => {
+            format!("INSERT {oid} {count}").into_bytes()
+        }
+        CommandCompleteVariant::Update { count } => format!("UPDATE {count}").into_bytes(),
+        CommandCompleteVariant::Delete { count } => format!("DELETE {count}").into_bytes(),
+        CommandCompleteVariant::Select { count } => format!("SELECT {count}").into_bytes(),
+        CommandCompleteVariant::Copy { count } => format!("COPY {count}").into_bytes(),
+        CommandCompleteVariant::Malformed(MalformedCommandComplete::Empty) => Vec::new(),
+        CommandCompleteVariant::Malformed(MalformedCommandComplete::MissingCount { command }) => {
+            command.as_str().as_bytes().to_vec()
+        }
+        CommandCompleteVariant::Malformed(MalformedCommandComplete::NonNumericCount {
+            command,
+            suffix,
+        }) => format!(
+            "{} {}",
+            command.as_str(),
+            sanitize_field_value(&suffix.value)
+        )
+        .into_bytes(),
+        CommandCompleteVariant::Malformed(MalformedCommandComplete::NumberOnly(count)) => {
+            count.to_string().into_bytes()
+        }
+        CommandCompleteVariant::Malformed(MalformedCommandComplete::InvalidUtf8) => {
+            vec![0xFF, 0xFE, 0xFD]
+        }
+    };
+
+    for _ in 0..tag.trailing_nulls {
+        message.push(0);
+    }
+
+    message
+}
+
+fn expected_command_complete_rows(tag: &CommandCompleteCase) -> Option<u64> {
+    match &tag.variant {
+        CommandCompleteVariant::Insert { count, .. }
+        | CommandCompleteVariant::Update { count }
+        | CommandCompleteVariant::Delete { count }
+        | CommandCompleteVariant::Select { count }
+        | CommandCompleteVariant::Copy { count } => Some(*count),
+        CommandCompleteVariant::Malformed(_) => None,
+    }
+}
+
 fuzz_target!(|scenario: PgMessageScenario| {
     // Size guard - prevent OOM
     let estimated_size = match &scenario {
@@ -444,6 +546,7 @@ fuzz_target!(|scenario: PgMessageScenario| {
             parameter_value,
             ..
         } => parameter_name.value.len() + parameter_value.value.len(),
+        PgMessageScenario::CommandComplete { .. } => MAX_FIELD_LENGTH,
         PgMessageScenario::EdgeCaseMessage { .. } => MAX_MESSAGE_SIZE,
     };
 
@@ -522,6 +625,24 @@ fuzz_target!(|scenario: PgMessageScenario| {
             let _ = fuzz_parse_error_response(&modified_message);
             let _ = fuzz_parse_notice_response(&modified_message);
             let _ = fuzz_parse_parameter_status(&modified_message);
+        }
+
+        PgMessageScenario::CommandComplete { tag } => {
+            let message = build_command_complete_message(&tag);
+            match expected_command_complete_rows(&tag) {
+                Some(expected) => match fuzz_parse_command_complete_tag(&message) {
+                    Ok(actual) => assert_eq!(actual, expected),
+                    Err(err) => panic!(
+                        "expected valid CommandComplete tag {:?}, got {err:?}",
+                        String::from_utf8_lossy(&message)
+                    ),
+                },
+                None => assert!(
+                    fuzz_parse_command_complete_tag(&message).is_err(),
+                    "malformed CommandComplete tag should return Err: {:?}",
+                    String::from_utf8_lossy(&message)
+                ),
+            }
         }
     }
 });

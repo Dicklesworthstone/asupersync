@@ -6,3 +6,5 @@
 // NOTE: h1_expect_continue_conformance module was created in earlier session
 // pub mod h1_expect_continue_conformance;
 pub mod h2_continuation_ordering_conformance;
+pub mod h2_rst_stream_error_propagation_conformance;
+pub mod h2_ping_rtt_measurement_conformance;
