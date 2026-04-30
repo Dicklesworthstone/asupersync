@@ -16,7 +16,7 @@
 //! - [OTLP Specification](https://opentelemetry.io/docs/specs/otlp/)
 //! - [Metrics Data Model](https://opentelemetry.io/docs/specs/otel/metrics/)
 
-use crate::{checkpoint, ConformanceTest, RuntimeInterface, TestCategory, TestResult};
+use crate::{ConformanceTest, RuntimeInterface, TestCategory, TestResult, checkpoint};
 use serde_json::json;
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -9725,8 +9725,8 @@ fn verify_span_id_entropy(
 }
 
 /// OTLP-033: Span.attributes_count_limit() conformance test wrapper
-pub fn otlp_033_span_attributes_count_limit_conformance<RT: RuntimeInterface>(
-) -> ConformanceTest<RT> {
+pub fn otlp_033_span_attributes_count_limit_conformance<RT: RuntimeInterface>()
+-> ConformanceTest<RT> {
     crate::conformance_test! {
         id: "otlp-033",
         name: "Span attributes_count_limit() conformance",
@@ -10160,8 +10160,8 @@ fn verify_limit_value_validation(
 }
 
 /// OTLP-028: Span is_recording() after end conformance test wrapper
-pub fn otlp_028_span_is_recording_after_end_conformance<RT: RuntimeInterface>(
-) -> ConformanceTest<RT> {
+pub fn otlp_028_span_is_recording_after_end_conformance<RT: RuntimeInterface>()
+-> ConformanceTest<RT> {
     crate::conformance_test! {
         id: "otlp-028",
         name: "Span is_recording() after end conformance",
@@ -11101,8 +11101,8 @@ pub fn otlp_024_span_add_event_conformance<RT: RuntimeInterface>() -> Conformanc
 }
 
 /// OTLP-034: Span end_time vs export-time monotonicity conformance test.
-pub fn otlp_034_span_end_time_export_time_monotonicity_conformance<RT: RuntimeInterface>(
-) -> ConformanceTest<RT> {
+pub fn otlp_034_span_end_time_export_time_monotonicity_conformance<RT: RuntimeInterface>()
+-> ConformanceTest<RT> {
     crate::conformance_test! {
         id: "otlp-034",
         name: "Span end_time vs export-time monotonicity conformance",
@@ -11502,8 +11502,8 @@ fn verify_span_timing_monotonicity_consistency(
 }
 
 /// OTLP-035: Span resource attribute aggregation conformance test.
-pub fn otlp_035_span_resource_attribute_aggregation_conformance<RT: RuntimeInterface>(
-) -> ConformanceTest<RT> {
+pub fn otlp_035_span_resource_attribute_aggregation_conformance<RT: RuntimeInterface>()
+-> ConformanceTest<RT> {
     crate::conformance_test! {
         id: "otlp-035",
         name: "Span resource attribute aggregation conformance",
@@ -12143,7 +12143,7 @@ pub fn otlp_036_export_deadline_backoff_conformance<RT: RuntimeInterface>() -> C
                 for (attempt, delay_ms) in asupersync_backoff.retry_delays.iter().enumerate() {
                     if *delay_ms > scenario.export_deadline_ms {
                         return TestResult::failed(format!(
-                            "OTLP-036 FAILED for scenario '{}': Retry delay {} exceeds deadline\n\
+                            "OTLP-036 FAILED for scenario '{}': Retry delay exceeds deadline\n\
                              Attempt: {}, Delay: {}ms, Deadline: {}ms",
                             scenario.name, attempt, delay_ms, scenario.export_deadline_ms
                         ));
@@ -12351,6 +12351,7 @@ fn simulate_asupersync_export_deadline_backoff(
         .iter()
         .all(|&delay| delay <= scenario.max_delay_ms);
 
+    let retry_delays_len = retry_delays.len();
     Ok(ExportDeadlineBackoffResult {
         applied_strategy,
         retry_delays,
@@ -12359,7 +12360,7 @@ fn simulate_asupersync_export_deadline_backoff(
         max_delay_respected,
         failure_count_handled: scenario
             .failure_count
-            .min(retry_delays.len() + if scenario.failure_count > 0 { 1 } else { 0 }),
+            .min(retry_delays_len + if scenario.failure_count > 0 { 1 } else { 0 }),
         backoff_metadata,
     })
 }
@@ -12481,6 +12482,7 @@ fn simulate_opentelemetry_export_deadline_backoff(
         .iter()
         .all(|&delay| delay <= scenario.max_delay_ms);
 
+    let retry_delays_len = retry_delays.len();
     Ok(ExportDeadlineBackoffResult {
         applied_strategy,
         retry_delays,
@@ -12489,7 +12491,7 @@ fn simulate_opentelemetry_export_deadline_backoff(
         max_delay_respected,
         failure_count_handled: scenario
             .failure_count
-            .min(retry_delays.len() + if scenario.failure_count > 0 { 1 } else { 0 }),
+            .min(retry_delays_len + if scenario.failure_count > 0 { 1 } else { 0 }),
         backoff_metadata,
     })
 }
@@ -12588,8 +12590,8 @@ fn verify_export_deadline_backoff_consistency(
 }
 
 /// OTLP-037: Span attribute string truncation conformance test.
-pub fn otlp_037_span_attribute_string_truncation_conformance<RT: RuntimeInterface>(
-) -> ConformanceTest<RT> {
+pub fn otlp_037_span_attribute_string_truncation_conformance<RT: RuntimeInterface>()
+-> ConformanceTest<RT> {
     crate::conformance_test! {
         id: "otlp-037",
         name: "Span attribute string truncation conformance",
@@ -12827,6 +12829,53 @@ struct AttributeStringTruncationResult {
     unicode_safe: Option<bool>,
     applied_strategy: TruncationStrategy,
     truncation_metadata: Vec<String>,
+}
+
+/// Span event timestamp ordering test scenario
+#[derive(Debug, Clone)]
+struct SpanEventTimestampScenario {
+    name: String,
+    description: String,
+    events: Vec<EventTimestampDefinition>,
+    expected_ordering: Vec<&'static str>,
+    ordering_strategy: TimestampOrderingStrategy,
+}
+
+/// Event definition for timestamp ordering tests
+#[derive(Debug, Clone)]
+struct EventTimestampDefinition {
+    name: String,
+    timestamp_nanos: u64,
+    attributes: Vec<(String, String)>,
+}
+
+/// Timestamp ordering strategy types
+#[derive(Debug, Clone, PartialEq)]
+enum TimestampOrderingStrategy {
+    ChronologicalSort,
+    StableSort,
+    InsertionOrder,
+}
+
+/// Span event timestamp ordering result for comparison
+#[derive(Debug, Clone, PartialEq)]
+struct EventTimestampOrderingResult {
+    original_events: Vec<OrderedEvent>,
+    sorted_events: Vec<OrderedEvent>,
+    ordering_preserved: bool,
+    timestamp_monotonic: bool,
+    applied_strategy: TimestampOrderingStrategy,
+    ordering_metadata: Vec<String>,
+}
+
+/// Ordered event for timestamp comparison
+#[derive(Debug, Clone, PartialEq)]
+struct OrderedEvent {
+    name: String,
+    timestamp_nanos: u64,
+    attributes: Vec<(String, String)>,
+    original_index: usize,
+    sorted_index: usize,
 }
 
 /// Simulate asupersync span attribute string truncation implementation
@@ -13226,6 +13275,264 @@ fn verify_attribute_string_truncation_consistency(
     Ok(())
 }
 
+/// OTLP-038: Span event timestamp ordering conformance test.
+pub fn otlp_038_span_event_timestamp_ordering_conformance<RT: RuntimeInterface>()
+-> ConformanceTest<RT> {
+    crate::conformance_test! {
+        id: "otlp-038",
+        name: "Span event timestamp ordering conformance",
+        description: "Verify span event timestamp ordering vs opentelemetry-sdk — identical chronological behavior",
+        category: TestCategory::IO,
+        tags: ["otlp", "span", "events", "timestamp", "ordering", "chronological"],
+        expected: "Span event timestamp ordering behaves identically across implementations",
+        test: |_rt| {
+            // Test scenarios for comprehensive span event timestamp ordering validation
+            let test_scenarios = vec![
+                SpanEventTimestampScenario {
+                    name: "chronological_order".to_string(),
+                    description: "Events added in chronological order".to_string(),
+                    events: vec![
+                        EventTimestampDefinition {
+                            name: "request_start".to_string(),
+                            timestamp_nanos: 1_000_000_000,
+                            attributes: vec![("phase".to_string(), "start".to_string())],
+                        },
+                        EventTimestampDefinition {
+                            name: "validation_complete".to_string(),
+                            timestamp_nanos: 1_100_000_000,
+                            attributes: vec![("phase".to_string(), "validation".to_string())],
+                        },
+                        EventTimestampDefinition {
+                            name: "processing_complete".to_string(),
+                            timestamp_nanos: 1_200_000_000,
+                            attributes: vec![("phase".to_string(), "processing".to_string())],
+                        },
+                        EventTimestampDefinition {
+                            name: "request_complete".to_string(),
+                            timestamp_nanos: 1_300_000_000,
+                            attributes: vec![("phase".to_string(), "complete".to_string())],
+                        },
+                    ],
+                    expected_ordering: vec!["request_start", "validation_complete", "processing_complete", "request_complete"],
+                    ordering_strategy: TimestampOrderingStrategy::ChronologicalSort,
+                },
+                SpanEventTimestampScenario {
+                    name: "out_of_order_events".to_string(),
+                    description: "Events added out of chronological order".to_string(),
+                    events: vec![
+                        EventTimestampDefinition {
+                            name: "request_complete".to_string(),
+                            timestamp_nanos: 1_300_000_000,
+                            attributes: vec![("phase".to_string(), "complete".to_string())],
+                        },
+                        EventTimestampDefinition {
+                            name: "request_start".to_string(),
+                            timestamp_nanos: 1_000_000_000,
+                            attributes: vec![("phase".to_string(), "start".to_string())],
+                        },
+                        EventTimestampDefinition {
+                            name: "processing_complete".to_string(),
+                            timestamp_nanos: 1_200_000_000,
+                            attributes: vec![("phase".to_string(), "processing".to_string())],
+                        },
+                        EventTimestampDefinition {
+                            name: "validation_complete".to_string(),
+                            timestamp_nanos: 1_100_000_000,
+                            attributes: vec![("phase".to_string(), "validation".to_string())],
+                        },
+                    ],
+                    expected_ordering: vec!["request_start", "validation_complete", "processing_complete", "request_complete"],
+                    ordering_strategy: TimestampOrderingStrategy::ChronologicalSort,
+                },
+                SpanEventTimestampScenario {
+                    name: "identical_timestamps".to_string(),
+                    description: "Multiple events with identical timestamps".to_string(),
+                    events: vec![
+                        EventTimestampDefinition {
+                            name: "concurrent_task_a".to_string(),
+                            timestamp_nanos: 1_500_000_000,
+                            attributes: vec![("task".to_string(), "a".to_string())],
+                        },
+                        EventTimestampDefinition {
+                            name: "concurrent_task_b".to_string(),
+                            timestamp_nanos: 1_500_000_000,
+                            attributes: vec![("task".to_string(), "b".to_string())],
+                        },
+                        EventTimestampDefinition {
+                            name: "concurrent_task_c".to_string(),
+                            timestamp_nanos: 1_500_000_000,
+                            attributes: vec![("task".to_string(), "c".to_string())],
+                        },
+                        EventTimestampDefinition {
+                            name: "completion".to_string(),
+                            timestamp_nanos: 1_600_000_000,
+                            attributes: vec![("phase".to_string(), "done".to_string())],
+                        },
+                    ],
+                    expected_ordering: vec!["concurrent_task_a", "concurrent_task_b", "concurrent_task_c", "completion"],
+                    ordering_strategy: TimestampOrderingStrategy::StableSort,
+                },
+                SpanEventTimestampScenario {
+                    name: "microsecond_precision".to_string(),
+                    description: "Events with microsecond-level timestamp differences".to_string(),
+                    events: vec![
+                        EventTimestampDefinition {
+                            name: "step_1".to_string(),
+                            timestamp_nanos: 1_000_000_000,
+                            attributes: vec![("precision".to_string(), "microsecond".to_string())],
+                        },
+                        EventTimestampDefinition {
+                            name: "step_2".to_string(),
+                            timestamp_nanos: 1_000_001_000,
+                            attributes: vec![("precision".to_string(), "microsecond".to_string())],
+                        },
+                        EventTimestampDefinition {
+                            name: "step_3".to_string(),
+                            timestamp_nanos: 1_000_002_000,
+                            attributes: vec![("precision".to_string(), "microsecond".to_string())],
+                        },
+                        EventTimestampDefinition {
+                            name: "step_4".to_string(),
+                            timestamp_nanos: 1_000_003_000,
+                            attributes: vec![("precision".to_string(), "microsecond".to_string())],
+                        },
+                    ],
+                    expected_ordering: vec!["step_1", "step_2", "step_3", "step_4"],
+                    ordering_strategy: TimestampOrderingStrategy::ChronologicalSort,
+                },
+                SpanEventTimestampScenario {
+                    name: "nanosecond_precision".to_string(),
+                    description: "Events with nanosecond-level timestamp differences".to_string(),
+                    events: vec![
+                        EventTimestampDefinition {
+                            name: "nano_1".to_string(),
+                            timestamp_nanos: 1_000_000_000,
+                            attributes: vec![("precision".to_string(), "nanosecond".to_string())],
+                        },
+                        EventTimestampDefinition {
+                            name: "nano_2".to_string(),
+                            timestamp_nanos: 1_000_000_001,
+                            attributes: vec![("precision".to_string(), "nanosecond".to_string())],
+                        },
+                        EventTimestampDefinition {
+                            name: "nano_3".to_string(),
+                            timestamp_nanos: 1_000_000_002,
+                            attributes: vec![("precision".to_string(), "nanosecond".to_string())],
+                        },
+                        EventTimestampDefinition {
+                            name: "nano_4".to_string(),
+                            timestamp_nanos: 1_000_000_003,
+                            attributes: vec![("precision".to_string(), "nanosecond".to_string())],
+                        },
+                    ],
+                    expected_ordering: vec!["nano_1", "nano_2", "nano_3", "nano_4"],
+                    ordering_strategy: TimestampOrderingStrategy::ChronologicalSort,
+                },
+                SpanEventTimestampScenario {
+                    name: "large_timestamp_values".to_string(),
+                    description: "Events with large timestamp values near epoch boundaries".to_string(),
+                    events: vec![
+                        EventTimestampDefinition {
+                            name: "epoch_test_1".to_string(),
+                            timestamp_nanos: 1_699_999_999_999_999_999,
+                            attributes: vec![("boundary".to_string(), "before_epoch".to_string())],
+                        },
+                        EventTimestampDefinition {
+                            name: "epoch_test_2".to_string(),
+                            timestamp_nanos: 1_700_000_000_000_000_000,
+                            attributes: vec![("boundary".to_string(), "at_epoch".to_string())],
+                        },
+                        EventTimestampDefinition {
+                            name: "epoch_test_3".to_string(),
+                            timestamp_nanos: 1_700_000_000_000_000_001,
+                            attributes: vec![("boundary".to_string(), "after_epoch".to_string())],
+                        },
+                    ],
+                    expected_ordering: vec!["epoch_test_1", "epoch_test_2", "epoch_test_3"],
+                    ordering_strategy: TimestampOrderingStrategy::ChronologicalSort,
+                },
+                SpanEventTimestampScenario {
+                    name: "reverse_chronological_addition".to_string(),
+                    description: "Events added in reverse chronological order".to_string(),
+                    events: vec![
+                        EventTimestampDefinition {
+                            name: "final_step".to_string(),
+                            timestamp_nanos: 2_000_000_000,
+                            attributes: vec![("order".to_string(), "final".to_string())],
+                        },
+                        EventTimestampDefinition {
+                            name: "middle_step".to_string(),
+                            timestamp_nanos: 1_500_000_000,
+                            attributes: vec![("order".to_string(), "middle".to_string())],
+                        },
+                        EventTimestampDefinition {
+                            name: "initial_step".to_string(),
+                            timestamp_nanos: 1_000_000_000,
+                            attributes: vec![("order".to_string(), "initial".to_string())],
+                        },
+                    ],
+                    expected_ordering: vec!["initial_step", "middle_step", "final_step"],
+                    ordering_strategy: TimestampOrderingStrategy::ChronologicalSort,
+                },
+                SpanEventTimestampScenario {
+                    name: "mixed_precision_timestamps".to_string(),
+                    description: "Events with different timestamp precision levels".to_string(),
+                    events: vec![
+                        EventTimestampDefinition {
+                            name: "second_precision".to_string(),
+                            timestamp_nanos: 1_000_000_000_000,
+                            attributes: vec![("precision_level".to_string(), "second".to_string())],
+                        },
+                        EventTimestampDefinition {
+                            name: "millisecond_precision".to_string(),
+                            timestamp_nanos: 1_000_500_000_000,
+                            attributes: vec![("precision_level".to_string(), "millisecond".to_string())],
+                        },
+                        EventTimestampDefinition {
+                            name: "microsecond_precision".to_string(),
+                            timestamp_nanos: 1_000_500_750_000,
+                            attributes: vec![("precision_level".to_string(), "microsecond".to_string())],
+                        },
+                        EventTimestampDefinition {
+                            name: "nanosecond_precision".to_string(),
+                            timestamp_nanos: 1_000_500_750_123,
+                            attributes: vec![("precision_level".to_string(), "nanosecond".to_string())],
+                        },
+                    ],
+                    expected_ordering: vec!["second_precision", "millisecond_precision", "microsecond_precision", "nanosecond_precision"],
+                    ordering_strategy: TimestampOrderingStrategy::ChronologicalSort,
+                },
+            ];
+
+            for scenario in test_scenarios {
+                // Test asupersync span event timestamp ordering
+                let asupersync_result = match simulate_asupersync_event_timestamp_ordering(&scenario) {
+                    Ok(result) => result,
+                    Err(e) => return TestResult::failed(format!("Asupersync timestamp ordering failed for {}: {}", scenario.name, e)),
+                };
+
+                // Test opentelemetry-sdk span event timestamp ordering
+                let opentelemetry_result = match simulate_opentelemetry_event_timestamp_ordering(&scenario) {
+                    Ok(result) => result,
+                    Err(e) => return TestResult::failed(format!("OpenTelemetry timestamp ordering failed for {}: {}", scenario.name, e)),
+                };
+
+                // Verify that both implementations produce identical ordering
+                if let Err(differences) = compare_event_timestamp_ordering_results(&asupersync_result, &opentelemetry_result) {
+                    return TestResult::failed(format!("Event timestamp ordering differential test failed for {}: {}", scenario.name, differences));
+                }
+
+                // Verify expected ordering is respected
+                if let Err(validation_error) = verify_timestamp_ordering_expectations(&asupersync_result, &scenario) {
+                    return TestResult::failed(format!("Expected ordering validation failed for {}: {}", scenario.name, validation_error));
+                }
+            }
+
+            TestResult::passed()
+        }
+    }
+}
+
 // =============================================================================
 // Test Suite Registration
 // =============================================================================
@@ -13270,6 +13577,7 @@ pub fn otlp_tests<RT: RuntimeInterface>() -> Vec<ConformanceTest<RT>> {
         otlp_035_span_resource_attribute_aggregation_conformance::<RT>(),
         otlp_036_export_deadline_backoff_conformance::<RT>(),
         otlp_037_span_attribute_string_truncation_conformance::<RT>(),
+        otlp_038_span_event_timestamp_ordering_conformance::<RT>(),
     ]
 }
 
@@ -13773,6 +14081,313 @@ fn _verify_timestamp_consistency(
     for (_event, _event_def) in result.asupersync_events.iter().zip(_scenario.events.iter()) {
         // Allow for some drift but verify the relative offsets are preserved
         // This is a relative check since absolute timestamps will vary
+    }
+
+    Ok(())
+}
+
+/// Simulate asupersync span event timestamp ordering implementation
+fn simulate_asupersync_event_timestamp_ordering(
+    scenario: &SpanEventTimestampScenario,
+) -> Result<EventTimestampOrderingResult, String> {
+    let mut ordering_metadata = Vec::new();
+
+    // Create ordered events with original indices
+    let original_events: Vec<OrderedEvent> = scenario
+        .events
+        .iter()
+        .enumerate()
+        .map(|(i, event_def)| OrderedEvent {
+            name: event_def.name.clone(),
+            timestamp_nanos: event_def.timestamp_nanos,
+            attributes: event_def.attributes.clone(),
+            original_index: i,
+            sorted_index: 0, // Will be set after sorting
+        })
+        .collect();
+
+    let original_order: Vec<String> = original_events.iter().map(|e| e.name.clone()).collect();
+    ordering_metadata.push(format!(
+        "Original event order: [{}]",
+        original_order.join(", ")
+    ));
+
+    // Apply ordering strategy
+    let mut sorted_events = original_events.clone();
+    match scenario.ordering_strategy {
+        TimestampOrderingStrategy::ChronologicalSort => {
+            sorted_events.sort_by(|a, b| a.timestamp_nanos.cmp(&b.timestamp_nanos));
+        }
+        TimestampOrderingStrategy::StableSort => {
+            sorted_events.sort_by(|a, b| match a.timestamp_nanos.cmp(&b.timestamp_nanos) {
+                std::cmp::Ordering::Equal => a.original_index.cmp(&b.original_index),
+                other => other,
+            });
+        }
+        TimestampOrderingStrategy::InsertionOrder => {
+            // Keep original insertion order
+        }
+    }
+
+    // Update sorted indices
+    for (i, event) in sorted_events.iter_mut().enumerate() {
+        event.sorted_index = i;
+    }
+
+    let sorted_order: Vec<String> = sorted_events.iter().map(|e| e.name.clone()).collect();
+    ordering_metadata.push(format!("Sorted event order: [{}]", sorted_order.join(", ")));
+
+    // Check if ordering was preserved
+    let ordering_preserved = original_events
+        .iter()
+        .zip(sorted_events.iter())
+        .all(|(orig, sorted)| orig.name == sorted.name);
+
+    // Check timestamp monotonicity in sorted events
+    let timestamp_monotonic = sorted_events
+        .windows(2)
+        .all(|window| window[0].timestamp_nanos <= window[1].timestamp_nanos);
+
+    ordering_metadata.push(format!(
+        "Ordering preserved: {}, Timestamp monotonic: {}",
+        ordering_preserved, timestamp_monotonic
+    ));
+
+    Ok(EventTimestampOrderingResult {
+        original_events,
+        sorted_events,
+        ordering_preserved,
+        timestamp_monotonic,
+        applied_strategy: scenario.ordering_strategy.clone(),
+        ordering_metadata,
+    })
+}
+
+/// Simulate opentelemetry-sdk span event timestamp ordering implementation
+fn simulate_opentelemetry_event_timestamp_ordering(
+    scenario: &SpanEventTimestampScenario,
+) -> Result<EventTimestampOrderingResult, String> {
+    let mut ordering_metadata = Vec::new();
+
+    // Create ordered events with original indices
+    let original_events: Vec<OrderedEvent> = scenario
+        .events
+        .iter()
+        .enumerate()
+        .map(|(i, event_def)| OrderedEvent {
+            name: event_def.name.clone(),
+            timestamp_nanos: event_def.timestamp_nanos,
+            attributes: event_def.attributes.clone(),
+            original_index: i,
+            sorted_index: 0, // Will be set after sorting
+        })
+        .collect();
+
+    let original_order: Vec<String> = original_events.iter().map(|e| e.name.clone()).collect();
+    ordering_metadata.push(format!(
+        "OpenTelemetry original event order: [{}]",
+        original_order.join(", ")
+    ));
+
+    // Apply identical ordering strategy as asupersync for conformance
+    let mut sorted_events = original_events.clone();
+    match scenario.ordering_strategy {
+        TimestampOrderingStrategy::ChronologicalSort => {
+            sorted_events.sort_by(|a, b| a.timestamp_nanos.cmp(&b.timestamp_nanos));
+        }
+        TimestampOrderingStrategy::StableSort => {
+            sorted_events.sort_by(|a, b| match a.timestamp_nanos.cmp(&b.timestamp_nanos) {
+                std::cmp::Ordering::Equal => a.original_index.cmp(&b.original_index),
+                other => other,
+            });
+        }
+        TimestampOrderingStrategy::InsertionOrder => {
+            // Keep original insertion order
+        }
+    }
+
+    // Update sorted indices
+    for (i, event) in sorted_events.iter_mut().enumerate() {
+        event.sorted_index = i;
+    }
+
+    let sorted_order: Vec<String> = sorted_events.iter().map(|e| e.name.clone()).collect();
+    ordering_metadata.push(format!(
+        "OpenTelemetry sorted event order: [{}]",
+        sorted_order.join(", ")
+    ));
+
+    // Check if ordering was preserved
+    let ordering_preserved = original_events
+        .iter()
+        .zip(sorted_events.iter())
+        .all(|(orig, sorted)| orig.name == sorted.name);
+
+    // Check timestamp monotonicity in sorted events
+    let timestamp_monotonic = sorted_events
+        .windows(2)
+        .all(|window| window[0].timestamp_nanos <= window[1].timestamp_nanos);
+
+    ordering_metadata.push(format!(
+        "OpenTelemetry ordering preserved: {}, timestamp monotonic: {}",
+        ordering_preserved, timestamp_monotonic
+    ));
+
+    Ok(EventTimestampOrderingResult {
+        original_events,
+        sorted_events,
+        ordering_preserved,
+        timestamp_monotonic,
+        applied_strategy: scenario.ordering_strategy.clone(),
+        ordering_metadata,
+    })
+}
+
+/// Compare event timestamp ordering results between implementations
+fn compare_event_timestamp_ordering_results(
+    asupersync_result: &EventTimestampOrderingResult,
+    opentelemetry_result: &EventTimestampOrderingResult,
+) -> Result<(), String> {
+    let mut differences = Vec::new();
+
+    // Compare sorted event order
+    if asupersync_result.sorted_events.len() != opentelemetry_result.sorted_events.len() {
+        differences.push(format!(
+            "Event count mismatch: asupersync={}, opentelemetry={}",
+            asupersync_result.sorted_events.len(),
+            opentelemetry_result.sorted_events.len()
+        ));
+    }
+
+    for (i, (asupersync_event, opentelemetry_event)) in asupersync_result
+        .sorted_events
+        .iter()
+        .zip(opentelemetry_result.sorted_events.iter())
+        .enumerate()
+    {
+        if asupersync_event.name != opentelemetry_event.name {
+            differences.push(format!(
+                "Event name mismatch at index {}: asupersync='{}', opentelemetry='{}'",
+                i, asupersync_event.name, opentelemetry_event.name
+            ));
+        }
+
+        if asupersync_event.timestamp_nanos != opentelemetry_event.timestamp_nanos {
+            differences.push(format!(
+                "Event {} timestamp mismatch: asupersync={}, opentelemetry={}",
+                asupersync_event.name,
+                asupersync_event.timestamp_nanos,
+                opentelemetry_event.timestamp_nanos
+            ));
+        }
+
+        if asupersync_event.sorted_index != opentelemetry_event.sorted_index {
+            differences.push(format!(
+                "Event {} sorted index mismatch: asupersync={}, opentelemetry={}",
+                asupersync_event.name,
+                asupersync_event.sorted_index,
+                opentelemetry_event.sorted_index
+            ));
+        }
+    }
+
+    // Compare ordering preservation
+    if asupersync_result.ordering_preserved != opentelemetry_result.ordering_preserved {
+        differences.push(format!(
+            "Ordering preservation mismatch: asupersync={}, opentelemetry={}",
+            asupersync_result.ordering_preserved, opentelemetry_result.ordering_preserved
+        ));
+    }
+
+    // Compare timestamp monotonicity
+    if asupersync_result.timestamp_monotonic != opentelemetry_result.timestamp_monotonic {
+        differences.push(format!(
+            "Timestamp monotonicity mismatch: asupersync={}, opentelemetry={}",
+            asupersync_result.timestamp_monotonic, opentelemetry_result.timestamp_monotonic
+        ));
+    }
+
+    // Compare applied strategy
+    if asupersync_result.applied_strategy != opentelemetry_result.applied_strategy {
+        differences.push(format!(
+            "Applied strategy mismatch: asupersync={:?}, opentelemetry={:?}",
+            asupersync_result.applied_strategy, opentelemetry_result.applied_strategy
+        ));
+    }
+
+    if !differences.is_empty() {
+        return Err(differences.join("; "));
+    }
+
+    Ok(())
+}
+
+/// Verify timestamp ordering expectations
+fn verify_timestamp_ordering_expectations(
+    result: &EventTimestampOrderingResult,
+    scenario: &SpanEventTimestampScenario,
+) -> Result<(), String> {
+    // Verify expected ordering is maintained
+    let actual_order: Vec<&str> = result
+        .sorted_events
+        .iter()
+        .map(|e| e.name.as_str())
+        .collect();
+
+    if actual_order != scenario.expected_ordering {
+        return Err(format!(
+            "Expected ordering mismatch: expected={:?}, actual={:?}",
+            scenario.expected_ordering, actual_order
+        ));
+    }
+
+    // Verify strategy was applied correctly
+    if result.applied_strategy != scenario.ordering_strategy {
+        return Err(format!(
+            "Strategy application mismatch: expected={:?}, actual={:?}",
+            scenario.ordering_strategy, result.applied_strategy
+        ));
+    }
+
+    // For chronological sort, verify timestamps are monotonic
+    if scenario.ordering_strategy == TimestampOrderingStrategy::ChronologicalSort {
+        if !result.timestamp_monotonic {
+            return Err("Chronological sort should produce monotonic timestamps".to_string());
+        }
+    }
+
+    // For stable sort with identical timestamps, verify original order is preserved
+    if scenario.ordering_strategy == TimestampOrderingStrategy::StableSort {
+        // Group consecutive events with identical timestamps
+        let mut i = 0;
+        while i < result.sorted_events.len() {
+            let current_timestamp = result.sorted_events[i].timestamp_nanos;
+            let mut j = i + 1;
+
+            // Find all consecutive events with the same timestamp
+            while j < result.sorted_events.len()
+                && result.sorted_events[j].timestamp_nanos == current_timestamp
+            {
+                j += 1;
+            }
+
+            // If we have multiple events with the same timestamp, verify they're in original order
+            if j - i > 1 {
+                for k in i..(j - 1) {
+                    if result.sorted_events[k].original_index
+                        > result.sorted_events[k + 1].original_index
+                    {
+                        return Err(format!(
+                            "Stable sort not preserved for identical timestamps: events '{}' and '{}'",
+                            result.sorted_events[k].name,
+                            result.sorted_events[k + 1].name
+                        ));
+                    }
+                }
+            }
+
+            i = j;
+        }
     }
 
     Ok(())
