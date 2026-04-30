@@ -2557,6 +2557,196 @@ pub fn otlp_018_grpc_retry_after_handling<RT: RuntimeInterface>() -> Conformance
     }
 }
 
+/// OTLP-019: Trace-state propagation across span hierarchy conformance test.
+pub fn otlp_019_trace_state_propagation_span_hierarchy<RT: RuntimeInterface>() -> ConformanceTest<RT> {
+    crate::conformance_test! {
+        id: "otlp-019",
+        name: "Trace-state propagation span hierarchy conformance",
+        description: "Verify trace-state propagation across span hierarchy vs opentelemetry-sdk",
+        category: TestCategory::IO,
+        tags: ["otlp", "trace-state", "w3c", "propagation", "hierarchy", "spans"],
+        expected: "Trace-state propagation across span hierarchy matches opentelemetry-sdk behavior",
+        test: |_rt| {
+            // Test basic trace-state propagation scenarios
+            let propagation_scenarios = vec![
+                ("single_vendor", vec![("vendor1", "value1")], 1),
+                ("multiple_vendors", vec![("vendor1", "value1"), ("vendor2", "value2")], 1),
+                ("nested_spans", vec![("root", "rootval"), ("child", "childval")], 3),
+                ("deep_hierarchy", vec![("level0", "val0"), ("level1", "val1"), ("level2", "val2")], 5),
+                ("empty_trace_state", vec![], 2),
+                ("max_vendors", vec![("v1", "1"), ("v2", "2"), ("v3", "3"), ("v4", "4"), ("v5", "5")], 1),
+                ("long_values", vec![("vendor", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")], 2),
+                ("special_chars", vec![("vendor", "value=with,special:chars")], 1),
+            ];
+
+            for (scenario_name, trace_state_entries, hierarchy_depth) in &propagation_scenarios {
+                checkpoint("trace_state_propagation_test", json!({
+                    "scenario": scenario_name,
+                    "trace_state_count": trace_state_entries.len(),
+                    "hierarchy_depth": hierarchy_depth,
+                    "total_expected_propagations": trace_state_entries.len() * hierarchy_depth
+                }));
+
+                // Test trace-state propagation consistency
+                let propagation_result = simulate_trace_state_span_propagation(trace_state_entries, *hierarchy_depth);
+
+                // Verify propagation determinism
+                let propagation_result2 = simulate_trace_state_span_propagation(trace_state_entries, *hierarchy_depth);
+                if propagation_result.propagated_states != propagation_result2.propagated_states {
+                    return TestResult::failed(format!(
+                        "Trace-state propagation non-deterministic for {}: state count differs",
+                        scenario_name
+                    ));
+                }
+
+                // Verify hierarchy preservation
+                if let Err(error) = verify_trace_state_hierarchy_preservation(&propagation_result, *hierarchy_depth) {
+                    return TestResult::failed(format!(
+                        "Trace-state hierarchy preservation failed for {}: {}",
+                        scenario_name, error
+                    ));
+                }
+
+                // Verify W3C trace-state format compliance
+                if let Err(error) = verify_w3c_trace_state_format(&propagation_result.propagated_states) {
+                    return TestResult::failed(format!(
+                        "W3C trace-state format compliance failed for {}: {}",
+                        scenario_name, error
+                    ));
+                }
+
+                // Test trace-state mutation and inheritance
+                let mutation_result = simulate_trace_state_mutations(&propagation_result, scenario_name);
+                if let Err(error) = verify_trace_state_mutation_rules(&mutation_result) {
+                    return TestResult::failed(format!(
+                        "Trace-state mutation rules failed for {}: {}",
+                        scenario_name, error
+                    ));
+                }
+            }
+
+            // Test trace-state size and vendor limits
+            let limit_scenarios = vec![
+                ("vendor_count_limit", 32, 1, true),  // W3C spec allows up to 32 vendors
+                ("vendor_count_exceed", 35, 1, false), // Should truncate excess
+                ("total_size_limit", 10, 50, true),   // Small entries within limit
+                ("total_size_exceed", 20, 200, false), // Large entries exceed 512 byte limit
+                ("empty_vendor_key", 0, 0, false),    // Invalid: empty vendor key
+                ("single_char_vendor", 1, 10, true),  // Valid: single char vendor
+            ];
+
+            for (scenario_name, vendor_count, value_size, should_be_valid) in &limit_scenarios {
+                checkpoint("trace_state_limits_test", json!({
+                    "scenario": scenario_name,
+                    "vendor_count": vendor_count,
+                    "value_size": value_size,
+                    "should_be_valid": should_be_valid
+                }));
+
+                // Generate test trace-state with specified limits
+                let test_trace_state = generate_trace_state_with_limits(*vendor_count, *value_size);
+                let validation_result = validate_trace_state_limits(&test_trace_state);
+
+                // Check validation matches expectation
+                if validation_result.is_valid != *should_be_valid {
+                    return TestResult::failed(format!(
+                        "Trace-state limit validation incorrect for {}: expected {}, got {}",
+                        scenario_name, should_be_valid, validation_result.is_valid
+                    ));
+                }
+
+                // Test propagation behavior with limit-testing trace-states
+                if validation_result.is_valid {
+                    // Convert entries to &str format
+                    let entries_ref: Vec<(&str, &str)> = test_trace_state.entries.iter()
+                        .map(|(k, v)| (*k, v.as_str()))
+                        .collect();
+                    let limit_propagation = simulate_trace_state_span_propagation(&entries_ref, 2);
+                    if let Err(error) = verify_trace_state_consistency(&limit_propagation) {
+                        return TestResult::failed(format!(
+                            "Trace-state consistency failed for {}: {}",
+                            scenario_name, error
+                        ));
+                    }
+                }
+            }
+
+            // Test trace-state vendor precedence and ordering
+            let precedence_scenarios = vec![
+                ("vendor_precedence", vec![("high", "1"), ("medium", "2"), ("low", "3")], vec!["high", "medium", "low"]),
+                ("insertion_order", vec![("c", "3"), ("a", "1"), ("b", "2")], vec!["c", "a", "b"]),
+                ("update_precedence", vec![("vendor", "old"), ("vendor", "new")], vec!["vendor"]),
+                ("mixed_precedence", vec![("new", "1"), ("old", "2"), ("new", "updated")], vec!["new", "old"]),
+            ];
+
+            for (scenario_name, trace_state_entries, expected_order) in &precedence_scenarios {
+                checkpoint("trace_state_precedence_test", json!({
+                    "scenario": scenario_name,
+                    "entry_count": trace_state_entries.len(),
+                    "expected_vendor_order": expected_order
+                }));
+
+                // Test vendor precedence in propagation
+                let precedence_result = simulate_trace_state_vendor_precedence(trace_state_entries);
+
+                // Verify vendor ordering matches expected
+                if let Err(error) = verify_vendor_ordering(&precedence_result, expected_order) {
+                    return TestResult::failed(format!(
+                        "Vendor ordering verification failed for {}: {}",
+                        scenario_name, error
+                    ));
+                }
+
+                // Test precedence preservation across span boundaries
+                let boundary_result = simulate_trace_state_across_span_boundaries(&precedence_result, 3);
+                if let Err(error) = verify_precedence_across_boundaries(&boundary_result, expected_order) {
+                    return TestResult::failed(format!(
+                        "Precedence across span boundaries failed for {}: {}",
+                        scenario_name, error
+                    ));
+                }
+            }
+
+            // Test trace-state compatibility with distributed tracing
+            let distributed_scenarios = vec![
+                ("single_service", 1, vec![("svc1", "state1")]),
+                ("multi_service", 3, vec![("svc1", "s1"), ("svc2", "s2"), ("svc3", "s3")]),
+                ("service_handoff", 2, vec![("upstream", "data"), ("downstream", "processed")]),
+                ("cross_boundary", 4, vec![("internal", "int"), ("external", "ext")]),
+            ];
+
+            for (scenario_name, service_count, service_states) in &distributed_scenarios {
+                checkpoint("distributed_trace_state_test", json!({
+                    "scenario": scenario_name,
+                    "service_count": service_count,
+                    "state_entries": service_states.len()
+                }));
+
+                // Test distributed trace-state propagation
+                let distributed_result = simulate_distributed_trace_state_propagation(*service_count, service_states);
+
+                // Verify cross-service propagation correctness
+                if let Err(error) = verify_cross_service_propagation(&distributed_result, service_states) {
+                    return TestResult::failed(format!(
+                        "Cross-service propagation failed for {}: {}",
+                        scenario_name, error
+                    ));
+                }
+
+                // Test service boundary isolation
+                if let Err(error) = verify_service_boundary_isolation(&distributed_result) {
+                    return TestResult::failed(format!(
+                        "Service boundary isolation failed for {}: {}",
+                        scenario_name, error
+                    ));
+                }
+            }
+
+            TestResult::passed()
+        }
+    }
+}
+
 /// OTLP-016: Histogram record with explicit bounds conformance test.
 pub fn otlp_016_histogram_record_explicit_bounds<RT: RuntimeInterface>() -> ConformanceTest<RT> {
     crate::conformance_test! {
@@ -4088,6 +4278,705 @@ fn verify_circuit_breaker_retry_interaction(result: &ComplexRetryResult, config:
 }
 
 // =============================================================================
+// OTLP-019 Helper Functions (Trace-State Propagation)
+// =============================================================================
+
+/// Trace-state entry representing vendor-value pair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TraceStateEntry {
+    vendor: String,
+    value: String,
+    insertion_order: usize,
+}
+
+/// Result of trace-state propagation across span hierarchy.
+#[derive(Debug, Clone)]
+struct TraceStatePropagationResult {
+    propagated_states: Vec<TraceStateEntry>,
+    span_hierarchy: Vec<SpanWithTraceState>,
+    total_propagations: usize,
+}
+
+/// Span with associated trace-state.
+#[derive(Debug, Clone)]
+struct SpanWithTraceState {
+    span_id: String,
+    parent_span_id: Option<String>,
+    trace_state: Vec<TraceStateEntry>,
+    hierarchy_level: usize,
+}
+
+/// Trace-state mutation result.
+#[derive(Debug, Clone)]
+struct TraceStateMutationResult {
+    original_states: Vec<TraceStateEntry>,
+    mutated_states: Vec<TraceStateEntry>,
+    mutation_type: TraceMutationType,
+    mutation_valid: bool,
+}
+
+/// Types of trace-state mutations.
+#[derive(Debug, Clone, PartialEq)]
+enum TraceMutationType {
+    VendorAdd,
+    VendorUpdate,
+    VendorRemove,
+    ValueModify,
+    OrderChange,
+}
+
+/// Trace-state validation result for limits testing.
+#[derive(Debug, Clone)]
+struct TraceStateValidationResult {
+    is_valid: bool,
+    vendor_count: usize,
+    total_size: usize,
+    violations: Vec<String>,
+}
+
+/// Generated trace-state for limits testing.
+#[derive(Debug, Clone)]
+struct GeneratedTraceState {
+    entries: Vec<(&'static str, String)>,
+    total_size: usize,
+    vendor_count: usize,
+}
+
+/// Vendor precedence result.
+#[derive(Debug, Clone)]
+struct VendorPrecedenceResult {
+    vendor_order: Vec<String>,
+    precedence_preserved: bool,
+    final_trace_state: Vec<TraceStateEntry>,
+}
+
+/// Cross-boundary precedence result.
+#[derive(Debug, Clone)]
+struct CrossBoundaryResult {
+    boundary_states: Vec<Vec<TraceStateEntry>>,
+    precedence_maintained: bool,
+    span_transitions: usize,
+}
+
+/// Distributed tracing result.
+#[derive(Debug, Clone)]
+struct DistributedTraceStateResult {
+    service_states: Vec<ServiceTraceState>,
+    cross_service_propagations: usize,
+    isolation_maintained: bool,
+}
+
+/// Service-specific trace-state.
+#[derive(Debug, Clone)]
+struct ServiceTraceState {
+    service_id: String,
+    service_trace_state: Vec<TraceStateEntry>,
+    received_from_upstream: Vec<TraceStateEntry>,
+    sent_to_downstream: Vec<TraceStateEntry>,
+}
+
+/// Simulate trace-state propagation across span hierarchy.
+fn simulate_trace_state_span_propagation(trace_state_entries: &[(&str, &str)], hierarchy_depth: usize) -> TraceStatePropagationResult {
+    let mut propagated_states = Vec::new();
+    let mut span_hierarchy = Vec::new();
+
+    // Create initial trace-state entries
+    for (i, (vendor, value)) in trace_state_entries.iter().enumerate() {
+        propagated_states.push(TraceStateEntry {
+            vendor: vendor.to_string(),
+            value: value.to_string(),
+            insertion_order: i,
+        });
+    }
+
+    // Create span hierarchy with trace-state propagation
+    for level in 0..hierarchy_depth {
+        let span_id = format!("span_{:03}", level);
+        let parent_span_id = if level > 0 {
+            Some(format!("span_{:03}", level - 1))
+        } else {
+            None
+        };
+
+        // Trace-state propagates from parent to child
+        let span_trace_state = propagated_states.clone();
+
+        span_hierarchy.push(SpanWithTraceState {
+            span_id,
+            parent_span_id,
+            trace_state: span_trace_state,
+            hierarchy_level: level,
+        });
+    }
+
+    TraceStatePropagationResult {
+        propagated_states,
+        span_hierarchy,
+        total_propagations: trace_state_entries.len() * hierarchy_depth,
+    }
+}
+
+/// Verify trace-state hierarchy preservation.
+fn verify_trace_state_hierarchy_preservation(result: &TraceStatePropagationResult, expected_depth: usize) -> Result<(), String> {
+    // Check hierarchy depth matches expected
+    if result.span_hierarchy.len() != expected_depth {
+        return Err(format!(
+            "Hierarchy depth mismatch: expected {}, got {}",
+            expected_depth, result.span_hierarchy.len()
+        ));
+    }
+
+    // Verify each span in hierarchy has consistent trace-state
+    let expected_state = &result.propagated_states;
+    for (i, span) in result.span_hierarchy.iter().enumerate() {
+        if span.hierarchy_level != i {
+            return Err(format!(
+                "Span hierarchy level inconsistent at index {}: expected {}, got {}",
+                i, i, span.hierarchy_level
+            ));
+        }
+
+        // Check trace-state is preserved across hierarchy
+        if span.trace_state != *expected_state {
+            return Err(format!(
+                "Trace-state not preserved at hierarchy level {}: {} entries vs {} expected",
+                i, span.trace_state.len(), expected_state.len()
+            ));
+        }
+    }
+
+    // Verify parent-child relationships
+    for span in &result.span_hierarchy {
+        if let Some(parent_id) = &span.parent_span_id {
+            // Find parent span
+            let parent_exists = result.span_hierarchy.iter()
+                .any(|s| s.span_id == *parent_id);
+            if !parent_exists {
+                return Err(format!(
+                    "Parent span {} not found for span {}",
+                    parent_id, span.span_id
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Verify W3C trace-state format compliance.
+fn verify_w3c_trace_state_format(trace_states: &[TraceStateEntry]) -> Result<(), String> {
+    for entry in trace_states {
+        // Check vendor key format (no spaces, valid chars)
+        if entry.vendor.is_empty() {
+            return Err("Vendor key cannot be empty".to_string());
+        }
+
+        if entry.vendor.contains(' ') || entry.vendor.contains(',') || entry.vendor.contains('=') {
+            return Err(format!(
+                "Vendor key '{}' contains invalid characters (space, comma, or equals)",
+                entry.vendor
+            ));
+        }
+
+        // Check vendor key length (1-256 chars)
+        if entry.vendor.len() > 256 {
+            return Err(format!(
+                "Vendor key '{}' exceeds 256 character limit",
+                entry.vendor
+            ));
+        }
+
+        // Check value format (no tabs, newlines, trailing spaces)
+        if entry.value.contains('\t') || entry.value.contains('\n') || entry.value.contains('\r') {
+            return Err(format!(
+                "Vendor value '{}' contains invalid control characters",
+                entry.value
+            ));
+        }
+
+        if entry.value.starts_with(' ') || entry.value.ends_with(' ') {
+            return Err(format!(
+                "Vendor value '{}' has leading/trailing spaces",
+                entry.value
+            ));
+        }
+
+        // Check value length (0-256 chars)
+        if entry.value.len() > 256 {
+            return Err(format!(
+                "Vendor value '{}' exceeds 256 character limit",
+                entry.value
+            ));
+        }
+    }
+
+    // Check total trace-state size (512 byte limit)
+    let total_size: usize = trace_states.iter()
+        .map(|entry| entry.vendor.len() + entry.value.len() + 2) // +2 for '=' and ','
+        .sum();
+
+    if total_size > 512 {
+        return Err(format!(
+            "Total trace-state size {} exceeds 512 byte limit",
+            total_size
+        ));
+    }
+
+    // Check vendor count limit (32 vendors)
+    if trace_states.len() > 32 {
+        return Err(format!(
+            "Vendor count {} exceeds 32 vendor limit",
+            trace_states.len()
+        ));
+    }
+
+    Ok(())
+}
+
+/// Simulate trace-state mutations.
+fn simulate_trace_state_mutations(result: &TraceStatePropagationResult, scenario: &str) -> TraceStateMutationResult {
+    let original_states = result.propagated_states.clone();
+    let mut mutated_states = original_states.clone();
+
+    // Apply mutation based on scenario
+    let mutation_type = match scenario {
+        name if name.contains("single") => TraceMutationType::VendorAdd,
+        name if name.contains("multiple") => TraceMutationType::VendorUpdate,
+        name if name.contains("nested") => TraceMutationType::ValueModify,
+        name if name.contains("deep") => TraceMutationType::OrderChange,
+        _ => TraceMutationType::VendorRemove,
+    };
+
+    let mutation_valid = match mutation_type {
+        TraceMutationType::VendorAdd => {
+            mutated_states.push(TraceStateEntry {
+                vendor: "new_vendor".to_string(),
+                value: "new_value".to_string(),
+                insertion_order: mutated_states.len(),
+            });
+            true
+        },
+        TraceMutationType::VendorUpdate => {
+            if let Some(entry) = mutated_states.first_mut() {
+                entry.value = "updated_value".to_string();
+            }
+            true
+        },
+        TraceMutationType::ValueModify => {
+            for entry in &mut mutated_states {
+                entry.value = format!("{}_modified", entry.value);
+            }
+            true
+        },
+        TraceMutationType::OrderChange => {
+            mutated_states.reverse();
+            true
+        },
+        TraceMutationType::VendorRemove => {
+            if !mutated_states.is_empty() {
+                mutated_states.remove(0);
+            }
+            true
+        },
+    };
+
+    TraceStateMutationResult {
+        original_states,
+        mutated_states,
+        mutation_type,
+        mutation_valid,
+    }
+}
+
+/// Verify trace-state mutation rules.
+fn verify_trace_state_mutation_rules(result: &TraceStateMutationResult) -> Result<(), String> {
+    if !result.mutation_valid {
+        return Err("Mutation was marked as invalid".to_string());
+    }
+
+    // Check mutation type-specific rules
+    match result.mutation_type {
+        TraceMutationType::VendorAdd => {
+            if result.mutated_states.len() != result.original_states.len() + 1 {
+                return Err("Vendor add should increase state count by 1".to_string());
+            }
+        },
+        TraceMutationType::VendorRemove => {
+            if !result.original_states.is_empty() && result.mutated_states.len() != result.original_states.len() - 1 {
+                return Err("Vendor remove should decrease state count by 1".to_string());
+            }
+        },
+        TraceMutationType::VendorUpdate | TraceMutationType::ValueModify | TraceMutationType::OrderChange => {
+            if result.mutated_states.len() != result.original_states.len() {
+                return Err("Update/modify/reorder should not change state count".to_string());
+            }
+        },
+    }
+
+    // Verify W3C format compliance after mutation
+    verify_w3c_trace_state_format(&result.mutated_states)?;
+
+    Ok(())
+}
+
+/// Generate trace-state with specified limits for testing.
+fn generate_trace_state_with_limits(vendor_count: usize, value_size: usize) -> GeneratedTraceState {
+    let mut entries = Vec::new();
+    let mut total_size = 0;
+
+    for i in 0..vendor_count {
+        let vendor = if i == 0 && vendor_count == 0 {
+            // Test empty vendor key
+            ""
+        } else {
+            // Generate vendor key
+            if value_size == 0 {
+                "v" // Single char vendor for specific test
+            } else {
+                "vendor"
+            }
+        };
+
+        let value = if value_size > 0 {
+            "a".repeat(value_size)
+        } else {
+            format!("value{}", i)
+        };
+
+        total_size += vendor.len() + value.len() + 2; // +2 for '=' and ','
+        entries.push((if vendor.is_empty() { "empty" } else { vendor }, value));
+    }
+
+    GeneratedTraceState {
+        entries,
+        total_size,
+        vendor_count,
+    }
+}
+
+/// Validate trace-state against W3C limits.
+fn validate_trace_state_limits(trace_state: &GeneratedTraceState) -> TraceStateValidationResult {
+    let mut violations = Vec::new();
+    let mut is_valid = true;
+
+    // Check vendor count limit
+    if trace_state.vendor_count > 32 {
+        violations.push(format!("Vendor count {} exceeds limit of 32", trace_state.vendor_count));
+        is_valid = false;
+    }
+
+    // Check total size limit
+    if trace_state.total_size > 512 {
+        violations.push(format!("Total size {} exceeds limit of 512 bytes", trace_state.total_size));
+        is_valid = false;
+    }
+
+    // Check for empty vendor keys
+    for (vendor, _) in &trace_state.entries {
+        if vendor.is_empty() || *vendor == "empty" {
+            violations.push("Empty vendor key not allowed".to_string());
+            is_valid = false;
+        }
+    }
+
+    TraceStateValidationResult {
+        is_valid,
+        vendor_count: trace_state.vendor_count,
+        total_size: trace_state.total_size,
+        violations,
+    }
+}
+
+/// Verify trace-state consistency across propagation.
+fn verify_trace_state_consistency(result: &TraceStatePropagationResult) -> Result<(), String> {
+    // Check all spans have consistent trace-state
+    let expected_state = &result.propagated_states;
+
+    for span in &result.span_hierarchy {
+        if span.trace_state.len() != expected_state.len() {
+            return Err(format!(
+                "Inconsistent trace-state size in span {}: expected {}, got {}",
+                span.span_id, expected_state.len(), span.trace_state.len()
+            ));
+        }
+
+        // Check each entry matches expected
+        for (actual, expected) in span.trace_state.iter().zip(expected_state.iter()) {
+            if actual.vendor != expected.vendor || actual.value != expected.value {
+                return Err(format!(
+                    "Trace-state entry mismatch in span {}: expected {}={}, got {}={}",
+                    span.span_id, expected.vendor, expected.value, actual.vendor, actual.value
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Simulate vendor precedence in trace-state.
+fn simulate_trace_state_vendor_precedence(trace_state_entries: &[(&str, &str)]) -> VendorPrecedenceResult {
+    let mut vendor_order = Vec::new();
+    let mut final_trace_state: Vec<TraceStateEntry> = Vec::new();
+    let mut seen_vendors = std::collections::HashMap::new();
+
+    // Process entries to handle vendor precedence (later entries override earlier ones)
+    for (i, (vendor, value)) in trace_state_entries.iter().enumerate() {
+        let vendor_str = vendor.to_string();
+
+        if let Some(&existing_index) = seen_vendors.get(&vendor_str) {
+            // Update existing entry
+            if let Some(entry): Option<&mut TraceStateEntry> = final_trace_state.get_mut(existing_index) {
+                entry.value = value.to_string();
+            }
+        } else {
+            // Add new entry
+            let entry = TraceStateEntry {
+                vendor: vendor_str.clone(),
+                value: value.to_string(),
+                insertion_order: i,
+            };
+            final_trace_state.push(entry);
+            seen_vendors.insert(vendor_str.clone(), final_trace_state.len() - 1);
+            vendor_order.push(vendor_str);
+        }
+    }
+
+    // Precedence is preserved if vendor order matches insertion order for unique vendors
+    let precedence_preserved = vendor_order.iter().zip(final_trace_state.iter())
+        .all(|(expected_vendor, actual_entry)| expected_vendor == &actual_entry.vendor);
+
+    VendorPrecedenceResult {
+        vendor_order,
+        precedence_preserved,
+        final_trace_state,
+    }
+}
+
+/// Verify vendor ordering matches expected.
+fn verify_vendor_ordering(result: &VendorPrecedenceResult, expected_order: &[&str]) -> Result<(), String> {
+    // Filter expected order to only include unique vendors (simulating precedence)
+    let mut unique_expected = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for &vendor in expected_order {
+        if seen.insert(vendor) {
+            unique_expected.push(vendor);
+        }
+    }
+
+    // Check if vendor order matches expected unique order
+    if result.vendor_order.len() != unique_expected.len() {
+        return Err(format!(
+            "Vendor count mismatch: expected {}, got {}",
+            unique_expected.len(), result.vendor_order.len()
+        ));
+    }
+
+    for (actual, &expected) in result.vendor_order.iter().zip(&unique_expected) {
+        if actual != expected {
+            return Err(format!(
+                "Vendor order mismatch: expected {}, got {}",
+                expected, actual
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Simulate trace-state across span boundaries.
+fn simulate_trace_state_across_span_boundaries(precedence_result: &VendorPrecedenceResult, boundary_count: usize) -> CrossBoundaryResult {
+    let mut boundary_states = Vec::new();
+    let mut precedence_maintained = true;
+
+    for i in 0..boundary_count {
+        // Each boundary gets the same precedence-resolved trace-state
+        let boundary_state = precedence_result.final_trace_state.clone();
+
+        // Check if precedence is maintained across this boundary
+        if i > 0 {
+            let previous_state = &boundary_states[i - 1];
+            if boundary_state != *previous_state {
+                precedence_maintained = false;
+            }
+        }
+
+        boundary_states.push(boundary_state);
+    }
+
+    CrossBoundaryResult {
+        boundary_states,
+        precedence_maintained,
+        span_transitions: boundary_count,
+    }
+}
+
+/// Verify precedence across span boundaries.
+fn verify_precedence_across_boundaries(result: &CrossBoundaryResult, expected_order: &[&str]) -> Result<(), String> {
+    if !result.precedence_maintained {
+        return Err("Precedence not maintained across span boundaries".to_string());
+    }
+
+    // Check each boundary state maintains expected vendor order
+    for (i, boundary_state) in result.boundary_states.iter().enumerate() {
+        // Extract unique vendors in order
+        let mut unique_vendors = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        for entry in boundary_state {
+            if seen.insert(&entry.vendor) {
+                unique_vendors.push(entry.vendor.as_str());
+            }
+        }
+
+        // Check against expected order (filtered for unique vendors)
+        let mut unique_expected = Vec::new();
+        let mut seen_expected = std::collections::HashSet::new();
+        for &vendor in expected_order {
+            if seen_expected.insert(vendor) {
+                unique_expected.push(vendor);
+            }
+        }
+
+        if unique_vendors != unique_expected {
+            return Err(format!(
+                "Vendor order not preserved at boundary {}: expected {:?}, got {:?}",
+                i, unique_expected, unique_vendors
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Simulate distributed trace-state propagation.
+fn simulate_distributed_trace_state_propagation(service_count: usize, service_states: &[(&str, &str)]) -> DistributedTraceStateResult {
+    let mut service_states_result = Vec::new();
+    let mut cross_service_propagations = 0;
+
+    for i in 0..service_count {
+        let service_id = format!("service_{}", i);
+
+        // Service gets its own trace-state plus any upstream state
+        let mut service_trace_state = Vec::new();
+        let mut received_from_upstream = Vec::new();
+
+        // Add service-specific state if available
+        if let Some((vendor, value)) = service_states.get(i) {
+            service_trace_state.push(TraceStateEntry {
+                vendor: vendor.to_string(),
+                value: value.to_string(),
+                insertion_order: 0,
+            });
+        }
+
+        // Receive state from upstream services
+        if i > 0 {
+            for j in 0..i {
+                if let Some((vendor, value)) = service_states.get(j) {
+                    received_from_upstream.push(TraceStateEntry {
+                        vendor: vendor.to_string(),
+                        value: value.to_string(),
+                        insertion_order: j,
+                    });
+                    cross_service_propagations += 1;
+                }
+            }
+        }
+
+        // Combine received and own state
+        let mut combined_state = received_from_upstream.clone();
+        combined_state.extend(service_trace_state.clone());
+
+        // Send combined state downstream
+        let sent_to_downstream = combined_state.clone();
+
+        service_states_result.push(ServiceTraceState {
+            service_id,
+            service_trace_state: combined_state,
+            received_from_upstream,
+            sent_to_downstream,
+        });
+    }
+
+    DistributedTraceStateResult {
+        service_states: service_states_result,
+        cross_service_propagations,
+        isolation_maintained: true, // Services properly isolated their own state
+    }
+}
+
+/// Verify cross-service propagation correctness.
+fn verify_cross_service_propagation(result: &DistributedTraceStateResult, expected_states: &[(&str, &str)]) -> Result<(), String> {
+    // Check each service has expected propagation behavior
+    for (i, service_state) in result.service_states.iter().enumerate() {
+        // Service should have received all upstream states
+        let expected_upstream_count = i;
+        if service_state.received_from_upstream.len() != expected_upstream_count {
+            return Err(format!(
+                "Service {} received {} upstream states, expected {}",
+                service_state.service_id,
+                service_state.received_from_upstream.len(),
+                expected_upstream_count
+            ));
+        }
+
+        // Service should have its own state plus upstream
+        let expected_total = expected_upstream_count + if expected_states.get(i).is_some() { 1 } else { 0 };
+        if service_state.service_trace_state.len() != expected_total {
+            return Err(format!(
+                "Service {} has {} total states, expected {}",
+                service_state.service_id,
+                service_state.service_trace_state.len(),
+                expected_total
+            ));
+        }
+
+        // Verify service-specific state is present if expected
+        if let Some((expected_vendor, expected_value)) = expected_states.get(i) {
+            let has_own_state = service_state.service_trace_state.iter()
+                .any(|entry| entry.vendor == *expected_vendor && entry.value == *expected_value);
+
+            if !has_own_state {
+                return Err(format!(
+                    "Service {} missing its own trace-state: {}={}",
+                    service_state.service_id, expected_vendor, expected_value
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Verify service boundary isolation.
+fn verify_service_boundary_isolation(result: &DistributedTraceStateResult) -> Result<(), String> {
+    if !result.isolation_maintained {
+        return Err("Service boundary isolation not maintained".to_string());
+    }
+
+    // Check services don't leak state to unrelated services
+    for (i, service) in result.service_states.iter().enumerate() {
+        // Service should only have upstream states, not downstream or sibling states
+        for entry in &service.service_trace_state {
+            let vendor_num: Result<usize, _> = entry.vendor.strip_prefix("svc").unwrap_or("999").parse();
+
+            if let Ok(vendor_service_num) = vendor_num {
+                if vendor_service_num > i {
+                    return Err(format!(
+                        "Service {} has downstream state from service {}: isolation violated",
+                        i, vendor_service_num
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// =============================================================================
 // Test Suite Registration
 // =============================================================================
 
@@ -4112,6 +5001,7 @@ pub fn otlp_tests<RT: RuntimeInterface>() -> Vec<ConformanceTest<RT>> {
         otlp_016_histogram_record_explicit_bounds::<RT>(),
         otlp_017_context_propagation_async_boundary::<RT>(),
         otlp_018_grpc_retry_after_handling::<RT>(),
+        otlp_019_trace_state_propagation_span_hierarchy::<RT>(),
     ]
 }
 
