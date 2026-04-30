@@ -1508,6 +1508,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h2_flow_control_window_rst_stream"
+path = "fuzz_targets/h2_flow_control_window_rst_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_priority_update_frame"
+path = "fuzz_targets/h2_priority_update_frame.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "symbol_auth"
 path = "fuzz_targets/symbol_auth.rs"
 test = false
@@ -3897,6 +3911,17 @@ bench = false
 [[bin]]
 name = "oneshot_sender_clone_drop"
 path = "fuzz_targets/oneshot_sender_clone_drop.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #165 — Oneshot sender.send() after receiver-drop fuzzer
+# Tests arbitrary timing between sender.send() and receiver drop operations.
+# Validates that send returns Err(SendError::Disconnected(value)) with value
+# preserved, never panics, and handles concurrent drop/send scenarios correctly.
+[[bin]]
+name = "oneshot_send_after_receiver_drop"
+path = "fuzz_targets/oneshot_send_after_receiver_drop.rs"
 test = false
 doc = false
 bench = false
