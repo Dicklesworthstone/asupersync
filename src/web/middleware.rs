@@ -1269,9 +1269,49 @@ impl<H: Handler> Handler for RequestTraceMiddleware<H> {
 pub enum AuthPolicy {
     /// Any well-formed bearer token is accepted.
     AnyBearer,
-    /// Only the listed bearer tokens are accepted. An empty allowlist fails
-    /// closed, which is also the default policy.
-    ExactBearer(Vec<String>),
+    /// Only the listed bearer tokens are accepted while unexpired. An empty
+    /// allowlist fails closed, which is also the default policy.
+    ExactBearer(Vec<BearerToken>),
+}
+
+/// A bearer token accepted by [`AuthPolicy::ExactBearer`] until `expires_at`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BearerToken {
+    token: String,
+    expires_at: Time,
+}
+
+impl BearerToken {
+    /// Create a token record that expires at the provided runtime time.
+    #[must_use]
+    pub fn new(token: impl Into<String>, expires_at: Time) -> Self {
+        Self {
+            token: token.into(),
+            expires_at,
+        }
+    }
+
+    /// Create a token record with no practical expiration.
+    #[must_use]
+    pub fn non_expiring(token: impl Into<String>) -> Self {
+        Self::new(token, Time::MAX)
+    }
+
+    /// Return the raw bearer token string.
+    #[must_use]
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    /// Return the expiration instant.
+    #[must_use]
+    pub const fn expires_at(&self) -> Time {
+        self.expires_at
+    }
+
+    fn is_valid_at(&self, now: Time) -> bool {
+        now < self.expires_at
+    }
 }
 
 impl Default for AuthPolicy {
@@ -1284,10 +1324,40 @@ impl AuthPolicy {
     /// Require exactly one bearer token.
     #[must_use]
     pub fn exact_bearer(token: impl Into<String>) -> Self {
-        Self::ExactBearer(vec![token.into()])
+        Self::ExactBearer(vec![BearerToken::non_expiring(token)])
     }
 
-    fn allows(&self, req: &Request) -> bool {
+    /// Require exactly one bearer token until `expires_at`.
+    #[must_use]
+    pub fn exact_bearer_until(token: impl Into<String>, expires_at: Time) -> Self {
+        Self::ExactBearer(vec![BearerToken::new(token, expires_at)])
+    }
+
+    /// Require exactly one bearer token for `ttl` after `issued_at`.
+    #[must_use]
+    pub fn exact_bearer_for(token: impl Into<String>, issued_at: Time, ttl: Duration) -> Self {
+        Self::exact_bearer_until(token, issued_at + ttl)
+    }
+
+    /// Add a replacement bearer token and remove tokens expired at `now`.
+    ///
+    /// This supports rotation windows where the old token remains accepted
+    /// until its own expiration while the new token becomes valid immediately.
+    pub fn rotate_exact_bearer(&mut self, token: impl Into<String>, expires_at: Time, now: Time) {
+        if let Self::ExactBearer(tokens) = self {
+            tokens.retain(|token| token.is_valid_at(now));
+            tokens.push(BearerToken::new(token, expires_at));
+        }
+    }
+
+    /// Remove expired exact-bearer tokens. `AnyBearer` is unchanged.
+    pub fn prune_expired(&mut self, now: Time) {
+        if let Self::ExactBearer(tokens) = self {
+            tokens.retain(|token| token.is_valid_at(now));
+        }
+    }
+
+    fn allows_at(&self, req: &Request, now: Time) -> bool {
         let Some(value) = header_value(req, "authorization") else {
             return false;
         };
@@ -1300,23 +1370,29 @@ impl AuthPolicy {
                 // Constant-time scan: evaluate every token to prevent timing
                 // side-channel leaks about which token matched or list length.
                 tokens.iter().fold(false, |matched, expected| {
-                    let mut diff = 0u8;
-                    if expected.len() != token.len() {
-                        diff |= 1;
-                    }
-                    let token_bytes = token.as_bytes();
-                    for (i, b) in expected.bytes().enumerate() {
-                        diff |= b ^ token_bytes.get(i).copied().unwrap_or(0);
-                    }
+                    let token_matches = constant_time_str_eq(expected.token(), token);
+                    let token_active = expected.is_valid_at(now);
                     // Intentional bitwise OR for constant-time comparison —
                     // `||` would short-circuit and leak timing information.
                     #[allow(clippy::needless_bitwise_bool)]
-                    let result = matched | (diff == 0);
+                    let result = matched | (token_active & token_matches);
                     result
                 })
             }
         }
     }
+}
+
+fn constant_time_str_eq(expected: &str, token: &str) -> bool {
+    let mut diff = 0u8;
+    if expected.len() != token.len() {
+        diff |= 1;
+    }
+    let token_bytes = token.as_bytes();
+    for (i, b) in expected.bytes().enumerate() {
+        diff |= b ^ token_bytes.get(i).copied().unwrap_or(0);
+    }
+    diff == 0
 }
 
 fn parse_bearer_token(header: &str) -> Option<&str> {
@@ -1332,19 +1408,30 @@ fn parse_bearer_token(header: &str) -> Option<&str> {
 pub struct AuthMiddleware<H> {
     inner: H,
     policy: AuthPolicy,
+    time_getter: fn() -> Time,
 }
 
 impl<H: Handler> AuthMiddleware<H> {
     /// Wrap a handler with authorization checks.
     #[must_use]
     pub fn new(inner: H, policy: AuthPolicy) -> Self {
-        Self { inner, policy }
+        Self::with_time_getter(inner, policy, wall_clock_now)
+    }
+
+    /// Wrap a handler with authorization checks using an injected clock.
+    #[must_use]
+    pub fn with_time_getter(inner: H, policy: AuthPolicy, time_getter: fn() -> Time) -> Self {
+        Self {
+            inner,
+            policy,
+            time_getter,
+        }
     }
 }
 
 impl<H: Handler> Handler for AuthMiddleware<H> {
     fn call(&self, req: Request) -> Response {
-        if !self.policy.allows(&req) {
+        if !self.policy.allows_at(&req, (self.time_getter)()) {
             return Response::new(StatusCode::UNAUTHORIZED, b"Unauthorized".to_vec())
                 .header("www-authenticate", "Bearer");
         }
@@ -1881,6 +1968,14 @@ mod tests {
 
     fn rate_limit_test_time() -> Time {
         Time::from_millis(RATE_LIMIT_TEST_TIME_MS.with(std::cell::Cell::get))
+    }
+
+    fn auth_test_time_10s() -> Time {
+        Time::from_secs(10)
+    }
+
+    fn auth_test_time_20s() -> Time {
+        Time::from_secs(20)
     }
 
     fn ok_handler() -> &'static str {
@@ -2557,6 +2652,56 @@ mod tests {
         let req = Request::new("GET", "/auth").with_header("authorization", "Bearer nope");
         let resp = mw.call(req);
         assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn auth_rejects_expired_exact_bearer_token() {
+        let mw = AuthMiddleware::with_time_getter(
+            FnHandler::new(ok_handler),
+            AuthPolicy::exact_bearer_until("token-123", Time::from_secs(10)),
+            auth_test_time_10s,
+        );
+        let req = Request::new("GET", "/auth").with_header("authorization", "Bearer token-123");
+        let resp = mw.call(req);
+        assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn auth_accepts_unexpired_exact_bearer_token() {
+        let mw = AuthMiddleware::with_time_getter(
+            FnHandler::new(ok_handler),
+            AuthPolicy::exact_bearer_until("token-123", Time::from_secs(11)),
+            auth_test_time_10s,
+        );
+        let req = Request::new("GET", "/auth").with_header("authorization", "Bearer token-123");
+        let resp = mw.call(req);
+        assert_eq!(resp.status, StatusCode::OK);
+    }
+
+    #[test]
+    fn auth_rotation_accepts_new_token_and_rejects_expired_old_token() {
+        let mut policy = AuthPolicy::exact_bearer_until("old-token", Time::from_secs(20));
+        policy.rotate_exact_bearer("new-token", Time::from_secs(40), Time::from_secs(10));
+
+        let before_expiry = AuthMiddleware::with_time_getter(
+            FnHandler::new(ok_handler),
+            policy.clone(),
+            auth_test_time_10s,
+        );
+        let old_req = Request::new("GET", "/auth").with_header("authorization", "Bearer old-token");
+        let new_req = Request::new("GET", "/auth").with_header("authorization", "Bearer new-token");
+        assert_eq!(before_expiry.call(old_req).status, StatusCode::OK);
+        assert_eq!(before_expiry.call(new_req).status, StatusCode::OK);
+
+        let after_expiry = AuthMiddleware::with_time_getter(
+            FnHandler::new(ok_handler),
+            policy,
+            auth_test_time_20s,
+        );
+        let old_req = Request::new("GET", "/auth").with_header("authorization", "Bearer old-token");
+        let new_req = Request::new("GET", "/auth").with_header("authorization", "Bearer new-token");
+        assert_eq!(after_expiry.call(old_req).status, StatusCode::UNAUTHORIZED);
+        assert_eq!(after_expiry.call(new_req).status, StatusCode::OK);
     }
 
     // --- LoadShedMiddleware ---
