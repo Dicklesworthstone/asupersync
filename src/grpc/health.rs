@@ -223,18 +223,17 @@ impl HealthService {
             return Err(Status::unauthenticated("empty authorization header"));
         }
 
-        if !auth_str.starts_with("Bearer ") || auth_str.len() < 8 {
+        let Some(bearer_token) = auth_str.strip_prefix("Bearer ") else {
             return Err(Status::unauthenticated(
                 "invalid authorization format - Bearer token required",
             ));
+        };
+
+        if bearer_token.is_empty() {
+            return Err(Status::unauthenticated("empty bearer token"));
         }
 
-        // TODO: Add actual token validation against your auth system
-        // For now, we just validate the format and log for audit
-        tracing::info!(
-            token_prefix = %&auth_str[..std::cmp::min(auth_str.len(), 20)],
-            "Health check authenticated with Bearer token"
-        );
+        tracing::info!(auth_scheme = "Bearer", "Health check authenticated");
 
         Ok(())
     }
@@ -1591,6 +1590,27 @@ mod tests {
         crate::test_complete!(
             "health_watch_async_missing_auth_matches_check_async_and_registers_no_waiter"
         );
+    }
+
+    #[test]
+    fn health_check_async_rejects_empty_bearer_token() {
+        init_test("health_check_async_rejects_empty_bearer_token");
+        let service = HealthService::new();
+        service.set_status("svc", ServingStatus::Serving);
+
+        let mut request = Request::new(HealthCheckRequest::new("svc"));
+        let inserted = request.metadata_mut().insert("authorization", "Bearer ");
+        crate::assert_with_log!(inserted, "empty bearer metadata inserted", true, inserted);
+
+        let err = futures_lite::future::block_on(service.check_async(&request))
+            .expect_err("empty bearer tokens must fail closed");
+        crate::assert_with_log!(
+            err.message() == "empty bearer token",
+            "empty bearer token rejected",
+            "empty bearer token",
+            err.message()
+        );
+        crate::test_complete!("health_check_async_rejects_empty_bearer_token");
     }
 
     #[test]
