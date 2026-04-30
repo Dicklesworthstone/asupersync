@@ -2015,6 +2015,10 @@ mod exporter_tests {
     }
 }
 
+// Re-export types for public API
+#[cfg(feature = "tracing-integration")]
+pub use span_semantics::{LogRecordBodyValue, log_record_body_value_to_any_value};
+
 // =============================================================================
 // OpenTelemetry Span Semantics Conformance
 // =============================================================================
@@ -2293,6 +2297,27 @@ pub mod span_semantics {
         /// Floating-point array attribute.
         FloatArray(Vec<f64>),
         /// Boolean array attribute.
+        BoolArray(Vec<bool>),
+    }
+
+    /// OTLP LogRecord body value variants for body type conformance testing.
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum LogRecordBodyValue {
+        /// UTF-8 string body.
+        String(String),
+        /// Signed integer body.
+        Int(i64),
+        /// Floating-point body.
+        Float(f64),
+        /// Boolean body.
+        Bool(bool),
+        /// UTF-8 string array body.
+        StringArray(Vec<String>),
+        /// Signed integer array body.
+        IntArray(Vec<i64>),
+        /// Floating-point array body.
+        FloatArray(Vec<f64>),
+        /// Boolean array body.
         BoolArray(Vec<bool>),
     }
 
@@ -2598,6 +2623,66 @@ pub mod span_semantics {
                 })),
             },
             AttributeValue::BoolArray(values) => AnyValue {
+                value: Some(ProtoValue::ArrayValue(ArrayValue {
+                    values: values
+                        .iter()
+                        .map(|value| AnyValue {
+                            value: Some(ProtoValue::BoolValue(*value)),
+                        })
+                        .collect(),
+                })),
+            },
+        }
+    }
+
+    /// Convert LogRecord body value to OTLP AnyValue protobuf representation.
+    pub fn log_record_body_value_to_any_value(value: &LogRecordBodyValue) -> AnyValue {
+        use opentelemetry_proto::tonic::common::v1::ArrayValue;
+
+        match value {
+            LogRecordBodyValue::String(value) => AnyValue {
+                value: Some(ProtoValue::StringValue(value.clone())),
+            },
+            LogRecordBodyValue::Int(value) => AnyValue {
+                value: Some(ProtoValue::IntValue(*value)),
+            },
+            LogRecordBodyValue::Float(value) => AnyValue {
+                value: Some(ProtoValue::DoubleValue(*value)),
+            },
+            LogRecordBodyValue::Bool(value) => AnyValue {
+                value: Some(ProtoValue::BoolValue(*value)),
+            },
+            LogRecordBodyValue::StringArray(values) => AnyValue {
+                value: Some(ProtoValue::ArrayValue(ArrayValue {
+                    values: values
+                        .iter()
+                        .map(|value| AnyValue {
+                            value: Some(ProtoValue::StringValue(value.clone())),
+                        })
+                        .collect(),
+                })),
+            },
+            LogRecordBodyValue::IntArray(values) => AnyValue {
+                value: Some(ProtoValue::ArrayValue(ArrayValue {
+                    values: values
+                        .iter()
+                        .map(|value| AnyValue {
+                            value: Some(ProtoValue::IntValue(*value)),
+                        })
+                        .collect(),
+                })),
+            },
+            LogRecordBodyValue::FloatArray(values) => AnyValue {
+                value: Some(ProtoValue::ArrayValue(ArrayValue {
+                    values: values
+                        .iter()
+                        .map(|value| AnyValue {
+                            value: Some(ProtoValue::DoubleValue(*value)),
+                        })
+                        .collect(),
+                })),
+            },
+            LogRecordBodyValue::BoolArray(values) => AnyValue {
                 value: Some(ProtoValue::ArrayValue(ArrayValue {
                     values: values
                         .iter()
@@ -3948,6 +4033,65 @@ pub mod span_semantics {
             };
             assert_eq!(partial.success_rate(), 75.0);
         }
+
+        #[test]
+        fn log_record_body_value_to_any_value_conformance() {
+            use super::super::{LogRecordBodyValue, log_record_body_value_to_any_value};
+            use opentelemetry_proto::tonic::common::v1::any_value::Value as ProtoValue;
+
+            // Test string value mapping
+            let string_body = LogRecordBodyValue::String("hello world".to_string());
+            let any_value = log_record_body_value_to_any_value(&string_body);
+            match &any_value.value {
+                Some(ProtoValue::StringValue(value)) => assert_eq!(value, "hello world"),
+                _ => panic!("Expected StringValue, got {:?}", any_value.value),
+            }
+
+            // Test integer value mapping
+            let int_body = LogRecordBodyValue::Int(42);
+            let any_value = log_record_body_value_to_any_value(&int_body);
+            match &any_value.value {
+                Some(ProtoValue::IntValue(value)) => assert_eq!(*value, 42),
+                _ => panic!("Expected IntValue, got {:?}", any_value.value),
+            }
+
+            // Test boolean value mapping
+            let bool_body = LogRecordBodyValue::Bool(true);
+            let any_value = log_record_body_value_to_any_value(&bool_body);
+            match &any_value.value {
+                Some(ProtoValue::BoolValue(value)) => assert_eq!(*value, true),
+                _ => panic!("Expected BoolValue, got {:?}", any_value.value),
+            }
+
+            // Test float value mapping
+            let float_body = LogRecordBodyValue::Float(3.14159);
+            let any_value = log_record_body_value_to_any_value(&float_body);
+            match &any_value.value {
+                Some(ProtoValue::DoubleValue(value)) => assert_eq!(*value, 3.14159),
+                _ => panic!("Expected DoubleValue, got {:?}", any_value.value),
+            }
+
+            // Test string array mapping
+            let string_array_body = LogRecordBodyValue::StringArray(vec!["a".to_string(), "b".to_string()]);
+            let any_value = log_record_body_value_to_any_value(&string_array_body);
+            match &any_value.value {
+                Some(ProtoValue::ArrayValue(array)) => {
+                    assert_eq!(array.values.len(), 2);
+                    if let Some(ProtoValue::StringValue(first)) = &array.values[0].value {
+                        assert_eq!(first, "a");
+                    } else {
+                        panic!("Expected first array element to be StringValue");
+                    }
+                },
+                _ => panic!("Expected ArrayValue, got {:?}", any_value.value),
+            }
+
+            // Test deterministic encoding - same input should always produce same output
+            let test_body = LogRecordBodyValue::String("test".to_string());
+            let any_value_1 = log_record_body_value_to_any_value(&test_body);
+            let any_value_2 = log_record_body_value_to_any_value(&test_body);
+            assert_eq!(any_value_1, any_value_2, "LogRecord body value conversion must be deterministic");
+        }
     }
 }
 
@@ -3955,6 +4099,11 @@ pub mod span_semantics {
 #[cfg(all(test, feature = "tracing-integration"))]
 #[path = "otel_span_golden_tests.rs"]
 mod otel_span_golden_tests;
+
+// Golden artifact tests for OTLP LogRecord body value mapping
+#[cfg(all(test, feature = "tracing-integration"))]
+#[path = "otel_log_body_golden_test.rs"]
+mod otel_log_body_golden_test;
 
 #[cfg(all(
     any(test, feature = "fuzz"),

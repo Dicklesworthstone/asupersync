@@ -135,6 +135,10 @@ name = "otel_span_event_timestamps_conformance"
 path = "src/bin/otel_span_event_timestamps_conformance.rs"
 
 [[bin]]
+name = "otel_logs_severity_range_conformance"
+path = "src/bin/otel_logs_severity_range_conformance.rs"
+
+[[bin]]
 name = "h1_expect_continue_conformance"
 path = "src/bin/h1_expect_continue_conformance.rs"
 [dependencies]
@@ -150,6 +154,7 @@ env_logger = "0.10"
 h2 = "0.4"
 bytes = "1.11"
 uuid = { version = "1.0", features = ["v4"] }
+hyper = { version = "0.14", features = ["client", "http1"] }
 urlencoding = "2.1"
 prometheus-client = "0.23"
 opentelemetry = { version = "0.31", features = ["trace"] }
@@ -166,3 +171,15 @@ redis = "0.26"
 h2 = "0.4"
 tokio-util = { version = "0.7", features = ["codec"] }
 bytes = "1.11"
+
+[[bin]]
+name = "otel_trace_id_randomness_conformance"
+path = "src/bin/otel_trace_id_randomness_conformance.rs"
+
+[[bin]]
+name = "otel_span_id_randomness_conformance"
+path = "src/bin/otel_span_id_randomness_conformance.rs"
+
+[[bin]]
+name = "otel_histogram_record_conformance"
+path = "src/bin/otel_histogram_record_conformance.rs"

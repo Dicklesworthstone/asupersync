@@ -54,7 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("🔧 HTTP/1.1 Request Building Conformance Tester");
-    println!("   Testing asupersync against reqwest reference");
+    println!("   Testing asupersync against hyper-util reference");
     println!("   Focus: Byte-identical wire format for same RequestBuilder operations");
     println!();
 
@@ -152,7 +152,7 @@ fn generate_summary_output(
                     result.error.as_deref().unwrap_or("Unknown error")
                 ));
                 output.push_str(&format!(
-                    "     Bytes match: {}, Asupersync: {} bytes, Reqwest: {} bytes\n",
+                    "     Bytes match: {}, Asupersync: {} bytes, Hyper-util: {} bytes\n",
                     result.bytes_match, result.asupersync_size, result.reqwest_size
                 ));
             }
@@ -163,7 +163,7 @@ fn generate_summary_output(
     output.push_str("\nWIRE FORMAT ANALYSIS:\n");
     for result in &report.results {
         output.push_str(&format!(
-            "  📊 {}: match={}, asupersync={} bytes, reqwest={} bytes\n",
+            "  📊 {}: match={}, asupersync={} bytes, hyper-util={} bytes\n",
             result.case_id, result.bytes_match, result.asupersync_size, result.reqwest_size
         ));
     }

@@ -434,6 +434,121 @@ pub fn otlp_005_compatibility<RT: RuntimeInterface>() -> ConformanceTest<RT> {
     }
 }
 
+/// OTLP-006: LogRecord body type mapping conformance.
+pub fn otlp_006_log_record_body_mapping<RT: RuntimeInterface>() -> ConformanceTest<RT> {
+    crate::conformance_test! {
+        id: "otlp-006",
+        name: "LogRecord body type AnyValue mapping",
+        description: "Verify LogRecord body values map to identical OTLP AnyValue protobuf encoding",
+        category: TestCategory::IO,
+        tags: ["otlp", "logrecord", "body", "anyvalue", "protobuf"],
+        expected: "Same Rust values produce identical AnyValue protobuf representations",
+        test: |_rt| {
+            use asupersync::observability::otel::{LogRecordBodyValue, log_record_body_value_to_any_value};
+
+            let test_cases = vec![
+                // String values
+                ("string_simple", LogRecordBodyValue::String("hello world".to_string())),
+                ("string_empty", LogRecordBodyValue::String("".to_string())),
+                ("string_unicode", LogRecordBodyValue::String("测试 🚀".to_string())),
+
+                // Integer values
+                ("int_positive", LogRecordBodyValue::Int(42)),
+                ("int_negative", LogRecordBodyValue::Int(-100)),
+                ("int_zero", LogRecordBodyValue::Int(0)),
+                ("int_max", LogRecordBodyValue::Int(i64::MAX)),
+                ("int_min", LogRecordBodyValue::Int(i64::MIN)),
+
+                // Float values
+                ("float_positive", LogRecordBodyValue::Float(3.14159)),
+                ("float_negative", LogRecordBodyValue::Float(-2.71828)),
+                ("float_zero", LogRecordBodyValue::Float(0.0)),
+                ("float_infinity", LogRecordBodyValue::Float(f64::INFINITY)),
+                ("float_neg_infinity", LogRecordBodyValue::Float(f64::NEG_INFINITY)),
+
+                // Boolean values
+                ("bool_true", LogRecordBodyValue::Bool(true)),
+                ("bool_false", LogRecordBodyValue::Bool(false)),
+
+                // Array values
+                ("string_array", LogRecordBodyValue::StringArray(vec!["a".to_string(), "b".to_string(), "c".to_string()])),
+                ("string_array_empty", LogRecordBodyValue::StringArray(vec![])),
+                ("int_array", LogRecordBodyValue::IntArray(vec![1, 2, 3])),
+                ("int_array_empty", LogRecordBodyValue::IntArray(vec![])),
+                ("float_array", LogRecordBodyValue::FloatArray(vec![1.1, 2.2, 3.3])),
+                ("bool_array", LogRecordBodyValue::BoolArray(vec![true, false, true])),
+            ];
+
+            for (test_name, body_value) in &test_cases {
+                checkpoint("log_body_mapping_test", json!({
+                    "test_case": test_name,
+                    "body_type": format!("{:?}", body_value).chars().take(20).collect::<String>()
+                }));
+
+                // Convert to AnyValue twice to test determinism
+                let any_value_1 = log_record_body_value_to_any_value(body_value);
+                let any_value_2 = log_record_body_value_to_any_value(body_value);
+
+                // Verify identical encoding - both protobuf representations should be identical
+                if any_value_1 != any_value_2 {
+                    return TestResult::failed(format!(
+                        "LogRecord body mapping non-deterministic for {}: first != second conversion",
+                        test_name
+                    ));
+                }
+
+                // Verify AnyValue structure is correct based on input type
+                let is_valid = match (&body_value, &any_value_1.value) {
+                    (LogRecordBodyValue::String(_), Some(proto_value)) => {
+                        matches!(proto_value, opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(_))
+                    },
+                    (LogRecordBodyValue::Int(_), Some(proto_value)) => {
+                        matches!(proto_value, opentelemetry_proto::tonic::common::v1::any_value::Value::IntValue(_))
+                    },
+                    (LogRecordBodyValue::Float(_), Some(proto_value)) => {
+                        matches!(proto_value, opentelemetry_proto::tonic::common::v1::any_value::Value::DoubleValue(_))
+                    },
+                    (LogRecordBodyValue::Bool(_), Some(proto_value)) => {
+                        matches!(proto_value, opentelemetry_proto::tonic::common::v1::any_value::Value::BoolValue(_))
+                    },
+                    (LogRecordBodyValue::StringArray(_), Some(proto_value)) |
+                    (LogRecordBodyValue::IntArray(_), Some(proto_value)) |
+                    (LogRecordBodyValue::FloatArray(_), Some(proto_value)) |
+                    (LogRecordBodyValue::BoolArray(_), Some(proto_value)) => {
+                        matches!(proto_value, opentelemetry_proto::tonic::common::v1::any_value::Value::ArrayValue(_))
+                    },
+                    _ => false,
+                };
+
+                if !is_valid {
+                    return TestResult::failed(format!(
+                        "LogRecord body mapping incorrect type for {}: {:?}",
+                        test_name, any_value_1.value
+                    ));
+                }
+
+                // Test round-trip determinism with serialization
+                let serialized_1 = serialize_any_value(&any_value_1);
+                let serialized_2 = serialize_any_value(&any_value_2);
+
+                if serialized_1 != serialized_2 {
+                    return TestResult::failed(format!(
+                        "LogRecord body serialization non-deterministic for {}: serialized bytes differ",
+                        test_name
+                    ));
+                }
+            }
+
+            TestResult::passed()
+                .with_checkpoint(crate::Checkpoint::new("log_body_mapping_summary", json!({
+                    "test_cases": test_cases.len(),
+                    "all_passed": true,
+                    "types_tested": ["string", "int", "float", "bool", "arrays"]
+                })))
+        }
+    }
+}
+
 // =============================================================================
 // Helper Functions (Mock Implementations)
 // =============================================================================
@@ -486,6 +601,14 @@ fn validate_compatibility(_implementation: &str) -> bool {
     true
 }
 
+/// Serialize AnyValue to bytes for comparison testing.
+fn serialize_any_value(any_value: &opentelemetry_proto::tonic::common::v1::AnyValue) -> Vec<u8> {
+    use prost::Message;
+    let mut buf = Vec::new();
+    any_value.encode(&mut buf).unwrap_or_default();
+    buf
+}
+
 // =============================================================================
 // Test Suite Registration
 // =============================================================================
@@ -498,6 +621,7 @@ pub fn otlp_tests<RT: RuntimeInterface>() -> Vec<ConformanceTest<RT>> {
         otlp_003_temporality::<RT>(),
         otlp_004_cardinality::<RT>(),
         otlp_005_compatibility::<RT>(),
+        otlp_006_log_record_body_mapping::<RT>(),
     ]
 }
 
