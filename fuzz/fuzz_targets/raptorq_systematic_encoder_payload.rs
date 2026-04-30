@@ -43,6 +43,7 @@
 use arbitrary::Arbitrary;
 use asupersync::raptorq::systematic::{SystematicEncoder, SystematicParams};
 use libfuzzer_sys::fuzz_target;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 const SMALL_MEDIUM_MAX_SYMBOL_SIZE: usize = 256;
 const TRACTABLE_LARGE_K_MAX_SYMBOL_SIZE: usize = 16;
@@ -50,6 +51,8 @@ const LARGE_K_MAX_SYMBOL_SIZE: usize = 8;
 const SMALL_MEDIUM_MAX_REPAIR_COUNT: usize = 32;
 const TRACTABLE_LARGE_K_MAX_REPAIR_COUNT: usize = 8;
 const LARGE_K_MAX_REPAIR_COUNT: usize = 4;
+const MAX_MALFORMED_SOURCE_SYMBOLS: usize = 32;
+const MAX_MALFORMED_SYMBOL_BYTES: usize = 512;
 
 /// Structured fuzz input. Derives Arbitrary so libFuzzer can mutate
 /// each field independently (better coverage than reading raw bytes).
@@ -59,6 +62,16 @@ enum KEdge {
     K42,
     K2048,
     K8192,
+}
+
+#[derive(Arbitrary, Debug, Clone, Copy)]
+enum MalformedSourceBlockKind {
+    Empty,
+    ShortFirst,
+    LongFirst,
+    MixedLengths,
+    ZeroSymbolSize,
+    WellFormedControl,
 }
 
 #[derive(Arbitrary, Debug)]
@@ -76,9 +89,128 @@ struct EncoderInput {
     /// Source byte stream. Chunked into K source symbols of size
     /// `symbol_size`; padded with zeros if short, truncated if long.
     source: Vec<u8>,
+    /// Explicit malformed source-block lane. This is independent of the
+    /// well-formed source chunker above so fuzzing can hit constructor
+    /// precondition failures directly.
+    malformed_kind: MalformedSourceBlockKind,
+    malformed_symbol_size: u16,
+    malformed_symbols: Vec<Vec<u8>>,
+}
+
+fn truncate_malformed_symbols(symbols: &mut Vec<Vec<u8>>) {
+    symbols.truncate(MAX_MALFORMED_SOURCE_SYMBOLS);
+    for symbol in symbols {
+        symbol.truncate(MAX_MALFORMED_SYMBOL_BYTES);
+    }
+}
+
+fn build_malformed_source_block(
+    kind: MalformedSourceBlockKind,
+    symbol_size: usize,
+    mut symbols: Vec<Vec<u8>>,
+) -> (Vec<Vec<u8>>, usize, bool) {
+    truncate_malformed_symbols(&mut symbols);
+
+    match kind {
+        MalformedSourceBlockKind::Empty => (Vec::new(), symbol_size.max(1), true),
+        MalformedSourceBlockKind::ShortFirst => {
+            if symbols.is_empty() {
+                symbols.push(vec![0u8; symbol_size.max(1)]);
+            }
+            let malformed_symbol_size = symbol_size.max(2);
+            symbols[0].truncate(malformed_symbol_size - 1);
+            for symbol in symbols.iter_mut().skip(1) {
+                symbol.resize(malformed_symbol_size, 0x5A);
+            }
+            (symbols, malformed_symbol_size, true)
+        }
+        MalformedSourceBlockKind::LongFirst => {
+            if symbols.is_empty() {
+                symbols.push(vec![0u8; symbol_size.max(1)]);
+            }
+            let malformed_symbol_size = symbol_size.max(1);
+            symbols[0].resize(malformed_symbol_size.saturating_add(1), 0xA5);
+            for symbol in symbols.iter_mut().skip(1) {
+                symbol.resize(malformed_symbol_size, 0x5A);
+            }
+            (symbols, malformed_symbol_size, true)
+        }
+        MalformedSourceBlockKind::MixedLengths => {
+            if symbols.len() < 2 {
+                symbols.resize_with(2, Vec::new);
+            }
+            let malformed_symbol_size = symbol_size.max(1);
+            symbols[0].resize(malformed_symbol_size, 0x11);
+            symbols[1].resize(malformed_symbol_size.saturating_add(1), 0x22);
+            for symbol in symbols.iter_mut().skip(2) {
+                symbol.resize(malformed_symbol_size, 0x33);
+            }
+            (symbols, malformed_symbol_size, true)
+        }
+        MalformedSourceBlockKind::ZeroSymbolSize => {
+            if symbols.is_empty() {
+                symbols.push(Vec::new());
+            }
+            for symbol in &mut symbols {
+                symbol.clear();
+            }
+            (symbols, 0, false)
+        }
+        MalformedSourceBlockKind::WellFormedControl => {
+            if symbols.is_empty() {
+                symbols.push(Vec::new());
+            }
+            let control_symbol_size = symbol_size.max(1);
+            for symbol in &mut symbols {
+                symbol.resize(control_symbol_size, 0xC3);
+            }
+            (symbols, control_symbol_size, false)
+        }
+    }
+}
+
+fn assert_malformed_source_block_boundary(input: &EncoderInput) {
+    let symbol_size = (usize::from(input.malformed_symbol_size) % SMALL_MEDIUM_MAX_SYMBOL_SIZE) + 1;
+    let (source_symbols, constructor_symbol_size, is_malformed) = build_malformed_source_block(
+        input.malformed_kind,
+        symbol_size,
+        input.malformed_symbols.clone(),
+    );
+    let shape_is_well_formed = !source_symbols.is_empty()
+        && source_symbols
+            .iter()
+            .all(|symbol| symbol.len() == constructor_symbol_size);
+
+    let constructed = catch_unwind(AssertUnwindSafe(|| {
+        SystematicEncoder::new(&source_symbols, constructor_symbol_size, input.seed)
+    }));
+
+    match constructed {
+        Ok(Some(mut encoder)) => {
+            assert!(
+                shape_is_well_formed,
+                "malformed source blocks must not construct an encoder"
+            );
+            let emitted = encoder.emit_systematic();
+            assert_eq!(
+                emitted.len(),
+                source_symbols.len(),
+                "well-formed control source block must emit every source symbol"
+            );
+        }
+        Ok(None) => {}
+        Err(_) => {
+            assert!(
+                is_malformed || !shape_is_well_formed,
+                "well-formed source-block controls must not panic"
+            );
+        }
+    }
 }
 
 fuzz_target!(|input: EncoderInput| {
+    assert_malformed_source_block_boundary(&input);
+
     let k = match input.k_edge {
         KEdge::K1 => 1,
         KEdge::K42 => 42,
@@ -86,18 +218,14 @@ fuzz_target!(|input: EncoderInput| {
         KEdge::K8192 => 8192,
     };
     let symbol_size = match input.k_edge {
-        KEdge::K2048 => {
-            (usize::from(input.symbol_size) % TRACTABLE_LARGE_K_MAX_SYMBOL_SIZE) + 1
-        }
+        KEdge::K2048 => (usize::from(input.symbol_size) % TRACTABLE_LARGE_K_MAX_SYMBOL_SIZE) + 1,
         KEdge::K8192 => (usize::from(input.symbol_size) % LARGE_K_MAX_SYMBOL_SIZE) + 1,
         KEdge::K1 | KEdge::K42 => {
             (usize::from(input.symbol_size) % SMALL_MEDIUM_MAX_SYMBOL_SIZE) + 1
         }
     };
     let repair_count = match input.k_edge {
-        KEdge::K2048 => {
-            usize::from(input.repair_count) % (TRACTABLE_LARGE_K_MAX_REPAIR_COUNT + 1)
-        }
+        KEdge::K2048 => usize::from(input.repair_count) % (TRACTABLE_LARGE_K_MAX_REPAIR_COUNT + 1),
         KEdge::K8192 => usize::from(input.repair_count) % (LARGE_K_MAX_REPAIR_COUNT + 1),
         KEdge::K1 | KEdge::K42 => {
             usize::from(input.repair_count) % (SMALL_MEDIUM_MAX_REPAIR_COUNT + 1)
@@ -117,7 +245,10 @@ fuzz_target!(|input: EncoderInput| {
         "L must equal K' + S + H"
     );
     if matches!(input.k_edge, KEdge::K2048) {
-        assert_eq!(params.k_prime, 2070, "K=2048 must round up to the live RFC row");
+        assert_eq!(
+            params.k_prime, 2070,
+            "K=2048 must round up to the live RFC row"
+        );
         assert_eq!(params.j, 506, "K=2048 must pin the RFC J(K') value");
         assert_eq!(params.s, 89, "K=2048 must pin the RFC S(K') value");
         assert_eq!(params.h, 11, "K=2048 must pin the RFC H(K') value");
@@ -204,8 +335,7 @@ fuzz_target!(|input: EncoderInput| {
             "systematic payload length must stay equal to symbol_size"
         );
         assert_eq!(
-            symbol.data,
-            source_symbols[esi],
+            symbol.data, source_symbols[esi],
             "systematic emission must preserve source payload bytes"
         );
     }
