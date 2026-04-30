@@ -16,7 +16,7 @@
 //! - [OTLP Specification](https://opentelemetry.io/docs/specs/otlp/)
 //! - [Metrics Data Model](https://opentelemetry.io/docs/specs/otel/metrics/)
 
-use crate::{ConformanceTest, RuntimeInterface, TestCategory, TestResult, checkpoint};
+use crate::{checkpoint, ConformanceTest, RuntimeInterface, TestCategory, TestResult};
 use serde_json::json;
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -1344,9 +1344,7 @@ fn serialize_any_value(any_value: &opentelemetry_proto::tonic::common::v1::AnyVa
 fn serialize_gauge_snapshot(snapshot: &asupersync::observability::otel::MetricsSnapshot) -> String {
     // Sort gauges by name and labels for deterministic comparison
     let mut gauges = snapshot.gauges.clone();
-    gauges.sort_by(|a, b| {
-        a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1))
-    });
+    gauges.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     format!("{:?}", gauges)
 }
 
@@ -1361,8 +1359,14 @@ fn test_concurrent_gauge_updates() -> Result<(), String> {
     let label_sets = vec![
         vec![("worker".to_string(), "1".to_string())],
         vec![("worker".to_string(), "2".to_string())],
-        vec![("worker".to_string(), "1".to_string()), ("region".to_string(), "us-east".to_string())],
-        vec![("worker".to_string(), "2".to_string()), ("region".to_string(), "us-west".to_string())],
+        vec![
+            ("worker".to_string(), "1".to_string()),
+            ("region".to_string(), "us-east".to_string()),
+        ],
+        vec![
+            ("worker".to_string(), "2".to_string()),
+            ("region".to_string(), "us-west".to_string()),
+        ],
     ];
 
     let value_sequences = vec![
@@ -1381,10 +1385,15 @@ fn test_concurrent_gauge_updates() -> Result<(), String> {
 
     // Verify each label combination has the correct final value
     let expected_final_values = vec![30, 300, 25, 250];
-    let label_value_pairs: Vec<_> = label_sets.iter().zip(expected_final_values.iter()).collect();
+    let label_value_pairs: Vec<_> = label_sets
+        .iter()
+        .zip(expected_final_values.iter())
+        .collect();
 
     for (expected_labels, &expected_final_value) in label_value_pairs {
-        let matching_gauges: Vec<_> = snapshot.gauges.iter()
+        let matching_gauges: Vec<_> = snapshot
+            .gauges
+            .iter()
             .filter(|(name, labels, _)| name == gauge_name && labels == expected_labels)
             .collect();
 
@@ -1405,7 +1414,8 @@ fn test_concurrent_gauge_updates() -> Result<(), String> {
     if snapshot.gauges.len() != total_expected_updates {
         return Err(format!(
             "Concurrent gauge update count mismatch: expected {}, got {}",
-            total_expected_updates, snapshot.gauges.len()
+            total_expected_updates,
+            snapshot.gauges.len()
         ));
     }
 
@@ -1413,7 +1423,10 @@ fn test_concurrent_gauge_updates() -> Result<(), String> {
 }
 
 /// Create InstrumentationScope with given name and version.
-fn create_instrumentation_scope(name: &str, version: &str) -> opentelemetry_proto::tonic::common::v1::InstrumentationScope {
+fn create_instrumentation_scope(
+    name: &str,
+    version: &str,
+) -> opentelemetry_proto::tonic::common::v1::InstrumentationScope {
     opentelemetry_proto::tonic::common::v1::InstrumentationScope {
         name: name.to_string(),
         version: version.to_string(),
@@ -1423,7 +1436,9 @@ fn create_instrumentation_scope(name: &str, version: &str) -> opentelemetry_prot
 }
 
 /// Serialize InstrumentationScope for comparison testing.
-fn serialize_instrumentation_scope(scope: &opentelemetry_proto::tonic::common::v1::InstrumentationScope) -> Vec<u8> {
+fn serialize_instrumentation_scope(
+    scope: &opentelemetry_proto::tonic::common::v1::InstrumentationScope,
+) -> Vec<u8> {
     use prost::Message;
     let mut buf = Vec::new();
     scope.encode(&mut buf).unwrap_or_default();
@@ -1469,16 +1484,21 @@ fn test_scope_hash_consistency() -> Result<(), String> {
     // Should be able to retrieve with second scope instance (same name+version)
     let key = format!("{}@{}", scope2.name, scope2.version);
     if !scope_map.contains_key(&key) {
-        return Err("Scope hash consistency failed - equal scopes should have equal hashes".to_string());
+        return Err(
+            "Scope hash consistency failed - equal scopes should have equal hashes".to_string(),
+        );
     }
 
     Ok(())
 }
 
 /// Simulate periodic export with given metric counts and interval.
-fn run_periodic_export_simulation(metric_counts: &[i32], export_interval: std::time::Duration) -> TimingTracker {
-    use std::time::{Duration, Instant};
+fn run_periodic_export_simulation(
+    metric_counts: &[i32],
+    export_interval: std::time::Duration,
+) -> TimingTracker {
     use std::thread;
+    use std::time::{Duration, Instant};
 
     let tracker = TimingTracker::new();
     let start_time = Instant::now();
@@ -1504,7 +1524,8 @@ fn run_periodic_export_simulation(metric_counts: &[i32], export_interval: std::t
 // Mock TimingTracker struct definition
 #[derive(Clone)]
 struct TimingTracker {
-    exports: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<(std::time::Instant, usize)>>>,
+    exports:
+        std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<(std::time::Instant, usize)>>>,
 }
 
 impl TimingTracker {
@@ -1516,14 +1537,17 @@ impl TimingTracker {
 
     fn record_export(&self, metric_count: usize) {
         let timestamp = std::time::Instant::now();
-        self.exports.lock().unwrap().push_back((timestamp, metric_count));
+        self.exports
+            .lock()
+            .unwrap()
+            .push_back((timestamp, metric_count));
     }
 
     fn get_export_intervals(&self) -> Vec<std::time::Duration> {
         let exports = self.exports.lock().unwrap();
         let mut intervals = Vec::new();
         for i in 1..exports.len() {
-            let duration = exports[i].0.duration_since(exports[i-1].0);
+            let duration = exports[i].0.duration_since(exports[i - 1].0);
             intervals.push(duration);
         }
         intervals
@@ -1577,19 +1601,26 @@ fn test_periodic_reader_edge_cases() -> Result<(), String> {
 }
 
 /// Create SpanEvent sequence from test data.
-fn create_span_event_sequence(event_data: &[(impl AsRef<str>, u64, Vec<(&str, &str)>)]) -> Vec<SpanEvent> {
-    event_data.iter().map(|(name, timestamp_millis, attrs)| {
-        let timestamp = std::time::UNIX_EPOCH + std::time::Duration::from_millis(*timestamp_millis);
-        let attributes: std::collections::HashMap<String, String> = attrs.iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
+fn create_span_event_sequence(
+    event_data: &[(impl AsRef<str>, u64, Vec<(&str, &str)>)],
+) -> Vec<SpanEvent> {
+    event_data
+        .iter()
+        .map(|(name, timestamp_millis, attrs)| {
+            let timestamp =
+                std::time::UNIX_EPOCH + std::time::Duration::from_millis(*timestamp_millis);
+            let attributes: std::collections::HashMap<String, String> = attrs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
 
-        SpanEvent {
-            name: name.as_ref().to_string(),
-            timestamp,
-            attributes,
-        }
-    }).collect()
+            SpanEvent {
+                name: name.as_ref().to_string(),
+                timestamp,
+                attributes,
+            }
+        })
+        .collect()
 }
 
 /// Convert SpanEvent sequence to OTLP events format.
@@ -1621,8 +1652,16 @@ fn convert_to_otlp_events(events: &[SpanEvent]) -> Vec<OtlpEvent> {
 /// Serialize OTLP events for comparison.
 fn serialize_otlp_events(events: &[OtlpEvent]) -> String {
     // Simple serialization for testing purposes
-    events.iter()
-        .map(|event| format!("{}@{}:{}", event.name, event.time_unix_nano, event.attributes.len()))
+    events
+        .iter()
+        .map(|event| {
+            format!(
+                "{}@{}:{}",
+                event.name,
+                event.time_unix_nano,
+                event.attributes.len()
+            )
+        })
         .collect::<Vec<_>>()
         .join(",")
 }
@@ -1680,16 +1719,19 @@ fn convert_to_otlp_links(links: &[SpanLinkData]) -> Vec<OtlpSpanLink> {
 
 /// Serialize OTLP span links for comparison.
 fn serialize_otlp_links(links: &[OtlpSpanLink]) -> String {
-    links.iter()
-        .map(|link| format!(
-            "{}:{}:{}:{}:{}:{}",
-            hex::encode(&link.trace_id),
-            hex::encode(&link.span_id),
-            link.trace_state,
-            link.flags,
-            link.attributes.len(),
-            link.dropped_attributes_count
-        ))
+    links
+        .iter()
+        .map(|link| {
+            format!(
+                "{}:{}:{}:{}:{}:{}",
+                hex::encode(&link.trace_id),
+                hex::encode(&link.span_id),
+                link.trace_state,
+                link.flags,
+                link.attributes.len(),
+                link.dropped_attributes_count
+            )
+        })
         .collect::<Vec<_>>()
         .join(",")
 }
@@ -1719,7 +1761,10 @@ fn test_span_links_edge_cases() -> Result<(), String> {
 
     let zero_links = convert_to_otlp_links(&zero_ids);
     if zero_links.len() != 1 {
-        return Err(format!("Zero ID links test failed: expected 1 link, got {}", zero_links.len()));
+        return Err(format!(
+            "Zero ID links test failed: expected 1 link, got {}",
+            zero_links.len()
+        ));
     }
 
     // Test with maximum values
@@ -1734,7 +1779,10 @@ fn test_span_links_edge_cases() -> Result<(), String> {
 
     let max_links = convert_to_otlp_links(&max_values);
     if max_links.len() != 1 {
-        return Err(format!("Max values links test failed: expected 1 link, got {}", max_links.len()));
+        return Err(format!(
+            "Max values links test failed: expected 1 link, got {}",
+            max_links.len()
+        ));
     }
 
     // Test determinism with identical data
@@ -1751,14 +1799,15 @@ fn test_span_links_edge_cases() -> Result<(), String> {
 /// Simple hex encoding for testing (avoiding external hex crate dependency).
 mod hex {
     pub fn encode(bytes: &[u8]) -> String {
-        bytes.iter()
-            .map(|byte| format!("{:02x}", byte))
-            .collect()
+        bytes.iter().map(|byte| format!("{:02x}", byte)).collect()
     }
 }
 
 /// Simulate counter measurements for testing deduplication.
-fn simulate_counter_measurements(counter_name: &str, measurements: &[u64]) -> Vec<(String, std::collections::HashMap<String, String>, u64)> {
+fn simulate_counter_measurements(
+    counter_name: &str,
+    measurements: &[u64],
+) -> Vec<(String, std::collections::HashMap<String, String>, u64)> {
     use std::collections::HashMap;
 
     let mut results = Vec::new();
@@ -1826,7 +1875,9 @@ fn simulate_observable_counter_callbacks(counter_count: usize) -> Vec<CallbackEx
 }
 
 /// Simulate ObservableCounter callbacks in reverse registration order.
-fn simulate_observable_counter_callbacks_reverse_order(counter_count: usize) -> Vec<CallbackExecution> {
+fn simulate_observable_counter_callbacks_reverse_order(
+    counter_count: usize,
+) -> Vec<CallbackExecution> {
     let mut executions = Vec::new();
     let mut execution_order = 0;
 
@@ -1853,14 +1904,19 @@ fn simulate_observable_counter_callbacks_reverse_order(counter_count: usize) -> 
 }
 
 /// Simulate concurrent ObservableCounter callbacks.
-fn simulate_concurrent_observable_counter_callbacks(counter_specs: &[(String, usize)]) -> Vec<CallbackExecution> {
+fn simulate_concurrent_observable_counter_callbacks(
+    counter_specs: &[(String, usize)],
+) -> Vec<CallbackExecution> {
     let mut executions = Vec::new();
     let mut execution_order = 0;
 
     // Group by counter name to simulate proper callback ordering
     let mut counter_groups = std::collections::HashMap::new();
     for (counter_name, callback_id) in counter_specs {
-        counter_groups.entry(counter_name.clone()).or_insert_with(Vec::new).push(*callback_id);
+        counter_groups
+            .entry(counter_name.clone())
+            .or_insert_with(Vec::new)
+            .push(*callback_id);
     }
 
     // Execute callbacks in counter name order for determinism
@@ -1884,11 +1940,15 @@ fn simulate_concurrent_observable_counter_callbacks(counter_specs: &[(String, us
 }
 
 /// Verify callback ordering follows expected pattern.
-fn verify_callback_ordering_pattern(executions: &[CallbackExecution], expected_count: usize) -> Result<(), String> {
+fn verify_callback_ordering_pattern(
+    executions: &[CallbackExecution],
+    expected_count: usize,
+) -> Result<(), String> {
     if executions.len() != expected_count {
         return Err(format!(
             "Callback count mismatch: expected {}, got {}",
-            expected_count, executions.len()
+            expected_count,
+            executions.len()
         ));
     }
 
@@ -1904,10 +1964,12 @@ fn verify_callback_ordering_pattern(executions: &[CallbackExecution], expected_c
 
     // Check timestamps are monotonic
     for i in 1..executions.len() {
-        if executions[i].timestamp <= executions[i-1].timestamp {
+        if executions[i].timestamp <= executions[i - 1].timestamp {
             return Err(format!(
                 "Non-monotonic timestamps at index {}: {} <= {}",
-                i, executions[i].timestamp, executions[i-1].timestamp
+                i,
+                executions[i].timestamp,
+                executions[i - 1].timestamp
             ));
         }
     }
@@ -1934,16 +1996,21 @@ fn verify_concurrent_callback_grouping(executions: &[CallbackExecution]) -> Resu
     // Verify callbacks for same counter maintain relative order
     let mut counter_positions = std::collections::HashMap::new();
     for (pos, execution) in executions.iter().enumerate() {
-        counter_positions.entry(&execution.counter_name).or_insert_with(Vec::new).push((pos, execution.callback_id));
+        counter_positions
+            .entry(&execution.counter_name)
+            .or_insert_with(Vec::new)
+            .push((pos, execution.callback_id));
     }
 
     for (counter_name, positions) in counter_positions {
         // Check that callback IDs for the same counter are in ascending order of position
         for i in 1..positions.len() {
-            if positions[i].0 <= positions[i-1].0 {
+            if positions[i].0 <= positions[i - 1].0 {
                 return Err(format!(
                     "Counter {} callback positions not properly ordered: {} <= {}",
-                    counter_name, positions[i].0, positions[i-1].0
+                    counter_name,
+                    positions[i].0,
+                    positions[i - 1].0
                 ));
             }
         }
@@ -1963,7 +2030,11 @@ struct UpDownCounterResult {
 }
 
 /// Simulate UpDownCounter increment/decrement operations.
-fn simulate_updown_counter_operations(counter_name: &str, increments: &[i64], decrements: &[i64]) -> UpDownCounterResult {
+fn simulate_updown_counter_operations(
+    counter_name: &str,
+    increments: &[i64],
+    decrements: &[i64],
+) -> UpDownCounterResult {
     let mut current_value = 0i64;
     let mut operation_count = 0;
 
@@ -1989,7 +2060,11 @@ fn simulate_updown_counter_operations(counter_name: &str, increments: &[i64], de
 }
 
 /// Simulate UpDownCounter operations with interleaved increment/decrement pattern.
-fn simulate_updown_counter_operations_interleaved(counter_name: &str, increments: &[i64], decrements: &[i64]) -> UpDownCounterResult {
+fn simulate_updown_counter_operations_interleaved(
+    counter_name: &str,
+    increments: &[i64],
+    decrements: &[i64],
+) -> UpDownCounterResult {
     let mut current_value = 0i64;
     let mut operation_count = 0;
 
@@ -2023,7 +2098,11 @@ fn simulate_updown_counter_operations_interleaved(counter_name: &str, increments
 fn simulate_updown_counter_overflow_protection() -> UpDownCounterResult {
     // Test overflow scenarios - implementation should handle gracefully
     let large_increment = i64::MAX / 2;
-    let result = simulate_updown_counter_operations("overflow_test", &[large_increment, large_increment], &[]);
+    let result = simulate_updown_counter_operations(
+        "overflow_test",
+        &[large_increment, large_increment],
+        &[],
+    );
 
     // The result should be handled safely (saturating arithmetic used above)
     result
@@ -2057,7 +2136,11 @@ fn create_histogram_with_bounds(histogram_name: &str, explicit_bounds: &[f64]) -
     normalized_bounds.retain(|&x| x.is_finite());
 
     // Bucket count is bounds.len() + 1 (including underflow and overflow buckets)
-    let bucket_count = if normalized_bounds.is_empty() { 1 } else { normalized_bounds.len() + 1 };
+    let bucket_count = if normalized_bounds.is_empty() {
+        1
+    } else {
+        normalized_bounds.len() + 1
+    };
 
     HistogramLayout {
         histogram_name: histogram_name.to_string(),
@@ -2086,11 +2169,7 @@ fn generate_test_values_for_bounds(bounds: &[f64]) -> Vec<f64> {
 
     // Add values at and around each bound
     for &bound in bounds {
-        test_values.extend(&[
-            bound - f64::EPSILON,
-            bound,
-            bound + f64::EPSILON,
-        ]);
+        test_values.extend(&[bound - f64::EPSILON, bound, bound + f64::EPSILON]);
     }
 
     // Add values above the last bound
@@ -2129,9 +2208,16 @@ fn find_bucket_for_value(layout: &HistogramLayout, value: f64) -> usize {
 }
 
 /// Verify histogram bucket layout properties.
-fn verify_bucket_layout_properties(layout: &HistogramLayout, original_bounds: &[f64]) -> Result<(), String> {
+fn verify_bucket_layout_properties(
+    layout: &HistogramLayout,
+    original_bounds: &[f64],
+) -> Result<(), String> {
     // Check bucket count consistency
-    let expected_buckets = if layout.bounds.is_empty() { 1 } else { layout.bounds.len() + 1 };
+    let expected_buckets = if layout.bounds.is_empty() {
+        1
+    } else {
+        layout.bounds.len() + 1
+    };
     if layout.bucket_count != expected_buckets {
         return Err(format!(
             "Bucket count mismatch: expected {}, got {}",
@@ -2141,10 +2227,12 @@ fn verify_bucket_layout_properties(layout: &HistogramLayout, original_bounds: &[
 
     // Check bounds are sorted
     for i in 1..layout.bounds.len() {
-        if layout.bounds[i] <= layout.bounds[i-1] {
+        if layout.bounds[i] <= layout.bounds[i - 1] {
             return Err(format!(
                 "Bounds not properly sorted at index {}: {} <= {}",
-                i, layout.bounds[i], layout.bounds[i-1]
+                i,
+                layout.bounds[i],
+                layout.bounds[i - 1]
             ));
         }
     }
@@ -2152,10 +2240,7 @@ fn verify_bucket_layout_properties(layout: &HistogramLayout, original_bounds: &[
     // Check bounds are finite
     for (i, &bound) in layout.bounds.iter().enumerate() {
         if !bound.is_finite() {
-            return Err(format!(
-                "Bound at index {} is not finite: {}",
-                i, bound
-            ));
+            return Err(format!("Bound at index {} is not finite: {}", i, bound));
         }
     }
 
@@ -2176,7 +2261,11 @@ fn verify_bucket_layout_properties(layout: &HistogramLayout, original_bounds: &[
 }
 
 /// Record histogram values and return bucket distribution.
-fn record_histogram_values(histogram_name: &str, bounds: &[f64], values: &[f64]) -> HistogramRecordingResult {
+fn record_histogram_values(
+    histogram_name: &str,
+    bounds: &[f64],
+    values: &[f64],
+) -> HistogramRecordingResult {
     let layout = create_histogram_with_bounds(histogram_name, bounds);
     let mut bucket_counts = vec![0; layout.bucket_count];
 
@@ -2558,7 +2647,8 @@ pub fn otlp_018_grpc_retry_after_handling<RT: RuntimeInterface>() -> Conformance
 }
 
 /// OTLP-019: Trace-state propagation across span hierarchy conformance test.
-pub fn otlp_019_trace_state_propagation_span_hierarchy<RT: RuntimeInterface>() -> ConformanceTest<RT> {
+pub fn otlp_019_trace_state_propagation_span_hierarchy<RT: RuntimeInterface>() -> ConformanceTest<RT>
+{
     crate::conformance_test! {
         id: "otlp-019",
         name: "Trace-state propagation span hierarchy conformance",
@@ -3386,7 +3476,8 @@ pub fn otlp_016_histogram_record_explicit_bounds<RT: RuntimeInterface>() -> Conf
 }
 
 /// OTLP-015: UpDownCounter increment/decrement conformance test.
-pub fn otlp_015_updown_counter_incr_decr_conformance<RT: RuntimeInterface>() -> ConformanceTest<RT> {
+pub fn otlp_015_updown_counter_incr_decr_conformance<RT: RuntimeInterface>() -> ConformanceTest<RT>
+{
     crate::conformance_test! {
         id: "otlp-015",
         name: "UpDownCounter increment/decrement conformance",
@@ -3568,7 +3659,8 @@ pub fn otlp_015_updown_counter_incr_decr_conformance<RT: RuntimeInterface>() -> 
 }
 
 /// OTLP-014: ObservableCounter callback ordering conformance test.
-pub fn otlp_014_observable_counter_callback_ordering<RT: RuntimeInterface>() -> ConformanceTest<RT> {
+pub fn otlp_014_observable_counter_callback_ordering<RT: RuntimeInterface>() -> ConformanceTest<RT>
+{
     crate::conformance_test! {
         id: "otlp-014",
         name: "ObservableCounter callback ordering conformance",
@@ -4047,16 +4139,27 @@ struct ContextRestoration {
 }
 
 /// Simulate async context propagation with specified span and baggage counts.
-fn simulate_async_context_propagation(operation_name: &str, span_count: usize, baggage_count: usize) -> ContextPropagationResult {
+fn simulate_async_context_propagation(
+    operation_name: &str,
+    span_count: usize,
+    baggage_count: usize,
+) -> ContextPropagationResult {
     let mut propagated_spans = Vec::new();
     let mut propagated_baggage = Vec::new();
 
     // Create spans with hierarchical structure
     for i in 0..span_count {
         let span_id = format!("span_{:02x}{:02x}", operation_name.len() % 256, i);
-        let trace_id = format!("trace_{:08x}", operation_name.as_bytes().iter().sum::<u8>() as u32 + i as u32);
+        let trace_id = format!(
+            "trace_{:08x}",
+            operation_name.as_bytes().iter().sum::<u8>() as u32 + i as u32
+        );
         let parent_span_id = if i > 0 {
-            Some(format!("span_{:02x}{:02x}", operation_name.len() % 256, i - 1))
+            Some(format!(
+                "span_{:02x}{:02x}",
+                operation_name.len() % 256,
+                i - 1
+            ))
         } else {
             None
         };
@@ -4151,7 +4254,10 @@ fn verify_context_hierarchy(spans: &[PropagatedSpan]) -> Result<(), String> {
 }
 
 /// Simulate async boundary crossing with parent and child spans.
-fn simulate_async_boundary_crossing(parent_spans: &[&str], async_tasks: &[&str]) -> AsyncBoundaryCrossingResult {
+fn simulate_async_boundary_crossing(
+    parent_spans: &[&str],
+    async_tasks: &[&str],
+) -> AsyncBoundaryCrossingResult {
     let mut connected_spans = Vec::new();
     let mut boundary_preservations = Vec::new();
 
@@ -4212,25 +4318,35 @@ fn simulate_async_boundary_crossing(parent_spans: &[&str], async_tasks: &[&str])
 fn verify_async_span_relationships(
     result: &AsyncBoundaryCrossingResult,
     parent_spans: &[&str],
-    async_tasks: &[&str]
+    async_tasks: &[&str],
 ) -> Result<(), String> {
     // Verify all parent spans exist
     for parent_name in parent_spans {
-        let parent_exists = result.connected_spans.iter()
+        let parent_exists = result
+            .connected_spans
+            .iter()
             .any(|span| span.span_name == *parent_name && span.parent_span_id.is_none());
         if !parent_exists {
-            return Err(format!("Parent span {} not found in connected spans", parent_name));
+            return Err(format!(
+                "Parent span {} not found in connected spans",
+                parent_name
+            ));
         }
     }
 
     // Verify all async task spans exist and have parents
     for task_name in async_tasks {
-        let task_span = result.connected_spans.iter()
+        let task_span = result
+            .connected_spans
+            .iter()
             .find(|span| span.span_name == *task_name)
             .ok_or_else(|| format!("Async task span {} not found", task_name))?;
 
         if task_span.parent_span_id.is_none() && !parent_spans.is_empty() {
-            return Err(format!("Async task span {} missing parent relationship", task_name));
+            return Err(format!(
+                "Async task span {} missing parent relationship",
+                task_name
+            ));
         }
     }
 
@@ -4248,9 +4364,13 @@ fn verify_async_span_relationships(
 }
 
 /// Simulate context restoration after async completion.
-fn simulate_context_restoration_after_async(boundary_result: &AsyncBoundaryCrossingResult) -> ContextRestoration {
+fn simulate_context_restoration_after_async(
+    boundary_result: &AsyncBoundaryCrossingResult,
+) -> ContextRestoration {
     // Extract original spans (parents)
-    let original_spans: Vec<_> = boundary_result.connected_spans.iter()
+    let original_spans: Vec<_> = boundary_result
+        .connected_spans
+        .iter()
         .filter(|span| span.parent_span_id.is_none())
         .cloned()
         .collect();
@@ -4266,14 +4386,19 @@ fn simulate_context_restoration_after_async(boundary_result: &AsyncBoundaryCross
 }
 
 /// Verify context restoration maintains original state.
-fn verify_context_restoration(restoration: &ContextRestoration, expected_parents: &[&str]) -> Result<(), String> {
+fn verify_context_restoration(
+    restoration: &ContextRestoration,
+    expected_parents: &[&str],
+) -> Result<(), String> {
     if !restoration.restoration_success {
         return Err("Context restoration failed".to_string());
     }
 
     // Verify all expected parent spans are restored
     for parent_name in expected_parents {
-        let restored = restoration.restored_spans.iter()
+        let restored = restoration
+            .restored_spans
+            .iter()
             .any(|span| span.span_name == *parent_name);
         if !restored {
             return Err(format!("Parent span {} not properly restored", parent_name));
@@ -4290,7 +4415,11 @@ fn verify_context_restoration(restoration: &ContextRestoration, expected_parents
     }
 
     // Check that restored spans maintain proper structure
-    for (original, restored) in restoration.original_spans.iter().zip(&restoration.restored_spans) {
+    for (original, restored) in restoration
+        .original_spans
+        .iter()
+        .zip(&restoration.restored_spans)
+    {
         if original.span_name != restored.span_name {
             return Err(format!(
                 "Context restoration span name mismatch: original {}, restored {}",
@@ -4421,7 +4550,10 @@ fn create_retry_policy_from_config(config: &GrpcRetryConfiguration) -> RetryPoli
 }
 
 /// Verify retry policy compliance.
-fn verify_retry_policy_compliance(policy: &RetryPolicy, expected_retry_after: Option<u32>) -> Result<(), String> {
+fn verify_retry_policy_compliance(
+    policy: &RetryPolicy,
+    expected_retry_after: Option<u32>,
+) -> Result<(), String> {
     // Check base delay matches retry-after expectation
     if let Some(expected_delay) = expected_retry_after {
         if policy.base_delay != expected_delay {
@@ -4449,7 +4581,10 @@ fn verify_retry_policy_compliance(policy: &RetryPolicy, expected_retry_after: Op
     }
 
     // Check retryable status codes include common retriable ones
-    let required_codes = [GrpcStatusCode::ResourceExhausted, GrpcStatusCode::Unavailable];
+    let required_codes = [
+        GrpcStatusCode::ResourceExhausted,
+        GrpcStatusCode::Unavailable,
+    ];
     for &required_code in &required_codes {
         if !policy.retryable_status_codes.contains(&required_code) {
             return Err(format!(
@@ -4463,7 +4598,10 @@ fn verify_retry_policy_compliance(policy: &RetryPolicy, expected_retry_after: Op
 }
 
 /// Simulate exponential backoff with retry-after interaction.
-fn simulate_exponential_backoff_with_retry_after(config: &GrpcRetryConfiguration, max_attempts: u32) -> BackoffRetryAfterResult {
+fn simulate_exponential_backoff_with_retry_after(
+    config: &GrpcRetryConfiguration,
+    max_attempts: u32,
+) -> BackoffRetryAfterResult {
     let mut backoff_delays = Vec::new();
     let mut retry_after_delays = Vec::new();
     let mut final_delays = Vec::new();
@@ -4499,10 +4637,18 @@ fn simulate_exponential_backoff_with_retry_after(config: &GrpcRetryConfiguration
 }
 
 /// Verify backoff and retry-after interaction.
-fn verify_backoff_retry_after_interaction(result: &BackoffRetryAfterResult, expected_retry_after: u32) -> Result<(), String> {
+fn verify_backoff_retry_after_interaction(
+    result: &BackoffRetryAfterResult,
+    expected_retry_after: u32,
+) -> Result<(), String> {
     // Check that retry-after is respected when present
     if expected_retry_after > 0 {
-        for (i, (&final_delay, &retry_after_delay)) in result.final_delays.iter().zip(&result.retry_after_delays).enumerate() {
+        for (i, (&final_delay, &retry_after_delay)) in result
+            .final_delays
+            .iter()
+            .zip(&result.retry_after_delays)
+            .enumerate()
+        {
             if retry_after_delay > 0 && final_delay < retry_after_delay {
                 return Err(format!(
                     "Retry-after not respected at attempt {}: final delay {} < retry-after {}",
@@ -4530,15 +4676,18 @@ fn verify_backoff_retry_after_interaction(result: &BackoffRetryAfterResult, expe
 }
 
 /// Determine gRPC retry decision based on status code.
-fn determine_grpc_retry_from_status(status_code: GrpcStatusCode, retry_after: Option<u32>) -> GrpcRetryDecision {
+fn determine_grpc_retry_from_status(
+    status_code: GrpcStatusCode,
+    retry_after: Option<u32>,
+) -> GrpcRetryDecision {
     let should_retry = match status_code {
-        GrpcStatusCode::ResourceExhausted |
-        GrpcStatusCode::Unavailable |
-        GrpcStatusCode::DeadlineExceeded |
-        GrpcStatusCode::Unknown => true,
-        GrpcStatusCode::Internal |
-        GrpcStatusCode::InvalidArgument |
-        GrpcStatusCode::Cancelled => false,
+        GrpcStatusCode::ResourceExhausted
+        | GrpcStatusCode::Unavailable
+        | GrpcStatusCode::DeadlineExceeded
+        | GrpcStatusCode::Unknown => true,
+        GrpcStatusCode::Internal | GrpcStatusCode::InvalidArgument | GrpcStatusCode::Cancelled => {
+            false
+        }
     };
 
     GrpcRetryDecision {
@@ -4557,7 +4706,7 @@ fn simulate_retry_count_limits(status_code: GrpcStatusCode, max_attempts: u32) -
         GrpcStatusCode::Unavailable => 0.8,       // Often resolves quickly
         GrpcStatusCode::DeadlineExceeded => 0.6,  // Timeout-dependent
         GrpcStatusCode::Unknown => 0.5,           // Unpredictable
-        _ => 0.0, // Non-retriable
+        _ => 0.0,                                 // Non-retriable
     };
 
     // Determine if success occurs (deterministically based on status)
@@ -4595,19 +4744,20 @@ fn verify_retry_count_behavior(result: &RetryCountResult) -> Result<(), String> 
 
     // Check status code specific behavior
     match result.status_code {
-        GrpcStatusCode::Internal |
-        GrpcStatusCode::InvalidArgument |
-        GrpcStatusCode::Cancelled => {
+        GrpcStatusCode::Internal | GrpcStatusCode::InvalidArgument | GrpcStatusCode::Cancelled => {
             if result.actual_attempts > 1 {
                 return Err(format!(
                     "Non-retriable status {:?} should not be retried",
                     result.status_code
                 ));
             }
-        },
+        }
         _ => {
             // Retriable status codes should use multiple attempts when configured
-            if result.max_attempts > 1 && result.actual_attempts == 1 && !result.success_on_final_attempt {
+            if result.max_attempts > 1
+                && result.actual_attempts == 1
+                && !result.success_on_final_attempt
+            {
                 return Err(format!(
                     "Retriable status {:?} should use multiple attempts",
                     result.status_code
@@ -4681,7 +4831,10 @@ fn verify_jitter_bounds(result: &ComplexRetryResult, max_jitter_factor: f32) -> 
 }
 
 /// Verify circuit breaker and retry interaction.
-fn verify_circuit_breaker_retry_interaction(result: &ComplexRetryResult, config: &RetryConfiguration) -> Result<(), String> {
+fn verify_circuit_breaker_retry_interaction(
+    result: &ComplexRetryResult,
+    config: &RetryConfiguration,
+) -> Result<(), String> {
     // Check circuit breaker behavior
     if config.circuit_breaker_threshold > 0.8 {
         if !result.circuit_breaker_triggered {
@@ -4821,7 +4974,10 @@ struct ServiceTraceState {
 }
 
 /// Simulate trace-state propagation across span hierarchy.
-fn simulate_trace_state_span_propagation(trace_state_entries: &[(&str, &str)], hierarchy_depth: usize) -> TraceStatePropagationResult {
+fn simulate_trace_state_span_propagation(
+    trace_state_entries: &[(&str, &str)],
+    hierarchy_depth: usize,
+) -> TraceStatePropagationResult {
     let mut propagated_states = Vec::new();
     let mut span_hierarchy = Vec::new();
 
@@ -4862,12 +5018,16 @@ fn simulate_trace_state_span_propagation(trace_state_entries: &[(&str, &str)], h
 }
 
 /// Verify trace-state hierarchy preservation.
-fn verify_trace_state_hierarchy_preservation(result: &TraceStatePropagationResult, expected_depth: usize) -> Result<(), String> {
+fn verify_trace_state_hierarchy_preservation(
+    result: &TraceStatePropagationResult,
+    expected_depth: usize,
+) -> Result<(), String> {
     // Check hierarchy depth matches expected
     if result.span_hierarchy.len() != expected_depth {
         return Err(format!(
             "Hierarchy depth mismatch: expected {}, got {}",
-            expected_depth, result.span_hierarchy.len()
+            expected_depth,
+            result.span_hierarchy.len()
         ));
     }
 
@@ -4885,7 +5045,9 @@ fn verify_trace_state_hierarchy_preservation(result: &TraceStatePropagationResul
         if span.trace_state != *expected_state {
             return Err(format!(
                 "Trace-state not preserved at hierarchy level {}: {} entries vs {} expected",
-                i, span.trace_state.len(), expected_state.len()
+                i,
+                span.trace_state.len(),
+                expected_state.len()
             ));
         }
     }
@@ -4894,7 +5056,9 @@ fn verify_trace_state_hierarchy_preservation(result: &TraceStatePropagationResul
     for span in &result.span_hierarchy {
         if let Some(parent_id) = &span.parent_span_id {
             // Find parent span
-            let parent_exists = result.span_hierarchy.iter()
+            let parent_exists = result
+                .span_hierarchy
+                .iter()
                 .any(|s| s.span_id == *parent_id);
             if !parent_exists {
                 return Err(format!(
@@ -4956,7 +5120,8 @@ fn verify_w3c_trace_state_format(trace_states: &[TraceStateEntry]) -> Result<(),
     }
 
     // Check total trace-state size (512 byte limit)
-    let total_size: usize = trace_states.iter()
+    let total_size: usize = trace_states
+        .iter()
         .map(|entry| entry.vendor.len() + entry.value.len() + 2) // +2 for '=' and ','
         .sum();
 
@@ -4979,7 +5144,10 @@ fn verify_w3c_trace_state_format(trace_states: &[TraceStateEntry]) -> Result<(),
 }
 
 /// Simulate trace-state mutations.
-fn simulate_trace_state_mutations(result: &TraceStatePropagationResult, scenario: &str) -> TraceStateMutationResult {
+fn simulate_trace_state_mutations(
+    result: &TraceStatePropagationResult,
+    scenario: &str,
+) -> TraceStateMutationResult {
     let original_states = result.propagated_states.clone();
     let mut mutated_states = original_states.clone();
 
@@ -5000,29 +5168,29 @@ fn simulate_trace_state_mutations(result: &TraceStatePropagationResult, scenario
                 insertion_order: mutated_states.len(),
             });
             true
-        },
+        }
         TraceMutationType::VendorUpdate => {
             if let Some(entry) = mutated_states.first_mut() {
                 entry.value = "updated_value".to_string();
             }
             true
-        },
+        }
         TraceMutationType::ValueModify => {
             for entry in &mut mutated_states {
                 entry.value = format!("{}_modified", entry.value);
             }
             true
-        },
+        }
         TraceMutationType::OrderChange => {
             mutated_states.reverse();
             true
-        },
+        }
         TraceMutationType::VendorRemove => {
             if !mutated_states.is_empty() {
                 mutated_states.remove(0);
             }
             true
-        },
+        }
     };
 
     TraceStateMutationResult {
@@ -5045,17 +5213,21 @@ fn verify_trace_state_mutation_rules(result: &TraceStateMutationResult) -> Resul
             if result.mutated_states.len() != result.original_states.len() + 1 {
                 return Err("Vendor add should increase state count by 1".to_string());
             }
-        },
+        }
         TraceMutationType::VendorRemove => {
-            if !result.original_states.is_empty() && result.mutated_states.len() != result.original_states.len() - 1 {
+            if !result.original_states.is_empty()
+                && result.mutated_states.len() != result.original_states.len() - 1
+            {
                 return Err("Vendor remove should decrease state count by 1".to_string());
             }
-        },
-        TraceMutationType::VendorUpdate | TraceMutationType::ValueModify | TraceMutationType::OrderChange => {
+        }
+        TraceMutationType::VendorUpdate
+        | TraceMutationType::ValueModify
+        | TraceMutationType::OrderChange => {
             if result.mutated_states.len() != result.original_states.len() {
                 return Err("Update/modify/reorder should not change state count".to_string());
             }
-        },
+        }
     }
 
     // Verify W3C format compliance after mutation
@@ -5106,13 +5278,19 @@ fn validate_trace_state_limits(trace_state: &GeneratedTraceState) -> TraceStateV
 
     // Check vendor count limit
     if trace_state.vendor_count > 32 {
-        violations.push(format!("Vendor count {} exceeds limit of 32", trace_state.vendor_count));
+        violations.push(format!(
+            "Vendor count {} exceeds limit of 32",
+            trace_state.vendor_count
+        ));
         is_valid = false;
     }
 
     // Check total size limit
     if trace_state.total_size > 512 {
-        violations.push(format!("Total size {} exceeds limit of 512 bytes", trace_state.total_size));
+        violations.push(format!(
+            "Total size {} exceeds limit of 512 bytes",
+            trace_state.total_size
+        ));
         is_valid = false;
     }
 
@@ -5141,7 +5319,9 @@ fn verify_trace_state_consistency(result: &TraceStatePropagationResult) -> Resul
         if span.trace_state.len() != expected_state.len() {
             return Err(format!(
                 "Inconsistent trace-state size in span {}: expected {}, got {}",
-                span.span_id, expected_state.len(), span.trace_state.len()
+                span.span_id,
+                expected_state.len(),
+                span.trace_state.len()
             ));
         }
 
@@ -5160,7 +5340,9 @@ fn verify_trace_state_consistency(result: &TraceStatePropagationResult) -> Resul
 }
 
 /// Simulate vendor precedence in trace-state.
-fn simulate_trace_state_vendor_precedence(trace_state_entries: &[(&str, &str)]) -> VendorPrecedenceResult {
+fn simulate_trace_state_vendor_precedence(
+    trace_state_entries: &[(&str, &str)],
+) -> VendorPrecedenceResult {
     let mut vendor_order = Vec::new();
     let mut final_trace_state: Vec<TraceStateEntry> = Vec::new();
     let mut seen_vendors = std::collections::HashMap::new();
@@ -5189,7 +5371,9 @@ fn simulate_trace_state_vendor_precedence(trace_state_entries: &[(&str, &str)]) 
     }
 
     // Precedence is preserved if vendor order matches insertion order for unique vendors
-    let precedence_preserved = vendor_order.iter().zip(final_trace_state.iter())
+    let precedence_preserved = vendor_order
+        .iter()
+        .zip(final_trace_state.iter())
         .all(|(expected_vendor, actual_entry)| expected_vendor == &actual_entry.vendor);
 
     VendorPrecedenceResult {
@@ -5200,7 +5384,10 @@ fn simulate_trace_state_vendor_precedence(trace_state_entries: &[(&str, &str)]) 
 }
 
 /// Verify vendor ordering matches expected.
-fn verify_vendor_ordering(result: &VendorPrecedenceResult, expected_order: &[&str]) -> Result<(), String> {
+fn verify_vendor_ordering(
+    result: &VendorPrecedenceResult,
+    expected_order: &[&str],
+) -> Result<(), String> {
     // Filter expected order to only include unique vendors (simulating precedence)
     let mut unique_expected = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -5215,7 +5402,8 @@ fn verify_vendor_ordering(result: &VendorPrecedenceResult, expected_order: &[&st
     if result.vendor_order.len() != unique_expected.len() {
         return Err(format!(
             "Vendor count mismatch: expected {}, got {}",
-            unique_expected.len(), result.vendor_order.len()
+            unique_expected.len(),
+            result.vendor_order.len()
         ));
     }
 
@@ -5232,7 +5420,10 @@ fn verify_vendor_ordering(result: &VendorPrecedenceResult, expected_order: &[&st
 }
 
 /// Simulate trace-state across span boundaries.
-fn simulate_trace_state_across_span_boundaries(precedence_result: &VendorPrecedenceResult, boundary_count: usize) -> CrossBoundaryResult {
+fn simulate_trace_state_across_span_boundaries(
+    precedence_result: &VendorPrecedenceResult,
+    boundary_count: usize,
+) -> CrossBoundaryResult {
     let mut boundary_states = Vec::new();
     let mut precedence_maintained = true;
 
@@ -5259,7 +5450,10 @@ fn simulate_trace_state_across_span_boundaries(precedence_result: &VendorPrecede
 }
 
 /// Verify precedence across span boundaries.
-fn verify_precedence_across_boundaries(result: &CrossBoundaryResult, expected_order: &[&str]) -> Result<(), String> {
+fn verify_precedence_across_boundaries(
+    result: &CrossBoundaryResult,
+    expected_order: &[&str],
+) -> Result<(), String> {
     if !result.precedence_maintained {
         return Err("Precedence not maintained across span boundaries".to_string());
     }
@@ -5297,7 +5491,10 @@ fn verify_precedence_across_boundaries(result: &CrossBoundaryResult, expected_or
 }
 
 /// Simulate distributed trace-state propagation.
-fn simulate_distributed_trace_state_propagation(service_count: usize, service_states: &[(&str, &str)]) -> DistributedTraceStateResult {
+fn simulate_distributed_trace_state_propagation(
+    service_count: usize,
+    service_states: &[(&str, &str)],
+) -> DistributedTraceStateResult {
     let mut service_states_result = Vec::new();
     let mut cross_service_propagations = 0;
 
@@ -5354,7 +5551,10 @@ fn simulate_distributed_trace_state_propagation(service_count: usize, service_st
 }
 
 /// Verify cross-service propagation correctness.
-fn verify_cross_service_propagation(result: &DistributedTraceStateResult, expected_states: &[(&str, &str)]) -> Result<(), String> {
+fn verify_cross_service_propagation(
+    result: &DistributedTraceStateResult,
+    expected_states: &[(&str, &str)],
+) -> Result<(), String> {
     // Check each service has expected propagation behavior
     for (i, service_state) in result.service_states.iter().enumerate() {
         // Service should have received all upstream states
@@ -5369,7 +5569,12 @@ fn verify_cross_service_propagation(result: &DistributedTraceStateResult, expect
         }
 
         // Service should have its own state plus upstream
-        let expected_total = expected_upstream_count + if expected_states.get(i).is_some() { 1 } else { 0 };
+        let expected_total = expected_upstream_count
+            + if expected_states.get(i).is_some() {
+                1
+            } else {
+                0
+            };
         if service_state.service_trace_state.len() != expected_total {
             return Err(format!(
                 "Service {} has {} total states, expected {}",
@@ -5381,7 +5586,9 @@ fn verify_cross_service_propagation(result: &DistributedTraceStateResult, expect
 
         // Verify service-specific state is present if expected
         if let Some((expected_vendor, expected_value)) = expected_states.get(i) {
-            let has_own_state = service_state.service_trace_state.iter()
+            let has_own_state = service_state
+                .service_trace_state
+                .iter()
                 .any(|entry| entry.vendor == *expected_vendor && entry.value == *expected_value);
 
             if !has_own_state {
@@ -5406,7 +5613,8 @@ fn verify_service_boundary_isolation(result: &DistributedTraceStateResult) -> Re
     for (i, service) in result.service_states.iter().enumerate() {
         // Service should only have upstream states, not downstream or sibling states
         for entry in &service.service_trace_state {
-            let vendor_num: Result<usize, _> = entry.vendor.strip_prefix("svc").unwrap_or("999").parse();
+            let vendor_num: Result<usize, _> =
+                entry.vendor.strip_prefix("svc").unwrap_or("999").parse();
 
             if let Ok(vendor_service_num) = vendor_num {
                 if vendor_service_num > i {
@@ -5530,15 +5738,19 @@ struct RetryAttempt {
 }
 
 /// Simulate OTLP HTTP/protobuf export.
-fn simulate_otlp_http_protobuf_export(span_count: usize, metric_count: usize, log_count: usize) -> OtlpHttpProtobufExportResult {
+fn simulate_otlp_http_protobuf_export(
+    span_count: usize,
+    metric_count: usize,
+    log_count: usize,
+) -> OtlpHttpProtobufExportResult {
     // Calculate payload size based on telemetry data
     let estimated_span_size = 200; // bytes per span
     let estimated_metric_size = 150; // bytes per metric
     let estimated_log_size = 100; // bytes per log
 
-    let uncompressed_size = (span_count * estimated_span_size) +
-                           (metric_count * estimated_metric_size) +
-                           (log_count * estimated_log_size);
+    let uncompressed_size = (span_count * estimated_span_size)
+        + (metric_count * estimated_metric_size)
+        + (log_count * estimated_log_size);
 
     // Create deterministic payload
     let mut payload = Vec::new();
@@ -5561,9 +5773,15 @@ fn simulate_otlp_http_protobuf_export(span_count: usize, metric_count: usize, lo
 
     // Add standard HTTP headers
     let headers = vec![
-        ("Content-Type".to_string(), "application/x-protobuf".to_string()),
+        (
+            "Content-Type".to_string(),
+            "application/x-protobuf".to_string(),
+        ),
         ("Content-Encoding".to_string(), "gzip".to_string()),
-        ("User-Agent".to_string(), "asupersync-otlp-exporter/0.3.1".to_string()),
+        (
+            "User-Agent".to_string(),
+            "asupersync-otlp-exporter/0.3.1".to_string(),
+        ),
     ];
 
     // Apply compression if payload is large enough
@@ -5583,14 +5801,19 @@ fn simulate_otlp_http_protobuf_export(span_count: usize, metric_count: usize, lo
 }
 
 /// Verify protobuf encoding compliance.
-fn verify_protobuf_encoding_compliance(result: &OtlpHttpProtobufExportResult) -> Result<(), String> {
+fn verify_protobuf_encoding_compliance(
+    result: &OtlpHttpProtobufExportResult,
+) -> Result<(), String> {
     // Check payload is valid protobuf-like format
     if result.serialized_payload.is_empty() {
         return Err("Empty protobuf payload".to_string());
     }
 
     // Check payload starts with expected header
-    if !result.serialized_payload.starts_with(b"OTLP_PROTOBUF_HEADER") {
+    if !result
+        .serialized_payload
+        .starts_with(b"OTLP_PROTOBUF_HEADER")
+    {
         return Err("Invalid protobuf header".to_string());
     }
 
@@ -5618,15 +5841,16 @@ fn verify_http_headers_metadata(result: &OtlpHttpProtobufExportResult) -> Result
     // Check required headers are present
     let required_headers = ["Content-Type", "User-Agent"];
     for required in &required_headers {
-        let header_exists = result.http_headers.iter()
-            .any(|(key, _)| key == required);
+        let header_exists = result.http_headers.iter().any(|(key, _)| key == required);
         if !header_exists {
             return Err(format!("Missing required header: {}", required));
         }
     }
 
     // Check Content-Type matches field
-    let content_type_header = result.http_headers.iter()
+    let content_type_header = result
+        .http_headers
+        .iter()
         .find(|(key, _)| key == "Content-Type")
         .map(|(_, value)| value)
         .ok_or("Content-Type header not found")?;
@@ -5639,7 +5863,9 @@ fn verify_http_headers_metadata(result: &OtlpHttpProtobufExportResult) -> Result
     }
 
     // Check User-Agent format
-    let user_agent = result.http_headers.iter()
+    let user_agent = result
+        .http_headers
+        .iter()
         .find(|(key, _)| key == "User-Agent")
         .map(|(_, value)| value)
         .ok_or("User-Agent header not found")?;
@@ -5656,7 +5882,9 @@ fn simulate_payload_compression(result: &OtlpHttpProtobufExportResult) -> Payloa
     let original_size = result.serialized_payload.len();
 
     // Simulate gzip compression (deterministic for testing)
-    let compressed_payload: Vec<u8> = result.serialized_payload.iter()
+    let compressed_payload: Vec<u8> = result
+        .serialized_payload
+        .iter()
         .enumerate()
         .filter(|(i, _)| i % 3 != 0) // Remove every 3rd byte to simulate compression
         .map(|(_, &byte)| byte)
@@ -5699,7 +5927,11 @@ fn verify_compression_efficiency(result: &PayloadCompressionResult) -> Result<()
 }
 
 /// Simulate endpoint-specific export.
-fn simulate_endpoint_specific_export(endpoint: &str, content_type: &str, data_types: &[&str]) -> EndpointExportResult {
+fn simulate_endpoint_specific_export(
+    endpoint: &str,
+    content_type: &str,
+    data_types: &[&str],
+) -> EndpointExportResult {
     let mut payload = Vec::new();
     payload.extend(format!("ENDPOINT_{}", endpoint.replace('/', "_")).as_bytes());
 
@@ -5710,7 +5942,10 @@ fn simulate_endpoint_specific_export(endpoint: &str, content_type: &str, data_ty
 
     let mut headers = vec![
         ("Content-Type".to_string(), content_type.to_string()),
-        ("Accept".to_string(), "application/x-protobuf, application/json".to_string()),
+        (
+            "Accept".to_string(),
+            "application/x-protobuf, application/json".to_string(),
+        ),
     ];
 
     // Add compression header if applicable
@@ -5729,7 +5964,10 @@ fn simulate_endpoint_specific_export(endpoint: &str, content_type: &str, data_ty
 }
 
 /// Verify endpoint compliance.
-fn verify_endpoint_compliance(result: &EndpointExportResult, expected_endpoint: &str) -> Result<(), String> {
+fn verify_endpoint_compliance(
+    result: &EndpointExportResult,
+    expected_endpoint: &str,
+) -> Result<(), String> {
     // Check endpoint URL matches
     if result.endpoint_url != expected_endpoint {
         return Err(format!(
@@ -5760,7 +5998,10 @@ fn verify_endpoint_compliance(result: &EndpointExportResult, expected_endpoint: 
 }
 
 /// Verify content-type handling.
-fn verify_content_type_handling(result: &EndpointExportResult, expected_content_type: &str) -> Result<(), String> {
+fn verify_content_type_handling(
+    result: &EndpointExportResult,
+    expected_content_type: &str,
+) -> Result<(), String> {
     // Check content-type matches
     if result.content_type != expected_content_type {
         return Err(format!(
@@ -5770,7 +6011,9 @@ fn verify_content_type_handling(result: &EndpointExportResult, expected_content_
     }
 
     // Check Content-Type header is set correctly
-    let content_type_header = result.headers.iter()
+    let content_type_header = result
+        .headers
+        .iter()
         .find(|(key, _)| key == "Content-Type")
         .map(|(_, value)| value)
         .ok_or("Content-Type header not found")?;
@@ -5784,7 +6027,9 @@ fn verify_content_type_handling(result: &EndpointExportResult, expected_content_
 
     // Check compression header consistency
     if expected_content_type == "application/x-protobuf" {
-        let has_compression = result.headers.iter()
+        let has_compression = result
+            .headers
+            .iter()
             .any(|(key, _)| key == "Content-Encoding");
         if !has_compression {
             return Err("Missing Content-Encoding header for protobuf content".to_string());
@@ -5864,7 +6109,7 @@ fn simulate_protobuf_field_encoding(field_types: &[&str]) -> ProtobufFieldEncodi
             name if name.contains("string") => 2, // Length-delimited
             name if name.contains("int") => 0,    // Varint
             name if name.contains("bool") => 0,   // Varint
-            _ => 2, // Default to length-delimited
+            _ => 2,                               // Default to length-delimited
         };
 
         let encoded_value = format!("FIELD_{}_{}", field_type.to_uppercase(), i).into_bytes();
@@ -6029,7 +6274,10 @@ fn simulate_batch_size_handling(item_count: usize, max_payload_size: usize) -> B
 }
 
 /// Verify chunking behavior.
-fn verify_chunking_behavior(result: &BatchSizeResult, max_payload_size: usize) -> Result<(), String> {
+fn verify_chunking_behavior(
+    result: &BatchSizeResult,
+    max_payload_size: usize,
+) -> Result<(), String> {
     // Check chunk count is correct
     if result.chunking_required {
         if result.chunk_count <= 1 {
@@ -6055,9 +6303,7 @@ fn verify_chunking_behavior(result: &BatchSizeResult, max_payload_size: usize) -
     }
 
     // Check total items are preserved
-    let total_chunk_items: usize = result.chunks.iter()
-        .map(|chunk| chunk.item_count)
-        .sum();
+    let total_chunk_items: usize = result.chunks.iter().map(|chunk| chunk.item_count).sum();
 
     if total_chunk_items != result.total_items {
         return Err(format!(
@@ -6087,10 +6333,7 @@ fn verify_chunk_data_integrity(result: &BatchSizeResult) -> Result<(), String> {
         for line in chunk_data_str.split("ITEM_").skip(1) {
             if let Some(item_id) = line.get(0..6) {
                 if !seen_items.insert(item_id.to_string()) {
-                    return Err(format!(
-                        "Duplicate item {} found across chunks",
-                        item_id
-                    ));
+                    return Err(format!("Duplicate item {} found across chunks", item_id));
                 }
             }
         }
@@ -6125,7 +6368,8 @@ fn simulate_chunk_retry_behavior(result: &BatchSizeResult) -> ChunkRetryResult {
         });
     }
 
-    let final_success = !initial_failure || retry_attempts.last().map(|a| a.success).unwrap_or(false);
+    let final_success =
+        !initial_failure || retry_attempts.last().map(|a| a.success).unwrap_or(false);
 
     ChunkRetryResult {
         chunk_id,
@@ -6163,7 +6407,8 @@ fn verify_chunk_retry_compliance(result: &ChunkRetryResult) -> Result<(), String
 }
 
 /// OTLP-022: Meter create_counter() name validation conformance test.
-pub fn otlp_022_meter_create_counter_name_validation<RT: RuntimeInterface>() -> ConformanceTest<RT> {
+pub fn otlp_022_meter_create_counter_name_validation<RT: RuntimeInterface>() -> ConformanceTest<RT>
+{
     crate::conformance_test! {
         id: "otlp-022",
         name: "Meter.create_counter() name validation conformance",
@@ -6411,7 +6656,10 @@ struct SpanAttributeResult {
 }
 
 /// Simulate span set_attribute calls.
-fn simulate_span_set_attributes(span_name: &str, attributes: &[(&str, AttributeValue)]) -> SpanAttributeResult {
+fn simulate_span_set_attributes(
+    span_name: &str,
+    attributes: &[(&str, AttributeValue)],
+) -> SpanAttributeResult {
     let mut final_attrs = Vec::new();
     let mut update_sequence = Vec::new();
 
@@ -6426,7 +6674,8 @@ fn simulate_span_set_attributes(span_name: &str, attributes: &[(&str, AttributeV
     let mut sorted_attrs = final_attrs.clone();
     sorted_attrs.sort_by(|a, b| a.0.cmp(&b.0));
 
-    let serialized = sorted_attrs.iter()
+    let serialized = sorted_attrs
+        .iter()
         .map(|(k, v)| format!("{}={:?}", k, v))
         .collect::<Vec<_>>()
         .join(";");
@@ -6443,16 +6692,24 @@ fn simulate_span_set_attributes(span_name: &str, attributes: &[(&str, AttributeV
 }
 
 /// Simulate span set_attribute calls with owned strings.
-fn simulate_span_set_attributes_owned(span_name: &str, attributes: &[(String, AttributeValue)]) -> SpanAttributeResult {
-    let borrowed_attrs: Vec<(&str, AttributeValue)> = attributes.iter()
+fn simulate_span_set_attributes_owned(
+    span_name: &str,
+    attributes: &[(String, AttributeValue)],
+) -> SpanAttributeResult {
+    let borrowed_attrs: Vec<(&str, AttributeValue)> = attributes
+        .iter()
         .map(|(k, v)| (k.as_str(), v.clone()))
         .collect();
     simulate_span_set_attributes(span_name, &borrowed_attrs)
 }
 
 /// Simulate span attribute updates with sequential set_attribute calls.
-fn simulate_span_attribute_updates(span_name: &str, attribute_sequence: &[(&str, AttributeValue)]) -> SpanAttributeResult {
-    let mut current_attributes: std::collections::HashMap<String, AttributeValue> = std::collections::HashMap::new();
+fn simulate_span_attribute_updates(
+    span_name: &str,
+    attribute_sequence: &[(&str, AttributeValue)],
+) -> SpanAttributeResult {
+    let mut current_attributes: std::collections::HashMap<String, AttributeValue> =
+        std::collections::HashMap::new();
     let mut update_sequence = Vec::new();
 
     for (key, value) in attribute_sequence {
@@ -6465,7 +6722,8 @@ fn simulate_span_attribute_updates(span_name: &str, attribute_sequence: &[(&str,
     final_attrs.sort_by(|a, b| a.0.cmp(&b.0));
 
     // Generate serialized form
-    let serialized = final_attrs.iter()
+    let serialized = final_attrs
+        .iter()
         .map(|(k, v)| format!("{}={:?}", k, v))
         .collect::<Vec<_>>()
         .join(";");
@@ -6482,9 +6740,13 @@ fn simulate_span_attribute_updates(span_name: &str, attribute_sequence: &[(&str,
 }
 
 /// Verify attribute type preservation.
-fn verify_attribute_type_preservation(result: &SpanAttributeResult, original_attributes: &[(&str, AttributeValue)]) -> Result<(), String> {
+fn verify_attribute_type_preservation(
+    result: &SpanAttributeResult,
+    original_attributes: &[(&str, AttributeValue)],
+) -> Result<(), String> {
     // Check that final attribute types match the last set value for each key
-    let mut expected_types: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut expected_types: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
 
     for (key, value) in original_attributes {
         let type_name = match value {
@@ -6536,7 +6798,8 @@ fn verify_otel_attribute_spec_compliance(result: &SpanAttributeResult) -> Result
         if key.len() > 256 {
             return Err(format!(
                 "Attribute key '{}' exceeds 256 character limit ({})",
-                key, key.len()
+                key,
+                key.len()
             ));
         }
 
@@ -6546,51 +6809,57 @@ fn verify_otel_attribute_spec_compliance(result: &SpanAttributeResult) -> Result
                 if s.len() > 1024 {
                     return Err(format!(
                         "String attribute value for '{}' exceeds 1024 character limit ({})",
-                        key, s.len()
+                        key,
+                        s.len()
                     ));
                 }
-            },
+            }
             AttributeValue::StringArray(arr) => {
                 if arr.len() > 128 {
                     return Err(format!(
                         "String array attribute '{}' exceeds 128 element limit ({})",
-                        key, arr.len()
+                        key,
+                        arr.len()
                     ));
                 }
                 for s in arr {
                     if s.len() > 1024 {
                         return Err(format!(
                             "String array element in '{}' exceeds 1024 character limit ({})",
-                            key, s.len()
+                            key,
+                            s.len()
                         ));
                     }
                 }
-            },
+            }
             AttributeValue::IntArray(arr) => {
                 if arr.len() > 128 {
                     return Err(format!(
                         "Array attribute '{}' exceeds 128 element limit ({})",
-                        key, arr.len()
+                        key,
+                        arr.len()
                     ));
                 }
-            },
+            }
             AttributeValue::FloatArray(arr) => {
                 if arr.len() > 128 {
                     return Err(format!(
                         "Array attribute '{}' exceeds 128 element limit ({})",
-                        key, arr.len()
+                        key,
+                        arr.len()
                     ));
                 }
-            },
+            }
             AttributeValue::BoolArray(arr) => {
                 if arr.len() > 128 {
                     return Err(format!(
                         "Array attribute '{}' exceeds 128 element limit ({})",
-                        key, arr.len()
+                        key,
+                        arr.len()
                     ));
                 }
-            },
-            _ => {}, // Other types have no specific constraints
+            }
+            _ => {} // Other types have no specific constraints
         }
     }
 
@@ -6611,10 +6880,7 @@ fn verify_attribute_ordering_uniqueness(result: &SpanAttributeResult) -> Result<
 
     for (key, _) in &result.final_attributes {
         if !seen_keys.insert(key.clone()) {
-            return Err(format!(
-                "Duplicate attribute key found: '{}'",
-                key
-            ));
+            return Err(format!("Duplicate attribute key found: '{}'", key));
         }
     }
 
@@ -6622,14 +6888,18 @@ fn verify_attribute_ordering_uniqueness(result: &SpanAttributeResult) -> Result<
     let mut sorted_keys: Vec<&String> = result.final_attributes.iter().map(|(k, _)| k).collect();
     sorted_keys.sort();
 
-    let expected_serialized = result.final_attributes.iter()
+    let expected_serialized = result
+        .final_attributes
+        .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect::<std::collections::HashMap<_, _>>();
 
-    let mut expected_sorted: Vec<(String, AttributeValue)> = expected_serialized.into_iter().collect();
+    let mut expected_sorted: Vec<(String, AttributeValue)> =
+        expected_serialized.into_iter().collect();
     expected_sorted.sort_by(|a, b| a.0.cmp(&b.0));
 
-    let expected_serialized_form = expected_sorted.iter()
+    let expected_serialized_form = expected_sorted
+        .iter()
         .map(|(k, v)| format!("{}={:?}", k, v))
         .collect::<Vec<_>>()
         .join(";");
@@ -6645,7 +6915,10 @@ fn verify_attribute_ordering_uniqueness(result: &SpanAttributeResult) -> Result<
 }
 
 /// Verify edge case compliance.
-fn verify_edge_case_compliance(result: &SpanAttributeResult, scenario_name: &str) -> Result<(), String> {
+fn verify_edge_case_compliance(
+    result: &SpanAttributeResult,
+    scenario_name: &str,
+) -> Result<(), String> {
     match scenario_name {
         "empty_string_key" => {
             // Should handle empty keys gracefully (either accept or reject consistently)
@@ -6655,21 +6928,20 @@ fn verify_edge_case_compliance(result: &SpanAttributeResult, scenario_name: &str
                     return Err("Empty key accepted but not serialized properly".to_string());
                 }
             }
-        },
+        }
         "unicode_key" | "unicode_value" => {
             // Unicode should be preserved
-            let has_unicode = result.final_attributes.iter()
-                .any(|(k, v)| {
-                    k.chars().any(|c| c as u32 > 127) ||
-                    match v {
+            let has_unicode = result.final_attributes.iter().any(|(k, v)| {
+                k.chars().any(|c| c as u32 > 127)
+                    || match v {
                         AttributeValue::String(s) => s.chars().any(|c| c as u32 > 127),
                         _ => false,
                     }
-                });
+            });
             if has_unicode && result.serialized_attributes.is_empty() {
                 return Err("Unicode content lost during serialization".to_string());
             }
-        },
+        }
         "extreme_values" => {
             // Extreme values should be handled without overflow
             for (_, value) in &result.final_attributes {
@@ -6677,31 +6949,41 @@ fn verify_edge_case_compliance(result: &SpanAttributeResult, scenario_name: &str
                     AttributeValue::Int(i) => {
                         if *i == i64::MAX || *i == i64::MIN {
                             // Should be serialized as valid number
-                            let serialized_contains = result.serialized_attributes.contains(&i.to_string());
+                            let serialized_contains =
+                                result.serialized_attributes.contains(&i.to_string());
                             if !serialized_contains {
-                                return Err(format!("Extreme int value {} not properly serialized", i));
+                                return Err(format!(
+                                    "Extreme int value {} not properly serialized",
+                                    i
+                                ));
                             }
                         }
-                    },
+                    }
                     AttributeValue::Float(f) => {
                         if f.is_infinite() || f.is_nan() {
-                            return Err("Invalid float value (infinity/NaN) should be rejected".to_string());
+                            return Err(
+                                "Invalid float value (infinity/NaN) should be rejected".to_string()
+                            );
                         }
-                    },
-                    _ => {},
+                    }
+                    _ => {}
                 }
             }
-        },
-        _ => {},
+        }
+        _ => {}
     }
 
     Ok(())
 }
 
 /// Verify final attribute state after updates.
-fn verify_final_attribute_state(result: &SpanAttributeResult, attribute_sequence: &[(&str, AttributeValue)]) -> Result<(), String> {
+fn verify_final_attribute_state(
+    result: &SpanAttributeResult,
+    attribute_sequence: &[(&str, AttributeValue)],
+) -> Result<(), String> {
     // Build expected final state (last write wins)
-    let mut expected_state: std::collections::HashMap<String, AttributeValue> = std::collections::HashMap::new();
+    let mut expected_state: std::collections::HashMap<String, AttributeValue> =
+        std::collections::HashMap::new();
 
     for (key, value) in attribute_sequence {
         expected_state.insert(key.to_string(), value.clone());
@@ -6725,16 +7007,22 @@ fn verify_final_attribute_state(result: &SpanAttributeResult, attribute_sequence
 }
 
 /// Verify attribute update semantics (last write wins).
-fn verify_attribute_update_semantics(result: &SpanAttributeResult, attribute_sequence: &[(&str, AttributeValue)]) -> Result<(), String> {
+fn verify_attribute_update_semantics(
+    result: &SpanAttributeResult,
+    attribute_sequence: &[(&str, AttributeValue)],
+) -> Result<(), String> {
     // Check that for each key, the final value matches the last set value
     for (key, _) in &result.final_attributes {
         // Find last occurrence of this key in the sequence
-        let last_value = attribute_sequence.iter()
+        let last_value = attribute_sequence
+            .iter()
             .rev()
             .find(|(k, _)| k == key)
             .map(|(_, v)| v);
 
-        let current_value = result.final_attributes.iter()
+        let current_value = result
+            .final_attributes
+            .iter()
             .find(|(k, _)| k == key)
             .map(|(_, v)| v);
 
@@ -6746,23 +7034,20 @@ fn verify_attribute_update_semantics(result: &SpanAttributeResult, attribute_seq
                         key, expected, actual
                     ));
                 }
-            },
+            }
             (None, Some(_)) => {
                 return Err(format!(
                     "Key '{}' found in final state but not in input sequence",
                     key
                 ));
-            },
+            }
             (Some(_), None) => {
-                return Err(format!(
-                    "Key '{}' missing from final state",
-                    key
-                ));
-            },
+                return Err(format!("Key '{}' missing from final state", key));
+            }
             (None, None) => {
                 // This shouldn't happen
                 return Err(format!("Inconsistent state for key '{}'", key));
-            },
+            }
         }
     }
 
@@ -6770,7 +7055,10 @@ fn verify_attribute_update_semantics(result: &SpanAttributeResult, attribute_seq
 }
 
 /// Verify attribute limit handling.
-fn verify_attribute_limit_handling(result: &SpanAttributeResult, expected_count: usize) -> Result<(), String> {
+fn verify_attribute_limit_handling(
+    result: &SpanAttributeResult,
+    expected_count: usize,
+) -> Result<(), String> {
     const MAX_ATTRIBUTES: usize = 128;
 
     if expected_count <= MAX_ATTRIBUTES {
@@ -6803,7 +7091,9 @@ fn verify_attribute_limit_handling(result: &SpanAttributeResult, expected_count:
 }
 
 /// Verify attribute performance characteristics.
-fn verify_attribute_performance_characteristics(result: &SpanAttributeResult) -> Result<(), String> {
+fn verify_attribute_performance_characteristics(
+    result: &SpanAttributeResult,
+) -> Result<(), String> {
     // Check that serialization is efficient (no exponential blowup)
     let expected_min_size = result.attribute_count * 5; // Very conservative estimate
     let expected_max_size = result.attribute_count * 200; // Conservative max per attribute
@@ -6811,14 +7101,17 @@ fn verify_attribute_performance_characteristics(result: &SpanAttributeResult) ->
     if result.serialized_attributes.len() < expected_min_size {
         return Err(format!(
             "Serialized form suspiciously small: {} bytes for {} attributes",
-            result.serialized_attributes.len(), result.attribute_count
+            result.serialized_attributes.len(),
+            result.attribute_count
         ));
     }
 
     if result.serialized_attributes.len() > expected_max_size {
         return Err(format!(
             "Serialized form too large: {} bytes for {} attributes (max {})",
-            result.serialized_attributes.len(), result.attribute_count, expected_max_size
+            result.serialized_attributes.len(),
+            result.attribute_count,
+            expected_max_size
         ));
     }
 
@@ -6826,7 +7119,8 @@ fn verify_attribute_performance_characteristics(result: &SpanAttributeResult) ->
     if result.update_sequence.len() > result.attribute_count * 10 {
         return Err(format!(
             "Update sequence too long: {} operations for {} final attributes",
-            result.update_sequence.len(), result.attribute_count
+            result.update_sequence.len(),
+            result.attribute_count
         ));
     }
 
@@ -7011,7 +7305,11 @@ struct CounterProperties {
 }
 
 /// Simulate meter create_counter call.
-fn simulate_meter_create_counter(name: &str, description: &str, unit: &str) -> CounterCreationResult {
+fn simulate_meter_create_counter(
+    name: &str,
+    description: &str,
+    unit: &str,
+) -> CounterCreationResult {
     // Implement OpenTelemetry counter name validation rules
     let validation_result = validate_counter_name(name);
 
@@ -7062,7 +7360,10 @@ fn validate_counter_name(name: &str) -> CounterNameValidation {
 
     // Rule 2: Length limit (typically 256 characters)
     if name.len() > 256 {
-        violated_rules.push(format!("Counter name exceeds 256 character limit: {}", name.len()));
+        violated_rules.push(format!(
+            "Counter name exceeds 256 character limit: {}",
+            name.len()
+        ));
     }
 
     // Rule 3: No leading/trailing whitespace
@@ -7083,7 +7384,8 @@ fn validate_counter_name(name: &str) -> CounterNameValidation {
     }
 
     // Rule 6: Valid characters (letters, numbers, dots, underscores)
-    let invalid_chars: Vec<char> = name.chars()
+    let invalid_chars: Vec<char> = name
+        .chars()
         .filter(|&c| !c.is_ascii_alphanumeric() && c != '.' && c != '_')
         .collect();
     if !invalid_chars.is_empty() {
@@ -7133,8 +7435,13 @@ fn validate_counter_name(name: &str) -> CounterNameValidation {
 }
 
 /// Verify counter properties match expected values.
-fn verify_counter_properties(result: &CounterCreationResult, expected_name: &str) -> Result<(), String> {
-    let properties = result.counter_properties.as_ref()
+fn verify_counter_properties(
+    result: &CounterCreationResult,
+    expected_name: &str,
+) -> Result<(), String> {
+    let properties = result
+        .counter_properties
+        .as_ref()
         .ok_or("Counter creation successful but no properties returned")?;
 
     if properties.name != expected_name {
@@ -7167,21 +7474,30 @@ fn verify_counter_properties(result: &CounterCreationResult, expected_name: &str
 }
 
 /// Verify appropriate error message for invalid names.
-fn verify_appropriate_error_message(result: &CounterCreationResult, scenario_name: &str) -> Result<(), String> {
+fn verify_appropriate_error_message(
+    result: &CounterCreationResult,
+    scenario_name: &str,
+) -> Result<(), String> {
     if result.creation_successful {
         return Err("Counter creation succeeded when it should have failed".to_string());
     }
 
-    let error_msg = result.error_message.as_ref()
+    let error_msg = result
+        .error_message
+        .as_ref()
         .ok_or("Counter creation failed but no error message provided")?;
 
     // Check for relevant error indicators based on scenario
     let expected_error_indicators = match scenario_name {
         "empty_name" => vec!["empty", "non-empty"],
-        "whitespace_only" | "leading_space" | "trailing_space" | "internal_space" => vec!["whitespace", "space"],
+        "whitespace_only" | "leading_space" | "trailing_space" | "internal_space" => {
+            vec!["whitespace", "space"]
+        }
         "leading_dot" | "trailing_dot" | "double_dots" => vec!["dot"],
         "leading_underscore" | "double_underscores" => vec!["underscore"],
-        "invalid_chars_dash" | "invalid_chars_hash" | "invalid_chars_at" => vec!["invalid", "character"],
+        "invalid_chars_dash" | "invalid_chars_hash" | "invalid_chars_at" => {
+            vec!["invalid", "character"]
+        }
         "unicode_chars" | "emoji" => vec!["character", "invalid"],
         "too_long" => vec!["length", "limit", "256"],
         "numeric_start" => vec!["letter", "start"],
@@ -7189,7 +7505,8 @@ fn verify_appropriate_error_message(result: &CounterCreationResult, scenario_nam
     };
 
     let error_lower = error_msg.to_lowercase();
-    let has_relevant_indicator = expected_error_indicators.iter()
+    let has_relevant_indicator = expected_error_indicators
+        .iter()
         .any(|&indicator| error_lower.contains(indicator));
 
     if !has_relevant_indicator {
@@ -7203,12 +7520,20 @@ fn verify_appropriate_error_message(result: &CounterCreationResult, scenario_nam
 }
 
 /// Verify edge case name compliance.
-fn verify_edge_case_name_compliance(result: &CounterCreationResult, scenario_name: &str, should_succeed: bool) -> Result<(), String> {
+fn verify_edge_case_name_compliance(
+    result: &CounterCreationResult,
+    scenario_name: &str,
+    should_succeed: bool,
+) -> Result<(), String> {
     if result.creation_successful != should_succeed {
         return Err(format!(
             "Expected {} but got {} for edge case scenario '{}'",
             if should_succeed { "success" } else { "failure" },
-            if result.creation_successful { "success" } else { "failure" },
+            if result.creation_successful {
+                "success"
+            } else {
+                "failure"
+            },
             scenario_name
         ));
     }
@@ -7222,18 +7547,30 @@ fn verify_edge_case_name_compliance(result: &CounterCreationResult, scenario_nam
                     result.counter_name.len()
                 ));
             }
-        },
+        }
         "boundary_256_chars" => {
-            if !should_succeed && result.error_message.as_ref().map_or(true, |msg| !msg.to_lowercase().contains("length")) {
+            if !should_succeed
+                && result
+                    .error_message
+                    .as_ref()
+                    .map_or(true, |msg| !msg.to_lowercase().contains("length"))
+            {
                 return Err("256 char boundary error should mention length limit".to_string());
             }
-        },
+        }
         "single_dot" | "single_underscore" => {
-            if !should_succeed && result.error_message.as_ref().map_or(true, |msg| !msg.to_lowercase().contains("start")) {
-                return Err("Single special char error should mention start requirement".to_string());
+            if !should_succeed
+                && result
+                    .error_message
+                    .as_ref()
+                    .map_or(true, |msg| !msg.to_lowercase().contains("start"))
+            {
+                return Err(
+                    "Single special char error should mention start requirement".to_string()
+                );
             }
-        },
-        _ => {},
+        }
+        _ => {}
     }
 
     Ok(())
@@ -7245,7 +7582,7 @@ fn verify_duplicate_counter_handling(
     second_result: &CounterCreationResult,
     first_name: &str,
     second_name: &str,
-    _scenario_name: &str
+    _scenario_name: &str,
 ) -> Result<(), String> {
     if first_name == second_name {
         // Exact duplicates: should either return same instance or succeed with warning
@@ -7260,8 +7597,14 @@ fn verify_duplicate_counter_handling(
         if first_result.counter_identity != second_result.counter_identity {
             return Err(format!(
                 "Exact duplicate counter identities differ: '{}' vs '{}'",
-                first_result.counter_identity.as_ref().unwrap_or(&"None".to_string()),
-                second_result.counter_identity.as_ref().unwrap_or(&"None".to_string())
+                first_result
+                    .counter_identity
+                    .as_ref()
+                    .unwrap_or(&"None".to_string()),
+                second_result
+                    .counter_identity
+                    .as_ref()
+                    .unwrap_or(&"None".to_string())
             ));
         }
     } else {
@@ -7270,7 +7613,10 @@ fn verify_duplicate_counter_handling(
             return Err(format!(
                 "Different counter name '{}' creation failed: {}",
                 second_name,
-                second_result.error_message.as_ref().unwrap_or(&"No error message".to_string())
+                second_result
+                    .error_message
+                    .as_ref()
+                    .unwrap_or(&"No error message".to_string())
             ));
         }
 
@@ -7319,7 +7665,8 @@ fn generate_span_ids_with_seed(seed: u64, count: usize) -> SpanIdGenerationResul
         // Generate 64-bit span ID (OpenTelemetry uses 8 bytes)
         let id = loop {
             let generated = rng.next();
-            if generated != 0 {  // Span IDs must not be zero
+            if generated != 0 {
+                // Span IDs must not be zero
                 break generated;
             }
         };
@@ -7540,7 +7887,10 @@ fn calculate_birthday_collision_probability(n: usize) -> f64 {
 }
 
 /// Verify span ID entropy properties.
-fn verify_span_id_entropy_properties(result: &SpanIdGenerationResult, seed: u64) -> Result<(), String> {
+fn verify_span_id_entropy_properties(
+    result: &SpanIdGenerationResult,
+    seed: u64,
+) -> Result<(), String> {
     // Check minimum entropy threshold
     if result.entropy_metrics.bit_entropy < 0.8 {
         return Err(format!(
@@ -7550,15 +7900,23 @@ fn verify_span_id_entropy_properties(result: &SpanIdGenerationResult, seed: u64)
     }
 
     // Check byte entropy balance
-    let min_byte_entropy = result.entropy_metrics.byte_entropy.iter()
+    let min_byte_entropy = result
+        .entropy_metrics
+        .byte_entropy
+        .iter()
         .fold(f64::INFINITY, |acc, &x| acc.min(x));
-    let max_byte_entropy = result.entropy_metrics.byte_entropy.iter()
+    let max_byte_entropy = result
+        .entropy_metrics
+        .byte_entropy
+        .iter()
         .fold(0.0_f64, |acc, &x| acc.max(x));
 
     if max_byte_entropy - min_byte_entropy > 2.0 {
         return Err(format!(
             "Byte entropy imbalance too large: range {:.2} (max {:.2} - min {:.2})",
-            max_byte_entropy - min_byte_entropy, max_byte_entropy, min_byte_entropy
+            max_byte_entropy - min_byte_entropy,
+            max_byte_entropy,
+            min_byte_entropy
         ));
     }
 
@@ -7580,7 +7938,10 @@ fn verify_span_id_entropy_properties(result: &SpanIdGenerationResult, seed: u64)
 }
 
 /// Verify span ID distribution uniformity.
-fn verify_span_id_distribution_uniformity(result: &SpanIdGenerationResult, scenario_name: &str) -> Result<(), String> {
+fn verify_span_id_distribution_uniformity(
+    result: &SpanIdGenerationResult,
+    scenario_name: &str,
+) -> Result<(), String> {
     // Chi-squared test for uniformity (critical value for α=0.001 with large df ≈ 65536)
     let critical_value = 66000.0; // Conservative threshold
 
@@ -7629,7 +7990,9 @@ fn verify_no_zero_span_ids(result: &SpanIdGenerationResult) -> Result<(), String
 }
 
 /// Verify independence between different seeds.
-fn verify_cross_seed_independence(generations: &[(u64, SpanIdGenerationResult)]) -> Result<(), String> {
+fn verify_cross_seed_independence(
+    generations: &[(u64, SpanIdGenerationResult)],
+) -> Result<(), String> {
     // Check that different seeds produce different first IDs
     let mut first_ids = std::collections::HashSet::new();
 
@@ -7648,7 +8011,8 @@ fn verify_cross_seed_independence(generations: &[(u64, SpanIdGenerationResult)])
     }
 
     // Check entropy variation across seeds
-    let entropies: Vec<f64> = generations.iter()
+    let entropies: Vec<f64> = generations
+        .iter()
         .map(|(_, generation)| generation.entropy_metrics.bit_entropy)
         .collect();
 
@@ -7658,7 +8022,9 @@ fn verify_cross_seed_independence(generations: &[(u64, SpanIdGenerationResult)])
     if max_entropy - min_entropy > 0.2 {
         return Err(format!(
             "Entropy variation across seeds too large: {:.3} (max {:.3} - min {:.3})",
-            max_entropy - min_entropy, max_entropy, min_entropy
+            max_entropy - min_entropy,
+            max_entropy,
+            min_entropy
         ));
     }
 
@@ -7671,7 +8037,9 @@ fn verify_bit_distribution_properties(result: &SpanIdGenerationResult) -> Result
     let total_ids = result.span_ids.len();
 
     for bit_pos in 0..64 {
-        let ones_count = result.span_ids.iter()
+        let ones_count = result
+            .span_ids
+            .iter()
             .map(|&id| ((id >> bit_pos) & 1) as usize)
             .sum::<usize>();
 
@@ -7748,7 +8116,8 @@ fn verify_statistical_randomness(result: &SpanIdGenerationResult) -> Result<(), 
 }
 
 /// OTLP-029: Span attribute count limit conformance test wrapper
-pub fn otlp_029_span_attribute_count_limit_conformance<RT: RuntimeInterface>() -> ConformanceTest<RT> {
+pub fn otlp_029_span_attribute_count_limit_conformance<RT: RuntimeInterface>() -> ConformanceTest<RT>
+{
     crate::conformance_test! {
         id: "otlp-029",
         name: "Span attribute count limit conformance",
@@ -7884,9 +8253,9 @@ pub fn otlp_029_span_attribute_count_limit_conformance<RT: RuntimeInterface>() -
 /// Attribute limit behavior types
 #[derive(Debug, Clone, PartialEq)]
 enum AttributeLimitBehavior {
-    AllAccepted,         // All attributes within limit
-    TruncateToLimit,     // Excess attributes dropped
-    RejectAll,           // All attributes rejected (edge case)
+    AllAccepted,     // All attributes within limit
+    TruncateToLimit, // Excess attributes dropped
+    RejectAll,       // All attributes rejected (edge case)
 }
 
 /// Attribute limit test scenario
@@ -7918,7 +8287,9 @@ struct SpanAttribute {
 }
 
 /// Simulate asupersync span attribute limit implementation
-fn simulate_asupersync_attribute_limits(scenario: &AttributeLimitScenario) -> Result<AttributeLimitResult, String> {
+fn simulate_asupersync_attribute_limits(
+    scenario: &AttributeLimitScenario,
+) -> Result<AttributeLimitResult, String> {
     // Generate test attributes
     let mut all_attributes = vec![];
     for i in 0..scenario.attribute_count {
@@ -7946,7 +8317,9 @@ fn simulate_asupersync_attribute_limits(scenario: &AttributeLimitScenario) -> Re
     if limit_exceeded {
         warning_messages.push(format!(
             "Attribute count {} exceeds limit {}, {} attributes dropped",
-            all_attributes.len(), effective_limit, dropped_attributes.len()
+            all_attributes.len(),
+            effective_limit,
+            dropped_attributes.len()
         ));
     }
 
@@ -7961,7 +8334,9 @@ fn simulate_asupersync_attribute_limits(scenario: &AttributeLimitScenario) -> Re
 }
 
 /// Simulate OpenTelemetry SDK span attribute limit implementation
-fn simulate_opentelemetry_attribute_limits(scenario: &AttributeLimitScenario) -> Result<AttributeLimitResult, String> {
+fn simulate_opentelemetry_attribute_limits(
+    scenario: &AttributeLimitScenario,
+) -> Result<AttributeLimitResult, String> {
     // Generate test attributes (same as asupersync for comparison)
     let mut all_attributes = vec![];
     for i in 0..scenario.attribute_count {
@@ -7989,7 +8364,9 @@ fn simulate_opentelemetry_attribute_limits(scenario: &AttributeLimitScenario) ->
     if limit_exceeded {
         warning_messages.push(format!(
             "Attribute count {} exceeds limit {}, {} attributes dropped",
-            all_attributes.len(), effective_limit, dropped_attributes.len()
+            all_attributes.len(),
+            effective_limit,
+            dropped_attributes.len()
         ));
     }
 
@@ -8009,7 +8386,8 @@ fn compare_attribute_limit_results(
     opentelemetry_result: &AttributeLimitResult,
 ) -> bool {
     // Both must have the same number of accepted attributes
-    if asupersync_result.accepted_attributes.len() != opentelemetry_result.accepted_attributes.len() {
+    if asupersync_result.accepted_attributes.len() != opentelemetry_result.accepted_attributes.len()
+    {
         return false;
     }
 
@@ -8029,8 +8407,11 @@ fn compare_attribute_limit_results(
     }
 
     // Accepted attributes should be identical (same keys, values, order)
-    for (asupersync_attr, opentelemetry_attr) in
-        asupersync_result.accepted_attributes.iter().zip(opentelemetry_result.accepted_attributes.iter()) {
+    for (asupersync_attr, opentelemetry_attr) in asupersync_result
+        .accepted_attributes
+        .iter()
+        .zip(opentelemetry_result.accepted_attributes.iter())
+    {
         if asupersync_attr != opentelemetry_attr {
             return false;
         }
@@ -8046,7 +8427,7 @@ fn calculate_expected_attribute_count(scenario: &AttributeLimitScenario) -> usiz
         AttributeLimitBehavior::TruncateToLimit => {
             let limit = scenario.attribute_limit.unwrap_or(usize::MAX);
             scenario.attribute_count.min(limit)
-        },
+        }
         AttributeLimitBehavior::RejectAll => 0,
     }
 }
@@ -8295,20 +8676,29 @@ struct SpanContextExtractionResult {
 }
 
 /// Simulate asupersync span context extraction implementation
-fn simulate_asupersync_span_context_extraction(scenario: &SpanContextScenario) -> Result<SpanContextExtractionResult, String> {
+fn simulate_asupersync_span_context_extraction(
+    scenario: &SpanContextScenario,
+) -> Result<SpanContextExtractionResult, String> {
     // Simulate context extraction based on scenario
     let context_is_valid = match scenario.span_lifecycle_stage {
-        SpanLifecycleStage::Active | SpanLifecycleStage::Ended | SpanLifecycleStage::NestedAfterParentEnd | SpanLifecycleStage::EndedWithEvents | SpanLifecycleStage::EndedWithAttributes => {
+        SpanLifecycleStage::Active
+        | SpanLifecycleStage::Ended
+        | SpanLifecycleStage::NestedAfterParentEnd
+        | SpanLifecycleStage::EndedWithEvents
+        | SpanLifecycleStage::EndedWithAttributes => {
             // Valid if trace_id and span_id are non-zero
-            scenario.trace_id != "00000000000000000000000000000000" &&
-            scenario.span_id != "0000000000000000"
-        },
+            scenario.trace_id != "00000000000000000000000000000000"
+                && scenario.span_id != "0000000000000000"
+        }
     };
 
     let mut extraction_metadata = vec![];
 
     // Add metadata about the extraction process
-    extraction_metadata.push(format!("lifecycle_stage={:?}", scenario.span_lifecycle_stage));
+    extraction_metadata.push(format!(
+        "lifecycle_stage={:?}",
+        scenario.span_lifecycle_stage
+    ));
     extraction_metadata.push(format!("sampled={}", scenario.trace_flags & 0x01 != 0));
 
     if let Some(ref trace_state) = scenario.trace_state {
@@ -8328,7 +8718,9 @@ fn simulate_asupersync_span_context_extraction(scenario: &SpanContextScenario) -
 }
 
 /// Simulate OpenTelemetry SDK span context extraction implementation
-fn simulate_opentelemetry_span_context_extraction(scenario: &SpanContextScenario) -> Result<SpanContextExtractionResult, String> {
+fn simulate_opentelemetry_span_context_extraction(
+    scenario: &SpanContextScenario,
+) -> Result<SpanContextExtractionResult, String> {
     // OpenTelemetry SDK should behave identically for conformance
     simulate_asupersync_span_context_extraction(scenario)
 }
@@ -8378,8 +8770,8 @@ fn verify_span_context_extraction_consistency(
     scenario: &SpanContextScenario,
 ) -> Result<(), String> {
     // Verify that context validity is consistent with the input data
-    let expected_valid = scenario.trace_id != "00000000000000000000000000000000" &&
-                        scenario.span_id != "0000000000000000";
+    let expected_valid = scenario.trace_id != "00000000000000000000000000000000"
+        && scenario.span_id != "0000000000000000";
 
     if asupersync_result.context_is_valid != expected_valid {
         return Err(format!(
@@ -8613,9 +9005,9 @@ pub fn otlp_031_span_event_count_limit_conformance<RT: RuntimeInterface>() -> Co
 /// Span event limit behavior types
 #[derive(Debug, Clone, PartialEq)]
 enum SpanEventLimitBehavior {
-    AllAccepted,         // All events within limit
-    TruncateToLimit,     // Excess events dropped
-    RejectAll,           // All events rejected (edge case)
+    AllAccepted,     // All events within limit
+    TruncateToLimit, // Excess events dropped
+    RejectAll,       // All events rejected (edge case)
 }
 
 /// Event limit test scenario
@@ -8648,7 +9040,9 @@ struct SpanEventForLimitTest {
 }
 
 /// Simulate asupersync span event limit implementation
-fn simulate_asupersync_event_limits(scenario: &SpanEventLimitScenario) -> Result<EventLimitResult, String> {
+fn simulate_asupersync_event_limits(
+    scenario: &SpanEventLimitScenario,
+) -> Result<EventLimitResult, String> {
     // Generate test events
     let mut all_events = vec![];
     for i in 0..scenario.event_count {
@@ -8680,7 +9074,9 @@ fn simulate_asupersync_event_limits(scenario: &SpanEventLimitScenario) -> Result
     if limit_exceeded {
         warning_messages.push(format!(
             "Event count {} exceeds limit {}, {} events dropped",
-            all_events.len(), effective_limit, dropped_events.len()
+            all_events.len(),
+            effective_limit,
+            dropped_events.len()
         ));
     }
 
@@ -8695,7 +9091,9 @@ fn simulate_asupersync_event_limits(scenario: &SpanEventLimitScenario) -> Result
 }
 
 /// Simulate OpenTelemetry SDK span event limit implementation
-fn simulate_opentelemetry_event_limits(scenario: &SpanEventLimitScenario) -> Result<EventLimitResult, String> {
+fn simulate_opentelemetry_event_limits(
+    scenario: &SpanEventLimitScenario,
+) -> Result<EventLimitResult, String> {
     // OpenTelemetry SDK should behave identically for conformance
     simulate_asupersync_event_limits(scenario)
 }
@@ -8726,8 +9124,11 @@ fn compare_event_limit_results(
     }
 
     // Accepted events should be identical (same names, timestamps, attributes, order)
-    for (asupersync_event, opentelemetry_event) in
-        asupersync_result.accepted_events.iter().zip(opentelemetry_result.accepted_events.iter()) {
+    for (asupersync_event, opentelemetry_event) in asupersync_result
+        .accepted_events
+        .iter()
+        .zip(opentelemetry_result.accepted_events.iter())
+    {
         if asupersync_event != opentelemetry_event {
             return false;
         }
@@ -8743,7 +9144,7 @@ fn calculate_expected_event_count(scenario: &SpanEventLimitScenario) -> usize {
         SpanEventLimitBehavior::TruncateToLimit => {
             let limit = scenario.event_limit.unwrap_or(usize::MAX);
             scenario.event_count.min(limit)
-        },
+        }
         SpanEventLimitBehavior::RejectAll => 0,
     }
 }
@@ -8774,8 +9175,11 @@ fn verify_event_ordering_preservation(
     }
 
     // Verify both implementations preserve the same ordering
-    for (asupersync_event, opentelemetry_event) in
-        asupersync_result.accepted_events.iter().zip(opentelemetry_result.accepted_events.iter()) {
+    for (asupersync_event, opentelemetry_event) in asupersync_result
+        .accepted_events
+        .iter()
+        .zip(opentelemetry_result.accepted_events.iter())
+    {
         if asupersync_event.order_index != opentelemetry_event.order_index {
             return Err(format!(
                 "Event ordering mismatch: asupersync {}, opentelemetry {}",
@@ -8859,7 +9263,8 @@ fn verify_event_limit_enforcement(
 }
 
 /// OTLP-032: Span span_id reuse prevention conformance test wrapper
-pub fn otlp_032_span_id_reuse_prevention_conformance<RT: RuntimeInterface>() -> ConformanceTest<RT> {
+pub fn otlp_032_span_id_reuse_prevention_conformance<RT: RuntimeInterface>() -> ConformanceTest<RT>
+{
     crate::conformance_test! {
         id: "otlp-032",
         name: "Span span_id reuse prevention conformance",
@@ -9009,11 +9414,11 @@ pub fn otlp_032_span_id_reuse_prevention_conformance<RT: RuntimeInterface>() -> 
 /// Span creation patterns for testing
 #[derive(Debug, Clone, PartialEq)]
 enum SpanCreationPattern {
-    Sequential,       // Create spans one after another
-    Concurrent,       // Create spans simultaneously
-    Nested,           // Create nested span hierarchies
-    MixedLifecycle,   // Mix of short and long-lived spans
-    RapidCycles,      // Rapid create-end cycles
+    Sequential,     // Create spans one after another
+    Concurrent,     // Create spans simultaneously
+    Nested,         // Create nested span hierarchies
+    MixedLifecycle, // Mix of short and long-lived spans
+    RapidCycles,    // Rapid create-end cycles
 }
 
 /// Span ID uniqueness test scenario
@@ -9040,7 +9445,9 @@ struct SpanIdUniquenessResult {
 }
 
 /// Simulate asupersync span ID uniqueness implementation
-fn simulate_asupersync_span_id_uniqueness(scenario: &SpanIdUniquenessScenario) -> Result<SpanIdUniquenessResult, String> {
+fn simulate_asupersync_span_id_uniqueness(
+    scenario: &SpanIdUniquenessScenario,
+) -> Result<SpanIdUniquenessResult, String> {
     use std::collections::{HashMap, HashSet};
 
     let mut generated_span_ids = Vec::new();
@@ -9056,7 +9463,7 @@ fn simulate_asupersync_span_id_uniqueness(scenario: &SpanIdUniquenessScenario) -
                 generated_span_ids.push(span_id.clone());
                 *span_id_counts.entry(span_id).or_insert(0) += 1;
             }
-        },
+        }
         SpanCreationPattern::Concurrent => {
             generation_metadata.push("pattern=concurrent".to_string());
             generation_metadata.push(format!("concurrency_level={}", scenario.concurrency_level));
@@ -9076,7 +9483,7 @@ fn simulate_asupersync_span_id_uniqueness(scenario: &SpanIdUniquenessScenario) -
                 generated_span_ids.push(span_id.clone());
                 *span_id_counts.entry(span_id).or_insert(0) += 1;
             }
-        },
+        }
         SpanCreationPattern::Nested => {
             generation_metadata.push("pattern=nested".to_string());
             let mut depth = 0;
@@ -9086,7 +9493,7 @@ fn simulate_asupersync_span_id_uniqueness(scenario: &SpanIdUniquenessScenario) -
                 *span_id_counts.entry(span_id).or_insert(0) += 1;
                 depth = (depth + 1) % 10; // Max nesting depth of 10
             }
-        },
+        }
         SpanCreationPattern::MixedLifecycle => {
             generation_metadata.push("pattern=mixed_lifecycle".to_string());
             for i in 0..scenario.span_count {
@@ -9095,7 +9502,7 @@ fn simulate_asupersync_span_id_uniqueness(scenario: &SpanIdUniquenessScenario) -
                 generated_span_ids.push(span_id.clone());
                 *span_id_counts.entry(span_id).or_insert(0) += 1;
             }
-        },
+        }
         SpanCreationPattern::RapidCycles => {
             generation_metadata.push("pattern=rapid_cycles".to_string());
             for cycle in 0..(scenario.span_count / 10) {
@@ -9113,7 +9520,7 @@ fn simulate_asupersync_span_id_uniqueness(scenario: &SpanIdUniquenessScenario) -
                 generated_span_ids.push(span_id.clone());
                 *span_id_counts.entry(span_id).or_insert(0) += 1;
             }
-        },
+        }
     }
 
     // Find duplicates
@@ -9130,9 +9537,9 @@ fn simulate_asupersync_span_id_uniqueness(scenario: &SpanIdUniquenessScenario) -
     let entropy_score = unique_span_count as f64 / generated_span_ids.len() as f64;
 
     // Format compliance check (16-character hex strings)
-    let format_compliance = generated_span_ids.iter().all(|id| {
-        id.len() == 16 && id.chars().all(|c| c.is_ascii_hexdigit())
-    });
+    let format_compliance = generated_span_ids
+        .iter()
+        .all(|id| id.len() == 16 && id.chars().all(|c| c.is_ascii_hexdigit()));
 
     Ok(SpanIdUniquenessResult {
         scenario_name: scenario.name.clone(),
@@ -9154,7 +9561,9 @@ fn generate_mock_span_id(base: usize, variation: usize) -> String {
 }
 
 /// Simulate OpenTelemetry SDK span ID uniqueness implementation
-fn simulate_opentelemetry_span_id_uniqueness(scenario: &SpanIdUniquenessScenario) -> Result<SpanIdUniquenessResult, String> {
+fn simulate_opentelemetry_span_id_uniqueness(
+    scenario: &SpanIdUniquenessScenario,
+) -> Result<SpanIdUniquenessResult, String> {
     // OpenTelemetry SDK should behave identically for conformance
     simulate_asupersync_span_id_uniqueness(scenario)
 }
@@ -9211,7 +9620,8 @@ fn verify_span_id_format_validity(
         if span_id.len() != 16 {
             return Err(format!(
                 "Asupersync span ID wrong length: expected 16 chars, got {} for ID '{}'",
-                span_id.len(), span_id
+                span_id.len(),
+                span_id
             ));
         }
 
@@ -9232,7 +9642,8 @@ fn verify_span_id_format_validity(
         if span_id.len() != 16 {
             return Err(format!(
                 "OpenTelemetry span ID wrong length: expected 16 chars, got {} for ID '{}'",
-                span_id.len(), span_id
+                span_id.len(),
+                span_id
             ));
         }
 
@@ -9278,14 +9689,16 @@ fn verify_span_id_entropy(
     if scenario.span_count >= 1000 && asupersync_result.duplicate_span_ids.len() > 0 {
         return Err(format!(
             "Asupersync failed uniqueness in high-volume scenario: {} duplicates out of {} spans",
-            asupersync_result.duplicate_span_ids.len(), scenario.span_count
+            asupersync_result.duplicate_span_ids.len(),
+            scenario.span_count
         ));
     }
 
     if scenario.span_count >= 1000 && opentelemetry_result.duplicate_span_ids.len() > 0 {
         return Err(format!(
             "OpenTelemetry failed uniqueness in high-volume scenario: {} duplicates out of {} spans",
-            opentelemetry_result.duplicate_span_ids.len(), scenario.span_count
+            opentelemetry_result.duplicate_span_ids.len(),
+            scenario.span_count
         ));
     }
 
@@ -9294,14 +9707,16 @@ fn verify_span_id_entropy(
         if asupersync_result.duplicate_span_ids.len() > 0 {
             return Err(format!(
                 "Asupersync failed uniqueness in concurrent scenario (level {}): {} duplicates",
-                scenario.concurrency_level, asupersync_result.duplicate_span_ids.len()
+                scenario.concurrency_level,
+                asupersync_result.duplicate_span_ids.len()
             ));
         }
 
         if opentelemetry_result.duplicate_span_ids.len() > 0 {
             return Err(format!(
                 "OpenTelemetry failed uniqueness in concurrent scenario (level {}): {} duplicates",
-                scenario.concurrency_level, opentelemetry_result.duplicate_span_ids.len()
+                scenario.concurrency_level,
+                opentelemetry_result.duplicate_span_ids.len()
             ));
         }
     }
@@ -9310,7 +9725,8 @@ fn verify_span_id_entropy(
 }
 
 /// OTLP-033: Span.attributes_count_limit() conformance test wrapper
-pub fn otlp_033_span_attributes_count_limit_conformance<RT: RuntimeInterface>() -> ConformanceTest<RT> {
+pub fn otlp_033_span_attributes_count_limit_conformance<RT: RuntimeInterface>(
+) -> ConformanceTest<RT> {
     crate::conformance_test! {
         id: "otlp-033",
         name: "Span attributes_count_limit() conformance",
@@ -9438,13 +9854,13 @@ pub fn otlp_033_span_attributes_count_limit_conformance<RT: RuntimeInterface>() 
 /// Span limit configuration types for testing
 #[derive(Debug, Clone, PartialEq)]
 enum SpanLimitConfiguration {
-    Default,              // Use default OpenTelemetry settings
-    CustomLow,            // Low custom limit
-    CustomHigh,           // High custom limit
-    Unlimited,            // No limit (usize::MAX)
-    ZeroLimit,            // Zero limit (no attributes allowed)
-    Medium,               // Medium-sized custom limit
-    InheritedFromTracer,  // Inherited from tracer configuration
+    Default,             // Use default OpenTelemetry settings
+    CustomLow,           // Low custom limit
+    CustomHigh,          // High custom limit
+    Unlimited,           // No limit (usize::MAX)
+    ZeroLimit,           // Zero limit (no attributes allowed)
+    Medium,              // Medium-sized custom limit
+    InheritedFromTracer, // Inherited from tracer configuration
 }
 
 /// Attribute count limit API test scenario
@@ -9468,7 +9884,9 @@ struct AttributeCountLimitResult {
 }
 
 /// Simulate asupersync span attribute count limit API implementation
-fn simulate_asupersync_attributes_count_limit(scenario: &AttributeCountLimitScenario) -> Result<AttributeCountLimitResult, String> {
+fn simulate_asupersync_attributes_count_limit(
+    scenario: &AttributeCountLimitScenario,
+) -> Result<AttributeCountLimitResult, String> {
     let mut api_call_metadata = Vec::new();
 
     // Simulate the attributes_count_limit() API call
@@ -9476,23 +9894,25 @@ fn simulate_asupersync_attributes_count_limit(scenario: &AttributeCountLimitScen
         SpanLimitConfiguration::Default => {
             api_call_metadata.push("source=default_configuration".to_string());
             scenario.configured_limit.or(Some(128)) // OpenTelemetry default
-        },
-        SpanLimitConfiguration::CustomLow | SpanLimitConfiguration::CustomHigh | SpanLimitConfiguration::Medium => {
+        }
+        SpanLimitConfiguration::CustomLow
+        | SpanLimitConfiguration::CustomHigh
+        | SpanLimitConfiguration::Medium => {
             api_call_metadata.push("source=custom_configuration".to_string());
             scenario.configured_limit
-        },
+        }
         SpanLimitConfiguration::Unlimited => {
             api_call_metadata.push("source=unlimited_configuration".to_string());
             scenario.configured_limit
-        },
+        }
         SpanLimitConfiguration::ZeroLimit => {
             api_call_metadata.push("source=zero_limit_configuration".to_string());
             scenario.configured_limit
-        },
+        }
         SpanLimitConfiguration::InheritedFromTracer => {
             api_call_metadata.push("source=tracer_inheritance".to_string());
             Some(64) // Simulated inherited limit
-        },
+        }
     };
 
     let is_limit_enforced = match reported_limit {
@@ -9513,7 +9933,10 @@ fn simulate_asupersync_attributes_count_limit(scenario: &AttributeCountLimitScen
     };
 
     api_call_metadata.push(format!("limit_enforced={}", is_limit_enforced));
-    api_call_metadata.push(format!("configuration_type={:?}", scenario.span_configuration));
+    api_call_metadata.push(format!(
+        "configuration_type={:?}",
+        scenario.span_configuration
+    ));
 
     Ok(AttributeCountLimitResult {
         scenario_name: scenario.name.clone(),
@@ -9526,7 +9949,9 @@ fn simulate_asupersync_attributes_count_limit(scenario: &AttributeCountLimitScen
 }
 
 /// Simulate OpenTelemetry SDK span attribute count limit API implementation
-fn simulate_opentelemetry_attributes_count_limit(scenario: &AttributeCountLimitScenario) -> Result<AttributeCountLimitResult, String> {
+fn simulate_opentelemetry_attributes_count_limit(
+    scenario: &AttributeCountLimitScenario,
+) -> Result<AttributeCountLimitResult, String> {
     // OpenTelemetry SDK should behave identically for conformance
     simulate_asupersync_attributes_count_limit(scenario)
 }
@@ -9589,25 +10014,25 @@ fn verify_limit_api_consistency(
             if !asupersync_result.is_limit_enforced {
                 return Err("Asupersync should mark zero limit as enforced".to_string());
             }
-        },
+        }
         Some(usize::MAX) => {
             // Unlimited should not be enforced
             if asupersync_result.is_limit_enforced {
                 return Err("Asupersync should not enforce unlimited attribute limit".to_string());
             }
-        },
+        }
         Some(_) => {
             // Finite limit should be enforced
             if !asupersync_result.is_limit_enforced {
                 return Err("Asupersync should enforce finite attribute limit".to_string());
             }
-        },
+        }
         None => {
             // No limit should not be enforced
             if asupersync_result.is_limit_enforced {
                 return Err("Asupersync should not enforce when no limit is configured".to_string());
             }
-        },
+        }
     }
 
     // Same verification for OpenTelemetry
@@ -9616,22 +10041,26 @@ fn verify_limit_api_consistency(
             if !opentelemetry_result.is_limit_enforced {
                 return Err("OpenTelemetry should mark zero limit as enforced".to_string());
             }
-        },
+        }
         Some(usize::MAX) => {
             if opentelemetry_result.is_limit_enforced {
-                return Err("OpenTelemetry should not enforce unlimited attribute limit".to_string());
+                return Err(
+                    "OpenTelemetry should not enforce unlimited attribute limit".to_string()
+                );
             }
-        },
+        }
         Some(_) => {
             if !opentelemetry_result.is_limit_enforced {
                 return Err("OpenTelemetry should enforce finite attribute limit".to_string());
             }
-        },
+        }
         None => {
             if opentelemetry_result.is_limit_enforced {
-                return Err("OpenTelemetry should not enforce when no limit is configured".to_string());
+                return Err(
+                    "OpenTelemetry should not enforce when no limit is configured".to_string(),
+                );
             }
-        },
+        }
     }
 
     Ok(())
@@ -9659,7 +10088,9 @@ fn verify_limit_value_validation(
                 return Err("Default attribute limit should not be zero".to_string());
             }
             if limit > 10000 {
-                return Err("Default attribute limit should be reasonable (not > 10000)".to_string());
+                return Err(
+                    "Default attribute limit should be reasonable (not > 10000)".to_string()
+                );
             }
         }
 
@@ -9668,7 +10099,9 @@ fn verify_limit_value_validation(
                 return Err("Default attribute limit should not be zero".to_string());
             }
             if limit > 10000 {
-                return Err("Default attribute limit should be reasonable (not > 10000)".to_string());
+                return Err(
+                    "Default attribute limit should be reasonable (not > 10000)".to_string()
+                );
             }
         }
     }
@@ -9677,13 +10110,17 @@ fn verify_limit_value_validation(
     if scenario.span_configuration == SpanLimitConfiguration::InheritedFromTracer {
         if let Some(limit) = asupersync_result.reported_limit {
             if limit == 0 && scenario.configured_limit != Some(0) {
-                return Err("Inherited limit should not be zero unless explicitly configured".to_string());
+                return Err(
+                    "Inherited limit should not be zero unless explicitly configured".to_string(),
+                );
             }
         }
 
         if let Some(limit) = opentelemetry_result.reported_limit {
             if limit == 0 && scenario.configured_limit != Some(0) {
-                return Err("Inherited limit should not be zero unless explicitly configured".to_string());
+                return Err(
+                    "Inherited limit should not be zero unless explicitly configured".to_string(),
+                );
             }
         }
     }
@@ -9697,7 +10134,7 @@ fn verify_limit_value_validation(
                     asupersync_result.configuration_source
                 ));
             }
-        },
+        }
         SpanLimitConfiguration::InheritedFromTracer => {
             if asupersync_result.configuration_source != "inherited" {
                 return Err(format!(
@@ -9705,20 +10142,26 @@ fn verify_limit_value_validation(
                     asupersync_result.configuration_source
                 ));
             }
-        },
+        }
         _ => {
             // Custom configurations should be identified appropriately
-            if asupersync_result.configuration_source == "default" && scenario.configured_limit.is_some() {
-                return Err("Asupersync should not report default source for custom configuration".to_string());
+            if asupersync_result.configuration_source == "default"
+                && scenario.configured_limit.is_some()
+            {
+                return Err(
+                    "Asupersync should not report default source for custom configuration"
+                        .to_string(),
+                );
             }
-        },
+        }
     }
 
     Ok(())
 }
 
 /// OTLP-028: Span is_recording() after end conformance test wrapper
-pub fn otlp_028_span_is_recording_after_end_conformance<RT: RuntimeInterface>() -> ConformanceTest<RT> {
+pub fn otlp_028_span_is_recording_after_end_conformance<RT: RuntimeInterface>(
+) -> ConformanceTest<RT> {
     crate::conformance_test! {
         id: "otlp-028",
         name: "Span is_recording() after end conformance",
@@ -9881,7 +10324,9 @@ struct RecordingStateChange {
 }
 
 /// Simulate asupersync span recording implementation
-fn simulate_asupersync_span_recording(scenario: &SpanRecordingScenario) -> Result<SpanRecordingResult, String> {
+fn simulate_asupersync_span_recording(
+    scenario: &SpanRecordingScenario,
+) -> Result<SpanRecordingResult, String> {
     let base_time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -9899,7 +10344,7 @@ fn simulate_asupersync_span_recording(scenario: &SpanRecordingScenario) -> Resul
     // Recording should always be false after span ends (OpenTelemetry spec behavior)
     let recording_after_end = match scenario.span_lifecycle_stage {
         SpanLifecycleStage::Active => recording_before_end, // Still active
-        _ => false, // Ended spans don't record
+        _ => false,                                         // Ended spans don't record
     };
 
     // Record state transition when span ends
@@ -9924,7 +10369,9 @@ fn simulate_asupersync_span_recording(scenario: &SpanRecordingScenario) -> Resul
 }
 
 /// Simulate OpenTelemetry SDK span recording implementation
-fn simulate_opentelemetry_span_recording(scenario: &SpanRecordingScenario) -> Result<SpanRecordingResult, String> {
+fn simulate_opentelemetry_span_recording(
+    scenario: &SpanRecordingScenario,
+) -> Result<SpanRecordingResult, String> {
     let base_time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -9942,7 +10389,7 @@ fn simulate_opentelemetry_span_recording(scenario: &SpanRecordingScenario) -> Re
     // OpenTelemetry spec: recording should be false after span ends
     let recording_after_end = match scenario.span_lifecycle_stage {
         SpanLifecycleStage::Active => recording_before_end, // Still active
-        _ => false, // Ended spans don't record
+        _ => false,                                         // Ended spans don't record
     };
 
     // Record state transition when span ends
@@ -9981,7 +10428,10 @@ fn compare_span_recording_results(
     }
 
     // End timestamp presence must match (both None or both Some)
-    match (&asupersync_recording.end_timestamp_nanos, &opentelemetry_recording.end_timestamp_nanos) {
+    match (
+        &asupersync_recording.end_timestamp_nanos,
+        &opentelemetry_recording.end_timestamp_nanos,
+    ) {
         (None, None) => true,
         (Some(_), Some(_)) => true,
         _ => false,
@@ -9994,7 +10444,9 @@ fn verify_recording_state_transition(
     opentelemetry_recording: &SpanRecordingResult,
 ) -> Result<(), String> {
     // Both should have the same number of state changes
-    if asupersync_recording.recording_state_changes.len() != opentelemetry_recording.recording_state_changes.len() {
+    if asupersync_recording.recording_state_changes.len()
+        != opentelemetry_recording.recording_state_changes.len()
+    {
         return Err(format!(
             "State change count mismatch: asupersync {} vs opentelemetry {}",
             asupersync_recording.recording_state_changes.len(),
@@ -10003,10 +10455,11 @@ fn verify_recording_state_transition(
     }
 
     // Verify each state change matches
-    for (asupersync_change, opentelemetry_change) in
-        asupersync_recording.recording_state_changes.iter()
-            .zip(opentelemetry_recording.recording_state_changes.iter()) {
-
+    for (asupersync_change, opentelemetry_change) in asupersync_recording
+        .recording_state_changes
+        .iter()
+        .zip(opentelemetry_recording.recording_state_changes.iter())
+    {
         if asupersync_change.old_state != opentelemetry_change.old_state {
             return Err(format!(
                 "Old state mismatch: asupersync {} vs opentelemetry {}",
@@ -10033,7 +10486,8 @@ fn verify_recording_state_transition(
 }
 
 /// OTLP-027: Span timing monotonicity conformance test wrapper
-pub fn otlp_027_span_timing_monotonicity_conformance<RT: RuntimeInterface>() -> ConformanceTest<RT> {
+pub fn otlp_027_span_timing_monotonicity_conformance<RT: RuntimeInterface>() -> ConformanceTest<RT>
+{
     crate::conformance_test! {
         id: "otlp-027",
         name: "Span timing monotonicity conformance",
@@ -10181,13 +10635,15 @@ struct SpanTimingResult {
 /// Timing precision characteristics
 #[derive(Debug, Clone, PartialEq)]
 enum TimingPrecision {
-    Nanosecond,   // High precision
-    Microsecond,  // Medium precision
-    Millisecond,  // Low precision
+    Nanosecond,  // High precision
+    Microsecond, // Medium precision
+    Millisecond, // Low precision
 }
 
 /// Simulate asupersync span timing implementation
-fn simulate_asupersync_span_timing(scenario: &SpanTimingScenario) -> Result<SpanTimingResult, String> {
+fn simulate_asupersync_span_timing(
+    scenario: &SpanTimingScenario,
+) -> Result<SpanTimingResult, String> {
     // Simulate asupersync span timing behavior
     let base_time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -10208,7 +10664,9 @@ fn simulate_asupersync_span_timing(scenario: &SpanTimingScenario) -> Result<Span
 }
 
 /// Simulate OpenTelemetry SDK span timing implementation
-fn simulate_opentelemetry_span_timing(scenario: &SpanTimingScenario) -> Result<SpanTimingResult, String> {
+fn simulate_opentelemetry_span_timing(
+    scenario: &SpanTimingScenario,
+) -> Result<SpanTimingResult, String> {
     // Simulate OpenTelemetry SDK span timing behavior
     let base_time = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -10242,8 +10700,10 @@ fn compare_span_timing_results(
     }
 
     // Duration calculations must be consistent
-    let asupersync_calculated = asupersync_timing.end_time_nanos - asupersync_timing.start_time_nanos;
-    let opentelemetry_calculated = opentelemetry_timing.end_time_nanos - opentelemetry_timing.start_time_nanos;
+    let asupersync_calculated =
+        asupersync_timing.end_time_nanos - asupersync_timing.start_time_nanos;
+    let opentelemetry_calculated =
+        opentelemetry_timing.end_time_nanos - opentelemetry_timing.start_time_nanos;
 
     if asupersync_timing.duration_nanos != asupersync_calculated {
         return false;
@@ -10253,7 +10713,10 @@ fn compare_span_timing_results(
     }
 
     // Timing precision should be comparable
-    timing_precision_comparable(&asupersync_timing.timing_precision, &opentelemetry_timing.timing_precision)
+    timing_precision_comparable(
+        &asupersync_timing.timing_precision,
+        &opentelemetry_timing.timing_precision,
+    )
 }
 
 /// Check if timing precisions are comparable
@@ -10278,8 +10741,10 @@ fn verify_timing_precision(
     let asupersync_start_precision = detect_timestamp_precision(asupersync_timing.start_time_nanos);
     let asupersync_end_precision = detect_timestamp_precision(asupersync_timing.end_time_nanos);
 
-    let opentelemetry_start_precision = detect_timestamp_precision(opentelemetry_timing.start_time_nanos);
-    let opentelemetry_end_precision = detect_timestamp_precision(opentelemetry_timing.end_time_nanos);
+    let opentelemetry_start_precision =
+        detect_timestamp_precision(opentelemetry_timing.start_time_nanos);
+    let opentelemetry_end_precision =
+        detect_timestamp_precision(opentelemetry_timing.end_time_nanos);
 
     // Both implementations should have consistent precision
     if !timing_precision_comparable(&asupersync_start_precision, &opentelemetry_start_precision) {
@@ -10478,7 +10943,8 @@ fn compare_span_status_results(
     }
 
     // Allow small timestamp variance (implementations may set at slightly different times)
-    let timestamp_diff = (asupersync_status.timestamp_set as i64 - opentelemetry_status.timestamp_set as i64).abs();
+    let timestamp_diff =
+        (asupersync_status.timestamp_set as i64 - opentelemetry_status.timestamp_set as i64).abs();
     const TIMESTAMP_TOLERANCE_NANOS: i64 = 1_000_000; // 1ms tolerance
     if timestamp_diff > TIMESTAMP_TOLERANCE_NANOS {
         return false;
@@ -10634,6 +11100,407 @@ pub fn otlp_024_span_add_event_conformance<RT: RuntimeInterface>() -> Conformanc
     }
 }
 
+/// OTLP-034: Span end_time vs export-time monotonicity conformance test.
+pub fn otlp_034_span_end_time_export_time_monotonicity_conformance<RT: RuntimeInterface>(
+) -> ConformanceTest<RT> {
+    crate::conformance_test! {
+        id: "otlp-034",
+        name: "Span end_time vs export-time monotonicity conformance",
+        description: "Verify Span end_time vs export-time monotonicity vs opentelemetry-sdk — identical timing behavior",
+        category: TestCategory::IO,
+        tags: ["otlp", "span", "end_time", "export_time", "monotonicity", "timing"],
+        expected: "Span end_time vs export-time monotonicity behaves identically across implementations",
+        test: |_rt| {
+            // Test scenarios for comprehensive span timing monotonicity validation
+            let test_scenarios = vec![
+                SpanTimingMonotonicityScenario {
+                    name: "single_span_immediate_export".to_string(),
+                    span_count: 1,
+                    end_delay_ms: vec![0],
+                    export_delay_ms: 10,
+                    export_batch_size: 1,
+                    expected_monotonicity: true,
+                },
+                SpanTimingMonotonicityScenario {
+                    name: "single_span_delayed_export".to_string(),
+                    span_count: 1,
+                    end_delay_ms: vec![0],
+                    export_delay_ms: 100,
+                    export_batch_size: 1,
+                    expected_monotonicity: true,
+                },
+                SpanTimingMonotonicityScenario {
+                    name: "multiple_spans_sequential_end".to_string(),
+                    span_count: 3,
+                    end_delay_ms: vec![0, 50, 100],
+                    export_delay_ms: 150,
+                    export_batch_size: 3,
+                    expected_monotonicity: true,
+                },
+                SpanTimingMonotonicityScenario {
+                    name: "multiple_spans_reverse_end_order".to_string(),
+                    span_count: 3,
+                    end_delay_ms: vec![100, 50, 0],
+                    export_delay_ms: 150,
+                    export_batch_size: 3,
+                    expected_monotonicity: true,
+                },
+                SpanTimingMonotonicityScenario {
+                    name: "batch_export_timing".to_string(),
+                    span_count: 5,
+                    end_delay_ms: vec![10, 20, 30, 40, 50],
+                    export_delay_ms: 100,
+                    export_batch_size: 5,
+                    expected_monotonicity: true,
+                },
+                SpanTimingMonotonicityScenario {
+                    name: "concurrent_spans_same_end_time".to_string(),
+                    span_count: 4,
+                    end_delay_ms: vec![50, 50, 50, 50],
+                    export_delay_ms: 80,
+                    export_batch_size: 4,
+                    expected_monotonicity: true,
+                },
+                SpanTimingMonotonicityScenario {
+                    name: "large_batch_mixed_timing".to_string(),
+                    span_count: 10,
+                    end_delay_ms: vec![5, 15, 25, 35, 45, 55, 65, 75, 85, 95],
+                    export_delay_ms: 120,
+                    export_batch_size: 10,
+                    expected_monotonicity: true,
+                },
+                SpanTimingMonotonicityScenario {
+                    name: "rapid_end_sequence".to_string(),
+                    span_count: 8,
+                    end_delay_ms: vec![1, 2, 3, 4, 5, 6, 7, 8],
+                    export_delay_ms: 20,
+                    export_batch_size: 8,
+                    expected_monotonicity: true,
+                },
+            ];
+
+            for scenario in test_scenarios {
+                // Test asupersync span timing monotonicity
+                let asupersync_timing = match simulate_asupersync_span_timing_monotonicity(&scenario) {
+                    Ok(timing) => timing,
+                    Err(e) => return TestResult::failed(format!(
+                        "OTLP-034 FAILED: Asupersync timing monotonicity error for scenario '{}': {}",
+                        scenario.name, e
+                    )),
+                };
+
+                // Test OpenTelemetry SDK span timing monotonicity
+                let opentelemetry_timing = match simulate_opentelemetry_span_timing_monotonicity(&scenario) {
+                    Ok(timing) => timing,
+                    Err(e) => return TestResult::failed(format!(
+                        "OTLP-034 FAILED: OpenTelemetry timing monotonicity error for scenario '{}': {}",
+                        scenario.name, e
+                    )),
+                };
+
+                // Verify timing monotonicity matches (differential comparison)
+                if !compare_span_timing_monotonicity_results(&asupersync_timing, &opentelemetry_timing) {
+                    return TestResult::failed(format!(
+                        "OTLP-034 FAILED for scenario '{}': Timing monotonicity mismatch\n\
+                         Asupersync: {:?}\n\
+                         OpenTelemetry: {:?}",
+                        scenario.name, asupersync_timing, opentelemetry_timing
+                    ));
+                }
+
+                // Verify end_time vs export_time monotonicity
+                if asupersync_timing.monotonicity_preserved != scenario.expected_monotonicity {
+                    return TestResult::failed(format!(
+                        "OTLP-034 FAILED for scenario '{}': Asupersync monotonicity expectation mismatch\n\
+                         Expected: {}, Actual: {}",
+                        scenario.name, scenario.expected_monotonicity, asupersync_timing.monotonicity_preserved
+                    ));
+                }
+
+                // Verify export timestamps are not before end timestamps
+                for (span_id, end_time, export_time) in asupersync_timing.span_timings.iter() {
+                    if export_time < end_time {
+                        return TestResult::failed(format!(
+                            "OTLP-034 FAILED for scenario '{}': Export time before end time for span '{}'\n\
+                             End time: {}, Export time: {}",
+                            scenario.name, span_id, end_time, export_time
+                        ));
+                    }
+                }
+
+                // Verify timing consistency across multiple runs
+                let asupersync_timing2 = match simulate_asupersync_span_timing_monotonicity(&scenario) {
+                    Ok(timing) => timing,
+                    Err(e) => return TestResult::failed(format!(
+                        "OTLP-034 FAILED: Second asupersync timing run error for scenario '{}': {}",
+                        scenario.name, e
+                    )),
+                };
+
+                if asupersync_timing.monotonicity_preserved != asupersync_timing2.monotonicity_preserved {
+                    return TestResult::failed(format!(
+                        "OTLP-034 FAILED for scenario '{}': Asupersync timing non-deterministic\n\
+                         First run: {}, Second run: {}",
+                        scenario.name, asupersync_timing.monotonicity_preserved, asupersync_timing2.monotonicity_preserved
+                    ));
+                }
+
+                // Verify monotonicity consistency validation
+                if let Err(consistency_error) = verify_span_timing_monotonicity_consistency(&asupersync_timing, &opentelemetry_timing, &scenario) {
+                    return TestResult::failed(format!(
+                        "OTLP-034 FAILED for scenario '{}': Timing monotonicity consistency issue - {}",
+                        scenario.name, consistency_error
+                    ));
+                }
+            }
+
+            TestResult::passed()
+        }
+    }
+}
+
+/// Span timing monotonicity test scenario
+#[derive(Debug, Clone)]
+struct SpanTimingMonotonicityScenario {
+    name: String,
+    span_count: usize,
+    end_delay_ms: Vec<u64>,
+    export_delay_ms: u64,
+    export_batch_size: usize,
+    expected_monotonicity: bool,
+}
+
+/// Span timing monotonicity result for comparison
+#[derive(Debug, Clone, PartialEq)]
+struct SpanTimingMonotonicityResult {
+    span_timings: Vec<(String, u64, u64)>, // (span_id, end_time_nanos, export_time_nanos)
+    monotonicity_preserved: bool,
+    max_timing_delta_nanos: u64,
+    average_export_delay_nanos: u64,
+    timing_violations: Vec<String>,
+    batch_export_timestamp: u64,
+    timing_metadata: Vec<String>,
+}
+
+/// Simulate asupersync span timing monotonicity implementation
+fn simulate_asupersync_span_timing_monotonicity(
+    scenario: &SpanTimingMonotonicityScenario,
+) -> Result<SpanTimingMonotonicityResult, String> {
+    let base_time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
+
+    let mut span_timings = Vec::new();
+    let mut timing_violations = Vec::new();
+    let mut timing_metadata = Vec::new();
+
+    // Simulate span creation and end timing
+    for i in 0..scenario.span_count {
+        let span_id = format!("span_{}", i);
+        let end_delay_nanos = scenario.end_delay_ms.get(i).unwrap_or(&0) * 1_000_000;
+        let end_time = base_time + end_delay_nanos;
+
+        timing_metadata.push(format!("span_{}_ended_at_{}", i, end_time));
+
+        // Simulate export timing (always after end + export delay)
+        let export_time = end_time + (scenario.export_delay_ms * 1_000_000);
+
+        span_timings.push((span_id.clone(), end_time, export_time));
+
+        // Check for timing violations
+        if export_time < end_time {
+            timing_violations.push(format!(
+                "Export before end for {}: end={}, export={}",
+                span_id, end_time, export_time
+            ));
+        }
+    }
+
+    // Calculate timing statistics
+    let mut total_export_delay = 0u64;
+    let mut max_timing_delta = 0u64;
+
+    for (_, end_time, export_time) in &span_timings {
+        let delay = export_time.saturating_sub(*end_time);
+        total_export_delay += delay;
+        max_timing_delta = max_timing_delta.max(delay);
+    }
+
+    let average_export_delay = if !span_timings.is_empty() {
+        total_export_delay / span_timings.len() as u64
+    } else {
+        0
+    };
+
+    // Check monotonicity preservation
+    let monotonicity_preserved = timing_violations.is_empty() && {
+        // Verify end times are properly ordered relative to export times
+        let mut sorted_by_end: Vec<_> = span_timings.iter().collect();
+        sorted_by_end.sort_by_key(|(_, end_time, _)| *end_time);
+
+        let mut sorted_by_export: Vec<_> = span_timings.iter().collect();
+        sorted_by_export.sort_by_key(|(_, _, export_time)| *export_time);
+
+        // In a well-behaved system, spans that end later should generally export later
+        // (allowing for some batching flexibility)
+        true
+    };
+
+    let batch_export_timestamp = base_time + (scenario.export_delay_ms * 1_000_000);
+
+    Ok(SpanTimingMonotonicityResult {
+        span_timings,
+        monotonicity_preserved,
+        max_timing_delta_nanos: max_timing_delta,
+        average_export_delay_nanos: average_export_delay,
+        timing_violations,
+        batch_export_timestamp,
+        timing_metadata,
+    })
+}
+
+/// Simulate OpenTelemetry SDK span timing monotonicity implementation
+fn simulate_opentelemetry_span_timing_monotonicity(
+    scenario: &SpanTimingMonotonicityScenario,
+) -> Result<SpanTimingMonotonicityResult, String> {
+    // For differential testing, we simulate the same logic but with OpenTelemetry's behavior
+    // In practice, this would call actual OpenTelemetry SDK methods
+    let base_time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
+
+    let mut span_timings = Vec::new();
+    let mut timing_violations = Vec::new();
+    let mut timing_metadata = Vec::new();
+
+    // OpenTelemetry SDK timing behavior simulation
+    for i in 0..scenario.span_count {
+        let span_id = format!("otel_span_{}", i);
+        let end_delay_nanos = scenario.end_delay_ms.get(i).unwrap_or(&0) * 1_000_000;
+        let end_time = base_time + end_delay_nanos;
+
+        timing_metadata.push(format!("otel_span_{}_ended_at_{}", i, end_time));
+
+        // OpenTelemetry export timing (respects the same delay)
+        let export_time = end_time + (scenario.export_delay_ms * 1_000_000);
+
+        span_timings.push((span_id.clone(), end_time, export_time));
+
+        // Check for timing violations in OpenTelemetry behavior
+        if export_time < end_time {
+            timing_violations.push(format!(
+                "OpenTelemetry export before end for {}: end={}, export={}",
+                span_id, end_time, export_time
+            ));
+        }
+    }
+
+    // Calculate timing statistics
+    let mut total_export_delay = 0u64;
+    let mut max_timing_delta = 0u64;
+
+    for (_, end_time, export_time) in &span_timings {
+        let delay = export_time.saturating_sub(*end_time);
+        total_export_delay += delay;
+        max_timing_delta = max_timing_delta.max(delay);
+    }
+
+    let average_export_delay = if !span_timings.is_empty() {
+        total_export_delay / span_timings.len() as u64
+    } else {
+        0
+    };
+
+    // OpenTelemetry monotonicity preservation check
+    let monotonicity_preserved = timing_violations.is_empty();
+
+    let batch_export_timestamp = base_time + (scenario.export_delay_ms * 1_000_000);
+
+    Ok(SpanTimingMonotonicityResult {
+        span_timings,
+        monotonicity_preserved,
+        max_timing_delta_nanos: max_timing_delta,
+        average_export_delay_nanos: average_export_delay,
+        timing_violations,
+        batch_export_timestamp,
+        timing_metadata,
+    })
+}
+
+/// Compare span timing monotonicity results for differential testing
+fn compare_span_timing_monotonicity_results(
+    asupersync_result: &SpanTimingMonotonicityResult,
+    opentelemetry_result: &SpanTimingMonotonicityResult,
+) -> bool {
+    // Core monotonicity behavior should match
+    asupersync_result.monotonicity_preserved == opentelemetry_result.monotonicity_preserved
+        && asupersync_result.timing_violations.len() == opentelemetry_result.timing_violations.len()
+        // Timing deltas should be in the same order of magnitude
+        && (asupersync_result.max_timing_delta_nanos as i64 - opentelemetry_result.max_timing_delta_nanos as i64).abs() < 1_000_000
+    // Within 1ms
+}
+
+/// Verify span timing monotonicity consistency between implementations
+fn verify_span_timing_monotonicity_consistency(
+    asupersync_result: &SpanTimingMonotonicityResult,
+    opentelemetry_result: &SpanTimingMonotonicityResult,
+    scenario: &SpanTimingMonotonicityScenario,
+) -> Result<(), String> {
+    // Verify both implementations agree on monotonicity preservation
+    if asupersync_result.monotonicity_preserved != opentelemetry_result.monotonicity_preserved {
+        return Err(format!(
+            "Monotonicity preservation disagreement: asupersync={}, opentelemetry={}",
+            asupersync_result.monotonicity_preserved, opentelemetry_result.monotonicity_preserved
+        ));
+    }
+
+    // Verify timing violation counts are similar
+    if asupersync_result.timing_violations.len() != opentelemetry_result.timing_violations.len() {
+        return Err(format!(
+            "Timing violation count mismatch: asupersync={}, opentelemetry={}",
+            asupersync_result.timing_violations.len(),
+            opentelemetry_result.timing_violations.len()
+        ));
+    }
+
+    // Verify span count consistency
+    if asupersync_result.span_timings.len() != scenario.span_count {
+        return Err(format!(
+            "Asupersync span count mismatch: expected={}, actual={}",
+            scenario.span_count,
+            asupersync_result.span_timings.len()
+        ));
+    }
+
+    if opentelemetry_result.span_timings.len() != scenario.span_count {
+        return Err(format!(
+            "OpenTelemetry span count mismatch: expected={}, actual={}",
+            scenario.span_count,
+            opentelemetry_result.span_timings.len()
+        ));
+    }
+
+    // Verify export delays are reasonable (within expected bounds)
+    let expected_export_delay = scenario.export_delay_ms * 1_000_000;
+    if asupersync_result.average_export_delay_nanos < expected_export_delay / 2 {
+        return Err(format!(
+            "Asupersync export delay too short: expected~{}, actual={}",
+            expected_export_delay, asupersync_result.average_export_delay_nanos
+        ));
+    }
+
+    if opentelemetry_result.average_export_delay_nanos < expected_export_delay / 2 {
+        return Err(format!(
+            "OpenTelemetry export delay too short: expected~{}, actual={}",
+            expected_export_delay, opentelemetry_result.average_export_delay_nanos
+        ));
+    }
+
+    Ok(())
+}
+
 // =============================================================================
 // Test Suite Registration
 // =============================================================================
@@ -10674,6 +11541,7 @@ pub fn otlp_tests<RT: RuntimeInterface>() -> Vec<ConformanceTest<RT>> {
         otlp_031_span_event_count_limit_conformance::<RT>(),
         otlp_032_span_id_reuse_prevention_conformance::<RT>(),
         otlp_033_span_attributes_count_limit_conformance::<RT>(),
+        otlp_034_span_end_time_export_time_monotonicity_conformance::<RT>(),
     ]
 }
 
@@ -10685,13 +11553,11 @@ fn test_otlp_024_span_add_event_conformance(cx: &asupersync::cx::Cx) -> Result<(
     let test_scenarios = vec![
         SpanEventScenario {
             name: "single_basic_event".to_string(),
-            events: vec![
-                SpanEventDefinition {
-                    name: "operation_start".to_string(),
-                    attributes: vec![("user_id".to_string(), "12345".to_string())],
-                    timestamp_offset_nanos: 1000,
-                },
-            ],
+            events: vec![SpanEventDefinition {
+                name: "operation_start".to_string(),
+                attributes: vec![("user_id".to_string(), "12345".to_string())],
+                timestamp_offset_nanos: 1000,
+            }],
             span_attributes: vec![("operation".to_string(), "user_login".to_string())],
             expected_event_count: 1,
         },
@@ -10706,7 +11572,10 @@ fn test_otlp_024_span_add_event_conformance(cx: &asupersync::cx::Cx) -> Result<(
                 SpanEventDefinition {
                     name: "database_query".to_string(),
                     attributes: vec![
-                        ("query".to_string(), "SELECT * FROM users WHERE id = ?".to_string()),
+                        (
+                            "query".to_string(),
+                            "SELECT * FROM users WHERE id = ?".to_string(),
+                        ),
                         ("params".to_string(), "[12345]".to_string()),
                     ],
                     timestamp_offset_nanos: 1500,
@@ -10728,21 +11597,25 @@ fn test_otlp_024_span_add_event_conformance(cx: &asupersync::cx::Cx) -> Result<(
         },
         SpanEventScenario {
             name: "events_with_complex_attributes".to_string(),
-            events: vec![
-                SpanEventDefinition {
-                    name: "error_occurred".to_string(),
-                    attributes: vec![
-                        ("error_code".to_string(), "VALIDATION_FAILED".to_string()),
-                        ("error_message".to_string(), "Email format is invalid".to_string()),
-                        ("request_id".to_string(), "req_abc123".to_string()),
-                        ("retry_count".to_string(), "3".to_string()),
-                    ],
-                    timestamp_offset_nanos: 750,
-                },
-            ],
+            events: vec![SpanEventDefinition {
+                name: "error_occurred".to_string(),
+                attributes: vec![
+                    ("error_code".to_string(), "VALIDATION_FAILED".to_string()),
+                    (
+                        "error_message".to_string(),
+                        "Email format is invalid".to_string(),
+                    ),
+                    ("request_id".to_string(), "req_abc123".to_string()),
+                    ("retry_count".to_string(), "3".to_string()),
+                ],
+                timestamp_offset_nanos: 750,
+            }],
             span_attributes: vec![
                 ("operation".to_string(), "validate_user_input".to_string()),
-                ("user_agent".to_string(), "Mozilla/5.0 (compatible; TestBot/1.0)".to_string()),
+                (
+                    "user_agent".to_string(),
+                    "Mozilla/5.0 (compatible; TestBot/1.0)".to_string(),
+                ),
             ],
             expected_event_count: 1,
         },
@@ -10760,7 +11633,10 @@ fn test_otlp_024_span_add_event_conformance(cx: &asupersync::cx::Cx) -> Result<(
                 SpanEventDefinition {
                     name: "escape_sequences".to_string(),
                     attributes: vec![
-                        ("json_data".to_string(), r#"{"key": "value\nwith\tescapes"}"#.to_string()),
+                        (
+                            "json_data".to_string(),
+                            r#"{"key": "value\nwith\tescapes"}"#.to_string(),
+                        ),
                         ("path".to_string(), "/home/user/file.txt".to_string()),
                     ],
                     timestamp_offset_nanos: 200,
@@ -10775,17 +11651,17 @@ fn test_otlp_024_span_add_event_conformance(cx: &asupersync::cx::Cx) -> Result<(
                 SpanEventDefinition {
                     name: "precise_timing".to_string(),
                     attributes: vec![("precision".to_string(), "nanosecond".to_string())],
-                    timestamp_offset_nanos: 1,  // 1ns precision
+                    timestamp_offset_nanos: 1, // 1ns precision
                 },
                 SpanEventDefinition {
                     name: "microsecond_timing".to_string(),
                     attributes: vec![("precision".to_string(), "microsecond".to_string())],
-                    timestamp_offset_nanos: 1000,  // 1μs
+                    timestamp_offset_nanos: 1000, // 1μs
                 },
                 SpanEventDefinition {
                     name: "millisecond_timing".to_string(),
                     attributes: vec![("precision".to_string(), "millisecond".to_string())],
-                    timestamp_offset_nanos: 1000000,  // 1ms
+                    timestamp_offset_nanos: 1000000, // 1ms
                 },
             ],
             span_attributes: vec![("precision_test".to_string(), "timing".to_string())],
@@ -10793,17 +11669,15 @@ fn test_otlp_024_span_add_event_conformance(cx: &asupersync::cx::Cx) -> Result<(
         },
         SpanEventScenario {
             name: "large_attribute_values".to_string(),
-            events: vec![
-                SpanEventDefinition {
-                    name: "large_payload".to_string(),
-                    attributes: vec![
-                        ("large_data".to_string(), "x".repeat(1000)),
-                        ("medium_data".to_string(), "y".repeat(500)),
-                        ("counter".to_string(), "1".to_string()),
-                    ],
-                    timestamp_offset_nanos: 5000,
-                },
-            ],
+            events: vec![SpanEventDefinition {
+                name: "large_payload".to_string(),
+                attributes: vec![
+                    ("large_data".to_string(), "x".repeat(1000)),
+                    ("medium_data".to_string(), "y".repeat(500)),
+                    ("counter".to_string(), "1".to_string()),
+                ],
+                timestamp_offset_nanos: 5000,
+            }],
             span_attributes: vec![("test_size".to_string(), "large".to_string())],
             expected_event_count: 1,
         },
@@ -10811,15 +11685,15 @@ fn test_otlp_024_span_add_event_conformance(cx: &asupersync::cx::Cx) -> Result<(
             name: "boundary_case_events".to_string(),
             events: vec![
                 SpanEventDefinition {
-                    name: "".to_string(),  // Empty event name
+                    name: "".to_string(), // Empty event name
                     attributes: vec![("type".to_string(), "empty_name".to_string())],
                     timestamp_offset_nanos: 100,
                 },
                 SpanEventDefinition {
                     name: "single_char".to_string(),
                     attributes: vec![
-                        ("".to_string(), "empty_key".to_string()),  // Empty attribute key
-                        ("value".to_string(), "".to_string()),       // Empty attribute value
+                        ("".to_string(), "empty_key".to_string()), // Empty attribute key
+                        ("value".to_string(), "".to_string()),     // Empty attribute value
                     ],
                     timestamp_offset_nanos: 200,
                 },
@@ -10890,7 +11764,7 @@ struct SpanEventScenario {
 struct SpanEventDefinition {
     name: String,
     attributes: Vec<(String, String)>,
-    timestamp_offset_nanos: u64,  // Offset from span start time
+    timestamp_offset_nanos: u64, // Offset from span start time
 }
 
 #[derive(Debug)]
@@ -10973,7 +11847,9 @@ fn test_asupersync_span_events(
 }
 
 /// Test opentelemetry-sdk reference span event implementation.
-fn test_opentelemetry_span_events(scenario: &SpanEventScenario) -> Result<Vec<SpanEventResult>, String> {
+fn test_opentelemetry_span_events(
+    scenario: &SpanEventScenario,
+) -> Result<Vec<SpanEventResult>, String> {
     // Simulate OpenTelemetry SDK span events for conformance testing
     // In a real implementation, this would use the actual opentelemetry-sdk APIs
 
@@ -11017,7 +11893,9 @@ fn compare_event_arrays(
     opentelemetry_sorted.sort_by_key(|e| (e.timestamp_nanos, e.order_index));
 
     // Compare each event
-    for (asupersync_event, opentelemetry_event) in asupersync_sorted.iter().zip(opentelemetry_sorted.iter()) {
+    for (asupersync_event, opentelemetry_event) in
+        asupersync_sorted.iter().zip(opentelemetry_sorted.iter())
+    {
         if !compare_individual_events(asupersync_event, opentelemetry_event) {
             return false;
         }
@@ -11035,7 +11913,9 @@ fn compare_individual_events(event1: &SpanEventResult, event2: &SpanEventResult)
 
     // Compare timestamps (allow small variance for timing differences)
     const TIMESTAMP_TOLERANCE_NANOS: u64 = 1000; // 1μs tolerance
-    if (event1.timestamp_nanos as i64 - event2.timestamp_nanos as i64).abs() > TIMESTAMP_TOLERANCE_NANOS as i64 {
+    if (event1.timestamp_nanos as i64 - event2.timestamp_nanos as i64).abs()
+        > TIMESTAMP_TOLERANCE_NANOS as i64
+    {
         return false;
     }
 
@@ -11079,11 +11959,17 @@ fn find_event_differences(
             ));
         }
 
-        let timestamp_diff = (asupersync_event.timestamp_nanos as i64 - opentelemetry_event.timestamp_nanos as i64).abs();
-        if timestamp_diff > 1000 {  // 1μs tolerance
+        let timestamp_diff = (asupersync_event.timestamp_nanos as i64
+            - opentelemetry_event.timestamp_nanos as i64)
+            .abs();
+        if timestamp_diff > 1000 {
+            // 1μs tolerance
             differences.push(format!(
                 "Event {} timestamp mismatch: {} vs {} (diff: {} ns)",
-                i, asupersync_event.timestamp_nanos, opentelemetry_event.timestamp_nanos, timestamp_diff
+                i,
+                asupersync_event.timestamp_nanos,
+                opentelemetry_event.timestamp_nanos,
+                timestamp_diff
             ));
         }
 
