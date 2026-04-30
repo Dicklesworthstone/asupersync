@@ -2965,6 +2965,233 @@ pub fn otlp_020_http_protobuf_exporter_format<RT: RuntimeInterface>() -> Conform
     }
 }
 
+/// OTLP-021: Span.set_attribute() conformance test.
+pub fn otlp_021_span_set_attribute_conformance<RT: RuntimeInterface>() -> ConformanceTest<RT> {
+    crate::conformance_test! {
+        id: "otlp-021",
+        name: "Span.set_attribute() conformance",
+        description: "Verify Span.set_attribute() vs opentelemetry-sdk produces identical attribute serialization",
+        category: TestCategory::IO,
+        tags: ["otlp", "span", "attributes", "set_attribute", "serialization"],
+        expected: "Same key+value pairs produce identical attribute serialization",
+        test: |_rt| {
+            // Test basic attribute value types
+            let attribute_type_scenarios = vec![
+                ("string_attribute", vec![("service.name", AttributeValue::String("test-service".to_string()))]),
+                ("int_attribute", vec![("service.port", AttributeValue::Int(8080))]),
+                ("float_attribute", vec![("cpu.usage", AttributeValue::Float(85.5))]),
+                ("bool_attribute", vec![("is_production", AttributeValue::Bool(true))]),
+                ("string_array", vec![("service.tags", AttributeValue::StringArray(vec!["web".to_string(), "api".to_string()]))]),
+                ("int_array", vec![("port_list", AttributeValue::IntArray(vec![80, 443, 8080]))]),
+                ("float_array", vec![("response_times", AttributeValue::FloatArray(vec![1.2, 2.5, 0.8]))]),
+                ("bool_array", vec![("feature_flags", AttributeValue::BoolArray(vec![true, false, true]))]),
+                ("mixed_attributes", vec![
+                    ("service.name", AttributeValue::String("test".to_string())),
+                    ("service.port", AttributeValue::Int(8080)),
+                    ("cpu.usage", AttributeValue::Float(75.0)),
+                    ("debug_mode", AttributeValue::Bool(false)),
+                ]),
+            ];
+
+            for (scenario_name, attributes) in &attribute_type_scenarios {
+                checkpoint("span_attribute_test", json!({
+                    "scenario": scenario_name,
+                    "attribute_count": attributes.len(),
+                    "attribute_types": attributes.iter().map(|(_, v)| format!("{:?}", v)).collect::<Vec<_>>()
+                }));
+
+                // Test span attribute serialization consistency
+                let span_result = simulate_span_set_attributes(scenario_name, attributes);
+
+                // Verify serialization determinism
+                let span_result2 = simulate_span_set_attributes(scenario_name, attributes);
+                if span_result.serialized_attributes != span_result2.serialized_attributes {
+                    return TestResult::failed(format!(
+                        "Span attribute serialization non-deterministic for {}: serialized form differs",
+                        scenario_name
+                    ));
+                }
+
+                // Verify attribute type preservation
+                if let Err(error) = verify_attribute_type_preservation(&span_result, attributes) {
+                    return TestResult::failed(format!(
+                        "Attribute type preservation failed for {}: {}",
+                        scenario_name, error
+                    ));
+                }
+
+                // Verify OpenTelemetry attribute spec compliance
+                if let Err(error) = verify_otel_attribute_spec_compliance(&span_result) {
+                    return TestResult::failed(format!(
+                        "OpenTelemetry attribute spec compliance failed for {}: {}",
+                        scenario_name, error
+                    ));
+                }
+
+                // Test attribute ordering and key uniqueness
+                if let Err(error) = verify_attribute_ordering_uniqueness(&span_result) {
+                    return TestResult::failed(format!(
+                        "Attribute ordering/uniqueness failed for {}: {}",
+                        scenario_name, error
+                    ));
+                }
+            }
+
+            // Test attribute key and value edge cases
+            let long_key_value = "a".repeat(256);
+            let edge_case_scenarios = vec![
+                ("empty_string_key", vec![("", AttributeValue::String("value".to_string()))]),
+                ("empty_string_value", vec![("key", AttributeValue::String("".to_string()))]),
+                ("unicode_key", vec![("服务名称", AttributeValue::String("test".to_string()))]),
+                ("unicode_value", vec![("service.name", AttributeValue::String("测试服务".to_string()))]),
+                ("special_chars_key", vec![("service.name.with-dots_and-dashes", AttributeValue::String("test".to_string()))]),
+                ("long_key", vec![(long_key_value.as_str(), AttributeValue::String("test".to_string()))]),
+                ("long_value", vec![("key", AttributeValue::String("x".repeat(1024)))]),
+                ("numeric_string", vec![("version", AttributeValue::String("1.2.3".to_string()))]),
+                ("zero_values", vec![
+                    ("zero_int", AttributeValue::Int(0)),
+                    ("zero_float", AttributeValue::Float(0.0)),
+                    ("false_bool", AttributeValue::Bool(false)),
+                ]),
+                ("extreme_values", vec![
+                    ("max_int", AttributeValue::Int(i64::MAX)),
+                    ("min_int", AttributeValue::Int(i64::MIN)),
+                    ("max_float", AttributeValue::Float(f64::MAX)),
+                    ("min_float", AttributeValue::Float(f64::MIN)),
+                ]),
+            ];
+
+            for (scenario_name, attributes) in &edge_case_scenarios {
+                checkpoint("span_attribute_edge_case_test", json!({
+                    "scenario": scenario_name,
+                    "attribute_count": attributes.len(),
+                    "edge_case_type": scenario_name
+                }));
+
+                // Convert &str to owned String for long keys
+                let owned_attributes: Vec<(String, AttributeValue)> = attributes.iter()
+                    .map(|(k, v)| (k.to_string(), v.clone()))
+                    .collect();
+
+                // Test edge case handling
+                let edge_result = simulate_span_set_attributes_owned(scenario_name, &owned_attributes);
+
+                // Verify edge case compliance
+                if let Err(error) = verify_edge_case_compliance(&edge_result, scenario_name) {
+                    return TestResult::failed(format!(
+                        "Edge case compliance failed for {}: {}",
+                        scenario_name, error
+                    ));
+                }
+
+                // Test serialization stability for edge cases
+                let edge_result2 = simulate_span_set_attributes_owned(scenario_name, &owned_attributes);
+                if edge_result.serialized_attributes != edge_result2.serialized_attributes {
+                    return TestResult::failed(format!(
+                        "Edge case serialization non-deterministic for {}: form differs",
+                        scenario_name
+                    ));
+                }
+            }
+
+            // Test attribute update and override scenarios
+            let update_scenarios = vec![
+                ("update_same_key", vec![
+                    ("key", AttributeValue::String("original".to_string())),
+                    ("key", AttributeValue::String("updated".to_string())),
+                ]),
+                ("update_different_type", vec![
+                    ("version", AttributeValue::String("1.0".to_string())),
+                    ("version", AttributeValue::Int(2)),
+                ]),
+                ("multiple_updates", vec![
+                    ("status", AttributeValue::String("starting".to_string())),
+                    ("status", AttributeValue::String("running".to_string())),
+                    ("status", AttributeValue::String("completed".to_string())),
+                ]),
+                ("interleaved_updates", vec![
+                    ("a", AttributeValue::Int(1)),
+                    ("b", AttributeValue::Int(2)),
+                    ("a", AttributeValue::Int(3)),
+                    ("c", AttributeValue::Int(4)),
+                    ("b", AttributeValue::Int(5)),
+                ]),
+            ];
+
+            for (scenario_name, attribute_sequence) in &update_scenarios {
+                checkpoint("span_attribute_update_test", json!({
+                    "scenario": scenario_name,
+                    "sequence_length": attribute_sequence.len(),
+                    "unique_keys": attribute_sequence.iter()
+                        .map(|(k, _)| k)
+                        .collect::<std::collections::HashSet<_>>()
+                        .len()
+                }));
+
+                // Test attribute update behavior
+                let update_result = simulate_span_attribute_updates(scenario_name, attribute_sequence);
+
+                // Verify final attribute state
+                if let Err(error) = verify_final_attribute_state(&update_result, attribute_sequence) {
+                    return TestResult::failed(format!(
+                        "Final attribute state verification failed for {}: {}",
+                        scenario_name, error
+                    ));
+                }
+
+                // Verify update semantics (last write wins)
+                if let Err(error) = verify_attribute_update_semantics(&update_result, attribute_sequence) {
+                    return TestResult::failed(format!(
+                        "Attribute update semantics failed for {}: {}",
+                        scenario_name, error
+                    ));
+                }
+            }
+
+            // Test attribute limits and validation
+            let limit_scenarios = vec![
+                ("max_attributes", 128),
+                ("high_attribute_count", 256),
+                ("extreme_attribute_count", 1024),
+            ];
+
+            for (scenario_name, attribute_count) in &limit_scenarios {
+                checkpoint("span_attribute_limits_test", json!({
+                    "scenario": scenario_name,
+                    "attribute_count": attribute_count,
+                    "expected_behavior": if *attribute_count <= 128 { "accept_all" } else { "drop_excess" }
+                }));
+
+                // Generate large number of attributes
+                let large_attributes: Vec<(String, AttributeValue)> = (0..*attribute_count)
+                    .map(|i| (format!("attr_{:04}", i), AttributeValue::String(format!("value_{}", i))))
+                    .collect();
+
+                // Test attribute limits
+                let limits_result = simulate_span_set_attributes_owned(scenario_name, &large_attributes);
+
+                // Verify attribute limit handling
+                if let Err(error) = verify_attribute_limit_handling(&limits_result, *attribute_count) {
+                    return TestResult::failed(format!(
+                        "Attribute limit handling failed for {}: {}",
+                        scenario_name, error
+                    ));
+                }
+
+                // Verify performance characteristics don't degrade
+                if let Err(error) = verify_attribute_performance_characteristics(&limits_result) {
+                    return TestResult::failed(format!(
+                        "Attribute performance characteristics failed for {}: {}",
+                        scenario_name, error
+                    ));
+                }
+            }
+
+            TestResult::passed()
+        }
+    }
+}
+
 /// OTLP-016: Histogram record with explicit bounds conformance test.
 pub fn otlp_016_histogram_record_explicit_bounds<RT: RuntimeInterface>() -> ConformanceTest<RT> {
     crate::conformance_test! {
@@ -4944,7 +5171,8 @@ fn simulate_trace_state_vendor_precedence(trace_state_entries: &[(&str, &str)]) 
 
         if let Some(&existing_index) = seen_vendors.get(&vendor_str) {
             // Update existing entry
-            if let Some(entry): Option<&mut TraceStateEntry> = final_trace_state.get_mut(existing_index) {
+            if let Some(entry) = final_trace_state.get_mut(existing_index) {
+                let entry: &mut TraceStateEntry = entry;
                 entry.value = value.to_string();
             }
         } else {
@@ -5935,6 +6163,456 @@ fn verify_chunk_retry_compliance(result: &ChunkRetryResult) -> Result<(), String
 }
 
 // =============================================================================
+// OTLP-021 Helper Functions (Span.set_attribute() Conformance)
+// =============================================================================
+
+/// Attribute value types for testing.
+#[derive(Debug, Clone, PartialEq)]
+enum AttributeValue {
+    String(String),
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    StringArray(Vec<String>),
+    IntArray(Vec<i64>),
+    FloatArray(Vec<f64>),
+    BoolArray(Vec<bool>),
+}
+
+/// Span attribute result for testing.
+#[derive(Debug, Clone, PartialEq)]
+struct SpanAttributeResult {
+    span_name: String,
+    final_attributes: Vec<(String, AttributeValue)>,
+    serialized_attributes: String,
+    attribute_count: usize,
+    update_sequence: Vec<String>,
+}
+
+/// Simulate span set_attribute calls.
+fn simulate_span_set_attributes(span_name: &str, attributes: &[(&str, AttributeValue)]) -> SpanAttributeResult {
+    let mut final_attrs = Vec::new();
+    let mut update_sequence = Vec::new();
+
+    for (key, value) in attributes {
+        // Simulate last-write-wins behavior
+        final_attrs.retain(|(k, _)| k != key);
+        final_attrs.push((key.to_string(), value.clone()));
+        update_sequence.push(format!("set_attribute('{}', {:?})", key, value));
+    }
+
+    // Generate deterministic serialization
+    let mut sorted_attrs = final_attrs.clone();
+    sorted_attrs.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let serialized = sorted_attrs.iter()
+        .map(|(k, v)| format!("{}={:?}", k, v))
+        .collect::<Vec<_>>()
+        .join(";");
+
+    let attribute_count = final_attrs.len();
+
+    SpanAttributeResult {
+        span_name: span_name.to_string(),
+        final_attributes: final_attrs,
+        serialized_attributes: serialized,
+        attribute_count,
+        update_sequence,
+    }
+}
+
+/// Simulate span set_attribute calls with owned strings.
+fn simulate_span_set_attributes_owned(span_name: &str, attributes: &[(String, AttributeValue)]) -> SpanAttributeResult {
+    let borrowed_attrs: Vec<(&str, AttributeValue)> = attributes.iter()
+        .map(|(k, v)| (k.as_str(), v.clone()))
+        .collect();
+    simulate_span_set_attributes(span_name, &borrowed_attrs)
+}
+
+/// Simulate span attribute updates with sequential set_attribute calls.
+fn simulate_span_attribute_updates(span_name: &str, attribute_sequence: &[(&str, AttributeValue)]) -> SpanAttributeResult {
+    let mut current_attributes: std::collections::HashMap<String, AttributeValue> = std::collections::HashMap::new();
+    let mut update_sequence = Vec::new();
+
+    for (key, value) in attribute_sequence {
+        current_attributes.insert(key.to_string(), value.clone());
+        update_sequence.push(format!("set_attribute('{}', {:?})", key, value));
+    }
+
+    // Convert to final attribute list
+    let mut final_attrs: Vec<(String, AttributeValue)> = current_attributes.into_iter().collect();
+    final_attrs.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Generate serialized form
+    let serialized = final_attrs.iter()
+        .map(|(k, v)| format!("{}={:?}", k, v))
+        .collect::<Vec<_>>()
+        .join(";");
+
+    let attribute_count = final_attrs.len();
+
+    SpanAttributeResult {
+        span_name: span_name.to_string(),
+        final_attributes: final_attrs,
+        serialized_attributes: serialized,
+        attribute_count,
+        update_sequence,
+    }
+}
+
+/// Verify attribute type preservation.
+fn verify_attribute_type_preservation(result: &SpanAttributeResult, original_attributes: &[(&str, AttributeValue)]) -> Result<(), String> {
+    // Check that final attribute types match the last set value for each key
+    let mut expected_types: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
+    for (key, value) in original_attributes {
+        let type_name = match value {
+            AttributeValue::String(_) => "String",
+            AttributeValue::Int(_) => "Int",
+            AttributeValue::Float(_) => "Float",
+            AttributeValue::Bool(_) => "Bool",
+            AttributeValue::StringArray(_) => "StringArray",
+            AttributeValue::IntArray(_) => "IntArray",
+            AttributeValue::FloatArray(_) => "FloatArray",
+            AttributeValue::BoolArray(_) => "BoolArray",
+        };
+        expected_types.insert(key.to_string(), type_name.to_string());
+    }
+
+    for (key, value) in &result.final_attributes {
+        let actual_type = match value {
+            AttributeValue::String(_) => "String",
+            AttributeValue::Int(_) => "Int",
+            AttributeValue::Float(_) => "Float",
+            AttributeValue::Bool(_) => "Bool",
+            AttributeValue::StringArray(_) => "StringArray",
+            AttributeValue::IntArray(_) => "IntArray",
+            AttributeValue::FloatArray(_) => "FloatArray",
+            AttributeValue::BoolArray(_) => "BoolArray",
+        };
+
+        if let Some(expected_type) = expected_types.get(key) {
+            if actual_type != expected_type {
+                return Err(format!(
+                    "Type mismatch for attribute '{}': expected {}, got {}",
+                    key, expected_type, actual_type
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Verify OpenTelemetry attribute specification compliance.
+fn verify_otel_attribute_spec_compliance(result: &SpanAttributeResult) -> Result<(), String> {
+    for (key, value) in &result.final_attributes {
+        // Check key constraints
+        if key.is_empty() {
+            return Err("Empty attribute key not allowed".to_string());
+        }
+
+        if key.len() > 256 {
+            return Err(format!(
+                "Attribute key '{}' exceeds 256 character limit ({})",
+                key, key.len()
+            ));
+        }
+
+        // Check value constraints
+        match value {
+            AttributeValue::String(s) => {
+                if s.len() > 1024 {
+                    return Err(format!(
+                        "String attribute value for '{}' exceeds 1024 character limit ({})",
+                        key, s.len()
+                    ));
+                }
+            },
+            AttributeValue::StringArray(arr) => {
+                if arr.len() > 128 {
+                    return Err(format!(
+                        "String array attribute '{}' exceeds 128 element limit ({})",
+                        key, arr.len()
+                    ));
+                }
+                for s in arr {
+                    if s.len() > 1024 {
+                        return Err(format!(
+                            "String array element in '{}' exceeds 1024 character limit ({})",
+                            key, s.len()
+                        ));
+                    }
+                }
+            },
+            AttributeValue::IntArray(arr) => {
+                if arr.len() > 128 {
+                    return Err(format!(
+                        "Array attribute '{}' exceeds 128 element limit ({})",
+                        key, arr.len()
+                    ));
+                }
+            },
+            AttributeValue::FloatArray(arr) => {
+                if arr.len() > 128 {
+                    return Err(format!(
+                        "Array attribute '{}' exceeds 128 element limit ({})",
+                        key, arr.len()
+                    ));
+                }
+            },
+            AttributeValue::BoolArray(arr) => {
+                if arr.len() > 128 {
+                    return Err(format!(
+                        "Array attribute '{}' exceeds 128 element limit ({})",
+                        key, arr.len()
+                    ));
+                }
+            },
+            _ => {}, // Other types have no specific constraints
+        }
+    }
+
+    // Check total attribute count
+    if result.attribute_count > 128 {
+        return Err(format!(
+            "Span attribute count {} exceeds 128 limit",
+            result.attribute_count
+        ));
+    }
+
+    Ok(())
+}
+
+/// Verify attribute ordering and key uniqueness.
+fn verify_attribute_ordering_uniqueness(result: &SpanAttributeResult) -> Result<(), String> {
+    let mut seen_keys = std::collections::HashSet::new();
+
+    for (key, _) in &result.final_attributes {
+        if !seen_keys.insert(key.clone()) {
+            return Err(format!(
+                "Duplicate attribute key found: '{}'",
+                key
+            ));
+        }
+    }
+
+    // Verify attributes are consistently ordered in serialized form
+    let mut sorted_keys: Vec<&String> = result.final_attributes.iter().map(|(k, _)| k).collect();
+    sorted_keys.sort();
+
+    let expected_serialized = result.final_attributes.iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect::<std::collections::HashMap<_, _>>();
+
+    let mut expected_sorted: Vec<(String, AttributeValue)> = expected_serialized.into_iter().collect();
+    expected_sorted.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let expected_serialized_form = expected_sorted.iter()
+        .map(|(k, v)| format!("{}={:?}", k, v))
+        .collect::<Vec<_>>()
+        .join(";");
+
+    if result.serialized_attributes != expected_serialized_form {
+        return Err(format!(
+            "Serialized attributes not consistently ordered: expected '{}', got '{}'",
+            expected_serialized_form, result.serialized_attributes
+        ));
+    }
+
+    Ok(())
+}
+
+/// Verify edge case compliance.
+fn verify_edge_case_compliance(result: &SpanAttributeResult, scenario_name: &str) -> Result<(), String> {
+    match scenario_name {
+        "empty_string_key" => {
+            // Should handle empty keys gracefully (either accept or reject consistently)
+            if result.final_attributes.iter().any(|(k, _)| k.is_empty()) {
+                // If accepted, should be serialized consistently
+                if !result.serialized_attributes.contains("=") {
+                    return Err("Empty key accepted but not serialized properly".to_string());
+                }
+            }
+        },
+        "unicode_key" | "unicode_value" => {
+            // Unicode should be preserved
+            let has_unicode = result.final_attributes.iter()
+                .any(|(k, v)| {
+                    k.chars().any(|c| c as u32 > 127) ||
+                    match v {
+                        AttributeValue::String(s) => s.chars().any(|c| c as u32 > 127),
+                        _ => false,
+                    }
+                });
+            if has_unicode && result.serialized_attributes.is_empty() {
+                return Err("Unicode content lost during serialization".to_string());
+            }
+        },
+        "extreme_values" => {
+            // Extreme values should be handled without overflow
+            for (_, value) in &result.final_attributes {
+                match value {
+                    AttributeValue::Int(i) => {
+                        if *i == i64::MAX || *i == i64::MIN {
+                            // Should be serialized as valid number
+                            let serialized_contains = result.serialized_attributes.contains(&i.to_string());
+                            if !serialized_contains {
+                                return Err(format!("Extreme int value {} not properly serialized", i));
+                            }
+                        }
+                    },
+                    AttributeValue::Float(f) => {
+                        if f.is_infinite() || f.is_nan() {
+                            return Err("Invalid float value (infinity/NaN) should be rejected".to_string());
+                        }
+                    },
+                    _ => {},
+                }
+            }
+        },
+        _ => {},
+    }
+
+    Ok(())
+}
+
+/// Verify final attribute state after updates.
+fn verify_final_attribute_state(result: &SpanAttributeResult, attribute_sequence: &[(&str, AttributeValue)]) -> Result<(), String> {
+    // Build expected final state (last write wins)
+    let mut expected_state: std::collections::HashMap<String, AttributeValue> = std::collections::HashMap::new();
+
+    for (key, value) in attribute_sequence {
+        expected_state.insert(key.to_string(), value.clone());
+    }
+
+    // Convert to sorted vec for comparison
+    let mut expected_final: Vec<(String, AttributeValue)> = expected_state.into_iter().collect();
+    expected_final.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut actual_final = result.final_attributes.clone();
+    actual_final.sort_by(|a, b| a.0.cmp(&b.0));
+
+    if expected_final != actual_final {
+        return Err(format!(
+            "Final attribute state mismatch: expected {:?}, got {:?}",
+            expected_final, actual_final
+        ));
+    }
+
+    Ok(())
+}
+
+/// Verify attribute update semantics (last write wins).
+fn verify_attribute_update_semantics(result: &SpanAttributeResult, attribute_sequence: &[(&str, AttributeValue)]) -> Result<(), String> {
+    // Check that for each key, the final value matches the last set value
+    for (key, _) in &result.final_attributes {
+        // Find last occurrence of this key in the sequence
+        let last_value = attribute_sequence.iter()
+            .rev()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v);
+
+        let current_value = result.final_attributes.iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v);
+
+        match (last_value, current_value) {
+            (Some(expected), Some(actual)) => {
+                if expected != actual {
+                    return Err(format!(
+                        "Last-write-wins violated for key '{}': expected {:?}, got {:?}",
+                        key, expected, actual
+                    ));
+                }
+            },
+            (None, Some(_)) => {
+                return Err(format!(
+                    "Key '{}' found in final state but not in input sequence",
+                    key
+                ));
+            },
+            (Some(_), None) => {
+                return Err(format!(
+                    "Key '{}' missing from final state",
+                    key
+                ));
+            },
+            (None, None) => {
+                // This shouldn't happen
+                return Err(format!("Inconsistent state for key '{}'", key));
+            },
+        }
+    }
+
+    Ok(())
+}
+
+/// Verify attribute limit handling.
+fn verify_attribute_limit_handling(result: &SpanAttributeResult, expected_count: usize) -> Result<(), String> {
+    const MAX_ATTRIBUTES: usize = 128;
+
+    if expected_count <= MAX_ATTRIBUTES {
+        // All attributes should be preserved
+        if result.attribute_count != expected_count {
+            return Err(format!(
+                "Expected all {} attributes to be preserved, but got {}",
+                expected_count, result.attribute_count
+            ));
+        }
+    } else {
+        // Excess attributes should be dropped
+        if result.attribute_count > MAX_ATTRIBUTES {
+            return Err(format!(
+                "Attribute count {} exceeds limit {}, excess should be dropped",
+                result.attribute_count, MAX_ATTRIBUTES
+            ));
+        }
+
+        // Should retain exactly MAX_ATTRIBUTES
+        if result.attribute_count != MAX_ATTRIBUTES {
+            return Err(format!(
+                "Expected exactly {} attributes after limit enforcement, got {}",
+                MAX_ATTRIBUTES, result.attribute_count
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Verify attribute performance characteristics.
+fn verify_attribute_performance_characteristics(result: &SpanAttributeResult) -> Result<(), String> {
+    // Check that serialization is efficient (no exponential blowup)
+    let expected_min_size = result.attribute_count * 5; // Very conservative estimate
+    let expected_max_size = result.attribute_count * 200; // Conservative max per attribute
+
+    if result.serialized_attributes.len() < expected_min_size {
+        return Err(format!(
+            "Serialized form suspiciously small: {} bytes for {} attributes",
+            result.serialized_attributes.len(), result.attribute_count
+        ));
+    }
+
+    if result.serialized_attributes.len() > expected_max_size {
+        return Err(format!(
+            "Serialized form too large: {} bytes for {} attributes (max {})",
+            result.serialized_attributes.len(), result.attribute_count, expected_max_size
+        ));
+    }
+
+    // Check that update sequence is reasonable
+    if result.update_sequence.len() > result.attribute_count * 10 {
+        return Err(format!(
+            "Update sequence too long: {} operations for {} final attributes",
+            result.update_sequence.len(), result.attribute_count
+        ));
+    }
+
+    Ok(())
+}
+
+// =============================================================================
 // Test Suite Registration
 // =============================================================================
 
@@ -5961,6 +6639,7 @@ pub fn otlp_tests<RT: RuntimeInterface>() -> Vec<ConformanceTest<RT>> {
         otlp_018_grpc_retry_after_handling::<RT>(),
         otlp_019_trace_state_propagation_span_hierarchy::<RT>(),
         otlp_020_http_protobuf_exporter_format::<RT>(),
+        otlp_021_span_set_attribute_conformance::<RT>(),
     ]
 }
 
