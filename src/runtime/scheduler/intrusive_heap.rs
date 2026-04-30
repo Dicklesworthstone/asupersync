@@ -349,6 +349,62 @@ impl IntrusivePriorityHeap {
     }
 }
 
+#[cfg(any(test, feature = "test-internals"))]
+impl IntrusivePriorityHeap {
+    #[doc(hidden)]
+    pub fn decrease_key_for_test(
+        &mut self,
+        task: TaskId,
+        new_priority: u8,
+        arena: &mut Arena<TaskRecord>,
+    ) -> bool {
+        let Some(record) = arena.get(task.arena_index()) else {
+            return false;
+        };
+
+        let Some(pos) = record.heap_index else {
+            return false;
+        };
+
+        let pos = pos as usize;
+        if pos >= self.heap.len() || self.heap[pos] != task {
+            return false;
+        }
+
+        let current_priority = record.sched_priority;
+        if new_priority >= current_priority {
+            return false;
+        }
+
+        if let Some(record) = arena.get_mut(task.arena_index()) {
+            record.sched_priority = new_priority;
+        }
+        self.sift_down(pos, arena);
+        true
+    }
+
+    #[doc(hidden)]
+    #[must_use]
+    pub fn verify_invariants_for_test(&self, arena: &Arena<TaskRecord>) -> bool {
+        for (idx, &task) in self.heap.iter().enumerate() {
+            let Some(record) = arena.get(task.arena_index()) else {
+                return false;
+            };
+            if record.heap_index != Some(idx as u32) {
+                return false;
+            }
+
+            if idx > 0 {
+                let parent = (idx - 1) / 2;
+                if self.higher_priority(idx, parent, arena) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(

@@ -1,378 +1,242 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
+use asupersync::record::task::TaskRecord;
+use asupersync::runtime::scheduler::IntrusivePriorityHeap;
+use asupersync::types::{Budget, RegionId, TaskId};
+use asupersync::util::{Arena, ArenaIndex};
 use libfuzzer_sys::fuzz_target;
+use std::collections::HashMap;
 
-/// Comprehensive fuzz target for intrusive heap operations in scheduler
+/// Structure-aware intrusive-heap harness for insert/decrease-key sequences.
 ///
-/// This fuzzes both IntrusiveRing and IntrusiveStack operations to find:
-/// - Memory safety violations (use-after-free, double-free)
-/// - Logic bugs in linked list manipulation
-/// - Invariant violations (queue_tag consistency, link integrity)
-/// - ABA problems in concurrent-like scenarios
-/// - Invalid state transitions
-/// - Arithmetic overflow/underflow
+/// Asserts:
+/// 1. heap invariants remain valid after every operation
+/// 2. peek/pop always match a shadow max-heap model
+/// 3. decrease-key is a no-op when not strictly lowering priority
+/// 4. repeating the same decrease-key is idempotent
 #[derive(Arbitrary, Debug)]
 struct IntrusiveHeapFuzz {
-    /// Sequence of operations to execute on ring
-    ring_ops: Vec<RingOperation>,
-    /// Sequence of operations to execute on stack
-    stack_ops: Vec<StackOperation>,
-    /// Initial task count (1-100)
-    initial_tasks: u8,
-    /// Ring queue tag (1-255)
-    ring_tag: u8,
-    /// Stack queue tag (1-255)
-    stack_tag: u8,
+    /// Number of preallocated task records addressable by the operation stream.
+    task_slots: u8,
+    /// Sequence of heap operations.
+    operations: Vec<HeapOperation>,
 }
 
-/// Operations for IntrusiveRing fuzzing
-#[derive(Arbitrary, Debug)]
-enum RingOperation {
-    /// Push task to back of ring
-    PushBack { task_index: u8 },
-    /// Pop task from front of ring
-    PopFront,
-    /// Remove specific task from ring
-    Remove { task_index: u8 },
-    /// Check if task is in ring
-    Contains { task_index: u8 },
-    /// Peek front without removing
-    PeekFront,
-    /// Clear entire ring
-    Clear,
-    /// Verify ring invariants
-    VerifyInvariants,
-}
-
-/// Operations for IntrusiveStack fuzzing
-#[derive(Arbitrary, Debug)]
-enum StackOperation {
-    /// Push task to top of stack
-    Push { task_index: u8 },
-    /// Push to bottom of stack
-    PushBottom { task_index: u8 },
-    /// Pop from top (LIFO)
+#[derive(Arbitrary, Debug, Clone)]
+enum HeapOperation {
+    Insert { task_index: u8, priority: u8 },
+    DecreaseKey { task_index: u8, new_priority: u8 },
     Pop,
-    /// Steal batch from bottom
-    StealBatch { max_steal: u8 },
-    /// Steal batch into another stack
-    StealBatchInto { max_steal: u8 },
-    /// Verify stack invariants
+    Peek,
+    Clear,
     VerifyInvariants,
-    /// Check local task count
-    CheckLocalCount,
 }
 
-/// Shadow model for state verification
-#[derive(Debug)]
-struct ShadowState {
-    /// Tasks expected to be in ring (by task_index)
-    ring_tasks: std::collections::HashSet<u8>,
-    /// Tasks expected to be in stack (by task_index)
-    stack_tasks: std::collections::HashSet<u8>,
-    /// Expected ring length
-    ring_len: usize,
-    /// Expected stack length
-    stack_len: usize,
+#[derive(Debug, Clone, Copy)]
+struct ShadowEntry {
+    priority: u8,
+    generation: u64,
 }
 
-impl ShadowState {
-    fn new() -> Self {
-        Self {
-            ring_tasks: std::collections::HashSet::new(),
-            stack_tasks: std::collections::HashSet::new(),
-            ring_len: 0,
-            stack_len: 0,
+#[derive(Debug, Default)]
+struct ShadowHeap {
+    live: HashMap<u8, ShadowEntry>,
+    next_generation: u64,
+}
+
+impl ShadowHeap {
+    fn insert(&mut self, task_index: u8, priority: u8) {
+        if self.live.contains_key(&task_index) {
+            return;
+        }
+
+        let generation = self.next_generation;
+        self.next_generation = self.next_generation.wrapping_add(1);
+        self.live.insert(
+            task_index,
+            ShadowEntry {
+                priority,
+                generation,
+            },
+        );
+    }
+
+    fn decrease_key(&mut self, task_index: u8, new_priority: u8) -> bool {
+        let Some(entry) = self.live.get_mut(&task_index) else {
+            return false;
+        };
+        if new_priority >= entry.priority {
+            return false;
+        }
+        entry.priority = new_priority;
+        true
+    }
+
+    fn expected_top(&self) -> Option<u8> {
+        let mut best: Option<(u8, ShadowEntry)> = None;
+        for (&task_index, &entry) in &self.live {
+            match best {
+                None => best = Some((task_index, entry)),
+                Some((_, current)) if shadow_beats(entry, current) => {
+                    best = Some((task_index, entry));
+                }
+                _ => {}
+            }
+        }
+        best.map(|(task_index, _)| task_index)
+    }
+
+    fn pop_expected_top(&mut self) -> Option<u8> {
+        let top = self.expected_top()?;
+        self.live.remove(&top);
+        self.reset_generation_if_empty();
+        Some(top)
+    }
+
+    fn clear(&mut self) {
+        self.live.clear();
+        self.reset_generation_if_empty();
+    }
+
+    fn reset_generation_if_empty(&mut self) {
+        if self.live.is_empty() {
+            self.next_generation = 0;
         }
     }
-
-    fn verify_ring_invariants(
-        &self,
-        ring: &asupersync::runtime::scheduler::intrusive::IntrusiveRing,
-    ) {
-        // Ring length must match shadow state
-        assert_eq!(ring.len(), self.ring_len, "Ring length mismatch");
-        assert_eq!(
-            ring.is_empty(),
-            self.ring_len == 0,
-            "Ring emptiness mismatch"
-        );
-    }
-
-    fn verify_stack_invariants(
-        &self,
-        stack: &asupersync::runtime::scheduler::intrusive::IntrusiveStack,
-    ) {
-        // Stack length must match shadow state
-        assert_eq!(stack.len(), self.stack_len, "Stack length mismatch");
-        assert_eq!(
-            stack.is_empty(),
-            self.stack_len == 0,
-            "Stack emptiness mismatch"
-        );
-    }
 }
 
-/// Maximum limits for safety
-const MAX_OPERATIONS: usize = 100;
-const MAX_TASKS: usize = 100;
+fn shadow_beats(candidate: ShadowEntry, incumbent: ShadowEntry) -> bool {
+    candidate.priority > incumbent.priority
+        || (candidate.priority == incumbent.priority
+            && incumbent
+                .generation
+                .wrapping_sub(candidate.generation)
+                .cast_signed()
+                > 0)
+}
+
+const MAX_TASK_SLOTS: usize = 64;
+const MAX_OPERATIONS: usize = 256;
 
 fuzz_target!(|input: IntrusiveHeapFuzz| {
-    use asupersync::record::task::TaskRecord;
-    use asupersync::runtime::scheduler::intrusive::{IntrusiveRing, IntrusiveStack};
-    use asupersync::types::{Budget, RegionId, TaskId};
-    use asupersync::util::Arena;
-    use std::collections::HashMap;
+    let task_slots = usize::from(input.task_slots).clamp(1, MAX_TASK_SLOTS);
+    let operations: Vec<_> = input.operations.into_iter().take(MAX_OPERATIONS).collect();
 
-    // Bounds checking
-    if input.ring_ops.len() > MAX_OPERATIONS || input.stack_ops.len() > MAX_OPERATIONS {
-        return;
-    }
+    let mut arena = setup_arena(task_slots as u32);
+    let task_ids: Vec<_> = (0..task_slots).map(|idx| task(idx as u32)).collect();
+    let mut heap = IntrusivePriorityHeap::with_capacity(task_slots);
+    let mut shadow = ShadowHeap::default();
 
-    let initial_tasks = (input.initial_tasks as usize).max(1).min(MAX_TASKS);
-
-    // Ensure valid queue tags (non-zero)
-    let ring_tag = if input.ring_tag == 0 {
-        1
-    } else {
-        input.ring_tag
-    };
-    let stack_tag = if input.stack_tag == 0 || input.stack_tag == ring_tag {
-        ring_tag.wrapping_add(1).max(1)
-    } else {
-        input.stack_tag
-    };
-
-    // Initialize test environment
-    let mut arena = Arena::<TaskRecord>::new();
-    let mut shadow = ShadowState::new();
-    let mut ring = IntrusiveRing::new(ring_tag);
-    let mut stack = IntrusiveStack::new(stack_tag);
-    let mut task_map: HashMap<u8, TaskId> = HashMap::new();
-
-    // Pre-allocate some tasks in arena
-    for i in 0..initial_tasks {
-        let task_id = TaskId::testing_default();
-        let region_id = RegionId::testing_default();
-        let budget = Budget::with_deadline_ns(1_000_000_000); // 1 second in nanoseconds
-
-        let record = TaskRecord::new(task_id, region_id, budget);
-        let arena_index = arena.insert(record);
-        // Map logical task index to actual TaskId
-        task_map.insert(i as u8, TaskId::from_arena(arena_index));
-    }
-
-    // Execute ring operations
-    for op in input.ring_ops.iter().take(MAX_OPERATIONS) {
+    for op in operations {
         match op {
-            RingOperation::PushBack { task_index } => {
-                if let Some(&task_id) = task_map.get(task_index) {
-                    let arena_index = task_id.arena_index();
-
-                    // Check if task is already in a queue
-                    if let Some(record) = arena.get(arena_index) {
-                        if !record.is_in_queue() {
-                            ring.push_back(task_id, &mut arena);
-
-                            // Update shadow state
-                            shadow.ring_tasks.insert(*task_index);
-                            shadow.ring_len += 1;
-                        }
+            HeapOperation::Insert {
+                task_index,
+                priority,
+            } => {
+                if let Some(&task_id) = task_ids.get(usize::from(task_index)) {
+                    let was_present = shadow.live.contains_key(&task_index);
+                    heap.push(task_id, priority, &mut arena);
+                    if !was_present {
+                        shadow.insert(task_index, priority);
                     }
                 }
             }
-
-            RingOperation::PopFront => {
-                if let Some(task_id) = ring.pop_front(&mut arena) {
-                    // Find the logical task index
-                    if let Some((&logical_index, _)) =
-                        task_map.iter().find(|(_, &id)| id == task_id)
-                    {
-                        // Update shadow state
-                        shadow.ring_tasks.remove(&logical_index);
-                        shadow.ring_len = shadow.ring_len.saturating_sub(1);
-                    }
-
-                    // Verify task is no longer in queue
-                    if let Some(record) = arena.get(task_id.arena_index()) {
-                        assert!(!record.is_in_queue(), "Popped task still shows as in queue");
-                    }
-                }
-            }
-
-            RingOperation::Remove { task_index } => {
-                if let Some(&task_id) = task_map.get(task_index) {
-                    let removed = ring.remove(task_id, &mut arena);
-
-                    if removed {
-                        // Update shadow state
-                        shadow.ring_tasks.remove(task_index);
-                        shadow.ring_len = shadow.ring_len.saturating_sub(1);
-
-                        // Verify task is no longer in queue
-                        if let Some(record) = arena.get(task_id.arena_index()) {
-                            assert!(
-                                !record.is_in_queue(),
-                                "Removed task still shows as in queue"
-                            );
-                        }
-                    }
-                }
-            }
-
-            RingOperation::Contains { task_index } => {
-                if let Some(&task_id) = task_map.get(task_index) {
-                    let contains = ring.contains(task_id, &arena);
-                    let expected = shadow.ring_tasks.contains(task_index);
-
-                    // Verify contains matches shadow state
+            HeapOperation::DecreaseKey {
+                task_index,
+                new_priority,
+            } => {
+                if let Some(&task_id) = task_ids.get(usize::from(task_index)) {
+                    let expected = shadow.decrease_key(task_index, new_priority);
+                    let changed = heap.decrease_key_for_test(task_id, new_priority, &mut arena);
                     assert_eq!(
-                        contains, expected,
-                        "Contains mismatch for task {}: ring says {}, shadow says {}",
-                        task_index, contains, expected
+                        changed, expected,
+                        "decrease-key result must match shadow model"
+                    );
+
+                    let repeated = heap.decrease_key_for_test(task_id, new_priority, &mut arena);
+                    assert!(
+                        !repeated,
+                        "repeating the same decrease-key must be idempotent"
                     );
                 }
             }
-
-            RingOperation::PeekFront => {
-                let front = ring.peek_front();
-                let is_empty = shadow.ring_len == 0;
-
-                assert_eq!(
-                    front.is_none(),
-                    is_empty,
-                    "Peek front emptiness mismatch: got {:?}, expected empty: {}",
-                    front,
-                    is_empty
-                );
+            HeapOperation::Pop => {
+                let expected = shadow
+                    .pop_expected_top()
+                    .and_then(|task_index| task_ids.get(usize::from(task_index)).copied());
+                let popped = heap.pop(&mut arena);
+                assert_eq!(popped, expected, "pop must match the shadow heap");
             }
-
-            RingOperation::Clear => {
-                ring.clear(&mut arena);
-
-                // Update shadow state
-                shadow.ring_tasks.clear();
-                shadow.ring_len = 0;
-
-                assert_eq!(ring.len(), 0, "Ring not empty after clear");
-                assert!(ring.is_empty(), "Ring not empty after clear");
+            HeapOperation::Peek => {
+                let expected = shadow
+                    .expected_top()
+                    .and_then(|task_index| task_ids.get(usize::from(task_index)).copied());
+                assert_eq!(heap.peek(), expected, "peek must match the shadow heap");
             }
-
-            RingOperation::VerifyInvariants => {
-                shadow.verify_ring_invariants(&ring);
+            HeapOperation::Clear => {
+                heap.clear(&mut arena);
+                shadow.clear();
             }
+            HeapOperation::VerifyInvariants => {}
         }
+
+        assert_heap_matches_shadow(&heap, &shadow, &arena, &task_ids);
     }
 
-    // Execute stack operations
-    for op in input.stack_ops.iter().take(MAX_OPERATIONS) {
-        match op {
-            StackOperation::Push { task_index } => {
-                if let Some(&task_id) = task_map.get(task_index) {
-                    let arena_index = task_id.arena_index();
-
-                    // Check if task is already in a queue
-                    if let Some(record) = arena.get(arena_index) {
-                        if !record.is_in_queue() {
-                            stack.push(task_id, &mut arena);
-
-                            // Update shadow state
-                            shadow.stack_tasks.insert(*task_index);
-                            shadow.stack_len += 1;
-                        }
-                    }
-                }
-            }
-
-            StackOperation::PushBottom { task_index } => {
-                if let Some(&task_id) = task_map.get(task_index) {
-                    let arena_index = task_id.arena_index();
-
-                    if let Some(record) = arena.get(arena_index) {
-                        if !record.is_in_queue() {
-                            stack.push_bottom(task_id, &mut arena);
-
-                            // Update shadow state
-                            shadow.stack_tasks.insert(*task_index);
-                            shadow.stack_len += 1;
-                        }
-                    }
-                }
-            }
-
-            StackOperation::Pop => {
-                if let Some(task_id) = stack.pop(&mut arena) {
-                    // Find the logical task index
-                    if let Some((&logical_index, _)) =
-                        task_map.iter().find(|(_, &id)| id == task_id)
-                    {
-                        // Update shadow state
-                        shadow.stack_tasks.remove(&logical_index);
-                        shadow.stack_len = shadow.stack_len.saturating_sub(1);
-                    }
-
-                    // Verify task is no longer in queue
-                    if let Some(record) = arena.get(task_id.arena_index()) {
-                        assert!(!record.is_in_queue(), "Popped task still shows as in queue");
-                    }
-                }
-            }
-
-            StackOperation::StealBatch { max_steal } => {
-                let mut stolen = Vec::new();
-                let max_steal = (*max_steal as usize).min(20); // Reasonable limit
-
-                stack.steal_batch(max_steal, &mut arena, &mut stolen);
-
-                // Update shadow state for stolen tasks
-                for &task_id in &stolen {
-                    if let Some((&logical_index, _)) =
-                        task_map.iter().find(|(_, &id)| id == task_id)
-                    {
-                        shadow.stack_tasks.remove(&logical_index);
-                    }
-                }
-                shadow.stack_len = shadow.stack_len.saturating_sub(stolen.len());
-            }
-
-            StackOperation::StealBatchInto { max_steal } => {
-                let mut dest_stack = IntrusiveStack::new(stack_tag.wrapping_add(1).max(1));
-                let max_steal = (*max_steal as usize).min(20);
-
-                let stolen_count = stack.steal_batch_into(max_steal, &mut arena, &mut dest_stack);
-
-                // Update shadow state
-                shadow.stack_len = shadow.stack_len.saturating_sub(stolen_count);
-
-                // Clear stolen tasks from shadow (conservative approach)
-                if stolen_count > 0 {
-                    let remaining_tasks: std::collections::HashSet<u8> = shadow
-                        .stack_tasks
-                        .iter()
-                        .take(shadow.stack_len)
-                        .copied()
-                        .collect();
-                    shadow.stack_tasks = remaining_tasks;
-                }
-            }
-
-            StackOperation::VerifyInvariants => {
-                shadow.verify_stack_invariants(&stack);
-            }
-
-            StackOperation::CheckLocalCount => {
-                let has_local = stack.has_local_tasks();
-
-                // Basic invariant: empty stack should not have local tasks
-                if shadow.stack_len == 0 {
-                    assert!(!has_local, "Empty stack reports local tasks");
-                }
-            }
-        }
+    while !heap.is_empty() {
+        let expected = shadow
+            .pop_expected_top()
+            .and_then(|task_index| task_ids.get(usize::from(task_index)).copied());
+        assert_eq!(
+            heap.pop(&mut arena),
+            expected,
+            "final drain must preserve shadow heap ordering"
+        );
+        assert_heap_matches_shadow(&heap, &shadow, &arena, &task_ids);
     }
 
-    // Final invariant checks
-    shadow.verify_ring_invariants(&ring);
-    shadow.verify_stack_invariants(&stack);
+    assert!(shadow.live.is_empty(), "shadow heap should drain to empty");
 });
+
+fn assert_heap_matches_shadow(
+    heap: &IntrusivePriorityHeap,
+    shadow: &ShadowHeap,
+    arena: &Arena<TaskRecord>,
+    task_ids: &[TaskId],
+) {
+    assert_eq!(heap.len(), shadow.live.len(), "heap length mismatch");
+    assert_eq!(
+        heap.is_empty(),
+        shadow.live.is_empty(),
+        "heap emptiness mismatch"
+    );
+    assert!(
+        heap.verify_invariants_for_test(arena),
+        "intrusive heap invariants must hold after every operation"
+    );
+
+    let expected_top = shadow
+        .expected_top()
+        .and_then(|task_index| task_ids.get(usize::from(task_index)).copied());
+    assert_eq!(heap.peek(), expected_top, "peek must match the shadow heap");
+}
+
+fn region() -> RegionId {
+    RegionId::from_arena(ArenaIndex::new(0, 0))
+}
+
+fn task(n: u32) -> TaskId {
+    TaskId::from_arena(ArenaIndex::new(n, 0))
+}
+
+fn setup_arena(count: u32) -> Arena<TaskRecord> {
+    let mut arena = Arena::new();
+    for i in 0..count {
+        let id = task(i);
+        let record = TaskRecord::new(id, region(), Budget::INFINITE);
+        let idx = arena.insert(record);
+        assert_eq!(idx.index(), i);
+    }
+    arena
+}
