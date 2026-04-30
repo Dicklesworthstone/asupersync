@@ -2820,16 +2820,7 @@ impl PgConnection {
                 match Self::negotiate_tls(cx, tcp_stream, &options).await {
                     Ok(s) => s,
                     Err(PgError::Cancelled(reason)) => return Outcome::Cancelled(reason),
-                    Err(e) if options.ssl_mode == SslMode::Require => {
-                        return outcome_from_error(e);
-                    }
-                    Err(_) => {
-                        // Prefer mode: TLS failed, reconnect without TLS.
-                        match Self::connect_tcp(&options).await {
-                            Ok(stream) => PgStream::Plain(stream),
-                            Err(e) => return Outcome::Err(e),
-                        }
-                    }
+                    Err(e) => return outcome_from_error(e),
                 }
             }
             #[cfg(not(feature = "tls"))]
@@ -9691,6 +9682,87 @@ mod tests {
         accept_thread
             .join()
             .expect("accept helper should exit cleanly");
+    }
+
+    #[cfg(feature = "tls")]
+    #[test]
+    fn prefer_tls_handshake_error_is_not_swallowed_by_plaintext_fallback() {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("listener addr");
+        let (second_accept_tx, second_accept_rx) = std::sync::mpsc::channel();
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept first connection");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .expect("set read timeout");
+            stream
+                .set_write_timeout(Some(std::time::Duration::from_secs(2)))
+                .expect("set write timeout");
+
+            let mut ssl_request = [0u8; 8];
+            stream
+                .read_exact(&mut ssl_request)
+                .expect("read SSLRequest");
+            assert_eq!(&ssl_request[0..4], &8i32.to_be_bytes());
+            assert_eq!(&ssl_request[4..8], &80_877_103i32.to_be_bytes());
+
+            stream.write_all(b"S").expect("write SSL accept");
+            stream.flush().expect("flush SSL accept");
+            drop(stream);
+
+            listener
+                .set_nonblocking(true)
+                .expect("set nonblocking after TLS abort");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
+            let mut saw_second_accept = false;
+            while std::time::Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((_second, _peer)) => {
+                        saw_second_accept = true;
+                        break;
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(err) => panic!("unexpected second accept error: {err}"),
+                }
+            }
+            second_accept_tx
+                .send(saw_second_accept)
+                .expect("send second accept observation");
+        });
+
+        let mut options = PgConnectOptions::parse(&format!(
+            "postgres://user:pass@{}:{}/db?sslmode=prefer",
+            addr.ip(),
+            addr.port()
+        ))
+        .expect("parse options");
+        options.connect_timeout = Some(std::time::Duration::from_secs(1));
+
+        let cx = Cx::for_testing();
+        match run(PgConnection::connect_with_options(&cx, options)) {
+            Outcome::Err(PgError::Tls(msg)) => {
+                assert!(
+                    !msg.is_empty(),
+                    "TLS abort should surface a concrete handshake error"
+                );
+            }
+            other => panic!("expected TLS error, got {other:?}"),
+        }
+
+        let saw_second_accept = second_accept_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("receive second accept observation");
+        assert!(
+            !saw_second_accept,
+            "prefer mode must not reconnect in plaintext after the server already accepted TLS"
+        );
+
+        server.join().expect("server thread should exit cleanly");
     }
 
     #[test]
