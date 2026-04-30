@@ -491,9 +491,9 @@ pub fn fuzz_bearer_token(auth: &str) -> Option<&str> {
 fn validate_metadata_key(key: &str) -> bool {
     !key.is_empty()
         && !key.starts_with('-')
-        && key.chars().all(|c| {
-            c.is_ascii_alphanumeric() || c == '-' || c == '_'
-        })
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 fn copy_metadata_value(

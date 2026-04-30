@@ -184,7 +184,8 @@ impl Response {
         // Atomic removal of all case-variant keys - collect AND remove in the
         // same iteration to prevent TOCTOU where case variants could be added
         // between collection and removal phases
-        self.headers.retain(|key, _| !key.eq_ignore_ascii_case(&normalized));
+        self.headers
+            .retain(|key, _| !key.eq_ignore_ascii_case(&normalized));
 
         self.headers.insert(normalized, sanitized_value);
     }
@@ -200,14 +201,17 @@ impl Response {
         // Atomic check-and-set: find existing value or use default, then
         // set atomically to prevent TOCTOU where header could change between
         // check and set operations
-        let value = self.headers
+        let value = self
+            .headers
             .iter()
             .find(|(key, _)| key.eq_ignore_ascii_case(&normalized))
             .map_or_else(|| default_value.into(), |(_, value)| value.clone());
 
         // Remove all case variants atomically
-        self.headers.retain(|key, _| !key.eq_ignore_ascii_case(&normalized));
-        self.headers.insert(normalized, sanitize_header_value(value));
+        self.headers
+            .retain(|key, _| !key.eq_ignore_ascii_case(&normalized));
+        self.headers
+            .insert(normalized, sanitize_header_value(value));
     }
 
     /// Remove a header using HTTP's case-insensitive matching rules.
@@ -666,7 +670,8 @@ impl IntoResponse for Redirect {
         // validation rejects ALL bytes outside 0x21-0x7E, so final sanitization
         // must enforce the same constraint to prevent control character
         // injection if validation is bypassed or weakened in future changes.
-        let location = self.location
+        let location = self
+            .location
             .bytes()
             .filter(|&b| (0x21..=0x7E).contains(&b))
             .map(|b| b as char)
@@ -1291,19 +1296,27 @@ mod tests {
         let mut resp = Response::new(StatusCode::OK, "test");
 
         // Add multiple case variants
-        resp.headers.insert("X-Test".to_string(), "value1".to_string());
-        resp.headers.insert("x-TEST".to_string(), "value2".to_string());
-        resp.headers.insert("X-test".to_string(), "value3".to_string());
+        resp.headers
+            .insert("X-Test".to_string(), "value1".to_string());
+        resp.headers
+            .insert("x-TEST".to_string(), "value2".to_string());
+        resp.headers
+            .insert("X-test".to_string(), "value3".to_string());
 
         // set_header should atomically remove all case variants
         resp.set_header("x-test", "final");
 
-        let test_headers: Vec<_> = resp.headers
+        let test_headers: Vec<_> = resp
+            .headers
             .iter()
             .filter(|(k, _)| k.eq_ignore_ascii_case("x-test"))
             .collect();
 
-        assert_eq!(test_headers.len(), 1, "All case variants should be removed atomically");
+        assert_eq!(
+            test_headers.len(),
+            1,
+            "All case variants should be removed atomically"
+        );
         assert_eq!(test_headers[0].0, "x-test");
         assert_eq!(test_headers[0].1, "final");
     }
@@ -1313,17 +1326,23 @@ mod tests {
         let mut resp = Response::new(StatusCode::OK, "test");
 
         // Add header with non-normalized case
-        resp.headers.insert("X-Custom".to_string(), "existing".to_string());
+        resp.headers
+            .insert("X-Custom".to_string(), "existing".to_string());
 
         // ensure_header should preserve existing value atomically
         resp.ensure_header("x-custom", "default");
 
-        let custom_headers: Vec<_> = resp.headers
+        let custom_headers: Vec<_> = resp
+            .headers
             .iter()
             .filter(|(k, _)| k.eq_ignore_ascii_case("x-custom"))
             .collect();
 
-        assert_eq!(custom_headers.len(), 1, "Should be exactly one header after ensure");
+        assert_eq!(
+            custom_headers.len(),
+            1,
+            "Should be exactly one header after ensure"
+        );
         assert_eq!(custom_headers[0].0, "x-custom"); // normalized case
         assert_eq!(custom_headers[0].1, "existing"); // preserved value
     }

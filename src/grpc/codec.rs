@@ -1579,8 +1579,7 @@ mod tests {
 
         let rfc_default_stream_window = 65_535usize;
         let grpc_go_initial_stream_window = 96 * 1024usize;
-        let stream_open_window_update =
-            grpc_go_initial_stream_window - rfc_default_stream_window;
+        let stream_open_window_update = grpc_go_initial_stream_window - rfc_default_stream_window;
 
         assert_eq!(
             grpc_go_initial_stream_window,
@@ -1648,7 +1647,10 @@ mod tests {
         let expanded_window_limit_result =
             expanded_window_limit_decoder.decode(&mut expanded_window_limit_buf);
         assert!(
-            matches!(expanded_window_limit_result, Err(GrpcError::MessageTooLarge)),
+            matches!(
+                expanded_window_limit_result,
+                Err(GrpcError::MessageTooLarge)
+            ),
             "grpc-go rejects a first message once it exceeds the effective post-WINDOW_UPDATE window by one byte"
         );
 

@@ -2018,7 +2018,8 @@ mod tests {
             assert!(
                 observed_values.iter().all(|&v| v == first_observed),
                 "EQUIVALENCE VIOLATION: Threads observed different values: {:?} (racers={})",
-                observed_values, num_racers
+                observed_values,
+                num_racers
             );
 
             // 3. The observed value must be one of the racer's intended values
@@ -2026,7 +2027,8 @@ mod tests {
             assert!(
                 intended_values.contains(&first_observed),
                 "CONSISTENCY VIOLATION: Observed value {} not in intended set {:?}",
-                first_observed, intended_values
+                first_observed,
+                intended_values
             );
 
             // 4. Cell remains initialized with the same value for subsequent calls
@@ -2039,6 +2041,8 @@ mod tests {
             );
         }
 
-        crate::test_complete!("metamorphic_init_then_get_equivalence_under_concurrent_first_init_race");
+        crate::test_complete!(
+            "metamorphic_init_then_get_equivalence_under_concurrent_first_init_race"
+        );
     }
 }

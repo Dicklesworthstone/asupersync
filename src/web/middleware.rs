@@ -2834,10 +2834,10 @@ mod tests {
             ..CorsPolicy::with_exact_origins(vec!["https://allowed.example".to_string()])
         };
         let mw = CorsMiddleware::new(FnHandler::new(ok_handler), policy);
-        let resp = mw.call(
-            Request::new("GET", "/cors")
-                .with_header("Origin", "https://allowed.example, https://attacker.example"),
-        );
+        let resp = mw.call(Request::new("GET", "/cors").with_header(
+            "Origin",
+            "https://allowed.example, https://attacker.example",
+        ));
 
         assert_eq!(resp.status, StatusCode::OK, "inner handler still runs");
         assert!(
@@ -2855,10 +2855,10 @@ mod tests {
     #[test]
     fn cors_multi_origin_header_fails_closed_for_any_policy() {
         let mw = CorsMiddleware::new(FnHandler::new(ok_handler), CorsPolicy::default());
-        let resp = mw.call(
-            Request::new("GET", "/cors")
-                .with_header("Origin", "https://allowed.example, https://attacker.example"),
-        );
+        let resp = mw.call(Request::new("GET", "/cors").with_header(
+            "Origin",
+            "https://allowed.example, https://attacker.example",
+        ));
 
         assert_eq!(resp.status, StatusCode::OK, "inner handler still runs");
         assert!(

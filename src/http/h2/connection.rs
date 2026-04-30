@@ -5069,8 +5069,10 @@ mod tests {
             let final_window = conn.send_window();
             let expected = initial + 100 + 200 + 300;
 
-            assert_eq!(final_window, expected,
-                "Simple sequence [100, 200, 300] failed additive property");
+            assert_eq!(
+                final_window, expected,
+                "Simple sequence [100, 200, 300] failed additive property"
+            );
         }
 
         #[test]
@@ -5081,7 +5083,10 @@ mod tests {
             let frame = Frame::WindowUpdate(WindowUpdateFrame::new(0, 0));
             let result = conn.process_frame(frame);
 
-            assert!(result.is_err(), "Zero increment WINDOW_UPDATE must be rejected");
+            assert!(
+                result.is_err(),
+                "Zero increment WINDOW_UPDATE must be rejected"
+            );
             if let Err(err) = result {
                 assert_eq!(err.code, ErrorCode::ProtocolError);
             }

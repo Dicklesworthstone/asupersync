@@ -276,7 +276,7 @@ fuzz_target!(|data: &[u8]| {
     }
 
     // Test concurrent panic scenarios if requested
-    if sequence.test_concurrency && !cell.is_initialized() {
+    let cell = if sequence.test_concurrency && !cell.is_initialized() {
         let cell = Arc::new(cell);
         let tracker = Arc::clone(&tracker);
 
@@ -321,10 +321,14 @@ fuzz_target!(|data: &[u8]| {
         for handle in handles {
             handle.join().expect("Thread should complete");
         }
-    }
+
+        cell
+    } else {
+        Arc::new(cell)
+    };
 
     // Final invariant checks
-    if let Err(msg) = tracker.check_invariants(&cell) {
+    if let Err(msg) = tracker.check_invariants(&*cell) {
         panic!("Final panic recovery invariant violation: {}", msg);
     }
 

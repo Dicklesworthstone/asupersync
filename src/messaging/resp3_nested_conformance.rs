@@ -46,27 +46,31 @@ mod tests {
 
         // This is the exact golden wire format from the existing test in redis.rs
         let expected_golden = concat!(
-            "%2\r\n",                   // Map with 2 key-value pairs
-            "$7\r\nnumbers\r\n",        // BulkString key "numbers"
-            "~2\r\n",                   // Set with 2 elements
-            ":1\r\n",                   // Integer 1
-            "$3\r\ntwo\r\n",            // BulkString "two"
-            "$4\r\nmeta\r\n",           // BulkString key "meta"
-            "%2\r\n",                   // Map with 2 key-value pairs
-            "+proto\r\n",               // SimpleString key "proto"
-            ":3\r\n",                   // Integer 3
-            "+mode\r\n",                // SimpleString key "mode"
-            "+standalone\r\n",          // SimpleString "standalone"
-        ).as_bytes();
+            "%2\r\n",            // Map with 2 key-value pairs
+            "$7\r\nnumbers\r\n", // BulkString key "numbers"
+            "~2\r\n",            // Set with 2 elements
+            ":1\r\n",            // Integer 1
+            "$3\r\ntwo\r\n",     // BulkString "two"
+            "$4\r\nmeta\r\n",    // BulkString key "meta"
+            "%2\r\n",            // Map with 2 key-value pairs
+            "+proto\r\n",        // SimpleString key "proto"
+            ":3\r\n",            // Integer 3
+            "+mode\r\n",         // SimpleString key "mode"
+            "+standalone\r\n",   // SimpleString "standalone"
+        )
+        .as_bytes();
 
         // Test our encoding matches the golden
         let actual = value.encode();
-        assert_eq!(actual, expected_golden,
+        assert_eq!(
+            actual,
+            expected_golden,
             "RESP3 wire format must match redis-rs value model golden bytes\n\
              Expected: {:?}\n\
              Actual:   {:?}",
             String::from_utf8_lossy(expected_golden),
-            String::from_utf8_lossy(&actual));
+            String::from_utf8_lossy(&actual)
+        );
 
         // Test round-trip decoding
         let (decoded, consumed) = RespValue::try_decode(&actual)
@@ -144,9 +148,10 @@ mod tests {
         assert_eq!(decoded, empty_set);
 
         // Single element Map
-        let single_map = RespValue::Map(vec![
-            (RespValue::SimpleString("key".to_string()), RespValue::Integer(42)),
-        ]);
+        let single_map = RespValue::Map(vec![(
+            RespValue::SimpleString("key".to_string()),
+            RespValue::Integer(42),
+        )]);
         let encoded = single_map.encode();
         let (decoded, _) = RespValue::try_decode(&encoded).unwrap().unwrap();
         assert_eq!(decoded, single_map);
