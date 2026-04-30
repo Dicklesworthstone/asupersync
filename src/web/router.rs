@@ -411,26 +411,35 @@ impl Router {
 
 /// Strip a prefix from a path, returning the remainder.
 fn strip_prefix(path: &str, prefix: &str) -> Option<String> {
-    let normalized_prefix = prefix.trim_end_matches('/');
     let normalized_path = if path.is_empty() { "/" } else { path };
 
+    if prefix.trim_matches('/').is_empty() {
+        return normalized_path
+            .starts_with('/')
+            .then(|| normalized_path.to_string());
+    }
+
+    let requires_slash_boundary = prefix.ends_with('/');
+    let normalized_prefix = prefix.trim_end_matches('/');
+
     if normalized_path == normalized_prefix {
+        if requires_slash_boundary {
+            return None;
+        }
         return Some("/".to_string());
     }
 
-    normalized_path
-        .strip_prefix(normalized_prefix)
-        .and_then(|rest| {
-            if rest.starts_with('/') || rest.is_empty() {
-                Some(if rest.is_empty() {
-                    "/".to_string()
-                } else {
-                    rest.to_string()
-                })
-            } else {
-                None
-            }
-        })
+    let rest = normalized_path.strip_prefix(normalized_prefix)?;
+    let rest = rest.strip_prefix('/')?;
+    if rest.starts_with('/') {
+        return None;
+    }
+
+    Some(if rest.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{rest}")
+    })
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -837,6 +846,21 @@ mod tests {
     }
 
     #[test]
+    fn nested_router_trailing_slash_prefix_rejects_slashless_boundary() {
+        let api = Router::new().route("/", get(FnHandler::new(created_handler)));
+
+        let app = Router::new()
+            .nest("/api/v1/", api)
+            .fallback(FnHandler::new(ok_handler));
+
+        let resp = app.handle(Request::new("GET", "/api/v1"));
+        assert_eq!(resp.status, StatusCode::OK);
+
+        let resp = app.handle(Request::new("GET", "/api/v1/"));
+        assert_eq!(resp.status, StatusCode::CREATED);
+    }
+
+    #[test]
     fn nested_router_prefers_most_specific_prefix() {
         let broad = Router::new().route("/health", get(FnHandler::new(ok_handler)));
         let specific = Router::new().route("/users", get(FnHandler::new(created_handler)));
@@ -937,6 +961,7 @@ mod tests {
             Some("/users".to_string())
         );
         assert_eq!(strip_prefix("/api/v1", "/api/v1"), Some("/".to_string()));
+        assert_eq!(strip_prefix("/api/v1/", "/api/v1"), Some("/".to_string()));
         assert!(strip_prefix("/other", "/api/v1").is_none());
     }
 
@@ -944,5 +969,21 @@ mod tests {
     fn strip_prefix_boundary_mismatch() {
         assert!(strip_prefix("/apix/users", "/api").is_none());
         assert!(strip_prefix("/apiary", "/api").is_none());
+    }
+
+    #[test]
+    fn strip_prefix_trailing_slash_prefix_requires_declared_boundary() {
+        assert_eq!(
+            strip_prefix("/api/v1/users", "/api/v1/"),
+            Some("/users".to_string())
+        );
+        assert_eq!(strip_prefix("/api/v1/", "/api/v1/"), Some("/".to_string()));
+        assert!(strip_prefix("/api/v1", "/api/v1/").is_none());
+    }
+
+    #[test]
+    fn strip_prefix_rejects_empty_segment_at_mount_boundary() {
+        assert!(strip_prefix("/api//users", "/api").is_none());
+        assert!(strip_prefix("/api//users", "/api/").is_none());
     }
 }
