@@ -15,13 +15,15 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use asupersync::bytes::{Bytes, BytesMut};
-use asupersync::http::h2::{H2Error, Frame};
-use asupersync::http::h2::frame::{SettingsFrame, Setting, HeadersFrame, FrameHeader, headers_flags, parse_frame};
-use asupersync::http::h2::connection::{Connection, ConnectionState};
-use asupersync::http::h2::settings::Settings;
+use asupersync::http::h2::connection::Connection;
 use asupersync::http::h2::error::ErrorCode;
+use asupersync::http::h2::frame::{
+    FrameHeader, HeadersFrame, Setting, SettingsFrame, headers_flags, parse_frame,
+};
+use asupersync::http::h2::settings::Settings;
+use asupersync::http::h2::{Frame, H2Error};
+use libfuzzer_sys::fuzz_target;
 
 /// Maximum input size to prevent OOM
 const MAX_INPUT_SIZE: usize = 4096;
@@ -38,18 +40,22 @@ fuzz_target!(|data: &[u8]| {
     // Test 1: Basic priority parsing with arbitrary values
     {
         if data.len() >= 6 {
-            let stream_id = ((u32::from_be_bytes([data[0], data[1], data[2], data[3]]) & 0x7fff_ffff) % 1000) * 2 + 1; // Odd client stream
+            let stream_id =
+                ((u32::from_be_bytes([data[0], data[1], data[2], data[3]]) & 0x7fff_ffff) % 1000)
+                    * 2
+                    + 1; // Odd client stream
             let dependency = u32::from_be_bytes([data[2], data[3], data[4], data[5]]) & 0x7fff_ffff;
             let weight = data[5];
             let exclusive = data[0] & 0x80 != 0;
 
-            let result = create_headers_frame_with_priority(stream_id, dependency, weight, exclusive);
+            let result =
+                create_headers_frame_with_priority(stream_id, dependency, weight, exclusive);
             match result {
                 Ok(frame) => {
                     // Test that the frame parses correctly
                     let _parsing_result = validate_headers_frame_priority(&frame);
                 }
-                Err(_) => {}, // Expected for some invalid combinations
+                Err(_) => {} // Expected for some invalid combinations
             }
         }
     }
@@ -57,16 +63,23 @@ fuzz_target!(|data: &[u8]| {
     // Test 2: Self-dependency detection (should fail)
     {
         if data.len() >= 4 {
-            let stream_id = ((u32::from_be_bytes([data[0], data[1], data[2], data[3]]) & 0x7fff_ffff) % 1000) * 2 + 1;
+            let stream_id =
+                ((u32::from_be_bytes([data[0], data[1], data[2], data[3]]) & 0x7fff_ffff) % 1000)
+                    * 2
+                    + 1;
             let weight = if data.len() > 4 { data[4] } else { 16 };
             let exclusive = data[0] & 0x01 != 0;
 
             // Create frame where dependency == stream_id (self-dependency)
-            let result = create_headers_frame_with_priority(stream_id, stream_id, weight, exclusive);
+            let result =
+                create_headers_frame_with_priority(stream_id, stream_id, weight, exclusive);
             match result {
-                Ok(_) => {}, // Should not happen - self-dependency should be rejected
-                Err(H2Error { code: ErrorCode::ProtocolError, .. }) => {}, // Expected
-                Err(_) => {}, // Other errors acceptable
+                Ok(_) => {} // Should not happen - self-dependency should be rejected
+                Err(H2Error {
+                    code: ErrorCode::ProtocolError,
+                    ..
+                }) => {} // Expected
+                Err(_) => {} // Other errors acceptable
             }
         }
     }
@@ -76,11 +89,19 @@ fuzz_target!(|data: &[u8]| {
         let test_weights = [0, 1, 15, 16, 127, 128, 254, 255];
         for &weight in &test_weights {
             if data.len() >= 8 {
-                let stream_id = ((u32::from_be_bytes([data[0], data[1], data[2], data[3]]) & 0x7fff_ffff) % 500) * 2 + 1;
-                let dependency = ((u32::from_be_bytes([data[4], data[5], data[6], data[7]]) & 0x7fff_ffff) % 500) * 2;
+                let stream_id = ((u32::from_be_bytes([data[0], data[1], data[2], data[3]])
+                    & 0x7fff_ffff)
+                    % 500)
+                    * 2
+                    + 1;
+                let dependency = ((u32::from_be_bytes([data[4], data[5], data[6], data[7]])
+                    & 0x7fff_ffff)
+                    % 500)
+                    * 2;
 
                 if stream_id != dependency {
-                    let _result = create_headers_frame_with_priority(stream_id, dependency, weight, false);
+                    let _result =
+                        create_headers_frame_with_priority(stream_id, dependency, weight, false);
                 }
             }
         }
@@ -98,7 +119,8 @@ fuzz_target!(|data: &[u8]| {
                 let weight = data[offset];
                 let exclusive = data[offset + 1] & 0x80 != 0;
 
-                let _result = create_headers_frame_with_priority(stream_id, prev_stream, weight, exclusive);
+                let _result =
+                    create_headers_frame_with_priority(stream_id, prev_stream, weight, exclusive);
                 prev_stream = stream_id;
             }
         }
@@ -117,15 +139,18 @@ fuzz_target!(|data: &[u8]| {
                     let _exclusive = priority.exclusive;
                 }
             }
-            Err(_) => {}, // Parse errors acceptable for malformed input
-            _ => {}, // Other frame types
+            Err(_) => {} // Parse errors acceptable for malformed input
+            _ => {}      // Other frame types
         }
     }
 
     // Test 6: Exclusive dependency flag combinations
     if data.len() >= 8 {
-        let stream_id = ((u32::from_be_bytes([data[0], data[1], data[2], data[3]]) & 0x7fff_ffff) % 1000) * 2 + 1;
-        let dependency = ((u32::from_be_bytes([data[4], data[5], data[6], data[7]]) & 0x7fff_ffff) % 1000) * 2;
+        let stream_id =
+            ((u32::from_be_bytes([data[0], data[1], data[2], data[3]]) & 0x7fff_ffff) % 1000) * 2
+                + 1;
+        let dependency =
+            ((u32::from_be_bytes([data[4], data[5], data[6], data[7]]) & 0x7fff_ffff) % 1000) * 2;
         let weight = if data.len() > 8 { data[8] } else { 16 };
 
         if stream_id != dependency {
@@ -147,11 +172,16 @@ fuzz_target!(|data: &[u8]| {
 
         for &dependency in &large_dependencies {
             if data.len() >= 4 {
-                let stream_id = ((u32::from_be_bytes([data[0], data[1], data[2], data[3]]) & 0x7fff_ffff) % 100) * 2 + 1;
+                let stream_id = ((u32::from_be_bytes([data[0], data[1], data[2], data[3]])
+                    & 0x7fff_ffff)
+                    % 100)
+                    * 2
+                    + 1;
                 let weight = if data.len() > 4 { data[4] } else { 16 };
 
                 if stream_id != dependency {
-                    let _result = create_headers_frame_with_priority(stream_id, dependency, weight, false);
+                    let _result =
+                        create_headers_frame_with_priority(stream_id, dependency, weight, false);
                 }
             }
         }
@@ -173,12 +203,19 @@ fuzz_target!(|data: &[u8]| {
             let offset = 1 + (i as usize) * 6;
             if offset + 6 <= data.len() {
                 let stream_id = ((i as u32 + 1) * 2) + 1;
-                let dependency = u32::from_be_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]]) & 0x7fff_ffff;
+                let dependency = u32::from_be_bytes([
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                ]) & 0x7fff_ffff;
                 let weight = data[offset + 4];
                 let exclusive = data[offset + 5] & 0x80 != 0;
 
                 if stream_id != dependency {
-                    let _result = create_headers_frame_with_priority(stream_id, dependency, weight, exclusive);
+                    let _result = create_headers_frame_with_priority(
+                        stream_id, dependency, weight, exclusive,
+                    );
                 }
             }
         }
@@ -203,7 +240,7 @@ fn create_headers_frame_with_priority(
     stream_id: u32,
     dependency: u32,
     weight: u8,
-    exclusive: bool
+    exclusive: bool,
 ) -> Result<Frame, H2Error> {
     // Create priority specification
     let priority = asupersync::http::h2::frame::PrioritySpec {
@@ -243,13 +280,17 @@ fn test_priority_in_connection_context(data: &[u8]) -> Result<(), H2Error> {
     conn.process_frame(Frame::Settings(settings_frame))?;
 
     if data.len() >= 8 {
-        let stream_id = ((u32::from_be_bytes([data[0], data[1], data[2], data[3]]) & 0x7fff_ffff) % 1000) * 2 + 1;
-        let dependency = ((u32::from_be_bytes([data[4], data[5], data[6], data[7]]) & 0x7fff_ffff) % 1000) * 2;
+        let stream_id =
+            ((u32::from_be_bytes([data[0], data[1], data[2], data[3]]) & 0x7fff_ffff) % 1000) * 2
+                + 1;
+        let dependency =
+            ((u32::from_be_bytes([data[4], data[5], data[6], data[7]]) & 0x7fff_ffff) % 1000) * 2;
         let weight = if data.len() > 8 { data[8] } else { 16 };
         let exclusive = data[0] & 0x01 != 0;
 
         if stream_id != dependency {
-            let frame = create_headers_frame_with_priority(stream_id, dependency, weight, exclusive)?;
+            let frame =
+                create_headers_frame_with_priority(stream_id, dependency, weight, exclusive)?;
             conn.process_frame(frame)?;
         }
     }
@@ -271,7 +312,10 @@ fn parse_headers_frame_with_priority_from_raw(data: &[u8]) -> Result<Frame, H2Er
 }
 
 /// Create HEADERS frame with truncated priority data to test error handling
-fn create_headers_frame_with_truncated_priority(stream_id: u32, priority_data: &[u8]) -> Result<Frame, H2Error> {
+fn create_headers_frame_with_truncated_priority(
+    stream_id: u32,
+    priority_data: &[u8],
+) -> Result<Frame, H2Error> {
     // Create frame header with PRIORITY flag
     let header = FrameHeader {
         length: priority_data.len() as u32,
