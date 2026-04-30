@@ -655,7 +655,10 @@ fn validate_nats_publish_subject(subject: &str, field: &str) -> Result<(), NatsE
     Ok(())
 }
 
-fn validate_nats_subscription_pattern(pattern: &str, field: &str) -> Result<(), NatsError> {
+pub(crate) fn validate_nats_subscription_pattern(
+    pattern: &str,
+    field: &str,
+) -> Result<(), NatsError> {
     validate_nats_token(pattern, field)?;
     if parse_subscription_pattern(pattern).is_none() {
         return Err(NatsError::Protocol(format!(
@@ -675,6 +678,12 @@ pub fn fuzz_validate_nats_publish_subject(subject: &str) -> Result<(), String> {
 #[doc(hidden)]
 pub fn fuzz_parse_nats_publish_subject(subject: &str) -> Option<Vec<String>> {
     parse_publish_subject(subject).map(|tokens| tokens.into_iter().map(ToOwned::to_owned).collect())
+}
+
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_validate_nats_subscription_pattern(pattern: &str) -> Result<(), String> {
+    validate_nats_subscription_pattern(pattern, "subject").map_err(|err| err.to_string())
 }
 
 #[cfg(feature = "test-internals")]

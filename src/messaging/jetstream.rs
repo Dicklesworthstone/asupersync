@@ -33,7 +33,7 @@
 //! }
 //! ```
 
-use super::nats::{Message, NatsClient, NatsError};
+use super::nats::{Message, NatsClient, NatsError, validate_nats_subscription_pattern};
 use crate::cx::Cx;
 use crate::time::{timeout_at, wall_now};
 use crate::tracing_compat::warn;
@@ -533,6 +533,15 @@ impl ConsumerConfig {
         self
     }
 
+    fn validate(&mut self) -> Result<(), JsError> {
+        self.normalize_identity()?;
+        if let Some(filter_subject) = self.filter_subject.as_deref() {
+            validate_nats_subscription_pattern(filter_subject, "filter_subject")
+                .map_err(|err| JsError::InvalidConfig(err.to_string()))?;
+        }
+        Ok(())
+    }
+
     /// Canonicalize the deprecated durable alias into one validated consumer identity.
     fn normalize_identity(&mut self) -> Result<(), JsError> {
         let name = Self::validate_consumer_name("name", self.name.as_deref())?;
@@ -928,7 +937,7 @@ impl JetStreamContext {
     ) -> Result<Consumer, JsError> {
         cx.checkpoint().map_err(|_| NatsError::Cancelled)?;
 
-        config.normalize_identity()?;
+        config.validate()?;
         let consumer_name = config.name.clone().unwrap_or_default();
         let subject = if consumer_name.is_empty() {
             format!("{}.CONSUMER.CREATE.{}", self.prefix, stream)
@@ -1494,6 +1503,23 @@ pub fn fuzz_normalize_consumer_identity(
     config.name = name.map(ToOwned::to_owned);
     config.durable_name = durable_name.map(ToOwned::to_owned);
     config.normalize_identity()?;
+    Ok(config.name)
+}
+
+/// Conformance-target re-exporter for the full JetStream ConsumerConfig
+/// validation boundary used by `create_consumer`.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_validate_consumer_config(
+    name: Option<&str>,
+    durable_name: Option<&str>,
+    filter_subject: Option<&str>,
+) -> Result<Option<String>, String> {
+    let mut config = ConsumerConfig::ephemeral();
+    config.name = name.map(ToOwned::to_owned);
+    config.durable_name = durable_name.map(ToOwned::to_owned);
+    config.filter_subject = filter_subject.map(ToOwned::to_owned);
+    config.validate().map_err(|err| err.to_string())?;
     Ok(config.name)
 }
 
@@ -2146,6 +2172,17 @@ mod tests {
             err.to_string()
                 .contains("consumer name contains prohibited characters")
         );
+    }
+
+    #[test]
+    fn consumer_config_validate_rejects_invalid_filter_subject_tick140() {
+        let mut cfg = ConsumerConfig::new("worker");
+        cfg.filter_subject = Some("orders.>.archived".into());
+
+        let err = cfg.validate().unwrap_err();
+        assert!(matches!(err, JsError::InvalidConfig(_)));
+        assert!(err.to_string().contains("filter_subject"));
+        assert!(err.to_string().contains("invalid NATS wildcard placement"));
     }
 
     #[test]

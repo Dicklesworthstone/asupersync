@@ -50,9 +50,10 @@
 
 use asupersync::cx::Cx;
 use asupersync::messaging::jetstream::{
-    AckPolicy, ConsumerConfig, DeliverPolicy, JetStreamContext,
+    AckPolicy, ConsumerConfig, DeliverPolicy, JetStreamContext, fuzz_normalize_consumer_identity,
+    fuzz_validate_consumer_config,
 };
-use asupersync::messaging::nats::NatsClient;
+use asupersync::messaging::nats::{NatsClient, fuzz_validate_nats_subscription_pattern};
 use asupersync::runtime::RuntimeBuilder;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
@@ -409,4 +410,79 @@ fn jetstream_pull_request_carries_batch_and_expires_in_nanos_vu86e3() {
         body.contains("\"expires\":2000000000"),
         "pull body must encode expires in nanoseconds (2s -> 2_000_000_000), got: {body}"
     );
+}
+
+#[test]
+fn consumer_config_validator_matches_nats_filter_reference_tick140() {
+    let cases = [
+        (Some("processor"), None, None),
+        (Some("processor"), None, Some("orders.created")),
+        (Some("processor"), None, Some("orders.*")),
+        (Some("processor"), None, Some("orders.>")),
+        (Some("processor"), None, Some("orders.>.archived")),
+        (Some("processor"), None, Some("orders..archived")),
+        (
+            Some("processor"),
+            None,
+            Some("orders\r\nPUB injected 0\r\n"),
+        ),
+        (Some("processor"), Some("processor"), Some("orders.*")),
+        (Some("processor"), Some("processor-v2"), Some("orders.*")),
+        (Some("worker.bad"), None, Some("orders.*")),
+        (None, Some("durable"), Some(">")),
+    ];
+
+    for (name, durable_name, filter_subject) in cases {
+        let actual = fuzz_validate_consumer_config(name, durable_name, filter_subject);
+
+        let expected_identity =
+            fuzz_normalize_consumer_identity(name, durable_name).map_err(|err| err.to_string());
+        let expected = match (expected_identity, filter_subject) {
+            (Err(err), _) => Err(err),
+            (Ok(canonical_name), Some(subject)) => {
+                fuzz_validate_nats_subscription_pattern(subject).map(|()| canonical_name)
+            }
+            (Ok(canonical_name), None) => Ok(canonical_name),
+        };
+
+        assert_eq!(
+            actual.is_ok(),
+            expected.is_ok(),
+            "ConsumerConfig accept/reject drifted for name={name:?} durable_name={durable_name:?} filter_subject={filter_subject:?}: actual={actual:?} expected={expected:?}"
+        );
+
+        match (actual, expected) {
+            (Ok(actual_name), Ok(expected_name)) => {
+                assert_eq!(
+                    actual_name, expected_name,
+                    "canonical consumer identity drifted for name={name:?} durable_name={durable_name:?} filter_subject={filter_subject:?}"
+                );
+            }
+            (Err(actual_err), Err(expected_err)) => {
+                if let Some(filter_subject) = filter_subject {
+                    let expected_filter_failure =
+                        fuzz_validate_nats_subscription_pattern(filter_subject).is_err();
+                    if expected_filter_failure && expected_identity_is_ok(name, durable_name) {
+                        assert!(
+                            actual_err.contains("filter_subject"),
+                            "filter-subject parity failure must surface the field name, got {actual_err:?}"
+                        );
+                    }
+                }
+                assert!(
+                    !actual_err.trim().is_empty(),
+                    "actual validator returned an empty error for name={name:?} durable_name={durable_name:?} filter_subject={filter_subject:?}"
+                );
+                assert!(
+                    !expected_err.trim().is_empty(),
+                    "reference validator returned an empty error for name={name:?} durable_name={durable_name:?} filter_subject={filter_subject:?}"
+                );
+            }
+            _ => unreachable!("accept/reject parity checked above"),
+        }
+    }
+}
+
+fn expected_identity_is_ok(name: Option<&str>, durable_name: Option<&str>) -> bool {
+    fuzz_normalize_consumer_identity(name, durable_name).is_ok()
 }
