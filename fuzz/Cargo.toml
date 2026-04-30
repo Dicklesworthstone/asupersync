@@ -1543,6 +1543,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h2_settings_frame_multiplicity"
+path = "fuzz_targets/h2_settings_frame_multiplicity.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_ping_mismatched_ack"
+path = "fuzz_targets/h2_ping_mismatched_ack.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "symbol_auth"
 path = "fuzz_targets/symbol_auth.rs"
 test = false
@@ -3330,6 +3344,17 @@ bench = false
 [[bin]]
 name = "rwlock_poison_writer_panic"
 path = "fuzz_targets/rwlock_poison_writer_panic.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #170 — Oneshot receiver cancel-during-await race condition testing
+# Tests arbitrary cancellation timing during receiver await operations to verify receiver gets
+# either Cancelled OR value, never both. Validates cancel-safety and proper race resolution.
+# Exercises concurrent send/cancel patterns with multiple timing variations.
+[[bin]]
+name = "oneshot_receiver_cancel_race"
+path = "fuzz_targets/oneshot_receiver_cancel_race.rs"
 test = false
 doc = false
 bench = false
