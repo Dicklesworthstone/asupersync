@@ -28,7 +28,7 @@ const LARGE_K_THRESHOLD: usize = 842;
 const SMALL_K_CANDIDATES: &[usize] = &[1, 2, 3, 4, 7, 8, 15, 16, 17, 31, 32, 33];
 const MEDIUM_K_CANDIDATES: &[usize] =
     &[42, 63, 64, 65, 127, 128, 129, 255, 256, 257, 511, 512, 513];
-const LARGE_K_CANDIDATES: &[usize] = &[842, 1023, 1024, 1025, 2047, 2048, 2049, 4096, 8192];
+const LARGE_K_CANDIDATES: &[usize] = &[842, 1023, 1024, 1025, 2047, 2048, 2049, 4096, 8192, 16384];
 const SMALL_SYMBOL_SIZE_CANDIDATES: &[usize] =
     &[1, 2, 3, 4, 7, 8, 15, 16, 31, 32, 63, 64, 127, 128, 255, 256];
 const LARGE_SYMBOL_SIZE_CANDIDATES: &[usize] = &[1, 2, 3, 4, 8, 16, 32];
@@ -226,25 +226,36 @@ fn spread_missing_columns(
     k: usize,
     fallback_count: usize,
 ) -> Vec<usize> {
-    if k == 0 {
-        return Vec::new();
-    }
-
     let target_count = if missing_sources.is_empty() {
         fallback_count.clamp(1, k)
     } else {
         missing_sources.len().min(k)
     };
+    spread_missing_columns_exact_count(seed, missing_sources, k, target_count)
+}
+
+fn spread_missing_columns_exact_count(
+    seed: u64,
+    missing_sources: &[u8],
+    k: usize,
+    target_count: usize,
+) -> Vec<usize> {
+    if k == 0 {
+        return Vec::new();
+    }
+
+    let target_count = target_count.clamp(1, k);
     let start = seed as usize % k;
     let stride = (((seed.rotate_left(17) as usize) | 1) % k.max(2)).max(1);
     let mut used = vec![false; k];
     let mut columns = Vec::with_capacity(target_count);
 
     for offset in 0..target_count {
-        let raw = missing_sources
-            .get(offset)
-            .copied()
-            .unwrap_or_else(|| seed.wrapping_add(offset as u64) as u8);
+        let raw = if missing_sources.is_empty() {
+            seed.wrapping_add(offset as u64) as u8
+        } else {
+            missing_sources[offset % missing_sources.len()]
+        };
         let mut candidate =
             (start + offset.saturating_mul(stride) + usize::from(raw).saturating_mul(17)) % k;
         while used[candidate] {
@@ -391,9 +402,7 @@ fn apply_reorder(packets: &mut [ReceivedSymbol], reorder: PacketReorder) {
 
 fn nontrivial_reorder(reorder: PacketReorder, seed: u64) -> PacketReorder {
     match reorder {
-        PacketReorder::Preserve => PacketReorder::Rotate {
-            by: seed as u8 | 1,
-        },
+        PacketReorder::Preserve => PacketReorder::Rotate { by: seed as u8 | 1 },
         other => other,
     }
 }
@@ -719,17 +728,38 @@ fn assert_k4096_burst_loss_recovers(
     }
 
     let params = decoder.params();
-    assert_eq!(params.k, 4096, "K=4096 burst oracle must preserve the public K");
+    assert_eq!(
+        params.k, 4096,
+        "K=4096 burst oracle must preserve the public K"
+    );
     assert_eq!(
         params.k_prime, 4112,
         "K=4096 burst oracle must pin the rounded RFC row"
     );
-    assert_eq!(params.j, 726, "K=4096 burst oracle must pin the RFC J(K') value");
-    assert_eq!(params.s, 137, "K=4096 burst oracle must pin the RFC S(K') value");
-    assert_eq!(params.h, 11, "K=4096 burst oracle must pin the RFC H(K') value");
-    assert_eq!(params.w, 4159, "K=4096 burst oracle must pin the RFC W(K') value");
-    assert_eq!(params.l, 4260, "K=4096 burst oracle must pin the RFC L value");
-    assert_eq!(params.b, 4022, "K=4096 burst oracle must pin the RFC B value");
+    assert_eq!(
+        params.j, 726,
+        "K=4096 burst oracle must pin the RFC J(K') value"
+    );
+    assert_eq!(
+        params.s, 137,
+        "K=4096 burst oracle must pin the RFC S(K') value"
+    );
+    assert_eq!(
+        params.h, 11,
+        "K=4096 burst oracle must pin the RFC H(K') value"
+    );
+    assert_eq!(
+        params.w, 4159,
+        "K=4096 burst oracle must pin the RFC W(K') value"
+    );
+    assert_eq!(
+        params.l, 4260,
+        "K=4096 burst oracle must pin the RFC L value"
+    );
+    assert_eq!(
+        params.b, 4022,
+        "K=4096 burst oracle must pin the RFC B value"
+    );
 
     let scenarios = [
         (
@@ -801,17 +831,38 @@ fn assert_k8192_tail_burst_loss_recovers(
     }
 
     let params = decoder.params();
-    assert_eq!(params.k, 8192, "K=8192 burst oracle must preserve the public K");
+    assert_eq!(
+        params.k, 8192,
+        "K=8192 burst oracle must preserve the public K"
+    );
     assert_eq!(
         params.k_prime, 8194,
         "K=8192 burst oracle must pin the rounded RFC row"
     );
-    assert_eq!(params.j, 212, "K=8192 burst oracle must pin the RFC J(K') value");
-    assert_eq!(params.s, 211, "K=8192 burst oracle must pin the RFC S(K') value");
-    assert_eq!(params.h, 11, "K=8192 burst oracle must pin the RFC H(K') value");
-    assert_eq!(params.w, 8273, "K=8192 burst oracle must pin the RFC W(K') value");
-    assert_eq!(params.l, 8416, "K=8192 burst oracle must pin the RFC L value");
-    assert_eq!(params.b, 8062, "K=8192 burst oracle must pin the RFC B value");
+    assert_eq!(
+        params.j, 212,
+        "K=8192 burst oracle must pin the RFC J(K') value"
+    );
+    assert_eq!(
+        params.s, 211,
+        "K=8192 burst oracle must pin the RFC S(K') value"
+    );
+    assert_eq!(
+        params.h, 11,
+        "K=8192 burst oracle must pin the RFC H(K') value"
+    );
+    assert_eq!(
+        params.w, 8273,
+        "K=8192 burst oracle must pin the RFC W(K') value"
+    );
+    assert_eq!(
+        params.l, 8416,
+        "K=8192 burst oracle must pin the RFC L value"
+    );
+    assert_eq!(
+        params.b, 8062,
+        "K=8192 burst oracle must pin the RFC B value"
+    );
 
     let tail_start = |tail_offset: usize, jitter: u16| -> u16 {
         source
@@ -895,20 +946,42 @@ fn assert_k8192_reorder_and_duplicates_recover(
     }
 
     let params = decoder.params();
-    assert_eq!(params.k, 8192, "K=8192 duplicate oracle must preserve the public K");
+    assert_eq!(
+        params.k, 8192,
+        "K=8192 duplicate oracle must preserve the public K"
+    );
     assert_eq!(
         params.k_prime, 8194,
         "K=8192 duplicate oracle must pin the rounded RFC row"
     );
-    assert_eq!(params.j, 212, "K=8192 duplicate oracle must pin the RFC J(K') value");
-    assert_eq!(params.s, 211, "K=8192 duplicate oracle must pin the RFC S(K') value");
-    assert_eq!(params.h, 11, "K=8192 duplicate oracle must pin the RFC H(K') value");
-    assert_eq!(params.w, 8273, "K=8192 duplicate oracle must pin the RFC W(K') value");
-    assert_eq!(params.l, 8416, "K=8192 duplicate oracle must pin the RFC L value");
-    assert_eq!(params.b, 8062, "K=8192 duplicate oracle must pin the RFC B value");
+    assert_eq!(
+        params.j, 212,
+        "K=8192 duplicate oracle must pin the RFC J(K') value"
+    );
+    assert_eq!(
+        params.s, 211,
+        "K=8192 duplicate oracle must pin the RFC S(K') value"
+    );
+    assert_eq!(
+        params.h, 11,
+        "K=8192 duplicate oracle must pin the RFC H(K') value"
+    );
+    assert_eq!(
+        params.w, 8273,
+        "K=8192 duplicate oracle must pin the RFC W(K') value"
+    );
+    assert_eq!(
+        params.l, 8416,
+        "K=8192 duplicate oracle must pin the RFC L value"
+    );
+    assert_eq!(
+        params.b, 8062,
+        "K=8192 duplicate oracle must pin the RFC B value"
+    );
 
     let ec_overhead = extra_repairs.saturating_add(12);
-    let missing_columns = spread_missing_columns(seed.rotate_left(7), missing_sources, source.len(), 24);
+    let missing_columns =
+        spread_missing_columns(seed.rotate_left(7), missing_sources, source.len(), 24);
     let Some(mut payload_packets) = build_exact_overhead_packets(
         decoder,
         encoder,
@@ -1016,17 +1089,38 @@ fn assert_k2048_exact_overhead_repairs_recover(
     }
 
     let params = decoder.params();
-    assert_eq!(params.k, 2048, "K=2048 decoder oracle must preserve the public K");
+    assert_eq!(
+        params.k, 2048,
+        "K=2048 decoder oracle must preserve the public K"
+    );
     assert_eq!(
         params.k_prime, 2070,
         "K=2048 decoder oracle must pin the rounded RFC row"
     );
-    assert_eq!(params.j, 506, "K=2048 decoder oracle must pin the RFC J(K') value");
-    assert_eq!(params.s, 89, "K=2048 decoder oracle must pin the RFC S(K') value");
-    assert_eq!(params.h, 11, "K=2048 decoder oracle must pin the RFC H(K') value");
-    assert_eq!(params.w, 2099, "K=2048 decoder oracle must pin the RFC W(K') value");
-    assert_eq!(params.l, 2170, "K=2048 decoder oracle must pin the RFC L value");
-    assert_eq!(params.b, 2010, "K=2048 decoder oracle must pin the RFC B value");
+    assert_eq!(
+        params.j, 506,
+        "K=2048 decoder oracle must pin the RFC J(K') value"
+    );
+    assert_eq!(
+        params.s, 89,
+        "K=2048 decoder oracle must pin the RFC S(K') value"
+    );
+    assert_eq!(
+        params.h, 11,
+        "K=2048 decoder oracle must pin the RFC H(K') value"
+    );
+    assert_eq!(
+        params.w, 2099,
+        "K=2048 decoder oracle must pin the RFC W(K') value"
+    );
+    assert_eq!(
+        params.l, 2170,
+        "K=2048 decoder oracle must pin the RFC L value"
+    );
+    assert_eq!(
+        params.b, 2010,
+        "K=2048 decoder oracle must pin the RFC B value"
+    );
     assert!(
         params.k_prime > params.k,
         "K=2048 decoder oracle must exercise rounded K..K' synthesis"
@@ -1047,7 +1141,10 @@ fn assert_k2048_exact_overhead_repairs_recover(
         return;
     };
 
-    let repair_count = payload_packets.iter().filter(|packet| !packet.is_source).count();
+    let repair_count = payload_packets
+        .iter()
+        .filter(|packet| !packet.is_source)
+        .count();
     assert_eq!(
         repair_count,
         missing_columns.len().saturating_add(ec_overhead),
@@ -1091,17 +1188,38 @@ fn assert_k4096_exact_overhead_repairs_recover(
     }
 
     let params = decoder.params();
-    assert_eq!(params.k, 4096, "K=4096 decoder oracle must preserve the public K");
+    assert_eq!(
+        params.k, 4096,
+        "K=4096 decoder oracle must preserve the public K"
+    );
     assert_eq!(
         params.k_prime, 4112,
         "K=4096 decoder oracle must pin the rounded RFC row"
     );
-    assert_eq!(params.j, 726, "K=4096 decoder oracle must pin the RFC J(K') value");
-    assert_eq!(params.s, 137, "K=4096 decoder oracle must pin the RFC S(K') value");
-    assert_eq!(params.h, 11, "K=4096 decoder oracle must pin the RFC H(K') value");
-    assert_eq!(params.w, 4159, "K=4096 decoder oracle must pin the RFC W(K') value");
-    assert_eq!(params.l, 4260, "K=4096 decoder oracle must pin the RFC L value");
-    assert_eq!(params.b, 4022, "K=4096 decoder oracle must pin the RFC B value");
+    assert_eq!(
+        params.j, 726,
+        "K=4096 decoder oracle must pin the RFC J(K') value"
+    );
+    assert_eq!(
+        params.s, 137,
+        "K=4096 decoder oracle must pin the RFC S(K') value"
+    );
+    assert_eq!(
+        params.h, 11,
+        "K=4096 decoder oracle must pin the RFC H(K') value"
+    );
+    assert_eq!(
+        params.w, 4159,
+        "K=4096 decoder oracle must pin the RFC W(K') value"
+    );
+    assert_eq!(
+        params.l, 4260,
+        "K=4096 decoder oracle must pin the RFC L value"
+    );
+    assert_eq!(
+        params.b, 4022,
+        "K=4096 decoder oracle must pin the RFC B value"
+    );
     assert!(
         params.k_prime > params.k,
         "K=4096 decoder oracle must exercise rounded K..K' synthesis"
@@ -1122,7 +1240,10 @@ fn assert_k4096_exact_overhead_repairs_recover(
         return;
     };
 
-    let repair_count = payload_packets.iter().filter(|packet| !packet.is_source).count();
+    let repair_count = payload_packets
+        .iter()
+        .filter(|packet| !packet.is_source)
+        .count();
     assert_eq!(
         repair_count,
         missing_columns.len().saturating_add(ec_overhead),
@@ -1147,6 +1268,114 @@ fn assert_k4096_exact_overhead_repairs_recover(
     assert_eq!(
         decoded.source, source,
         "K=4096 exact-overhead repair patterns must recover original source"
+    );
+}
+
+fn assert_k16384_half_loss_repairs_recover(
+    decoder: &InactivationDecoder,
+    encoder: &SystematicEncoder,
+    source: &[Vec<u8>],
+    seed: u64,
+    missing_sources: &[u8],
+    extra_repairs: usize,
+    repair_distribution: RepairDistribution,
+    wavefront_batch: usize,
+    object_id: ObjectId,
+) {
+    if source.len() != 16384 {
+        return;
+    }
+
+    let params = decoder.params();
+    assert_eq!(
+        params.k, 16384,
+        "K=16384 decoder oracle must preserve the public K"
+    );
+    assert_eq!(
+        params.k_prime, 16505,
+        "K=16384 decoder oracle must pin the rounded RFC row"
+    );
+    assert_eq!(
+        params.j, 732,
+        "K=16384 decoder oracle must pin the RFC J(K') value"
+    );
+    assert_eq!(
+        params.s, 347,
+        "K=16384 decoder oracle must pin the RFC S(K') value"
+    );
+    assert_eq!(
+        params.h, 12,
+        "K=16384 decoder oracle must pin the RFC H(K') value"
+    );
+    assert_eq!(
+        params.w, 16661,
+        "K=16384 decoder oracle must pin the RFC W(K') value"
+    );
+    assert_eq!(
+        params.l, 16864,
+        "K=16384 decoder oracle must pin the RFC L value"
+    );
+    assert_eq!(
+        params.b, 16314,
+        "K=16384 decoder oracle must pin the RFC B value"
+    );
+    assert!(
+        params.k_prime > params.k,
+        "K=16384 decoder oracle must exercise rounded K..K' synthesis"
+    );
+
+    let missing_count = source.len() / 2;
+    let ec_overhead = extra_repairs.saturating_add(16);
+    let missing_columns =
+        spread_missing_columns_exact_count(seed, missing_sources, source.len(), missing_count);
+    let Some(payload_packets) = build_exact_overhead_packets(
+        decoder,
+        encoder,
+        source,
+        &missing_columns,
+        ec_overhead,
+        repair_distribution,
+    ) else {
+        return;
+    };
+
+    let repair_count = payload_packets
+        .iter()
+        .filter(|packet| !packet.is_source)
+        .count();
+    assert_eq!(
+        missing_columns.len(),
+        missing_count,
+        "K=16384 oracle must hold the source loss rate at exactly 50%"
+    );
+    assert_eq!(
+        repair_count,
+        missing_count.saturating_add(ec_overhead),
+        "K=16384 oracle must emit one repair per erasure plus EC overhead"
+    );
+    assert_eq!(
+        payload_packets.len(),
+        source.len().saturating_add(ec_overhead),
+        "K=16384 oracle must keep the received payload budget at K+overhead"
+    );
+    assert!(
+        payload_packets.len() >= source.len(),
+        "K=16384 oracle must only assert decode once total received payload is at least K"
+    );
+
+    let received = combine_symbols(decoder, &payload_packets);
+    let batch = if received.is_empty() {
+        0
+    } else {
+        wavefront_batch % (received.len() + 1)
+    };
+    assert_decode_consensus(decoder, &received, source, batch, object_id);
+    let decoded = decoder
+        .decode(&received)
+        .expect("K=16384 half-loss repair patterns must remain decodable");
+    assert_eq!(
+        decoded.source, source,
+        "K=16384 half-loss repair patterns must recover original source"
     );
 }
 
@@ -1277,15 +1506,30 @@ fn assert_k16_low_intermediate_sparse_vs_dense_repairs_recover(
     }
 
     let params = decoder.params();
-    assert_eq!(params.k, 16, "K=16 decoder oracle must preserve the public K");
+    assert_eq!(
+        params.k, 16,
+        "K=16 decoder oracle must preserve the public K"
+    );
     assert_eq!(
         params.k_prime, 18,
         "K=16 decoder oracle must stay on the second padded RFC row"
     );
-    assert_eq!(params.j, 682, "K=16 decoder oracle must pin the RFC J(K') value");
-    assert_eq!(params.s, 11, "K=16 decoder oracle must pin the RFC S(K') value");
-    assert_eq!(params.h, 10, "K=16 decoder oracle must pin the RFC H(K') value");
-    assert_eq!(params.w, 29, "K=16 decoder oracle must pin the RFC W(K') value");
+    assert_eq!(
+        params.j, 682,
+        "K=16 decoder oracle must pin the RFC J(K') value"
+    );
+    assert_eq!(
+        params.s, 11,
+        "K=16 decoder oracle must pin the RFC S(K') value"
+    );
+    assert_eq!(
+        params.h, 10,
+        "K=16 decoder oracle must pin the RFC H(K') value"
+    );
+    assert_eq!(
+        params.w, 29,
+        "K=16 decoder oracle must pin the RFC W(K') value"
+    );
     assert_eq!(params.l, 39, "K=16 decoder oracle must pin the RFC L value");
     assert_eq!(params.b, 18, "K=16 decoder oracle must pin the RFC B value");
     assert!(
@@ -1485,6 +1729,18 @@ fuzz_target!(|data: &[u8]| {
         object_id,
     );
 
+    assert_k16384_half_loss_repairs_recover(
+        &decoder,
+        &encoder,
+        &source,
+        input.seed,
+        &input.missing_sources,
+        input.extra_repairs as usize,
+        input.repair_distribution,
+        input.wavefront_batch as usize,
+        object_id,
+    );
+
     assert_decode_consensus(
         &decoder,
         &baseline_received,
@@ -1560,16 +1816,17 @@ fuzz_target!(|data: &[u8]| {
 mod tests {
     use super::{
         LARGE_K_CANDIDATES, LARGE_K_THRESHOLD, LARGE_SYMBOL_SIZE_CANDIDATES, LossWindow,
-        MEDIUM_K_CANDIDATES, MutationKind, PacketMutation, RepairDistribution, SMALL_K_CANDIDATES,
-        SMALL_SYMBOL_SIZE_CANDIDATES, PacketReorder, append_duplicate_packets,
+        MEDIUM_K_CANDIDATES, MutationKind, PacketMutation, PacketReorder, RepairDistribution,
+        SMALL_K_CANDIDATES, SMALL_SYMBOL_SIZE_CANDIDATES, append_duplicate_packets,
         apply_contiguous_loss_windows, apply_mutations, build_repair_esi_sequence,
-        burst_repair_count, count_duplicate_packets, k16_low_intermediate_missing_sources,
-        k4_transition_missing_sources, k8_low_intermediate_missing_sources,
+        burst_repair_count, count_duplicate_packets, k4_transition_missing_sources,
+        k8_low_intermediate_missing_sources, k16_low_intermediate_missing_sources,
         nontrivial_reorder, repair_stress_missing_sources, select_k_candidate,
         select_symbol_size_candidate, sparse_repair_stride, spread_missing_columns,
+        spread_missing_columns_exact_count,
     };
-    use asupersync::raptorq::gf256::Gf256;
     use asupersync::raptorq::decoder::ReceivedSymbol;
+    use asupersync::raptorq::gf256::Gf256;
 
     #[test]
     fn k_selector_can_reach_large_rfc_boundary_profiles() {
@@ -1647,6 +1904,23 @@ mod tests {
     }
 
     #[test]
+    fn k_selector_includes_large_k_16384_edge_case() {
+        assert!(
+            LARGE_K_CANDIDATES.contains(&16384),
+            "large-K candidate set must include the K=16384 half-loss profile"
+        );
+        let selector = 8 * LARGE_K_CANDIDATES
+            .iter()
+            .position(|&candidate| candidate == 16384)
+            .expect("K=16384 must be selectable");
+        assert_eq!(
+            select_k_candidate(selector),
+            16384,
+            "selector normalization must be able to reach K=16384"
+        );
+    }
+
+    #[test]
     fn k_selector_includes_k42_burst_profile() {
         assert!(
             MEDIUM_K_CANDIDATES.contains(&42),
@@ -1689,6 +1963,14 @@ mod tests {
     }
 
     #[test]
+    fn symbol_size_selector_keeps_k16384_targets_within_budget() {
+        let symbol_size = select_symbol_size_candidate(6, 16384, 64 * 1024);
+        assert_eq!(symbol_size, 4);
+        assert!(LARGE_SYMBOL_SIZE_CANDIDATES.contains(&symbol_size));
+        assert!(16384usize.saturating_mul(symbol_size) <= 64 * 1024);
+    }
+
+    #[test]
     fn symbol_size_selector_preserves_small_block_edge_sizes() {
         let symbol_size = select_symbol_size_candidate(15, 16, 64 * 1024);
         assert_eq!(symbol_size, 256);
@@ -1728,7 +2010,10 @@ mod tests {
         let repair_count = burst_repair_count(
             &[
                 LossWindow { start: 0, len: 511 },
-                LossWindow { start: 17, len: 255 },
+                LossWindow {
+                    start: 17,
+                    len: 255,
+                },
             ],
             12,
             4096,
@@ -1741,7 +2026,10 @@ mod tests {
         let repair_count = burst_repair_count(
             &[
                 LossWindow { start: 0, len: 767 },
-                LossWindow { start: 31, len: 127 },
+                LossWindow {
+                    start: 31,
+                    len: 127,
+                },
             ],
             28,
             8192,
@@ -1825,6 +2113,19 @@ mod tests {
     }
 
     #[test]
+    fn spread_missing_columns_exact_count_reaches_half_of_k16384() {
+        let columns = spread_missing_columns_exact_count(0x16384BAD, &[1, 2, 3, 4], 16384, 8192);
+        let unique: std::collections::BTreeSet<_> = columns.iter().copied().collect();
+        assert_eq!(columns.len(), 8192);
+        assert_eq!(unique.len(), 8192);
+        assert!(columns.iter().all(|column| *column < 16384));
+        assert!(
+            columns.iter().any(|column| *column >= 8192),
+            "K=16384 half-loss spread must reach beyond the first half of the block"
+        );
+    }
+
+    #[test]
     fn k4_transition_missing_sources_wraps_contiguously() {
         assert_eq!(k4_transition_missing_sources(0, 0), Vec::<u8>::new());
         assert_eq!(k4_transition_missing_sources(0, 3), vec![0, 1, 2]);
@@ -1849,10 +2150,7 @@ mod tests {
     #[test]
     fn k16_low_intermediate_missing_sources_wraps_contiguously() {
         assert_eq!(k16_low_intermediate_missing_sources(0, 0), Vec::<u8>::new());
-        assert_eq!(
-            k16_low_intermediate_missing_sources(0, 4),
-            vec![0, 1, 2, 3]
-        );
+        assert_eq!(k16_low_intermediate_missing_sources(0, 4), vec![0, 1, 2, 3]);
         assert_eq!(
             k16_low_intermediate_missing_sources(15, 16),
             vec![15, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
