@@ -11,9 +11,11 @@
 //! source+repair packets. Whenever at least `K` payload packets survive, decode
 //! must still recover the original source block. Dedicated large-K lanes pin
 //! exact RFC rows and assert successful recovery from exact `K+overhead`
-//! payload budgets under dense and sparse repair schedules.
+//! payload budgets under dense and sparse repair schedules. The K=512 lane
+//! pins packet-order invariance under a nontrivial reorder before decode.
 
 #![no_main]
+#![allow(clippy::too_many_arguments)]
 
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
@@ -125,7 +127,7 @@ impl DecoderPacketInput {
 fn select_k_candidate(selector: usize) -> usize {
     let candidates = match selector % 8 {
         0 | 1 => LARGE_K_CANDIDATES,
-        2 | 3 | 4 => MEDIUM_K_CANDIDATES,
+        2..=4 => MEDIUM_K_CANDIDATES,
         _ => SMALL_K_CANDIDATES,
     };
     candidates[(selector / 8) % candidates.len()]
@@ -406,7 +408,10 @@ fn apply_reorder(packets: &mut [ReceivedSymbol], reorder: PacketReorder) {
 
 fn nontrivial_reorder(reorder: PacketReorder, seed: u64) -> PacketReorder {
     match reorder {
-        PacketReorder::Preserve => PacketReorder::Rotate { by: seed as u8 | 1 },
+        PacketReorder::Preserve | PacketReorder::SortByEsi => {
+            PacketReorder::Rotate { by: seed as u8 | 1 }
+        }
+        PacketReorder::Rotate { by: 0 } => PacketReorder::Rotate { by: 1 },
         other => other,
     }
 }
@@ -874,6 +879,108 @@ fn assert_k42_mixed_repair_packet_sizes_handled(
     if let Err(err) = decoder.decode(&received) {
         assert_recoverable_or_unrecoverable(&err);
     }
+}
+
+fn assert_k512_reorder_exact_overhead_repairs_recover(
+    decoder: &InactivationDecoder,
+    encoder: &SystematicEncoder,
+    source: &[Vec<u8>],
+    seed: u64,
+    missing_sources: &[u8],
+    ec_overhead: usize,
+    repair_distribution: RepairDistribution,
+    reorder: PacketReorder,
+    wavefront_batch: usize,
+    object_id: ObjectId,
+) {
+    if source.len() != 512 {
+        return;
+    }
+
+    let params = decoder.params();
+    assert_eq!(
+        params.k, 512,
+        "K=512 reorder oracle must preserve the public K"
+    );
+    assert_eq!(
+        params.k_prime, 526,
+        "K=512 reorder oracle must pin the rounded RFC row"
+    );
+    assert_eq!(
+        params.j, 923,
+        "K=512 reorder oracle must pin the RFC J(K') value"
+    );
+    assert_eq!(
+        params.s, 41,
+        "K=512 reorder oracle must pin the RFC S(K') value"
+    );
+    assert_eq!(
+        params.h, 10,
+        "K=512 reorder oracle must pin the RFC H(K') value"
+    );
+    assert_eq!(
+        params.w, 541,
+        "K=512 reorder oracle must pin the RFC W(K') value"
+    );
+    assert_eq!(
+        params.l, 577,
+        "K=512 reorder oracle must pin the RFC L value"
+    );
+    assert_eq!(
+        params.b, 500,
+        "K=512 reorder oracle must pin the RFC B value"
+    );
+    assert!(
+        params.k_prime > params.k,
+        "K=512 reorder oracle must exercise rounded K..K' synthesis"
+    );
+
+    let ec_overhead = ec_overhead.saturating_add(8);
+    let missing_columns = spread_missing_columns(seed.rotate_left(5), missing_sources, 512, 12);
+    let Some(mut payload_packets) = build_exact_overhead_packets(
+        decoder,
+        encoder,
+        source,
+        &missing_columns,
+        ec_overhead,
+        repair_distribution,
+    ) else {
+        return;
+    };
+
+    let repair_count = payload_packets
+        .iter()
+        .filter(|packet| !packet.is_source)
+        .count();
+    assert_eq!(
+        repair_count,
+        missing_columns.len().saturating_add(ec_overhead),
+        "K=512 reorder oracle must emit one repair per erasure plus EC overhead"
+    );
+    assert_eq!(
+        payload_packets.len(),
+        source.len().saturating_add(ec_overhead),
+        "K=512 reorder oracle must keep the received payload budget at K+overhead"
+    );
+
+    apply_reorder(
+        &mut payload_packets,
+        nontrivial_reorder(reorder, seed.rotate_left(31)),
+    );
+    let received = combine_symbols(decoder, &payload_packets);
+    let batch = if received.is_empty() {
+        0
+    } else {
+        wavefront_batch % (received.len() + 1)
+    };
+    assert_decode_consensus(decoder, &received, source, batch, object_id);
+    let decoded = decoder
+        .decode(&received)
+        .expect("K=512 reordered exact-overhead repair patterns must remain decodable");
+    assert_eq!(
+        decoded.source, source,
+        "K=512 reordered exact-overhead repair patterns must recover original source"
+    );
 }
 
 fn assert_k4096_burst_loss_recovers(
@@ -1808,6 +1915,19 @@ fuzz_target!(|data: &[u8]| {
         object_id,
     );
 
+    assert_k512_reorder_exact_overhead_repairs_recover(
+        &decoder,
+        &encoder,
+        &source,
+        input.seed,
+        &input.missing_sources,
+        input.extra_repairs as usize,
+        input.repair_distribution,
+        input.reorder,
+        input.wavefront_batch as usize,
+        object_id,
+    );
+
     assert_k4096_burst_loss_recovers(
         &decoder,
         &encoder,
@@ -1994,15 +2114,18 @@ mod tests {
         MEDIUM_K_CANDIDATES, MutationKind, PacketMutation, PacketReorder, RepairDistribution,
         SMALL_K_CANDIDATES, SMALL_SYMBOL_SIZE_CANDIDATES, append_duplicate_packets,
         apply_contiguous_loss_windows, apply_mixed_repair_packet_sizes, apply_mutations,
-        build_repair_esi_sequence, burst_repair_count, count_duplicate_packets,
+        assert_k512_reorder_exact_overhead_repairs_recover, build_repair_esi_sequence,
+        build_source_block, burst_repair_count, count_duplicate_packets,
         k4_transition_missing_sources, k8_low_intermediate_missing_sources,
         k16_low_intermediate_missing_sources, max_repair_payload_len, nontrivial_reorder,
         repair_stress_missing_sources, select_k_candidate, select_repair_payload_len,
         select_symbol_size_candidate, sparse_repair_stride, spread_missing_columns,
         spread_missing_columns_exact_count,
     };
-    use asupersync::raptorq::decoder::ReceivedSymbol;
+    use asupersync::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
     use asupersync::raptorq::gf256::Gf256;
+    use asupersync::raptorq::systematic::SystematicEncoder;
+    use asupersync::types::ObjectId;
 
     #[test]
     fn k_selector_can_reach_large_rfc_boundary_profiles() {
@@ -2111,6 +2234,24 @@ mod tests {
             select_k_candidate(selector),
             42,
             "selector normalization must be able to reach K=42"
+        );
+    }
+
+    #[test]
+    fn k_selector_includes_k512_reorder_profile() {
+        assert!(
+            MEDIUM_K_CANDIDATES.contains(&512),
+            "medium-K candidate set must include the K=512 reorder profile"
+        );
+        let selector = 8 * MEDIUM_K_CANDIDATES
+            .iter()
+            .position(|&candidate| candidate == 512)
+            .expect("K=512 must be selectable")
+            + 2;
+        assert_eq!(
+            select_k_candidate(selector),
+            512,
+            "selector normalization must be able to reach K=512"
         );
     }
 
@@ -2228,6 +2369,14 @@ mod tests {
             PacketReorder::Rotate { by } => assert_ne!(by, 0),
             other => panic!("expected preserve to promote to rotate, got {other:?}"),
         }
+        match nontrivial_reorder(PacketReorder::SortByEsi, 0) {
+            PacketReorder::Rotate { by } => assert_ne!(by, 0),
+            other => panic!("expected sorted order to promote to rotate, got {other:?}"),
+        }
+        assert!(matches!(
+            nontrivial_reorder(PacketReorder::Rotate { by: 0 }, 7),
+            PacketReorder::Rotate { by: 1 }
+        ));
         assert!(matches!(
             nontrivial_reorder(PacketReorder::Reverse, 7),
             PacketReorder::Reverse
@@ -2305,6 +2454,17 @@ mod tests {
         assert!(
             columns.iter().any(|column| *column >= 256),
             "large-K missing-column spread should reach beyond the first byte-sized prefix"
+        );
+    }
+
+    #[test]
+    fn spread_missing_columns_reaches_full_k512_space() {
+        let columns = spread_missing_columns(0x512BAD, &[1, 2, 3, 4, 5, 6], 512, 12);
+        assert_eq!(columns.len(), 6);
+        assert!(columns.iter().all(|column| *column < 512));
+        assert!(
+            columns.iter().any(|column| *column >= 256),
+            "K=512 missing-column spread should reach beyond byte-sized source indices"
         );
     }
 
@@ -2420,5 +2580,29 @@ mod tests {
             "duplicate corruption must actually perturb payload bytes"
         );
         assert_eq!(packets[1].data, vec![0xAA, 0x5A, 0x11]);
+    }
+
+    #[test]
+    fn k512_reorder_oracle_decodes_rotated_exact_overhead_payload() {
+        let k = 512usize;
+        let symbol_size = 4usize;
+        let seed = 0x5120_1800_u64;
+        let source = build_source_block(&[0x51, 0x20, 0x18], k, symbol_size, seed);
+        let encoder =
+            SystematicEncoder::new(&source, symbol_size, seed).expect("K=512 encoder builds");
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+
+        assert_k512_reorder_exact_overhead_repairs_recover(
+            &decoder,
+            &encoder,
+            &source,
+            seed,
+            &[3, 17, 29, 43, 101, 211],
+            0,
+            RepairDistribution::Dense,
+            PacketReorder::Preserve,
+            7,
+            ObjectId::from_u128(512),
+        );
     }
 }
