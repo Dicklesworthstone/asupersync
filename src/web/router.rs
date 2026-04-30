@@ -149,6 +149,20 @@ struct RoutePattern {
 }
 
 #[derive(Debug, Clone)]
+struct RouteMatch {
+    params: HashMap<String, String>,
+    specificity: RouteSpecificity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct RouteSpecificity {
+    exact_path: bool,
+    literal_segments: usize,
+    param_segments: usize,
+    total_segments: usize,
+}
+
+#[derive(Debug, Clone)]
 enum Segment {
     Literal(String),
     Param(String),
@@ -182,7 +196,7 @@ impl RoutePattern {
     }
 
     /// Try to match a path against this pattern, extracting parameters.
-    fn matches(&self, path: &str) -> Option<HashMap<String, String>> {
+    fn matches(&self, path: &str) -> Option<RouteMatch> {
         let path_segments: SmallVec<[&str; 8]> =
             path.split('/').filter(|s| !s.is_empty()).collect();
 
@@ -220,12 +234,39 @@ impl RoutePattern {
                     // Wildcard matches the rest of the path.
                     let rest = path_segments[i..].join("/");
                     params.insert("*".to_string(), rest);
-                    return Some(params);
+                    return Some(RouteMatch {
+                        params,
+                        specificity: self.specificity(),
+                    });
                 }
             }
         }
 
-        Some(params)
+        Some(RouteMatch {
+            params,
+            specificity: self.specificity(),
+        })
+    }
+
+    fn specificity(&self) -> RouteSpecificity {
+        let mut literal_segments = 0;
+        let mut param_segments = 0;
+        let mut exact_path = true;
+
+        for segment in &self.segments {
+            match segment {
+                Segment::Literal(_) => literal_segments += 1,
+                Segment::Param(_) => param_segments += 1,
+                Segment::Wildcard => exact_path = false,
+            }
+        }
+
+        RouteSpecificity {
+            exact_path,
+            literal_segments,
+            param_segments,
+            total_segments: self.segments.len(),
+        }
     }
 }
 
@@ -233,8 +274,9 @@ impl RoutePattern {
 
 /// HTTP request router.
 ///
-/// Routes are matched in the order they are registered. The first matching
-/// route handles the request.
+/// Routes are matched by specificity: exact paths beat wildcard routes, literal
+/// segments beat parameter segments, and registration order only breaks ties
+/// between equally specific patterns.
 ///
 /// # Path Parameters
 ///
@@ -308,18 +350,32 @@ impl Router {
 
     /// Handle an incoming request.
     ///
-    /// Routes are checked in registration order. Nested routers are checked
-    /// after top-level routes.
+    /// Top-level routes are selected by path specificity. Nested routers are
+    /// selected by longest matching prefix after top-level route selection.
     #[must_use]
     pub fn handle(&self, mut req: Request) -> Response {
         req.extensions.extend_from(&self.extensions);
 
-        // Check top-level routes.
+        // Pick the most specific top-level route. First-registered only wins
+        // among equal-specificity routes; broad wildcard routes must not shadow
+        // narrower protected paths.
+        let mut best_route: Option<(RouteSpecificity, &MethodRouter, HashMap<String, String>)> =
+            None;
         for (pattern, method_router) in &self.routes {
-            if let Some(params) = pattern.matches(&req.path) {
-                req.path_params = params;
-                return method_router.dispatch(req);
+            if let Some(route_match) = pattern.matches(&req.path) {
+                match &best_route {
+                    Some((best_specificity, _, _))
+                        if *best_specificity >= route_match.specificity => {}
+                    _ => {
+                        best_route =
+                            Some((route_match.specificity, method_router, route_match.params));
+                    }
+                }
             }
+        }
+        if let Some((_, method_router, params)) = best_route {
+            req.path_params = params;
+            return method_router.dispatch(req);
         }
 
         // Check nested routers.
@@ -658,7 +714,7 @@ mod tests {
             .route("/users/me", get(FnHandler::new(ok_handler)));
 
         let resp = router.handle(Request::new("GET", "/users/me"));
-        assert_eq!(resp.status, StatusCode::CREATED);
+        assert_eq!(resp.status, StatusCode::OK);
     }
 
     #[test]
@@ -687,7 +743,7 @@ mod tests {
     }
 
     #[test]
-    fn route_priority_wildcard_before_literal() {
+    fn route_priority_wildcard_cannot_shadow_literal() {
         use crate::web::extract::Path;
         use crate::web::handler::FnHandler1;
 
@@ -703,12 +759,19 @@ mod tests {
                 get(FnHandler1::<
                     _,
                     Path<std::collections::HashMap<String, String>>,
+                >::new(wildcard_handler))
+                .post(FnHandler1::<
+                    _,
+                    Path<std::collections::HashMap<String, String>>,
                 >::new(wildcard_handler)),
             )
             .route("/files/static", get(FnHandler::new(ok_handler)));
 
         let resp = router.handle(Request::new("GET", "/files/static"));
-        assert_eq!(resp.status, StatusCode::ACCEPTED);
+        assert_eq!(resp.status, StatusCode::OK);
+
+        let resp = router.handle(Request::new("POST", "/files/static"));
+        assert_eq!(resp.status, StatusCode::METHOD_NOT_ALLOWED);
     }
 
     #[test]
@@ -798,7 +861,7 @@ mod tests {
     #[test]
     fn route_pattern_matching() {
         let pattern = RoutePattern::parse("/users/:id");
-        let params = pattern.matches("/users/42").unwrap();
+        let params = pattern.matches("/users/42").unwrap().params;
         assert_eq!(params.get("id").unwrap(), "42");
 
         assert!(pattern.matches("/users").is_none());
@@ -808,7 +871,7 @@ mod tests {
     #[test]
     fn route_pattern_multiple_params() {
         let pattern = RoutePattern::parse("/users/:uid/posts/:pid");
-        let params = pattern.matches("/users/1/posts/99").unwrap();
+        let params = pattern.matches("/users/1/posts/99").unwrap().params;
         assert_eq!(params.get("uid").unwrap(), "1");
         assert_eq!(params.get("pid").unwrap(), "99");
     }
@@ -816,7 +879,7 @@ mod tests {
     #[test]
     fn route_pattern_wildcard() {
         let pattern = RoutePattern::parse("/files/*");
-        let params = pattern.matches("/files/a/b/c").unwrap();
+        let params = pattern.matches("/files/a/b/c").unwrap().params;
         assert_eq!(params.get("*").unwrap(), "a/b/c");
     }
 
