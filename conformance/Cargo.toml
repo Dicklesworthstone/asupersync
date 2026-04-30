@@ -127,6 +127,10 @@ name = "otel_exponential_histogram_conformance"
 path = "src/bin/otel_exponential_histogram_conformance.rs"
 
 [[bin]]
+name = "otel_resource_detection_conformance"
+path = "src/bin/otel_resource_detection_conformance.rs"
+
+[[bin]]
 name = "h1_expect_continue_conformance"
 path = "src/bin/h1_expect_continue_conformance.rs"
 [dependencies]
