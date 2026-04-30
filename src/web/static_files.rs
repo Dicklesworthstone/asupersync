@@ -366,13 +366,13 @@ fn guess_mime(path: &Path) -> &'static str {
 fn has_traversal(path: &str) -> bool {
     // Block ".." components.
     for component in path.split('/') {
-        if component == ".." {
+        if is_parent_dir_segment(component) {
             return true;
         }
     }
     // Also check backslash separators (Windows paths in URLs).
     for component in path.split('\\') {
-        if component == ".." {
+        if is_parent_dir_segment(component) {
             return true;
         }
     }
@@ -381,6 +381,22 @@ fn has_traversal(path: &str) -> bool {
         return true;
     }
     false
+}
+
+fn is_parent_dir_segment(component: &str) -> bool {
+    let mut chars = component.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    let Some(second) = chars.next() else {
+        return false;
+    };
+
+    is_path_dot(first) && is_path_dot(second) && chars.next().is_none()
+}
+
+fn is_path_dot(ch: char) -> bool {
+    matches!(ch, '.' | '\u{2024}' | '\u{FE52}' | '\u{FF0E}')
 }
 
 fn path_contains_symlink(root: &Path, relative: &Path) -> bool {
@@ -546,6 +562,14 @@ mod tests {
     }
 
     #[test]
+    fn traversal_unicode_dot_variants() {
+        assert!(has_traversal("\u{2024}\u{2024}/etc/passwd"));
+        assert!(has_traversal(".\u{2024}/etc/passwd"));
+        assert!(has_traversal("foo/\u{FE52}\u{FE52}/bar"));
+        assert!(has_traversal("foo/\u{FF0E}\u{FF0E}/bar"));
+    }
+
+    #[test]
     fn no_traversal() {
         assert!(!has_traversal("hello.txt"));
         assert!(!has_traversal("sub/page.html"));
@@ -569,6 +593,14 @@ mod tests {
     #[test]
     fn percent_decode_path_separator() {
         assert_eq!(percent_decode("foo%2Fbar"), "foo/bar");
+    }
+
+    #[test]
+    fn percent_decode_utf8_path_dot() {
+        assert_eq!(percent_decode("%E2%80%A4%E2%80%A4"), "\u{2024}\u{2024}");
+        assert!(has_traversal(&percent_decode(
+            "%E2%80%A4%E2%80%A4/etc/passwd"
+        )));
     }
 
     #[test]
