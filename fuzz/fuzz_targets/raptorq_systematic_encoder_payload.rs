@@ -34,6 +34,11 @@
 //!      coherent without relying on the full encoder solve on every fuzz
 //!      iteration.
 //!
+//!   6. **Extreme symbol sizes stay width-stable.** A dedicated small-K lane
+//!      probes 1-byte through 4096-byte symbols so systematic emission,
+//!      on-demand repair, buffered repair, and cursor-based repair emission all
+//!      preserve the configured `symbol_size` exactly.
+//!
 //! Existing coverage: `codec_raptorq_roundtrip.rs` exercises the high-
 //! level `EncodingPipeline` round-trip but not the low-level
 //! `SystematicEncoder` API directly. This target locks the lower-level
@@ -53,6 +58,8 @@ const TRACTABLE_LARGE_K_MAX_REPAIR_COUNT: usize = 8;
 const LARGE_K_MAX_REPAIR_COUNT: usize = 4;
 const MAX_MALFORMED_SOURCE_SYMBOLS: usize = 32;
 const MAX_MALFORMED_SYMBOL_BYTES: usize = 512;
+const EXTREME_MAX_SYMBOL_SIZE: usize = 4096;
+const EXTREME_REPAIR_PROBES: usize = 3;
 
 /// Structured fuzz input. Derives Arbitrary so libFuzzer can mutate
 /// each field independently (better coverage than reading raw bytes).
@@ -74,6 +81,42 @@ enum MalformedSourceBlockKind {
     WellFormedControl,
 }
 
+#[derive(Arbitrary, Debug, Clone, Copy)]
+enum ExtremeSymbolK {
+    K1,
+    K2,
+    K8,
+    K17,
+}
+
+#[derive(Arbitrary, Debug, Clone, Copy)]
+enum ExtremeSymbolSize {
+    OneByte,
+    TwoBytes,
+    ThreeBytes,
+    ThirtyOneBytes,
+    ThirtyTwoBytes,
+    ThirtyThreeBytes,
+    TwoFiftyFiveBytes,
+    TwoFiftySixBytes,
+    TwoFiftySevenBytes,
+    FiveElevenBytes,
+    FiveTwelveBytes,
+    OneKiB,
+    TwoKiB,
+    FourKiB,
+    Raw { value: u16 },
+}
+
+#[derive(Arbitrary, Debug, Clone, Copy)]
+struct SymbolSizeExtremeInput {
+    k_case: ExtremeSymbolK,
+    symbol_size: ExtremeSymbolSize,
+    seed: u64,
+    source_seed: u64,
+    repair_offset: u8,
+}
+
 #[derive(Arbitrary, Debug)]
 struct EncoderInput {
     /// Explicit edge-case K selector.
@@ -89,6 +132,10 @@ struct EncoderInput {
     /// Source byte stream. Chunked into K source symbols of size
     /// `symbol_size`; padded with zeros if short, truncated if long.
     source: Vec<u8>,
+    /// Independent valid-lane probe for very small and very large symbol
+    /// sizes. Kept on small K values so the fuzzer can exercise wide payloads
+    /// without spending the whole budget in the matrix solve.
+    symbol_size_extreme: SymbolSizeExtremeInput,
     /// Explicit malformed source-block lane. This is independent of the
     /// well-formed source chunker above so fuzzing can hit constructor
     /// precondition failures directly.
@@ -169,6 +216,157 @@ fn build_malformed_source_block(
     }
 }
 
+fn resolve_extreme_k(k_case: ExtremeSymbolK) -> usize {
+    match k_case {
+        ExtremeSymbolK::K1 => 1,
+        ExtremeSymbolK::K2 => 2,
+        ExtremeSymbolK::K8 => 8,
+        ExtremeSymbolK::K17 => 17,
+    }
+}
+
+fn resolve_extreme_symbol_size(symbol_size: ExtremeSymbolSize) -> usize {
+    match symbol_size {
+        ExtremeSymbolSize::OneByte => 1,
+        ExtremeSymbolSize::TwoBytes => 2,
+        ExtremeSymbolSize::ThreeBytes => 3,
+        ExtremeSymbolSize::ThirtyOneBytes => 31,
+        ExtremeSymbolSize::ThirtyTwoBytes => 32,
+        ExtremeSymbolSize::ThirtyThreeBytes => 33,
+        ExtremeSymbolSize::TwoFiftyFiveBytes => 255,
+        ExtremeSymbolSize::TwoFiftySixBytes => 256,
+        ExtremeSymbolSize::TwoFiftySevenBytes => 257,
+        ExtremeSymbolSize::FiveElevenBytes => 511,
+        ExtremeSymbolSize::FiveTwelveBytes => 512,
+        ExtremeSymbolSize::OneKiB => 1024,
+        ExtremeSymbolSize::TwoKiB => 2048,
+        ExtremeSymbolSize::FourKiB => EXTREME_MAX_SYMBOL_SIZE,
+        ExtremeSymbolSize::Raw { value } => (usize::from(value) % EXTREME_MAX_SYMBOL_SIZE) + 1,
+    }
+}
+
+fn build_seeded_source_symbols(k: usize, symbol_size: usize, seed: u64) -> Vec<Vec<u8>> {
+    (0..k)
+        .map(|row| {
+            let row_seed = seed.wrapping_add(
+                u64::try_from(row)
+                    .expect("bounded fuzz row must fit in u64")
+                    .wrapping_mul(0x9E37_79B9_7F4A_7C15),
+            );
+            (0..symbol_size)
+                .map(|col| {
+                    let rotation = u32::try_from(col % 63).expect("rotation must fit in u32");
+                    let mixed = row_seed.rotate_left(rotation)
+                        ^ u64::try_from(col)
+                            .expect("bounded fuzz column must fit in u64")
+                            .wrapping_mul(0xD1B5_4A32_D192_ED03);
+                    u8::try_from(mixed & 0xFF).expect("masked byte must fit in u8")
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn assert_symbol_size_extreme_lane(input: SymbolSizeExtremeInput) {
+    let k = resolve_extreme_k(input.k_case);
+    let symbol_size = resolve_extreme_symbol_size(input.symbol_size);
+    let source_symbols = build_seeded_source_symbols(k, symbol_size, input.source_seed);
+
+    let constructed = catch_unwind(AssertUnwindSafe(|| {
+        SystematicEncoder::new(&source_symbols, symbol_size, input.seed)
+    }))
+    .unwrap_or_else(|_| {
+        panic!(
+            "encoder construction panicked for symbol-size extreme lane: \
+             K={k}, T={symbol_size}"
+        )
+    });
+    let Some(mut encoder) = constructed else {
+        return;
+    };
+
+    assert_eq!(
+        encoder.params().symbol_size,
+        symbol_size,
+        "encoder params must preserve the configured symbol_size"
+    );
+
+    let systematic = encoder.emit_systematic();
+    assert_eq!(
+        systematic.len(),
+        k,
+        "extreme symbol-size lane must emit every source symbol"
+    );
+    for (expected_esi, symbol) in systematic.iter().enumerate() {
+        assert!(symbol.is_source, "source lane must stay systematic");
+        assert_eq!(
+            symbol.esi, expected_esi as u32,
+            "source lane must preserve contiguous ESIs"
+        );
+        assert_eq!(
+            symbol.data.len(),
+            symbol_size,
+            "systematic payload must preserve extreme symbol_size"
+        );
+        assert_eq!(
+            symbol.data, source_symbols[expected_esi],
+            "systematic payload must preserve source bytes"
+        );
+    }
+
+    let k_u32 = u32::try_from(k).expect("bounded fuzz K must fit in u32");
+    let repair_start = k_u32.saturating_add(u32::from(input.repair_offset % 4));
+    for offset in 0..EXTREME_REPAIR_PROBES {
+        let esi = repair_start.saturating_add(u32::try_from(offset).expect("offset fits"));
+        let repair = encoder.repair_symbol(esi);
+        assert_eq!(
+            repair.len(),
+            symbol_size,
+            "repair_symbol must preserve extreme symbol_size \
+             (K={k}, T={symbol_size}, esi={esi})"
+        );
+
+        let mut buffered =
+            vec![0xA5; symbol_size.saturating_add(usize::from(input.repair_offset % 3))];
+        encoder.repair_symbol_into(esi, &mut buffered);
+        assert_eq!(
+            &buffered[..symbol_size],
+            repair.as_slice(),
+            "repair_symbol_into must match repair_symbol for extreme symbol_size"
+        );
+    }
+
+    let emitted_repairs = encoder.emit_repair(EXTREME_REPAIR_PROBES);
+    assert_eq!(
+        emitted_repairs.len(),
+        EXTREME_REPAIR_PROBES,
+        "extreme symbol-size lane must emit requested repairs"
+    );
+    for (offset, symbol) in emitted_repairs.iter().enumerate() {
+        assert!(
+            !symbol.is_source,
+            "repair lane must not emit source symbols"
+        );
+        assert_eq!(
+            symbol.esi,
+            k_u32.saturating_add(u32::try_from(offset).expect("offset fits")),
+            "repair lane must start at K after source emission"
+        );
+        assert_eq!(
+            symbol.data.len(),
+            symbol_size,
+            "emit_repair payload must preserve extreme symbol_size"
+        );
+    }
+    assert_eq!(
+        encoder.next_repair_esi(),
+        k_u32.saturating_add(
+            u32::try_from(EXTREME_REPAIR_PROBES).expect("repair probe count must fit in u32")
+        ),
+        "repair cursor must advance by emitted repair count in the extreme lane"
+    );
+}
+
 fn assert_malformed_source_block_boundary(input: &EncoderInput) {
     let symbol_size = (usize::from(input.malformed_symbol_size) % SMALL_MEDIUM_MAX_SYMBOL_SIZE) + 1;
     let (source_symbols, constructor_symbol_size, is_malformed) = build_malformed_source_block(
@@ -209,6 +407,7 @@ fn assert_malformed_source_block_boundary(input: &EncoderInput) {
 }
 
 fuzz_target!(|input: EncoderInput| {
+    assert_symbol_size_extreme_lane(input.symbol_size_extreme);
     assert_malformed_source_block_boundary(&input);
 
     let k = match input.k_edge {
