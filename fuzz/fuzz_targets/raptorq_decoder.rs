@@ -9,7 +9,9 @@
 //!
 //! The same structured input also drives contiguous loss bursts over valid
 //! source+repair packets. Whenever at least `K` payload packets survive, decode
-//! must still recover the original source block.
+//! must still recover the original source block. Dedicated large-K lanes pin
+//! exact RFC rows and assert successful recovery from exact `K+overhead`
+//! payload budgets under dense and sparse repair schedules.
 
 #![no_main]
 
@@ -215,6 +217,83 @@ fn build_valid_packets(
         packets.push(ReceivedSymbol::repair(esi, columns, coefficients, data));
     }
 
+    Some(packets)
+}
+
+fn spread_missing_columns(
+    seed: u64,
+    missing_sources: &[u8],
+    k: usize,
+    fallback_count: usize,
+) -> Vec<usize> {
+    if k == 0 {
+        return Vec::new();
+    }
+
+    let target_count = if missing_sources.is_empty() {
+        fallback_count.clamp(1, k)
+    } else {
+        missing_sources.len().min(k)
+    };
+    let start = seed as usize % k;
+    let stride = (((seed.rotate_left(17) as usize) | 1) % k.max(2)).max(1);
+    let mut used = vec![false; k];
+    let mut columns = Vec::with_capacity(target_count);
+
+    for offset in 0..target_count {
+        let raw = missing_sources
+            .get(offset)
+            .copied()
+            .unwrap_or_else(|| seed.wrapping_add(offset as u64) as u8);
+        let mut candidate =
+            (start + offset.saturating_mul(stride) + usize::from(raw).saturating_mul(17)) % k;
+        while used[candidate] {
+            candidate = (candidate + stride) % k;
+        }
+        used[candidate] = true;
+        columns.push(candidate);
+    }
+
+    columns
+}
+
+fn build_exact_overhead_packets(
+    decoder: &InactivationDecoder,
+    encoder: &SystematicEncoder,
+    source: &[Vec<u8>],
+    missing_columns: &[usize],
+    ec_overhead: usize,
+    repair_distribution: RepairDistribution,
+) -> Option<Vec<ReceivedSymbol>> {
+    let k = source.len();
+    let mut missing = vec![false; k];
+    for &column in missing_columns {
+        missing[column % k] = true;
+    }
+
+    let missing_count = missing.iter().filter(|&&is_missing| is_missing).count();
+    let repair_count = missing_count.saturating_add(ec_overhead);
+    let mut packets = Vec::with_capacity(k.saturating_add(ec_overhead));
+
+    for (esi, data) in source.iter().enumerate() {
+        if !missing[esi] {
+            packets.push(ReceivedSymbol::source(esi as u32, data.clone()));
+        }
+    }
+
+    for esi in build_repair_esi_sequence(k, repair_count, repair_distribution) {
+        let Ok((columns, coefficients)) = decoder.repair_equation(esi) else {
+            return None;
+        };
+        let data = encoder.repair_symbol(esi);
+        packets.push(ReceivedSymbol::repair(esi, columns, coefficients, data));
+    }
+
+    assert_eq!(
+        packets.len(),
+        k.saturating_add(ec_overhead),
+        "exact-overhead packet builder must preserve the K+overhead payload budget"
+    );
     Some(packets)
 }
 
@@ -627,6 +706,81 @@ fn assert_k842_sparse_vs_dense_repairs_recover(
     }
 }
 
+fn assert_k2048_exact_overhead_repairs_recover(
+    decoder: &InactivationDecoder,
+    encoder: &SystematicEncoder,
+    source: &[Vec<u8>],
+    seed: u64,
+    missing_sources: &[u8],
+    ec_overhead: usize,
+    repair_distribution: RepairDistribution,
+    wavefront_batch: usize,
+    object_id: ObjectId,
+) {
+    if source.len() != 2048 {
+        return;
+    }
+
+    let params = decoder.params();
+    assert_eq!(params.k, 2048, "K=2048 decoder oracle must preserve the public K");
+    assert_eq!(
+        params.k_prime, 2070,
+        "K=2048 decoder oracle must pin the rounded RFC row"
+    );
+    assert_eq!(params.j, 506, "K=2048 decoder oracle must pin the RFC J(K') value");
+    assert_eq!(params.s, 89, "K=2048 decoder oracle must pin the RFC S(K') value");
+    assert_eq!(params.h, 11, "K=2048 decoder oracle must pin the RFC H(K') value");
+    assert_eq!(params.w, 2099, "K=2048 decoder oracle must pin the RFC W(K') value");
+    assert_eq!(params.l, 2170, "K=2048 decoder oracle must pin the RFC L value");
+    assert_eq!(params.b, 2010, "K=2048 decoder oracle must pin the RFC B value");
+    assert!(
+        params.k_prime > params.k,
+        "K=2048 decoder oracle must exercise rounded K..K' synthesis"
+    );
+
+    // Large-K repair schedules are only expected to decode once they have some
+    // real overhead beyond the raw erasure count.
+    let ec_overhead = ec_overhead.saturating_add(4);
+    let missing_columns = spread_missing_columns(seed, missing_sources, source.len(), 16);
+    let Some(payload_packets) = build_exact_overhead_packets(
+        decoder,
+        encoder,
+        source,
+        &missing_columns,
+        ec_overhead,
+        repair_distribution,
+    ) else {
+        return;
+    };
+
+    let repair_count = payload_packets.iter().filter(|packet| !packet.is_source).count();
+    assert_eq!(
+        repair_count,
+        missing_columns.len().saturating_add(ec_overhead),
+        "K=2048 exact-overhead oracle must emit one repair per erasure plus EC overhead"
+    );
+    assert_eq!(
+        payload_packets.len(),
+        source.len().saturating_add(ec_overhead),
+        "K=2048 exact-overhead oracle must keep the received payload budget at K+overhead"
+    );
+
+    let received = combine_symbols(decoder, &payload_packets);
+    let batch = if received.is_empty() {
+        0
+    } else {
+        wavefront_batch % (received.len() + 1)
+    };
+    assert_decode_consensus(decoder, &received, source, batch, object_id);
+    let decoded = decoder
+        .decode(&received)
+        .expect("K=2048 exact-overhead repair patterns must remain decodable");
+    assert_eq!(
+        decoded.source, source,
+        "K=2048 exact-overhead repair patterns must recover original source"
+    );
+}
+
 fn assert_k4_transition_sparse_vs_dense_repairs_recover(
     decoder: &InactivationDecoder,
     encoder: &SystematicEncoder,
@@ -907,6 +1061,18 @@ fuzz_target!(|data: &[u8]| {
         object_id,
     );
 
+    assert_k2048_exact_overhead_repairs_recover(
+        &decoder,
+        &encoder,
+        &source,
+        input.seed,
+        &input.missing_sources,
+        input.extra_repairs as usize,
+        input.repair_distribution,
+        input.wavefront_batch as usize,
+        object_id,
+    );
+
     assert_decode_consensus(
         &decoder,
         &baseline_received,
@@ -987,7 +1153,7 @@ mod tests {
         build_repair_esi_sequence, burst_repair_count, k16_low_intermediate_missing_sources,
         k4_transition_missing_sources, k8_low_intermediate_missing_sources,
         repair_stress_missing_sources, select_k_candidate, select_symbol_size_candidate,
-        sparse_repair_stride,
+        sparse_repair_stride, spread_missing_columns,
     };
     use asupersync::raptorq::decoder::ReceivedSymbol;
 
@@ -1012,6 +1178,23 @@ mod tests {
             select_k_candidate(selector),
             842,
             "selector normalization must be able to reach K=842"
+        );
+    }
+
+    #[test]
+    fn k_selector_includes_large_k_2048_edge_case() {
+        assert!(
+            LARGE_K_CANDIDATES.contains(&2048),
+            "large-K candidate set must include the canonical K=2048 edge"
+        );
+        let selector = 8 * LARGE_K_CANDIDATES
+            .iter()
+            .position(|&candidate| candidate == 2048)
+            .expect("K=2048 must be selectable");
+        assert_eq!(
+            select_k_candidate(selector),
+            2048,
+            "selector normalization must be able to reach K=2048"
         );
     }
 
@@ -1099,6 +1282,17 @@ mod tests {
         assert_eq!(fallback.len(), 16);
         assert_eq!(fallback[0], 2026u64 as u8);
         assert_eq!(fallback[15], (2026u64 as u8).wrapping_add(15));
+    }
+
+    #[test]
+    fn spread_missing_columns_reaches_full_k2048_space() {
+        let columns = spread_missing_columns(0xDEADBEEF, &[1, 2, 3, 4, 5, 6], 2048, 16);
+        assert_eq!(columns.len(), 6);
+        assert!(columns.iter().all(|column| *column < 2048));
+        assert!(
+            columns.iter().any(|column| *column >= 256),
+            "large-K missing-column spread should reach beyond the first byte-sized prefix"
+        );
     }
 
     #[test]
