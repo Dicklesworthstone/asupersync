@@ -136,8 +136,7 @@ impl PartialEq for AuthenticationTag {
 
 impl fmt::Debug for AuthenticationTag {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Display prefix for identification
-        write!(f, "Tag({:02x}{:02x}...)", self.bytes[0], self.bytes[1])
+        f.write_str("Tag(<redacted>)")
     }
 }
 
@@ -219,6 +218,18 @@ mod tests {
                 "single non-zero byte at position {byte_idx} must not be treated as zero"
             );
         }
+    }
+
+    #[test]
+    fn debug_redacts_all_tag_bytes() {
+        let tag = AuthenticationTag::from_bytes([0xABu8; TAG_SIZE]);
+        let debug = format!("{tag:?}");
+
+        assert_eq!(debug, "Tag(<redacted>)");
+        assert!(
+            !debug.contains("ab"),
+            "AuthenticationTag Debug output must not expose HMAC byte prefixes"
+        );
     }
 
     #[test]
