@@ -1571,6 +1571,31 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h2_priority_frame_circular_dependency"
+path = "fuzz_targets/h2_priority_frame_circular_dependency.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_rst_stream_frame_size_error"
+path = "fuzz_targets/h2_rst_stream_frame_size_error.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #176 — HTTP/0.9 simple-request rejection fuzzer
+# Tests arbitrary HTTP/0.9 style requests (missing version specifiers) against
+# modern HTTP/1.1 parser. Validates proper rejection with 400 Bad Request for
+# requests like "GET /path\r\n" that lack "HTTP/1.1" version identifier.
+[[bin]]
+name = "h1_http09_simple_request_rejection"
+path = "fuzz_targets/h1_http09_simple_request_rejection.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "symbol_auth"
 path = "fuzz_targets/symbol_auth.rs"
 test = false
@@ -3770,6 +3795,28 @@ bench = false
 [[bin]]
 name = "notify_spurious_wake"
 path = "fuzz_targets/notify_spurious_wake.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #174 — Oneshot send to detached receiver fuzzer
+# Tests arbitrary detach/send sequences, validates that sending to detached receiver
+# returns Disconnected error without panicking. Includes patterns for concurrent
+# detach/send, reserve/commit timing, and rapid operation sequences.
+[[bin]]
+name = "oneshot_detached_send"
+path = "fuzz_targets/oneshot_detached_send.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #175 — Mutex lock_arc cancellation fuzzer
+# Tests arbitrary cancel during OwnedMutexGuard::lock() (lock_arc) await, validates
+# lock state remains correct and no resource leaks occur. Includes patterns for
+# concurrent cancellation, sequential operations, and rapid cancellation sequences.
+[[bin]]
+name = "mutex_lock_arc_cancel"
+path = "fuzz_targets/mutex_lock_arc_cancel.rs"
 test = false
 doc = false
 bench = false
