@@ -398,6 +398,7 @@ fn build_client_config(
 ) -> ClientConfig {
     let mut client = ClientConfig::new();
     client.set("bootstrap.servers", config.bootstrap_servers.join(","));
+    apply_security_config(&mut client, &config.security);
     if let Some(client_id) = &config.client_id {
         client.set("client.id", client_id);
     }
@@ -843,6 +844,219 @@ pub(crate) fn is_loopback_bootstrap_server(endpoint: &str) -> bool {
             .is_ok_and(|ip| ip.is_loopback())
 }
 
+/// TLS settings for Kafka clients.
+#[derive(Clone, PartialEq, Eq, Default)]
+pub struct KafkaTlsConfig {
+    /// File or directory path to CA certificates used to verify the broker.
+    pub ca_location: Option<String>,
+    /// Client certificate path for mutual TLS.
+    pub certificate_location: Option<String>,
+    /// Client private key path for mutual TLS.
+    pub key_location: Option<String>,
+    key_password: Option<String>,
+}
+
+impl fmt::Debug for KafkaTlsConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KafkaTlsConfig")
+            .field("ca_location", &self.ca_location)
+            .field("certificate_location", &self.certificate_location)
+            .field("key_location", &self.key_location)
+            .field(
+                "key_password",
+                &self.key_password.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
+}
+
+impl KafkaTlsConfig {
+    /// Create an empty TLS config. librdkafka will use its platform CA lookup
+    /// unless `ca_location` is set explicitly.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the CA certificate file or directory.
+    #[must_use]
+    pub fn ca_location(mut self, location: impl Into<String>) -> Self {
+        self.ca_location = Some(location.into());
+        self
+    }
+
+    /// Set the client certificate path for mutual TLS.
+    #[must_use]
+    pub fn certificate_location(mut self, location: impl Into<String>) -> Self {
+        self.certificate_location = Some(location.into());
+        self
+    }
+
+    /// Set the client private key path for mutual TLS.
+    #[must_use]
+    pub fn key_location(mut self, location: impl Into<String>) -> Self {
+        self.key_location = Some(location.into());
+        self
+    }
+
+    /// Set the client private key password for mutual TLS.
+    #[must_use]
+    pub fn key_password(mut self, password: impl Into<String>) -> Self {
+        self.key_password = Some(password.into());
+        self
+    }
+}
+
+/// SASL mechanisms exposed by the Kafka client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KafkaSaslMechanism {
+    /// SCRAM with SHA-256.
+    ScramSha256,
+    /// SCRAM with SHA-512.
+    ScramSha512,
+}
+
+impl KafkaSaslMechanism {
+    #[cfg(feature = "kafka")]
+    fn as_librdkafka_str(self) -> &'static str {
+        match self {
+            Self::ScramSha256 => "SCRAM-SHA-256",
+            Self::ScramSha512 => "SCRAM-SHA-512",
+        }
+    }
+}
+
+/// SASL/SCRAM credentials for Kafka clients.
+#[derive(Clone, PartialEq, Eq)]
+pub struct KafkaSaslConfig {
+    /// SCRAM mechanism.
+    pub mechanism: KafkaSaslMechanism,
+    /// SASL username.
+    pub username: String,
+    password: String,
+    /// TLS settings used with SASL_SSL.
+    pub tls: KafkaTlsConfig,
+}
+
+impl fmt::Debug for KafkaSaslConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KafkaSaslConfig")
+            .field("mechanism", &self.mechanism)
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .field("tls", &self.tls)
+            .finish()
+    }
+}
+
+impl KafkaSaslConfig {
+    /// Create SCRAM-SHA-256 credentials.
+    #[must_use]
+    pub fn scram_sha_256(username: impl Into<String>, password: impl Into<String>) -> Self {
+        Self {
+            mechanism: KafkaSaslMechanism::ScramSha256,
+            username: username.into(),
+            password: password.into(),
+            tls: KafkaTlsConfig::default(),
+        }
+    }
+
+    /// Create SCRAM-SHA-512 credentials.
+    #[must_use]
+    pub fn scram_sha_512(username: impl Into<String>, password: impl Into<String>) -> Self {
+        Self {
+            mechanism: KafkaSaslMechanism::ScramSha512,
+            username: username.into(),
+            password: password.into(),
+            tls: KafkaTlsConfig::default(),
+        }
+    }
+
+    /// Attach TLS settings to SASL_SSL.
+    #[must_use]
+    pub fn with_tls(mut self, tls: KafkaTlsConfig) -> Self {
+        self.tls = tls;
+        self
+    }
+
+    fn validate(&self) -> Result<(), KafkaError> {
+        if self.username.trim().is_empty() {
+            return Err(KafkaError::Config(
+                "Kafka SASL username cannot be empty".to_string(),
+            ));
+        }
+        if self.password.trim().is_empty() {
+            return Err(KafkaError::Config(
+                "Kafka SASL password cannot be empty".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Security transport for Kafka clients.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum KafkaSecurityConfig {
+    /// Plaintext transport. Valid only for loopback brokers unless the
+    /// test/debug-only insecure bypass is enabled.
+    #[default]
+    Plaintext,
+    /// TLS transport without SASL.
+    Tls(KafkaTlsConfig),
+    /// SASL/SCRAM over TLS. SASL_PLAINTEXT is intentionally not exposed.
+    SaslSsl(KafkaSaslConfig),
+}
+
+impl KafkaSecurityConfig {
+    #[must_use]
+    pub(crate) fn is_remote_secure(&self) -> bool {
+        matches!(self, Self::Tls(_) | Self::SaslSsl(_))
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), KafkaError> {
+        match self {
+            Self::Plaintext | Self::Tls(_) => Ok(()),
+            Self::SaslSsl(config) => config.validate(),
+        }
+    }
+}
+
+#[cfg(feature = "kafka")]
+fn apply_tls_config(client: &mut ClientConfig, tls: &KafkaTlsConfig) {
+    if let Some(location) = &tls.ca_location {
+        client.set("ssl.ca.location", location);
+    }
+    if let Some(location) = &tls.certificate_location {
+        client.set("ssl.certificate.location", location);
+    }
+    if let Some(location) = &tls.key_location {
+        client.set("ssl.key.location", location);
+    }
+    if let Some(password) = &tls.key_password {
+        client.set("ssl.key.password", password);
+    }
+}
+
+#[cfg(feature = "kafka")]
+pub(crate) fn apply_security_config(client: &mut ClientConfig, security: &KafkaSecurityConfig) {
+    match security {
+        KafkaSecurityConfig::Plaintext => {
+            client.set("security.protocol", "plaintext");
+        }
+        KafkaSecurityConfig::Tls(tls) => {
+            client.set("security.protocol", "ssl");
+            apply_tls_config(client, tls);
+        }
+        KafkaSecurityConfig::SaslSsl(sasl) => {
+            client.set("security.protocol", "sasl_ssl");
+            client.set("sasl.mechanisms", sasl.mechanism.as_librdkafka_str());
+            client.set("sasl.username", &sasl.username);
+            client.set("sasl.password", &sasl.password);
+            apply_tls_config(client, &sasl.tls);
+        }
+    }
+}
+
 /// Configuration for Kafka producer.
 #[derive(Debug, Clone)]
 pub struct ProducerConfig {
@@ -866,10 +1080,12 @@ pub struct ProducerConfig {
     pub request_timeout: Duration,
     /// Maximum message size in bytes.
     pub max_message_size: usize,
+    /// Transport security for Kafka broker connections.
+    pub security: KafkaSecurityConfig,
     /// Internal test/debug-only opt-in for PLAINTEXT / unauthenticated remote brokers.
     ///
-    /// `src/messaging/kafka.rs` does not yet expose TLS or SASL settings, so
-    /// the secure default is fail-closed for non-loopback bootstrap servers.
+    /// The secure default is fail-closed for non-loopback plaintext bootstrap
+    /// servers.
     /// Keep this private so release callers cannot enable the bypass through a
     /// struct literal.
     allow_insecure_transport_for_testing: bool,
@@ -888,6 +1104,7 @@ impl Default for ProducerConfig {
             retries: 3,
             request_timeout: Duration::from_secs(30),
             max_message_size: 1_048_576, // 1MB
+            security: KafkaSecurityConfig::default(),
             allow_insecure_transport_for_testing: false,
         }
     }
@@ -952,6 +1169,43 @@ impl ProducerConfig {
         self
     }
 
+    /// Set Kafka broker transport security.
+    #[must_use]
+    pub fn security(mut self, security: KafkaSecurityConfig) -> Self {
+        self.security = security;
+        self
+    }
+
+    /// Require TLS for Kafka broker transport.
+    #[must_use]
+    pub fn tls(self, tls: KafkaTlsConfig) -> Self {
+        self.security(KafkaSecurityConfig::Tls(tls))
+    }
+
+    /// Require SASL/SCRAM-SHA-256 over TLS for Kafka broker transport.
+    #[must_use]
+    pub fn sasl_scram_sha_256(
+        self,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
+        self.security(KafkaSecurityConfig::SaslSsl(
+            KafkaSaslConfig::scram_sha_256(username, password),
+        ))
+    }
+
+    /// Require SASL/SCRAM-SHA-512 over TLS for Kafka broker transport.
+    #[must_use]
+    pub fn sasl_scram_sha_512(
+        self,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
+        self.security(KafkaSecurityConfig::SaslSsl(
+            KafkaSaslConfig::scram_sha_512(username, password),
+        ))
+    }
+
     /// Scary test/debug-only opt-in for remote PLAINTEXT / unauthenticated brokers.
     ///
     /// This setter is intentionally unavailable in release builds so
@@ -978,14 +1232,13 @@ impl ProducerConfig {
                 "max_message_size must be > 0".to_string(),
             ));
         }
-        if !self.allow_insecure_transport_for_testing {
+        self.security.validate()?;
+        if !self.allow_insecure_transport_for_testing && !self.security.is_remote_secure() {
             for server in &self.bootstrap_servers {
                 if !is_loopback_bootstrap_server(server) {
                     return Err(KafkaError::Config(format!(
                         "remote Kafka bootstrap server '{server}' is rejected by default: \
-                         src/messaging/kafka.rs has no TLS/SASL knobs yet, so only loopback \
-                         brokers are allowed; test/debug builds may opt in with \
-                         allow_insecure_transport_for_testing(true)"
+                         configure TLS or SASL_SSL SCRAM security for non-loopback brokers"
                     )));
                 }
             }
@@ -1868,6 +2121,7 @@ impl KafkaClient {
         // Create consumer config based on producer config
         let mut consumer_config = ClientConfig::new();
         consumer_config.set("bootstrap.servers", self.config.bootstrap_servers.join(","));
+        apply_security_config(&mut consumer_config, &self.config.security);
         consumer_config.set("group.id", &group_id);
         if let Some(client_id) = &self.config.client_id {
             consumer_config.set("client.id", client_id);
@@ -2250,6 +2504,7 @@ mod tests {
         assert!(config.enable_idempotence);
         assert_eq!(config.acks, Acks::All);
         assert!(!config.allow_insecure_transport_for_testing);
+        assert_eq!(config.security, KafkaSecurityConfig::Plaintext);
     }
 
     #[test]
@@ -2282,13 +2537,30 @@ mod tests {
         let err = remote_plaintext.validate().expect_err(
             "remote non-loopback bootstrap servers must fail closed until TLS/SASL support lands",
         );
-        assert!(
-            matches!(err, KafkaError::Config(msg) if msg.contains("allow_insecure_transport_for_testing"))
-        );
+        assert!(matches!(err, KafkaError::Config(msg) if msg.contains("TLS or SASL_SSL")));
 
         let explicit_insecure = ProducerConfig::new(vec!["broker.example.com:9092".to_string()])
             .allow_insecure_transport_for_testing(true);
         assert!(explicit_insecure.validate().is_ok());
+
+        let tls = ProducerConfig::new(vec!["broker.example.com:9092".to_string()])
+            .tls(KafkaTlsConfig::new().ca_location("/etc/ssl/certs"));
+        assert!(tls.validate().is_ok());
+
+        let sasl = ProducerConfig::new(vec!["broker.example.com:9092".to_string()])
+            .sasl_scram_sha_512("service-user", "top-secret");
+        assert!(sasl.validate().is_ok());
+
+        let bad_sasl = ProducerConfig::new(vec!["broker.example.com:9092".to_string()])
+            .sasl_scram_sha_256("", "top-secret");
+        let err = bad_sasl
+            .validate()
+            .expect_err("blank SASL username must fail closed");
+        assert!(matches!(err, KafkaError::Config(msg) if msg.contains("username")));
+
+        let debug = format!("{sasl:?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("top-secret"));
     }
 
     #[test]
@@ -2498,6 +2770,7 @@ mod tests {
         assert_eq!(cfg.request_timeout, Duration::from_secs(30));
         assert_eq!(cfg.max_message_size, 1_048_576);
         assert!(!cfg.allow_insecure_transport_for_testing);
+        assert_eq!(cfg.security, KafkaSecurityConfig::Plaintext);
     }
 
     #[test]

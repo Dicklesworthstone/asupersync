@@ -18,7 +18,11 @@
 #![allow(clippy::unused_async)]
 
 use crate::cx::Cx;
-use crate::messaging::kafka::{KafkaError, is_loopback_bootstrap_server};
+#[cfg(feature = "kafka")]
+use crate::messaging::kafka::apply_security_config;
+use crate::messaging::kafka::{
+    KafkaError, KafkaSaslConfig, KafkaSecurityConfig, KafkaTlsConfig, is_loopback_bootstrap_server,
+};
 #[cfg(not(feature = "kafka"))]
 use crate::messaging::kafka::{stub_broker_end_offset, stub_broker_fetch, stub_broker_notify};
 use crate::sync::Notify;
@@ -113,14 +117,15 @@ pub struct ConsumerConfig {
     pub fetch_max_wait: Duration,
     /// Isolation level for transactional reads.
     pub isolation_level: IsolationLevel,
+    /// Transport security for Kafka broker connections.
+    pub security: KafkaSecurityConfig,
     /// Force real Kafka connection even in test mode.
     /// When true, always use rdkafka broker connection.
     /// When false (default), use StubBroker in test mode for deterministic testing.
     pub force_real_kafka: bool,
     /// Internal test/debug-only opt-in for PLAINTEXT / unauthenticated remote brokers.
     ///
-    /// `src/messaging/kafka_consumer.rs` does not yet expose TLS or SASL
-    /// knobs, so the secure default is fail-closed for non-loopback bootstrap
+    /// The secure default is fail-closed for non-loopback plaintext bootstrap
     /// servers. Keep this private so release callers cannot enable the bypass
     /// through a struct literal.
     allow_insecure_transport_for_testing: bool,
@@ -148,6 +153,7 @@ impl Default for ConsumerConfig {
             fetch_max_bytes: 50 * 1024 * 1024,
             fetch_max_wait: Duration::from_millis(500),
             isolation_level: IsolationLevel::ReadUncommitted,
+            security: KafkaSecurityConfig::default(),
             force_real_kafka: false,
             allow_insecure_transport_for_testing: false,
         }
@@ -249,6 +255,43 @@ impl ConsumerConfig {
         self
     }
 
+    /// Set Kafka broker transport security.
+    #[must_use]
+    pub fn security(mut self, security: KafkaSecurityConfig) -> Self {
+        self.security = security;
+        self
+    }
+
+    /// Require TLS for Kafka broker transport.
+    #[must_use]
+    pub fn tls(self, tls: KafkaTlsConfig) -> Self {
+        self.security(KafkaSecurityConfig::Tls(tls))
+    }
+
+    /// Require SASL/SCRAM-SHA-256 over TLS for Kafka broker transport.
+    #[must_use]
+    pub fn sasl_scram_sha_256(
+        self,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
+        self.security(KafkaSecurityConfig::SaslSsl(
+            KafkaSaslConfig::scram_sha_256(username, password),
+        ))
+    }
+
+    /// Require SASL/SCRAM-SHA-512 over TLS for Kafka broker transport.
+    #[must_use]
+    pub fn sasl_scram_sha_512(
+        self,
+        username: impl Into<String>,
+        password: impl Into<String>,
+    ) -> Self {
+        self.security(KafkaSecurityConfig::SaslSsl(
+            KafkaSaslConfig::scram_sha_512(username, password),
+        ))
+    }
+
     /// Scary test/debug-only opt-in for remote PLAINTEXT / unauthenticated brokers.
     ///
     /// This setter is intentionally unavailable in release builds so
@@ -280,14 +323,13 @@ impl ConsumerConfig {
                 "fetch_min_bytes must be <= fetch_max_bytes".to_string(),
             ));
         }
-        if !self.allow_insecure_transport_for_testing {
+        self.security.validate()?;
+        if !self.allow_insecure_transport_for_testing && !self.security.is_remote_secure() {
             for server in &self.bootstrap_servers {
                 if !is_loopback_bootstrap_server(server) {
                     return Err(KafkaError::Config(format!(
                         "remote Kafka bootstrap server '{server}' is rejected by default: \
-                         src/messaging/kafka_consumer.rs has no TLS/SASL knobs yet, so only loopback \
-                         brokers are allowed; test/debug builds may opt in with \
-                         allow_insecure_transport_for_testing(true)"
+                         configure TLS or SASL_SSL SCRAM security for non-loopback brokers"
                     )));
                 }
             }
@@ -470,6 +512,7 @@ fn duration_to_millis(duration: Duration) -> u64 {
 fn build_consumer_config(config: &ConsumerConfig) -> rdkafka::ClientConfig {
     let mut client = rdkafka::ClientConfig::new();
     client.set("bootstrap.servers", config.bootstrap_servers.join(","));
+    apply_security_config(&mut client, &config.security);
     client.set("group.id", &config.group_id);
     if let Some(client_id) = &config.client_id {
         client.set("client.id", client_id);
@@ -1566,6 +1609,7 @@ mod tests {
         assert_eq!(config.fetch_max_bytes, 1024);
         assert_eq!(config.isolation_level, IsolationLevel::ReadCommitted);
         assert!(!config.allow_insecure_transport_for_testing);
+        assert_eq!(config.security, KafkaSecurityConfig::Plaintext);
     }
 
     #[test]
@@ -1589,14 +1633,31 @@ mod tests {
         let err = remote_plaintext.validate().expect_err(
             "remote non-loopback bootstrap servers must fail closed until TLS/SASL support lands",
         );
-        assert!(
-            matches!(err, KafkaError::Config(msg) if msg.contains("allow_insecure_transport_for_testing"))
-        );
+        assert!(matches!(err, KafkaError::Config(msg) if msg.contains("TLS or SASL_SSL")));
 
         let explicit_insecure =
             ConsumerConfig::new(vec!["broker.example.com:9092".to_string()], "group")
                 .allow_insecure_transport_for_testing(true);
         assert!(explicit_insecure.validate().is_ok());
+
+        let tls = ConsumerConfig::new(vec!["broker.example.com:9092".to_string()], "group")
+            .tls(KafkaTlsConfig::new().ca_location("/etc/ssl/certs"));
+        assert!(tls.validate().is_ok());
+
+        let sasl = ConsumerConfig::new(vec!["broker.example.com:9092".to_string()], "group")
+            .sasl_scram_sha_256("service-user", "top-secret");
+        assert!(sasl.validate().is_ok());
+
+        let bad_sasl = ConsumerConfig::new(vec!["broker.example.com:9092".to_string()], "group")
+            .sasl_scram_sha_512("service-user", "");
+        let err = bad_sasl
+            .validate()
+            .expect_err("blank SASL password must fail closed");
+        assert!(matches!(err, KafkaError::Config(msg) if msg.contains("password")));
+
+        let debug = format!("{sasl:?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("top-secret"));
     }
 
     #[test]
