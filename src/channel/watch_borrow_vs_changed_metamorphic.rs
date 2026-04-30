@@ -4,18 +4,22 @@
 //! (version update) and waiter wake in send() operations. This ensures that
 //! borrow_and_update() and changed() maintain proper synchronization.
 
-use crate::channel::watch::{channel, RecvError};
-use crate::cx::Cx;
+use crate::channel::watch::{RecvError, channel};
 use crate::test_utils::{init_test, test_cx};
-use crate::types::{Budget, RegionId, TaskId};
-use crate::util::ArenaIndex;
 use proptest::prelude::*;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
-use std::task::{Context, Poll, Waker};
-use std::future::Future;
-use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::thread;
+
+fn init_test(_name: &str) {
+    crate::test_utils::init_test_logging();
+}
+
+fn test_cx() -> crate::cx::Cx {
+    crate::cx::Cx::for_testing()
+}
 
 /// Simple block_on implementation for tests.
 fn block_on<F: Future>(f: F) -> F::Output {
@@ -25,7 +29,7 @@ fn block_on<F: Future>(f: F) -> F::Output {
     loop {
         match pinned.as_mut().poll(&mut cx) {
             Poll::Ready(v) => return v,
-            Poll::Pending => (),
+            Poll::Pending => thread::yield_now(),
         }
     }
 }
@@ -33,8 +37,8 @@ fn block_on<F: Future>(f: F) -> F::Output {
 /// Test configuration for borrow-and-update vs changed() ordering.
 #[derive(Debug, Clone)]
 struct OrderingTestConfig {
-    /// Number of concurrent senders.
-    sender_count: usize,
+    /// Number of sender pacing batches. Watch channels are single-producer.
+    send_batch_count: usize,
     /// Number of concurrent receivers using borrow_and_update.
     borrow_receiver_count: usize,
     /// Number of concurrent receivers using changed().
@@ -51,22 +55,24 @@ impl Arbitrary for OrderingTestConfig {
 
     fn arbitrary_with(_args: Self::Parameters) -> Self::Strategy {
         (
-            1usize..=3,  // sender_count
-            1usize..=4,  // borrow_receiver_count
-            1usize..=4,  // changed_receiver_count
-            3usize..=8,  // value_count
+            1usize..=3,    // sender_count
+            1usize..=4,    // borrow_receiver_count
+            1usize..=4,    // changed_receiver_count
+            3usize..=8,    // value_count
             any::<bool>(), // with_delays
         )
-        .prop_map(|(sender_count, borrow_count, changed_count, value_count, with_delays)| {
-            OrderingTestConfig {
-                sender_count,
-                borrow_receiver_count: borrow_count,
-                changed_receiver_count: changed_count,
-                value_count,
-                with_delays,
-            }
-        })
-        .boxed()
+            .prop_map(
+                |(send_batch_count, borrow_count, changed_count, value_count, with_delays)| {
+                    OrderingTestConfig {
+                        send_batch_count,
+                        borrow_receiver_count: borrow_count,
+                        changed_receiver_count: changed_count,
+                        value_count,
+                        with_delays,
+                    }
+                },
+            )
+            .boxed()
     }
 }
 
@@ -82,18 +88,18 @@ fn verify_signal_completeness(config: &OrderingTestConfig) {
     init_test("metamorphic_signal_completeness");
     let cx = test_cx();
 
-    let (tx, base_rx) = channel(0u32);
+    let (tx, _base_rx) = channel(0u32);
 
     // Shared state for tracking signals
     let signals_received = Arc::new(AtomicUsize::new(0));
     let borrow_updates_seen = Arc::new(AtomicUsize::new(0));
-    let expected_signals = Arc::new(AtomicUsize::new(0));
     let completed = Arc::new(AtomicBool::new(false));
+    let with_delays = config.with_delays;
 
     let mut handles = Vec::new();
 
     // Spawn changed() receivers
-    for i in 0..config.changed_receiver_count {
+    for _ in 0..config.changed_receiver_count {
         let mut rx = tx.subscribe();
         let signals_received = Arc::clone(&signals_received);
         let completed = Arc::clone(&completed);
@@ -115,7 +121,7 @@ fn verify_signal_completeness(config: &OrderingTestConfig) {
                     Err(RecvError::PolledAfterCompletion) => break,
                 }
 
-                if config.with_delays {
+                if with_delays {
                     thread::sleep(std::time::Duration::from_millis(1));
                 }
             }
@@ -125,7 +131,7 @@ fn verify_signal_completeness(config: &OrderingTestConfig) {
     }
 
     // Spawn borrow_and_update() receivers
-    for i in 0..config.borrow_receiver_count {
+    for _ in 0..config.borrow_receiver_count {
         let mut rx = tx.subscribe();
         let borrow_updates_seen = Arc::clone(&borrow_updates_seen);
         let completed = Arc::clone(&completed);
@@ -135,7 +141,7 @@ fn verify_signal_completeness(config: &OrderingTestConfig) {
             let mut update_count = 0;
 
             while !completed.load(Ordering::Acquire) {
-                let current_value = rx.borrow_and_update();
+                let _current_value = rx.borrow_and_update();
                 let current_version = rx.seen_version();
 
                 if current_version != last_version {
@@ -144,7 +150,7 @@ fn verify_signal_completeness(config: &OrderingTestConfig) {
                     last_version = current_version;
                 }
 
-                if config.with_delays {
+                if with_delays {
                     thread::sleep(std::time::Duration::from_millis(1));
                 }
                 thread::yield_now();
@@ -154,49 +160,38 @@ fn verify_signal_completeness(config: &OrderingTestConfig) {
         handles.push(handle);
     }
 
-    // Send values from multiple threads
-    let mut send_handles = Vec::new();
+    // Send values in paced batches. The watch channel is intentionally
+    // single-producer, so the interleaving pressure comes from receivers.
     let total_sends = config.value_count;
-    let sends_per_thread = (total_sends + config.sender_count - 1) / config.sender_count;
+    let sends_per_batch = total_sends.div_ceil(config.send_batch_count);
+    let mut total_actual_sends = 0;
 
-    for thread_id in 0..config.sender_count {
-        let tx_clone = tx.clone();
-        let expected_signals = Arc::clone(&expected_signals);
+    for batch_id in 0..config.send_batch_count {
+        let start = batch_id * sends_per_batch;
+        let end = std::cmp::min(start + sends_per_batch, total_sends);
 
-        let handle = thread::spawn(move || {
-            let start = thread_id * sends_per_thread;
-            let end = std::cmp::min(start + sends_per_thread, total_sends);
-            let mut actual_sends = 0;
-
-            for i in start..end {
-                let value = (i + 1) as u32;
-                if tx_clone.send(value).is_ok() {
-                    actual_sends += 1;
-                    expected_signals.fetch_add(1, Ordering::Relaxed);
-                }
-
-                if config.with_delays {
-                    thread::sleep(std::time::Duration::from_millis(1));
-                }
+        for i in start..end {
+            let value = (i + 1) as u32;
+            if tx.send(value).is_ok() {
+                total_actual_sends += 1;
             }
-            actual_sends
-        });
-        send_handles.push(handle);
-    }
 
-    // Wait for all sends to complete
-    let total_actual_sends: usize = send_handles.into_iter()
-        .map(|h| h.join().unwrap())
-        .sum();
+            if with_delays {
+                thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+        thread::yield_now();
+    }
 
     // Give receivers time to process all signals
     thread::sleep(std::time::Duration::from_millis(50));
     completed.store(true, Ordering::Release);
+    drop(tx);
 
-    // Collect receiver results
-    let receiver_results: Vec<usize> = handles.into_iter()
-        .map(|h| h.join().unwrap())
-        .collect();
+    // Join receivers after closing the sender so changed() waiters cannot park forever.
+    for handle in handles {
+        handle.join().unwrap();
+    }
 
     // METAMORPHIC ASSERTION 1: Signal completeness
     let total_changed_signals = signals_received.load(Ordering::Acquire);
@@ -214,13 +209,16 @@ fn verify_signal_completeness(config: &OrderingTestConfig) {
     assert!(
         signal_variance <= 0.5, // Allow 50% variance due to concurrency
         "Signal completeness violation: expected ~{} total signals, got {} (variance: {:.2}%)",
-        expected_total, total_changed_signals, signal_variance * 100.0
+        expected_total,
+        total_changed_signals,
+        signal_variance * 100.0
     );
 
     // METAMORPHIC ASSERTION 2: Borrow updates consistency
     // Each borrow_and_update should see updates corresponding to actual sends
     let borrow_variance = if total_actual_sends > 0 {
-        (total_borrow_updates as i64 - (total_actual_sends * config.borrow_receiver_count) as i64).abs() as f64
+        (total_borrow_updates as i64 - (total_actual_sends * config.borrow_receiver_count) as i64)
+            .abs() as f64
             / (total_actual_sends * config.borrow_receiver_count) as f64
     } else {
         0.0
@@ -229,7 +227,9 @@ fn verify_signal_completeness(config: &OrderingTestConfig) {
     assert!(
         borrow_variance <= 0.3, // Stricter for borrow_and_update
         "Borrow update consistency violation: expected ~{} updates, got {} (variance: {:.2}%)",
-        total_actual_sends * config.borrow_receiver_count, total_borrow_updates, borrow_variance * 100.0
+        total_actual_sends * config.borrow_receiver_count,
+        total_borrow_updates,
+        borrow_variance * 100.0
     );
 
     crate::test_complete!("metamorphic_signal_completeness");
@@ -266,7 +266,10 @@ fn verify_ordering_consistency() {
                     let mut max_val = max_signaled_version_clone.load(Ordering::Relaxed);
                     while current_version > max_val {
                         match max_signaled_version_clone.compare_exchange_weak(
-                            max_val, current_version, Ordering::Relaxed, Ordering::Relaxed
+                            max_val,
+                            current_version,
+                            Ordering::Relaxed,
+                            Ordering::Relaxed,
                         ) {
                             Ok(_) => break,
                             Err(actual) => max_val = actual,
@@ -291,7 +294,10 @@ fn verify_ordering_consistency() {
             let mut max_val = max_borrowed_version_clone.load(Ordering::Relaxed);
             while current_version > max_val {
                 match max_borrowed_version_clone.compare_exchange_weak(
-                    max_val, current_version, Ordering::Relaxed, Ordering::Relaxed
+                    max_val,
+                    current_version,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
                 ) {
                     Ok(_) => break,
                     Err(actual) => max_val = actual,
@@ -322,7 +328,8 @@ fn verify_ordering_consistency() {
     assert!(
         max_borrowed <= max_signaled + 1,
         "Ordering consistency violation: borrow saw version {}, but changed only signaled {}",
-        max_borrowed, max_signaled
+        max_borrowed,
+        max_signaled
     );
 
     crate::test_complete!("metamorphic_ordering_consistency");
@@ -357,7 +364,10 @@ fn verify_no_lost_wakeups() {
 
         // Poll once to register waiter
         let initial_poll = changed_future.as_mut().poll(&mut context);
-        assert!(matches!(initial_poll, Poll::Pending), "Should be pending initially");
+        assert!(
+            matches!(initial_poll, Poll::Pending),
+            "Should be pending initially"
+        );
 
         let initial_wake_count = wake_count.load(Ordering::SeqCst);
 
@@ -374,7 +384,9 @@ fn verify_no_lost_wakeups() {
         assert!(
             final_wake_count > initial_wake_count,
             "Scenario {}: Lost wakeup detected - wake count didn't increase (was {}, now {})",
-            scenario, initial_wake_count, final_wake_count
+            scenario,
+            initial_wake_count,
+            final_wake_count
         );
 
         // Verify the future now returns Ready
@@ -419,7 +431,7 @@ proptest! {
 #[test]
 fn concrete_single_sender_multiple_receivers() {
     let config = OrderingTestConfig {
-        sender_count: 1,
+        send_batch_count: 1,
         borrow_receiver_count: 2,
         changed_receiver_count: 2,
         value_count: 5,
@@ -431,7 +443,7 @@ fn concrete_single_sender_multiple_receivers() {
 #[test]
 fn concrete_multiple_senders_single_receiver() {
     let config = OrderingTestConfig {
-        sender_count: 3,
+        send_batch_count: 3,
         borrow_receiver_count: 1,
         changed_receiver_count: 1,
         value_count: 6,
@@ -453,35 +465,21 @@ fn concrete_no_lost_wakeups() {
 /// Helper module to create a simple waker function.
 mod waker_fn {
     use std::sync::Arc;
-    use std::task::{RawWaker, RawWakerVTable, Waker};
+    use std::task::{Wake, Waker};
+
+    struct FnWaker<F>(F);
+
+    impl<F: Fn() + Send + Sync + 'static> Wake for FnWaker<F> {
+        fn wake(self: Arc<Self>) {
+            (self.0)();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            (self.0)();
+        }
+    }
 
     pub fn waker_fn<F: Fn() + Send + Sync + 'static>(f: F) -> Waker {
-        let raw = Arc::into_raw(Arc::new(f)) as *const ();
-        let vtable = &RawWakerVTable::new(clone_fn, wake_fn, wake_by_ref_fn, drop_fn);
-        unsafe { Waker::from_raw(RawWaker::new(raw, vtable)) }
-    }
-
-    unsafe fn clone_fn(data: *const ()) -> RawWaker {
-        let arc = Arc::from_raw(data as *const (dyn Fn() + Send + Sync + 'static));
-        let cloned = arc.clone();
-        std::mem::forget(arc);
-        let raw = Arc::into_raw(cloned) as *const ();
-        let vtable = &RawWakerVTable::new(clone_fn, wake_fn, wake_by_ref_fn, drop_fn);
-        RawWaker::new(raw, vtable)
-    }
-
-    unsafe fn wake_fn(data: *const ()) {
-        let arc = Arc::from_raw(data as *const (dyn Fn() + Send + Sync + 'static));
-        arc();
-    }
-
-    unsafe fn wake_by_ref_fn(data: *const ()) {
-        let arc = Arc::from_raw(data as *const (dyn Fn() + Send + Sync + 'static));
-        arc();
-        std::mem::forget(arc);
-    }
-
-    unsafe fn drop_fn(data: *const ()) {
-        drop(Arc::from_raw(data as *const (dyn Fn() + Send + Sync + 'static)));
+        Waker::from(Arc::new(FnWaker(f)))
     }
 }

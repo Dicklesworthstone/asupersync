@@ -81,6 +81,10 @@ mod oneshot_metamorphic;
 #[path = "mpsc_metamorphic.rs"]
 mod mpsc_metamorphic;
 
+#[cfg(test)]
+#[path = "watch_borrow_vs_changed_metamorphic.rs"]
+mod watch_borrow_vs_changed_metamorphic;
+
 // Re-export commonly used types from mpsc (the default channel)
 pub use mpsc::{Receiver, SendPermit, Sender, channel};
 pub use session::{TrackedOneshotSender, TrackedSender, tracked_channel, tracked_oneshot};
