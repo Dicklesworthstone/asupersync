@@ -198,7 +198,11 @@ impl KafkaMessageFactory {
     }
 
     /// Create payment settlement message (critical financial data).
-    fn create_payment_settle_message(&self, user_id: &str, amount_cents: u64) -> (Vec<u8>, Vec<u8>) {
+    fn create_payment_settle_message(
+        &self,
+        user_id: &str,
+        amount_cents: u64,
+    ) -> (Vec<u8>, Vec<u8>) {
         let msg_id = self.message_counter.fetch_add(1, Ordering::SeqCst);
         let key = format!("payment-{}", user_id).into_bytes();
         let payload = json!({
@@ -218,7 +222,11 @@ impl KafkaMessageFactory {
     }
 
     /// Create payment charge message.
-    fn create_payment_charge_message(&self, user_id: &str, amount_cents: u64) -> (Vec<u8>, Vec<u8>) {
+    fn create_payment_charge_message(
+        &self,
+        user_id: &str,
+        amount_cents: u64,
+    ) -> (Vec<u8>, Vec<u8>) {
         let msg_id = self.message_counter.fetch_add(1, Ordering::SeqCst);
         let key = format!("payment-{}", user_id).into_bytes();
         let payload = json!({
@@ -238,7 +246,11 @@ impl KafkaMessageFactory {
     }
 
     /// Create payment refund message.
-    fn create_payment_refund_message(&self, user_id: &str, amount_cents: u64) -> (Vec<u8>, Vec<u8>) {
+    fn create_payment_refund_message(
+        &self,
+        user_id: &str,
+        amount_cents: u64,
+    ) -> (Vec<u8>, Vec<u8>) {
         let msg_id = self.message_counter.fetch_add(1, Ordering::SeqCst);
         let key = format!("payment-{}", user_id).into_bytes();
         let payload = json!({
@@ -259,7 +271,12 @@ impl KafkaMessageFactory {
     }
 
     /// Create transaction message for abort/replay testing.
-    fn create_transaction_message(&self, transaction_id: &str, transaction_type: &str, amount: u64) -> (Vec<u8>, Vec<u8>) {
+    fn create_transaction_message(
+        &self,
+        transaction_id: &str,
+        transaction_type: &str,
+        amount: u64,
+    ) -> (Vec<u8>, Vec<u8>) {
         let key = format!("{}", transaction_id).into_bytes();
         let payload = json!({
             "transaction_id": transaction_id,
@@ -276,7 +293,13 @@ impl KafkaMessageFactory {
     }
 
     /// Create payment message with sequence for ordering tests.
-    fn create_payment_message_with_sequence(&self, user_id: &str, payment_type: &str, amount_cents: u64, sequence: u64) -> (Vec<u8>, Vec<u8>) {
+    fn create_payment_message_with_sequence(
+        &self,
+        user_id: &str,
+        payment_type: &str,
+        amount_cents: u64,
+        sequence: u64,
+    ) -> (Vec<u8>, Vec<u8>) {
         let key = format!("payment-{}", user_id).into_bytes();
         let payload = json!({
             "type": format!("payment.{}", payment_type),
@@ -854,13 +877,15 @@ fn test_real_broker_payment_message_delivery() {
         // Send critical payment messages
         let payment_messages = vec![
             factory.create_payment_settle_message("user123", 10000), // $100.00
-            factory.create_payment_charge_message("user456", 5000),   // $50.00
-            factory.create_payment_refund_message("user789", 2500),   // $25.00
+            factory.create_payment_charge_message("user456", 5000),  // $50.00
+            factory.create_payment_refund_message("user789", 2500),  // $25.00
         ];
 
         let mut sent_metadata = Vec::new();
         for (i, (key, payload)) in payment_messages.iter().enumerate() {
-            let result = producer.send(&cx, &payment_topic, Some(key), payload, None).await;
+            let result = producer
+                .send(&cx, &payment_topic, Some(key), payload, None)
+                .await;
 
             match result {
                 Ok(metadata) => {
@@ -882,7 +907,11 @@ fn test_real_broker_payment_message_delivery() {
         let poll_start = std::time::Instant::now();
 
         while received_messages.len() < payment_messages.len() && poll_start.elapsed() < timeout {
-            if let Some(records) = consumer.poll(&cx, Duration::from_millis(1000)).await.unwrap() {
+            if let Some(records) = consumer
+                .poll(&cx, Duration::from_millis(1000))
+                .await
+                .unwrap()
+            {
                 for record in records {
                     // Payment processing simulation: verify message integrity
                     let key = String::from_utf8(record.key.unwrap_or_default()).unwrap();
@@ -891,9 +920,18 @@ fn test_real_broker_payment_message_delivery() {
 
                     // Verify payment message structure
                     assert!(payment["user_id"].is_string(), "Payment must have user_id");
-                    assert!(payment["amount_cents"].is_u64(), "Payment must have amount in cents");
-                    assert!(payment["transaction_id"].is_string(), "Payment must have transaction_id");
-                    assert!(payment["timestamp"].is_string(), "Payment must have timestamp");
+                    assert!(
+                        payment["amount_cents"].is_u64(),
+                        "Payment must have amount in cents"
+                    );
+                    assert!(
+                        payment["transaction_id"].is_string(),
+                        "Payment must have transaction_id"
+                    );
+                    assert!(
+                        payment["timestamp"].is_string(),
+                        "Payment must have timestamp"
+                    );
 
                     received_messages.push((key, payload));
 
@@ -908,10 +946,10 @@ fn test_real_broker_payment_message_delivery() {
                     log.kafka_operation(
                         "payment_processed",
                         None,
-                        Some(&format!("user={}, amount={}",
-                            payment["user_id"],
-                            payment["amount_cents"]
-                        ))
+                        Some(&format!(
+                            "user={}, amount={}",
+                            payment["user_id"], payment["amount_cents"]
+                        )),
                     );
                 }
             }
@@ -932,7 +970,10 @@ fn test_real_broker_payment_message_delivery() {
         for (i, (sent_key, sent_payload)) in payment_messages.iter().enumerate() {
             let (received_key, received_payload) = &received_messages[i];
             assert_eq!(sent_key, received_key, "Payment key must match exactly");
-            assert_eq!(sent_payload, received_payload, "Payment payload must match exactly");
+            assert_eq!(
+                sent_payload, received_payload,
+                "Payment payload must match exactly"
+            );
         }
 
         log.phase("cleanup");
