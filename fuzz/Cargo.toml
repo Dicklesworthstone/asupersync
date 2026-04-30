@@ -1522,6 +1522,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h2_rst_stream_internal_error"
+path = "fuzz_targets/h2_rst_stream_internal_error.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "symbol_auth"
 path = "fuzz_targets/symbol_auth.rs"
 test = false
@@ -3666,6 +3673,17 @@ bench = false
 [[bin]]
 name = "notify_one_poll_interleave"
 path = "fuzz_targets/notify_one_poll_interleave.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #166 — Notify notify_one() with multiple Notified futures fuzzer
+# Tests arbitrary scenarios with multiple waiters, validates that notify_one()
+# wakes exactly one waiter while others remain pending. Includes patterns like
+# single notify, multiple notify calls, interleaved operations, and rapid notify.
+[[bin]]
+name = "notify_one_multiple_waiters"
+path = "fuzz_targets/notify_one_multiple_waiters.rs"
 test = false
 doc = false
 bench = false
