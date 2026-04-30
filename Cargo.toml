@@ -56,8 +56,8 @@ wasm-browser-minimal = ["wasm-runtime"]
 # Enable internal test helpers for integration tests.
 # This exposes private APIs like Cx::new() and is NOT for production use.
 test-internals = ["dep:tracing", "dep:tracing-subscriber", "dep:visibility"]
-# OpenTelemetry metrics provider (optional).
-metrics = ["dep:opentelemetry", "dep:opentelemetry_sdk"]
+# OpenTelemetry metrics provider and OTLP wire helpers (optional).
+metrics = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-proto"]
 # Enable tracing integration for structured logging and spans.
 # When disabled, tracing macros compile to no-ops for zero overhead.
 tracing-integration = ["dep:tracing"]
