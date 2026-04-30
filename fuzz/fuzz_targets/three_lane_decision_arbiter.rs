@@ -951,6 +951,125 @@ fn assert_deadline_miss_promotion_once(scenario: &FuzzDeadlinePromotionScenario)
     }
 }
 
+fn assert_monotone_deadlines_preserve_edf_under_promotion(
+    scenario: &FuzzDeadlinePromotionScenario,
+) {
+    if scenario.tasks.is_empty() {
+        return;
+    }
+
+    let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+    let clock = Arc::new(VirtualClock::starting_at(Time::ZERO));
+    {
+        let mut guard = state.lock().expect("lock runtime state");
+        guard.set_timer_driver(TimerDriverHandle::with_virtual_clock(clock.clone()));
+    }
+
+    let cancel_limit = scenario.tasks.len().max(1);
+    let mut scheduler = ThreeLaneScheduler::new_with_cancel_limit(1, &state, cancel_limit);
+    let mut workers = scheduler.take_workers();
+    let worker = workers.first_mut().expect("worker");
+
+    let mut monotone_deadlines = Vec::with_capacity(scenario.tasks.len());
+    let mut current_deadline_ns = 0u64;
+    for task in &scenario.tasks {
+        current_deadline_ns =
+            current_deadline_ns.max(timed_deadline_from_bucket(task.deadline_bucket).as_nanos());
+        monotone_deadlines.push(Time::from_nanos(current_deadline_ns));
+    }
+
+    let mut promoted = Vec::new();
+    let mut remaining_timed = Vec::new();
+    for (index, task) in scenario.tasks.iter().enumerate() {
+        let task_id = scheduler_task_id(96_000, index);
+        worker.schedule_local_timed(task_id, monotone_deadlines[index]);
+        if task.promote_after_miss {
+            promoted.push((task_id, task.promote_attempts, task.cancel_priority));
+        } else {
+            remaining_timed.push(task_id);
+        }
+    }
+
+    let max_deadline_ns = monotone_deadlines
+        .last()
+        .map(|deadline| deadline.as_nanos())
+        .unwrap_or(0u64)
+        .saturating_add(1);
+    clock.advance_to(Time::from_nanos(max_deadline_ns));
+    for (task_id, attempts, priority) in &promoted {
+        for _ in 0..usize::from(*attempts) {
+            worker.schedule_local_cancel(*task_id, *priority);
+        }
+    }
+
+    let expected_total = scenario.tasks.len();
+    let mut dispatch_trace = Vec::with_capacity(expected_total);
+    while dispatch_trace.len() < expected_total {
+        let Some(task) = worker.next_task() else {
+            break;
+        };
+        assert!(
+            !dispatch_trace.contains(&task),
+            "monotone deadline promotion duplicated task {task:?}"
+        );
+        dispatch_trace.push(task);
+    }
+
+    assert_eq!(
+        dispatch_trace.len(),
+        expected_total,
+        "monotone deadline scenario must dispatch every task exactly once"
+    );
+
+    let expected_promoted: Vec<_> = promoted.iter().map(|(task_id, _, _)| *task_id).collect();
+    let observed_promoted: Vec<_> = dispatch_trace
+        .iter()
+        .copied()
+        .filter(|task_id| expected_promoted.contains(task_id))
+        .collect();
+    assert_eq!(
+        observed_promoted, expected_promoted,
+        "promoted tasks from a monotone deadline stream must preserve EDF-equivalent order"
+    );
+
+    let observed_remaining: Vec<_> = dispatch_trace
+        .iter()
+        .copied()
+        .filter(|task_id| remaining_timed.contains(task_id))
+        .collect();
+    assert_eq!(
+        observed_remaining, remaining_timed,
+        "non-promoted timed tasks from a monotone deadline stream must preserve EDF order"
+    );
+
+    let expected_trace: Vec<_> = expected_promoted
+        .iter()
+        .copied()
+        .chain(remaining_timed.iter().copied())
+        .collect();
+    assert_eq!(
+        dispatch_trace, expected_trace,
+        "lane promotion must preserve monotone EDF order across cancel/timed observation boundaries"
+    );
+
+    let metrics = worker.preemption_metrics();
+    assert_eq!(metrics.cancel_dispatches as usize, expected_promoted.len());
+    assert_eq!(metrics.timed_dispatches as usize, remaining_timed.len());
+    assert_eq!(metrics.ready_dispatches, 0);
+    assert!(
+        worker.invariant_violations().is_empty(),
+        "monotone deadline promotion must not introduce scheduler invariant violations"
+    );
+
+    for _ in 0..2 {
+        assert_eq!(
+            worker.next_task(),
+            None,
+            "worker should quiesce after draining the monotone deadline promotion scenario"
+        );
+    }
+}
+
 fn assert_zero_reward_policy_trace(trace: &FuzzZeroRewardPolicyTrace) {
     if trace.forced_arms.is_empty() {
         return;
@@ -1415,22 +1534,26 @@ fuzz_target!(|input: DecisionArbiterInput| {
     // Test 5: Missed-deadline promotion collapses to a single cancel observation.
     assert_deadline_miss_promotion_once(&input.deadline_promotion);
 
-    // Test 6: All-zero adaptive reward traces must keep discounted arm masses
+    // Test 6: Monotone deadlines preserve EDF-equivalent order across
+    // cancel-lane promotion boundaries.
+    assert_monotone_deadlines_preserve_edf_under_promotion(&input.deadline_promotion);
+
+    // Test 7: All-zero adaptive reward traces must keep discounted arm masses
     // finite and strictly positive.
     assert_zero_reward_policy_trace(&input.zero_reward_trace);
 
-    // Test 7: Shutdown must wake an in-flight reactor leader and let workers
+    // Test 8: Shutdown must wake an in-flight reactor leader and let workers
     // exit without hanging.
     assert_reactor_shutdown_handshake(&input.reactor_shutdown);
 
-    // Test 8: Concurrent steals across multiple victims must never surface the
+    // Test 9: Concurrent steals across multiple victims must never surface the
     // same task twice.
     assert_concurrent_multi_victim_steal_no_double_steal(&input.concurrent_multi_victim_steal);
 
-    // Test 9: Cancel-mask state propagates into scheduler snapshots without
+    // Test 10: Cancel-mask state propagates into scheduler snapshots without
     // becoming runnable phantom work.
     assert_cancel_mask_propagation(&input.workload, &input.state_snapshots[0]);
 
-    // Test 10: Adaptive cancel-streak governor stays bounded and terminates.
+    // Test 11: Adaptive cancel-streak governor stays bounded and terminates.
     assert_adaptive_budget_governor(&input.adaptive_budget, &weights);
 });
