@@ -3624,6 +3624,28 @@ test = false
 doc = false
 bench = false
 
+# Tick #160 — Notify one/poll interleave spurious readiness detection fuzzer
+# Tests notify_one() interleaved with notified.poll() for arbitrary mixing patterns.
+# Validates that poll() only returns Ready after notify_one(), never spuriously.
+# Includes tracking wakers and comprehensive operation sequencing.
+[[bin]]
+name = "notify_one_poll_interleave"
+path = "fuzz_targets/notify_one_poll_interleave.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #161 — Oneshot explicit close operations fuzzer
+# Tests arbitrary close+send/recv interleavings through sender/receiver drops.
+# Validates post-close send returns Disconnected/Cancelled error and post-close
+# recv returns Closed/Cancelled error with proper state consistency.
+[[bin]]
+name = "oneshot_explicit_close"
+path = "fuzz_targets/oneshot_explicit_close.rs"
+test = false
+doc = false
+bench = false
+
 # Tick #133 — HTTP/2 PUSH_PROMISE frame handling fuzzer
 # Targets PUSH_PROMISE frame handling logic in src/http/h2/connection.rs
 # to test handling of arbitrary frames including push without ENABLE_PUSH=1,
