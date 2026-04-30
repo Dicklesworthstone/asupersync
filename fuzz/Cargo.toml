@@ -1501,6 +1501,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h2_data_frame_after_end_stream"
+path = "fuzz_targets/h2_data_frame_after_end_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "symbol_auth"
 path = "fuzz_targets/symbol_auth.rs"
 test = false
@@ -3667,6 +3674,17 @@ bench = false
 [[bin]]
 name = "notify_waiters_drop_pending"
 path = "fuzz_targets/notify_waiters_drop_pending.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #163 — OnceCell init-with-panic recovery fuzzer
+# Tests arbitrary panic-during-init scenarios to ensure panic recovery behavior.
+# Validates cell stays uninitialized after panic and retry attempts succeed.
+# Includes concurrent panic handling and state corruption detection.
+[[bin]]
+name = "once_cell_init_with_panic"
+path = "fuzz_targets/once_cell_init_with_panic.rs"
 test = false
 doc = false
 bench = false
