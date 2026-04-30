@@ -1473,6 +1473,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h2_settings_max_header_list_size"
+path = "fuzz_targets/h2_settings_max_header_list_size.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "symbol_auth"
 path = "fuzz_targets/symbol_auth.rs"
 test = false
@@ -3562,6 +3569,17 @@ bench = false
 [[bin]]
 name = "notify_drop_race"
 path = "fuzz_targets/notify_drop_race.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #156 — RwLock read-to-write upgrade race fuzzer
+# Tests arbitrary upgrade attempts to ensure only one upgrade succeeds while
+# others fail appropriately. Validates race conditions between multiple readers
+# attempting to upgrade to write access simultaneously.
+[[bin]]
+name = "rwlock_upgrade_race"
+path = "fuzz_targets/rwlock_upgrade_race.rs"
 test = false
 doc = false
 bench = false
