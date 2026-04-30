@@ -31,8 +31,8 @@ struct SpanEventTimestampData {
 }
 
 fn main() {
-    println!("🔍 OpenTelemetry Span Event Timestamps Conformance Test");
-    println!("Verifying same Instant → identical OTLP unix-nanos");
+    println!("OpenTelemetry Span Event Timestamps Conformance Test");
+    println!("Verifying same Instant -> identical OTLP unix-nanos");
 
     // Create reference time points for consistent testing
     let base_instant = Instant::now();
@@ -169,7 +169,7 @@ fn main() {
     ];
 
     println!(
-        "📋 Running {} Span event timestamp conformance tests",
+        "Running {} Span event timestamp conformance tests",
         test_cases.len()
     );
 
@@ -190,21 +190,21 @@ fn main() {
         {
             failed_tests.push((test_case.name.to_string(), error));
         } else {
-            println!("    ✅ {}", test_case.name);
+            println!("    PASS {}", test_case.name);
         }
     }
 
     // Test edge cases
-    println!("\n📋 Testing Span event timestamp edge cases");
+    println!("\nTesting Span event timestamp edge cases");
     test_span_event_timestamp_edge_cases(&mut failed_tests);
 
     // Report results
-    println!("\n📊 Span Event Timestamp Conformance Test Results");
+    println!("\nSpan Event Timestamp Conformance Test Results");
     if failed_tests.is_empty() {
-        println!("✅ ALL TESTS PASSED - Span event timestamps are conformant");
-        println!("🎯 OTLP unix nanosecond precision is stable for identical event instants");
+        println!("ALL TESTS PASSED - Span event timestamps are conformant");
+        println!("OTLP unix nanosecond precision is stable for identical event instants");
     } else {
-        println!("❌ {} TESTS FAILED:", failed_tests.len());
+        println!("{} TESTS FAILED:", failed_tests.len());
         for (test_name, error) in &failed_tests {
             println!("   {} - {}", test_name, error);
         }
@@ -390,7 +390,7 @@ fn test_span_event_timestamp_edge_cases(failed_tests: &mut Vec<(String, String)>
         {
             failed_tests.push((format!("edge_case_{}", case_name), error));
         } else {
-            println!("    ✅ edge_case_{}", case_name);
+            println!("    PASS edge_case_{}", case_name);
         }
     }
 }
