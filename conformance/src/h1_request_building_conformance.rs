@@ -7,10 +7,8 @@
 use asupersync::bytes::BytesMut;
 use asupersync::codec::Encoder;
 use asupersync::http::h1::client::Http1ClientCodec;
-use asupersync::http::h1::types::{Method, Request, RequestBuilder, Version};
-use reqwest::Client;
+use asupersync::http::h1::types::{Method, RequestBuilder, Version};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fmt;
 
 /// Test verdict for request building conformance cases.
@@ -364,6 +362,8 @@ impl RequestBuildingConformanceTester {
         } else {
             RequestBuildingTestVerdict::Fail
         };
+        let asupersync_size = asupersync_wire.len();
+        let reqwest_size = reqwest_wire.len();
 
         RequestBuildingTestResult {
             case_id: case.id.clone(),
@@ -372,8 +372,8 @@ impl RequestBuildingConformanceTester {
             asupersync_wire,
             reqwest_wire,
             bytes_match,
-            asupersync_size: asupersync_wire.len(),
-            reqwest_size: reqwest_wire.len(),
+            asupersync_size,
+            reqwest_size,
         }
     }
 

@@ -4,9 +4,9 @@
 //! implementation to ensure byte-identical wire output given the same HeaderMap
 //! and dynamic table state.
 
+use asupersync::bytes::Bytes;
 use asupersync::bytes::BytesMut;
-use asupersync::http::h2::{Header, HpackEncoder as AsupersyncEncoder};
-use h2::hpack::Encoder as H2Encoder;
+use asupersync::http::h2::{Header, HpackDecoder, HpackEncoder as AsupersyncEncoder};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -269,52 +269,22 @@ impl HpackEncoderConformanceTester {
         let asupersync_output = asupersync_buf.to_vec();
         let asupersync_table_size = asupersync_encoder.dynamic_table_size();
 
-        // Test h2 reference encoder
-        let mut h2_encoder = H2Encoder::new();
-        if let Some(size) = case.max_table_size {
-            h2_encoder.update_max_size(size);
-        }
+        let roundtrip_error = decode_asupersync_output(&asupersync_output, &case.headers).err();
+        let h2_output = Vec::new();
+        let h2_table_size = 0;
+        let bytes_match = false;
+        let table_size_match = true;
 
-        // Convert our headers to h2 format
-        let h2_headers: Vec<h2::hpack::Header> = case
-            .headers
-            .iter()
-            .map(|h| {
-                h2::hpack::Header::new(
-                    h2::hpack::Name::from_bytes(h.name.as_bytes()).unwrap(),
-                    h.value.as_bytes(),
-                )
-            })
-            .collect();
-
-        let mut h2_buf = BytesMut::new();
-        // Note: h2 doesn't have a public set_use_huffman method, it's internal
-        h2_encoder.encode(&h2_headers, &mut h2_buf);
-        let h2_output = h2_buf.to_vec();
-
-        // h2 encoder doesn't expose dynamic table size, so we'll approximate
-        let h2_table_size = 0; // Placeholder - h2 doesn't expose this
-
-        let bytes_match = asupersync_output == h2_output;
-        let table_size_match = asupersync_table_size == h2_table_size || h2_table_size == 0;
-
-        let verdict = if case.expected_identical && bytes_match {
-            EncoderTestVerdict::Pass
-        } else if !case.expected_identical {
-            // For cases where we don't expect identical output
-            EncoderTestVerdict::Pass
+        let (verdict, error) = if let Some(error) = roundtrip_error {
+            (EncoderTestVerdict::Fail, Some(error))
         } else {
-            EncoderTestVerdict::Fail
-        };
-
-        let error = if verdict == EncoderTestVerdict::Fail {
-            Some(format!(
-                "Output mismatch: asupersync={} bytes, h2={} bytes",
-                asupersync_output.len(),
-                h2_output.len()
-            ))
-        } else {
-            None
+            (
+                EncoderTestVerdict::Skipped,
+                Some(
+                    "h2 crate HPACK encoder internals are private; byte-differential reference output is unavailable"
+                        .to_string(),
+                ),
+            )
         };
 
         HpackEncoderTestResult {
@@ -439,6 +409,19 @@ impl HpackEncoderConformanceTester {
         }
 
         output
+    }
+}
+
+fn decode_asupersync_output(encoded: &[u8], expected: &[Header]) -> Result<(), String> {
+    let mut decoder = HpackDecoder::new();
+    let mut src = Bytes::copy_from_slice(encoded);
+    let decoded = decoder.decode(&mut src).map_err(|err| err.to_string())?;
+    if decoded == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "asupersync HPACK encode/decode round trip differed: decoded={decoded:?}, expected={expected:?}"
+        ))
     }
 }
 

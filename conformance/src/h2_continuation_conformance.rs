@@ -5,8 +5,11 @@
 //! focusing on the requirement that CONTINUATION frames must immediately
 //! follow HEADERS/PUSH_PROMISE frames without intervening frames.
 
-use asupersync::bytes::{Bytes, BytesMut};
-use asupersync::http::h2::{Connection as AsupersyncConnection, ErrorCode, H2Error};
+use asupersync::bytes::Bytes;
+use asupersync::http::h2::frame::{
+    ContinuationFrame, DataFrame, HeadersFrame, PingFrame, SettingsFrame, WindowUpdateFrame,
+};
+use asupersync::http::h2::{Connection, ErrorCode, Frame, Settings};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -425,16 +428,16 @@ impl ContinuationConformanceTester {
 
     /// Test frame sequence against asupersync implementation.
     async fn test_asupersync_implementation(&self, sequence: &FrameSequence) -> TestFrameResult {
-        use asupersync::bytes::Bytes;
-        use asupersync::http::h2::Frame;
-        use asupersync::http::h2::frame::{
-            ContinuationFrame, DataFrame, HeadersFrame, PingFrame, SettingsFrame, WindowUpdateFrame,
-        };
-        use asupersync::http::h2::{Connection, ConnectionState, Settings};
-
         // Create a server connection for testing
         let mut connection = Connection::server(Settings::default());
-        connection.state = ConnectionState::Open; // Skip handshake for testing
+        if let Err(error) = connection.process_frame(Frame::Settings(SettingsFrame::new(vec![]))) {
+            return TestFrameResult {
+                accepted: false,
+                error_code: Some(format!("{:?}", error.code)),
+                error_message: Some(error.message),
+                frames_processed: 0,
+            };
+        }
 
         let mut frames_processed = 0;
         let mut last_error: Option<String> = None;

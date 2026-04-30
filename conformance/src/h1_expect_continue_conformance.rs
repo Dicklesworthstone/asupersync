@@ -4,11 +4,7 @@
 //! handling against a `reqwest`-based reference server to ensure identical
 //! behavior for 100 Continue and 417 Expectation Failed responses.
 
-use asupersync::bytes::BytesMut;
-use asupersync::codec::{Decoder, Encoder};
-use asupersync::http::h1::{Http1Codec, HttpError};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fmt;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -581,9 +577,7 @@ async fn handle_asupersync_connection(
 }
 
 /// Handle connection for reference server (simplified implementation).
-async fn handle_reference_connection(
-    mut stream: TcpStream,
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn handle_reference_connection(stream: TcpStream) -> Result<(), Box<dyn std::error::Error>> {
     // This would be the same logic as asupersync for conformance
     // In practice, this would use the actual reference implementation
     handle_asupersync_connection(stream).await
