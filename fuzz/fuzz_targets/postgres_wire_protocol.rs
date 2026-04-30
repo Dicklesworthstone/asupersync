@@ -19,7 +19,8 @@ use arbitrary::Arbitrary;
 use asupersync::Cx;
 use asupersync::database::PgColumn;
 use asupersync::database::postgres::{
-    fuzz_apply_ready_for_query, fuzz_parse_data_row, fuzz_parse_error_response,
+    Format, IsNull, PgError, ToSql, build_bind_msg, fuzz_apply_ready_for_query,
+    fuzz_parse_bind_message, fuzz_parse_data_row, fuzz_parse_error_response,
     fuzz_parse_parameter_description, fuzz_parse_row_description, fuzz_read_backend_message,
 };
 use futures::executor::block_on;
@@ -84,6 +85,10 @@ enum FuzzScenario {
         field_count: u16,
         data_rows: Vec<CopyRow>,
         delimiter_tests: Vec<DelimiterTest>,
+    },
+    /// Bind parameter-format code compression and per-parameter encoding.
+    BindParameterFormats {
+        parameters: Vec<BindFormatParameter>,
     },
     /// ReadyForQuery transaction-state parsing and transition validation.
     ReadyForQueryState {
@@ -333,6 +338,19 @@ struct PrepOptions {
 }
 
 #[derive(Arbitrary, Debug)]
+struct BindFormatParameter {
+    format: BindWireFormat,
+    is_null: bool,
+    value: Vec<u8>,
+}
+
+#[derive(Arbitrary, Debug, Clone, Copy)]
+enum BindWireFormat {
+    Text,
+    Binary,
+}
+
+#[derive(Arbitrary, Debug)]
 enum CopyFormat {
     Text,
     Binary,
@@ -454,6 +472,8 @@ fuzz_target!(|scenario: FuzzScenario| match scenario {
         data_rows,
         delimiter_tests,
     } => fuzz_copy_protocol(copy_format, field_count, data_rows, delimiter_tests),
+
+    FuzzScenario::BindParameterFormats { parameters } => fuzz_bind_parameter_formats(parameters),
 
     FuzzScenario::ReadyForQueryState {
         initial_status,
@@ -971,6 +991,57 @@ fn fuzz_copy_protocol(
     }
 }
 
+fn fuzz_bind_parameter_formats(parameters: Vec<BindFormatParameter>) {
+    let owned = parameters
+        .into_iter()
+        .take(MAX_PARAMETERS)
+        .map(FuzzBindValue::from)
+        .collect::<Vec<_>>();
+    let refs = owned
+        .iter()
+        .map(|value| value as &dyn ToSql)
+        .collect::<Vec<_>>();
+    let frame = build_bind_msg("portal", "stmt", &refs, Format::Text)
+        .expect("Bind builder must accept fuzz wrapper parameters");
+    let bind = match fuzz_parse_bind_message(&frame) {
+        Ok(bind) => bind,
+        Err(err) => panic!("Bind frame emitted by builder must parse, got {err:?}"),
+    };
+
+    assert_eq!(bind.portal, "portal");
+    assert_eq!(bind.statement_name, "stmt");
+    assert_eq!(
+        bind.param_format_codes,
+        expected_bind_format_codes(&owned),
+        "parameter-format section must follow PostgreSQL compression rules"
+    );
+    assert_eq!(
+        bind.parameter_values.len(),
+        owned.len(),
+        "Bind parser must preserve parameter arity"
+    );
+    assert_eq!(
+        bind.result_format_codes,
+        vec![0],
+        "Format::Text result format must encode a single text result-format code"
+    );
+
+    for (parsed, expected) in bind.parameter_values.iter().zip(&owned) {
+        match (parsed, expected.is_null) {
+            (None, true) => {}
+            (Some(actual), false) => {
+                assert_eq!(
+                    actual, &expected.value,
+                    "Bind payload bytes must be preserved exactly per parameter"
+                );
+            }
+            (other, is_null) => {
+                panic!("unexpected bind parameter state {other:?} for is_null={is_null}")
+            }
+        }
+    }
+}
+
 fn ready_for_query_status_byte(status: &ReadyForQueryStatus) -> u8 {
     match status {
         ReadyForQueryStatus::Idle => b'I',
@@ -1040,6 +1111,73 @@ fn fuzz_ready_for_query_state(
 
 fn sanitize_string(input: &str, max_len: usize) -> String {
     input.chars().take(max_len).collect()
+}
+
+#[derive(Debug)]
+struct FuzzBindValue {
+    format: BindWireFormat,
+    is_null: bool,
+    value: Vec<u8>,
+}
+
+impl From<BindFormatParameter> for FuzzBindValue {
+    fn from(param: BindFormatParameter) -> Self {
+        Self {
+            format: param.format,
+            is_null: param.is_null,
+            value: param
+                .value
+                .into_iter()
+                .take(MAX_STRING_LENGTH)
+                .collect::<Vec<_>>(),
+        }
+    }
+}
+
+impl ToSql for FuzzBindValue {
+    fn to_sql(&self, buf: &mut Vec<u8>) -> Result<IsNull, PgError> {
+        if self.is_null {
+            return Ok(IsNull::Yes);
+        }
+        buf.extend_from_slice(&self.value);
+        Ok(IsNull::No)
+    }
+
+    fn type_oid(&self) -> u32 {
+        0
+    }
+
+    fn format(&self) -> Format {
+        match self.format {
+            BindWireFormat::Text => Format::Text,
+            BindWireFormat::Binary => Format::Binary,
+        }
+    }
+}
+
+fn expected_bind_format_codes(parameters: &[FuzzBindValue]) -> Vec<i16> {
+    if parameters.is_empty()
+        || parameters
+            .iter()
+            .all(|param| matches!(param.format, BindWireFormat::Text))
+    {
+        return Vec::new();
+    }
+
+    if parameters
+        .iter()
+        .all(|param| matches!(param.format, BindWireFormat::Binary))
+    {
+        vec![1]
+    } else {
+        parameters
+            .iter()
+            .map(|param| match param.format {
+                BindWireFormat::Text => 0,
+                BindWireFormat::Binary => 1,
+            })
+            .collect()
+    }
 }
 
 fn apply_malformed_data(data: &mut Vec<u8>, malformation: &MalformedData) {

@@ -4514,7 +4514,25 @@ impl PgConnection {
     }
 
     fn affected_rows_from_command_tag(tag: &str) -> Option<u64> {
-        tag.rsplit(' ').next()?.parse::<u64>().ok()
+        let mut parts = tag.split_ascii_whitespace();
+        match parts.next()? {
+            "INSERT" => {
+                let _oid = parts.next()?;
+                let count = parts.next()?;
+                if parts.next().is_some() {
+                    return None;
+                }
+                count.parse::<u64>().ok()
+            }
+            "UPDATE" | "DELETE" | "SELECT" | "COPY" => {
+                let count = parts.next()?;
+                if parts.next().is_some() {
+                    return None;
+                }
+                count.parse::<u64>().ok()
+            }
+            _ => None,
+        }
     }
 
     fn command_tag_requires_prepared_cache_invalidation(tag: &str) -> bool {
@@ -6349,6 +6367,19 @@ pub fn fuzz_build_unlisten_sql(channel: &str) -> Result<String, PgError> {
 pub fn fuzz_parse_notification_response(data: &[u8]) -> Result<(), PgError> {
     let (mut conn, _peer) = fuzz_test_connection_with_peer();
     conn.handle_notification_response(data)
+}
+
+/// Fuzz-target re-exporter for strict CommandComplete tag parsing.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_parse_command_complete_tag(data: &[u8]) -> Result<u64, PgError> {
+    let tag = PgConnection::parse_command_tag(data)
+        .ok_or_else(|| PgError::Protocol("CommandComplete tag must be valid UTF-8".to_string()))?;
+    PgConnection::affected_rows_from_command_tag(tag).ok_or_else(|| {
+        PgError::Protocol(format!(
+            "CommandComplete tag missing numeric row count: {tag:?}"
+        ))
+    })
 }
 
 /// Fuzz-target re-exporter for ReadyForQuery transaction-state parsing.
@@ -9172,6 +9203,27 @@ mod tests {
                 other => panic!("expected malformed ReadyForQuery error, got {other:?}"),
             }
             assert_eq!(final_status, b'T');
+        }
+    }
+
+    #[test]
+    fn fuzz_parse_command_complete_tag_extracts_rows() {
+        assert_eq!(fuzz_parse_command_complete_tag(b"INSERT 0 5\0").unwrap(), 5);
+        assert_eq!(fuzz_parse_command_complete_tag(b"UPDATE 42\0").unwrap(), 42);
+        assert_eq!(fuzz_parse_command_complete_tag(b"COPY 7").unwrap(), 7);
+    }
+
+    #[test]
+    fn fuzz_parse_command_complete_tag_rejects_malformed() {
+        for payload in [
+            b"UPDATE nope\0".as_slice(),
+            b"\xff\xfe\x00".as_slice(),
+            b"".as_slice(),
+        ] {
+            match fuzz_parse_command_complete_tag(payload) {
+                Err(PgError::Protocol(_)) => {}
+                other => panic!("expected malformed CommandComplete tag error, got {other:?}"),
+            }
         }
     }
 
