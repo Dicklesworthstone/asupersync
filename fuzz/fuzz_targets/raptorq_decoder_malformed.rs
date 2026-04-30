@@ -22,6 +22,9 @@ const MAX_SOURCE_BYTES: usize = MAX_K * MAX_SYMBOL_SIZE;
 const MAX_REPAIR_PACKETS: usize = 24;
 const MAX_SOURCE_MUTATIONS: usize = 16;
 const MAX_PACKET_BYTES: usize = 256;
+const MAX_EXTREME_FEC_PACKETS: usize = 12;
+const MAX_EXTREME_PAYLOAD_BYTES: usize = 8 * 1024;
+const MAX_EXTREME_COLUMNS: usize = 96;
 
 #[derive(Arbitrary, Debug)]
 struct MalformedSourceBlockInput {
@@ -32,6 +35,7 @@ struct MalformedSourceBlockInput {
     wavefront_batch: u8,
     source_bytes: Vec<u8>,
     repair_packets: Vec<RepairPacketInput>,
+    extreme_fec_packets: Vec<ExtremeFecPayloadInput>,
     source_mutations: Vec<SourceMutation>,
 }
 
@@ -52,6 +56,27 @@ enum RepairPacketMutation {
     ZeroFirstCoefficient,
     DuplicateFirstColumn,
     PretendSource,
+}
+
+#[derive(Arbitrary, Debug, Clone)]
+struct ExtremeFecPayloadInput {
+    esi_seed: u32,
+    payload_seed: u8,
+    column_seed: u16,
+    coefficient_seed: u8,
+    mode: ExtremeFecMode,
+}
+
+#[derive(Arbitrary, Debug, Clone)]
+enum ExtremeFecMode {
+    HugeRepairEsi,
+    HugeSourceEsi,
+    MaxColumnIndex,
+    ColumnArityExplosion { count: u8 },
+    CoefficientArityExplosion { count: u8 },
+    OversizedPayload { multiplier: u8 },
+    EmptyPayload,
+    SourceFlagOnRepairEquation,
 }
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -92,6 +117,7 @@ impl MalformedSourceBlockInput {
         self.symbol_size = ((self.symbol_size as usize % MAX_SYMBOL_SIZE) + 1) as u8;
         self.source_bytes.truncate(MAX_SOURCE_BYTES);
         self.repair_packets.truncate(MAX_REPAIR_PACKETS);
+        self.extreme_fec_packets.truncate(MAX_EXTREME_FEC_PACKETS);
         self.source_mutations.truncate(MAX_SOURCE_MUTATIONS);
         for packet in &mut self.repair_packets {
             packet.data.truncate(MAX_PACKET_BYTES);
@@ -209,6 +235,119 @@ fn build_repair_packets(
     packets
 }
 
+fn repeated_payload(seed: u8, len: usize) -> Vec<u8> {
+    (0..len)
+        .map(|idx| seed.wrapping_add(idx as u8).rotate_left((idx % 7) as u32))
+        .collect()
+}
+
+fn nonzero_coefficient(seed: u8) -> Gf256 {
+    if seed == 0 {
+        Gf256::ONE
+    } else {
+        Gf256::new(seed)
+    }
+}
+
+fn push_extreme_fec_payloads(
+    packets: &mut Vec<ReceivedSymbol>,
+    decoder: &InactivationDecoder,
+    symbol_size: usize,
+    inputs: &[ExtremeFecPayloadInput],
+) {
+    let k = decoder.params().k;
+    let l = decoder.params().l;
+    let base_repair_esi = u32::try_from(k).expect("bounded fuzz K must fit in u32");
+
+    for input in inputs {
+        match input.mode {
+            ExtremeFecMode::HugeRepairEsi => {
+                packets.push(ReceivedSymbol::repair(
+                    u32::MAX.saturating_sub(input.esi_seed % 16),
+                    vec![usize::from(input.column_seed) % l.max(1)],
+                    vec![nonzero_coefficient(input.coefficient_seed)],
+                    repeated_payload(input.payload_seed, symbol_size),
+                ));
+            }
+            ExtremeFecMode::HugeSourceEsi => {
+                let mut symbol = ReceivedSymbol::source(
+                    u32::MAX.saturating_sub(input.esi_seed % 16),
+                    repeated_payload(input.payload_seed, symbol_size),
+                );
+                symbol.columns = vec![usize::from(input.column_seed) % l.max(1)];
+                packets.push(symbol);
+            }
+            ExtremeFecMode::MaxColumnIndex => {
+                packets.push(ReceivedSymbol::repair(
+                    base_repair_esi.saturating_add(input.esi_seed % 32),
+                    vec![usize::MAX, l.saturating_add(usize::from(input.column_seed))],
+                    vec![Gf256::ONE, nonzero_coefficient(input.coefficient_seed)],
+                    repeated_payload(input.payload_seed, symbol_size),
+                ));
+            }
+            ExtremeFecMode::ColumnArityExplosion { count } => {
+                let count = (usize::from(count) % MAX_EXTREME_COLUMNS).saturating_add(1);
+                let columns: Vec<_> = (0..count)
+                    .map(|idx| {
+                        if idx % 5 == 0 {
+                            l.saturating_add(idx)
+                        } else {
+                            (usize::from(input.column_seed) + idx) % l.max(1)
+                        }
+                    })
+                    .collect();
+                packets.push(ReceivedSymbol::repair(
+                    base_repair_esi.saturating_add(input.esi_seed % 32),
+                    columns,
+                    vec![nonzero_coefficient(input.coefficient_seed)],
+                    repeated_payload(input.payload_seed, symbol_size),
+                ));
+            }
+            ExtremeFecMode::CoefficientArityExplosion { count } => {
+                let count = (usize::from(count) % MAX_EXTREME_COLUMNS).saturating_add(1);
+                let coefficients = (0..count)
+                    .map(|idx| Gf256::new(input.coefficient_seed.wrapping_add(idx as u8)))
+                    .collect();
+                packets.push(ReceivedSymbol::repair(
+                    base_repair_esi.saturating_add(input.esi_seed % 32),
+                    vec![usize::from(input.column_seed) % l.max(1)],
+                    coefficients,
+                    repeated_payload(input.payload_seed, symbol_size),
+                ));
+            }
+            ExtremeFecMode::OversizedPayload { multiplier } => {
+                let payload_len = symbol_size
+                    .saturating_mul(usize::from(multiplier).saturating_add(2))
+                    .clamp(symbol_size.saturating_add(1), MAX_EXTREME_PAYLOAD_BYTES);
+                packets.push(ReceivedSymbol::repair(
+                    base_repair_esi.saturating_add(input.esi_seed % 32),
+                    vec![usize::from(input.column_seed) % l.max(1)],
+                    vec![nonzero_coefficient(input.coefficient_seed)],
+                    repeated_payload(input.payload_seed, payload_len),
+                ));
+            }
+            ExtremeFecMode::EmptyPayload => {
+                packets.push(ReceivedSymbol::repair(
+                    base_repair_esi.saturating_add(input.esi_seed % 32),
+                    vec![usize::from(input.column_seed) % l.max(1)],
+                    vec![nonzero_coefficient(input.coefficient_seed)],
+                    Vec::new(),
+                ));
+            }
+            ExtremeFecMode::SourceFlagOnRepairEquation => {
+                let mut symbol = ReceivedSymbol::repair(
+                    base_repair_esi.saturating_add(input.esi_seed % 32),
+                    vec![usize::from(input.column_seed) % l.max(1)],
+                    vec![nonzero_coefficient(input.coefficient_seed)],
+                    repeated_payload(input.payload_seed, symbol_size),
+                );
+                symbol.is_source = true;
+                packets.push(symbol);
+            }
+        }
+    }
+}
+
 fn apply_source_mutations(
     source_symbols: &mut Vec<ReceivedSymbol>,
     mutations: &[SourceMutation],
@@ -291,6 +430,7 @@ fn assert_failure_classified(error: &DecodeError) {
     );
 }
 
+#[allow(clippy::result_large_err)]
 fn assert_decode_entrypoints(
     input: &MalformedSourceBlockInput,
     decoder: &InactivationDecoder,
@@ -392,6 +532,12 @@ fuzz_target!(|input: MalformedSourceBlockInput| {
         symbol_size,
         &input.repair_packets,
     ));
+    push_extreme_fec_payloads(
+        &mut received,
+        &decoder,
+        symbol_size,
+        &input.extreme_fec_packets,
+    );
 
     let batch_size = if received.is_empty() {
         0
