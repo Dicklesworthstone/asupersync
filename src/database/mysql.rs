@@ -7170,6 +7170,78 @@ mod tests {
     }
 
     #[test]
+    fn test_send_handshake_response_rejects_sha256_password_plugin() {
+        let mut conn = make_test_connection();
+        let options = MySqlConnectOptions::parse("mysql://user:pass@localhost/db").unwrap();
+        let handshake = Handshake {
+            server_version: "8.0.0-test".to_string(),
+            connection_id: 1,
+            auth_plugin_data: b"01234567890123456789".to_vec(),
+            capabilities: capability::CLIENT_PROTOCOL_41
+                | capability::CLIENT_SECURE_CONNECTION
+                | capability::CLIENT_PLUGIN_AUTH,
+            charset: 45,
+            status_flags: 0,
+            auth_plugin_name: "sha256_password".to_string(),
+        };
+
+        let err = run(conn.send_handshake_response(&options, &handshake)).unwrap_err();
+        assert!(
+            matches!(err, MySqlError::UnsupportedAuthPlugin(plugin) if plugin == "sha256_password"),
+            "unexpected plugin error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_auth_switch_rejects_sha256_password_plugin() {
+        let mut conn = make_test_connection();
+        let options = MySqlConnectOptions::parse("mysql://user:pass@localhost/db").unwrap();
+        let handshake = Handshake {
+            server_version: "8.0.0-test".to_string(),
+            connection_id: 1,
+            auth_plugin_data: b"01234567890123456789".to_vec(),
+            capabilities: capability::CLIENT_PROTOCOL_41
+                | capability::CLIENT_SECURE_CONNECTION
+                | capability::CLIENT_PLUGIN_AUTH,
+            charset: 45,
+            status_flags: 0,
+            auth_plugin_name: "caching_sha2_password".to_string(),
+        };
+        let mut auth_switch = b"sha256_password\0".to_vec();
+        auth_switch.extend_from_slice(b"01234567890123456789\0");
+
+        let err = run(conn.handle_auth_switch(&auth_switch, &options, &handshake)).unwrap_err();
+        assert!(
+            matches!(err, MySqlError::UnsupportedAuthPlugin(plugin) if plugin == "sha256_password"),
+            "unexpected plugin error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_caching_sha2_full_auth_request_fails_closed_without_rsa_path() {
+        let mut conn = make_test_connection();
+        let options = MySqlConnectOptions::parse("mysql://user:pass@localhost/db").unwrap();
+        let handshake = Handshake {
+            server_version: "8.0.0-test".to_string(),
+            connection_id: 1,
+            auth_plugin_data: b"01234567890123456789".to_vec(),
+            capabilities: capability::CLIENT_PROTOCOL_41
+                | capability::CLIENT_SECURE_CONNECTION
+                | capability::CLIENT_PLUGIN_AUTH,
+            charset: 45,
+            status_flags: 0,
+            auth_plugin_name: "caching_sha2_password".to_string(),
+        };
+
+        let err =
+            run(conn.handle_caching_sha2_more_data(&[0x04], &options, &handshake)).unwrap_err();
+        assert!(
+            matches!(err, MySqlError::AuthenticationFailed(msg) if msg.contains("requires secure connection")),
+            "unexpected full-auth error: {err:?}"
+        );
+    }
+
+    #[test]
     fn test_is_eof_packet() {
         // Classic EOF: 0xFE + up to 4 bytes warning/status
         assert!(MySqlConnection::is_eof_packet(&[
