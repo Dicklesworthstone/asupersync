@@ -1536,6 +1536,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h2_settings_ack_timeout"
+path = "fuzz_targets/h2_settings_ack_timeout.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "symbol_auth"
 path = "fuzz_targets/symbol_auth.rs"
 test = false
@@ -3312,6 +3319,17 @@ bench = false
 [[bin]]
 name = "rwlock_writer_priority_fairness"
 path = "fuzz_targets/rwlock_writer_priority_fairness.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #168 — RwLock writer panic poisoning behavior testing
+# Tests arbitrary panic scenarios during write operations to verify subsequent lock
+# acquisitions return PoisonError and poison state propagates correctly across all acquisition methods.
+# Validates poison flag consistency and error propagation for reader/writer operations.
+[[bin]]
+name = "rwlock_poison_writer_panic"
+path = "fuzz_targets/rwlock_poison_writer_panic.rs"
 test = false
 doc = false
 bench = false
