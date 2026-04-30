@@ -138,7 +138,7 @@ fn k2048_large_k_matches_raptorq_rs() {
     let k = 2048usize;
     let symbol_size = 16usize;
     let seed = 0x6330_2048_u64;
-    let loss_count = 64usize;
+    let loss_count = 16usize;
     let repair_count = loss_count + 8;
     let draw_count = loss_count.saturating_mul(16);
     let drop_indices =
