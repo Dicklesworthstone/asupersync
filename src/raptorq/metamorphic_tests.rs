@@ -1508,11 +1508,7 @@ fn mr_encoder_linearity_under_xor_of_source_vectors() {
             assert_eq!(r_b.len(), symbol_size);
             assert_eq!(r_xor.len(), symbol_size);
 
-            let r_a_xor_r_b: Vec<u8> = r_a
-                .iter()
-                .zip(r_b.iter())
-                .map(|(x, y)| x ^ y)
-                .collect();
+            let r_a_xor_r_b: Vec<u8> = r_a.iter().zip(r_b.iter()).map(|(x, y)| x ^ y).collect();
 
             assert_eq!(
                 r_xor, r_a_xor_r_b,

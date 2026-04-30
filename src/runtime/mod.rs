@@ -139,9 +139,9 @@ pub mod region_heap;
 mod region_heap_metamorphic_tests;
 pub mod region_table;
 #[cfg(test)]
-mod region_table_metamorphic_tests;
-#[cfg(test)]
 mod region_table_idempotence_demo;
+#[cfg(test)]
+mod region_table_metamorphic_tests;
 pub mod resource_cleanup_verifier;
 pub mod resource_monitor;
 pub mod scheduler;

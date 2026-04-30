@@ -4150,16 +4150,12 @@ mod tests {
         let span_events = vec![
             // Span start: task spawned in a region
             TraceEvent::spawn(1, Time::from_nanos(1000), task(10), region(5)),
-
             // Task gets scheduled for execution
             TraceEvent::schedule(2, Time::from_nanos(1100), task(10), region(5)),
-
             // Task execution begins
             TraceEvent::poll(3, Time::from_nanos(1200), task(10), region(5)),
-
             // User trace event within the span
             TraceEvent::user_trace(4, Time::from_nanos(1250), "otel-span-processing"),
-
             // Span end: task completion
             TraceEvent::complete(5, Time::from_nanos(1300), task(10), region(5)),
         ];
@@ -4169,7 +4165,10 @@ mod tests {
             let json = serde_json::to_value(event).expect("serialize otel span event");
             let decoded: TraceEvent =
                 serde_json::from_value(json).expect("deserialize otel span event");
-            assert_eq!(*event, decoded, "otel span round-trip mismatch for {event:?}");
+            assert_eq!(
+                *event, decoded,
+                "otel span round-trip mismatch for {event:?}"
+            );
         }
 
         insta::assert_json_snapshot!("otel_span_golden_tests", span_events);
@@ -4207,8 +4206,8 @@ mod tests {
         ];
 
         // Generate canonical NDJSON format
-        let ndjson_output = trace_events_to_ndjson(&ndjson_events)
-            .expect("NDJSON serialization should succeed");
+        let ndjson_output =
+            trace_events_to_ndjson(&ndjson_events).expect("NDJSON serialization should succeed");
 
         // Verify each line is valid JSON
         for (i, line) in ndjson_output.lines().enumerate() {

@@ -22,7 +22,9 @@
 //! binary, independent of the in-tree `cfg(test)` modules in `src/`
 //! that occasionally break the lib test binary.
 
-use asupersync::database::postgres::{Format, ToSql, build_bind_msg, build_execute_msg, build_sync_msg};
+use asupersync::database::postgres::{
+    Format, ToSql, build_bind_msg, build_execute_msg, build_sync_msg,
+};
 
 /// Helper: list of `&dyn ToSql` references where each entry borrows
 /// from a Boxed value owned for the duration of the call.

@@ -47,9 +47,9 @@ impl PromotionIdempotenceHarness {
         let mut lab_runtime = LabRuntime::new_with_config(
             LabConfig::builder()
                 .num_workers(num_workers)
-                .enable_parking(false)  // Disable parking for deterministic testing
+                .enable_parking(false) // Disable parking for deterministic testing
                 .cancel_streak_limit(16)
-                .build()
+                .build(),
         );
 
         let scheduler_clock = Arc::new(VirtualClock::new());
@@ -61,7 +61,7 @@ impl PromotionIdempotenceHarness {
         // Create initial tasks for testing
         let mut initial_tasks = Vec::new();
         for i in 0..num_initial_tasks {
-            let task_id = TaskId::new(i as u64 + 1000);  // Use high IDs to avoid conflicts
+            let task_id = TaskId::new(i as u64 + 1000); // Use high IDs to avoid conflicts
             initial_tasks.push(task_id);
         }
 
@@ -118,10 +118,10 @@ impl PromotionIdempotenceHarness {
 /// Generate test data for priority promotion scenarios
 #[derive(Debug, Clone)]
 struct PromotionScenario {
-    ready_tasks: Vec<(TaskId, u8)>,    // (task_id, priority) in ready lane
-    cancel_tasks: Vec<(TaskId, u8)>,   // (task_id, priority) in cancel lane
-    target_task: (TaskId, u8),         // Task to test promotion idempotence on
-    num_promotions: usize,             // Number of times to promote target_task
+    ready_tasks: Vec<(TaskId, u8)>,  // (task_id, priority) in ready lane
+    cancel_tasks: Vec<(TaskId, u8)>, // (task_id, priority) in cancel lane
+    target_task: (TaskId, u8),       // Task to test promotion idempotence on
+    num_promotions: usize,           // Number of times to promote target_task
 }
 
 impl Arbitrary for PromotionScenario {
@@ -130,28 +130,30 @@ impl Arbitrary for PromotionScenario {
 
     fn arbitrary_with(_: Self::Parameters) -> Self::Strategy {
         (
-            prop::collection::vec((1000u64..2000u64, 0u8..255u8), 1..8),  // ready_tasks
-            prop::collection::vec((2000u64..3000u64, 0u8..255u8), 0..5),  // cancel_tasks
-            (3000u64..4000u64, 0u8..255u8),  // target_task
-            2usize..8usize,  // num_promotions
-        ).prop_map(|(ready_raw, cancel_raw, target_raw, num_promotions)| {
-            let ready_tasks = ready_raw
-                .into_iter()
-                .map(|(id, prio)| (TaskId::new(id), prio))
-                .collect();
-            let cancel_tasks = cancel_raw
-                .into_iter()
-                .map(|(id, prio)| (TaskId::new(id), prio))
-                .collect();
-            let target_task = (TaskId::new(target_raw.0), target_raw.1);
+            prop::collection::vec((1000u64..2000u64, 0u8..255u8), 1..8), // ready_tasks
+            prop::collection::vec((2000u64..3000u64, 0u8..255u8), 0..5), // cancel_tasks
+            (3000u64..4000u64, 0u8..255u8),                              // target_task
+            2usize..8usize,                                              // num_promotions
+        )
+            .prop_map(|(ready_raw, cancel_raw, target_raw, num_promotions)| {
+                let ready_tasks = ready_raw
+                    .into_iter()
+                    .map(|(id, prio)| (TaskId::new(id), prio))
+                    .collect();
+                let cancel_tasks = cancel_raw
+                    .into_iter()
+                    .map(|(id, prio)| (TaskId::new(id), prio))
+                    .collect();
+                let target_task = (TaskId::new(target_raw.0), target_raw.1);
 
-            PromotionScenario {
-                ready_tasks,
-                cancel_tasks,
-                target_task,
-                num_promotions,
-            }
-        }).boxed()
+                PromotionScenario {
+                    ready_tasks,
+                    cancel_tasks,
+                    target_task,
+                    num_promotions,
+                }
+            })
+            .boxed()
     }
 }
 
@@ -292,11 +294,11 @@ fn test_mixed_priority_promotion_idempotence() {
 
     // Test scenario: multiple tasks with different priorities
     let ready_tasks = vec![
-        (TaskId::new(1001), 10),  // Low priority
-        (TaskId::new(1002), 50),  // Medium priority
-        (TaskId::new(1003), 90),  // High priority
+        (TaskId::new(1001), 10), // Low priority
+        (TaskId::new(1002), 50), // Medium priority
+        (TaskId::new(1003), 90), // High priority
     ];
-    let target_task = (TaskId::new(2001), 75);  // Medium-high priority
+    let target_task = (TaskId::new(2001), 75); // Medium-high priority
 
     // Single promotion
     harness.reset_scheduler_state();
@@ -307,20 +309,24 @@ fn test_mixed_priority_promotion_idempotence() {
     // Triple promotion
     harness.reset_scheduler_state();
     harness.inject_ready_tasks(&ready_tasks);
-    harness.inject_cancel_tasks(&[target_task]);  // First
-    harness.inject_cancel_tasks(&[target_task]);  // Second
-    harness.inject_cancel_tasks(&[target_task]);  // Third
+    harness.inject_cancel_tasks(&[target_task]); // First
+    harness.inject_cancel_tasks(&[target_task]); // Second
+    harness.inject_cancel_tasks(&[target_task]); // Third
     let triple_sequence = harness.capture_scheduling_sequence();
 
-    assert_eq!(single_sequence, triple_sequence,
-        "Mixed priority promotion idempotence failed");
+    assert_eq!(
+        single_sequence, triple_sequence,
+        "Mixed priority promotion idempotence failed"
+    );
 
     // Ensure target task is scheduled before lower priority ready tasks
     if let (Some(target_pos), Some(low_prio_pos)) = (
         single_sequence.iter().position(|&t| t == target_task.0),
-        single_sequence.iter().position(|&t| t == TaskId::new(1001))
+        single_sequence.iter().position(|&t| t == TaskId::new(1001)),
     ) {
-        assert!(target_pos < low_prio_pos,
-            "Priority ordering violated: target task should appear before lower priority tasks");
+        assert!(
+            target_pos < low_prio_pos,
+            "Priority ordering violated: target task should appear before lower priority tasks"
+        );
     }
 }

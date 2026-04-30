@@ -146,8 +146,7 @@ impl SchedulerDecisionContract {
         // Age matters as much as count here: a single obligation that has
         // stayed pending across multiple governor snapshots is stronger
         // evidence of congestion than a freshly reserved permit.
-        let obligation_age_load =
-            (snapshot.obligation_age_sum_ns as f64 / 100_000_000.0).ln_1p();
+        let obligation_age_load = (snapshot.obligation_age_sum_ns as f64 / 100_000_000.0).ln_1p();
         let obligation_load = f64::from(snapshot.pending_obligations) + obligation_age_load;
         let ready_load = f64::from(snapshot.ready_queue_depth);
         let drain_load = f64::from(snapshot.draining_regions);

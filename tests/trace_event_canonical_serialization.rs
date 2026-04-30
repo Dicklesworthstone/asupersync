@@ -152,8 +152,7 @@ fn trace_event_canonical_serialization_golden() {
 
     for event in &events {
         let json = serde_json::to_value(event).expect("serialize trace event");
-        let decoded: TraceEvent =
-            serde_json::from_value(json).expect("deserialize trace event");
+        let decoded: TraceEvent = serde_json::from_value(json).expect("deserialize trace event");
         assert_eq!(*event, decoded, "round-trip mismatch for {event:?}");
     }
 

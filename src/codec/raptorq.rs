@@ -610,7 +610,9 @@ mod golden_tests {
             let original_data: Vec<Vec<u8>> = (0..k)
                 .map(|i| {
                     let len = 8 + (i % 4); // Variable length 8-11 bytes
-                    (0..len).map(|j| ((i * 23 + j * 41 + 89) % 256) as u8).collect()
+                    (0..len)
+                        .map(|j| ((i * 23 + j * 41 + 89) % 256) as u8)
+                        .collect()
                 })
                 .collect();
 
@@ -639,8 +641,14 @@ mod golden_tests {
             for esi in 0..(k as u32 + 2) {
                 if (esi as usize) < k {
                     // Source symbols: original should match padded after truncation
-                    original_symbols.push(ReceivedSymbol::source(esi, original_data[esi as usize].clone()));
-                    padded_symbols.push(ReceivedSymbol::source(esi, padded_data[esi as usize].clone()));
+                    original_symbols.push(ReceivedSymbol::source(
+                        esi,
+                        original_data[esi as usize].clone(),
+                    ));
+                    padded_symbols.push(ReceivedSymbol::source(
+                        esi,
+                        padded_data[esi as usize].clone(),
+                    ));
                 } else {
                     // Repair symbols: should be deterministically related
                     let decoder = InactivationDecoder::new(k, symbol_size, seed);
@@ -652,10 +660,16 @@ mod golden_tests {
                     let padded_repair = padded_encoder.repair_symbol(esi);
 
                     original_symbols.push(ReceivedSymbol::repair(
-                        esi, columns.clone(), coefficients.clone(), original_repair
+                        esi,
+                        columns.clone(),
+                        coefficients.clone(),
+                        original_repair,
                     ));
                     padded_symbols.push(ReceivedSymbol::repair(
-                        esi, columns, coefficients, padded_repair
+                        esi,
+                        columns,
+                        coefficients,
+                        padded_repair,
                     ));
                 }
             }
@@ -684,7 +698,8 @@ mod golden_tests {
                 "MR2 violation: decoded symbol counts differ with zero-padding"
             );
 
-            for (i, (orig, padded)) in original_result.source
+            for (i, (orig, padded)) in original_result
+                .source
                 .iter()
                 .zip(padded_result.source.iter())
                 .enumerate()
@@ -774,7 +789,8 @@ mod golden_tests {
                 "MR3 violation: symbol permutation changed result count"
             );
 
-            for (i, (orig, perm)) in original_result.source
+            for (i, (orig, perm)) in original_result
+                .source
                 .iter()
                 .zip(permuted_result.source.iter())
                 .enumerate()

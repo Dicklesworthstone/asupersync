@@ -33,7 +33,9 @@ use std::fmt::Write as _;
 #[test]
 fn rfc6330_section6_systematic_repair_mix_differential() {
     let actual = generate_rfc6330_section6_test_case();
-    let expected = include_str!("../../tests/goldens/codec_raptorq/rfc6330_section6_systematic_repair_k4_r2_ss8.golden");
+    let expected = include_str!(
+        "../../tests/goldens/codec_raptorq/rfc6330_section6_systematic_repair_k4_r2_ss8.golden"
+    );
 
     assert_eq!(
         actual, expected,
@@ -64,10 +66,10 @@ fn generate_rfc6330_section6_test_case() -> String {
 /// Creates a pipeline configured specifically for RFC 6330 §6 testing
 fn create_rfc6330_test_pipeline() -> EncodingPipeline {
     let config = EncodingConfig {
-        repair_overhead: 0.5, // 50% overhead = 2 repair symbols for K=4
-        max_block_size: 32,   // Forces single block with K=4 at symbol_size=8
-        symbol_size: 8,       // 8-byte symbols
-        encoding_parallelism: 1,  // Deterministic single-thread encoding
+        repair_overhead: 0.5,    // 50% overhead = 2 repair symbols for K=4
+        max_block_size: 32,      // Forces single block with K=4 at symbol_size=8
+        symbol_size: 8,          // 8-byte symbols
+        encoding_parallelism: 1, // Deterministic single-thread encoding
         decoding_parallelism: 1,
     };
     EncodingPipeline::new(config, SymbolPool::new(PoolConfig::default()))
@@ -80,10 +82,27 @@ fn render_systematic_repair_trace(
     data: &[u8],
 ) -> String {
     let mut out = String::new();
-    writeln!(&mut out, "# RFC 6330 Section 6 Systematic + Repair Symbol Mix Test").unwrap();
-    writeln!(&mut out, "# Input: {} bytes, expected K=4, repair=2", data.len()).unwrap();
-    writeln!(&mut out, "# Systematic symbols: ESI 0-3 (must match source data)").unwrap();
-    writeln!(&mut out, "# Repair symbols: ESI 4-5 (must be linearly independent)").unwrap();
+    writeln!(
+        &mut out,
+        "# RFC 6330 Section 6 Systematic + Repair Symbol Mix Test"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "# Input: {} bytes, expected K=4, repair=2",
+        data.len()
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "# Systematic symbols: ESI 0-3 (must match source data)"
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "# Repair symbols: ESI 4-5 (must be linearly independent)"
+    )
+    .unwrap();
     writeln!(&mut out).unwrap();
 
     let mut systematic_count = 0;
@@ -109,23 +128,46 @@ fn render_systematic_repair_trace(
                     let expected_data = &data[expected_start..expected_end];
                     assert_eq!(
                         symbol_data, expected_data,
-                        "Systematic symbol ESI {} data mismatch (RFC 6330 §6 violation)", esi
+                        "Systematic symbol ESI {} data mismatch (RFC 6330 §6 violation)",
+                        esi
                     );
-                    writeln!(&mut out, "systematic esi={:04} verified_match=true data_hex={}",
-                            esi, hex_encode(symbol_data)).unwrap();
+                    writeln!(
+                        &mut out,
+                        "systematic esi={:04} verified_match=true data_hex={}",
+                        esi,
+                        hex_encode(symbol_data)
+                    )
+                    .unwrap();
                 } else {
-                    writeln!(&mut out, "systematic esi={:04} verified_match=padding data_hex={}",
-                            esi, hex_encode(symbol_data)).unwrap();
+                    writeln!(
+                        &mut out,
+                        "systematic esi={:04} verified_match=padding data_hex={}",
+                        esi,
+                        hex_encode(symbol_data)
+                    )
+                    .unwrap();
                 }
-            },
+            }
             k if k.to_string().contains("Repair") => {
                 repair_count += 1;
                 assert!(esi >= 4, "Repair symbol ESI {} should be >= K=4", esi);
-                writeln!(&mut out, "repair esi={:04} data_hex={}", esi, hex_encode(symbol_data)).unwrap();
-            },
+                writeln!(
+                    &mut out,
+                    "repair esi={:04} data_hex={}",
+                    esi,
+                    hex_encode(symbol_data)
+                )
+                .unwrap();
+            }
             _ => {
-                writeln!(&mut out, "unknown_kind esi={:04} kind={:?} data_hex={}",
-                        esi, kind, hex_encode(symbol_data)).unwrap();
+                writeln!(
+                    &mut out,
+                    "unknown_kind esi={:04} kind={:?} data_hex={}",
+                    esi,
+                    kind,
+                    hex_encode(symbol_data)
+                )
+                .unwrap();
             }
         }
     }
@@ -133,17 +175,37 @@ fn render_systematic_repair_trace(
     // RFC 6330 §6 requirement verification
     writeln!(&mut out).unwrap();
     writeln!(&mut out, "# RFC 6330 Section 6 Compliance Summary").unwrap();
-    writeln!(&mut out, "systematic_symbols={} repair_symbols={}", systematic_count, repair_count).unwrap();
-    writeln!(&mut out, "total_symbols={}", systematic_count + repair_count).unwrap();
+    writeln!(
+        &mut out,
+        "systematic_symbols={} repair_symbols={}",
+        systematic_count, repair_count
+    )
+    .unwrap();
+    writeln!(
+        &mut out,
+        "total_symbols={}",
+        systematic_count + repair_count
+    )
+    .unwrap();
 
     // Validate compliance
-    assert_eq!(systematic_count, 4, "RFC 6330 §6: Expected exactly K=4 systematic symbols");
-    assert_eq!(repair_count, 2, "Expected exactly 2 repair symbols (50% overhead)");
+    assert_eq!(
+        systematic_count, 4,
+        "RFC 6330 §6: Expected exactly K=4 systematic symbols"
+    );
+    assert_eq!(
+        repair_count, 2,
+        "Expected exactly 2 repair symbols (50% overhead)"
+    );
     writeln!(&mut out, "rfc6330_section6_compliance=PASS").unwrap();
 
     let stats = pipeline.stats();
-    writeln!(&mut out, "pipeline_stats bytes_in={} blocks={} source_symbols={} repair_symbols={}",
-        stats.bytes_in, stats.blocks, stats.source_symbols, stats.repair_symbols).unwrap();
+    writeln!(
+        &mut out,
+        "pipeline_stats bytes_in={} blocks={} source_symbols={} repair_symbols={}",
+        stats.bytes_in, stats.blocks, stats.source_symbols, stats.repair_symbols
+    )
+    .unwrap();
 
     out
 }
@@ -166,13 +228,13 @@ fn hex_encode(bytes: &[u8]) -> String {
 fn regenerate_rfc6330_section6_golden() {
     let golden_content = generate_rfc6330_section6_test_case();
 
-    std::fs::create_dir_all("tests/goldens/codec_raptorq")
-        .expect("create golden directory");
+    std::fs::create_dir_all("tests/goldens/codec_raptorq").expect("create golden directory");
 
     std::fs::write(
         "tests/goldens/codec_raptorq/rfc6330_section6_systematic_repair_k4_r2_ss8.golden",
         &golden_content,
-    ).expect("write RFC 6330 §6 golden file");
+    )
+    .expect("write RFC 6330 §6 golden file");
 
     println!("Generated RFC 6330 Section 6 golden file:");
     println!("{}", golden_content);
@@ -204,11 +266,8 @@ mod rfc6330_section6_conformance_tests {
 
         // Generate with repair_overhead = 0.5 (2 repair symbols)
         let mut pipeline1 = create_rfc6330_test_pipeline();
-        let trace1 = render_systematic_repair_trace(
-            &mut pipeline1,
-            ObjectId::new_for_test(0x1),
-            test_data
-        );
+        let trace1 =
+            render_systematic_repair_trace(&mut pipeline1, ObjectId::new_for_test(0x1), test_data);
 
         // Generate with repair_overhead = 1.0 (4 repair symbols)
         let config2 = EncodingConfig {
@@ -219,22 +278,23 @@ mod rfc6330_section6_conformance_tests {
             decoding_parallelism: 1,
         };
         let mut pipeline2 = EncodingPipeline::new(config2, SymbolPool::new(PoolConfig::default()));
-        let trace2 = render_systematic_repair_trace(
-            &mut pipeline2,
-            ObjectId::new_for_test(0x1),
-            test_data
-        );
+        let trace2 =
+            render_systematic_repair_trace(&mut pipeline2, ObjectId::new_for_test(0x1), test_data);
 
         // Extract systematic symbol lines from both traces
-        let systematic1: Vec<&str> = trace1.lines()
+        let systematic1: Vec<&str> = trace1
+            .lines()
             .filter(|line| line.starts_with("systematic"))
             .collect();
-        let systematic2: Vec<&str> = trace2.lines()
+        let systematic2: Vec<&str> = trace2
+            .lines()
             .filter(|line| line.starts_with("systematic"))
             .collect();
 
         // RFC 6330 §6: systematic symbols must be identical regardless of repair count
-        assert_eq!(systematic1, systematic2,
-            "RFC 6330 §6 violation: systematic symbols changed when repair count changed");
+        assert_eq!(
+            systematic1, systematic2,
+            "RFC 6330 §6 violation: systematic symbols changed when repair count changed"
+        );
     }
 }

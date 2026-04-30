@@ -18,7 +18,10 @@ mod tests {
     };
     use std::time::Instant;
 
-    #[cfg(all(feature = "simd-intrinsics", any(target_arch = "x86", target_arch = "x86_64")))]
+    #[cfg(all(
+        feature = "simd-intrinsics",
+        any(target_arch = "x86", target_arch = "x86_64")
+    ))]
     fn host_has_gf256_simd() -> bool {
         std::is_x86_feature_detected!("avx2")
     }
@@ -74,10 +77,13 @@ mod tests {
             gf256_mul_slice(&mut simd_block, scalar);
 
             let pair_start = block_idx * SIMD_BLOCK_LEN;
-            for (lane_idx, (&src, &actual)) in original_block.iter().zip(simd_block.iter()).enumerate() {
+            for (lane_idx, (&src, &actual)) in
+                original_block.iter().zip(simd_block.iter()).enumerate()
+            {
                 let expected = Gf256::new(src).mul_field(scalar).raw();
                 assert_eq!(
-                    actual, expected,
+                    actual,
+                    expected,
                     "seed={seed:#x} kernel={kernel:?} pair={} lane={} src={src:#04x} scalar={:#04x}",
                     pair_start + lane_idx,
                     lane_idx,

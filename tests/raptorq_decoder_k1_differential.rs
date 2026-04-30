@@ -9,6 +9,12 @@ use raptorq::{
     PayloadId as RaptorqRsPayloadId,
 };
 
+#[derive(Clone, Copy)]
+enum PacketSelection {
+    Source(usize),
+    Repair(u32),
+}
+
 fn make_source_data(k: usize, symbol_size: usize) -> Vec<Vec<u8>> {
     (0..k)
         .map(|symbol_idx| {
@@ -131,6 +137,73 @@ fn reference_decode_with_raptorq_rs(
     panic!("raptorq-rs reference decode must succeed for this differential repair case");
 }
 
+fn build_received_symbols_from_selection(
+    decoder: &InactivationDecoder,
+    encoder: &SystematicEncoder,
+    source: &[Vec<u8>],
+    selection: &[PacketSelection],
+) -> Vec<ReceivedSymbol> {
+    let mut received = decoder.constraint_symbols();
+
+    for packet in selection {
+        match *packet {
+            PacketSelection::Source(esi) => {
+                received.push(ReceivedSymbol::source(
+                    u32::try_from(esi).expect("source ESI must fit in u32"),
+                    source[esi].clone(),
+                ));
+            }
+            PacketSelection::Repair(esi) => {
+                let (cols, coefs) = decoder
+                    .repair_equation(esi)
+                    .unwrap_or_else(|err| panic!("repair equation for esi={esi} failed: {err:?}"));
+                received.push(ReceivedSymbol::repair(
+                    esi,
+                    cols,
+                    coefs,
+                    encoder.repair_symbol(esi),
+                ));
+            }
+        }
+    }
+
+    received
+}
+
+fn reference_decode_with_raptorq_rs_from_selection(
+    source: &[Vec<u8>],
+    encoder: &SystematicEncoder,
+    selection: &[PacketSelection],
+) -> Vec<u8> {
+    let transfer_length = source
+        .len()
+        .checked_mul(source[0].len())
+        .expect("transfer length overflow");
+    let symbol_size =
+        u16::try_from(source[0].len()).expect("symbol size must fit in u16 for raptorq-rs");
+    let config =
+        RaptorqRsObjectTransmissionInformation::new(transfer_length as u64, symbol_size, 1, 1, 1);
+    let mut decoder = RaptorqRsDecoder::new(config);
+
+    for packet in selection {
+        let encoding_packet = match *packet {
+            PacketSelection::Source(esi) => RaptorqRsEncodingPacket::new(
+                RaptorqRsPayloadId::new(0, u32::try_from(esi).expect("source ESI must fit in u32")),
+                source[esi].clone(),
+            ),
+            PacketSelection::Repair(esi) => RaptorqRsEncodingPacket::new(
+                RaptorqRsPayloadId::new(0, esi),
+                encoder.repair_symbol(esi),
+            ),
+        };
+        if let Some(decoded) = decoder.decode(encoding_packet) {
+            return decoded;
+        }
+    }
+
+    panic!("raptorq-rs reference decode must succeed for this selected packet case");
+}
+
 fn assert_case_matches_raptorq_rs(
     k: usize,
     symbol_size: usize,
@@ -149,6 +222,35 @@ fn assert_case_matches_raptorq_rs(
         .decode(&received)
         .unwrap_or_else(|err| panic!("{case_name} differential decode must succeed: {err:?}"));
     let reference = reference_decode_with_raptorq_rs(&source, &encoder, drop_indices, repair_count);
+
+    assert_eq!(
+        ours.source.concat(),
+        reference,
+        "our decoder must match raptorq-rs for {case_name}"
+    );
+    assert_eq!(
+        ours.source, source,
+        "{case_name} must recover the original source symbols"
+    );
+}
+
+fn assert_selected_packets_match_raptorq_rs(
+    k: usize,
+    symbol_size: usize,
+    seed: u64,
+    selection: &[PacketSelection],
+    case_name: &str,
+) {
+    let source = make_source_data(k, symbol_size);
+    let encoder =
+        SystematicEncoder::new(&source, symbol_size, seed).expect("encoder setup must succeed");
+    let decoder = InactivationDecoder::new(k, symbol_size, seed);
+    let received = build_received_symbols_from_selection(&decoder, &encoder, &source, selection);
+
+    let ours = decoder
+        .decode(&received)
+        .unwrap_or_else(|err| panic!("{case_name} differential decode must succeed: {err:?}"));
+    let reference = reference_decode_with_raptorq_rs_from_selection(&source, &encoder, selection);
 
     assert_eq!(
         ours.source.concat(),
@@ -181,6 +283,32 @@ fn k2_single_erasure_single_repair_matches_raptorq_rs() {
         );
         assert_case_matches_raptorq_rs(2, 32, 0x6330_0002_u64, &[missing_symbol], 1, &case_name);
     }
+}
+
+#[test]
+fn k2_systematic_only_matches_raptorq_rs() {
+    assert_selected_packets_match_raptorq_rs(
+        2,
+        32,
+        0x6330_0002_u64,
+        &[PacketSelection::Source(0), PacketSelection::Source(1)],
+        "the K=2 systematic-only recovery case",
+    );
+}
+
+#[test]
+fn k2_repair_only_matches_raptorq_rs() {
+    assert_selected_packets_match_raptorq_rs(
+        2,
+        32,
+        0x6330_0002_u64,
+        &[
+            PacketSelection::Repair(2),
+            PacketSelection::Repair(3),
+            PacketSelection::Repair(4),
+        ],
+        "the K=2 repair-only recovery case",
+    );
 }
 
 #[test]

@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use asupersync::record::task::TaskRecord;
 use asupersync::runtime::scheduler::three_lane::{
-    ThreeLaneScheduler, ThreeLaneWorker, WorkerConfig
+    ThreeLaneScheduler, ThreeLaneWorker, WorkerConfig,
 };
 use asupersync::runtime::{RuntimeState, TaskTable};
 use asupersync::sync::ContendedMutex;
