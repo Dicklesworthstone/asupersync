@@ -28,7 +28,7 @@ const LARGE_K_THRESHOLD: usize = 842;
 const SMALL_K_CANDIDATES: &[usize] = &[1, 2, 3, 4, 7, 8, 15, 16, 17, 31, 32, 33];
 const MEDIUM_K_CANDIDATES: &[usize] =
     &[42, 63, 64, 65, 127, 128, 129, 255, 256, 257, 511, 512, 513];
-const LARGE_K_CANDIDATES: &[usize] = &[842, 1023, 1024, 1025, 2047, 2048, 2049];
+const LARGE_K_CANDIDATES: &[usize] = &[842, 1023, 1024, 1025, 2047, 2048, 2049, 4096];
 const SMALL_SYMBOL_SIZE_CANDIDATES: &[usize] =
     &[1, 2, 3, 4, 7, 8, 15, 16, 31, 32, 63, 64, 127, 128, 255, 256];
 const LARGE_SYMBOL_SIZE_CANDIDATES: &[usize] = &[1, 2, 3, 4, 8, 16, 32];
@@ -781,6 +781,81 @@ fn assert_k2048_exact_overhead_repairs_recover(
     );
 }
 
+fn assert_k4096_exact_overhead_repairs_recover(
+    decoder: &InactivationDecoder,
+    encoder: &SystematicEncoder,
+    source: &[Vec<u8>],
+    seed: u64,
+    missing_sources: &[u8],
+    ec_overhead: usize,
+    repair_distribution: RepairDistribution,
+    wavefront_batch: usize,
+    object_id: ObjectId,
+) {
+    if source.len() != 4096 {
+        return;
+    }
+
+    let params = decoder.params();
+    assert_eq!(params.k, 4096, "K=4096 decoder oracle must preserve the public K");
+    assert_eq!(
+        params.k_prime, 4112,
+        "K=4096 decoder oracle must pin the rounded RFC row"
+    );
+    assert_eq!(params.j, 726, "K=4096 decoder oracle must pin the RFC J(K') value");
+    assert_eq!(params.s, 137, "K=4096 decoder oracle must pin the RFC S(K') value");
+    assert_eq!(params.h, 11, "K=4096 decoder oracle must pin the RFC H(K') value");
+    assert_eq!(params.w, 4159, "K=4096 decoder oracle must pin the RFC W(K') value");
+    assert_eq!(params.l, 4260, "K=4096 decoder oracle must pin the RFC L value");
+    assert_eq!(params.b, 4022, "K=4096 decoder oracle must pin the RFC B value");
+    assert!(
+        params.k_prime > params.k,
+        "K=4096 decoder oracle must exercise rounded K..K' synthesis"
+    );
+
+    // This much larger row needs a slightly wider recovery margin to keep the
+    // arbitrary repair schedule decodable while still pinning an exact budget.
+    let ec_overhead = ec_overhead.saturating_add(8);
+    let missing_columns = spread_missing_columns(seed, missing_sources, source.len(), 24);
+    let Some(payload_packets) = build_exact_overhead_packets(
+        decoder,
+        encoder,
+        source,
+        &missing_columns,
+        ec_overhead,
+        repair_distribution,
+    ) else {
+        return;
+    };
+
+    let repair_count = payload_packets.iter().filter(|packet| !packet.is_source).count();
+    assert_eq!(
+        repair_count,
+        missing_columns.len().saturating_add(ec_overhead),
+        "K=4096 exact-overhead oracle must emit one repair per erasure plus EC overhead"
+    );
+    assert_eq!(
+        payload_packets.len(),
+        source.len().saturating_add(ec_overhead),
+        "K=4096 exact-overhead oracle must keep the received payload budget at K+overhead"
+    );
+
+    let received = combine_symbols(decoder, &payload_packets);
+    let batch = if received.is_empty() {
+        0
+    } else {
+        wavefront_batch % (received.len() + 1)
+    };
+    assert_decode_consensus(decoder, &received, source, batch, object_id);
+    let decoded = decoder
+        .decode(&received)
+        .expect("K=4096 exact-overhead repair patterns must remain decodable");
+    assert_eq!(
+        decoded.source, source,
+        "K=4096 exact-overhead repair patterns must recover original source"
+    );
+}
+
 fn assert_k4_transition_sparse_vs_dense_repairs_recover(
     decoder: &InactivationDecoder,
     encoder: &SystematicEncoder,
@@ -1073,6 +1148,18 @@ fuzz_target!(|data: &[u8]| {
         object_id,
     );
 
+    assert_k4096_exact_overhead_repairs_recover(
+        &decoder,
+        &encoder,
+        &source,
+        input.seed,
+        &input.missing_sources,
+        input.extra_repairs as usize,
+        input.repair_distribution,
+        input.wavefront_batch as usize,
+        object_id,
+    );
+
     assert_decode_consensus(
         &decoder,
         &baseline_received,
@@ -1199,6 +1286,23 @@ mod tests {
     }
 
     #[test]
+    fn k_selector_includes_large_k_4096_edge_case() {
+        assert!(
+            LARGE_K_CANDIDATES.contains(&4096),
+            "large-K candidate set must include the canonical K=4096 edge"
+        );
+        let selector = 8 * LARGE_K_CANDIDATES
+            .iter()
+            .position(|&candidate| candidate == 4096)
+            .expect("K=4096 must be selectable");
+        assert_eq!(
+            select_k_candidate(selector),
+            4096,
+            "selector normalization must be able to reach K=4096"
+        );
+    }
+
+    #[test]
     fn k_selector_includes_k42_burst_profile() {
         assert!(
             MEDIUM_K_CANDIDATES.contains(&42),
@@ -1222,6 +1326,14 @@ mod tests {
         assert!(symbol_size <= 32);
         assert!(LARGE_SYMBOL_SIZE_CANDIDATES.contains(&symbol_size));
         assert!(2048usize.saturating_mul(symbol_size) <= 64 * 1024);
+    }
+
+    #[test]
+    fn symbol_size_selector_keeps_k4096_targets_within_budget() {
+        let symbol_size = select_symbol_size_candidate(6, 4096, 64 * 1024);
+        assert_eq!(symbol_size, 16);
+        assert!(LARGE_SYMBOL_SIZE_CANDIDATES.contains(&symbol_size));
+        assert!(4096usize.saturating_mul(symbol_size) <= 64 * 1024);
     }
 
     #[test]
@@ -1292,6 +1404,17 @@ mod tests {
         assert!(
             columns.iter().any(|column| *column >= 256),
             "large-K missing-column spread should reach beyond the first byte-sized prefix"
+        );
+    }
+
+    #[test]
+    fn spread_missing_columns_reaches_full_k4096_space() {
+        let columns = spread_missing_columns(0xBADC0FFE, &[8, 9, 10, 11, 12, 13], 4096, 24);
+        assert_eq!(columns.len(), 6);
+        assert!(columns.iter().all(|column| *column < 4096));
+        assert!(
+            columns.iter().any(|column| *column >= 1024),
+            "very-large-K missing-column spread should reach well beyond the early prefix"
         );
     }
 
