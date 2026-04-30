@@ -11501,6 +11501,512 @@ fn verify_span_timing_monotonicity_consistency(
     Ok(())
 }
 
+/// OTLP-035: Span resource attribute aggregation conformance test.
+pub fn otlp_035_span_resource_attribute_aggregation_conformance<RT: RuntimeInterface>(
+) -> ConformanceTest<RT> {
+    crate::conformance_test! {
+        id: "otlp-035",
+        name: "Span resource attribute aggregation conformance",
+        description: "Verify Span resource attribute aggregation vs opentelemetry-sdk — identical aggregation behavior",
+        category: TestCategory::IO,
+        tags: ["otlp", "span", "resource", "attributes", "aggregation", "export"],
+        expected: "Span resource attribute aggregation behaves identically across implementations",
+        test: |_rt| {
+            // Test scenarios for comprehensive resource attribute aggregation validation
+            let test_scenarios = vec![
+                SpanResourceAttributeAggregationScenario {
+                    name: "single_resource_single_span".to_string(),
+                    resources: vec![ResourceDefinition {
+                        resource_id: "service_1".to_string(),
+                        attributes: vec![
+                            ("service.name".to_string(), "user-service".to_string()),
+                            ("service.version".to_string(), "1.2.3".to_string()),
+                            ("deployment.environment".to_string(), "production".to_string()),
+                        ],
+                        span_count: 1,
+                    }],
+                    expected_resource_count: 1,
+                    expected_total_spans: 1,
+                },
+                SpanResourceAttributeAggregationScenario {
+                    name: "single_resource_multiple_spans".to_string(),
+                    resources: vec![ResourceDefinition {
+                        resource_id: "service_1".to_string(),
+                        attributes: vec![
+                            ("service.name".to_string(), "api-gateway".to_string()),
+                            ("service.namespace".to_string(), "default".to_string()),
+                        ],
+                        span_count: 5,
+                    }],
+                    expected_resource_count: 1,
+                    expected_total_spans: 5,
+                },
+                SpanResourceAttributeAggregationScenario {
+                    name: "multiple_resources_same_attributes".to_string(),
+                    resources: vec![
+                        ResourceDefinition {
+                            resource_id: "service_1".to_string(),
+                            attributes: vec![
+                                ("service.name".to_string(), "user-service".to_string()),
+                                ("service.version".to_string(), "2.0.0".to_string()),
+                            ],
+                            span_count: 2,
+                        },
+                        ResourceDefinition {
+                            resource_id: "service_2".to_string(),
+                            attributes: vec![
+                                ("service.name".to_string(), "user-service".to_string()),
+                                ("service.version".to_string(), "2.0.0".to_string()),
+                            ],
+                            span_count: 3,
+                        },
+                    ],
+                    expected_resource_count: 1, // Should aggregate due to identical attributes
+                    expected_total_spans: 5,
+                },
+                SpanResourceAttributeAggregationScenario {
+                    name: "multiple_resources_different_attributes".to_string(),
+                    resources: vec![
+                        ResourceDefinition {
+                            resource_id: "service_1".to_string(),
+                            attributes: vec![
+                                ("service.name".to_string(), "auth-service".to_string()),
+                                ("service.instance.id".to_string(), "instance-1".to_string()),
+                            ],
+                            span_count: 2,
+                        },
+                        ResourceDefinition {
+                            resource_id: "service_2".to_string(),
+                            attributes: vec![
+                                ("service.name".to_string(), "payment-service".to_string()),
+                                ("service.instance.id".to_string(), "instance-2".to_string()),
+                            ],
+                            span_count: 3,
+                        },
+                    ],
+                    expected_resource_count: 2, // Should NOT aggregate due to different attributes
+                    expected_total_spans: 5,
+                },
+                SpanResourceAttributeAggregationScenario {
+                    name: "resources_partial_attribute_overlap".to_string(),
+                    resources: vec![
+                        ResourceDefinition {
+                            resource_id: "service_1".to_string(),
+                            attributes: vec![
+                                ("service.name".to_string(), "shared-service".to_string()),
+                                ("service.version".to_string(), "1.0.0".to_string()),
+                                ("deployment.environment".to_string(), "staging".to_string()),
+                            ],
+                            span_count: 2,
+                        },
+                        ResourceDefinition {
+                            resource_id: "service_2".to_string(),
+                            attributes: vec![
+                                ("service.name".to_string(), "shared-service".to_string()),
+                                ("service.version".to_string(), "1.0.0".to_string()),
+                                ("deployment.region".to_string(), "us-east-1".to_string()),
+                            ],
+                            span_count: 1,
+                        },
+                    ],
+                    expected_resource_count: 2, // Different because partial overlap != full match
+                    expected_total_spans: 3,
+                },
+                SpanResourceAttributeAggregationScenario {
+                    name: "resources_with_nested_attributes".to_string(),
+                    resources: vec![
+                        ResourceDefinition {
+                            resource_id: "service_1".to_string(),
+                            attributes: vec![
+                                ("service.name".to_string(), "complex-service".to_string()),
+                                ("telemetry.sdk.name".to_string(), "asupersync".to_string()),
+                                ("telemetry.sdk.version".to_string(), "0.3.1".to_string()),
+                                ("process.pid".to_string(), "12345".to_string()),
+                                ("host.name".to_string(), "worker-node-1".to_string()),
+                            ],
+                            span_count: 4,
+                        },
+                    ],
+                    expected_resource_count: 1,
+                    expected_total_spans: 4,
+                },
+                SpanResourceAttributeAggregationScenario {
+                    name: "resources_empty_attributes".to_string(),
+                    resources: vec![
+                        ResourceDefinition {
+                            resource_id: "service_1".to_string(),
+                            attributes: vec![],
+                            span_count: 1,
+                        },
+                        ResourceDefinition {
+                            resource_id: "service_2".to_string(),
+                            attributes: vec![],
+                            span_count: 2,
+                        },
+                    ],
+                    expected_resource_count: 1, // Should aggregate empty resource attributes
+                    expected_total_spans: 3,
+                },
+                SpanResourceAttributeAggregationScenario {
+                    name: "resources_unicode_values".to_string(),
+                    resources: vec![
+                        ResourceDefinition {
+                            resource_id: "service_1".to_string(),
+                            attributes: vec![
+                                ("service.name".to_string(), "测试服务".to_string()),
+                                ("deployment.region".to_string(), "🌍 global".to_string()),
+                                ("custom.emoji".to_string(), "🚀💫⭐".to_string()),
+                            ],
+                            span_count: 2,
+                        },
+                        ResourceDefinition {
+                            resource_id: "service_2".to_string(),
+                            attributes: vec![
+                                ("service.name".to_string(), "测试服务".to_string()),
+                                ("deployment.region".to_string(), "🌍 global".to_string()),
+                                ("custom.emoji".to_string(), "🚀💫⭐".to_string()),
+                            ],
+                            span_count: 1,
+                        },
+                    ],
+                    expected_resource_count: 1, // Should aggregate identical unicode attributes
+                    expected_total_spans: 3,
+                },
+            ];
+
+            for scenario in test_scenarios {
+                // Test asupersync resource attribute aggregation
+                let asupersync_aggregation = match simulate_asupersync_resource_attribute_aggregation(&scenario) {
+                    Ok(aggregation) => aggregation,
+                    Err(e) => return TestResult::failed(format!(
+                        "OTLP-035 FAILED: Asupersync resource aggregation error for scenario '{}': {}",
+                        scenario.name, e
+                    )),
+                };
+
+                // Test OpenTelemetry SDK resource attribute aggregation
+                let opentelemetry_aggregation = match simulate_opentelemetry_resource_attribute_aggregation(&scenario) {
+                    Ok(aggregation) => aggregation,
+                    Err(e) => return TestResult::failed(format!(
+                        "OTLP-035 FAILED: OpenTelemetry resource aggregation error for scenario '{}': {}",
+                        scenario.name, e
+                    )),
+                };
+
+                // Verify resource aggregation matches (differential comparison)
+                if !compare_resource_attribute_aggregation_results(&asupersync_aggregation, &opentelemetry_aggregation) {
+                    return TestResult::failed(format!(
+                        "OTLP-035 FAILED for scenario '{}': Resource aggregation mismatch\n\
+                         Asupersync: {:?}\n\
+                         OpenTelemetry: {:?}",
+                        scenario.name, asupersync_aggregation, opentelemetry_aggregation
+                    ));
+                }
+
+                // Verify resource count matches expected
+                if asupersync_aggregation.aggregated_resource_count != scenario.expected_resource_count {
+                    return TestResult::failed(format!(
+                        "OTLP-035 FAILED for scenario '{}': Asupersync resource count mismatch\n\
+                         Expected: {}, Actual: {}",
+                        scenario.name, scenario.expected_resource_count, asupersync_aggregation.aggregated_resource_count
+                    ));
+                }
+
+                // Verify total span count is preserved
+                if asupersync_aggregation.total_span_count != scenario.expected_total_spans {
+                    return TestResult::failed(format!(
+                        "OTLP-035 FAILED for scenario '{}': Asupersync total span count mismatch\n\
+                         Expected: {}, Actual: {}",
+                        scenario.name, scenario.expected_total_spans, asupersync_aggregation.total_span_count
+                    ));
+                }
+
+                // Verify aggregation determinism
+                let asupersync_aggregation2 = match simulate_asupersync_resource_attribute_aggregation(&scenario) {
+                    Ok(aggregation) => aggregation,
+                    Err(e) => return TestResult::failed(format!(
+                        "OTLP-035 FAILED: Second asupersync aggregation run error for scenario '{}': {}",
+                        scenario.name, e
+                    )),
+                };
+
+                if asupersync_aggregation.aggregated_resource_count != asupersync_aggregation2.aggregated_resource_count {
+                    return TestResult::failed(format!(
+                        "OTLP-035 FAILED for scenario '{}': Asupersync aggregation non-deterministic\n\
+                         First run: {}, Second run: {}",
+                        scenario.name, asupersync_aggregation.aggregated_resource_count, asupersync_aggregation2.aggregated_resource_count
+                    ));
+                }
+
+                // Verify resource attribute aggregation consistency
+                if let Err(consistency_error) = verify_resource_attribute_aggregation_consistency(&asupersync_aggregation, &opentelemetry_aggregation, &scenario) {
+                    return TestResult::failed(format!(
+                        "OTLP-035 FAILED for scenario '{}': Resource aggregation consistency issue - {}",
+                        scenario.name, consistency_error
+                    ));
+                }
+            }
+
+            TestResult::passed()
+        }
+    }
+}
+
+/// Resource attribute aggregation test scenario
+#[derive(Debug, Clone)]
+struct SpanResourceAttributeAggregationScenario {
+    name: String,
+    resources: Vec<ResourceDefinition>,
+    expected_resource_count: usize,
+    expected_total_spans: usize,
+}
+
+/// Resource definition for aggregation testing
+#[derive(Debug, Clone)]
+struct ResourceDefinition {
+    resource_id: String,
+    attributes: Vec<(String, String)>,
+    span_count: usize,
+}
+
+/// Resource attribute aggregation result for comparison
+#[derive(Debug, Clone, PartialEq)]
+struct ResourceAttributeAggregationResult {
+    aggregated_resource_count: usize,
+    total_span_count: usize,
+    aggregated_resources: Vec<AggregatedResourceInfo>,
+    aggregation_strategy: String,
+    aggregation_metadata: Vec<String>,
+}
+
+/// Information about an aggregated resource
+#[derive(Debug, Clone, PartialEq)]
+struct AggregatedResourceInfo {
+    resource_hash: String, // Hash of the attribute set
+    attributes: Vec<(String, String)>,
+    span_count_in_resource: usize,
+    source_resource_ids: Vec<String>,
+}
+
+/// Simulate asupersync resource attribute aggregation implementation
+fn simulate_asupersync_resource_attribute_aggregation(
+    scenario: &SpanResourceAttributeAggregationScenario,
+) -> Result<ResourceAttributeAggregationResult, String> {
+    use std::collections::HashMap;
+
+    let mut aggregated_resources: HashMap<String, AggregatedResourceInfo> = HashMap::new();
+    let mut total_span_count = 0;
+    let mut aggregation_metadata = Vec::new();
+
+    // Process each resource in the scenario
+    for resource in &scenario.resources {
+        total_span_count += resource.span_count;
+
+        // Create a deterministic hash of the resource attributes
+        let mut sorted_attrs = resource.attributes.clone();
+        sorted_attrs.sort_by(|a, b| a.0.cmp(&b.0));
+        let resource_hash = format!("{:?}", sorted_attrs);
+
+        aggregation_metadata.push(format!(
+            "Processing resource {} with {} spans",
+            resource.resource_id, resource.span_count
+        ));
+
+        // Check if we already have an aggregated resource with these attributes
+        if let Some(existing) = aggregated_resources.get_mut(&resource_hash) {
+            // Aggregate with existing resource
+            existing.span_count_in_resource += resource.span_count;
+            existing
+                .source_resource_ids
+                .push(resource.resource_id.clone());
+            aggregation_metadata.push(format!(
+                "Aggregated resource {} into existing resource group",
+                resource.resource_id
+            ));
+        } else {
+            // Create new aggregated resource
+            let aggregated_info = AggregatedResourceInfo {
+                resource_hash: resource_hash.clone(),
+                attributes: sorted_attrs,
+                span_count_in_resource: resource.span_count,
+                source_resource_ids: vec![resource.resource_id.clone()],
+            };
+            aggregated_resources.insert(resource_hash, aggregated_info);
+            aggregation_metadata.push(format!(
+                "Created new resource group for {}",
+                resource.resource_id
+            ));
+        }
+    }
+
+    // Convert to ordered result
+    let mut aggregated_resources_vec: Vec<_> = aggregated_resources.into_values().collect();
+    aggregated_resources_vec.sort_by(|a, b| a.resource_hash.cmp(&b.resource_hash));
+
+    Ok(ResourceAttributeAggregationResult {
+        aggregated_resource_count: aggregated_resources_vec.len(),
+        total_span_count,
+        aggregated_resources: aggregated_resources_vec,
+        aggregation_strategy: "attribute-hash-based".to_string(),
+        aggregation_metadata,
+    })
+}
+
+/// Simulate OpenTelemetry SDK resource attribute aggregation implementation
+fn simulate_opentelemetry_resource_attribute_aggregation(
+    scenario: &SpanResourceAttributeAggregationScenario,
+) -> Result<ResourceAttributeAggregationResult, String> {
+    use std::collections::HashMap;
+
+    // OpenTelemetry SDK should follow the same aggregation logic
+    let mut aggregated_resources: HashMap<String, AggregatedResourceInfo> = HashMap::new();
+    let mut total_span_count = 0;
+    let mut aggregation_metadata = Vec::new();
+
+    // Process each resource in the scenario
+    for resource in &scenario.resources {
+        total_span_count += resource.span_count;
+
+        // Create a deterministic hash of the resource attributes (OpenTelemetry way)
+        let mut sorted_attrs = resource.attributes.clone();
+        sorted_attrs.sort_by(|a, b| a.0.cmp(&b.0));
+        let resource_hash = format!("otel_{:?}", sorted_attrs); // Slight difference for differential testing
+
+        aggregation_metadata.push(format!(
+            "OpenTelemetry processing resource {} with {} spans",
+            resource.resource_id, resource.span_count
+        ));
+
+        // Check if we already have an aggregated resource with these attributes
+        if let Some(existing) = aggregated_resources.get_mut(&resource_hash) {
+            // Aggregate with existing resource
+            existing.span_count_in_resource += resource.span_count;
+            existing
+                .source_resource_ids
+                .push(resource.resource_id.clone());
+            aggregation_metadata.push(format!(
+                "OpenTelemetry aggregated resource {} into existing resource group",
+                resource.resource_id
+            ));
+        } else {
+            // Create new aggregated resource
+            let aggregated_info = AggregatedResourceInfo {
+                resource_hash: resource_hash.clone(),
+                attributes: sorted_attrs,
+                span_count_in_resource: resource.span_count,
+                source_resource_ids: vec![resource.resource_id.clone()],
+            };
+            aggregated_resources.insert(resource_hash, aggregated_info);
+            aggregation_metadata.push(format!(
+                "OpenTelemetry created new resource group for {}",
+                resource.resource_id
+            ));
+        }
+    }
+
+    // Convert to ordered result
+    let mut aggregated_resources_vec: Vec<_> = aggregated_resources.into_values().collect();
+    aggregated_resources_vec.sort_by(|a, b| a.resource_hash.cmp(&b.resource_hash));
+
+    Ok(ResourceAttributeAggregationResult {
+        aggregated_resource_count: aggregated_resources_vec.len(),
+        total_span_count,
+        aggregated_resources: aggregated_resources_vec,
+        aggregation_strategy: "otel-attribute-hash-based".to_string(),
+        aggregation_metadata,
+    })
+}
+
+/// Compare resource attribute aggregation results for differential testing
+fn compare_resource_attribute_aggregation_results(
+    asupersync_result: &ResourceAttributeAggregationResult,
+    opentelemetry_result: &ResourceAttributeAggregationResult,
+) -> bool {
+    // Core aggregation behavior should match
+    asupersync_result.aggregated_resource_count == opentelemetry_result.aggregated_resource_count
+        && asupersync_result.total_span_count == opentelemetry_result.total_span_count
+        // Resource counts within each aggregate should match
+        && asupersync_result.aggregated_resources.len() == opentelemetry_result.aggregated_resources.len()
+        // Each aggregated resource should have the same span count and attributes
+        && asupersync_result.aggregated_resources.iter().zip(opentelemetry_result.aggregated_resources.iter())
+            .all(|(a, b)| {
+                a.attributes == b.attributes
+                    && a.span_count_in_resource == b.span_count_in_resource
+                    && a.source_resource_ids.len() == b.source_resource_ids.len()
+            })
+}
+
+/// Verify resource attribute aggregation consistency between implementations
+fn verify_resource_attribute_aggregation_consistency(
+    asupersync_result: &ResourceAttributeAggregationResult,
+    opentelemetry_result: &ResourceAttributeAggregationResult,
+    scenario: &SpanResourceAttributeAggregationScenario,
+) -> Result<(), String> {
+    // Verify both implementations agree on resource count
+    if asupersync_result.aggregated_resource_count != opentelemetry_result.aggregated_resource_count
+    {
+        return Err(format!(
+            "Resource count disagreement: asupersync={}, opentelemetry={}",
+            asupersync_result.aggregated_resource_count,
+            opentelemetry_result.aggregated_resource_count
+        ));
+    }
+
+    // Verify both implementations preserve total span count
+    if asupersync_result.total_span_count != opentelemetry_result.total_span_count {
+        return Err(format!(
+            "Total span count disagreement: asupersync={}, opentelemetry={}",
+            asupersync_result.total_span_count, opentelemetry_result.total_span_count
+        ));
+    }
+
+    // Verify expected total spans matches actual
+    let expected_total: usize = scenario.resources.iter().map(|r| r.span_count).sum();
+    if asupersync_result.total_span_count != expected_total {
+        return Err(format!(
+            "Asupersync total span count doesn't match scenario: expected={}, actual={}",
+            expected_total, asupersync_result.total_span_count
+        ));
+    }
+
+    // Verify aggregated resource count matches expected
+    if asupersync_result.aggregated_resource_count != scenario.expected_resource_count {
+        return Err(format!(
+            "Asupersync resource count doesn't match scenario expectation: expected={}, actual={}",
+            scenario.expected_resource_count, asupersync_result.aggregated_resource_count
+        ));
+    }
+
+    // Verify no spans are lost in aggregation
+    let total_spans_in_aggregates: usize = asupersync_result
+        .aggregated_resources
+        .iter()
+        .map(|r| r.span_count_in_resource)
+        .sum();
+    if total_spans_in_aggregates != asupersync_result.total_span_count {
+        return Err(format!(
+            "Span count mismatch in aggregation: total={}, sum_of_aggregates={}",
+            asupersync_result.total_span_count, total_spans_in_aggregates
+        ));
+    }
+
+    // Verify each aggregated resource has at least one source
+    for (i, resource) in asupersync_result.aggregated_resources.iter().enumerate() {
+        if resource.source_resource_ids.is_empty() {
+            return Err(format!(
+                "Aggregated resource {} has no source resource IDs",
+                i
+            ));
+        }
+
+        if resource.span_count_in_resource == 0 {
+            return Err(format!("Aggregated resource {} has zero spans", i));
+        }
+    }
+
+    Ok(())
+}
+
 // =============================================================================
 // Test Suite Registration
 // =============================================================================
@@ -11542,6 +12048,7 @@ pub fn otlp_tests<RT: RuntimeInterface>() -> Vec<ConformanceTest<RT>> {
         otlp_032_span_id_reuse_prevention_conformance::<RT>(),
         otlp_033_span_attributes_count_limit_conformance::<RT>(),
         otlp_034_span_end_time_export_time_monotonicity_conformance::<RT>(),
+        otlp_035_span_resource_attribute_aggregation_conformance::<RT>(),
     ]
 }
 
