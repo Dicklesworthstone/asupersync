@@ -3694,3 +3694,25 @@ path = "fuzz_targets/oneshot_poll_after_await.rs"
 test = false
 doc = false
 bench = false
+
+# Tick #148 — Oneshot send-twice error scenarios fuzzer
+# Tests arbitrary multi-send attempts to ensure proper error handling when
+# sends fail due to disconnection or cancellation. Validates error cases
+# return original value and maintain channel state integrity.
+[[bin]]
+name = "oneshot_send_twice"
+path = "fuzz_targets/oneshot_send_twice.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #150 — Oneshot sender clone-then-drop scenarios fuzzer
+# Tests arbitrary clone+drop sequences using separate channels to simulate
+# multiple senders. Validates receivers get values when ANY sender sends,
+# and Cancelled only when ALL senders drop without sending.
+[[bin]]
+name = "oneshot_sender_clone_drop"
+path = "fuzz_targets/oneshot_sender_clone_drop.rs"
+test = false
+doc = false
+bench = false
