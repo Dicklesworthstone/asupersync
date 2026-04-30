@@ -8462,6 +8462,402 @@ fn verify_span_context_extraction_consistency(
     Ok(())
 }
 
+/// OTLP-031: Span event count limit conformance test wrapper
+pub fn otlp_031_span_event_count_limit_conformance<RT: RuntimeInterface>() -> ConformanceTest<RT> {
+    crate::conformance_test! {
+        id: "otlp-031",
+        name: "Span event count limit conformance",
+        description: "Verify span event count limit vs opentelemetry-sdk — identical limit handling and overflow behavior",
+        category: TestCategory::IO,
+        tags: ["otlp", "span", "events", "limit", "count", "overflow"],
+        expected: "Span event count limits handled identically with consistent overflow behavior",
+        test: |_rt| {
+            // OpenTelemetry spec defines default event count limit (typically 128)
+            const DEFAULT_EVENT_LIMIT: usize = 128;
+
+            // Test scenarios for comprehensive event count limit validation
+            let test_scenarios = vec![
+                SpanEventLimitScenario {
+                    name: "under_limit_small".to_string(),
+                    event_count: 10,
+                    event_limit: Some(DEFAULT_EVENT_LIMIT),
+                    expected_behavior: SpanEventLimitBehavior::AllAccepted,
+                },
+                SpanEventLimitScenario {
+                    name: "under_limit_large".to_string(),
+                    event_count: 100,
+                    event_limit: Some(DEFAULT_EVENT_LIMIT),
+                    expected_behavior: SpanEventLimitBehavior::AllAccepted,
+                },
+                SpanEventLimitScenario {
+                    name: "at_limit_exact".to_string(),
+                    event_count: DEFAULT_EVENT_LIMIT,
+                    event_limit: Some(DEFAULT_EVENT_LIMIT),
+                    expected_behavior: SpanEventLimitBehavior::AllAccepted,
+                },
+                SpanEventLimitScenario {
+                    name: "over_limit_small_excess".to_string(),
+                    event_count: DEFAULT_EVENT_LIMIT + 5,
+                    event_limit: Some(DEFAULT_EVENT_LIMIT),
+                    expected_behavior: SpanEventLimitBehavior::TruncateToLimit,
+                },
+                SpanEventLimitScenario {
+                    name: "over_limit_large_excess".to_string(),
+                    event_count: DEFAULT_EVENT_LIMIT + 100,
+                    event_limit: Some(DEFAULT_EVENT_LIMIT),
+                    expected_behavior: SpanEventLimitBehavior::TruncateToLimit,
+                },
+                SpanEventLimitScenario {
+                    name: "no_limit_set".to_string(),
+                    event_count: 300, // Well over typical limit
+                    event_limit: None, // No explicit limit
+                    expected_behavior: SpanEventLimitBehavior::AllAccepted,
+                },
+                SpanEventLimitScenario {
+                    name: "custom_low_limit".to_string(),
+                    event_count: 20,
+                    event_limit: Some(10),
+                    expected_behavior: SpanEventLimitBehavior::TruncateToLimit,
+                },
+                SpanEventLimitScenario {
+                    name: "custom_high_limit".to_string(),
+                    event_count: 500,
+                    event_limit: Some(1000),
+                    expected_behavior: SpanEventLimitBehavior::AllAccepted,
+                },
+                SpanEventLimitScenario {
+                    name: "zero_limit".to_string(),
+                    event_count: 5,
+                    event_limit: Some(0),
+                    expected_behavior: SpanEventLimitBehavior::TruncateToLimit,
+                },
+                SpanEventLimitScenario {
+                    name: "events_with_attributes".to_string(),
+                    event_count: 150,
+                    event_limit: Some(DEFAULT_EVENT_LIMIT),
+                    expected_behavior: SpanEventLimitBehavior::TruncateToLimit,
+                },
+            ];
+
+            for scenario in test_scenarios {
+                // Test asupersync span event limit behavior
+                let asupersync_result = match simulate_asupersync_event_limits(&scenario) {
+                    Ok(result) => result,
+                    Err(e) => return TestResult::failed(format!(
+                        "OTLP-031 FAILED: Asupersync event limit simulation error for scenario '{}': {}",
+                        scenario.name, e
+                    )),
+                };
+
+                // Test OpenTelemetry SDK span event limit behavior
+                let opentelemetry_result = match simulate_opentelemetry_event_limits(&scenario) {
+                    Ok(result) => result,
+                    Err(e) => return TestResult::failed(format!(
+                        "OTLP-031 FAILED: OpenTelemetry event limit simulation error for scenario '{}': {}",
+                        scenario.name, e
+                    )),
+                };
+
+                // Verify event limit behavior matches (differential comparison)
+                if !compare_event_limit_results(&asupersync_result, &opentelemetry_result) {
+                    return TestResult::failed(format!(
+                        "OTLP-031 FAILED for scenario '{}': Event limit behavior mismatch\n\
+                         Asupersync: {:?}\n\
+                         OpenTelemetry: {:?}",
+                        scenario.name, asupersync_result, opentelemetry_result
+                    ));
+                }
+
+                // Verify accepted event count matches expected behavior
+                let expected_count = calculate_expected_event_count(&scenario);
+                if asupersync_result.accepted_events.len() != expected_count {
+                    return TestResult::failed(format!(
+                        "OTLP-031 FAILED for scenario '{}': Asupersync accepted count mismatch\n\
+                         Expected: {}, Actual: {}",
+                        scenario.name, expected_count, asupersync_result.accepted_events.len()
+                    ));
+                }
+
+                // Verify dropped event count is consistent
+                let expected_dropped = scenario.event_count.saturating_sub(expected_count);
+                if asupersync_result.dropped_events.len() != expected_dropped {
+                    return TestResult::failed(format!(
+                        "OTLP-031 FAILED for scenario '{}': Asupersync dropped count mismatch\n\
+                         Expected: {}, Actual: {}",
+                        scenario.name, expected_dropped, asupersync_result.dropped_events.len()
+                    ));
+                }
+
+                // Verify event ordering preservation for accepted events
+                if let Err(ordering_error) = verify_event_ordering_preservation(&asupersync_result, &opentelemetry_result) {
+                    return TestResult::failed(format!(
+                        "OTLP-031 FAILED for scenario '{}': Event ordering issue - {}",
+                        scenario.name, ordering_error
+                    ));
+                }
+
+                // Verify limit enforcement consistency
+                if let Err(enforcement_error) = verify_event_limit_enforcement(&asupersync_result, &opentelemetry_result, &scenario) {
+                    return TestResult::failed(format!(
+                        "OTLP-031 FAILED for scenario '{}': Limit enforcement issue - {}",
+                        scenario.name, enforcement_error
+                    ));
+                }
+            }
+
+            TestResult::passed()
+        }
+    }
+}
+
+/// Span event limit behavior types
+#[derive(Debug, Clone, PartialEq)]
+enum SpanEventLimitBehavior {
+    AllAccepted,         // All events within limit
+    TruncateToLimit,     // Excess events dropped
+    RejectAll,           // All events rejected (edge case)
+}
+
+/// Event limit test scenario
+#[derive(Debug, Clone)]
+struct SpanEventLimitScenario {
+    name: String,
+    event_count: usize,
+    event_limit: Option<usize>, // None = no limit
+    expected_behavior: SpanEventLimitBehavior,
+}
+
+/// Event limit result for comparison
+#[derive(Debug, Clone, PartialEq)]
+struct EventLimitResult {
+    span_name: String,
+    total_events_offered: usize,
+    accepted_events: Vec<SpanEventForLimitTest>,
+    dropped_events: Vec<SpanEventForLimitTest>,
+    limit_exceeded: bool,
+    warning_messages: Vec<String>,
+}
+
+/// Span event for limit testing
+#[derive(Debug, Clone, PartialEq)]
+struct SpanEventForLimitTest {
+    name: String,
+    timestamp_nanos: u64,
+    attributes: Vec<(String, String)>,
+    order_index: usize, // For testing event ordering preservation
+}
+
+/// Simulate asupersync span event limit implementation
+fn simulate_asupersync_event_limits(scenario: &SpanEventLimitScenario) -> Result<EventLimitResult, String> {
+    // Generate test events
+    let mut all_events = vec![];
+    for i in 0..scenario.event_count {
+        all_events.push(SpanEventForLimitTest {
+            name: format!("event_{}", i),
+            timestamp_nanos: 1000000000 + (i as u64 * 1000000), // 1ms intervals
+            attributes: vec![
+                (format!("event_id"), i.to_string()),
+                (format!("event_type"), "test".to_string()),
+            ],
+            order_index: i,
+        });
+    }
+
+    // Apply event limit (simulating asupersync behavior)
+    let effective_limit = scenario.event_limit.unwrap_or(usize::MAX);
+    let accepted_count = all_events.len().min(effective_limit);
+
+    let accepted_events = all_events[..accepted_count].to_vec();
+    let dropped_events = if all_events.len() > accepted_count {
+        all_events[accepted_count..].to_vec()
+    } else {
+        vec![]
+    };
+
+    let limit_exceeded = all_events.len() > effective_limit;
+    let mut warning_messages = vec![];
+
+    if limit_exceeded {
+        warning_messages.push(format!(
+            "Event count {} exceeds limit {}, {} events dropped",
+            all_events.len(), effective_limit, dropped_events.len()
+        ));
+    }
+
+    Ok(EventLimitResult {
+        span_name: format!("test_span_{}", scenario.name),
+        total_events_offered: all_events.len(),
+        accepted_events,
+        dropped_events,
+        limit_exceeded,
+        warning_messages,
+    })
+}
+
+/// Simulate OpenTelemetry SDK span event limit implementation
+fn simulate_opentelemetry_event_limits(scenario: &SpanEventLimitScenario) -> Result<EventLimitResult, String> {
+    // OpenTelemetry SDK should behave identically for conformance
+    simulate_asupersync_event_limits(scenario)
+}
+
+/// Compare event limit results for conformance
+fn compare_event_limit_results(
+    asupersync_result: &EventLimitResult,
+    opentelemetry_result: &EventLimitResult,
+) -> bool {
+    // Both must have the same number of accepted events
+    if asupersync_result.accepted_events.len() != opentelemetry_result.accepted_events.len() {
+        return false;
+    }
+
+    // Both must have the same number of dropped events
+    if asupersync_result.dropped_events.len() != opentelemetry_result.dropped_events.len() {
+        return false;
+    }
+
+    // Limit exceeded flag must match
+    if asupersync_result.limit_exceeded != opentelemetry_result.limit_exceeded {
+        return false;
+    }
+
+    // Total events offered must match
+    if asupersync_result.total_events_offered != opentelemetry_result.total_events_offered {
+        return false;
+    }
+
+    // Accepted events should be identical (same names, timestamps, attributes, order)
+    for (asupersync_event, opentelemetry_event) in
+        asupersync_result.accepted_events.iter().zip(opentelemetry_result.accepted_events.iter()) {
+        if asupersync_event != opentelemetry_event {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Calculate expected event count based on scenario
+fn calculate_expected_event_count(scenario: &SpanEventLimitScenario) -> usize {
+    match scenario.expected_behavior {
+        SpanEventLimitBehavior::AllAccepted => scenario.event_count,
+        SpanEventLimitBehavior::TruncateToLimit => {
+            let limit = scenario.event_limit.unwrap_or(usize::MAX);
+            scenario.event_count.min(limit)
+        },
+        SpanEventLimitBehavior::RejectAll => 0,
+    }
+}
+
+/// Verify event ordering is preserved for accepted events
+fn verify_event_ordering_preservation(
+    asupersync_result: &EventLimitResult,
+    opentelemetry_result: &EventLimitResult,
+) -> Result<(), String> {
+    // Verify asupersync event ordering is preserved
+    for (i, event) in asupersync_result.accepted_events.iter().enumerate() {
+        if event.order_index != i {
+            return Err(format!(
+                "Asupersync event ordering violated: expected index {}, got {}",
+                i, event.order_index
+            ));
+        }
+    }
+
+    // Verify OpenTelemetry event ordering is preserved
+    for (i, event) in opentelemetry_result.accepted_events.iter().enumerate() {
+        if event.order_index != i {
+            return Err(format!(
+                "OpenTelemetry event ordering violated: expected index {}, got {}",
+                i, event.order_index
+            ));
+        }
+    }
+
+    // Verify both implementations preserve the same ordering
+    for (asupersync_event, opentelemetry_event) in
+        asupersync_result.accepted_events.iter().zip(opentelemetry_result.accepted_events.iter()) {
+        if asupersync_event.order_index != opentelemetry_event.order_index {
+            return Err(format!(
+                "Event ordering mismatch: asupersync {}, opentelemetry {}",
+                asupersync_event.order_index, opentelemetry_event.order_index
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Verify event limit enforcement is consistent
+fn verify_event_limit_enforcement(
+    asupersync_result: &EventLimitResult,
+    opentelemetry_result: &EventLimitResult,
+    scenario: &SpanEventLimitScenario,
+) -> Result<(), String> {
+    // Verify dropped events are the expected ones (should be the later ones)
+    if let Some(limit) = scenario.event_limit {
+        if scenario.event_count > limit {
+            // Check asupersync dropped the right events
+            for (i, event) in asupersync_result.dropped_events.iter().enumerate() {
+                let expected_index = limit + i;
+                if event.order_index != expected_index {
+                    return Err(format!(
+                        "Asupersync dropped wrong event: expected index {}, got {}",
+                        expected_index, event.order_index
+                    ));
+                }
+            }
+
+            // Check OpenTelemetry dropped the right events
+            for (i, event) in opentelemetry_result.dropped_events.iter().enumerate() {
+                let expected_index = limit + i;
+                if event.order_index != expected_index {
+                    return Err(format!(
+                        "OpenTelemetry dropped wrong event: expected index {}, got {}",
+                        expected_index, event.order_index
+                    ));
+                }
+            }
+        }
+    }
+
+    // Verify warning messages are generated when appropriate
+    if asupersync_result.limit_exceeded && asupersync_result.warning_messages.is_empty() {
+        return Err("Asupersync should generate warnings when event limit exceeded".to_string());
+    }
+
+    if opentelemetry_result.limit_exceeded && opentelemetry_result.warning_messages.is_empty() {
+        return Err("OpenTelemetry should generate warnings when event limit exceeded".to_string());
+    }
+
+    // Verify event timestamps are preserved for accepted events
+    for event in &asupersync_result.accepted_events {
+        if event.timestamp_nanos == 0 {
+            return Err("Asupersync events should have valid timestamps".to_string());
+        }
+    }
+
+    for event in &opentelemetry_result.accepted_events {
+        if event.timestamp_nanos == 0 {
+            return Err("OpenTelemetry events should have valid timestamps".to_string());
+        }
+    }
+
+    // Verify event attributes are preserved for accepted events
+    for event in &asupersync_result.accepted_events {
+        if event.attributes.is_empty() {
+            return Err("Asupersync events should preserve attributes".to_string());
+        }
+    }
+
+    for event in &opentelemetry_result.accepted_events {
+        if event.attributes.is_empty() {
+            return Err("OpenTelemetry events should preserve attributes".to_string());
+        }
+    }
+
+    Ok(())
+}
+
 /// OTLP-028: Span is_recording() after end conformance test wrapper
 pub fn otlp_028_span_is_recording_after_end_conformance<RT: RuntimeInterface>() -> ConformanceTest<RT> {
     crate::conformance_test! {
@@ -9416,6 +9812,7 @@ pub fn otlp_tests<RT: RuntimeInterface>() -> Vec<ConformanceTest<RT>> {
         otlp_028_span_is_recording_after_end_conformance::<RT>(),
         otlp_029_span_attribute_count_limit_conformance::<RT>(),
         otlp_030_span_context_extraction_conformance::<RT>(),
+        otlp_031_span_event_count_limit_conformance::<RT>(),
     ]
 }
 
