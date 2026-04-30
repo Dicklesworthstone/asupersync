@@ -2744,20 +2744,24 @@ mod tests {
             // Advance to Closing state
             assert!(region.begin_close(None));
             assert_eq!(region.state(), RegionState::Closing);
+            let after_close = region.state().as_u8();
 
-            // Try invalid transitions (should all fail by design)
+            // Forward progress is allowed and must remain monotone.
+            assert!(region.begin_drain());
             assert!(
-                !region.begin_drain() || region.state() == RegionState::Closing,
-                "Cannot transition backward"
+                region.state().as_u8() >= after_close,
+                "Closing→Draining must not move backward"
             );
+            assert_eq!(region.state(), RegionState::Draining);
 
-            // Advance to Finalizing
+            // Backward/restart transitions are rejected once draining.
+            assert!(!region.begin_close(None));
             assert!(region.begin_finalize());
             assert_eq!(region.state(), RegionState::Finalizing);
 
-            // Try backward transition (should fail)
-            let still_finalizing = region.state() == RegionState::Finalizing;
-            assert!(still_finalizing, "Should remain in Finalizing state");
+            assert!(!region.begin_close(None));
+            assert!(!region.begin_drain());
+            assert_eq!(region.state(), RegionState::Finalizing);
 
             passed += 1;
         }
