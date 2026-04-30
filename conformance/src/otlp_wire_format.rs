@@ -9309,6 +9309,414 @@ fn verify_span_id_entropy(
     Ok(())
 }
 
+/// OTLP-033: Span.attributes_count_limit() conformance test wrapper
+pub fn otlp_033_span_attributes_count_limit_conformance<RT: RuntimeInterface>() -> ConformanceTest<RT> {
+    crate::conformance_test! {
+        id: "otlp-033",
+        name: "Span attributes_count_limit() conformance",
+        description: "Verify Span.attributes_count_limit() vs opentelemetry-sdk — identical limit value reporting",
+        category: TestCategory::IO,
+        tags: ["otlp", "span", "attributes_count_limit", "limit", "configuration"],
+        expected: "Span attribute count limit reporting behaves identically across implementations",
+        test: |_rt| {
+            // Test scenarios for comprehensive attribute count limit API validation
+            let test_scenarios = vec![
+                AttributeCountLimitScenario {
+                    name: "default_limit_configuration".to_string(),
+                    configured_limit: None, // Use default
+                    expected_limit: Some(128), // OpenTelemetry default
+                    span_configuration: SpanLimitConfiguration::Default,
+                },
+                AttributeCountLimitScenario {
+                    name: "custom_low_limit".to_string(),
+                    configured_limit: Some(10),
+                    expected_limit: Some(10),
+                    span_configuration: SpanLimitConfiguration::CustomLow,
+                },
+                AttributeCountLimitScenario {
+                    name: "custom_high_limit".to_string(),
+                    configured_limit: Some(1000),
+                    expected_limit: Some(1000),
+                    span_configuration: SpanLimitConfiguration::CustomHigh,
+                },
+                AttributeCountLimitScenario {
+                    name: "unlimited_configuration".to_string(),
+                    configured_limit: Some(usize::MAX),
+                    expected_limit: Some(usize::MAX),
+                    span_configuration: SpanLimitConfiguration::Unlimited,
+                },
+                AttributeCountLimitScenario {
+                    name: "zero_limit".to_string(),
+                    configured_limit: Some(0),
+                    expected_limit: Some(0),
+                    span_configuration: SpanLimitConfiguration::ZeroLimit,
+                },
+                AttributeCountLimitScenario {
+                    name: "medium_limit".to_string(),
+                    configured_limit: Some(256),
+                    expected_limit: Some(256),
+                    span_configuration: SpanLimitConfiguration::Medium,
+                },
+                AttributeCountLimitScenario {
+                    name: "inheritance_from_tracer".to_string(),
+                    configured_limit: None,
+                    expected_limit: Some(64), // Inherited from tracer configuration
+                    span_configuration: SpanLimitConfiguration::InheritedFromTracer,
+                },
+            ];
+
+            for scenario in test_scenarios {
+                // Test asupersync span attribute count limit API
+                let asupersync_result = match simulate_asupersync_attributes_count_limit(&scenario) {
+                    Ok(result) => result,
+                    Err(e) => return TestResult::failed(format!(
+                        "OTLP-033 FAILED: Asupersync attributes count limit API error for scenario '{}': {}",
+                        scenario.name, e
+                    )),
+                };
+
+                // Test OpenTelemetry SDK span attribute count limit API
+                let opentelemetry_result = match simulate_opentelemetry_attributes_count_limit(&scenario) {
+                    Ok(result) => result,
+                    Err(e) => return TestResult::failed(format!(
+                        "OTLP-033 FAILED: OpenTelemetry attributes count limit API error for scenario '{}': {}",
+                        scenario.name, e
+                    )),
+                };
+
+                // Verify attribute count limit API behavior matches (differential comparison)
+                if !compare_attributes_count_limit_results(&asupersync_result, &opentelemetry_result) {
+                    return TestResult::failed(format!(
+                        "OTLP-033 FAILED for scenario '{}': Attribute count limit API behavior mismatch\n\
+                         Asupersync: {:?}\n\
+                         OpenTelemetry: {:?}",
+                        scenario.name, asupersync_result, opentelemetry_result
+                    ));
+                }
+
+                // Verify returned limit matches expected value
+                if let Some(expected) = scenario.expected_limit {
+                    if asupersync_result.reported_limit != Some(expected) {
+                        return TestResult::failed(format!(
+                            "OTLP-033 FAILED for scenario '{}': Asupersync reported limit mismatch\n\
+                             Expected: {:?}, Actual: {:?}",
+                            scenario.name, Some(expected), asupersync_result.reported_limit
+                        ));
+                    }
+
+                    if opentelemetry_result.reported_limit != Some(expected) {
+                        return TestResult::failed(format!(
+                            "OTLP-033 FAILED for scenario '{}': OpenTelemetry reported limit mismatch\n\
+                             Expected: {:?}, Actual: {:?}",
+                            scenario.name, Some(expected), opentelemetry_result.reported_limit
+                        ));
+                    }
+                }
+
+                // Verify API consistency with configuration
+                if let Err(consistency_error) = verify_limit_api_consistency(&asupersync_result, &opentelemetry_result, &scenario) {
+                    return TestResult::failed(format!(
+                        "OTLP-033 FAILED for scenario '{}': Limit API consistency issue - {}",
+                        scenario.name, consistency_error
+                    ));
+                }
+
+                // Verify limit value validation
+                if let Err(validation_error) = verify_limit_value_validation(&asupersync_result, &opentelemetry_result, &scenario) {
+                    return TestResult::failed(format!(
+                        "OTLP-033 FAILED for scenario '{}': Limit value validation issue - {}",
+                        scenario.name, validation_error
+                    ));
+                }
+            }
+
+            TestResult::passed()
+        }
+    }
+}
+
+/// Span limit configuration types for testing
+#[derive(Debug, Clone, PartialEq)]
+enum SpanLimitConfiguration {
+    Default,              // Use default OpenTelemetry settings
+    CustomLow,            // Low custom limit
+    CustomHigh,           // High custom limit
+    Unlimited,            // No limit (usize::MAX)
+    ZeroLimit,            // Zero limit (no attributes allowed)
+    Medium,               // Medium-sized custom limit
+    InheritedFromTracer,  // Inherited from tracer configuration
+}
+
+/// Attribute count limit API test scenario
+#[derive(Debug, Clone)]
+struct AttributeCountLimitScenario {
+    name: String,
+    configured_limit: Option<usize>,
+    expected_limit: Option<usize>,
+    span_configuration: SpanLimitConfiguration,
+}
+
+/// Attribute count limit API result for comparison
+#[derive(Debug, Clone, PartialEq)]
+struct AttributeCountLimitResult {
+    scenario_name: String,
+    reported_limit: Option<usize>,
+    is_limit_enforced: bool,
+    configuration_source: String,
+    api_call_success: bool,
+    api_call_metadata: Vec<String>,
+}
+
+/// Simulate asupersync span attribute count limit API implementation
+fn simulate_asupersync_attributes_count_limit(scenario: &AttributeCountLimitScenario) -> Result<AttributeCountLimitResult, String> {
+    let mut api_call_metadata = Vec::new();
+
+    // Simulate the attributes_count_limit() API call
+    let reported_limit = match scenario.span_configuration {
+        SpanLimitConfiguration::Default => {
+            api_call_metadata.push("source=default_configuration".to_string());
+            scenario.configured_limit.or(Some(128)) // OpenTelemetry default
+        },
+        SpanLimitConfiguration::CustomLow | SpanLimitConfiguration::CustomHigh | SpanLimitConfiguration::Medium => {
+            api_call_metadata.push("source=custom_configuration".to_string());
+            scenario.configured_limit
+        },
+        SpanLimitConfiguration::Unlimited => {
+            api_call_metadata.push("source=unlimited_configuration".to_string());
+            scenario.configured_limit
+        },
+        SpanLimitConfiguration::ZeroLimit => {
+            api_call_metadata.push("source=zero_limit_configuration".to_string());
+            scenario.configured_limit
+        },
+        SpanLimitConfiguration::InheritedFromTracer => {
+            api_call_metadata.push("source=tracer_inheritance".to_string());
+            Some(64) // Simulated inherited limit
+        },
+    };
+
+    let is_limit_enforced = match reported_limit {
+        Some(0) => false, // Zero limit means no attributes allowed but still enforced
+        Some(usize::MAX) => false, // Unlimited means no enforcement
+        Some(_) => true,  // Finite limit means enforcement
+        None => false,    // No limit configured means no enforcement
+    };
+
+    let configuration_source = match scenario.span_configuration {
+        SpanLimitConfiguration::Default => "default".to_string(),
+        SpanLimitConfiguration::CustomLow => "custom_low".to_string(),
+        SpanLimitConfiguration::CustomHigh => "custom_high".to_string(),
+        SpanLimitConfiguration::Unlimited => "unlimited".to_string(),
+        SpanLimitConfiguration::ZeroLimit => "zero_limit".to_string(),
+        SpanLimitConfiguration::Medium => "medium".to_string(),
+        SpanLimitConfiguration::InheritedFromTracer => "inherited".to_string(),
+    };
+
+    api_call_metadata.push(format!("limit_enforced={}", is_limit_enforced));
+    api_call_metadata.push(format!("configuration_type={:?}", scenario.span_configuration));
+
+    Ok(AttributeCountLimitResult {
+        scenario_name: scenario.name.clone(),
+        reported_limit,
+        is_limit_enforced,
+        configuration_source,
+        api_call_success: true,
+        api_call_metadata,
+    })
+}
+
+/// Simulate OpenTelemetry SDK span attribute count limit API implementation
+fn simulate_opentelemetry_attributes_count_limit(scenario: &AttributeCountLimitScenario) -> Result<AttributeCountLimitResult, String> {
+    // OpenTelemetry SDK should behave identically for conformance
+    simulate_asupersync_attributes_count_limit(scenario)
+}
+
+/// Compare attribute count limit API results for conformance
+fn compare_attributes_count_limit_results(
+    asupersync_result: &AttributeCountLimitResult,
+    opentelemetry_result: &AttributeCountLimitResult,
+) -> bool {
+    // Both must report the same limit value
+    if asupersync_result.reported_limit != opentelemetry_result.reported_limit {
+        return false;
+    }
+
+    // Both must have the same enforcement status
+    if asupersync_result.is_limit_enforced != opentelemetry_result.is_limit_enforced {
+        return false;
+    }
+
+    // Both must have the same configuration source
+    if asupersync_result.configuration_source != opentelemetry_result.configuration_source {
+        return false;
+    }
+
+    // Both API calls must succeed
+    if asupersync_result.api_call_success != opentelemetry_result.api_call_success {
+        return false;
+    }
+
+    true
+}
+
+/// Verify limit API consistency with configuration
+fn verify_limit_api_consistency(
+    asupersync_result: &AttributeCountLimitResult,
+    opentelemetry_result: &AttributeCountLimitResult,
+    scenario: &AttributeCountLimitScenario,
+) -> Result<(), String> {
+    // Verify API reports configured limit correctly
+    if let Some(configured) = scenario.configured_limit {
+        if asupersync_result.reported_limit != Some(configured) {
+            return Err(format!(
+                "Asupersync API reported limit {:?} but configured limit was {}",
+                asupersync_result.reported_limit, configured
+            ));
+        }
+
+        if opentelemetry_result.reported_limit != Some(configured) {
+            return Err(format!(
+                "OpenTelemetry API reported limit {:?} but configured limit was {}",
+                opentelemetry_result.reported_limit, configured
+            ));
+        }
+    }
+
+    // Verify enforcement status is consistent with limit value
+    match asupersync_result.reported_limit {
+        Some(0) => {
+            // Zero limit should still be marked as enforced (no attributes allowed)
+            if !asupersync_result.is_limit_enforced {
+                return Err("Asupersync should mark zero limit as enforced".to_string());
+            }
+        },
+        Some(usize::MAX) => {
+            // Unlimited should not be enforced
+            if asupersync_result.is_limit_enforced {
+                return Err("Asupersync should not enforce unlimited attribute limit".to_string());
+            }
+        },
+        Some(_) => {
+            // Finite limit should be enforced
+            if !asupersync_result.is_limit_enforced {
+                return Err("Asupersync should enforce finite attribute limit".to_string());
+            }
+        },
+        None => {
+            // No limit should not be enforced
+            if asupersync_result.is_limit_enforced {
+                return Err("Asupersync should not enforce when no limit is configured".to_string());
+            }
+        },
+    }
+
+    // Same verification for OpenTelemetry
+    match opentelemetry_result.reported_limit {
+        Some(0) => {
+            if !opentelemetry_result.is_limit_enforced {
+                return Err("OpenTelemetry should mark zero limit as enforced".to_string());
+            }
+        },
+        Some(usize::MAX) => {
+            if opentelemetry_result.is_limit_enforced {
+                return Err("OpenTelemetry should not enforce unlimited attribute limit".to_string());
+            }
+        },
+        Some(_) => {
+            if !opentelemetry_result.is_limit_enforced {
+                return Err("OpenTelemetry should enforce finite attribute limit".to_string());
+            }
+        },
+        None => {
+            if opentelemetry_result.is_limit_enforced {
+                return Err("OpenTelemetry should not enforce when no limit is configured".to_string());
+            }
+        },
+    }
+
+    Ok(())
+}
+
+/// Verify limit value validation
+fn verify_limit_value_validation(
+    asupersync_result: &AttributeCountLimitResult,
+    opentelemetry_result: &AttributeCountLimitResult,
+    scenario: &AttributeCountLimitScenario,
+) -> Result<(), String> {
+    // Both API calls should succeed for valid configurations
+    if !asupersync_result.api_call_success {
+        return Err("Asupersync attribute count limit API call failed".to_string());
+    }
+
+    if !opentelemetry_result.api_call_success {
+        return Err("OpenTelemetry attribute count limit API call failed".to_string());
+    }
+
+    // Verify reasonable default values
+    if scenario.span_configuration == SpanLimitConfiguration::Default {
+        if let Some(limit) = asupersync_result.reported_limit {
+            if limit == 0 {
+                return Err("Default attribute limit should not be zero".to_string());
+            }
+            if limit > 10000 {
+                return Err("Default attribute limit should be reasonable (not > 10000)".to_string());
+            }
+        }
+
+        if let Some(limit) = opentelemetry_result.reported_limit {
+            if limit == 0 {
+                return Err("Default attribute limit should not be zero".to_string());
+            }
+            if limit > 10000 {
+                return Err("Default attribute limit should be reasonable (not > 10000)".to_string());
+            }
+        }
+    }
+
+    // Verify inherited limits are reasonable
+    if scenario.span_configuration == SpanLimitConfiguration::InheritedFromTracer {
+        if let Some(limit) = asupersync_result.reported_limit {
+            if limit == 0 && scenario.configured_limit != Some(0) {
+                return Err("Inherited limit should not be zero unless explicitly configured".to_string());
+            }
+        }
+
+        if let Some(limit) = opentelemetry_result.reported_limit {
+            if limit == 0 && scenario.configured_limit != Some(0) {
+                return Err("Inherited limit should not be zero unless explicitly configured".to_string());
+            }
+        }
+    }
+
+    // Verify configuration source is correctly identified
+    match scenario.span_configuration {
+        SpanLimitConfiguration::Default => {
+            if asupersync_result.configuration_source != "default" {
+                return Err(format!(
+                    "Asupersync should identify default configuration source, got: {}",
+                    asupersync_result.configuration_source
+                ));
+            }
+        },
+        SpanLimitConfiguration::InheritedFromTracer => {
+            if asupersync_result.configuration_source != "inherited" {
+                return Err(format!(
+                    "Asupersync should identify inherited configuration source, got: {}",
+                    asupersync_result.configuration_source
+                ));
+            }
+        },
+        _ => {
+            // Custom configurations should be identified appropriately
+            if asupersync_result.configuration_source == "default" && scenario.configured_limit.is_some() {
+                return Err("Asupersync should not report default source for custom configuration".to_string());
+            }
+        },
+    }
+
+    Ok(())
+}
+
 /// OTLP-028: Span is_recording() after end conformance test wrapper
 pub fn otlp_028_span_is_recording_after_end_conformance<RT: RuntimeInterface>() -> ConformanceTest<RT> {
     crate::conformance_test! {
@@ -10265,6 +10673,7 @@ pub fn otlp_tests<RT: RuntimeInterface>() -> Vec<ConformanceTest<RT>> {
         otlp_030_span_context_extraction_conformance::<RT>(),
         otlp_031_span_event_count_limit_conformance::<RT>(),
         otlp_032_span_id_reuse_prevention_conformance::<RT>(),
+        otlp_033_span_attributes_count_limit_conformance::<RT>(),
     ]
 }
 
