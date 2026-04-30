@@ -20,9 +20,9 @@ use asupersync::Cx;
 use asupersync::database::PgColumn;
 use asupersync::database::postgres::{
     Format, FromSql, IsNull, PgError, ToSql, build_bind_msg, fuzz_apply_ready_for_query,
-    fuzz_apply_sync_recovery, fuzz_parse_bind_message, fuzz_parse_data_row,
-    fuzz_parse_error_response, fuzz_parse_parameter_description, fuzz_parse_row_description,
-    fuzz_read_backend_message, oid,
+    fuzz_apply_sync_recovery, fuzz_parse_bind_message, fuzz_parse_copy_out_response,
+    fuzz_parse_data_row, fuzz_parse_error_response, fuzz_parse_parameter_description,
+    fuzz_parse_row_description, fuzz_read_backend_message, oid,
 };
 use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
@@ -87,6 +87,8 @@ enum FuzzScenario {
         data_rows: Vec<CopyRow>,
         delimiter_tests: Vec<DelimiterTest>,
     },
+    /// CopyOutResponse body parser: format byte, column count, per-column formats.
+    CopyOutResponseParsing { body: CopyOutResponseBody },
     /// Bind parameter-format code compression and per-parameter encoding.
     BindParameterFormats {
         parameters: Vec<BindFormatParameter>,
@@ -408,6 +410,15 @@ struct DelimiterTest {
 }
 
 #[derive(Arbitrary, Debug)]
+struct CopyOutResponseBody {
+    overall_format: u8,
+    declared_field_count: i16,
+    column_format_codes: Vec<i16>,
+    trailing_bytes: Vec<u8>,
+    truncate_at: Option<usize>,
+}
+
+#[derive(Arbitrary, Debug)]
 enum ReadyForQueryStatus {
     Idle,
     InTransaction,
@@ -517,6 +528,8 @@ fuzz_target!(|scenario: FuzzScenario| match scenario {
         data_rows,
         delimiter_tests,
     } => fuzz_copy_protocol(copy_format, field_count, data_rows, delimiter_tests),
+
+    FuzzScenario::CopyOutResponseParsing { body } => fuzz_copy_out_response_parsing(body),
 
     FuzzScenario::BindParameterFormats { parameters } => fuzz_bind_parameter_formats(parameters),
 
@@ -1038,6 +1051,44 @@ fn fuzz_copy_protocol(
     // Test delimiter scenarios
     for delimiter_test in delimiter_tests.iter().take(8) {
         test_delimiter_handling(delimiter_test);
+    }
+}
+
+fn fuzz_copy_out_response_parsing(body: CopyOutResponseBody) {
+    let CopyOutResponseBody {
+        overall_format,
+        declared_field_count,
+        column_format_codes,
+        trailing_bytes,
+        truncate_at,
+    } = body;
+
+    let mut data = Vec::with_capacity(3 + (MAX_COLUMNS * 2) + 32);
+    data.push(overall_format);
+    data.extend_from_slice(&declared_field_count.to_be_bytes());
+
+    for code in column_format_codes.iter().take(MAX_COLUMNS) {
+        data.extend_from_slice(&code.to_be_bytes());
+    }
+
+    let trailing_len = trailing_bytes.len().min(32);
+    data.extend_from_slice(&trailing_bytes[..trailing_len]);
+
+    if let Some(truncate_at) = truncate_at {
+        data.truncate(truncate_at.min(data.len()));
+    }
+
+    if let Ok((overall, columns)) = fuzz_parse_copy_out_response(&data) {
+        assert!(matches!(overall, Format::Text | Format::Binary));
+        assert!(declared_field_count >= 0);
+        assert_eq!(columns.len(), declared_field_count as usize);
+        assert_eq!(data.len(), 3 + columns.len() * 2);
+        assert!(
+            columns
+                .iter()
+                .all(|format| matches!(*format, Format::Text | Format::Binary)),
+            "CopyOutResponse parser must reject non-0/1 column format codes"
+        );
     }
 }
 

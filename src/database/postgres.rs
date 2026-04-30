@@ -5292,6 +5292,62 @@ impl PgConnection {
         Ok(oids)
     }
 
+    fn parse_copy_response(context: &str, data: &[u8]) -> Result<(Format, Vec<Format>), PgError> {
+        let mut reader = MessageReader::new(data);
+        let overall_format =
+            Self::parse_copy_format_code(context, "overall", i16::from(reader.read_byte()?))?;
+        let field_count = reader.read_i16()?;
+        if field_count < 0 {
+            return Err(PgError::Protocol(format!(
+                "negative field count in {context}: {field_count}"
+            )));
+        }
+
+        let field_count = field_count as usize;
+        let expected_format_bytes = field_count
+            .checked_mul(2)
+            .ok_or_else(|| PgError::Protocol(format!("{context} field count overflow")))?;
+        if reader.remaining() < expected_format_bytes {
+            return Err(PgError::Protocol(format!(
+                "{context} declares {field_count} column format code(s) but has only {} byte(s)",
+                reader.remaining()
+            )));
+        }
+
+        let mut field_formats = Vec::with_capacity(field_count);
+        for column in 0..field_count {
+            let code = reader.read_i16()?;
+            field_formats.push(Self::parse_copy_column_format_code(context, column, code)?);
+        }
+
+        reader.ensure_consumed(context)?;
+        Ok((overall_format, field_formats))
+    }
+
+    fn parse_copy_format_code(context: &str, role: &str, code: i16) -> Result<Format, PgError> {
+        match code {
+            0 => Ok(Format::Text),
+            1 => Ok(Format::Binary),
+            _ => Err(PgError::Protocol(format!(
+                "invalid {context} {role} format code: {code}"
+            ))),
+        }
+    }
+
+    fn parse_copy_column_format_code(
+        context: &str,
+        column: usize,
+        code: i16,
+    ) -> Result<Format, PgError> {
+        match code {
+            0 => Ok(Format::Text),
+            1 => Ok(Format::Binary),
+            _ => Err(PgError::Protocol(format!(
+                "invalid {context} column {column} format code: {code}"
+            ))),
+        }
+    }
+
     /// Read results from Extended Query Protocol (query path).
     ///
     /// Expects: ParseComplete?, BindComplete, RowDescription?, DataRow*,
@@ -6328,6 +6384,13 @@ pub fn fuzz_parse_error_response(data: &[u8]) -> Result<PgError, PgError> {
 #[doc(hidden)]
 pub fn fuzz_parse_parameter_description(data: &[u8]) -> Result<Vec<u32>, PgError> {
     PgConnection::parse_parameter_description(data)
+}
+
+/// Fuzz-target re-exporter for CopyOutResponse body parsing.
+#[cfg(feature = "test-internals")]
+#[doc(hidden)]
+pub fn fuzz_parse_copy_out_response(data: &[u8]) -> Result<(Format, Vec<Format>), PgError> {
+    PgConnection::parse_copy_response("CopyOutResponse", data)
 }
 
 /// Fuzz-target re-exporter for the ParameterStatus message parser.
@@ -10521,6 +10584,16 @@ mod tests {
             buf
         }
 
+        fn build_copy_response_body(overall_format: u8, format_codes: &[i16]) -> Vec<u8> {
+            let mut buf = Vec::new();
+            buf.push(overall_format);
+            buf.extend_from_slice(&(format_codes.len() as i16).to_be_bytes());
+            for &code in format_codes {
+                buf.extend_from_slice(&code.to_be_bytes());
+            }
+            buf
+        }
+
         /// Creates a COPY DATA message for testing.
         fn build_copy_data_message(data: &[u8]) -> Vec<u8> {
             let mut buf = Vec::new();
@@ -10557,6 +10630,77 @@ mod tests {
             buf.push(0);
 
             buf
+        }
+
+        #[test]
+        fn copy_out_response_parser_accepts_valid_formats() {
+            let body = build_copy_response_body(1, &[0, 1, 0]);
+            let (overall_format, column_formats) =
+                PgConnection::parse_copy_response("CopyOutResponse", &body).unwrap();
+
+            assert_eq!(overall_format, Format::Binary);
+            assert_eq!(
+                column_formats,
+                vec![Format::Text, Format::Binary, Format::Text]
+            );
+        }
+
+        #[test]
+        fn copy_out_response_parser_rejects_invalid_overall_format() {
+            let body = build_copy_response_body(2, &[0]);
+            match PgConnection::parse_copy_response("CopyOutResponse", &body).unwrap_err() {
+                PgError::Protocol(msg) => {
+                    assert!(msg.contains("invalid CopyOutResponse overall format code: 2"));
+                }
+                other => panic!("expected Protocol error, got: {other}"),
+            }
+        }
+
+        #[test]
+        fn copy_out_response_parser_rejects_invalid_column_format() {
+            let body = build_copy_response_body(0, &[0, 7]);
+            match PgConnection::parse_copy_response("CopyOutResponse", &body).unwrap_err() {
+                PgError::Protocol(msg) => {
+                    assert!(msg.contains("invalid CopyOutResponse column 1 format code: 7"));
+                }
+                other => panic!("expected Protocol error, got: {other}"),
+            }
+        }
+
+        #[test]
+        fn copy_out_response_parser_rejects_truncated_columns() {
+            let mut body = Vec::new();
+            body.push(0);
+            body.extend_from_slice(&2i16.to_be_bytes());
+            body.extend_from_slice(&0i16.to_be_bytes());
+
+            match PgConnection::parse_copy_response("CopyOutResponse", &body).unwrap_err() {
+                PgError::Protocol(msg) => {
+                    assert!(
+                        msg.contains(
+                            "CopyOutResponse declares 2 column format code(s) but has only 2 byte(s)"
+                        ),
+                        "got: {msg}"
+                    );
+                }
+                other => panic!("expected Protocol error, got: {other}"),
+            }
+        }
+
+        #[test]
+        fn copy_out_response_parser_rejects_trailing_bytes() {
+            let mut body = build_copy_response_body(0, &[0]);
+            body.push(0xAA);
+
+            match PgConnection::parse_copy_response("CopyOutResponse", &body).unwrap_err() {
+                PgError::Protocol(msg) => {
+                    assert!(
+                        msg.contains("CopyOutResponse message has 1 trailing byte(s)"),
+                        "got: {msg}"
+                    );
+                }
+                other => panic!("expected Protocol error, got: {other}"),
+            }
         }
 
         #[test]
