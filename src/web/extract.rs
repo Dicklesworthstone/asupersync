@@ -579,10 +579,14 @@ const DEFAULT_MAX_JSON_BODY_SIZE: usize = 10 * 1024 * 1024;
 /// Default maximum form body size (2 MiB).
 const DEFAULT_MAX_FORM_BODY_SIZE: usize = 2 * 1024 * 1024;
 
+/// Default maximum raw body size (10 MiB).
+const DEFAULT_MAX_RAW_BODY_SIZE: usize = 10 * 1024 * 1024;
+
 /// Configurable body size limits for request extractors.
 ///
 /// Middleware can inject this into request extensions to override the default
-/// limits on a per-route or per-server basis. Extractors (`Json`, `Form`)
+/// limits on a per-route or per-server basis. Extractors (`Json`, `Form`,
+/// `RawBody`)
 /// check for this type in extensions and fall back to defaults if absent.
 ///
 /// # Example
@@ -599,6 +603,8 @@ pub struct BodyLimits {
     pub max_json_body_size: usize,
     /// Maximum form body size in bytes.
     pub max_form_body_size: usize,
+    /// Maximum raw body size in bytes.
+    pub max_raw_body_size: usize,
 }
 
 impl Default for BodyLimits {
@@ -606,12 +612,13 @@ impl Default for BodyLimits {
         Self {
             max_json_body_size: DEFAULT_MAX_JSON_BODY_SIZE,
             max_form_body_size: DEFAULT_MAX_FORM_BODY_SIZE,
+            max_raw_body_size: DEFAULT_MAX_RAW_BODY_SIZE,
         }
     }
 }
 
 impl BodyLimits {
-    /// Create body limits with defaults (10 MiB JSON, 2 MiB form).
+    /// Create body limits with defaults (10 MiB JSON, 2 MiB form, 10 MiB raw).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -628,6 +635,13 @@ impl BodyLimits {
     #[must_use]
     pub fn max_form_body_size(mut self, bytes: usize) -> Self {
         self.max_form_body_size = bytes;
+        self
+    }
+
+    /// Set the maximum raw body size.
+    #[must_use]
+    pub fn max_raw_body_size(mut self, bytes: usize) -> Self {
+        self.max_raw_body_size = bytes;
         self
     }
 }
@@ -806,6 +820,21 @@ pub struct RawBody(pub Bytes);
 
 impl FromRequest for RawBody {
     fn from_request(req: Request) -> Result<Self, ExtractionError> {
+        let limit = req
+            .extensions
+            .get_typed::<BodyLimits>()
+            .map_or(DEFAULT_MAX_RAW_BODY_SIZE, |l| l.max_raw_body_size);
+        if req.body.len() > limit {
+            return Err(ExtractionError::new(
+                super::response::StatusCode::PAYLOAD_TOO_LARGE,
+                format!(
+                    "raw body too large: {} bytes (limit {})",
+                    req.body.len(),
+                    limit
+                ),
+            ));
+        }
+
         Ok(Self(req.body))
     }
 }
@@ -1192,7 +1221,8 @@ mod tests {
         let limit = 8;
         let limits = BodyLimits::new()
             .max_json_body_size(limit)
-            .max_form_body_size(limit);
+            .max_form_body_size(limit)
+            .max_raw_body_size(limit);
 
         let mut oversized_json_req = Request::new("POST", "/json")
             .with_header("content-type", "application/json")
@@ -1212,6 +1242,15 @@ mod tests {
             Form::<HashMap<String, String>>::from_request(oversized_form_req).unwrap_err();
         assert_eq!(
             form_err.status,
+            crate::web::response::StatusCode::PAYLOAD_TOO_LARGE
+        );
+
+        let mut oversized_raw_req =
+            Request::new("POST", "/raw").with_body(Bytes::from_static(b"123456789"));
+        oversized_raw_req.extensions.insert_typed(limits);
+        let raw_err = RawBody::from_request(oversized_raw_req).unwrap_err();
+        assert_eq!(
+            raw_err.status,
             crate::web::response::StatusCode::PAYLOAD_TOO_LARGE
         );
     }
