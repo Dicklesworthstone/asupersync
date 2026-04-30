@@ -89,13 +89,12 @@ impl AuthenticationTag {
     pub const fn is_zero(&self) -> bool {
         let bytes = &self.bytes;
         let mut i = 0;
+        let mut diff = 0u8;
         while i < TAG_SIZE {
-            if bytes[i] != 0 {
-                return false;
-            }
+            diff |= bytes[i];
             i += 1;
         }
-        true
+        diff == 0
     }
 
     /// Returns an all-zero invalid sentinel tag for negative tests and fixtures.
@@ -208,6 +207,18 @@ mod tests {
         let tag = AuthenticationTag::zero();
         // Unless the computed tag happens to be zero (probability 2^-256)
         assert!(!tag.verify(&key, &symbol));
+    }
+
+    #[test]
+    fn is_zero_rejects_single_nonzero_byte_at_every_position() {
+        for byte_idx in 0..TAG_SIZE {
+            let mut bytes = [0u8; TAG_SIZE];
+            bytes[byte_idx] = 1;
+            assert!(
+                !AuthenticationTag::from_bytes(bytes).is_zero(),
+                "single non-zero byte at position {byte_idx} must not be treated as zero"
+            );
+        }
     }
 
     #[test]
