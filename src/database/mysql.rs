@@ -2338,17 +2338,20 @@ impl MySqlConnection {
         // column definitions; rows start immediately and the final terminator
         // is an OK packet. Without DEPRECATE_EOF we still expect EOF here.
         if Self::expects_metadata_eof(self.inner.capabilities) {
-            let (data, seq) = self.read_packet().await?;
-            self.inner.sequence = seq.wrapping_add(1);
-            if !Self::is_eof_packet(&data) {
-                return Err(MySqlError::Protocol(
-                    "expected EOF after columns".to_string(),
-                ));
-            }
-            self.inner.status_flags = Self::parse_eof_packet_status_flags(&data)?;
+            self.read_metadata_eof("columns").await?;
         }
 
         Ok((Arc::new(columns), Arc::new(indices)))
+    }
+
+    async fn read_metadata_eof(&mut self, label: &'static str) -> Result<(), MySqlError> {
+        let (data, seq) = self.read_packet().await?;
+        self.inner.sequence = seq.wrapping_add(1);
+        if !Self::is_eof_packet(&data) {
+            return Err(MySqlError::Protocol(format!("expected EOF after {label}")));
+        }
+        self.inner.status_flags = Self::parse_eof_packet_status_flags(&data)?;
+        Ok(())
     }
 
     fn parse_column_definition(data: &[u8]) -> Result<MySqlColumn, MySqlError> {
@@ -3258,6 +3261,7 @@ impl MySqlConnection {
                 return outcome_from_error(e);
             }
         };
+        let expects_metadata_eof = Self::expects_metadata_eof(self.inner.capabilities);
 
         // Read parameter metadata if any
         let mut params = Vec::new();
@@ -3273,12 +3277,11 @@ impl MySqlConnection {
                 params.push(MySqlColumn::new_simple_string("param"));
             }
 
-            // Read EOF packet after parameters
-            let (_eof_data, seq) = match self.read_packet().await {
-                Ok((data, seq)) => (data, seq),
-                Err(e) => return outcome_from_error(e),
-            };
-            self.inner.sequence = seq.wrapping_add(1);
+            if expects_metadata_eof {
+                if let Err(e) = self.read_metadata_eof("parameters").await {
+                    return outcome_from_error(e);
+                }
+            }
         }
 
         // Read column metadata if any
@@ -3295,12 +3298,11 @@ impl MySqlConnection {
                 columns.push(MySqlColumn::new_simple_string("column"));
             }
 
-            // Read EOF packet after columns
-            let (_eof_data, seq) = match self.read_packet().await {
-                Ok((data, seq)) => (data, seq),
-                Err(e) => return outcome_from_error(e),
-            };
-            self.inner.sequence = seq.wrapping_add(1);
+            if expects_metadata_eof {
+                if let Err(e) = self.read_metadata_eof("columns").await {
+                    return outcome_from_error(e);
+                }
+            }
         }
 
         self.inner.closed = false;
@@ -6614,6 +6616,101 @@ mod tests {
         assert_eq!(stmt2.owner_connection_id(), 55);
         assert_eq!(stmt1.param_count(), 2);
         assert_eq!(stmt2.param_count(), 2);
+        assert!(!conn.inner.closed);
+    }
+
+    #[test]
+    fn prepare_with_deprecate_eof_metadata_does_not_read_phantom_eof_packets() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+
+            let mut header = [0u8; 4];
+            stream.read_exact(&mut header).expect("read prepare header");
+            let payload_len = usize::from(header[0])
+                | (usize::from(header[1]) << 8)
+                | (usize::from(header[2]) << 16);
+            let mut payload = vec![0u8; payload_len];
+            stream
+                .read_exact(&mut payload)
+                .expect("read prepare payload");
+            assert_eq!(payload[0], command::COM_STMT_PREPARE);
+
+            let mut response = PacketBuffer::new();
+            response.write_byte(0x00);
+            response.write_u32_le(77);
+            response.write_u16_le(1);
+            response.write_u16_le(1);
+            response.write_byte(0x00);
+            response.write_u16_le(0);
+
+            let mut packet = PacketBuffer::new();
+            packet.set_sequence(1);
+            packet.buf = response.buf;
+            let packet = packet.build_packet();
+            stream
+                .write_all(&packet.bytes)
+                .expect("write prepare OK response");
+
+            let mut param_packet = PacketBuffer::new();
+            param_packet.set_sequence(2);
+            param_packet.buf = column_definition_payload("param");
+            let param_packet = param_packet.build_packet();
+            stream
+                .write_all(&param_packet.bytes)
+                .expect("write parameter metadata");
+
+            let mut column_packet = PacketBuffer::new();
+            column_packet.set_sequence(3);
+            column_packet.buf = column_definition_payload("result");
+            let column_packet = column_packet.build_packet();
+            stream
+                .write_all(&column_packet.bytes)
+                .expect("write column metadata");
+            stream.flush().expect("flush prepare metadata");
+        });
+
+        let stream = run(async {
+            crate::net::TcpStream::connect_socket_addr(addr)
+                .await
+                .expect("connect client")
+        });
+
+        let mut conn = MySqlConnection {
+            inner: MySqlConnectionInner {
+                stream,
+                connection_id: 7,
+                capabilities: capability::CLIENT_PROTOCOL_41 | capability::CLIENT_DEPRECATE_EOF,
+                charset: 0,
+                status_flags: 0,
+                sequence: 0,
+                closed: false,
+                server_version: String::new(),
+                needs_rollback: false,
+                max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                prepared_statement_epoch: 0,
+                query_in_flight: std::sync::atomic::AtomicBool::new(false),
+            },
+            options: None,
+        };
+        let cx = Cx::for_testing();
+
+        let stmt = match run(conn.prepare(&cx, "SELECT ?")) {
+            Outcome::Ok(stmt) => stmt,
+            other => panic!("expected prepare OK without metadata EOF packets, got {other:?}"),
+        };
+
+        server.join().expect("join server");
+        assert_eq!(stmt.statement_id, 77);
+        assert_eq!(stmt.owner_connection_id(), 7);
+        assert_eq!(stmt.param_count(), 1);
+        assert_eq!(stmt.column_count(), 1);
+        assert_eq!(conn.inner.sequence, 4);
         assert!(!conn.inner.closed);
     }
 
