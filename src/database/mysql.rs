@@ -2150,6 +2150,10 @@ impl MySqlConnection {
                 }
                 Outcome::Err(err)
             }
+            0xFB => Outcome::Err(MySqlError::Protocol(
+                "LOAD DATA LOCAL INFILE request rejected: client local infile is disabled by default"
+                    .to_string(),
+            )),
             _ => {
                 // Result set
                 match self.read_result_set(cx, &data).await {
@@ -2928,6 +2932,10 @@ impl MySqlConnection {
                 }
                 Outcome::Err(err)
             }
+            0xFB => Outcome::Err(MySqlError::Protocol(
+                "LOAD DATA LOCAL INFILE request rejected: client local infile is disabled by default"
+                    .to_string(),
+            )),
             _ => {
                 // Result set - consume it and return 0 affected rows
                 match self.read_result_set(cx, &data).await {
@@ -5498,6 +5506,86 @@ mod tests {
     }
 
     #[test]
+    fn handshake_response_does_not_advertise_local_infile_by_default() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+
+            let mut header = [0u8; 4];
+            stream
+                .read_exact(&mut header)
+                .expect("read handshake response header");
+            let payload_len = usize::from(header[0])
+                | (usize::from(header[1]) << 8)
+                | (usize::from(header[2]) << 16);
+            let mut payload = vec![0u8; payload_len];
+            stream
+                .read_exact(&mut payload)
+                .expect("read handshake response payload");
+
+            let client_caps =
+                u32::from_le_bytes(payload[0..4].try_into().expect("client capability bytes"));
+            assert_eq!(
+                client_caps & capability::CLIENT_LOCAL_FILES,
+                0,
+                "client must not advertise CLIENT_LOCAL_FILES without an explicit opt-in"
+            );
+            assert_ne!(
+                client_caps & capability::CLIENT_PROTOCOL_41,
+                0,
+                "sanity check: expected normal handshake capabilities"
+            );
+        });
+
+        let stream = run(async {
+            crate::net::TcpStream::connect_socket_addr(addr)
+                .await
+                .expect("connect client")
+        });
+
+        let mut conn = MySqlConnection {
+            inner: MySqlConnectionInner {
+                stream,
+                connection_id: 0,
+                capabilities: 0,
+                charset: 0,
+                status_flags: 0,
+                sequence: 1,
+                closed: false,
+                server_version: String::new(),
+                needs_rollback: false,
+                max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                prepared_statement_epoch: 0,
+                query_in_flight: std::sync::atomic::AtomicBool::new(false),
+            },
+            options: None,
+        };
+
+        let options = MySqlConnectOptions::parse("mysql://user:pass@localhost/testdb")
+            .expect("parse mysql options");
+        let handshake = Handshake {
+            server_version: "8.0.0-test".to_string(),
+            connection_id: 99,
+            auth_plugin_data: b"01234567890123456789".to_vec(),
+            capabilities: capability::CLIENT_PROTOCOL_41
+                | capability::CLIENT_SECURE_CONNECTION
+                | capability::CLIENT_PLUGIN_AUTH
+                | capability::CLIENT_LOCAL_FILES,
+            charset: 45,
+            status_flags: 0,
+            auth_plugin_name: "caching_sha2_password".to_string(),
+        };
+
+        run(conn.send_handshake_response(&options, &handshake)).expect("send handshake response");
+        server.join().expect("join server");
+    }
+
+    #[test]
     fn test_should_fail_closed_without_tls_required_always_rejects() {
         assert!(MySqlConnection::should_fail_closed_without_tls(
             SslMode::Required,
@@ -6545,6 +6633,81 @@ mod tests {
         assert!(
             !conn.inner.closed,
             "mismatch must fail before any protocol I/O marks the connection closed"
+        );
+    }
+
+    #[test]
+    fn query_unchecked_rejects_local_infile_request_and_keeps_connection_closed() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+
+            let mut header = [0u8; 4];
+            stream.read_exact(&mut header).expect("read query header");
+            let payload_len = usize::from(header[0])
+                | (usize::from(header[1]) << 8)
+                | (usize::from(header[2]) << 16);
+            let mut payload = vec![0u8; payload_len];
+            stream.read_exact(&mut payload).expect("read query payload");
+            assert_eq!(payload[0], command::COM_QUERY);
+
+            let mut response = PacketBuffer::new();
+            response.write_byte(0xFB);
+            response.write_bytes(b"/tmp/steal-me.txt");
+
+            let mut packet = PacketBuffer::new();
+            packet.set_sequence(1);
+            packet.buf = response.buf;
+            let packet = packet.build_packet();
+            stream
+                .write_all(&packet.bytes)
+                .expect("write local infile request");
+            stream.flush().expect("flush local infile request");
+        });
+
+        let stream = run(async {
+            crate::net::TcpStream::connect_socket_addr(addr)
+                .await
+                .expect("connect client")
+        });
+
+        let mut conn = MySqlConnection {
+            inner: MySqlConnectionInner {
+                stream,
+                connection_id: 0,
+                capabilities: 0,
+                charset: 0,
+                status_flags: 0,
+                sequence: 0,
+                closed: false,
+                server_version: String::new(),
+                needs_rollback: false,
+                max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                prepared_statement_epoch: 0,
+                query_in_flight: std::sync::atomic::AtomicBool::new(false),
+            },
+            options: None,
+        };
+        let cx = Cx::for_testing();
+
+        let outcome = run(conn.query_unchecked(&cx, "LOAD DATA LOCAL INFILE 'ignored'"));
+        match outcome {
+            Outcome::Err(MySqlError::Protocol(msg)) => {
+                assert!(msg.contains("LOAD DATA LOCAL INFILE request rejected"));
+                assert!(msg.contains("disabled by default"));
+            }
+            other => panic!("expected local infile rejection, got {other:?}"),
+        }
+
+        server.join().expect("join server");
+        assert!(
+            conn.inner.closed,
+            "rejecting LOCAL INFILE must keep the connection closed for fail-closed reuse"
         );
     }
 
