@@ -70,16 +70,14 @@ fn fixtures() -> Vec<IdentityFixture> {
 fn identity_codec_round_trip_preserves_prost_message_tree() {
     for (i, msg) in fixtures().iter().enumerate() {
         let mut wire = BytesMut::new();
-        let mut encoder = FramedCodec::<ProstCodec<IdentityFixture, IdentityFixture>>::new(
-            ProstCodec::new(),
-        )
-        .with_identity_frame_codec();
+        let mut encoder =
+            FramedCodec::<ProstCodec<IdentityFixture, IdentityFixture>>::new(ProstCodec::new())
+                .with_identity_frame_codec();
         encoder.encode_message(msg, &mut wire).expect("encode");
 
-        let mut decoder = FramedCodec::<ProstCodec<IdentityFixture, IdentityFixture>>::new(
-            ProstCodec::new(),
-        )
-        .with_identity_frame_codec();
+        let mut decoder =
+            FramedCodec::<ProstCodec<IdentityFixture, IdentityFixture>>::new(ProstCodec::new())
+                .with_identity_frame_codec();
         let decoded = decoder
             .decode_message(&mut wire)
             .expect("decode")
@@ -105,10 +103,9 @@ fn identity_codec_payload_region_equals_raw_prost_bytes() {
         let prost_bytes = msg.encode_to_vec();
 
         let mut wire = BytesMut::new();
-        let mut encoder = FramedCodec::<ProstCodec<IdentityFixture, IdentityFixture>>::new(
-            ProstCodec::new(),
-        )
-        .with_identity_frame_codec();
+        let mut encoder =
+            FramedCodec::<ProstCodec<IdentityFixture, IdentityFixture>>::new(ProstCodec::new())
+                .with_identity_frame_codec();
         encoder.encode_message(msg, &mut wire).expect("encode");
 
         assert!(wire.len() >= 5, "fixture {i}: missing 5-byte prefix");
@@ -145,13 +142,14 @@ fn identity_decoder_decodes_bare_codec_output() {
         // Encode with NO compressor (bare-frame path).
         let mut bare_encoder =
             FramedCodec::<ProstCodec<IdentityFixture, IdentityFixture>>::new(ProstCodec::new());
-        bare_encoder.encode_message(msg, &mut wire).expect("bare encode");
+        bare_encoder
+            .encode_message(msg, &mut wire)
+            .expect("bare encode");
 
         // Decode through the IDENTITY-aware codec.
-        let mut identity_decoder = FramedCodec::<ProstCodec<IdentityFixture, IdentityFixture>>::new(
-            ProstCodec::new(),
-        )
-        .with_identity_frame_codec();
+        let mut identity_decoder =
+            FramedCodec::<ProstCodec<IdentityFixture, IdentityFixture>>::new(ProstCodec::new())
+                .with_identity_frame_codec();
         let decoded = identity_decoder
             .decode_message(&mut wire)
             .expect("identity-aware decoder must accept bare-frame input")
@@ -184,10 +182,9 @@ fn identity_codec_sets_compressed_flag_and_bare_decoder_rejects() {
     // re-baseline.
     for (i, msg) in fixtures().iter().enumerate() {
         let mut wire = BytesMut::new();
-        let mut identity_encoder = FramedCodec::<ProstCodec<IdentityFixture, IdentityFixture>>::new(
-            ProstCodec::new(),
-        )
-        .with_identity_frame_codec();
+        let mut identity_encoder =
+            FramedCodec::<ProstCodec<IdentityFixture, IdentityFixture>>::new(ProstCodec::new())
+                .with_identity_frame_codec();
         identity_encoder
             .encode_message(msg, &mut wire)
             .expect("identity encode");
@@ -201,12 +198,10 @@ fn identity_codec_sets_compressed_flag_and_bare_decoder_rejects() {
 
         let mut bare_decoder =
             FramedCodec::<ProstCodec<IdentityFixture, IdentityFixture>>::new(ProstCodec::new());
-        let err = bare_decoder
-            .decode_message(&mut wire)
-            .expect_err(
-                "bare decoder must reject an identity-encoded frame today (flag=1, \
+        let err = bare_decoder.decode_message(&mut wire).expect_err(
+            "bare decoder must reject an identity-encoded frame today (flag=1, \
                  no decompressor configured)",
-            );
+        );
         // Sanity that the rejection is typed; not panic, not silent corruption.
         assert!(
             format!("{err}").contains("compressed frame received"),
@@ -239,7 +234,9 @@ fn identity_codec_does_not_double_decode_on_repeated_calls() {
 
     for round in 0..3 {
         let mut wire = BytesMut::new();
-        encoder.encode_message(&msg, &mut wire).expect("round encode");
+        encoder
+            .encode_message(&msg, &mut wire)
+            .expect("round encode");
         let decoded = decoder
             .decode_message(&mut wire)
             .expect("round decode")

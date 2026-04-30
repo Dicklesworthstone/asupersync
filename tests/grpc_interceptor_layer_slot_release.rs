@@ -30,10 +30,10 @@
 //!     that the counter is still being honoured.
 
 use asupersync::bytes::Bytes;
+use asupersync::grpc::server::Interceptor;
 use asupersync::grpc::status::{Code, Status};
 use asupersync::grpc::streaming::Request;
 use asupersync::grpc::{InterceptorLayer, RateLimitInterceptor};
-use asupersync::grpc::server::Interceptor;
 use std::sync::Arc;
 
 const MAX_REQUESTS: u32 = 4;
@@ -130,7 +130,8 @@ impl Interceptor for InspectableRateLimit {
         request: &Request<Bytes>,
         response: &mut asupersync::grpc::streaming::Response<Bytes>,
     ) -> Result<(), Status> {
-        self.inner.intercept_response_with_request(request, response)
+        self.inner
+            .intercept_response_with_request(request, response)
     }
     fn intercept_error_with_request(
         &self,

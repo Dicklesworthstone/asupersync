@@ -88,20 +88,18 @@ fn fixtures() -> Vec<GzipFixture> {
 fn gzip_round_trip_preserves_prost_message_tree() {
     for (i, msg) in fixtures().iter().enumerate() {
         let mut wire = BytesMut::new();
-        let mut encoder = FramedCodec::<ProstCodec<GzipFixture, GzipFixture>>::new(
-            ProstCodec::new(),
-        )
-        .with_gzip_frame_codec();
+        let mut encoder =
+            FramedCodec::<ProstCodec<GzipFixture, GzipFixture>>::new(ProstCodec::new())
+                .with_gzip_frame_codec();
         encoder
             .encode_message(msg, &mut wire)
             .expect("gzip encode_message must succeed for fixture-sized payload");
 
         // Decode through a separate codec instance so any encoder-side
         // hidden state cannot leak into the decoder.
-        let mut decoder = FramedCodec::<ProstCodec<GzipFixture, GzipFixture>>::new(
-            ProstCodec::new(),
-        )
-        .with_gzip_frame_codec();
+        let mut decoder =
+            FramedCodec::<ProstCodec<GzipFixture, GzipFixture>>::new(ProstCodec::new())
+                .with_gzip_frame_codec();
         let decoded = decoder
             .decode_message(&mut wire)
             .expect("gzip decode_message must succeed for self-encoded fixture")
@@ -134,9 +132,8 @@ fn gzip_compressed_flag_byte_is_set_on_wire() {
         wide: 0,
     };
     let mut wire = BytesMut::new();
-    let mut encoder =
-        FramedCodec::<ProstCodec<GzipFixture, GzipFixture>>::new(ProstCodec::new())
-            .with_gzip_frame_codec();
+    let mut encoder = FramedCodec::<ProstCodec<GzipFixture, GzipFixture>>::new(ProstCodec::new())
+        .with_gzip_frame_codec();
     encoder.encode_message(&msg, &mut wire).expect("encode");
 
     assert!(wire.len() >= 5, "frame must include the 5-byte LPM prefix");
@@ -176,7 +173,9 @@ fn gzip_decoder_accepts_uncompressed_frame_without_recompressing() {
     let mut wire = BytesMut::new();
     let mut plain_encoder =
         FramedCodec::<ProstCodec<GzipFixture, GzipFixture>>::new(ProstCodec::new());
-    plain_encoder.encode_message(&msg, &mut wire).expect("plain encode");
+    plain_encoder
+        .encode_message(&msg, &mut wire)
+        .expect("plain encode");
     assert_eq!(wire[0], 0x00, "uncompressed encoder must set flag=0");
 
     // Decode WITH gzip-aware decoder — must skip decompression
@@ -209,16 +208,16 @@ fn gzip_round_trip_is_idempotent_across_repeated_calls() {
         wide: 0,
     };
 
-    let mut encoder =
-        FramedCodec::<ProstCodec<GzipFixture, GzipFixture>>::new(ProstCodec::new())
-            .with_gzip_frame_codec();
-    let mut decoder =
-        FramedCodec::<ProstCodec<GzipFixture, GzipFixture>>::new(ProstCodec::new())
-            .with_gzip_frame_codec();
+    let mut encoder = FramedCodec::<ProstCodec<GzipFixture, GzipFixture>>::new(ProstCodec::new())
+        .with_gzip_frame_codec();
+    let mut decoder = FramedCodec::<ProstCodec<GzipFixture, GzipFixture>>::new(ProstCodec::new())
+        .with_gzip_frame_codec();
 
     for round in 0..3 {
         let mut wire = BytesMut::new();
-        encoder.encode_message(&msg, &mut wire).expect("encode round");
+        encoder
+            .encode_message(&msg, &mut wire)
+            .expect("encode round");
         let decoded = decoder
             .decode_message(&mut wire)
             .expect("decode round")

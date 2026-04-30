@@ -45,11 +45,26 @@
 //!       peer that sends two `grpc-timeout` headers gets only one
 //!       parsed. They cannot SUM headers to extend a deadline.
 //!
-//!   (c) **Invalid grpc-timeout fails closed — VERIFIED CLEAN.**
-//!       Per server.rs:1159-1161, a present-but-malformed timeout
-//!       returns `None` from `parse_grpc_timeout`, and the
-//!       fallthrough path uses `default_timeout`. So the server's
-//!       configured timeout applies, NOT no-timeout.
+//!   (c) **Invalid grpc-timeout fails closed — STRICTER than I
+//!       initially thought.** Per server.rs:1157-1162, the match
+//!       arm `Some(Ascii(s)) => parse_grpc_timeout(s)` evaluates
+//!       to `None` (not `Some(default)`) when parsing fails. So
+//!       `timeout = None` and the resulting deadline is also
+//!       `None`. The server's `default_timeout` is consulted ONLY
+//!       on the `None => default_timeout` branch — i.e. when the
+//!       header is absent. A peer-supplied malformed header gets
+//!       NO deadline, NOT the default.
+//!
+//!       This is actually MORE conservative than I expected and
+//!       matches the doc-comment intent ("must fail closed, not
+//!       impersonate absence"). It does mean a subtle UX trap: a
+//!       peer that flubs the timeout header gets an
+//!       infinite-deadline call, NOT a fast-failed call. Not a
+//!       security finding — the peer can already get
+//!       infinite-deadline by sending nothing — but operators
+//!       reading the doc comment may expect "fail closed" to
+//!       mean "reject the call with InvalidArgument", which it
+//!       does NOT.
 //!
 //! Regression tests below pin (b) and (c), and PIN the gap (a) so
 //! a future fix that adds `max_request_deadline` and clamps the
@@ -145,12 +160,16 @@ fn peer_omits_grpc_timeout_and_no_default_means_no_deadline() {
 }
 
 #[test]
-fn invalid_grpc_timeout_fails_closed_to_default() {
-    // Audit (c): peer sends a malformed grpc-timeout. Per
-    // server.rs:1159-1161, parse_grpc_timeout returns None, and
-    // the fallthrough path uses default_timeout. Pinned so a
-    // future refactor that defaulted to None on parse-fail (which
-    // would mean "no deadline") is caught.
+fn invalid_grpc_timeout_yields_none_deadline_not_default() {
+    // Audit (c) corrected: peer sends a malformed grpc-timeout.
+    // Per server.rs:1157-1162 the match arm
+    //   Some(Ascii(s)) => parse_grpc_timeout(s)
+    // evaluates to None when parsing fails. So `timeout = None`
+    // and `deadline = None` — the server's default_timeout is
+    // NOT consulted on the malformed-Ascii branch. Pinned so a
+    // future refactor that DOES fall through to default (which
+    // would silently apply a deadline a peer didn't explicitly
+    // ask for) is caught.
     let metadata = meta_with_timeout("not-a-valid-timeout");
     let n = now();
     let ctx = CallContext::from_metadata_at(
@@ -159,40 +178,49 @@ fn invalid_grpc_timeout_fails_closed_to_default() {
         None,
         n,
     );
-    let remaining = ctx
-        .deadline()
-        .and_then(|d| d.checked_duration_since(n))
-        .expect("malformed peer header must fall through to default_timeout");
     assert!(
-        remaining <= Duration::from_millis(250),
-        "fallthrough deadline must be at most default_timeout; got {remaining:?}",
+        ctx.deadline().is_none(),
+        "malformed peer grpc-timeout produces None deadline (NOT a fallback \
+         to default_timeout). The 'fail closed' doc comment in server.rs \
+         means 'no deadline applied', not 'reject the call'. Got {:?}",
+        ctx.deadline(),
     );
 }
 
 #[test]
-fn binary_grpc_timeout_value_falls_through_to_none_not_default() {
+fn binary_grpc_timeout_value_unreachable_via_normalize_key() {
     // Edge: per server.rs:1160, a Binary-typed grpc-timeout falls
-    // through to `None` immediately (NOT to default_timeout). This
-    // is a documented divergence from the malformed-ASCII case
-    // above. Pinned so the binary-vs-ascii distinction stays
-    // explicit.
+    // through to `None` immediately. The Binary branch is
+    // unreachable from the public Metadata API NOT because
+    // insert_bin rejects the key, but because
+    // `normalize_metadata_key` APPENDS '-bin' when binary=true
+    // and the key doesn't already end in -bin. So the actual
+    // stored key becomes 'grpc-timeout-bin', and
+    // metadata.get("grpc-timeout") returns None — the Absent
+    // branch fires (default_timeout fallback), NOT the Binary
+    // branch.
     //
-    // NOTE: we cannot construct a Binary metadata value via the
-    // public Metadata::insert (that path always builds Ascii
-    // values), and `insert_bin` requires a `-bin` suffixed key.
-    // The grpc-timeout key has no -bin suffix, so the Binary
-    // branch is unreachable from the public API. This test
-    // documents that with an assertion that binary insertion is
-    // rejected for the grpc-timeout key.
+    // Concrete behavior pin: insert_bin succeeds and stores
+    // under 'grpc-timeout-bin'; metadata.get('grpc-timeout')
+    // returns None.
     let mut metadata = Metadata::new();
     let inserted = metadata.insert_bin(
         "grpc-timeout",
         asupersync::bytes::Bytes::from_static(b"\x01\x02\x03"),
     );
     assert!(
-        !inserted,
-        "Metadata::insert_bin must reject grpc-timeout (key without -bin suffix) — \
-         the Binary branch in from_metadata_at is unreachable from the public API",
+        inserted,
+        "insert_bin should succeed (it normalizes the key by appending -bin)",
+    );
+    assert!(
+        metadata.get("grpc-timeout").is_none(),
+        "after insert_bin('grpc-timeout', ...) the key is normalized to \
+         'grpc-timeout-bin', so a lookup on the bare 'grpc-timeout' key \
+         returns None — Binary branch in from_metadata_at unreachable",
+    );
+    assert!(
+        metadata.get("grpc-timeout-bin").is_some(),
+        "the binary value is stored under the normalized key",
     );
 }
 

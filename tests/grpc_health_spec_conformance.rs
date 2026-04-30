@@ -39,8 +39,8 @@
 //!   * Authentication wrappers — covered by the recent security
 //!     audit pass (br-asupersync-n7w3l1).
 
-use asupersync::grpc::{HealthCheckRequest, HealthService, ServingStatus};
 use asupersync::grpc::status::Code;
+use asupersync::grpc::{HealthCheckRequest, HealthService, ServingStatus};
 
 /// Property 1: ServingStatus numeric values match the
 /// grpc-proto/health/v1 enum exactly. The `from_i32` helper is the
@@ -62,8 +62,15 @@ fn serving_status_i32_values_match_grpc_proto_health_v1() {
     assert_eq!(ServingStatus::from_i32(0), Some(ServingStatus::Unknown));
     assert_eq!(ServingStatus::from_i32(1), Some(ServingStatus::Serving));
     assert_eq!(ServingStatus::from_i32(2), Some(ServingStatus::NotServing));
-    assert_eq!(ServingStatus::from_i32(3), Some(ServingStatus::ServiceUnknown));
-    assert_eq!(ServingStatus::from_i32(4), None, "unknown variants must return None");
+    assert_eq!(
+        ServingStatus::from_i32(3),
+        Some(ServingStatus::ServiceUnknown)
+    );
+    assert_eq!(
+        ServingStatus::from_i32(4),
+        None,
+        "unknown variants must return None"
+    );
     assert_eq!(ServingStatus::from_i32(-1), None);
     assert_eq!(ServingStatus::from_i32(i32::MAX), None);
 }

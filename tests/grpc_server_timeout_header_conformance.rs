@@ -144,15 +144,16 @@ fn parse_format_round_trip_is_identity_for_representative_durations() {
         Duration::from_secs(86_400), // 1 day → fits in hours
         // Sub-second mixed precisions — exercise the lossless-unit
         // selection over the boundary.
-        Duration::new(1, 500_000_000),  // 1.5 s → 1500m
-        Duration::new(0, 1_500_000),    // 1500 μs → "1500u"
-        Duration::new(0, 12_345),       // 12.345 μs → "12345n"
+        Duration::new(1, 500_000_000), // 1.5 s → 1500m
+        Duration::new(0, 1_500_000),   // 1500 μs → "1500u"
+        Duration::new(0, 12_345),      // 12.345 μs → "12345n"
     ];
 
     for d in fixtures {
         let formatted = format_grpc_timeout(d);
-        let parsed = parse_grpc_timeout(&formatted)
-            .unwrap_or_else(|| panic!("formatter emitted unparseable string {formatted:?} for {d:?}"));
+        let parsed = parse_grpc_timeout(&formatted).unwrap_or_else(|| {
+            panic!("formatter emitted unparseable string {formatted:?} for {d:?}")
+        });
         assert_eq!(
             parsed, d,
             "round-trip drift: format({d:?}) = {formatted:?} → parse → {parsed:?}",
