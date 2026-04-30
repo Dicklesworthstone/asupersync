@@ -8,13 +8,14 @@ use asupersync::util::{Arena, ArenaIndex};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
-/// Structure-aware intrusive-heap harness for insert/decrease-key sequences.
+/// Structure-aware intrusive-heap harness for insert/decrease-key/delete sequences.
 ///
 /// Asserts:
 /// 1. heap invariants remain valid after every operation
 /// 2. peek/pop always match a shadow max-heap model
 /// 3. decrease-key is a no-op when not strictly lowering priority
 /// 4. repeating the same decrease-key is idempotent
+/// 5. delete-by-handle matches the shadow model and preserves heap validity
 #[derive(Arbitrary, Debug)]
 struct IntrusiveHeapFuzz {
     /// Number of preallocated task records addressable by the operation stream.
@@ -27,6 +28,7 @@ struct IntrusiveHeapFuzz {
 enum HeapOperation {
     Insert { task_index: u8, priority: u8 },
     DecreaseKey { task_index: u8, new_priority: u8 },
+    Remove { task_index: u8 },
     Pop,
     Peek,
     Clear,
@@ -99,6 +101,14 @@ impl ShadowHeap {
         self.reset_generation_if_empty();
     }
 
+    fn remove(&mut self, task_index: u8) -> bool {
+        let removed = self.live.remove(&task_index).is_some();
+        if removed {
+            self.reset_generation_if_empty();
+        }
+        removed
+    }
+
     fn reset_generation_if_empty(&mut self) {
         if self.live.is_empty() {
             self.next_generation = 0;
@@ -159,6 +169,16 @@ fuzz_target!(|input: IntrusiveHeapFuzz| {
                         !repeated,
                         "repeating the same decrease-key must be idempotent"
                     );
+                }
+            }
+            HeapOperation::Remove { task_index } => {
+                if let Some(&task_id) = task_ids.get(usize::from(task_index)) {
+                    let expected = shadow.remove(task_index);
+                    let removed = heap.remove(task_id, &mut arena);
+                    assert_eq!(removed, expected, "remove must match the shadow heap");
+
+                    let repeated = heap.remove(task_id, &mut arena);
+                    assert!(!repeated, "repeating the same remove must be idempotent");
                 }
             }
             HeapOperation::Pop => {
