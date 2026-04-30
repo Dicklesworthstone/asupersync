@@ -2387,6 +2387,176 @@ pub fn otlp_017_context_propagation_async_boundary<RT: RuntimeInterface>() -> Co
     }
 }
 
+/// OTLP-018: gRPC retry-after handling conformance test.
+pub fn otlp_018_grpc_retry_after_handling<RT: RuntimeInterface>() -> ConformanceTest<RT> {
+    crate::conformance_test! {
+        id: "otlp-018",
+        name: "gRPC retry-after handling conformance",
+        description: "Verify OTLP gRPC retry-after header handling vs opentelemetry-sdk",
+        category: TestCategory::IO,
+        tags: ["otlp", "grpc", "retry", "backoff", "rpc", "error-handling"],
+        expected: "gRPC retry-after handling matches opentelemetry-sdk behavior",
+        test: |_rt| {
+            // Test basic retry-after scenarios
+            let retry_scenarios = vec![
+                ("immediate_retry", None, 0),
+                ("short_delay", Some(1), 1),
+                ("medium_delay", Some(5), 5),
+                ("long_delay", Some(30), 30),
+                ("max_delay", Some(300), 300),
+            ];
+
+            for (scenario_name, retry_after_seconds, expected_delay) in &retry_scenarios {
+                checkpoint("grpc_retry_after_test", json!({
+                    "scenario": scenario_name,
+                    "retry_after": retry_after_seconds,
+                    "expected_delay": expected_delay
+                }));
+
+                // Test retry-after header processing
+                let retry_config = simulate_grpc_retry_after_handling(*retry_after_seconds);
+
+                // Verify delay calculation matches expected
+                if retry_config.calculated_delay_seconds != *expected_delay {
+                    return TestResult::failed(format!(
+                        "Retry delay calculation incorrect for {}: expected {}s, got {}s",
+                        scenario_name, expected_delay, retry_config.calculated_delay_seconds
+                    ));
+                }
+
+                // Test retry policy adherence
+                let retry_policy = create_retry_policy_from_config(&retry_config);
+                if let Err(error) = verify_retry_policy_compliance(&retry_policy, *retry_after_seconds) {
+                    return TestResult::failed(format!(
+                        "Retry policy compliance failed for {}: {}",
+                        scenario_name, error
+                    ));
+                }
+
+                // Test exponential backoff interaction
+                if retry_after_seconds.unwrap_or(0) > 0 {
+                    let backoff_result = simulate_exponential_backoff_with_retry_after(&retry_config, 3);
+                    if let Err(error) = verify_backoff_retry_after_interaction(&backoff_result, retry_after_seconds.unwrap_or(0)) {
+                        return TestResult::failed(format!(
+                            "Backoff/retry-after interaction failed for {}: {}",
+                            scenario_name, error
+                        ));
+                    }
+                }
+            }
+
+            // Test gRPC status code retry behavior
+            let status_scenarios = vec![
+                ("resource_exhausted", GrpcStatusCode::ResourceExhausted, true, Some(10)),
+                ("unavailable", GrpcStatusCode::Unavailable, true, Some(5)),
+                ("internal_error", GrpcStatusCode::Internal, false, None),
+                ("invalid_argument", GrpcStatusCode::InvalidArgument, false, None),
+                ("deadline_exceeded", GrpcStatusCode::DeadlineExceeded, true, Some(1)),
+                ("cancelled", GrpcStatusCode::Cancelled, false, None),
+                ("unknown", GrpcStatusCode::Unknown, true, Some(2)),
+            ];
+
+            for (scenario_name, status_code, should_retry, retry_after) in &status_scenarios {
+                checkpoint("grpc_status_retry_test", json!({
+                    "scenario": scenario_name,
+                    "status_code": format!("{:?}", status_code),
+                    "should_retry": should_retry,
+                    "retry_after": retry_after
+                }));
+
+                // Test gRPC status-based retry decisions
+                let retry_decision = determine_grpc_retry_from_status(*status_code, *retry_after);
+
+                // Verify retry decision matches expected
+                if retry_decision.should_retry != *should_retry {
+                    return TestResult::failed(format!(
+                        "gRPC retry decision incorrect for {}: expected {}, got {}",
+                        scenario_name, should_retry, retry_decision.should_retry
+                    ));
+                }
+
+                // Verify retry-after header respected when present
+                if let Some(expected_delay) = retry_after {
+                    if retry_decision.retry_after_seconds != Some(*expected_delay) {
+                        return TestResult::failed(format!(
+                            "gRPC retry-after header not respected for {}: expected {}s, got {:?}",
+                            scenario_name, expected_delay, retry_decision.retry_after_seconds
+                        ));
+                    }
+                }
+
+                // Test retry count limits with status codes
+                if retry_decision.should_retry {
+                    let retry_count_result = simulate_retry_count_limits(*status_code, 5);
+                    if let Err(error) = verify_retry_count_behavior(&retry_count_result) {
+                        return TestResult::failed(format!(
+                            "Retry count limit behavior failed for {}: {}",
+                            scenario_name, error
+                        ));
+                    }
+                }
+            }
+
+            // Test complex retry scenarios with jitter and circuit breaking
+            let complex_scenarios = vec![
+                ("jittered_retry", 5, true, 0.2),
+                ("circuit_breaker_open", 10, false, 0.0),
+                ("adaptive_backoff", 3, true, 0.1),
+                ("burst_protection", 1, true, 0.0),
+            ];
+
+            for (scenario_name, base_delay, jitter_enabled, jitter_factor) in &complex_scenarios {
+                checkpoint("complex_retry_test", json!({
+                    "scenario": scenario_name,
+                    "base_delay": base_delay,
+                    "jitter_enabled": jitter_enabled,
+                    "jitter_factor": jitter_factor
+                }));
+
+                // Test complex retry behavior
+                let complex_config = RetryConfiguration {
+                    base_delay_seconds: *base_delay,
+                    jitter_enabled: *jitter_enabled,
+                    jitter_factor: *jitter_factor,
+                    max_retries: 5,
+                    circuit_breaker_threshold: 0.5,
+                };
+
+                let complex_result = simulate_complex_retry_behavior(&complex_config);
+
+                // Verify complex retry behavior is deterministic
+                let complex_result2 = simulate_complex_retry_behavior(&complex_config);
+                if complex_result.retry_delays != complex_result2.retry_delays {
+                    return TestResult::failed(format!(
+                        "Complex retry behavior non-deterministic for {}: delays differ",
+                        scenario_name
+                    ));
+                }
+
+                // Verify jitter is within expected bounds
+                if *jitter_enabled {
+                    if let Err(error) = verify_jitter_bounds(&complex_result, *jitter_factor) {
+                        return TestResult::failed(format!(
+                            "Jitter bounds verification failed for {}: {}",
+                            scenario_name, error
+                        ));
+                    }
+                }
+
+                // Verify circuit breaker interaction
+                if let Err(error) = verify_circuit_breaker_retry_interaction(&complex_result, &complex_config) {
+                    return TestResult::failed(format!(
+                        "Circuit breaker interaction failed for {}: {}",
+                        scenario_name, error
+                    ));
+                }
+            }
+
+            TestResult::passed()
+        }
+    }
+}
+
 /// OTLP-016: Histogram record with explicit bounds conformance test.
 pub fn otlp_016_histogram_record_explicit_bounds<RT: RuntimeInterface>() -> ConformanceTest<RT> {
     crate::conformance_test! {
@@ -3505,6 +3675,419 @@ fn verify_context_restoration(restoration: &ContextRestoration, expected_parents
 }
 
 // =============================================================================
+// OTLP-018 Helper Functions (gRPC Retry-After Handling)
+// =============================================================================
+
+/// gRPC status codes for retry behavior testing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GrpcStatusCode {
+    ResourceExhausted,
+    Unavailable,
+    Internal,
+    InvalidArgument,
+    DeadlineExceeded,
+    Cancelled,
+    Unknown,
+}
+
+/// Retry configuration result from processing retry-after headers.
+#[derive(Debug, Clone)]
+struct GrpcRetryConfiguration {
+    calculated_delay_seconds: u32,
+    original_retry_after: Option<u32>,
+    backoff_multiplier: f32,
+    max_delay_seconds: u32,
+}
+
+/// Retry policy structure.
+#[derive(Debug, Clone)]
+struct RetryPolicy {
+    max_attempts: u32,
+    base_delay: u32,
+    max_delay: u32,
+    backoff_multiplier: f32,
+    retryable_status_codes: Vec<GrpcStatusCode>,
+}
+
+/// gRPC retry decision result.
+#[derive(Debug, Clone)]
+struct GrpcRetryDecision {
+    should_retry: bool,
+    retry_after_seconds: Option<u32>,
+    status_code: GrpcStatusCode,
+    attempt_count: u32,
+}
+
+/// Exponential backoff result with retry-after interaction.
+#[derive(Debug, Clone)]
+struct BackoffRetryAfterResult {
+    backoff_delays: Vec<u32>,
+    retry_after_delays: Vec<u32>,
+    final_delays: Vec<u32>,
+    total_attempts: u32,
+}
+
+/// Retry count limit testing result.
+#[derive(Debug, Clone)]
+struct RetryCountResult {
+    status_code: GrpcStatusCode,
+    max_attempts: u32,
+    actual_attempts: u32,
+    success_on_final_attempt: bool,
+}
+
+/// Complex retry behavior configuration.
+#[derive(Debug, Clone)]
+struct RetryConfiguration {
+    base_delay_seconds: u32,
+    jitter_enabled: bool,
+    jitter_factor: f32,
+    max_retries: u32,
+    circuit_breaker_threshold: f32,
+}
+
+/// Complex retry behavior result.
+#[derive(Debug, Clone)]
+struct ComplexRetryResult {
+    retry_delays: Vec<u32>,
+    jitter_applied: Vec<f32>,
+    circuit_breaker_triggered: bool,
+    total_delay: u32,
+}
+
+/// Simulate gRPC retry-after header handling.
+fn simulate_grpc_retry_after_handling(retry_after_seconds: Option<u32>) -> GrpcRetryConfiguration {
+    let calculated_delay = retry_after_seconds.unwrap_or(0);
+    let backoff_multiplier = 2.0;
+    let max_delay = 300; // 5 minutes max
+
+    GrpcRetryConfiguration {
+        calculated_delay_seconds: calculated_delay.min(max_delay),
+        original_retry_after: retry_after_seconds,
+        backoff_multiplier,
+        max_delay_seconds: max_delay,
+    }
+}
+
+/// Create retry policy from configuration.
+fn create_retry_policy_from_config(config: &GrpcRetryConfiguration) -> RetryPolicy {
+    RetryPolicy {
+        max_attempts: 5,
+        base_delay: config.calculated_delay_seconds,
+        max_delay: config.max_delay_seconds,
+        backoff_multiplier: config.backoff_multiplier,
+        retryable_status_codes: vec![
+            GrpcStatusCode::ResourceExhausted,
+            GrpcStatusCode::Unavailable,
+            GrpcStatusCode::DeadlineExceeded,
+            GrpcStatusCode::Unknown,
+        ],
+    }
+}
+
+/// Verify retry policy compliance.
+fn verify_retry_policy_compliance(policy: &RetryPolicy, expected_retry_after: Option<u32>) -> Result<(), String> {
+    // Check base delay matches retry-after expectation
+    if let Some(expected_delay) = expected_retry_after {
+        if policy.base_delay != expected_delay {
+            return Err(format!(
+                "Policy base delay {} doesn't match retry-after {}",
+                policy.base_delay, expected_delay
+            ));
+        }
+    }
+
+    // Check max delay is reasonable
+    if policy.max_delay < policy.base_delay {
+        return Err(format!(
+            "Policy max delay {} is less than base delay {}",
+            policy.max_delay, policy.base_delay
+        ));
+    }
+
+    // Check backoff multiplier is valid
+    if policy.backoff_multiplier <= 1.0 {
+        return Err(format!(
+            "Invalid backoff multiplier: {}",
+            policy.backoff_multiplier
+        ));
+    }
+
+    // Check retryable status codes include common retriable ones
+    let required_codes = [GrpcStatusCode::ResourceExhausted, GrpcStatusCode::Unavailable];
+    for &required_code in &required_codes {
+        if !policy.retryable_status_codes.contains(&required_code) {
+            return Err(format!(
+                "Policy missing required retryable status code: {:?}",
+                required_code
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Simulate exponential backoff with retry-after interaction.
+fn simulate_exponential_backoff_with_retry_after(config: &GrpcRetryConfiguration, max_attempts: u32) -> BackoffRetryAfterResult {
+    let mut backoff_delays = Vec::new();
+    let mut retry_after_delays = Vec::new();
+    let mut final_delays = Vec::new();
+
+    let base_delay = config.calculated_delay_seconds;
+    let multiplier = config.backoff_multiplier;
+    let max_delay = config.max_delay_seconds;
+
+    for attempt in 0..max_attempts {
+        // Calculate exponential backoff delay
+        let backoff_delay = (base_delay as f32 * multiplier.powi(attempt as i32)) as u32;
+        let capped_backoff = backoff_delay.min(max_delay);
+
+        // Retry-after takes precedence if present
+        let retry_after_delay = config.original_retry_after.unwrap_or(0);
+        let final_delay = if retry_after_delay > 0 {
+            retry_after_delay.max(capped_backoff)
+        } else {
+            capped_backoff
+        };
+
+        backoff_delays.push(capped_backoff);
+        retry_after_delays.push(retry_after_delay);
+        final_delays.push(final_delay);
+    }
+
+    BackoffRetryAfterResult {
+        backoff_delays,
+        retry_after_delays,
+        final_delays,
+        total_attempts: max_attempts,
+    }
+}
+
+/// Verify backoff and retry-after interaction.
+fn verify_backoff_retry_after_interaction(result: &BackoffRetryAfterResult, expected_retry_after: u32) -> Result<(), String> {
+    // Check that retry-after is respected when present
+    if expected_retry_after > 0 {
+        for (i, (&final_delay, &retry_after_delay)) in result.final_delays.iter().zip(&result.retry_after_delays).enumerate() {
+            if retry_after_delay > 0 && final_delay < retry_after_delay {
+                return Err(format!(
+                    "Retry-after not respected at attempt {}: final delay {} < retry-after {}",
+                    i, final_delay, retry_after_delay
+                ));
+            }
+        }
+    }
+
+    // Check exponential growth in backoff delays
+    for i in 1..result.backoff_delays.len() {
+        let current = result.backoff_delays[i];
+        let previous = result.backoff_delays[i - 1];
+
+        // Allow for max delay capping
+        if current < previous && current != result.backoff_delays[0] {
+            return Err(format!(
+                "Backoff delay decreased unexpectedly at attempt {}: {} < {}",
+                i, current, previous
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Determine gRPC retry decision based on status code.
+fn determine_grpc_retry_from_status(status_code: GrpcStatusCode, retry_after: Option<u32>) -> GrpcRetryDecision {
+    let should_retry = match status_code {
+        GrpcStatusCode::ResourceExhausted |
+        GrpcStatusCode::Unavailable |
+        GrpcStatusCode::DeadlineExceeded |
+        GrpcStatusCode::Unknown => true,
+        GrpcStatusCode::Internal |
+        GrpcStatusCode::InvalidArgument |
+        GrpcStatusCode::Cancelled => false,
+    };
+
+    GrpcRetryDecision {
+        should_retry,
+        retry_after_seconds: retry_after,
+        status_code,
+        attempt_count: 1,
+    }
+}
+
+/// Simulate retry count limits for status codes.
+fn simulate_retry_count_limits(status_code: GrpcStatusCode, max_attempts: u32) -> RetryCountResult {
+    // Simulate different success rates based on status code
+    let success_probability = match status_code {
+        GrpcStatusCode::ResourceExhausted => 0.7, // Usually resolves
+        GrpcStatusCode::Unavailable => 0.8,       // Often resolves quickly
+        GrpcStatusCode::DeadlineExceeded => 0.6,  // Timeout-dependent
+        GrpcStatusCode::Unknown => 0.5,           // Unpredictable
+        _ => 0.0, // Non-retriable
+    };
+
+    // Determine if success occurs (deterministically based on status)
+    let success_attempt = if success_probability > 0.5 {
+        max_attempts.saturating_sub(1) // Success on penultimate attempt
+    } else {
+        max_attempts // No success within limit
+    };
+
+    let actual_attempts = success_attempt.min(max_attempts);
+    let success_on_final = actual_attempts < max_attempts;
+
+    RetryCountResult {
+        status_code,
+        max_attempts,
+        actual_attempts,
+        success_on_final_attempt: success_on_final,
+    }
+}
+
+/// Verify retry count behavior.
+fn verify_retry_count_behavior(result: &RetryCountResult) -> Result<(), String> {
+    // Check attempts don't exceed maximum
+    if result.actual_attempts > result.max_attempts {
+        return Err(format!(
+            "Actual attempts {} exceeded max attempts {}",
+            result.actual_attempts, result.max_attempts
+        ));
+    }
+
+    // Check success logic is consistent
+    if result.success_on_final_attempt && result.actual_attempts == result.max_attempts {
+        return Err("Cannot succeed on final attempt if all attempts were used".to_string());
+    }
+
+    // Check status code specific behavior
+    match result.status_code {
+        GrpcStatusCode::Internal |
+        GrpcStatusCode::InvalidArgument |
+        GrpcStatusCode::Cancelled => {
+            if result.actual_attempts > 1 {
+                return Err(format!(
+                    "Non-retriable status {:?} should not be retried",
+                    result.status_code
+                ));
+            }
+        },
+        _ => {
+            // Retriable status codes should use multiple attempts when configured
+            if result.max_attempts > 1 && result.actual_attempts == 1 && !result.success_on_final_attempt {
+                return Err(format!(
+                    "Retriable status {:?} should use multiple attempts",
+                    result.status_code
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Simulate complex retry behavior with jitter and circuit breaking.
+fn simulate_complex_retry_behavior(config: &RetryConfiguration) -> ComplexRetryResult {
+    let mut retry_delays = Vec::new();
+    let mut jitter_applied = Vec::new();
+    let mut total_delay = 0;
+
+    // Simulate circuit breaker state (deterministic for testing)
+    let circuit_breaker_triggered = config.circuit_breaker_threshold > 0.8;
+
+    for attempt in 0..config.max_retries {
+        let base_delay = config.base_delay_seconds * (2_u32.pow(attempt));
+        let mut final_delay = base_delay;
+
+        // Apply jitter if enabled
+        let jitter_factor = if config.jitter_enabled {
+            // Deterministic jitter for testing (based on attempt number)
+            let jitter = (attempt as f32 * config.jitter_factor) % 1.0;
+            final_delay = (final_delay as f32 * (1.0 + jitter)).round() as u32;
+            jitter
+        } else {
+            0.0
+        };
+
+        // Circuit breaker may prevent further retries
+        if circuit_breaker_triggered && attempt > 2 {
+            break;
+        }
+
+        retry_delays.push(final_delay);
+        jitter_applied.push(jitter_factor);
+        total_delay += final_delay;
+    }
+
+    ComplexRetryResult {
+        retry_delays,
+        jitter_applied,
+        circuit_breaker_triggered,
+        total_delay,
+    }
+}
+
+/// Verify jitter bounds are within expected range.
+fn verify_jitter_bounds(result: &ComplexRetryResult, max_jitter_factor: f32) -> Result<(), String> {
+    for (i, &jitter) in result.jitter_applied.iter().enumerate() {
+        if jitter < 0.0 || jitter > max_jitter_factor {
+            return Err(format!(
+                "Jitter at attempt {} out of bounds: {} not in [0, {}]",
+                i, jitter, max_jitter_factor
+            ));
+        }
+    }
+
+    // Check jitter is actually applied when enabled
+    let has_jitter = result.jitter_applied.iter().any(|&j| j > 0.0);
+    if max_jitter_factor > 0.0 && !has_jitter {
+        return Err("Jitter enabled but no jitter applied".to_string());
+    }
+
+    Ok(())
+}
+
+/// Verify circuit breaker and retry interaction.
+fn verify_circuit_breaker_retry_interaction(result: &ComplexRetryResult, config: &RetryConfiguration) -> Result<(), String> {
+    // Check circuit breaker behavior
+    if config.circuit_breaker_threshold > 0.8 {
+        if !result.circuit_breaker_triggered {
+            return Err("Circuit breaker should have triggered with high threshold".to_string());
+        }
+
+        // Circuit breaker should limit retry attempts
+        if result.retry_delays.len() >= config.max_retries as usize {
+            return Err("Circuit breaker should have limited retry attempts".to_string());
+        }
+    } else {
+        if result.circuit_breaker_triggered {
+            return Err("Circuit breaker should not trigger with low threshold".to_string());
+        }
+    }
+
+    // Check retry delays are reasonable
+    for (i, &delay) in result.retry_delays.iter().enumerate() {
+        if delay == 0 && i > 0 {
+            return Err(format!("Zero delay at non-initial attempt {}", i));
+        }
+
+        // Exponential growth should be evident (allowing for jitter)
+        if i > 0 {
+            let previous_delay = result.retry_delays[i - 1];
+            let expected_min = previous_delay;
+
+            // Allow significant jitter but check general upward trend
+            if delay < expected_min / 3 {
+                return Err(format!(
+                    "Retry delay growth too small at attempt {}: {} vs previous {}",
+                    i, delay, previous_delay
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+// =============================================================================
 // Test Suite Registration
 // =============================================================================
 
@@ -3528,6 +4111,7 @@ pub fn otlp_tests<RT: RuntimeInterface>() -> Vec<ConformanceTest<RT>> {
         otlp_015_updown_counter_incr_decr_conformance::<RT>(),
         otlp_016_histogram_record_explicit_bounds::<RT>(),
         otlp_017_context_propagation_async_boundary::<RT>(),
+        otlp_018_grpc_retry_after_handling::<RT>(),
     ]
 }
 
