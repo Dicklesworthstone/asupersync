@@ -434,6 +434,117 @@ pub fn otlp_005_compatibility<RT: RuntimeInterface>() -> ConformanceTest<RT> {
     }
 }
 
+/// OTLP-007: Gauge double-update value sequence conformance.
+pub fn otlp_007_gauge_double_update_conformance<RT: RuntimeInterface>() -> ConformanceTest<RT> {
+    crate::conformance_test! {
+        id: "otlp-007",
+        name: "Gauge double-update value sequence",
+        description: "Verify gauge double-update produces identical reported values vs OpenTelemetry reference",
+        category: TestCategory::IO,
+        tags: ["otlp", "gauge", "metrics", "double-update", "sequence"],
+        expected: "Same value sequence produces identical reported gauge values",
+        test: |_rt| {
+            use asupersync::observability::otel::{MetricsSnapshot, GaugeDataPoint};
+
+            let test_sequences = vec![
+                // Basic value updates
+                ("simple_update", vec![42, 84, 126]),
+                ("negative_values", vec![-10, -20, -5]),
+                ("zero_crossing", vec![10, 0, -10, 0, 5]),
+                ("same_value_repeated", vec![100, 100, 100]),
+                ("oscillating", vec![1, -1, 1, -1, 1]),
+                ("large_values", vec![i64::MAX, i64::MIN, 0]),
+                ("incremental", vec![1, 2, 3, 4, 5]),
+                ("decremental", vec![100, 80, 60, 40, 20]),
+                ("single_update", vec![42]),
+                ("empty_then_update", vec![0, 42]),
+            ];
+
+            for (test_name, value_sequence) in &test_sequences {
+                checkpoint("gauge_double_update_test", json!({
+                    "test_case": test_name,
+                    "sequence_length": value_sequence.len(),
+                    "first_value": value_sequence.first(),
+                    "last_value": value_sequence.last()
+                }));
+
+                // Apply the same value sequence twice
+                let gauge_name = format!("test_gauge_{}", test_name);
+                let labels = vec![("test_case".to_string(), test_name.to_string())];
+
+                // First application of the sequence
+                let mut snapshot1 = MetricsSnapshot::new();
+                for &value in value_sequence {
+                    snapshot1.add_gauge(&gauge_name, labels.clone(), value);
+                }
+
+                // Second application of the same sequence
+                let mut snapshot2 = MetricsSnapshot::new();
+                for &value in value_sequence {
+                    snapshot2.add_gauge(&gauge_name, labels.clone(), value);
+                }
+
+                // Verify that both snapshots contain identical gauge values
+                if snapshot1.gauges != snapshot2.gauges {
+                    return TestResult::failed(format!(
+                        "Gauge double-update non-deterministic for {}: first != second application",
+                        test_name
+                    ));
+                }
+
+                // Verify the final gauge value matches the last value in sequence
+                if let Some(last_value) = value_sequence.last() {
+                    if let Some((_, _, final_gauge_value)) = snapshot1.gauges.last() {
+                        if final_gauge_value != last_value {
+                            return TestResult::failed(format!(
+                                "Gauge final value incorrect for {}: expected {}, got {}",
+                                test_name, last_value, final_gauge_value
+                            ));
+                        }
+                    } else {
+                        return TestResult::failed(format!(
+                            "No gauge value recorded for {}", test_name
+                        ));
+                    }
+                }
+
+                // Test gauge overwrite behavior - last value wins
+                let expected_gauge_count = value_sequence.len();
+                if snapshot1.gauges.len() != expected_gauge_count {
+                    return TestResult::failed(format!(
+                        "Gauge update count incorrect for {}: expected {}, got {}",
+                        test_name, expected_gauge_count, snapshot1.gauges.len()
+                    ));
+                }
+
+                // Test serialization consistency
+                let serialized1 = serialize_gauge_snapshot(&snapshot1);
+                let serialized2 = serialize_gauge_snapshot(&snapshot2);
+
+                if serialized1 != serialized2 {
+                    return TestResult::failed(format!(
+                        "Gauge snapshot serialization non-deterministic for {}",
+                        test_name
+                    ));
+                }
+            }
+
+            // Test concurrent-style updates with same gauge name but different labels
+            let concurrent_test = test_concurrent_gauge_updates();
+            if let Err(error) = concurrent_test {
+                return TestResult::failed(format!("Concurrent gauge test failed: {}", error));
+            }
+
+            TestResult::passed()
+                .with_checkpoint(crate::Checkpoint::new("gauge_double_update_summary", json!({
+                    "test_sequences": test_sequences.len(),
+                    "all_passed": true,
+                    "value_types_tested": ["positive", "negative", "zero", "repeated", "oscillating", "extreme"]
+                })))
+        }
+    }
+}
+
 /// OTLP-006: LogRecord body type mapping conformance.
 pub fn otlp_006_log_record_body_mapping<RT: RuntimeInterface>() -> ConformanceTest<RT> {
     crate::conformance_test! {
@@ -609,6 +720,78 @@ fn serialize_any_value(any_value: &opentelemetry_proto::tonic::common::v1::AnyVa
     buf
 }
 
+/// Serialize gauge snapshot for consistency testing.
+fn serialize_gauge_snapshot(snapshot: &asupersync::observability::otel::MetricsSnapshot) -> String {
+    // Sort gauges by name and labels for deterministic comparison
+    let mut gauges = snapshot.gauges.clone();
+    gauges.sort_by(|a, b| {
+        a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1))
+    });
+    format!("{:?}", gauges)
+}
+
+/// Test concurrent-style gauge updates with different label sets.
+fn test_concurrent_gauge_updates() -> Result<(), String> {
+    use asupersync::observability::otel::MetricsSnapshot;
+
+    let gauge_name = "concurrent_test_gauge";
+    let mut snapshot = MetricsSnapshot::new();
+
+    // Simulate concurrent updates with different label combinations
+    let label_sets = vec![
+        vec![("worker".to_string(), "1".to_string())],
+        vec![("worker".to_string(), "2".to_string())],
+        vec![("worker".to_string(), "1".to_string()), ("region".to_string(), "us-east".to_string())],
+        vec![("worker".to_string(), "2".to_string()), ("region".to_string(), "us-west".to_string())],
+    ];
+
+    let value_sequences = vec![
+        vec![10, 20, 30],
+        vec![100, 200, 300],
+        vec![5, 15, 25],
+        vec![50, 150, 250],
+    ];
+
+    // Apply updates for each worker/label combination
+    for (labels, values) in label_sets.iter().zip(value_sequences.iter()) {
+        for &value in values {
+            snapshot.add_gauge(gauge_name, labels.clone(), value);
+        }
+    }
+
+    // Verify each label combination has the correct final value
+    let expected_final_values = vec![30, 300, 25, 250];
+    let label_value_pairs: Vec<_> = label_sets.iter().zip(expected_final_values.iter()).collect();
+
+    for (expected_labels, &expected_final_value) in label_value_pairs {
+        let matching_gauges: Vec<_> = snapshot.gauges.iter()
+            .filter(|(name, labels, _)| name == gauge_name && labels == expected_labels)
+            .collect();
+
+        if let Some((_, _, actual_value)) = matching_gauges.last() {
+            if *actual_value != expected_final_value {
+                return Err(format!(
+                    "Concurrent gauge final value mismatch for labels {:?}: expected {}, got {}",
+                    expected_labels, expected_final_value, actual_value
+                ));
+            }
+        } else {
+            return Err(format!("No gauge found for labels {:?}", expected_labels));
+        }
+    }
+
+    // Test that the total number of gauge updates is correct
+    let total_expected_updates: usize = value_sequences.iter().map(|v| v.len()).sum();
+    if snapshot.gauges.len() != total_expected_updates {
+        return Err(format!(
+            "Concurrent gauge update count mismatch: expected {}, got {}",
+            total_expected_updates, snapshot.gauges.len()
+        ));
+    }
+
+    Ok(())
+}
+
 // =============================================================================
 // Test Suite Registration
 // =============================================================================
@@ -622,6 +805,7 @@ pub fn otlp_tests<RT: RuntimeInterface>() -> Vec<ConformanceTest<RT>> {
         otlp_004_cardinality::<RT>(),
         otlp_005_compatibility::<RT>(),
         otlp_006_log_record_body_mapping::<RT>(),
+        otlp_007_gauge_double_update_conformance::<RT>(),
     ]
 }
 

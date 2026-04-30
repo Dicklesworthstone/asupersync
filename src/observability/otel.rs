@@ -4092,6 +4092,50 @@ pub mod span_semantics {
             let any_value_2 = log_record_body_value_to_any_value(&test_body);
             assert_eq!(any_value_1, any_value_2, "LogRecord body value conversion must be deterministic");
         }
+
+        #[test]
+        fn gauge_double_update_value_sequence_conformance() {
+            use super::super::{MetricsSnapshot, GaugeDataPoint};
+
+            // Test that applying the same gauge value sequence twice produces identical results
+            let value_sequence = vec![10, 20, 15, 30, 25];
+            let gauge_name = "test_gauge";
+            let labels = vec![("test".to_string(), "conformance".to_string())];
+
+            // First application
+            let mut snapshot1 = MetricsSnapshot::new();
+            for &value in &value_sequence {
+                snapshot1.add_gauge(gauge_name, labels.clone(), value);
+            }
+
+            // Second application
+            let mut snapshot2 = MetricsSnapshot::new();
+            for &value in &value_sequence {
+                snapshot2.add_gauge(gauge_name, labels.clone(), value);
+            }
+
+            // Both snapshots should be identical
+            assert_eq!(snapshot1.gauges, snapshot2.gauges, "Gauge double-update must be deterministic");
+
+            // Final value should match the last value in the sequence
+            let expected_final_value = *value_sequence.last().unwrap();
+            let actual_final_value = snapshot1.gauges.last().unwrap().2;
+            assert_eq!(actual_final_value, expected_final_value, "Gauge final value must match sequence end");
+
+            // Number of gauge entries should match sequence length
+            assert_eq!(snapshot1.gauges.len(), value_sequence.len(), "Gauge entry count must match sequence length");
+
+            // Test edge cases
+            let mut empty_snapshot = MetricsSnapshot::new();
+            empty_snapshot.add_gauge("empty_test", vec![], 0);
+            assert_eq!(empty_snapshot.gauges.len(), 1, "Empty labels gauge should work");
+
+            // Test negative values
+            let mut negative_snapshot = MetricsSnapshot::new();
+            negative_snapshot.add_gauge("negative_test", vec![], -100);
+            negative_snapshot.add_gauge("negative_test", vec![], i64::MIN);
+            assert_eq!(negative_snapshot.gauges.last().unwrap().2, i64::MIN, "Negative gauge values should work");
+        }
     }
 }
 
