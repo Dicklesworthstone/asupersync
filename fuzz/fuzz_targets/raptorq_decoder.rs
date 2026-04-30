@@ -389,6 +389,56 @@ fn apply_reorder(packets: &mut [ReceivedSymbol], reorder: PacketReorder) {
     }
 }
 
+fn nontrivial_reorder(reorder: PacketReorder, seed: u64) -> PacketReorder {
+    match reorder {
+        PacketReorder::Preserve => PacketReorder::Rotate {
+            by: seed as u8 | 1,
+        },
+        other => other,
+    }
+}
+
+fn append_duplicate_packets(packets: &mut Vec<ReceivedSymbol>, seed: u64, duplicate_count: usize) {
+    if packets.is_empty() {
+        return;
+    }
+
+    let original_len = packets.len();
+    let target = duplicate_count.clamp(1, 8).min(original_len);
+    let mut duplicate_indices = Vec::with_capacity(target);
+
+    if let Some(index) = packets.iter().position(|packet| packet.is_source) {
+        duplicate_indices.push(index);
+    }
+    if let Some(index) = packets.iter().position(|packet| !packet.is_source)
+        && !duplicate_indices.contains(&index)
+        && duplicate_indices.len() < target
+    {
+        duplicate_indices.push(index);
+    }
+
+    let stride = (((seed.rotate_left(9) as usize) | 1) % original_len.max(2)).max(1);
+    let mut candidate = seed as usize % original_len;
+    while duplicate_indices.len() < target {
+        if !duplicate_indices.contains(&candidate) {
+            duplicate_indices.push(candidate);
+        }
+        candidate = (candidate + stride) % original_len;
+    }
+
+    for index in duplicate_indices {
+        packets.push(packets[index].clone());
+    }
+}
+
+fn count_duplicate_packets(packets: &[ReceivedSymbol]) -> usize {
+    let mut seen = std::collections::BTreeMap::<(u32, bool), usize>::new();
+    for packet in packets {
+        *seen.entry((packet.esi, packet.is_source)).or_default() += 1;
+    }
+    seen.values().filter(|count| **count > 1).count()
+}
+
 fn apply_mutations(packets: &mut Vec<ReceivedSymbol>, mutations: &[PacketMutation]) {
     for mutation in mutations {
         if packets.is_empty() {
@@ -826,6 +876,78 @@ fn assert_k8192_tail_burst_loss_recovers(
             object_id,
         );
     }
+}
+
+fn assert_k8192_reorder_and_duplicates_recover(
+    decoder: &InactivationDecoder,
+    encoder: &SystematicEncoder,
+    source: &[Vec<u8>],
+    seed: u64,
+    missing_sources: &[u8],
+    extra_repairs: usize,
+    repair_distribution: RepairDistribution,
+    reorder: PacketReorder,
+    wavefront_batch: usize,
+    object_id: ObjectId,
+) {
+    if source.len() != 8192 {
+        return;
+    }
+
+    let params = decoder.params();
+    assert_eq!(params.k, 8192, "K=8192 duplicate oracle must preserve the public K");
+    assert_eq!(
+        params.k_prime, 8194,
+        "K=8192 duplicate oracle must pin the rounded RFC row"
+    );
+    assert_eq!(params.j, 212, "K=8192 duplicate oracle must pin the RFC J(K') value");
+    assert_eq!(params.s, 211, "K=8192 duplicate oracle must pin the RFC S(K') value");
+    assert_eq!(params.h, 11, "K=8192 duplicate oracle must pin the RFC H(K') value");
+    assert_eq!(params.w, 8273, "K=8192 duplicate oracle must pin the RFC W(K') value");
+    assert_eq!(params.l, 8416, "K=8192 duplicate oracle must pin the RFC L value");
+    assert_eq!(params.b, 8062, "K=8192 duplicate oracle must pin the RFC B value");
+
+    let ec_overhead = extra_repairs.saturating_add(12);
+    let missing_columns = spread_missing_columns(seed.rotate_left(7), missing_sources, source.len(), 24);
+    let Some(mut payload_packets) = build_exact_overhead_packets(
+        decoder,
+        encoder,
+        source,
+        &missing_columns,
+        ec_overhead,
+        repair_distribution,
+    ) else {
+        return;
+    };
+
+    let duplicate_count = missing_columns.len().clamp(2, 8);
+    let baseline_len = payload_packets.len();
+    append_duplicate_packets(&mut payload_packets, seed, duplicate_count);
+    assert_eq!(
+        payload_packets.len(),
+        baseline_len.saturating_add(duplicate_count),
+        "K=8192 duplicate oracle must append the requested duplicate budget"
+    );
+    assert!(
+        count_duplicate_packets(&payload_packets) >= 2,
+        "K=8192 duplicate oracle must include duplicate source and repair packets"
+    );
+
+    apply_reorder(&mut payload_packets, nontrivial_reorder(reorder, seed));
+    let received = combine_symbols(decoder, &payload_packets);
+    let batch = if received.is_empty() {
+        0
+    } else {
+        wavefront_batch % (received.len() + 1)
+    };
+    assert_decode_consensus(decoder, &received, source, batch, object_id);
+    let decoded = decoder
+        .decode(&received)
+        .expect("K=8192 reordered duplicate packets must remain decodable");
+    assert_eq!(
+        decoded.source, source,
+        "K=8192 reordered duplicate packets must recover original source"
+    );
 }
 
 fn assert_k842_sparse_vs_dense_repairs_recover(
@@ -1285,6 +1407,19 @@ fuzz_target!(|data: &[u8]| {
         object_id,
     );
 
+    assert_k8192_reorder_and_duplicates_recover(
+        &decoder,
+        &encoder,
+        &source,
+        input.seed,
+        &input.missing_sources,
+        input.extra_repairs as usize,
+        input.repair_distribution,
+        input.reorder,
+        input.wavefront_batch as usize,
+        object_id,
+    );
+
     assert_k4_transition_sparse_vs_dense_repairs_recover(
         &decoder,
         &encoder,
@@ -1426,12 +1561,14 @@ mod tests {
     use super::{
         LARGE_K_CANDIDATES, LARGE_K_THRESHOLD, LARGE_SYMBOL_SIZE_CANDIDATES, LossWindow,
         MEDIUM_K_CANDIDATES, MutationKind, PacketMutation, RepairDistribution, SMALL_K_CANDIDATES,
-        SMALL_SYMBOL_SIZE_CANDIDATES, apply_contiguous_loss_windows, apply_mutations,
-        build_repair_esi_sequence, burst_repair_count, k16_low_intermediate_missing_sources,
+        SMALL_SYMBOL_SIZE_CANDIDATES, PacketReorder, append_duplicate_packets,
+        apply_contiguous_loss_windows, apply_mutations, build_repair_esi_sequence,
+        burst_repair_count, count_duplicate_packets, k16_low_intermediate_missing_sources,
         k4_transition_missing_sources, k8_low_intermediate_missing_sources,
-        repair_stress_missing_sources, select_k_candidate, select_symbol_size_candidate,
-        sparse_repair_stride, spread_missing_columns,
+        nontrivial_reorder, repair_stress_missing_sources, select_k_candidate,
+        select_symbol_size_candidate, sparse_repair_stride, spread_missing_columns,
     };
+    use asupersync::raptorq::gf256::Gf256;
     use asupersync::raptorq::decoder::ReceivedSymbol;
 
     #[test]
@@ -1610,6 +1747,34 @@ mod tests {
             8192,
         );
         assert_eq!(repair_count, 924);
+    }
+
+    #[test]
+    fn nontrivial_reorder_promotes_preserve_to_rotation() {
+        match nontrivial_reorder(PacketReorder::Preserve, 0x22) {
+            PacketReorder::Rotate { by } => assert_ne!(by, 0),
+            other => panic!("expected preserve to promote to rotate, got {other:?}"),
+        }
+        assert!(matches!(
+            nontrivial_reorder(PacketReorder::Reverse, 7),
+            PacketReorder::Reverse
+        ));
+    }
+
+    #[test]
+    fn append_duplicate_packets_covers_source_and_repair_groups() {
+        let mut packets = vec![
+            ReceivedSymbol::source(0, vec![1, 2]),
+            ReceivedSymbol::source(1, vec![3, 4]),
+            ReceivedSymbol::repair(8, vec![0, 1], vec![Gf256::ONE, Gf256(7)], vec![9, 9]),
+        ];
+
+        append_duplicate_packets(&mut packets, 0x55AA, 2);
+
+        assert_eq!(packets.len(), 5);
+        assert_eq!(count_duplicate_packets(&packets), 2);
+        assert!(packets.iter().filter(|packet| packet.is_source).count() >= 3);
+        assert!(packets.iter().filter(|packet| !packet.is_source).count() >= 2);
     }
 
     #[test]
