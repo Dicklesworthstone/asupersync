@@ -3580,6 +3580,17 @@ test = false
 doc = false
 bench = false
 
+# Tick #145 — HTTP/2 Trailers-Only Response fuzzer
+# Targets src/http/h2/connection.rs trailers-only response handling to test
+# arbitrary headers with END_STREAM flag, assert empty body + trailers as final frames
+# per RFC 9113. Verifies pseudo-header rejection, payload preservation, and protocol compliance.
+[[bin]]
+name = "h2_trailers_only_response"
+path = "fuzz_targets/h2_trailers_only_response.rs"
+test = false
+doc = false
+bench = false
+
 # Targets src/observability/metrics.rs Counter.add() to test OTLP monotonic counter
 # specification compliance. Verifies counters never decrease, handles overflow
 # correctly, and maintains atomicity in concurrent scenarios per OTLP requirements.
@@ -3593,6 +3604,13 @@ bench = false
 [[bin]]
 name = "grpc_server_idle_timeout_state_machine"
 path = "fuzz_targets/grpc_server_idle_timeout_state_machine.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_codec_lpm_stream_boundary"
+path = "fuzz_targets/grpc_codec_lpm_stream_boundary.rs"
 test = false
 doc = false
 bench = false
