@@ -37,6 +37,7 @@ const MAX_PACKET_BYTES: usize = 4096;
 const MAX_EXTRA_REPAIRS: usize = 8;
 const MAX_BURST_WINDOWS: usize = 8;
 const MAX_MISSING_SOURCES: usize = 64;
+const MAX_REPAIR_SIZE_SELECTORS: usize = 32;
 
 #[derive(Debug, Arbitrary)]
 struct DecoderPacketInput {
@@ -49,6 +50,7 @@ struct DecoderPacketInput {
     missing_sources: Vec<u8>,
     loss_windows: Vec<LossWindow>,
     packet_bytes: Vec<u8>,
+    repair_size_selectors: Vec<u16>,
     mutations: Vec<PacketMutation>,
     reorder: PacketReorder,
     wavefront_batch: u8,
@@ -112,6 +114,8 @@ impl DecoderPacketInput {
         self.burst_repair_overhead =
             (self.burst_repair_overhead as usize % (MAX_EXTRA_REPAIRS + 1)) as u8;
         self.packet_bytes.truncate(MAX_PACKET_BYTES);
+        self.repair_size_selectors
+            .truncate(MAX_REPAIR_SIZE_SELECTORS);
         self.loss_windows.truncate(MAX_BURST_WINDOWS);
         self.mutations.truncate(MAX_MUTATIONS);
         self.missing_sources.truncate(MAX_MISSING_SOURCES);
@@ -530,6 +534,90 @@ fn apply_mutations(packets: &mut Vec<ReceivedSymbol>, mutations: &[PacketMutatio
     }
 }
 
+fn max_repair_payload_len(symbol_size: usize) -> usize {
+    symbol_size
+        .saturating_mul(2)
+        .saturating_add(1)
+        .clamp(1, MAX_PACKET_BYTES)
+}
+
+fn select_repair_payload_len(selector: u16, symbol_size: usize, repair_index: usize) -> usize {
+    let limit = max_repair_payload_len(symbol_size);
+    (usize::from(selector).wrapping_add(repair_index.saturating_mul(symbol_size.saturating_add(1))))
+        % (limit.saturating_add(1))
+}
+
+fn resize_packet_data(packet: &mut ReceivedSymbol, new_len: usize, fill: u8) {
+    if packet.data.len() > new_len {
+        packet.data.truncate(new_len);
+    } else if packet.data.len() < new_len {
+        packet
+            .data
+            .extend(std::iter::repeat_n(fill, new_len - packet.data.len()));
+    }
+}
+
+fn apply_mixed_repair_packet_sizes(
+    packets: &mut [ReceivedSymbol],
+    symbol_size: usize,
+    size_selectors: &[u16],
+    packet_bytes: &[u8],
+    seed: u64,
+) -> std::collections::BTreeSet<usize> {
+    let repair_indices: Vec<_> = packets
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, packet)| (!packet.is_source).then_some(idx))
+        .collect();
+    if repair_indices.is_empty() {
+        return std::collections::BTreeSet::new();
+    }
+
+    for (repair_index, packet_index) in repair_indices.iter().copied().enumerate() {
+        let selector = size_selectors
+            .get(repair_index)
+            .copied()
+            .unwrap_or_else(|| {
+                seed.wrapping_add((repair_index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)) as u16
+            });
+        let fill = packet_bytes
+            .get(repair_index % packet_bytes.len().max(1))
+            .copied()
+            .unwrap_or_else(|| seed.rotate_left((repair_index % 63) as u32) as u8);
+        let target_len = select_repair_payload_len(selector, symbol_size, repair_index);
+        resize_packet_data(&mut packets[packet_index], target_len, fill);
+    }
+
+    let mut lengths: std::collections::BTreeSet<_> = repair_indices
+        .iter()
+        .map(|&idx| packets[idx].data.len())
+        .collect();
+
+    if repair_indices.len() > 1 && lengths.len() == 1 {
+        let forced_index = repair_indices[1];
+        let forced_fill = packet_bytes
+            .get(1 % packet_bytes.len().max(1))
+            .copied()
+            .unwrap_or_else(|| seed.rotate_left(11) as u8);
+        let current = packets[forced_index].data.len();
+        let limit = max_repair_payload_len(symbol_size);
+        let forced_len = if current == 0 {
+            1
+        } else if current >= limit {
+            current.saturating_sub(1)
+        } else {
+            current + 1
+        };
+        resize_packet_data(&mut packets[forced_index], forced_len, forced_fill);
+        lengths = repair_indices
+            .iter()
+            .map(|&idx| packets[idx].data.len())
+            .collect();
+    }
+
+    lengths
+}
+
 fn combine_symbols(
     decoder: &InactivationDecoder,
     payload_packets: &[ReceivedSymbol],
@@ -712,6 +800,79 @@ fn assert_k42_burst_loss_recovers(
             wavefront_batch,
             object_id,
         );
+    }
+}
+
+fn assert_k42_mixed_repair_packet_sizes_handled(
+    decoder: &InactivationDecoder,
+    encoder: &SystematicEncoder,
+    source: &[Vec<u8>],
+    seed: u64,
+    missing_sources: &[u8],
+    extra_repairs: usize,
+    repair_distribution: RepairDistribution,
+    repair_size_selectors: &[u16],
+    packet_bytes: &[u8],
+    wavefront_batch: usize,
+    object_id: ObjectId,
+) {
+    if source.len() != 42 {
+        return;
+    }
+
+    let params = decoder.params();
+    assert_eq!(
+        params.k, 42,
+        "K=42 mixed-size oracle must preserve the public K"
+    );
+    assert_eq!(
+        params.k_prime, 42,
+        "K=42 mixed-size oracle must stay on the exact RFC boundary row"
+    );
+
+    let effective_missing_sources = repair_stress_missing_sources(missing_sources, seed);
+    let Some(mut payload_packets) = build_valid_packets(
+        decoder,
+        encoder,
+        source,
+        &effective_missing_sources,
+        extra_repairs.saturating_add(4),
+        repair_distribution,
+    ) else {
+        return;
+    };
+
+    let repair_count = payload_packets
+        .iter()
+        .filter(|packet| !packet.is_source)
+        .count();
+    assert!(
+        repair_count > 1,
+        "K=42 mixed-size oracle must exercise multiple repair packets"
+    );
+
+    let repair_lengths = apply_mixed_repair_packet_sizes(
+        &mut payload_packets,
+        source[0].len(),
+        repair_size_selectors,
+        packet_bytes,
+        seed,
+    );
+    assert!(
+        repair_lengths.len() > 1,
+        "K=42 mixed-size oracle must exercise multiple repair payload lengths"
+    );
+
+    let received = combine_symbols(decoder, &payload_packets);
+    let batch = if received.is_empty() {
+        0
+    } else {
+        wavefront_batch % (received.len() + 1)
+    };
+
+    assert_decode_consensus(decoder, &received, source, batch, object_id);
+    if let Err(err) = decoder.decode(&received) {
+        assert_recoverable_or_unrecoverable(&err);
     }
 }
 
@@ -1633,6 +1794,20 @@ fuzz_target!(|data: &[u8]| {
         object_id,
     );
 
+    assert_k42_mixed_repair_packet_sizes_handled(
+        &decoder,
+        &encoder,
+        &source,
+        input.seed,
+        &input.missing_sources,
+        input.extra_repairs as usize,
+        input.repair_distribution,
+        &input.repair_size_selectors,
+        &input.packet_bytes,
+        input.wavefront_batch as usize,
+        object_id,
+    );
+
     assert_k4096_burst_loss_recovers(
         &decoder,
         &encoder,
@@ -1818,10 +1993,11 @@ mod tests {
         LARGE_K_CANDIDATES, LARGE_K_THRESHOLD, LARGE_SYMBOL_SIZE_CANDIDATES, LossWindow,
         MEDIUM_K_CANDIDATES, MutationKind, PacketMutation, PacketReorder, RepairDistribution,
         SMALL_K_CANDIDATES, SMALL_SYMBOL_SIZE_CANDIDATES, append_duplicate_packets,
-        apply_contiguous_loss_windows, apply_mutations, build_repair_esi_sequence,
-        burst_repair_count, count_duplicate_packets, k4_transition_missing_sources,
-        k8_low_intermediate_missing_sources, k16_low_intermediate_missing_sources,
-        nontrivial_reorder, repair_stress_missing_sources, select_k_candidate,
+        apply_contiguous_loss_windows, apply_mixed_repair_packet_sizes, apply_mutations,
+        build_repair_esi_sequence, burst_repair_count, count_duplicate_packets,
+        k4_transition_missing_sources, k8_low_intermediate_missing_sources,
+        k16_low_intermediate_missing_sources, max_repair_payload_len, nontrivial_reorder,
+        repair_stress_missing_sources, select_k_candidate, select_repair_payload_len,
         select_symbol_size_candidate, sparse_repair_stride, spread_missing_columns,
         spread_missing_columns_exact_count,
     };
@@ -1936,6 +2112,15 @@ mod tests {
             42,
             "selector normalization must be able to reach K=42"
         );
+    }
+
+    #[test]
+    fn mixed_repair_payload_length_selector_stays_within_k42_limit() {
+        let symbol_size = 64usize;
+        let limit = max_repair_payload_len(symbol_size);
+        assert_eq!(limit, 129);
+        let len = select_repair_payload_len(u16::MAX, symbol_size, 7);
+        assert!(len <= limit);
     }
 
     #[test]
@@ -2063,6 +2248,28 @@ mod tests {
         assert_eq!(count_duplicate_packets(&packets), 2);
         assert!(packets.iter().filter(|packet| packet.is_source).count() >= 3);
         assert!(packets.iter().filter(|packet| !packet.is_source).count() >= 2);
+    }
+
+    #[test]
+    fn mixed_repair_packet_sizes_create_multiple_lengths_without_touching_sources() {
+        let mut packets = vec![
+            ReceivedSymbol::source(0, vec![1, 2, 3, 4]),
+            ReceivedSymbol::repair(42, vec![0], vec![Gf256::ONE], vec![9, 9, 9, 9]),
+            ReceivedSymbol::repair(43, vec![1], vec![Gf256::ONE], vec![8, 8, 8, 8]),
+            ReceivedSymbol::repair(44, vec![2], vec![Gf256::ONE], vec![7, 7, 7, 7]),
+        ];
+
+        let repair_lengths =
+            apply_mixed_repair_packet_sizes(&mut packets, 4, &[0, 1, 2], &[0xAA, 0xBB], 0x42);
+
+        assert_eq!(packets[0].data.len(), 4);
+        assert!(repair_lengths.len() > 1);
+        assert!(
+            packets
+                .iter()
+                .filter(|packet| !packet.is_source)
+                .all(|packet| packet.data.len() <= max_repair_payload_len(4))
+        );
     }
 
     #[test]
