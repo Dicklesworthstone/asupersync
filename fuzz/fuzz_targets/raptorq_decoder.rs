@@ -24,7 +24,8 @@ use asupersync::types::ObjectId;
 const MAX_SOURCE_BYTES: usize = 64 * 1024;
 const LARGE_K_THRESHOLD: usize = 842;
 const SMALL_K_CANDIDATES: &[usize] = &[1, 2, 3, 4, 7, 8, 15, 16, 17, 31, 32, 33];
-const MEDIUM_K_CANDIDATES: &[usize] = &[63, 64, 65, 127, 128, 129, 255, 256, 257, 511, 512, 513];
+const MEDIUM_K_CANDIDATES: &[usize] =
+    &[42, 63, 64, 65, 127, 128, 129, 255, 256, 257, 511, 512, 513];
 const LARGE_K_CANDIDATES: &[usize] = &[842, 1023, 1024, 1025, 2047, 2048, 2049];
 const SMALL_SYMBOL_SIZE_CANDIDATES: &[usize] =
     &[1, 2, 3, 4, 7, 8, 15, 16, 31, 32, 63, 64, 127, 128, 255, 256];
@@ -500,6 +501,82 @@ fn assert_burst_loss_recovers_when_received_at_least_k(
     );
 }
 
+fn assert_k42_burst_loss_recovers(
+    decoder: &InactivationDecoder,
+    encoder: &SystematicEncoder,
+    source: &[Vec<u8>],
+    seed: u64,
+    wavefront_batch: usize,
+    object_id: ObjectId,
+) {
+    if source.len() != 42 {
+        return;
+    }
+
+    let params = decoder.params();
+    assert_eq!(params.k, 42, "K=42 burst oracle must preserve the public K");
+    assert_eq!(
+        params.k_prime, 42,
+        "K=42 burst oracle must stay on the exact RFC boundary row"
+    );
+
+    let scenarios = [
+        (
+            vec![LossWindow {
+                start: seed as u16,
+                len: 0,
+            }],
+            1usize,
+        ),
+        (
+            vec![LossWindow {
+                start: seed.rotate_left(7) as u16,
+                len: 5,
+            }],
+            2usize,
+        ),
+        (
+            vec![LossWindow {
+                start: seed.rotate_left(13) as u16,
+                len: 11,
+            }],
+            3usize,
+        ),
+        (
+            vec![
+                LossWindow {
+                    start: seed.rotate_left(19) as u16,
+                    len: 7,
+                },
+                LossWindow {
+                    start: seed.rotate_left(23) as u16,
+                    len: 3,
+                },
+            ],
+            2usize,
+        ),
+        (
+            vec![LossWindow {
+                start: seed.rotate_left(29) as u16,
+                len: 20,
+            }],
+            4usize,
+        ),
+    ];
+
+    for (loss_windows, extra_repairs) in scenarios {
+        assert_burst_loss_recovers_when_received_at_least_k(
+            decoder,
+            encoder,
+            source,
+            &loss_windows,
+            extra_repairs,
+            wavefront_batch,
+            object_id,
+        );
+    }
+}
+
 fn assert_k842_sparse_vs_dense_repairs_recover(
     decoder: &InactivationDecoder,
     encoder: &SystematicEncoder,
@@ -780,6 +857,15 @@ fuzz_target!(|data: &[u8]| {
         );
     }
 
+    assert_k42_burst_loss_recovers(
+        &decoder,
+        &encoder,
+        &source,
+        input.seed,
+        input.wavefront_batch as usize,
+        object_id,
+    );
+
     assert_k4_transition_sparse_vs_dense_repairs_recover(
         &decoder,
         &encoder,
@@ -896,7 +982,7 @@ fuzz_target!(|data: &[u8]| {
 mod tests {
     use super::{
         LARGE_K_CANDIDATES, LARGE_K_THRESHOLD, LARGE_SYMBOL_SIZE_CANDIDATES, LossWindow,
-        MutationKind, PacketMutation, RepairDistribution, SMALL_K_CANDIDATES,
+        MEDIUM_K_CANDIDATES, MutationKind, PacketMutation, RepairDistribution, SMALL_K_CANDIDATES,
         SMALL_SYMBOL_SIZE_CANDIDATES, apply_contiguous_loss_windows, apply_mutations,
         build_repair_esi_sequence, burst_repair_count, k16_low_intermediate_missing_sources,
         k4_transition_missing_sources, k8_low_intermediate_missing_sources,
@@ -926,6 +1012,24 @@ mod tests {
             select_k_candidate(selector),
             842,
             "selector normalization must be able to reach K=842"
+        );
+    }
+
+    #[test]
+    fn k_selector_includes_k42_burst_profile() {
+        assert!(
+            MEDIUM_K_CANDIDATES.contains(&42),
+            "medium-K candidate set must include the canonical K=42 burst profile"
+        );
+        let selector = 8 * MEDIUM_K_CANDIDATES
+            .iter()
+            .position(|&candidate| candidate == 42)
+            .expect("K=42 must be selectable")
+            + 2;
+        assert_eq!(
+            select_k_candidate(selector),
+            42,
+            "selector normalization must be able to reach K=42"
         );
     }
 
