@@ -3949,6 +3949,15 @@ impl PgConnection {
         self.inner.needs_discard
     }
 
+    #[inline]
+    fn transport_matches_ssl_mode(&self, ssl_mode: SslMode) -> bool {
+        match ssl_mode {
+            SslMode::Disable => !self.inner.stream.is_tls(),
+            SslMode::Prefer => true,
+            SslMode::Require => self.inner.stream.is_tls(),
+        }
+    }
+
     /// Close the connection.
     pub async fn close(&mut self) -> Result<(), PgError> {
         if self.inner.closed {
@@ -6225,6 +6234,7 @@ impl crate::database::pool::AsyncConnectionManager for PgConnectionManager {
             && !conn.in_transaction()
             && !conn.needs_discard()
             && !conn.is_unhealthy()
+            && conn.transport_matches_ssl_mode(self.options.ssl_mode)
     }
 
     /// br-asupersync-a1x452 + br-asupersync-t4wfzb: refuse to recycle
@@ -6255,6 +6265,9 @@ impl crate::database::pool::AsyncConnectionManager for PgConnectionManager {
             return false;
         }
         if conn.in_transaction() {
+            return false;
+        }
+        if !conn.transport_matches_ssl_mode(self.options.ssl_mode) {
             return false;
         }
         true
@@ -11757,6 +11770,49 @@ mod tests {
         assert!(
             !mgr.release_check(&mut conn),
             "closed connection must reject"
+        );
+    }
+
+    #[test]
+    fn release_check_rejects_plain_connection_for_require_tls_pool() {
+        use crate::database::pool::AsyncConnectionManager;
+        let mgr = PgConnectionManager::new(
+            PgConnectOptions::parse("postgres://localhost/testdb?sslmode=require").unwrap(),
+        );
+        let mut conn = make_test_connection();
+
+        assert!(
+            !mgr.release_check(&mut conn),
+            "sslmode=require pools must not recycle plaintext connections"
+        );
+    }
+
+    #[test]
+    fn is_valid_rejects_plain_connection_for_require_tls_pool() {
+        use crate::database::pool::AsyncConnectionManager;
+        let mgr = PgConnectionManager::new(
+            PgConnectOptions::parse("postgres://localhost/testdb?sslmode=require").unwrap(),
+        );
+        let mut conn = make_test_connection();
+        let cx = crate::cx::Cx::for_testing();
+
+        assert!(
+            !run(mgr.is_valid(&cx, &mut conn)),
+            "checkout validation must reject plaintext connections for sslmode=require"
+        );
+    }
+
+    #[test]
+    fn release_check_accepts_plain_connection_for_prefer_tls_pool() {
+        use crate::database::pool::AsyncConnectionManager;
+        let mgr = PgConnectionManager::new(
+            PgConnectOptions::parse("postgres://localhost/testdb?sslmode=prefer").unwrap(),
+        );
+        let mut conn = make_test_connection();
+
+        assert!(
+            mgr.release_check(&mut conn),
+            "sslmode=prefer may reuse plaintext fallback connections"
         );
     }
 
