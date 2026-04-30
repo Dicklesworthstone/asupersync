@@ -1709,6 +1709,25 @@ impl MySqlConnection {
         let cap_upper = reader.read_u16_le()?;
         let capabilities = u32::from(cap_lower) | (u32::from(cap_upper) << 16);
 
+        // This client only implements the modern 4.1+ secure handshake.
+        // Accepting a server that strips either bit would silently
+        // downgrade us into a partially parsed or truncated-auth path.
+        let missing_required_caps =
+            (capability::CLIENT_PROTOCOL_41 | capability::CLIENT_SECURE_CONNECTION) & !capabilities;
+        if missing_required_caps != 0 {
+            let mut missing = Vec::new();
+            if missing_required_caps & capability::CLIENT_PROTOCOL_41 != 0 {
+                missing.push("CLIENT_PROTOCOL_41");
+            }
+            if missing_required_caps & capability::CLIENT_SECURE_CONNECTION != 0 {
+                missing.push("CLIENT_SECURE_CONNECTION");
+            }
+            return Err(MySqlError::Protocol(format!(
+                "server handshake missing required capabilities: {}",
+                missing.join(", ")
+            )));
+        }
+
         // Auth plugin data length
         let auth_data_len = reader.read_byte()?;
 
@@ -7398,6 +7417,96 @@ mod tests {
                 other
             ),
         }
+    }
+
+    fn handshake_packet_bytes(capabilities: u32) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.push(10); // protocol version
+        payload.extend_from_slice(b"8.0.0-test");
+        payload.push(0);
+        payload.extend_from_slice(&1u32.to_le_bytes());
+        payload.extend_from_slice(b"12345678");
+        payload.push(0);
+        payload.extend_from_slice(&(capabilities as u16).to_le_bytes());
+        payload.push(45); // utf8mb4_general_ci
+        payload.extend_from_slice(&0u16.to_le_bytes());
+        payload.extend_from_slice(&((capabilities >> 16) as u16).to_le_bytes());
+        payload.push(21);
+        payload.extend_from_slice(&[0u8; 10]);
+        if capabilities & capability::CLIENT_SECURE_CONNECTION != 0 {
+            payload.extend_from_slice(b"abcdefgh1234");
+            payload.push(0);
+        }
+        if capabilities & capability::CLIENT_PLUGIN_AUTH != 0 {
+            payload.extend_from_slice(b"caching_sha2_password");
+            payload.push(0);
+        }
+
+        let mut packet = PacketBuffer::new();
+        packet.set_sequence(0);
+        packet.buf = payload;
+        packet.build_packet().bytes
+    }
+
+    fn assert_handshake_capability_rejected(capabilities: u32, missing_capability: &str) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let packet = handshake_packet_bytes(capabilities);
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            stream.write_all(&packet).expect("write handshake packet");
+        });
+
+        let std_stream = std::net::TcpStream::connect(addr).expect("connect");
+        let stream = TcpStream::from_std(std_stream).expect("from_std");
+
+        let mut conn = MySqlConnection {
+            inner: MySqlConnectionInner {
+                stream,
+                connection_id: 0,
+                capabilities: 0,
+                charset: 0,
+                status_flags: 0,
+                sequence: 0,
+                closed: false,
+                server_version: String::new(),
+                needs_rollback: false,
+                max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                prepared_statement_epoch: 0,
+                query_in_flight: std::sync::atomic::AtomicBool::new(false),
+            },
+            options: None,
+        };
+
+        let result = run(conn.read_handshake());
+        server.join().expect("join server");
+
+        match result {
+            Outcome::Err(MySqlError::Protocol(msg)) => {
+                assert!(msg.contains("missing required capabilities"));
+                assert!(msg.contains(missing_capability));
+            }
+            other => {
+                panic!("Expected Protocol error for missing {missing_capability}, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn test_handshake_rejects_server_missing_protocol_41_capability() {
+        assert_handshake_capability_rejected(
+            capability::CLIENT_SECURE_CONNECTION | capability::CLIENT_PLUGIN_AUTH,
+            "CLIENT_PROTOCOL_41",
+        );
+    }
+
+    #[test]
+    fn test_handshake_rejects_server_missing_secure_connection_capability() {
+        assert_handshake_capability_rejected(
+            capability::CLIENT_PROTOCOL_41 | capability::CLIENT_PLUGIN_AUTH,
+            "CLIENT_SECURE_CONNECTION",
+        );
     }
 
     /// MySQL vs MariaDB OK_Packet Status Flags Differential Conformance Test
