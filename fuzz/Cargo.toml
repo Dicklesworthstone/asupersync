@@ -4188,3 +4188,25 @@ path = "fuzz_targets/h1_chunked_trailers.rs"
 test = false
 doc = false
 bench = false
+
+# Tick #182 — Oneshot split sender multi-drop fuzzer
+# Tests scenarios where multiple Sender instances exist and validates
+# that receiver only sees Closed when ALL senders are dropped.
+# Verifies partial sender drops don't cause premature channel closure.
+[[bin]]
+name = "oneshot_split_sender"
+path = "fuzz_targets/oneshot_split_sender.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #183 — HTTP/2 SETTINGS_ENABLE_PUSH dynamic update fuzzer
+# Tests dynamic toggling of SETTINGS_ENABLE_PUSH between 0 and 1 to validate
+# that PUSH_PROMISE frames are properly blocked when push is disabled. Tests
+# invalid values, server constraints, and state transition correctness.
+[[bin]]
+name = "h2_settings_enable_push_dynamic"
+path = "fuzz_targets/h2_settings_enable_push_dynamic.rs"
+test = false
+doc = false
+bench = false

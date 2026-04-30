@@ -1593,6 +1593,169 @@ fn parse_redirect(msg: &str) -> Option<Redirect> {
     }
 }
 
+const REDIS_CLUSTER_MAX_SLOT: u16 = 16_383;
+
+/// Node endpoint returned by `CLUSTER SLOTS`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedisClusterSlotNode {
+    /// Preferred endpoint. `None` represents Redis NULL or an empty endpoint.
+    pub endpoint: Option<String>,
+    /// TCP port advertised by the node.
+    pub port: u16,
+    /// Stable Redis Cluster node ID, absent on legacy replies.
+    pub node_id: Option<String>,
+}
+
+/// One slot range returned by `CLUSTER SLOTS`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RedisClusterSlotRange {
+    /// Inclusive start of the Redis hash-slot range.
+    pub start: u16,
+    /// Inclusive end of the Redis hash-slot range.
+    pub end: u16,
+    /// Master node for this slot range.
+    pub master: RedisClusterSlotNode,
+    /// Active replicas for this slot range.
+    pub replicas: Vec<RedisClusterSlotNode>,
+}
+
+/// Parse a Redis `CLUSTER SLOTS` response into slot ranges.
+///
+/// Redis returns an array of ranges whose first two fields are inclusive slot
+/// bounds, followed by the master node and zero or more replica nodes. Node
+/// arrays are accepted in both legacy form (`endpoint`, `port`) and modern form
+/// with node ID plus extra metadata fields; metadata after the fixed fields is
+/// intentionally ignored per Redis client guidance.
+///
+/// # Errors
+///
+/// Returns `RedisError::Protocol` when the response shape is not the nested
+/// array format Redis documents, when slots fall outside `0..=16383`, when a
+/// range is reversed, or when node endpoint / ID bytes are not UTF-8.
+pub fn parse_cluster_slots_response(
+    response: &RespValue,
+) -> Result<Vec<RedisClusterSlotRange>, RedisError> {
+    let ranges = cluster_slots_array(response, "response")?;
+    let mut parsed = Vec::with_capacity(ranges.len());
+
+    for (index, range) in ranges.iter().enumerate() {
+        parsed.push(parse_cluster_slot_range(range, index)?);
+    }
+
+    Ok(parsed)
+}
+
+fn parse_cluster_slot_range(
+    value: &RespValue,
+    index: usize,
+) -> Result<RedisClusterSlotRange, RedisError> {
+    let fields = cluster_slots_array(value, "slot range")?;
+    if fields.len() < 3 {
+        return Err(RedisError::Protocol(format!(
+            "CLUSTER SLOTS range {index} must contain start, end, and master node"
+        )));
+    }
+
+    let start = parse_cluster_slot(&fields[0], "start slot")?;
+    let end = parse_cluster_slot(&fields[1], "end slot")?;
+    if start > end {
+        return Err(RedisError::Protocol(format!(
+            "CLUSTER SLOTS range {index} start slot {start} exceeds end slot {end}"
+        )));
+    }
+
+    let master = parse_cluster_slot_node(&fields[2], "master node")?;
+    let mut replicas = Vec::with_capacity(fields.len().saturating_sub(3));
+    for replica in &fields[3..] {
+        replicas.push(parse_cluster_slot_node(replica, "replica node")?);
+    }
+
+    Ok(RedisClusterSlotRange {
+        start,
+        end,
+        master,
+        replicas,
+    })
+}
+
+fn cluster_slots_array<'a>(
+    value: &'a RespValue,
+    field: &str,
+) -> Result<&'a [RespValue], RedisError> {
+    match value {
+        RespValue::Array(Some(items)) => Ok(items),
+        _ => Err(RedisError::Protocol(format!(
+            "CLUSTER SLOTS {field} must be an array"
+        ))),
+    }
+}
+
+fn parse_cluster_slot(value: &RespValue, field: &str) -> Result<u16, RedisError> {
+    let slot = value
+        .as_integer()
+        .ok_or_else(|| RedisError::Protocol(format!("CLUSTER SLOTS {field} must be an integer")))?;
+    if !(0..=i64::from(REDIS_CLUSTER_MAX_SLOT)).contains(&slot) {
+        return Err(RedisError::Protocol(format!(
+            "CLUSTER SLOTS {field} {slot} is outside 0..={REDIS_CLUSTER_MAX_SLOT}"
+        )));
+    }
+    u16::try_from(slot).map_err(|_| {
+        RedisError::Protocol(format!("CLUSTER SLOTS {field} {slot} is outside u16 range"))
+    })
+}
+
+fn parse_cluster_port(value: &RespValue, field: &str) -> Result<u16, RedisError> {
+    let port = value.as_integer().ok_or_else(|| {
+        RedisError::Protocol(format!("CLUSTER SLOTS {field} port must be an integer"))
+    })?;
+    u16::try_from(port).map_err(|_| {
+        RedisError::Protocol(format!(
+            "CLUSTER SLOTS {field} port {port} is outside u16 range"
+        ))
+    })
+}
+
+fn parse_cluster_slot_node(
+    value: &RespValue,
+    field: &str,
+) -> Result<RedisClusterSlotNode, RedisError> {
+    let fields = cluster_slots_array(value, field)?;
+    if fields.len() < 2 {
+        return Err(RedisError::Protocol(format!(
+            "CLUSTER SLOTS {field} must contain endpoint and port"
+        )));
+    }
+
+    Ok(RedisClusterSlotNode {
+        endpoint: parse_cluster_optional_text(&fields[0], field, "endpoint")?,
+        port: parse_cluster_port(&fields[1], field)?,
+        node_id: fields
+            .get(2)
+            .map(|value| parse_cluster_optional_text(value, field, "node id"))
+            .transpose()?
+            .flatten(),
+    })
+}
+
+fn parse_cluster_optional_text(
+    value: &RespValue,
+    field: &str,
+    name: &str,
+) -> Result<Option<String>, RedisError> {
+    match value {
+        RespValue::BulkString(Some(bytes)) => {
+            let text = std::str::from_utf8(bytes).map_err(|_| {
+                RedisError::Protocol(format!("CLUSTER SLOTS {field} {name} is not valid UTF-8"))
+            })?;
+            Ok((!text.is_empty()).then(|| text.to_string()))
+        }
+        RespValue::BulkString(None) | RespValue::Null => Ok(None),
+        _ => Err(RedisError::Protocol(format!(
+            "CLUSTER SLOTS {field} {name} must be a bulk string or null"
+        ))),
+    }
+}
+
 /// Redis client (Phase 1: TCP + RESP decode + pooling; cluster-mode
 /// MOVED/ASK redirect handling per br-asupersync-hzgugy).
 pub struct RedisClient {
@@ -4417,6 +4580,98 @@ mod tests {
 
         primary_server.join().expect("primary server join");
         redirect_server.join().expect("redirect server join");
+    }
+
+    fn redis_bulk(value: &str) -> RespValue {
+        RespValue::BulkString(Some(value.as_bytes().to_vec()))
+    }
+
+    fn cluster_node(endpoint: RespValue, port: i64, node_id: Option<&str>) -> RespValue {
+        let mut fields = vec![endpoint, RespValue::Integer(port)];
+        if let Some(node_id) = node_id {
+            fields.push(redis_bulk(node_id));
+        }
+        RespValue::Array(Some(fields))
+    }
+
+    #[test]
+    fn cluster_slots_parser_accepts_metadata_and_replicas() {
+        let response = RespValue::Array(Some(vec![RespValue::Array(Some(vec![
+            RespValue::Integer(0),
+            RespValue::Integer(5460),
+            RespValue::Array(Some(vec![
+                redis_bulk("127.0.0.1"),
+                RespValue::Integer(30001),
+                redis_bulk("09dbe9720cda62f7865eabc5fd8857c5d2678366"),
+                RespValue::Map(vec![(
+                    redis_bulk("hostname"),
+                    redis_bulk("host-1.redis.example.com"),
+                )]),
+            ])),
+            RespValue::Array(Some(vec![
+                redis_bulk("127.0.0.1"),
+                RespValue::Integer(30004),
+                redis_bulk("821d8ca00d7ccf931ed3ffc7e3db0599d2271abf"),
+                RespValue::Map(vec![(
+                    redis_bulk("hostname"),
+                    redis_bulk("host-2.redis.example.com"),
+                )]),
+            ])),
+        ]))]));
+
+        let slots = parse_cluster_slots_response(&response).expect("cluster slots should parse");
+
+        assert_eq!(slots.len(), 1);
+        assert_eq!(slots[0].start, 0);
+        assert_eq!(slots[0].end, 5460);
+        assert_eq!(slots[0].master.endpoint.as_deref(), Some("127.0.0.1"));
+        assert_eq!(slots[0].master.port, 30001);
+        assert_eq!(
+            slots[0].master.node_id.as_deref(),
+            Some("09dbe9720cda62f7865eabc5fd8857c5d2678366")
+        );
+        assert_eq!(slots[0].replicas.len(), 1);
+        assert_eq!(slots[0].replicas[0].port, 30004);
+    }
+
+    #[test]
+    fn cluster_slots_parser_accepts_legacy_and_unknown_endpoints() {
+        let response = RespValue::Array(Some(vec![
+            RespValue::Array(Some(vec![
+                RespValue::Integer(0),
+                RespValue::Integer(0),
+                cluster_node(RespValue::BulkString(None), 6379, None),
+            ])),
+            RespValue::Array(Some(vec![
+                RespValue::Integer(1),
+                RespValue::Integer(2),
+                cluster_node(redis_bulk("?"), 6380, Some("node-2")),
+            ])),
+        ]));
+
+        let slots = parse_cluster_slots_response(&response).expect("cluster slots should parse");
+
+        assert_eq!(slots[0].master.endpoint, None);
+        assert_eq!(slots[0].master.node_id, None);
+        assert_eq!(slots[1].master.endpoint.as_deref(), Some("?"));
+        assert_eq!(slots[1].master.node_id.as_deref(), Some("node-2"));
+    }
+
+    #[test]
+    fn cluster_slots_parser_rejects_bad_ranges() {
+        let reversed = RespValue::Array(Some(vec![RespValue::Array(Some(vec![
+            RespValue::Integer(9),
+            RespValue::Integer(8),
+            cluster_node(redis_bulk("127.0.0.1"), 6379, Some("node")),
+        ]))]));
+        let out_of_range = RespValue::Array(Some(vec![RespValue::Array(Some(vec![
+            RespValue::Integer(0),
+            RespValue::Integer(16_384),
+            cluster_node(redis_bulk("127.0.0.1"), 6379, Some("node")),
+        ]))]));
+
+        assert!(parse_cluster_slots_response(&reversed).is_err());
+        assert!(parse_cluster_slots_response(&out_of_range).is_err());
     }
 
     #[test]
