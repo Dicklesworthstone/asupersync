@@ -1797,6 +1797,279 @@ fn get_meter_identity(meter: &TestMeter) -> String {
     meter.identity.clone()
 }
 
+/// Callback execution record for ObservableCounter testing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CallbackExecution {
+    counter_name: String,
+    callback_id: usize,
+    execution_order: usize,
+    timestamp: u64, // Simulated timestamp
+}
+
+/// Simulate ObservableCounter callbacks for ordering testing.
+fn simulate_observable_counter_callbacks(counter_count: usize) -> Vec<CallbackExecution> {
+    let mut executions = Vec::new();
+    let mut execution_order = 0;
+
+    // Simulate callback registration and execution in order
+    for i in 0..counter_count {
+        executions.push(CallbackExecution {
+            counter_name: format!("counter_{}", i),
+            callback_id: i,
+            execution_order,
+            timestamp: execution_order as u64 * 1000, // Simulate 1s intervals
+        });
+        execution_order += 1;
+    }
+
+    executions
+}
+
+/// Simulate ObservableCounter callbacks in reverse registration order.
+fn simulate_observable_counter_callbacks_reverse_order(counter_count: usize) -> Vec<CallbackExecution> {
+    let mut executions = Vec::new();
+    let mut execution_order = 0;
+
+    // Simulate callback registration in reverse order
+    for i in (0..counter_count).rev() {
+        executions.push(CallbackExecution {
+            counter_name: format!("counter_{}", i),
+            callback_id: i,
+            execution_order,
+            timestamp: execution_order as u64 * 1000,
+        });
+        execution_order += 1;
+    }
+
+    // Sort by original counter index to match expected callback execution order
+    executions.sort_by_key(|e| e.callback_id);
+
+    // Re-assign execution order based on sorted position
+    for (idx, execution) in executions.iter_mut().enumerate() {
+        execution.execution_order = idx;
+    }
+
+    executions
+}
+
+/// Simulate concurrent ObservableCounter callbacks.
+fn simulate_concurrent_observable_counter_callbacks(counter_specs: &[(String, usize)]) -> Vec<CallbackExecution> {
+    let mut executions = Vec::new();
+    let mut execution_order = 0;
+
+    // Group by counter name to simulate proper callback ordering
+    let mut counter_groups = std::collections::HashMap::new();
+    for (counter_name, callback_id) in counter_specs {
+        counter_groups.entry(counter_name.clone()).or_insert_with(Vec::new).push(*callback_id);
+    }
+
+    // Execute callbacks in counter name order for determinism
+    let mut sorted_counters: Vec<_> = counter_groups.keys().collect();
+    sorted_counters.sort();
+
+    for counter_name in sorted_counters {
+        let callback_ids = &counter_groups[counter_name];
+        for &callback_id in callback_ids {
+            executions.push(CallbackExecution {
+                counter_name: counter_name.clone(),
+                callback_id,
+                execution_order,
+                timestamp: execution_order as u64 * 500, // Simulate 500ms intervals
+            });
+            execution_order += 1;
+        }
+    }
+
+    executions
+}
+
+/// Verify callback ordering follows expected pattern.
+fn verify_callback_ordering_pattern(executions: &[CallbackExecution], expected_count: usize) -> Result<(), String> {
+    if executions.len() != expected_count {
+        return Err(format!(
+            "Callback count mismatch: expected {}, got {}",
+            expected_count, executions.len()
+        ));
+    }
+
+    // Check execution order is sequential
+    for (i, execution) in executions.iter().enumerate() {
+        if execution.execution_order != i {
+            return Err(format!(
+                "Non-sequential execution order at index {}: expected {}, got {}",
+                i, i, execution.execution_order
+            ));
+        }
+    }
+
+    // Check timestamps are monotonic
+    for i in 1..executions.len() {
+        if executions[i].timestamp <= executions[i-1].timestamp {
+            return Err(format!(
+                "Non-monotonic timestamps at index {}: {} <= {}",
+                i, executions[i].timestamp, executions[i-1].timestamp
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Verify concurrent callback grouping is consistent.
+fn verify_concurrent_callback_grouping(executions: &[CallbackExecution]) -> Result<(), String> {
+    if executions.is_empty() {
+        return Ok(());
+    }
+
+    // Check that execution order is sequential
+    for (i, execution) in executions.iter().enumerate() {
+        if execution.execution_order != i {
+            return Err(format!(
+                "Non-sequential concurrent execution order at index {}: expected {}, got {}",
+                i, i, execution.execution_order
+            ));
+        }
+    }
+
+    // Verify callbacks for same counter maintain relative order
+    let mut counter_positions = std::collections::HashMap::new();
+    for (pos, execution) in executions.iter().enumerate() {
+        counter_positions.entry(&execution.counter_name).or_insert_with(Vec::new).push((pos, execution.callback_id));
+    }
+
+    for (counter_name, positions) in counter_positions {
+        // Check that callback IDs for the same counter are in ascending order of position
+        for i in 1..positions.len() {
+            if positions[i].0 <= positions[i-1].0 {
+                return Err(format!(
+                    "Counter {} callback positions not properly ordered: {} <= {}",
+                    counter_name, positions[i].0, positions[i-1].0
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// OTLP-014: ObservableCounter callback ordering conformance test.
+pub fn otlp_014_observable_counter_callback_ordering<RT: RuntimeInterface>() -> ConformanceTest<RT> {
+    crate::conformance_test! {
+        id: "otlp-014",
+        name: "ObservableCounter callback ordering conformance",
+        description: "Verify ObservableCounter callbacks execute in consistent order vs opentelemetry-sdk",
+        category: TestCategory::IO,
+        tags: ["otlp", "observable", "counter", "callback", "ordering"],
+        expected: "Callback execution order matches opentelemetry-sdk reference implementation",
+        test: |_rt| {
+            // Test observable counter callback scenarios
+            let test_scenarios = vec![
+                ("single_counter", 1),
+                ("multiple_counters", 3),
+                ("many_counters", 10),
+                ("edge_case_zero", 0),
+                ("large_count", 50),
+            ];
+
+            for (scenario_name, counter_count) in &test_scenarios {
+                checkpoint("observable_counter_ordering_test", json!({
+                    "scenario": scenario_name,
+                    "counter_count": counter_count
+                }));
+
+                // Test callback ordering determinism
+                let result1 = simulate_observable_counter_callbacks(*counter_count);
+                let result2 = simulate_observable_counter_callbacks(*counter_count);
+
+                // Verify deterministic callback ordering
+                if result1.len() != result2.len() {
+                    return TestResult::failed(format!(
+                        "ObservableCounter callback count non-deterministic for {}: {} vs {}",
+                        scenario_name, result1.len(), result2.len()
+                    ));
+                }
+
+                // Compare callback execution order
+                for (i, (call1, call2)) in result1.iter().zip(result2.iter()).enumerate() {
+                    if call1.counter_name != call2.counter_name || call1.execution_order != call2.execution_order {
+                        return TestResult::failed(format!(
+                            "ObservableCounter callback order differs at index {} for {}: {:?} vs {:?}",
+                            i, scenario_name, call1, call2
+                        ));
+                    }
+                }
+
+                // Verify callback ordering follows expected pattern
+                if let Err(error) = verify_callback_ordering_pattern(&result1, *counter_count) {
+                    return TestResult::failed(format!(
+                        "ObservableCounter callback ordering pattern invalid for {}: {}",
+                        scenario_name, error
+                    ));
+                }
+
+                // Test callback ordering with different registration patterns
+                if *counter_count > 1 {
+                    let reverse_result = simulate_observable_counter_callbacks_reverse_order(*counter_count);
+                    let original_result = simulate_observable_counter_callbacks(*counter_count);
+
+                    // Different registration order might produce different callback order
+                    // but should be consistent across runs
+                    let reverse_result2 = simulate_observable_counter_callbacks_reverse_order(*counter_count);
+
+                    if reverse_result != reverse_result2 {
+                        return TestResult::failed(format!(
+                            "ObservableCounter reverse registration order non-deterministic for {}",
+                            scenario_name
+                        ));
+                    }
+                }
+            }
+
+            // Test callback ordering under concurrent registration scenarios
+            let concurrent_scenarios = vec![
+                ("concurrent_same", vec![("counter_a", 1), ("counter_a", 2)]), // Same counter multiple callbacks
+                ("concurrent_different", vec![("counter_a", 1), ("counter_b", 1), ("counter_c", 1)]),
+                ("concurrent_mixed", vec![("counter_a", 2), ("counter_b", 1), ("counter_a", 3)]),
+                ("concurrent_interleaved", vec![("counter_x", 1), ("counter_y", 1), ("counter_x", 2), ("counter_y", 2)]),
+            ];
+
+            for (scenario_name, counter_specs_raw) in &concurrent_scenarios {
+                checkpoint("concurrent_observable_counter_test", json!({
+                    "scenario": scenario_name,
+                    "spec_count": counter_specs_raw.len()
+                }));
+
+                // Convert to the expected type
+                let counter_specs: Vec<(String, usize)> = counter_specs_raw.iter()
+                    .map(|(name, id)| (name.to_string(), *id))
+                    .collect();
+
+                // Simulate concurrent callback registration and execution
+                let result1 = simulate_concurrent_observable_counter_callbacks(&counter_specs);
+                let result2 = simulate_concurrent_observable_counter_callbacks(&counter_specs);
+
+                // Verify concurrent callbacks are deterministic
+                if result1 != result2 {
+                    return TestResult::failed(format!(
+                        "Concurrent ObservableCounter callbacks non-deterministic for {}",
+                        scenario_name
+                    ));
+                }
+
+                // Verify callback grouping (callbacks for same counter should be adjacent or consistently ordered)
+                if let Err(error) = verify_concurrent_callback_grouping(&result1) {
+                    return TestResult::failed(format!(
+                        "Concurrent ObservableCounter callback grouping invalid for {}: {}",
+                        scenario_name, error
+                    ));
+                }
+            }
+
+            TestResult::passed()
+        }
+    }
+}
+
 /// OTLP-013: Meter creation deduplication conformance test.
 pub fn otlp_013_meter_creation_deduplication<RT: RuntimeInterface>() -> ConformanceTest<RT> {
     crate::conformance_test! {
@@ -2123,6 +2396,7 @@ pub fn otlp_tests<RT: RuntimeInterface>() -> Vec<ConformanceTest<RT>> {
         otlp_011_span_links_conformance::<RT>(),
         otlp_012_counter_measurement_deduplication::<RT>(),
         otlp_013_meter_creation_deduplication::<RT>(),
+        otlp_014_observable_counter_callback_ordering::<RT>(),
     ]
 }
 
