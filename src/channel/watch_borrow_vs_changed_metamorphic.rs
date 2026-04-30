@@ -23,7 +23,7 @@ fn test_cx() -> crate::cx::Cx {
 /// Simple block_on implementation for tests.
 fn block_on<F: Future>(f: F) -> F::Output {
     let waker = std::task::Waker::noop();
-    let mut cx = Context::from_waker(&waker);
+    let mut cx = Context::from_waker(waker);
     let mut pinned = Box::pin(f);
     loop {
         match pinned.as_mut().poll(&mut cx) {
@@ -77,12 +77,12 @@ impl Arbitrary for OrderingTestConfig {
 
 /// Metamorphic Relation 1: Signal Completeness
 ///
-/// **Property**: Every successful send() should eventually result in ALL waiting
-/// changed() receivers being woken AND all borrow_and_update() calls seeing
-/// the updated value. No signals should be lost between mark_changed and wake.
+/// **Property**: Every successful send() should leave all receiver styles able
+/// to converge on the latest value. Watch channels coalesce intermediate values,
+/// so receivers are not required to observe every version.
 ///
 /// **Transformation**: Vary concurrency patterns between send/borrow/changed.
-/// **Invariant**: Signal count = send count for all receiver patterns.
+/// **Invariant**: all receiver patterns eventually observe the latest value.
 fn verify_signal_completeness(config: &OrderingTestConfig) {
     init_test("metamorphic_signal_completeness");
     let cx = test_cx();
@@ -92,6 +92,8 @@ fn verify_signal_completeness(config: &OrderingTestConfig) {
     // Shared state for tracking signals
     let signals_received = Arc::new(AtomicUsize::new(0));
     let borrow_updates_seen = Arc::new(AtomicUsize::new(0));
+    let max_changed_value = Arc::new(AtomicU32::new(0));
+    let max_borrow_value = Arc::new(AtomicU32::new(0));
     let completed = Arc::new(AtomicBool::new(false));
     let with_delays = config.with_delays;
 
@@ -101,6 +103,7 @@ fn verify_signal_completeness(config: &OrderingTestConfig) {
     for _ in 0..config.changed_receiver_count {
         let mut rx = tx.subscribe();
         let signals_received = Arc::clone(&signals_received);
+        let max_changed_value = Arc::clone(&max_changed_value);
         let completed = Arc::clone(&completed);
         let cx_clone = cx.clone();
 
@@ -113,7 +116,8 @@ fn verify_signal_completeness(config: &OrderingTestConfig) {
                         signals_received.fetch_add(1, Ordering::Relaxed);
 
                         // Verify that borrow_and_update sees consistent value
-                        let _value = rx.borrow_and_update();
+                        let value = *rx.borrow_and_update();
+                        max_changed_value.fetch_max(value, Ordering::Relaxed);
                     }
                     Err(RecvError::Closed) => break,
                     Err(RecvError::Cancelled) => break,
@@ -124,6 +128,8 @@ fn verify_signal_completeness(config: &OrderingTestConfig) {
                     thread::sleep(std::time::Duration::from_millis(1));
                 }
             }
+            let value = *rx.borrow_and_update();
+            max_changed_value.fetch_max(value, Ordering::Relaxed);
             signal_count
         });
         handles.push(handle);
@@ -133,6 +139,7 @@ fn verify_signal_completeness(config: &OrderingTestConfig) {
     for _ in 0..config.borrow_receiver_count {
         let mut rx = tx.subscribe();
         let borrow_updates_seen = Arc::clone(&borrow_updates_seen);
+        let max_borrow_value = Arc::clone(&max_borrow_value);
         let completed = Arc::clone(&completed);
 
         let handle = thread::spawn(move || {
@@ -140,7 +147,8 @@ fn verify_signal_completeness(config: &OrderingTestConfig) {
             let mut update_count = 0;
 
             while !completed.load(Ordering::Acquire) {
-                let _current_value = rx.borrow_and_update();
+                let value = *rx.borrow_and_update();
+                max_borrow_value.fetch_max(value, Ordering::Relaxed);
                 let current_version = rx.seen_version();
 
                 if current_version != last_version {
@@ -154,6 +162,8 @@ fn verify_signal_completeness(config: &OrderingTestConfig) {
                 }
                 thread::yield_now();
             }
+            let value = *rx.borrow_and_update();
+            max_borrow_value.fetch_max(value, Ordering::Relaxed);
             update_count
         });
         handles.push(handle);
@@ -192,43 +202,27 @@ fn verify_signal_completeness(config: &OrderingTestConfig) {
         handle.join().unwrap();
     }
 
-    // METAMORPHIC ASSERTION 1: Signal completeness
+    // METAMORPHIC ASSERTION 1: eventual convergence to the latest watch value.
     let total_changed_signals = signals_received.load(Ordering::Acquire);
     let total_borrow_updates = borrow_updates_seen.load(Ordering::Acquire);
-    let expected_total = total_actual_sends * config.changed_receiver_count;
-
-    // Each changed() receiver should see approximately the same number of signals as sends
-    // (allowing for some variance due to concurrency)
-    let signal_variance = if expected_total > 0 {
-        (total_changed_signals as i64 - expected_total as i64).abs() as f64 / expected_total as f64
-    } else {
-        0.0
-    };
-
-    assert!(
-        signal_variance <= 0.5, // Allow 50% variance due to concurrency
-        "Signal completeness violation: expected ~{} total signals, got {} (variance: {:.2}%)",
-        expected_total,
-        total_changed_signals,
-        signal_variance * 100.0
+    let expected_latest = total_actual_sends as u32;
+    assert_eq!(
+        max_changed_value.load(Ordering::Acquire),
+        expected_latest,
+        "changed receivers should converge to the latest watch value"
     );
-
-    // METAMORPHIC ASSERTION 2: Borrow updates consistency
-    // Each borrow_and_update should see updates corresponding to actual sends
-    let borrow_variance = if total_actual_sends > 0 {
-        (total_borrow_updates as i64 - (total_actual_sends * config.borrow_receiver_count) as i64)
-            .abs() as f64
-            / (total_actual_sends * config.borrow_receiver_count) as f64
-    } else {
-        0.0
-    };
-
+    assert_eq!(
+        max_borrow_value.load(Ordering::Acquire),
+        expected_latest,
+        "borrow_and_update receivers should converge to the latest watch value"
+    );
     assert!(
-        borrow_variance <= 0.3, // Stricter for borrow_and_update
-        "Borrow update consistency violation: expected ~{} updates, got {} (variance: {:.2}%)",
-        total_actual_sends * config.borrow_receiver_count,
-        total_borrow_updates,
-        borrow_variance * 100.0
+        total_changed_signals > 0,
+        "at least one changed receiver should observe a wake"
+    );
+    assert!(
+        total_borrow_updates > 0,
+        "at least one borrow receiver should observe an update"
     );
 
     crate::test_complete!("metamorphic_signal_completeness");
@@ -287,7 +281,9 @@ fn verify_ordering_consistency() {
 
     let borrow_handle = thread::spawn(move || {
         while !completed_clone2.load(Ordering::Acquire) {
-            let _value = rx_borrow.borrow_and_update();
+            {
+                let _snapshot = rx_borrow.borrow_and_update();
+            }
             let current_version = rx_borrow.seen_version() as u32;
 
             let mut max_val = max_borrowed_version_clone.load(Ordering::Relaxed);
@@ -315,6 +311,7 @@ fn verify_ordering_consistency() {
 
     thread::sleep(std::time::Duration::from_millis(50));
     completed.store(true, Ordering::Release);
+    drop(tx);
 
     changed_handle.join().unwrap();
     borrow_handle.join().unwrap();
@@ -348,7 +345,7 @@ fn verify_no_lost_wakeups() {
 
     // Test multiple scenarios with different timing
     for scenario in 0..5 {
-        let (tx, mut rx) = channel(scenario as u32);
+        let (tx, mut rx) = channel(scenario);
 
         // Create a custom waker that tracks wake calls
         let wake_count = Arc::new(AtomicUsize::new(0));
@@ -395,6 +392,7 @@ fn verify_no_lost_wakeups() {
             "Scenario {}: changed() should return Ready after send and wake",
             scenario
         );
+        drop(changed_future);
 
         // Verify borrow_and_update sees the correct value
         let observed_value = *rx.borrow_and_update();
@@ -440,7 +438,7 @@ fn concrete_single_sender_multiple_receivers() {
 }
 
 #[test]
-fn concrete_multiple_senders_single_receiver() {
+fn concrete_multiple_send_batches_single_receiver() {
     let config = OrderingTestConfig {
         send_batch_count: 3,
         borrow_receiver_count: 1,
