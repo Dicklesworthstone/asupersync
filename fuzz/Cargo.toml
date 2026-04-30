@@ -4210,3 +4210,9 @@ path = "fuzz_targets/h2_settings_enable_push_dynamic.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "h2_trailers_end_stream_validation"
+path = "fuzz_targets/h2_trailers_end_stream_validation.rs"
+test = false
+doc = false
