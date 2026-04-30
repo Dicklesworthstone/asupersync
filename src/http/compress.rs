@@ -262,6 +262,45 @@ impl Compressor for IdentityCompressor {
     }
 }
 
+/// Identity compressor variant that enforces an output size cap.
+#[derive(Debug)]
+struct LimitedIdentityCompressor {
+    max_size: usize,
+    emitted: usize,
+}
+
+impl LimitedIdentityCompressor {
+    const fn new(max_size: usize) -> Self {
+        Self {
+            max_size,
+            emitted: 0,
+        }
+    }
+}
+
+impl Compressor for LimitedIdentityCompressor {
+    fn compress(&mut self, input: &[u8], output: &mut Vec<u8>) -> io::Result<()> {
+        let next_emitted = self
+            .emitted
+            .checked_add(input.len())
+            .ok_or_else(|| limit_error("compressed size exceeds limit"))?;
+        if next_emitted > self.max_size {
+            return Err(limit_error("compressed size exceeds limit"));
+        }
+        output.extend_from_slice(input);
+        self.emitted = next_emitted;
+        Ok(())
+    }
+
+    fn finish(&mut self, _output: &mut Vec<u8>) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn encoding(&self) -> ContentEncoding {
+        ContentEncoding::Identity
+    }
+}
+
 /// Identity decompressor that passes data through unchanged.
 #[derive(Debug, Default)]
 pub struct IdentityDecompressor {
@@ -363,7 +402,6 @@ const BROTLI_DEFAULT_QUALITY: u32 = 5;
 #[cfg(feature = "compression")]
 const BROTLI_DEFAULT_LGWIN: u32 = 22;
 
-#[cfg(feature = "compression")]
 fn limit_error(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
@@ -991,7 +1029,10 @@ pub fn make_compressor_with_output_limit(
     max_size: Option<usize>,
 ) -> Option<Box<dyn Compressor>> {
     match encoding {
-        ContentEncoding::Identity => Some(Box::new(IdentityCompressor)),
+        ContentEncoding::Identity => match max_size {
+            Some(max_size) => Some(Box::new(LimitedIdentityCompressor::new(max_size))),
+            None => Some(Box::new(IdentityCompressor)),
+        },
         #[cfg(feature = "compression")]
         ContentEncoding::Gzip => Some(Box::new(GzipCompressor::with_output_limit(max_size))),
         #[cfg(feature = "compression")]
@@ -1520,6 +1561,19 @@ mod tests {
         let comp = make_compressor(ContentEncoding::Identity);
         assert!(comp.is_some());
         assert_eq!(comp.unwrap().encoding(), ContentEncoding::Identity);
+    }
+
+    #[test]
+    fn make_compressor_with_output_limit_caps_identity() {
+        let mut comp = make_compressor_with_output_limit(ContentEncoding::Identity, Some(2))
+            .expect("identity compressor should always be available");
+        let mut output = Vec::new();
+
+        comp.compress(b"ab", &mut output).unwrap();
+        let result = comp.compress(b"c", &mut output);
+
+        assert!(result.is_err());
+        assert_eq!(output, b"ab");
     }
 
     #[cfg(feature = "compression")]
