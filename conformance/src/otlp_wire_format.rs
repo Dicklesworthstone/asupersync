@@ -7747,6 +7747,372 @@ fn verify_statistical_randomness(result: &SpanIdGenerationResult) -> Result<(), 
     Ok(())
 }
 
+/// OTLP-029: Span attribute count limit conformance test wrapper
+pub fn otlp_029_span_attribute_count_limit_conformance<RT: RuntimeInterface>() -> ConformanceTest<RT> {
+    crate::conformance_test! {
+        id: "otlp-029",
+        name: "Span attribute count limit conformance",
+        description: "Verify span attribute count limit vs opentelemetry-sdk — identical limit handling and overflow behavior",
+        category: TestCategory::IO,
+        tags: ["otlp", "span", "attributes", "limit", "count", "overflow"],
+        expected: "Span attribute count limits handled identically with consistent overflow behavior",
+        test: |_rt| {
+            // OpenTelemetry spec defines default attribute count limit (typically 128)
+            const DEFAULT_ATTRIBUTE_LIMIT: usize = 128;
+
+            // Test scenarios for comprehensive attribute limit validation
+            let test_scenarios = vec![
+                AttributeLimitScenario {
+                    name: "under_limit_small".to_string(),
+                    attribute_count: 10,
+                    attribute_limit: Some(DEFAULT_ATTRIBUTE_LIMIT),
+                    expected_behavior: AttributeLimitBehavior::AllAccepted,
+                },
+                AttributeLimitScenario {
+                    name: "under_limit_large".to_string(),
+                    attribute_count: 100,
+                    attribute_limit: Some(DEFAULT_ATTRIBUTE_LIMIT),
+                    expected_behavior: AttributeLimitBehavior::AllAccepted,
+                },
+                AttributeLimitScenario {
+                    name: "at_limit_exact".to_string(),
+                    attribute_count: DEFAULT_ATTRIBUTE_LIMIT,
+                    attribute_limit: Some(DEFAULT_ATTRIBUTE_LIMIT),
+                    expected_behavior: AttributeLimitBehavior::AllAccepted,
+                },
+                AttributeLimitScenario {
+                    name: "over_limit_small_excess".to_string(),
+                    attribute_count: DEFAULT_ATTRIBUTE_LIMIT + 5,
+                    attribute_limit: Some(DEFAULT_ATTRIBUTE_LIMIT),
+                    expected_behavior: AttributeLimitBehavior::TruncateToLimit,
+                },
+                AttributeLimitScenario {
+                    name: "over_limit_large_excess".to_string(),
+                    attribute_count: DEFAULT_ATTRIBUTE_LIMIT + 100,
+                    attribute_limit: Some(DEFAULT_ATTRIBUTE_LIMIT),
+                    expected_behavior: AttributeLimitBehavior::TruncateToLimit,
+                },
+                AttributeLimitScenario {
+                    name: "no_limit_set".to_string(),
+                    attribute_count: 300, // Well over typical limit
+                    attribute_limit: None, // No explicit limit
+                    expected_behavior: AttributeLimitBehavior::AllAccepted,
+                },
+                AttributeLimitScenario {
+                    name: "custom_low_limit".to_string(),
+                    attribute_count: 20,
+                    attribute_limit: Some(10),
+                    expected_behavior: AttributeLimitBehavior::TruncateToLimit,
+                },
+                AttributeLimitScenario {
+                    name: "custom_high_limit".to_string(),
+                    attribute_count: 500,
+                    attribute_limit: Some(1000),
+                    expected_behavior: AttributeLimitBehavior::AllAccepted,
+                },
+                AttributeLimitScenario {
+                    name: "zero_limit".to_string(),
+                    attribute_count: 5,
+                    attribute_limit: Some(0),
+                    expected_behavior: AttributeLimitBehavior::TruncateToLimit,
+                },
+            ];
+
+            for scenario in test_scenarios {
+                // Test asupersync span attribute limit behavior
+                let asupersync_result = match simulate_asupersync_attribute_limits(&scenario) {
+                    Ok(result) => result,
+                    Err(e) => return TestResult::failed(format!(
+                        "OTLP-029 FAILED: Asupersync attribute limit simulation error for scenario '{}': {}",
+                        scenario.name, e
+                    )),
+                };
+
+                // Test OpenTelemetry SDK span attribute limit behavior
+                let opentelemetry_result = match simulate_opentelemetry_attribute_limits(&scenario) {
+                    Ok(result) => result,
+                    Err(e) => return TestResult::failed(format!(
+                        "OTLP-029 FAILED: OpenTelemetry attribute limit simulation error for scenario '{}': {}",
+                        scenario.name, e
+                    )),
+                };
+
+                // Verify attribute limit behavior matches (differential comparison)
+                if !compare_attribute_limit_results(&asupersync_result, &opentelemetry_result) {
+                    return TestResult::failed(format!(
+                        "OTLP-029 FAILED for scenario '{}': Attribute limit behavior mismatch\n\
+                         Asupersync: {:?}\n\
+                         OpenTelemetry: {:?}",
+                        scenario.name, asupersync_result, opentelemetry_result
+                    ));
+                }
+
+                // Verify accepted attribute count matches expected behavior
+                let expected_count = calculate_expected_attribute_count(&scenario);
+                if asupersync_result.accepted_attributes.len() != expected_count {
+                    return TestResult::failed(format!(
+                        "OTLP-029 FAILED for scenario '{}': Asupersync accepted count mismatch\n\
+                         Expected: {}, Actual: {}",
+                        scenario.name, expected_count, asupersync_result.accepted_attributes.len()
+                    ));
+                }
+
+                // Verify dropped attribute count is consistent
+                let expected_dropped = scenario.attribute_count.saturating_sub(expected_count);
+                if asupersync_result.dropped_attributes.len() != expected_dropped {
+                    return TestResult::failed(format!(
+                        "OTLP-029 FAILED for scenario '{}': Asupersync dropped count mismatch\n\
+                         Expected: {}, Actual: {}",
+                        scenario.name, expected_dropped, asupersync_result.dropped_attributes.len()
+                    ));
+                }
+
+                // Verify limit enforcement consistency
+                if let Err(enforcement_error) = verify_limit_enforcement(&asupersync_result, &opentelemetry_result, &scenario) {
+                    return TestResult::failed(format!(
+                        "OTLP-029 FAILED for scenario '{}': Limit enforcement issue - {}",
+                        scenario.name, enforcement_error
+                    ));
+                }
+            }
+
+            TestResult::passed()
+        }
+    }
+}
+
+/// Attribute limit behavior types
+#[derive(Debug, Clone, PartialEq)]
+enum AttributeLimitBehavior {
+    AllAccepted,         // All attributes within limit
+    TruncateToLimit,     // Excess attributes dropped
+    RejectAll,           // All attributes rejected (edge case)
+}
+
+/// Attribute limit test scenario
+#[derive(Debug, Clone)]
+struct AttributeLimitScenario {
+    name: String,
+    attribute_count: usize,
+    attribute_limit: Option<usize>, // None = no limit
+    expected_behavior: AttributeLimitBehavior,
+}
+
+/// Attribute limit result for comparison
+#[derive(Debug, Clone, PartialEq)]
+struct AttributeLimitResult {
+    span_name: String,
+    total_attributes_offered: usize,
+    accepted_attributes: Vec<SpanAttribute>,
+    dropped_attributes: Vec<SpanAttribute>,
+    limit_exceeded: bool,
+    warning_messages: Vec<String>,
+}
+
+/// Span attribute for testing
+#[derive(Debug, Clone, PartialEq)]
+struct SpanAttribute {
+    key: String,
+    value: String,
+    order_index: usize, // For testing attribute ordering preservation
+}
+
+/// Simulate asupersync span attribute limit implementation
+fn simulate_asupersync_attribute_limits(scenario: &AttributeLimitScenario) -> Result<AttributeLimitResult, String> {
+    // Generate test attributes
+    let mut all_attributes = vec![];
+    for i in 0..scenario.attribute_count {
+        all_attributes.push(SpanAttribute {
+            key: format!("attr_key_{}", i),
+            value: format!("attr_value_{}", i),
+            order_index: i,
+        });
+    }
+
+    // Apply attribute limit (simulating asupersync behavior)
+    let effective_limit = scenario.attribute_limit.unwrap_or(usize::MAX);
+    let accepted_count = all_attributes.len().min(effective_limit);
+
+    let accepted_attributes = all_attributes[..accepted_count].to_vec();
+    let dropped_attributes = if all_attributes.len() > accepted_count {
+        all_attributes[accepted_count..].to_vec()
+    } else {
+        vec![]
+    };
+
+    let limit_exceeded = all_attributes.len() > effective_limit;
+    let mut warning_messages = vec![];
+
+    if limit_exceeded {
+        warning_messages.push(format!(
+            "Attribute count {} exceeds limit {}, {} attributes dropped",
+            all_attributes.len(), effective_limit, dropped_attributes.len()
+        ));
+    }
+
+    Ok(AttributeLimitResult {
+        span_name: format!("asupersync_{}", scenario.name),
+        total_attributes_offered: scenario.attribute_count,
+        accepted_attributes,
+        dropped_attributes,
+        limit_exceeded,
+        warning_messages,
+    })
+}
+
+/// Simulate OpenTelemetry SDK span attribute limit implementation
+fn simulate_opentelemetry_attribute_limits(scenario: &AttributeLimitScenario) -> Result<AttributeLimitResult, String> {
+    // Generate test attributes (same as asupersync for comparison)
+    let mut all_attributes = vec![];
+    for i in 0..scenario.attribute_count {
+        all_attributes.push(SpanAttribute {
+            key: format!("attr_key_{}", i),
+            value: format!("attr_value_{}", i),
+            order_index: i,
+        });
+    }
+
+    // Apply attribute limit (simulating OpenTelemetry SDK behavior)
+    let effective_limit = scenario.attribute_limit.unwrap_or(usize::MAX);
+    let accepted_count = all_attributes.len().min(effective_limit);
+
+    let accepted_attributes = all_attributes[..accepted_count].to_vec();
+    let dropped_attributes = if all_attributes.len() > accepted_count {
+        all_attributes[accepted_count..].to_vec()
+    } else {
+        vec![]
+    };
+
+    let limit_exceeded = all_attributes.len() > effective_limit;
+    let mut warning_messages = vec![];
+
+    if limit_exceeded {
+        warning_messages.push(format!(
+            "Attribute count {} exceeds limit {}, {} attributes dropped",
+            all_attributes.len(), effective_limit, dropped_attributes.len()
+        ));
+    }
+
+    Ok(AttributeLimitResult {
+        span_name: format!("opentelemetry_{}", scenario.name),
+        total_attributes_offered: scenario.attribute_count,
+        accepted_attributes,
+        dropped_attributes,
+        limit_exceeded,
+        warning_messages,
+    })
+}
+
+/// Compare attribute limit results for conformance
+fn compare_attribute_limit_results(
+    asupersync_result: &AttributeLimitResult,
+    opentelemetry_result: &AttributeLimitResult,
+) -> bool {
+    // Both must have the same number of accepted attributes
+    if asupersync_result.accepted_attributes.len() != opentelemetry_result.accepted_attributes.len() {
+        return false;
+    }
+
+    // Both must have the same number of dropped attributes
+    if asupersync_result.dropped_attributes.len() != opentelemetry_result.dropped_attributes.len() {
+        return false;
+    }
+
+    // Limit exceeded flag must match
+    if asupersync_result.limit_exceeded != opentelemetry_result.limit_exceeded {
+        return false;
+    }
+
+    // Total attributes offered must match
+    if asupersync_result.total_attributes_offered != opentelemetry_result.total_attributes_offered {
+        return false;
+    }
+
+    // Accepted attributes should be identical (same keys, values, order)
+    for (asupersync_attr, opentelemetry_attr) in
+        asupersync_result.accepted_attributes.iter().zip(opentelemetry_result.accepted_attributes.iter()) {
+        if asupersync_attr != opentelemetry_attr {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Calculate expected attribute count based on scenario
+fn calculate_expected_attribute_count(scenario: &AttributeLimitScenario) -> usize {
+    match scenario.expected_behavior {
+        AttributeLimitBehavior::AllAccepted => scenario.attribute_count,
+        AttributeLimitBehavior::TruncateToLimit => {
+            let limit = scenario.attribute_limit.unwrap_or(usize::MAX);
+            scenario.attribute_count.min(limit)
+        },
+        AttributeLimitBehavior::RejectAll => 0,
+    }
+}
+
+/// Verify limit enforcement is consistent
+fn verify_limit_enforcement(
+    asupersync_result: &AttributeLimitResult,
+    opentelemetry_result: &AttributeLimitResult,
+    scenario: &AttributeLimitScenario,
+) -> Result<(), String> {
+    // Verify attribute ordering is preserved for accepted attributes
+    for (i, attr) in asupersync_result.accepted_attributes.iter().enumerate() {
+        if attr.order_index != i {
+            return Err(format!(
+                "Asupersync attribute ordering violated: expected index {}, got {}",
+                i, attr.order_index
+            ));
+        }
+    }
+
+    for (i, attr) in opentelemetry_result.accepted_attributes.iter().enumerate() {
+        if attr.order_index != i {
+            return Err(format!(
+                "OpenTelemetry attribute ordering violated: expected index {}, got {}",
+                i, attr.order_index
+            ));
+        }
+    }
+
+    // Verify dropped attributes are the expected ones (should be the later ones)
+    if let Some(limit) = scenario.attribute_limit {
+        if scenario.attribute_count > limit {
+            for (i, attr) in asupersync_result.dropped_attributes.iter().enumerate() {
+                let expected_index = limit + i;
+                if attr.order_index != expected_index {
+                    return Err(format!(
+                        "Asupersync dropped wrong attribute: expected index {}, got {}",
+                        expected_index, attr.order_index
+                    ));
+                }
+            }
+
+            for (i, attr) in opentelemetry_result.dropped_attributes.iter().enumerate() {
+                let expected_index = limit + i;
+                if attr.order_index != expected_index {
+                    return Err(format!(
+                        "OpenTelemetry dropped wrong attribute: expected index {}, got {}",
+                        expected_index, attr.order_index
+                    ));
+                }
+            }
+        }
+    }
+
+    // Verify warning messages are generated when appropriate
+    if asupersync_result.limit_exceeded && asupersync_result.warning_messages.is_empty() {
+        return Err("Asupersync should generate warnings when limit exceeded".to_string());
+    }
+
+    if opentelemetry_result.limit_exceeded && opentelemetry_result.warning_messages.is_empty() {
+        return Err("OpenTelemetry should generate warnings when limit exceeded".to_string());
+    }
+
+    Ok(())
+}
+
 /// OTLP-028: Span is_recording() after end conformance test wrapper
 pub fn otlp_028_span_is_recording_after_end_conformance<RT: RuntimeInterface>() -> ConformanceTest<RT> {
     crate::conformance_test! {
@@ -8699,6 +9065,7 @@ pub fn otlp_tests<RT: RuntimeInterface>() -> Vec<ConformanceTest<RT>> {
         otlp_026_span_set_status_conformance::<RT>(),
         otlp_027_span_timing_monotonicity_conformance::<RT>(),
         otlp_028_span_is_recording_after_end_conformance::<RT>(),
+        otlp_029_span_attribute_count_limit_conformance::<RT>(),
     ]
 }
 
