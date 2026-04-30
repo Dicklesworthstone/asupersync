@@ -1466,6 +1466,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h1_lf_line_terminators"
+path = "fuzz_targets/h1_lf_line_terminators.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "symbol_auth"
 path = "fuzz_targets/symbol_auth.rs"
 test = false
@@ -3544,6 +3551,17 @@ bench = false
 [[bin]]
 name = "notify_drop_pending"
 path = "fuzz_targets/notify_drop_pending.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #155 — Notify notify_one + drop notified-fut race fuzzer
+# Tests arbitrary timing between notify_one() calls and Notified future
+# drops to ensure proper waiter slot cleanup and baton passing. Validates
+# that dropped futures release waiter slots and don't cause permanent leaks.
+[[bin]]
+name = "notify_drop_race"
+path = "fuzz_targets/notify_drop_race.rs"
 test = false
 doc = false
 bench = false
