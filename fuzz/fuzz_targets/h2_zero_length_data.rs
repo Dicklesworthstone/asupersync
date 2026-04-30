@@ -3,14 +3,15 @@
 use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
 
-use asupersync::bytes::BytesMut;
+use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::codec::Encoder;
-use asupersync::http::h2::connection::{FrameCodec, ConnectionState};
+use asupersync::http::h2::connection::FrameCodec;
 use asupersync::http::h2::frame::{
-    Frame, FrameType, DataFrame, SettingsFrame, HeadersFrame,
+    Frame, DataFrame, SettingsFrame, HeadersFrame,
+    WindowUpdateFrame, PingFrame, RstStreamFrame,
     FRAME_HEADER_SIZE
 };
-use asupersync::http::h2::error::{ErrorCode, H2Error};
+use asupersync::http::h2::error::ErrorCode;
 
 /// HTTP/2 zero-length DATA frame test sequence
 #[derive(Debug, Clone, Arbitrary)]
@@ -205,33 +206,26 @@ fn test_interleaved_zero_length_data(test_seq: &ZeroLengthDataSequence) {
 fn create_setup_frame(setup: &SetupFrame) -> Result<Frame, Box<dyn std::error::Error>> {
     match setup {
         SetupFrame::Settings => {
-            Ok(Frame::Settings(SettingsFrame::new(
-                Vec::new(), // Empty settings
-                false, // Not an ACK
-            )?))
+            Ok(Frame::Settings(SettingsFrame::new(Vec::new())))
         }
         SetupFrame::Headers { stream_id, end_headers } => {
             let normalized_stream_id = normalize_stream_id(*stream_id);
-            let headers = vec![
-                (b":method".to_vec(), b"GET".to_vec()),
-                (b":path".to_vec(), b"/".to_vec()),
-                (b":scheme".to_vec(), b"https".to_vec()),
-                (b":authority".to_vec(), b"example.com".to_vec()),
-            ];
+            let header_block = Bytes::from_static(b"\x00\x00\x00\x00"); // Minimal HPACK block
 
-            Ok(Frame::Headers(HeadersFrame::new(
-                normalized_stream_id,
-                headers.into(),
-                *end_headers,
-                false, // No priority
-            )?))
+            Ok(Frame::Headers(HeadersFrame {
+                stream_id: normalized_stream_id,
+                header_block,
+                end_stream: false,
+                end_headers: *end_headers,
+                priority: None,
+            }))
         }
         SetupFrame::WindowUpdate { stream_id, increment } => {
             let normalized_increment = if *increment == 0 { 1 } else { *increment };
-            Ok(Frame::WindowUpdate(asupersync::http::h2::frame::WindowUpdateFrame::new(
+            Ok(Frame::WindowUpdate(WindowUpdateFrame::new(
                 normalize_stream_id(*stream_id),
                 normalized_increment,
-            )?))
+            )))
         }
     }
 }
@@ -250,16 +244,14 @@ fn create_zero_length_data_frame(data_config: &ZeroLengthDataFrame) -> Frame {
             stream_id,
             padded_payload.into(),
             data_config.end_stream,
-            true, // PADDED flag
-        ).expect("Failed to create padded zero-length DATA frame"))
+        ))
     } else {
         // Pure zero-length DATA frame
         Frame::Data(DataFrame::new(
             stream_id,
-            Vec::new().into(),
+            Bytes::new(), // Zero-length data
             data_config.end_stream,
-            false, // No PADDED flag
-        ).expect("Failed to create zero-length DATA frame"))
+        ))
     }
 }
 
@@ -268,23 +260,25 @@ fn create_interleaved_frame(interleaved: &InterleavedFrame) -> Result<Frame, Box
     match interleaved {
         InterleavedFrame::Ping { ack } => {
             let ping_data = [0u8; 8];
-            Ok(Frame::Ping(asupersync::http::h2::frame::PingFrame::new(
-                ping_data,
-                *ack,
-            )?))
+            if *ack {
+                Ok(Frame::Ping(PingFrame::ack(ping_data)))
+            } else {
+                Ok(Frame::Ping(PingFrame::new(ping_data)))
+            }
         }
         InterleavedFrame::WindowUpdate { stream_id, increment } => {
             let normalized_increment = if *increment == 0 { 1 } else { *increment };
-            Ok(Frame::WindowUpdate(asupersync::http::h2::frame::WindowUpdateFrame::new(
+            Ok(Frame::WindowUpdate(WindowUpdateFrame::new(
                 normalize_stream_id(*stream_id),
                 normalized_increment,
-            )?))
+            )))
         }
         InterleavedFrame::Settings { ack } => {
-            Ok(Frame::Settings(SettingsFrame::new(
-                Vec::new(),
-                *ack,
-            )?))
+            if *ack {
+                Ok(Frame::Settings(SettingsFrame::ack()))
+            } else {
+                Ok(Frame::Settings(SettingsFrame::new(Vec::new())))
+            }
         }
         InterleavedFrame::RstStream { stream_id, error_code } => {
             let normalized_stream_id = normalize_stream_id(*stream_id);
@@ -299,10 +293,10 @@ fn create_interleaved_frame(interleaved: &InterleavedFrame) -> Result<Frame, Box
                 _ => ErrorCode::InternalError,
             };
 
-            Ok(Frame::RstStream(asupersync::http::h2::frame::RstStreamFrame::new(
+            Ok(Frame::RstStream(RstStreamFrame::new(
                 normalized_stream_id,
                 error,
-            )?))
+            )))
         }
     }
 }

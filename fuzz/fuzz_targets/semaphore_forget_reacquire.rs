@@ -15,10 +15,6 @@
 use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::sync::Semaphore;
-use asupersync::cx::Cx;
-use asupersync::types::Budget;
-use asupersync::util::ArenaIndex;
-use asupersync::{RegionId, TaskId};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Debug, Clone, Arbitrary)]
@@ -148,11 +144,6 @@ fn test_forget_reacquire_scenario(
     tracker: &PermitTracker,
 ) -> Result<(), String> {
     use std::collections::VecDeque;
-
-    let cx = Cx::new(
-        "semaphore_forget_reacquire",
-        Budget::INFINITE,
-    );
 
     let initial_permits = config.initial_permits.min(ForgetReacquireConfig::max_initial_permits()) as usize;
     if initial_permits == 0 {
