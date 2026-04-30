@@ -1,9 +1,65 @@
 #![no_main]
 
-use asupersync::database::postgres::PgError;
+use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 // Import the actual SCRAM implementation for comprehensive testing
 // Note: ScramAuth is internal, so we'll test through the exposed parser functions
+
+const MAX_SAFE_ITERATIONS: u32 = 600_000;
+
+#[derive(Debug, Clone, Arbitrary)]
+enum ClientFinalChannelBinding {
+    None,
+    SupportedNotUsed,
+}
+
+#[derive(Debug, Clone, Arbitrary)]
+struct ScramAtom(#[arbitrary(with = arbitrary_scram_atom)] String);
+
+#[derive(Debug, Clone, Arbitrary)]
+struct ClientFinalProofCase {
+    username: ScramAtom,
+    password: ScramAtom,
+    client_nonce: ScramAtom,
+    server_nonce_suffix: ScramAtom,
+    #[arbitrary(with = arbitrary_salt_bytes)]
+    salt: Vec<u8>,
+    #[arbitrary(with = arbitrary_iteration_count)]
+    iterations: u32,
+    channel_binding: ClientFinalChannelBinding,
+}
+
+fn arbitrary_scram_atom(u: &mut Unstructured<'_>) -> arbitrary::Result<String> {
+    let len = u.int_in_range(1..=24)?;
+    let mut value = String::with_capacity(len);
+    for _ in 0..len {
+        let idx = u.int_in_range(0..=63usize)?;
+        let ch = match idx {
+            0..=25 => (b'a' + idx as u8) as char,
+            26..=51 => (b'A' + (idx as u8 - 26)) as char,
+            52..=61 => (b'0' + (idx as u8 - 52)) as char,
+            62 => '_',
+            _ => '-',
+        };
+        value.push(ch);
+    }
+    Ok(value)
+}
+
+fn arbitrary_salt_bytes(u: &mut Unstructured<'_>) -> arbitrary::Result<Vec<u8>> {
+    let len = u.int_in_range(1..=32usize)?;
+    (0..len).map(|_| u.arbitrary()).collect()
+}
+
+fn arbitrary_iteration_count(u: &mut Unstructured<'_>) -> arbitrary::Result<u32> {
+    let selector: u8 = u.arbitrary()?;
+    Ok(match selector % 4 {
+        0 => 1,
+        1 => 4096,
+        2 => MAX_SAFE_ITERATIONS,
+        _ => u.int_in_range(1..=MAX_SAFE_ITERATIONS)?,
+    })
+}
 
 /// SCRAM-SHA-256 message parser for fuzzing PostgreSQL authentication
 struct ScramParser<'a> {
@@ -217,6 +273,59 @@ fn parse_client_final(data: &[u8]) -> Result<(String, String, Vec<u8>), String> 
     Ok((channel_binding.to_string(), nonce, proof))
 }
 
+fn expected_channel_binding(case: &ClientFinalProofCase) -> Vec<u8> {
+    match case.channel_binding {
+        ClientFinalChannelBinding::None => b"n,,".to_vec(),
+        ClientFinalChannelBinding::SupportedNotUsed => b"y,,".to_vec(),
+    }
+}
+
+fn verify_client_final_proof_oracle(case: &ClientFinalProofCase) {
+    use base64::Engine;
+
+    let username = &case.username.0;
+    let password = &case.password.0;
+    let client_nonce = &case.client_nonce.0;
+    let server_nonce = format!("{client_nonce}{}", case.server_nonce_suffix.0);
+    let salt_b64 = base64::engine::general_purpose::STANDARD.encode(&case.salt);
+
+    let client_first_bare = format!("n={username},r={client_nonce}");
+    let server_first = format!("r={server_nonce},s={salt_b64},i={}", case.iterations);
+    let channel_binding_raw = expected_channel_binding(case);
+    let channel_binding_b64 =
+        base64::engine::general_purpose::STANDARD.encode(&channel_binding_raw);
+    let client_final_without_proof = format!("c={channel_binding_b64},r={server_nonce}");
+    let auth_message = format!("{client_first_bare},{server_first},{client_final_without_proof}");
+
+    let salted_password = pbkdf2_sha256_test(password.as_bytes(), &case.salt, case.iterations);
+    let client_key = hmac_sha256_test(&salted_password, b"Client Key");
+    let stored_key = sha256_test(&client_key);
+    let client_signature = hmac_sha256_test(&stored_key, auth_message.as_bytes());
+    let expected_proof: Vec<u8> = client_key
+        .iter()
+        .zip(client_signature.iter())
+        .map(|(key, sig)| key ^ sig)
+        .collect();
+    let expected_proof_b64 = base64::engine::general_purpose::STANDARD.encode(&expected_proof);
+    let client_final = format!("{client_final_without_proof},p={expected_proof_b64}");
+
+    let (parsed_channel_binding, parsed_nonce, parsed_proof) =
+        parse_client_final(client_final.as_bytes()).expect("generated client-final must parse");
+
+    assert_eq!(
+        parsed_channel_binding, channel_binding_b64,
+        "client-final c= field must encode the GS2 header per RFC 7677"
+    );
+    assert_eq!(
+        parsed_nonce, server_nonce,
+        "client-final nonce must round-trip the combined client/server nonce"
+    );
+    assert_eq!(
+        parsed_proof, expected_proof,
+        "client-proof must exactly match the RFC 7677 XOR(ClientKey, ClientSignature) derivation"
+    );
+}
+
 /// Real PBKDF2-SHA256 implementation for boundary testing
 fn pbkdf2_sha256_test(password: &[u8], salt: &[u8], iterations: u32) -> Vec<u8> {
     if iterations == 0 || iterations > 600_000 || salt.is_empty() || salt.len() > 64 {
@@ -333,7 +442,7 @@ fn test_channel_binding(channel_data: &[u8]) -> Result<String, String> {
     use base64::Engine;
 
     // Test empty channel binding (no TLS)
-    let empty_binding = base64::engine::general_purpose::STANDARD.encode(b"n,,");
+    let _empty_binding = base64::engine::general_purpose::STANDARD.encode(b"n,,");
 
     // Test with channel data
     let mut binding_data = b"n,,".to_vec();
@@ -543,7 +652,7 @@ fn test_full_scram_flow(data: &[u8]) {
                 format!("{client_first_bare},{server_first},{client_final_without_proof}");
 
             // Test signature computations
-            let client_signature = hmac_sha256_test(&stored_key, auth_message.as_bytes());
+            let _client_signature = hmac_sha256_test(&stored_key, auth_message.as_bytes());
             let server_signature = hmac_sha256_test(&server_key, auth_message.as_bytes());
 
             // Test constant-time verification
@@ -562,6 +671,10 @@ fuzz_target!(|data: &[u8]| {
     // Limit input size to prevent timeouts (1h clean target)
     if data.len() > 8_192 {
         return;
+    }
+
+    if let Ok(case) = ClientFinalProofCase::arbitrary(&mut Unstructured::new(data)) {
+        verify_client_final_proof_oracle(&case);
     }
 
     // ===== CORE SCRAM-SHA-256 COVERAGE =====
