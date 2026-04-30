@@ -11007,7 +11007,7 @@ mod tests {
                     reward
                 );
                 assert!(
-                    reward >= 0.0 && reward <= 1.0,
+                    (0.0..=1.0).contains(&reward),
                     "Worker {} arm {} mean reward {:.4} out of bounds [0.0, 1.0]",
                     worker_idx,
                     arm_idx,

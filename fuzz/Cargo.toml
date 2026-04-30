@@ -1564,6 +1564,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h2_data_frame_closed_stream"
+path = "fuzz_targets/h2_data_frame_closed_stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "symbol_auth"
 path = "fuzz_targets/symbol_auth.rs"
 test = false
@@ -3752,6 +3759,17 @@ bench = false
 [[bin]]
 name = "notify_cancel_race"
 path = "fuzz_targets/notify_cancel_race.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #173 — Notify spurious wake under empty notifier fuzzer
+# Tests arbitrary poll-without-notify scenarios, validates that waiters stay Pending
+# with no false Ready states. Includes patterns for repeated polling, concurrent
+# polling, mixed notify/non-notify scenarios, and polling after non-notify operations.
+[[bin]]
+name = "notify_spurious_wake"
+path = "fuzz_targets/notify_spurious_wake.rs"
 test = false
 doc = false
 bench = false
