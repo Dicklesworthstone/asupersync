@@ -4166,3 +4166,25 @@ path = "fuzz_targets/h2_headers_frame_with_trailers.rs"
 test = false
 doc = false
 bench = false
+
+# Tick #181 — Notify one + Notified poll race fuzzer
+# Tests race conditions between notify_one() calls and Notified::poll()
+# operations. Validates proper notification delivery during concurrent
+# polling and notification, ensuring no lost or spurious wakeups.
+[[bin]]
+name = "notify_poll_race"
+path = "fuzz_targets/notify_poll_race.rs"
+test = false
+doc = false
+bench = false
+
+# Tick #182 — HTTP/1.1 chunked-body trailers fuzzer
+# Tests arbitrary trailer headers in HTTP/1.1 chunked encoding to validate
+# they are parsed only after the final 0-chunk per RFC 9112. Ensures
+# rejection of forbidden trailer headers and proper chunked state management.
+[[bin]]
+name = "h1_chunked_trailers"
+path = "fuzz_targets/h1_chunked_trailers.rs"
+test = false
+doc = false
+bench = false
