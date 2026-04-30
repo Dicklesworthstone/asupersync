@@ -3428,6 +3428,17 @@ test = false
 doc = false
 bench = false
 
+# Tick #152 — Semaphore forget+reacquire scenario fuzzer
+# Tests arbitrary forget+acquire patterns to ensure forgotten permits
+# never return to available pool and total invariant is preserved.
+# Validates available + acquired + forgotten = initial_permits.
+[[bin]]
+name = "semaphore_forget_reacquire"
+path = "fuzz_targets/semaphore_forget_reacquire.rs"
+test = false
+doc = false
+bench = false
+
 # Tick #134 — Notify multiple-waiter race condition fuzzer
 # Tests arbitrary M waiters + N notify_one calls to ensure exactly min(M,N)
 # waiters are notified in FIFO order. Validates notification accounting,
