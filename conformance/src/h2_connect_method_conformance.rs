@@ -106,9 +106,7 @@ impl ConnectMethodConformanceTester {
                 description: "Basic CONNECT to HTTPS endpoint".to_string(),
                 connect_request: ConnectRequest {
                     authority: "example.com:443".to_string(),
-                    headers: vec![
-                        ("User-Agent".to_string(), "test-client/1.0".to_string()),
-                    ],
+                    headers: vec![("User-Agent".to_string(), "test-client/1.0".to_string())],
                     tunnel_test_data: b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n".to_vec(),
                 },
                 expected_response_status: Some(200),
@@ -119,9 +117,10 @@ impl ConnectMethodConformanceTester {
                 description: "CONNECT to non-standard port".to_string(),
                 connect_request: ConnectRequest {
                     authority: "test.example.org:8080".to_string(),
-                    headers: vec![
-                        ("Proxy-Authorization".to_string(), "Basic dGVzdDp0ZXN0".to_string()),
-                    ],
+                    headers: vec![(
+                        "Proxy-Authorization".to_string(),
+                        "Basic dGVzdDp0ZXN0".to_string(),
+                    )],
                     tunnel_test_data: b"PING".to_vec(),
                 },
                 expected_response_status: Some(200),
@@ -143,9 +142,7 @@ impl ConnectMethodConformanceTester {
                 description: "CONNECT with IPv6 address".to_string(),
                 connect_request: ConnectRequest {
                     authority: "[2001:db8::1]:443".to_string(),
-                    headers: vec![
-                        ("X-Forwarded-For".to_string(), "203.0.113.1".to_string()),
-                    ],
+                    headers: vec![("X-Forwarded-For".to_string(), "203.0.113.1".to_string())],
                     tunnel_test_data: b"IPv6 tunnel test".to_vec(),
                 },
                 expected_response_status: Some(200),
@@ -178,9 +175,7 @@ impl ConnectMethodConformanceTester {
                 description: "CONNECT tunnel bidirectional data flow".to_string(),
                 connect_request: ConnectRequest {
                     authority: "echo.example.com:9090".to_string(),
-                    headers: vec![
-                        ("X-Protocol".to_string(), "websocket".to_string()),
-                    ],
+                    headers: vec![("X-Protocol".to_string(), "websocket".to_string())],
                     tunnel_test_data: b"ECHO_REQUEST\nHello, bidirectional tunnel!\n".to_vec(),
                 },
                 expected_response_status: Some(200),
@@ -202,9 +197,7 @@ impl ConnectMethodConformanceTester {
                 description: "CONNECT with timeout scenario".to_string(),
                 connect_request: ConnectRequest {
                     authority: "slow.example.com:443".to_string(),
-                    headers: vec![
-                        ("X-Timeout".to_string(), "30".to_string()),
-                    ],
+                    headers: vec![("X-Timeout".to_string(), "30".to_string())],
                     tunnel_test_data: b"Timeout test".to_vec(),
                 },
                 expected_response_status: Some(200),
@@ -248,7 +241,10 @@ impl ConnectMethodConformanceTester {
     }
 
     /// Run a single conformance test case.
-    async fn run_single_test(&self, test_case: &ConnectMethodConformanceCase) -> ConnectMethodTestResult {
+    async fn run_single_test(
+        &self,
+        test_case: &ConnectMethodConformanceCase,
+    ) -> ConnectMethodTestResult {
         let start_time = std::time::Instant::now();
 
         // Run test with asupersync implementation
@@ -267,7 +263,8 @@ impl ConnectMethodConformanceTester {
                 // Determine test verdict based on conformance
                 let verdict = if response_status_match && tunnel_behavior_match {
                     // Check if behavior matches expected
-                    let status_correct = test_case.expected_response_status
+                    let status_correct = test_case
+                        .expected_response_status
                         .map_or(true, |expected| asupersync_status == expected);
                     let tunnel_correct = asupersync_tunnel == test_case.should_establish_tunnel;
 
@@ -363,7 +360,10 @@ impl ConnectMethodConformanceTester {
     }
 
     /// Compute summary statistics from test results.
-    fn compute_summary(&self, results: &[ConnectMethodTestResult]) -> ConnectMethodComplianceSummary {
+    fn compute_summary(
+        &self,
+        results: &[ConnectMethodTestResult],
+    ) -> ConnectMethodComplianceSummary {
         let passed = results
             .iter()
             .filter(|r| r.verdict == ConnectMethodTestVerdict::Pass)
@@ -422,11 +422,19 @@ impl ConnectMethodConformanceTester {
         ));
 
         md.push_str("## Test Results\n\n");
-        md.push_str("| Test ID | Description | Verdict | Asupersync Status | H2 Status | Tunnel Match |\n");
-        md.push_str("|---------|-------------|---------|-------------------|-----------|-------------|\n");
+        md.push_str(
+            "| Test ID | Description | Verdict | Asupersync Status | H2 Status | Tunnel Match |\n",
+        );
+        md.push_str(
+            "|---------|-------------|---------|-------------------|-----------|-------------|\n",
+        );
 
         for result in &report.results {
-            let tunnel_icon = if result.tunnel_behavior_match { "✅" } else { "❌" };
+            let tunnel_icon = if result.tunnel_behavior_match {
+                "✅"
+            } else {
+                "❌"
+            };
             md.push_str(&format!(
                 "| {} | {} | {} | {} | {} | {} |\n",
                 result.case_id,
@@ -436,10 +444,12 @@ impl ConnectMethodConformanceTester {
                     .map(|case| case.description.as_str())
                     .unwrap_or("Unknown"),
                 result.verdict,
-                result.asupersync_response_status
+                result
+                    .asupersync_response_status
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| "Error".to_string()),
-                result.h2_response_status
+                result
+                    .h2_response_status
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| "Error".to_string()),
                 tunnel_icon

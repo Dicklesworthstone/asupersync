@@ -162,8 +162,16 @@ fn generate_summary_output(
     // Tunnel establishment analysis
     output.push_str("\nTUNNEL ESTABLISHMENT ANALYSIS:\n");
     for result in &report.results {
-        let asupersync_status = if result.asupersync_tunnel_established { "✅" } else { "❌" };
-        let h2_status = if result.h2_tunnel_established { "✅" } else { "❌" };
+        let asupersync_status = if result.asupersync_tunnel_established {
+            "✅"
+        } else {
+            "❌"
+        };
+        let h2_status = if result.h2_tunnel_established {
+            "✅"
+        } else {
+            "❌"
+        };
         output.push_str(&format!(
             "  📊 {}: asupersync={} h2={} ({}ms)\n",
             result.case_id, asupersync_status, h2_status, result.test_duration_ms

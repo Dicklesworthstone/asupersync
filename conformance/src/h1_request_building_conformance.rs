@@ -330,9 +330,7 @@ impl RequestBuildingConformanceTester {
         let asupersync_result = self.build_asupersync_request(&case.builder_ops).await;
 
         // Build request with hyper-util to get actual wire format
-        let hyper_util_result = self
-            .build_hyper_util_request(&case.builder_ops)
-            .await;
+        let hyper_util_result = self.build_hyper_util_request(&case.builder_ops).await;
 
         let (asupersync_wire, asupersync_error) = match asupersync_result {
             Ok(wire) => (wire, None),
@@ -453,10 +451,7 @@ impl RequestBuildingConformanceTester {
 
     /// Build request using hyper-util and capture the actual wire format.
     /// This uses hyper-util's HTTP/1.1 client to build a real request.
-    async fn build_hyper_util_request(
-        &self,
-        ops: &[RequestBuilderOp],
-    ) -> Result<Vec<u8>, String> {
+    async fn build_hyper_util_request(&self, ops: &[RequestBuilderOp]) -> Result<Vec<u8>, String> {
         // Build request manually following HTTP/1.1 standard, simulating how hyper would format it
         // This represents the "hyper-util reference implementation" wire format
         let mut method = "GET";

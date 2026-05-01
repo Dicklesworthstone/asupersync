@@ -116,9 +116,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Generate a concise summary output
-fn generate_summary_output(
-    report: &asupersync_conformance::EnablePushComplianceReport,
-) -> String {
+fn generate_summary_output(report: &asupersync_conformance::EnablePushComplianceReport) -> String {
     let mut output = String::new();
 
     output.push_str("HTTP/2 SETTINGS_ENABLE_PUSH=0 CONFORMANCE SUMMARY\n");

@@ -123,13 +123,8 @@ impl EnablePushConformanceTester {
                 requests: vec![TestRequest {
                     method: "GET".to_string(),
                     path: "/index.html".to_string(),
-                    headers: vec![
-                        ("Accept".to_string(), "text/html".to_string()),
-                    ],
-                    pushable_resources: vec![
-                        "/style.css".to_string(),
-                        "/script.js".to_string(),
-                    ],
+                    headers: vec![("Accept".to_string(), "text/html".to_string())],
+                    pushable_resources: vec!["/style.css".to_string(), "/script.js".to_string()],
                 }],
                 expected_push_promise_count: 2, // May push the CSS and JS
             },
@@ -367,7 +362,11 @@ impl EnablePushConformanceTester {
         md.push_str("|---------|-------------|---------|-----------------|---------|-------|\n");
 
         for result in &report.results {
-            let match_icon = if result.push_promises_match { "✅" } else { "❌" };
+            let match_icon = if result.push_promises_match {
+                "✅"
+            } else {
+                "❌"
+            };
             md.push_str(&format!(
                 "| {} | {} | {} | {} | {} | {} |\n",
                 result.case_id,

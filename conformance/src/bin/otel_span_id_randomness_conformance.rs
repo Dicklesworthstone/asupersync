@@ -12,7 +12,7 @@
 //! - Proper handling of invalid span ID (all zeros)
 
 use asupersync::observability::otel::OtelMetrics;
-use opentelemetry::trace::{SpanId as OtelSpanId};
+use opentelemetry::trace::SpanId as OtelSpanId;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -59,7 +59,8 @@ impl SpanIdData {
 
     /// Calculate Hamming distance from another span ID
     fn hamming_distance(&self, other: &SpanIdData) -> u32 {
-        self.bytes.iter()
+        self.bytes
+            .iter()
             .zip(other.bytes.iter())
             .map(|(a, b)| (a ^ b).count_ones())
             .sum()
@@ -89,9 +90,11 @@ impl SpanIdRandomnessAnalysis {
         // Calculate entropy statistics
         let entropies: Vec<f64> = span_ids.iter().map(|id| id.entropy()).collect();
         let entropy_mean = entropies.iter().sum::<f64>() / entropies.len() as f64;
-        let entropy_variance = entropies.iter()
+        let entropy_variance = entropies
+            .iter()
             .map(|e| (e - entropy_mean).powi(2))
-            .sum::<f64>() / entropies.len() as f64;
+            .sum::<f64>()
+            / entropies.len() as f64;
         let entropy_std = entropy_variance.sqrt();
 
         // Calculate byte distribution
@@ -102,9 +105,7 @@ impl SpanIdRandomnessAnalysis {
             }
         }
 
-        let invalid_count = span_ids.iter()
-            .filter(|id| !id.is_valid())
-            .count();
+        let invalid_count = span_ids.iter().filter(|id| !id.is_valid()).count();
 
         // Calculate Hamming distances (sample for performance)
         let mut hamming_distances = Vec::new();
@@ -134,7 +135,8 @@ impl SpanIdRandomnessAnalysis {
     fn chi_squared_uniformity(&self) -> Vec<f64> {
         let expected = self.sample_size as f64 / 256.0;
 
-        self.byte_distribution.iter()
+        self.byte_distribution
+            .iter()
             .map(|dist| {
                 dist.iter()
                     .map(|&observed| {
@@ -222,7 +224,9 @@ fn main() {
         let reference_span_ids = test_reference_span_id_generation(test_case);
 
         // Compare distributions
-        if let Err(error) = compare_span_id_distributions(&our_span_ids, &reference_span_ids, test_case) {
+        if let Err(error) =
+            compare_span_id_distributions(&our_span_ids, &reference_span_ids, test_case)
+        {
             failed_tests.push((test_case.name.to_string(), error));
         } else {
             println!("    ✅ {}", test_case.name);
@@ -339,7 +343,11 @@ fn compare_span_id_distributions(
     }
 
     // For differential testing with same RNG seed, outputs should be identical
-    for (i, (our_id, ref_id)) in our_span_ids.iter().zip(reference_span_ids.iter()).enumerate() {
+    for (i, (our_id, ref_id)) in our_span_ids
+        .iter()
+        .zip(reference_span_ids.iter())
+        .enumerate()
+    {
         if our_id != ref_id {
             return Err(format!(
                 "Span ID mismatch at index {}: our={:?}, reference={:?}",
@@ -395,7 +403,10 @@ fn test_span_id_randomness_properties(failed_tests: &mut Vec<(String, String)>) 
     if uniqueness_rate < 0.99 {
         failed_tests.push((
             "span_uniqueness_rate".to_string(),
-            format!("Span ID uniqueness rate {:.4} is below 0.99", uniqueness_rate),
+            format!(
+                "Span ID uniqueness rate {:.4} is below 0.99",
+                uniqueness_rate
+            ),
         ));
     } else {
         println!("    ✅ span_uniqueness_rate: {:.4}", uniqueness_rate);
@@ -436,10 +447,16 @@ fn test_span_id_randomness_properties(failed_tests: &mut Vec<(String, String)>) 
     if non_uniform_positions.len() > 2 {
         failed_tests.push((
             "span_byte_uniformity".to_string(),
-            format!("Too many non-uniform span byte positions: {:?}", non_uniform_positions),
+            format!(
+                "Too many non-uniform span byte positions: {:?}",
+                non_uniform_positions
+            ),
         ));
     } else {
-        println!("    ✅ span_byte_uniformity: {} positions exceed threshold", non_uniform_positions.len());
+        println!(
+            "    ✅ span_byte_uniformity: {} positions exceed threshold",
+            non_uniform_positions.len()
+        );
     }
 
     // Test 5: Hamming distance distribution (should be roughly half the bits different)
@@ -448,20 +465,32 @@ fn test_span_id_randomness_properties(failed_tests: &mut Vec<(String, String)>) 
     if (mean_hamming - expected_hamming).abs() > 5.0 {
         failed_tests.push((
             "hamming_distance".to_string(),
-            format!("Mean Hamming distance {:.1} deviates from expected {:.1}", mean_hamming, expected_hamming),
+            format!(
+                "Mean Hamming distance {:.1} deviates from expected {:.1}",
+                mean_hamming, expected_hamming
+            ),
         ));
     } else {
-        println!("    ✅ hamming_distance: {:.1} (expected ~{:.1})", mean_hamming, expected_hamming);
+        println!(
+            "    ✅ hamming_distance: {:.1} (expected ~{:.1})",
+            mean_hamming, expected_hamming
+        );
     }
 
     // Test 6: Standard deviation should be reasonable for 8-byte IDs
     if analysis.entropy_std > 0.8 {
         failed_tests.push((
             "span_entropy_consistency".to_string(),
-            format!("Span ID entropy standard deviation {:.3} is too high", analysis.entropy_std),
+            format!(
+                "Span ID entropy standard deviation {:.3} is too high",
+                analysis.entropy_std
+            ),
         ));
     } else {
-        println!("    ✅ span_entropy_consistency: std={:.3}", analysis.entropy_std);
+        println!(
+            "    ✅ span_entropy_consistency: std={:.3}",
+            analysis.entropy_std
+        );
     }
 }
 
@@ -531,7 +560,10 @@ mod tests {
         }
 
         // Should have very high uniqueness for 8-byte IDs
-        assert!(ids.len() > 9995, "Generated span IDs should be mostly unique");
+        assert!(
+            ids.len() > 9995,
+            "Generated span IDs should be mostly unique"
+        );
     }
 
     #[test]

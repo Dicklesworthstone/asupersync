@@ -12,7 +12,7 @@
 //! - Proper handling of invalid trace ID (all zeros)
 
 use asupersync::observability::otel::OtelMetrics;
-use opentelemetry::trace::{TraceId as OtelTraceId};
+use opentelemetry::trace::TraceId as OtelTraceId;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -80,9 +80,11 @@ impl RandomnessAnalysis {
         // Calculate entropy statistics
         let entropies: Vec<f64> = trace_ids.iter().map(|id| id.entropy()).collect();
         let entropy_mean = entropies.iter().sum::<f64>() / entropies.len() as f64;
-        let entropy_variance = entropies.iter()
+        let entropy_variance = entropies
+            .iter()
             .map(|e| (e - entropy_mean).powi(2))
-            .sum::<f64>() / entropies.len() as f64;
+            .sum::<f64>()
+            / entropies.len() as f64;
         let entropy_std = entropy_variance.sqrt();
 
         // Calculate byte distribution
@@ -93,9 +95,7 @@ impl RandomnessAnalysis {
             }
         }
 
-        let invalid_count = trace_ids.iter()
-            .filter(|id| !id.is_valid())
-            .count();
+        let invalid_count = trace_ids.iter().filter(|id| !id.is_valid()).count();
 
         RandomnessAnalysis {
             sample_size,
@@ -112,7 +112,8 @@ impl RandomnessAnalysis {
     fn chi_squared_uniformity(&self) -> Vec<f64> {
         let expected = self.sample_size as f64 / 256.0;
 
-        self.byte_distribution.iter()
+        self.byte_distribution
+            .iter()
             .map(|dist| {
                 dist.iter()
                     .map(|&observed| {
@@ -185,7 +186,9 @@ fn main() {
         let reference_trace_ids = test_reference_trace_id_generation(test_case);
 
         // Compare distributions
-        if let Err(error) = compare_trace_id_distributions(&our_trace_ids, &reference_trace_ids, test_case) {
+        if let Err(error) =
+            compare_trace_id_distributions(&our_trace_ids, &reference_trace_ids, test_case)
+        {
             failed_tests.push((test_case.name.to_string(), error));
         } else {
             println!("    ✅ {}", test_case.name);
@@ -311,7 +314,11 @@ fn compare_trace_id_distributions(
     }
 
     // For differential testing with same RNG seed, outputs should be identical
-    for (i, (our_id, ref_id)) in our_trace_ids.iter().zip(reference_trace_ids.iter()).enumerate() {
+    for (i, (our_id, ref_id)) in our_trace_ids
+        .iter()
+        .zip(reference_trace_ids.iter())
+        .enumerate()
+    {
         if our_id != ref_id {
             return Err(format!(
                 "Trace ID mismatch at index {}: our={:?}, reference={:?}",
@@ -407,20 +414,32 @@ fn test_trace_id_randomness_properties(failed_tests: &mut Vec<(String, String)>)
     if non_uniform_positions.len() > 2 {
         failed_tests.push((
             "byte_uniformity".to_string(),
-            format!("Too many non-uniform byte positions: {:?}", non_uniform_positions),
+            format!(
+                "Too many non-uniform byte positions: {:?}",
+                non_uniform_positions
+            ),
         ));
     } else {
-        println!("    ✅ byte_uniformity: {} positions exceed threshold", non_uniform_positions.len());
+        println!(
+            "    ✅ byte_uniformity: {} positions exceed threshold",
+            non_uniform_positions.len()
+        );
     }
 
     // Test 5: Standard deviation should be reasonable
     if analysis.entropy_std > 1.0 {
         failed_tests.push((
             "entropy_consistency".to_string(),
-            format!("Entropy standard deviation {:.3} is too high", analysis.entropy_std),
+            format!(
+                "Entropy standard deviation {:.3} is too high",
+                analysis.entropy_std
+            ),
         ));
     } else {
-        println!("    ✅ entropy_consistency: std={:.3}", analysis.entropy_std);
+        println!(
+            "    ✅ entropy_consistency: std={:.3}",
+            analysis.entropy_std
+        );
     }
 }
 

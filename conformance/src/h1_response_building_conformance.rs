@@ -327,15 +327,18 @@ impl ResponseBuildingConformanceTester {
     }
 
     /// Build response using asupersync ResponseBuilder and encode to wire format.
-    async fn build_asupersync_response(&self, ops: &[ResponseBuilderOp]) -> Result<Vec<u8>, String> {
+    async fn build_asupersync_response(
+        &self,
+        ops: &[ResponseBuilderOp],
+    ) -> Result<Vec<u8>, String> {
         let mut builder: Option<ResponseBuilder> = None;
 
         for op in ops {
             builder = Some(match op {
                 ResponseBuilderOp::New(status) => ResponseBuilder::new(*status),
-                ResponseBuilderOp::Status(status) => builder
-                    .ok_or("No builder initialized")?
-                    .status(*status),
+                ResponseBuilderOp::Status(status) => {
+                    builder.ok_or("No builder initialized")?.status(*status)
+                }
                 ResponseBuilderOp::Reason(reason) => builder
                     .ok_or("No builder initialized")?
                     .reason(reason.clone()),
@@ -345,9 +348,7 @@ impl ResponseBuildingConformanceTester {
                         "HTTP/1.1" => Version::Http11,
                         _ => return Err(format!("Unsupported version: {}", version_str)),
                     };
-                    builder
-                        .ok_or("No builder initialized")?
-                        .version(version)
+                    builder.ok_or("No builder initialized")?.version(version)
                 }
                 ResponseBuilderOp::Header { name, value } => builder
                     .ok_or("No builder initialized")?
@@ -356,9 +357,7 @@ impl ResponseBuildingConformanceTester {
                     .ok_or("No builder initialized")?
                     .headers(headers.clone()),
                 ResponseBuilderOp::Body(body) => {
-                    builder
-                        .ok_or("No builder initialized")?
-                        .body(body.clone())
+                    builder.ok_or("No builder initialized")?.body(body.clone())
                 }
                 ResponseBuilderOp::Trailer { name, value } => builder
                     .ok_or("No builder initialized")?
@@ -462,7 +461,10 @@ impl ResponseBuildingConformanceTester {
     }
 
     /// Compute summary statistics from test results.
-    fn compute_summary(&self, results: &[ResponseBuildingTestResult]) -> ResponseBuildingComplianceSummary {
+    fn compute_summary(
+        &self,
+        results: &[ResponseBuildingTestResult],
+    ) -> ResponseBuildingComplianceSummary {
         let passed = results
             .iter()
             .filter(|r| r.verdict == ResponseBuildingTestVerdict::Pass)

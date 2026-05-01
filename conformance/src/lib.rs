@@ -39,14 +39,14 @@ pub mod bench;
 pub mod h1_expect_continue_conformance;
 pub mod h1_request_building_conformance;
 pub mod h1_response_building_conformance;
+pub mod h2_connect_method_conformance;
 pub mod h2_continuation_conformance;
 pub mod h2_data_end_stream_conformance;
+pub mod h2_enable_push_conformance;
 pub mod h2_goaway_conformance;
 pub mod h2_ping_conformance;
 pub mod h2_priority_conformance;
 pub mod h2_settings_conformance;
-pub mod h2_enable_push_conformance;
-pub mod h2_connect_method_conformance;
 pub mod hpack_conformance;
 pub mod hpack_encoder_conformance;
 pub mod kafka_record_batch_v2;
@@ -84,6 +84,11 @@ pub use h1_response_building_conformance::{
     ResponseBuildingConformanceCase, ResponseBuildingConformanceTester, ResponseBuildingTestResult,
     ResponseBuildingTestVerdict,
 };
+pub use h2_connect_method_conformance::{
+    ConnectMethodComplianceReport, ConnectMethodComplianceSummary, ConnectMethodConformanceCase,
+    ConnectMethodConformanceTester, ConnectMethodTestResult, ConnectMethodTestVerdict,
+    ConnectRequest,
+};
 pub use h2_continuation_conformance::{
     ContinuationComplianceReport, ContinuationComplianceSummary, ContinuationConformanceCase,
     ContinuationConformanceTester, ContinuationTestResult, ContinuationTestVerdict,
@@ -95,6 +100,10 @@ pub use h2_data_end_stream_conformance::{
     DataEndStreamConformanceResult, DataEndStreamConformanceTester, DataEndStreamConnectionState,
     DataEndStreamTestVerdict, RequirementLevel as DataEndStreamRequirementLevel,
     SerializableDataFrame, StreamEndStreamState,
+};
+pub use h2_enable_push_conformance::{
+    EnablePushComplianceReport, EnablePushComplianceSummary, EnablePushConformanceCase,
+    EnablePushConformanceTester, EnablePushTestResult, EnablePushTestVerdict, TestRequest,
 };
 pub use h2_goaway_conformance::{
     GoAwayComplianceReport, GoAwayComplianceSummary, GoAwayConformanceCase,
@@ -116,14 +125,6 @@ pub use h2_settings_conformance::{
     ConformanceResult as SettingsConformanceResult, ExpectedOutcome, Setting,
     SettingsConformanceCase, SettingsConformanceTester, SettingsFrame, SettingsSnapshot,
     TestVerdict as SettingsTestVerdict,
-};
-pub use h2_enable_push_conformance::{
-    EnablePushComplianceReport, EnablePushComplianceSummary, EnablePushConformanceCase,
-    EnablePushConformanceTester, EnablePushTestResult, EnablePushTestVerdict, TestRequest,
-};
-pub use h2_connect_method_conformance::{
-    ConnectMethodComplianceReport, ConnectMethodComplianceSummary, ConnectMethodConformanceCase,
-    ConnectMethodConformanceTester, ConnectMethodTestResult, ConnectMethodTestVerdict, ConnectRequest,
 };
 pub use hpack_conformance::{
     ComplianceReport as HpackComplianceReport, ComplianceSummary as HpackComplianceSummary,

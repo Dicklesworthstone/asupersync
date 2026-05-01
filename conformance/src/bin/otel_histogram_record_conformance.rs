@@ -11,10 +11,10 @@
 //! - Total count tracking
 //! - Edge case handling (infinity, zero, negative values)
 
-use asupersync::observability::metrics::{Metrics, Histogram};
+use asupersync::observability::metrics::{Histogram, Metrics};
 use opentelemetry::metrics::{Histogram as OtelHistogram, MeterProvider};
-use opentelemetry_sdk::metrics::{SdkMeterProvider, PeriodicReader, data};
 use opentelemetry_sdk::Resource;
+use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider, data};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -153,7 +153,9 @@ fn main() {
         let reference_histogram_data = test_reference_histogram_recording(test_case);
 
         // Compare results
-        if let Err(error) = compare_histogram_data(&our_histogram_data, &reference_histogram_data, test_case) {
+        if let Err(error) =
+            compare_histogram_data(&our_histogram_data, &reference_histogram_data, test_case)
+        {
             failed_tests.push((test_case.name.to_string(), error));
         } else {
             println!("    ✅ {}", test_case.name);
@@ -193,7 +195,12 @@ fn test_our_histogram_recording(test_case: &HistogramRecordTestCase) -> Histogra
     let sum = extract_our_sum(&histogram);
     let count = extract_our_count(&histogram);
 
-    HistogramData::new(bucket_counts, sum, count, test_case.bucket_boundaries.clone())
+    HistogramData::new(
+        bucket_counts,
+        sum,
+        count,
+        test_case.bucket_boundaries.clone(),
+    )
 }
 
 /// Test reference opentelemetry-sdk histogram recording
@@ -208,7 +215,9 @@ fn test_reference_histogram_recording(test_case: &HistogramRecordTestCase) -> Hi
 
     for &observation in &test_case.observations {
         // Find bucket index using OTLP specification logic
-        let bucket_index = test_case.bucket_boundaries.iter()
+        let bucket_index = test_case
+            .bucket_boundaries
+            .iter()
             .position(|&boundary| observation <= boundary)
             .unwrap_or(test_case.bucket_boundaries.len());
 
@@ -217,7 +226,12 @@ fn test_reference_histogram_recording(test_case: &HistogramRecordTestCase) -> Hi
         count += 1;
     }
 
-    HistogramData::new(bucket_counts, sum, count, test_case.bucket_boundaries.clone())
+    HistogramData::new(
+        bucket_counts,
+        sum,
+        count,
+        test_case.bucket_boundaries.clone(),
+    )
 }
 
 /// Extract bucket counts from our histogram implementation
@@ -265,7 +279,9 @@ fn compare_histogram_data(
         ));
     }
 
-    for (i, (our_count, ref_count)) in our_data.bucket_counts.iter()
+    for (i, (our_count, ref_count)) in our_data
+        .bucket_counts
+        .iter()
         .zip(reference_data.bucket_counts.iter())
         .enumerate()
     {
@@ -362,7 +378,8 @@ fn test_histogram_edge_cases(failed_tests: &mut Vec<(String, String)>) {
 
         // Test both implementations
         let our_result = std::panic::catch_unwind(|| test_our_histogram_recording(&test_case));
-        let ref_result = std::panic::catch_unwind(|| test_reference_histogram_recording(&test_case));
+        let ref_result =
+            std::panic::catch_unwind(|| test_reference_histogram_recording(&test_case));
 
         match (our_result, ref_result) {
             (Ok(our_data), Ok(ref_data)) => {
@@ -381,7 +398,10 @@ fn test_histogram_edge_cases(failed_tests: &mut Vec<(String, String)>) {
             }
             (Err(_), Err(_)) => {
                 // Both panicked - consistent behavior
-                println!("    ✅ edge_case_{} (both panicked consistently)", case_name);
+                println!(
+                    "    ✅ edge_case_{} (both panicked consistently)",
+                    case_name
+                );
             }
             (Ok(_), Err(_)) => {
                 failed_tests.push((
@@ -405,12 +425,7 @@ mod tests {
 
     #[test]
     fn test_histogram_data_creation() {
-        let data = HistogramData::new(
-            vec![1, 2, 3],
-            10.5,
-            6,
-            vec![1.0, 5.0, 10.0],
-        );
+        let data = HistogramData::new(vec![1, 2, 3], 10.5, 6, vec![1.0, 5.0, 10.0]);
 
         assert_eq!(data.bucket_counts, vec![1, 2, 3]);
         assert_eq!(data.sum, 10.5);
@@ -434,13 +449,16 @@ mod tests {
         ];
 
         for (value, expected_bucket) in test_cases {
-            let bucket_index = boundaries.iter()
+            let bucket_index = boundaries
+                .iter()
                 .position(|&boundary| value <= boundary)
                 .unwrap_or(boundaries.len());
 
-            assert_eq!(bucket_index, expected_bucket,
+            assert_eq!(
+                bucket_index, expected_bucket,
                 "Value {} should be in bucket {}, got {}",
-                value, expected_bucket, bucket_index);
+                value, expected_bucket, bucket_index
+            );
         }
     }
 
