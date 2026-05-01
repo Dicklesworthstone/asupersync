@@ -1289,6 +1289,17 @@ pub enum RedisClientTrackingPush {
     RedirectBroken,
 }
 
+#[cfg(any(test, feature = "test-internals"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum RedisResp3NonPubSubPush {
+    ClientTracking(RedisClientTrackingPush),
+    Other {
+        kind: String,
+        payload: Vec<RespValue>,
+    },
+}
+
 fn expect_ok_response(resp: &RespValue, command: &str) -> Result<(), RedisError> {
     if resp.is_ok() {
         Ok(())
@@ -3500,6 +3511,54 @@ pub fn parse_client_tracking_push_for_fuzz(
             "unsupported client tracking push kind: {kind}"
         )))
     }
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn is_pubsub_push_kind(kind: &str) -> bool {
+    kind.eq_ignore_ascii_case("message")
+        || kind.eq_ignore_ascii_case("pmessage")
+        || kind.eq_ignore_ascii_case("subscribe")
+        || kind.eq_ignore_ascii_case("unsubscribe")
+        || kind.eq_ignore_ascii_case("psubscribe")
+        || kind.eq_ignore_ascii_case("punsubscribe")
+        || kind.eq_ignore_ascii_case("pong")
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[allow(dead_code)]
+#[doc(hidden)]
+pub fn parse_resp3_non_pubsub_push_for_fuzz(
+    value: RespValue,
+) -> Result<RedisResp3NonPubSubPush, RedisError> {
+    let items = match value {
+        RespValue::Push(items) => items,
+        other => {
+            return Err(RedisError::Protocol(format!(
+                "RESP3 non-pubsub push must be a push frame, got {other:?}"
+            )));
+        }
+    };
+
+    let kind = RedisPubSub::decode_text(
+        items
+            .first()
+            .cloned()
+            .ok_or_else(|| RedisError::Protocol("RESP3 push missing kind".to_string()))?,
+        "RESP3 push kind",
+    )?;
+    if is_pubsub_push_kind(&kind) {
+        return Err(RedisError::Protocol(format!(
+            "RESP3 push kind {kind} belongs to pubsub parser"
+        )));
+    }
+    if kind.eq_ignore_ascii_case("invalidate") || kind.eq_ignore_ascii_case("tracking-redir-broken")
+    {
+        return parse_client_tracking_push_for_fuzz(RespValue::Push(items))
+            .map(RedisResp3NonPubSubPush::ClientTracking);
+    }
+
+    let payload = items.into_iter().skip(1).collect();
+    Ok(RedisResp3NonPubSubPush::Other { kind, payload })
 }
 
 #[cfg(any(test, feature = "test-internals"))]
@@ -7386,6 +7445,59 @@ mod tests {
             trailing_redirect.is_err(),
             "tracking-redir-broken must reject trailing fields"
         );
+    }
+
+    #[test]
+    fn resp3_non_pubsub_push_classifies_generic_push() {
+        let event = parse_resp3_non_pubsub_push_for_fuzz(RespValue::Push(vec![
+            RespValue::BulkString(Some(b"server-event".to_vec())),
+            RespValue::BulkString(Some(
+                b"1700000000.000000 [0 127.0.0.1:1] \"GET\" \"k\"".to_vec(),
+            )),
+            RespValue::Integer(9),
+        ]))
+        .expect("generic non-pubsub push should parse");
+
+        assert_eq!(
+            event,
+            RedisResp3NonPubSubPush::Other {
+                kind: "server-event".to_string(),
+                payload: vec![
+                    RespValue::BulkString(Some(
+                        b"1700000000.000000 [0 127.0.0.1:1] \"GET\" \"k\"".to_vec()
+                    )),
+                    RespValue::Integer(9)
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn resp3_non_pubsub_push_delegates_tracking_and_rejects_pubsub() {
+        let tracking = parse_resp3_non_pubsub_push_for_fuzz(RespValue::Push(vec![
+            RespValue::BulkString(Some(b"invalidate".to_vec())),
+            RespValue::Array(Some(vec![RespValue::BulkString(Some(b"k".to_vec()))])),
+        ]))
+        .expect("client tracking push should parse through non-pubsub seam");
+        assert_eq!(
+            tracking,
+            RedisResp3NonPubSubPush::ClientTracking(RedisClientTrackingPush::Invalidate {
+                keys: Some(vec![b"k".to_vec()])
+            })
+        );
+
+        let pubsub = parse_resp3_non_pubsub_push_for_fuzz(RespValue::Push(vec![
+            RespValue::BulkString(Some(b"message".to_vec())),
+            RespValue::BulkString(Some(b"chan".to_vec())),
+            RespValue::BulkString(Some(b"body".to_vec())),
+        ]));
+        assert!(
+            pubsub.is_err(),
+            "pubsub push kinds must use the pubsub parser"
+        );
+
+        let empty = parse_resp3_non_pubsub_push_for_fuzz(RespValue::Push(vec![]));
+        assert!(empty.is_err(), "empty RESP3 pushes must be rejected");
     }
 
     #[test]
