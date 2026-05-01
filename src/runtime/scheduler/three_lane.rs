@@ -6289,6 +6289,75 @@ mod tests {
     }
 
     #[test]
+    fn test_inject_cancel_promotes_timed_task_without_duplicate() {
+        let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
+        let region = state
+            .lock()
+            .expect("lock")
+            .create_root_region(Budget::INFINITE);
+
+        let task_id = {
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let (task_id, _handle) = guard
+                .create_task(region, Budget::INFINITE, async {})
+                .expect("create task");
+            task_id
+        };
+
+        let scheduler = ThreeLaneScheduler::new(1, &state);
+
+        // 1. Inject task to timed lane first (with future deadline)
+        let deadline = Time::from_secs(100);
+        scheduler.inject_timed(task_id, deadline);
+        assert!(scheduler.global.has_timed_work());
+        assert!(!scheduler.global.has_cancel_work());
+
+        // 2. Inject cancel for same task
+        // Expected: Should be promoted to Cancel Lane and removed from Timed Lane
+        scheduler.inject_cancel(task_id, 100);
+
+        // 3. Verify task is in Cancel Lane
+        assert!(
+            scheduler.global.has_cancel_work(),
+            "Task should be promoted to cancel lane"
+        );
+
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
+
+        // 4. Dispatch from cancel lane
+        let first_task = worker.next_task();
+        assert_eq!(
+            first_task,
+            Some(task_id),
+            "First dispatch should get the cancelled task from cancel lane"
+        );
+
+        // 5. CRITICAL: Verify the same task is NOT dispatched again from timed lane
+        // Since deadline is far in the future (100 seconds), pop_timed_if_due should return None
+        let current_time = Time::ZERO;
+        let timed_task = scheduler.global.pop_timed_if_due(current_time);
+        assert!(
+            timed_task.is_none(),
+            "Task should not be available in timed lane after cancel promotion - \
+             this would be a duplicate dispatch defect"
+        );
+
+        // 6. Even if we force-pop from timed lane, task should not be there
+        let force_timed = scheduler.global.pop_timed();
+        if let Some(tt) = force_timed {
+            assert_ne!(
+                tt.task, task_id,
+                "DEFECT: Task was dispatched from both cancel AND timed lanes! \
+                 Task {} found in timed lane after being dispatched from cancel lane",
+                task_id
+            );
+        }
+    }
+
+    #[test]
     fn test_spawn_local_not_stolen() {
         let state = Arc::new(ContendedMutex::new("runtime_state", RuntimeState::new()));
         let mut scheduler = ThreeLaneScheduler::new(2, &state);
