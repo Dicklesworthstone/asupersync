@@ -10663,8 +10663,8 @@ mod tests {
             // Message type
             buf.push(b'd');
 
-            // Message length (excluding type byte)
-            buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            // Message length excludes the type byte but includes this length field.
+            buf.extend_from_slice(&(data.len() as u32 + 4).to_be_bytes());
 
             // Data payload
             buf.extend_from_slice(data);
@@ -10674,7 +10674,7 @@ mod tests {
 
         /// Creates a COPY DONE message for testing.
         fn build_copy_done_message() -> Vec<u8> {
-            vec![b'c', 0, 0, 0, 0] // type + 4-byte length (0 for no data)
+            vec![b'c', 0, 0, 0, 4] // type + 4-byte length field, no body
         }
 
         /// Creates a COPY FAIL message for testing.
@@ -10684,8 +10684,8 @@ mod tests {
             // Message type
             buf.push(b'f');
 
-            // Message length (excluding type byte)
-            buf.extend_from_slice(&(error_msg.len() as u32 + 1).to_be_bytes()); // +1 for null terminator
+            // Message length excludes the type byte but includes this length field.
+            buf.extend_from_slice(&(error_msg.len() as u32 + 5).to_be_bytes()); // +4 length field, +1 null terminator
 
             // Error message with null terminator
             buf.extend_from_slice(error_msg.as_bytes());
@@ -10889,14 +10889,14 @@ mod tests {
             assert_eq!(copy_done_msg.len(), 5);
             assert_eq!(copy_done_msg[0], b'c'); // CopyDone type
 
-            // Verify length is 0 (no payload)
+            // Verify length is 4: the length field itself, with no payload.
             let length = u32::from_be_bytes([
                 copy_done_msg[1],
                 copy_done_msg[2],
                 copy_done_msg[3],
                 copy_done_msg[4],
             ]);
-            assert_eq!(length, 0, "CopyDone should have no payload");
+            assert_eq!(length, 4, "CopyDone should have no body payload");
 
             // Test flush semantics: CopyDone should trigger immediate processing
             // In a real implementation, this would flush all pending COPY data
@@ -10926,7 +10926,7 @@ mod tests {
                 // Verify message structure
                 assert_eq!(copy_fail_msg[0], b'f'); // CopyFail type
 
-                // Verify length includes null terminator
+                // Verify length includes the length field and null terminator.
                 let length = u32::from_be_bytes([
                     copy_fail_msg[1],
                     copy_fail_msg[2],
@@ -10935,8 +10935,8 @@ mod tests {
                 ]);
                 assert_eq!(
                     length,
-                    error_msg.len() as u32 + 1,
-                    "Length should include null terminator"
+                    error_msg.len() as u32 + 5,
+                    "Length should include length field and null terminator"
                 );
 
                 // Verify message content and null termination
@@ -11145,7 +11145,7 @@ mod tests {
             assert_eq!(empty_data[0], b'd');
             let length =
                 u32::from_be_bytes([empty_data[1], empty_data[2], empty_data[3], empty_data[4]]);
-            assert_eq!(length, 0);
+            assert_eq!(length, 4);
 
             // Test maximum single chunk size (64MB limit mentioned in code)
             let max_chunk_size = 64 * 1024 * 1024;
@@ -11158,7 +11158,7 @@ mod tests {
                 large_chunk[3],
                 large_chunk[4],
             ]);
-            assert_eq!(chunk_length, max_chunk_size as u32);
+            assert_eq!(chunk_length, max_chunk_size as u32 + 4);
 
             // Test null values in binary format
             let mut null_data = Vec::new();
@@ -11186,7 +11186,7 @@ mod tests {
                 long_fail_msg[3],
                 long_fail_msg[4],
             ]);
-            assert_eq!(length, long_error.len() as u32 + 1); // +1 for null terminator
+            assert_eq!(length, long_error.len() as u32 + 5); // +4 length field, +1 null terminator
 
             // Test error message with embedded nulls (should be escaped or rejected)
             let null_error = "Error\0with\0nulls";
@@ -11208,7 +11208,9 @@ mod tests {
             let copy_data_msg = build_copy_data_message(test_data);
 
             // CONFORMANCE CHECK 1: CopyData message structure vs wire protocol spec
-            // Format: type byte 'd' (0x64) + 4-byte big-endian length + data
+            // Format: type byte 'd' (0x64) + 4-byte big-endian length + data.
+            // PostgreSQL's length excludes the type byte but includes the
+            // 4-byte length field itself.
             assert_eq!(
                 copy_data_msg[0], b'd',
                 "CopyData type byte must be 'd' (0x64)"
@@ -11222,8 +11224,8 @@ mod tests {
             ]);
             assert_eq!(
                 data_length,
-                test_data.len() as u32,
-                "CopyData length field must equal payload size"
+                test_data.len() as u32 + 4,
+                "CopyData length field must equal payload size plus length field"
             );
 
             let payload = &copy_data_msg[5..];
@@ -11243,7 +11245,7 @@ mod tests {
             let copy_done_msg = build_copy_done_message();
 
             // CONFORMANCE CHECK 2: CopyDone message structure vs wire protocol spec
-            // Format: type byte 'c' (0x63) + 4-byte big-endian length of 0
+            // Format: type byte 'c' (0x63) + 4-byte big-endian length of 4.
             assert_eq!(
                 copy_done_msg[0], b'c',
                 "CopyDone type byte must be 'c' (0x63)"
@@ -11261,8 +11263,8 @@ mod tests {
                 copy_done_msg[4],
             ]);
             assert_eq!(
-                done_length, 0,
-                "CopyDone length field must be 0 (no payload)"
+                done_length, 4,
+                "CopyDone length field must include the length field itself"
             );
 
             // CONFORMANCE CHECK 3: Message sequence compatibility
@@ -11280,7 +11282,7 @@ mod tests {
                 full_sequence[4],
             ]) as usize;
 
-            let second_msg_start = 5 + first_msg_len; // Skip type + length + data of first message
+            let second_msg_start = 1 + first_msg_len; // type byte + PostgreSQL message length
             assert_eq!(
                 full_sequence[second_msg_start], b'c',
                 "Second message must be CopyDone"

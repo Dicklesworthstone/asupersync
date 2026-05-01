@@ -417,8 +417,8 @@ pub fn build_copy_data_message(data: &[u8]) -> Vec<u8> {
     // Message type
     buf.push(CopyMessageType::CopyData as u8);
 
-    // Message length (excluding type byte)
-    buf.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    // Message length excludes the type byte but includes this length field.
+    buf.extend_from_slice(&(data.len() as u32 + 4).to_be_bytes());
 
     // Data payload
     buf.extend_from_slice(data);
@@ -429,7 +429,7 @@ pub fn build_copy_data_message(data: &[u8]) -> Vec<u8> {
 #[allow(dead_code)]
 
 pub fn build_copy_done_message() -> Vec<u8> {
-    vec![CopyMessageType::CopyDone as u8, 0, 0, 0, 0] // type + 4-byte length (0 for no data)
+    vec![CopyMessageType::CopyDone as u8, 0, 0, 0, 4] // type + 4-byte length field, no body
 }
 
 #[allow(dead_code)]
@@ -440,8 +440,8 @@ pub fn build_copy_fail_message(error_msg: &str) -> Vec<u8> {
     // Message type
     buf.push(CopyMessageType::CopyFail as u8);
 
-    // Message length (excluding type byte)
-    buf.extend_from_slice(&(error_msg.len() as u32 + 1).to_be_bytes()); // +1 for null terminator
+    // Message length excludes the type byte but includes this length field.
+    buf.extend_from_slice(&(error_msg.len() as u32 + 5).to_be_bytes()); // +4 length field, +1 null terminator
 
     // Error message with null terminator
     buf.extend_from_slice(error_msg.as_bytes());
@@ -623,7 +623,7 @@ impl PostgresCopyConformanceHarness {
                 };
             }
 
-            // Verify declared length matches actual payload
+            // Verify declared length matches PostgreSQL's type-excluded message length.
             let declared_length = u32::from_be_bytes([
                 copy_data_msg[1],
                 copy_data_msg[2],
@@ -631,7 +631,7 @@ impl PostgresCopyConformanceHarness {
                 copy_data_msg[4],
             ]);
 
-            if declared_length as usize != chunk.len() {
+            if declared_length as usize != chunk.len() + 4 {
                 return PostgresCopyResult {
                     test_id: "mr2_copy_data_chunks_bounded_by_message_length".to_string(),
                     description: "CopyData chunks must be bounded by message-length".to_string(),
@@ -639,9 +639,9 @@ impl PostgresCopyConformanceHarness {
                     requirement_level: RequirementLevel::Must,
                     verdict: TestVerdict::Fail,
                     error_message: Some(format!(
-                        "Declared length {} does not match actual payload size {}",
+                        "Declared length {} does not match expected message length {}",
                         declared_length,
-                        chunk.len()
+                        chunk.len() + 4
                     )),
                     execution_time_ms: start.elapsed().as_millis() as u64,
                 };
@@ -730,15 +730,15 @@ impl PostgresCopyConformanceHarness {
             };
         }
 
-        // Verify length field is 0 (no payload)
-        let payload_length = u32::from_be_bytes([
+        // Verify length field is 4: the length field itself, with no payload.
+        let message_length = u32::from_be_bytes([
             copy_done_msg[1],
             copy_done_msg[2],
             copy_done_msg[3],
             copy_done_msg[4],
         ]);
 
-        if payload_length != 0 {
+        if message_length != 4 {
             return PostgresCopyResult {
                 test_id: "mr3_copy_done_terminates_copy_in".to_string(),
                 description: "CopyDone must terminate COPY IN operation".to_string(),
@@ -746,8 +746,8 @@ impl PostgresCopyConformanceHarness {
                 requirement_level: RequirementLevel::Must,
                 verdict: TestVerdict::Fail,
                 error_message: Some(format!(
-                    "CopyDone should have no payload, got length {}",
-                    payload_length
+                    "CopyDone should have no body payload, got length {}",
+                    message_length
                 )),
                 execution_time_ms: start.elapsed().as_millis() as u64,
             };
@@ -823,7 +823,7 @@ impl PostgresCopyConformanceHarness {
             };
         }
 
-        // Verify error message encoding
+        // Verify error message encoding.
         let declared_length = u32::from_be_bytes([
             copy_fail_msg[1],
             copy_fail_msg[2],
@@ -831,7 +831,7 @@ impl PostgresCopyConformanceHarness {
             copy_fail_msg[4],
         ]);
 
-        if declared_length as usize != error_message.len() + 1 {
+        if declared_length as usize != error_message.len() + 5 {
             return PostgresCopyResult {
                 test_id: "mr4_copy_fail_rolls_back".to_string(),
                 description: "CopyFail must roll back COPY IN operation".to_string(),
@@ -1288,7 +1288,7 @@ impl PostgresCopyConformanceHarness {
                 };
             }
 
-            // Verify length includes null terminator
+            // Verify length includes the length field and null terminator.
             let declared_length = u32::from_be_bytes([
                 copy_fail_msg[1],
                 copy_fail_msg[2],
@@ -1296,7 +1296,7 @@ impl PostgresCopyConformanceHarness {
                 copy_fail_msg[4],
             ]) as usize;
 
-            if declared_length != error_msg.len() + 1 {
+            if declared_length != error_msg.len() + 5 {
                 return PostgresCopyResult {
                     test_id: "copy_fail_error_message_encoding".to_string(),
                     description: "CopyFail error messages must be properly encoded".to_string(),
