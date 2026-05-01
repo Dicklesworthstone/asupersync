@@ -4300,3 +4300,15 @@ name = "h1_keep_alive_http10_default"
 path = "fuzz_targets/h1_keep_alive_http10_default.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "h1_request_method_case_sensitivity"
+path = "fuzz_targets/h1_request_method_case_sensitivity.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "notify_drop_pending_fut"
+path = "fuzz_targets/notify_drop_pending_fut.rs"
+test = false
+doc = false
