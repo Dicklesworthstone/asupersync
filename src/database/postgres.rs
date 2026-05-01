@@ -7312,6 +7312,55 @@ mod tests {
     }
 
     #[test]
+    fn unlisten_quotes_channel_names_before_simple_query_write() {
+        let (mut conn, mut peer) = make_test_connection_with_peer();
+        std::io::Write::write_all(&mut peer, &backend_message(b'C', b"UNLISTEN\0")).unwrap();
+        std::io::Write::write_all(&mut peer, &ready_for_query(b'I')).unwrap();
+
+        let cx = crate::cx::Cx::for_testing();
+        match run(conn.unlisten(&cx, "jobs\";LISTEN attacker;--")) {
+            Outcome::Ok(()) => {}
+            other => panic!("expected successful UNLISTEN, got {other:?}"),
+        }
+
+        let expected = b"UNLISTEN \"jobs\"\";LISTEN attacker;--\"\0";
+        let written = read_until_contains(&mut peer, expected);
+        assert!(
+            written
+                .windows(expected.len())
+                .any(|window| window == expected)
+        );
+    }
+
+    #[test]
+    fn listen_rejects_nul_channel_name_before_writing() {
+        let mut conn = make_test_connection();
+        let cx = crate::cx::Cx::for_testing();
+
+        match run(conn.listen(&cx, "jobs\0attacker")) {
+            Outcome::Err(PgError::Protocol(msg)) => {
+                assert!(msg.contains("NUL bytes"), "got: {msg}");
+            }
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
+        assert!(!conn.inner.closed);
+    }
+
+    #[test]
+    fn notify_rejects_nul_channel_name_before_query_message() {
+        let mut conn = make_test_connection();
+        let cx = crate::cx::Cx::for_testing();
+
+        match run(conn.notify(&cx, "jobs\0attacker", "payload")) {
+            Outcome::Err(PgError::Protocol(msg)) => {
+                assert!(msg.contains("NUL bytes"), "got: {msg}");
+            }
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
+        assert!(!conn.inner.closed);
+    }
+
+    #[test]
     fn listen_rejects_overlong_channel_name_before_writing() {
         let mut conn = make_test_connection();
         let cx = crate::cx::Cx::for_testing();

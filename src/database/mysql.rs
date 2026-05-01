@@ -2025,22 +2025,25 @@ impl MySqlConnection {
         data: &[u8],
         _options: &MySqlConnectOptions,
     ) -> Result<(), MySqlError> {
-        if data.first() == Some(&0x03) {
-            // Fast auth success - wait for OK packet
-            let (data, seq) = self.read_packet().await?;
-            self.inner.sequence = seq.wrapping_add(1);
-            match data.first() {
-                Some(0x00) => Ok(()),
-                Some(0xFF) => Err(Self::parse_error(&data)),
-                _ => Err(MySqlError::Protocol(
-                    "unexpected response after fast auth".to_string(),
-                )),
+        match data.first() {
+            Some(0x03) => {
+                // Fast auth success - wait for OK packet
+                let (data, seq) = self.read_packet().await?;
+                self.inner.sequence = seq.wrapping_add(1);
+                match data.first() {
+                    Some(0x00) => Ok(()),
+                    Some(0xFF) => Err(Self::parse_error(&data)),
+                    _ => Err(MySqlError::Protocol(
+                        "unexpected response after fast auth".to_string(),
+                    )),
+                }
             }
-        } else {
-            Err(MySqlError::AuthenticationFailed(
-                "caching_sha2_password requires cached credentials or secure connection"
-                    .to_string(),
-            ))
+            Some(0x04) => Err(MySqlError::AuthenticationFailed(
+                "caching_sha2_password full auth requires secure connection".to_string(),
+            )),
+            status => Err(MySqlError::Protocol(format!(
+                "unexpected caching_sha2 final status: {status:?}"
+            ))),
         }
     }
 
@@ -7556,6 +7559,101 @@ mod tests {
             matches!(err, MySqlError::AuthenticationFailed(msg) if msg.contains("requires secure connection")),
             "unexpected full-auth error: {err:?}"
         );
+    }
+
+    #[test]
+    fn test_auth_switch_caching_sha2_full_auth_request_fails_closed() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept client");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("set read timeout");
+
+            let mut header = [0u8; 4];
+            stream
+                .read_exact(&mut header)
+                .expect("read auth switch response header");
+            assert_eq!(header[3], 0, "auth switch response sequence");
+            let payload_len = usize::from(header[0])
+                | (usize::from(header[1]) << 8)
+                | (usize::from(header[2]) << 16);
+            let mut payload = vec![0u8; payload_len];
+            stream
+                .read_exact(&mut payload)
+                .expect("read auth switch response payload");
+            assert_eq!(payload.len(), 32, "expected caching_sha2 fast-auth proof");
+            assert!(
+                !payload
+                    .windows(b"switch-secret".len())
+                    .any(|window| window == b"switch-secret"),
+                "fast-auth proof must not contain plaintext password"
+            );
+
+            let mut full_auth = PacketBuffer::new();
+            full_auth.set_sequence(1);
+            full_auth.buf = vec![0x01, 0x04];
+            let packet = full_auth.build_packet();
+            stream
+                .write_all(&packet.bytes)
+                .expect("write full-auth request");
+            stream.flush().expect("flush full-auth request");
+
+            let mut unexpected_header = [0u8; 4];
+            if stream.read_exact(&mut unexpected_header).is_ok() {
+                panic!(
+                    "client sent unexpected packet after full-auth request: {unexpected_header:?}"
+                );
+            }
+        });
+
+        let stream = run(async {
+            crate::net::TcpStream::connect_socket_addr(addr)
+                .await
+                .expect("connect client")
+        });
+        let mut conn = MySqlConnection {
+            inner: MySqlConnectionInner {
+                stream,
+                connection_id: 0,
+                capabilities: 0,
+                charset: 0,
+                status_flags: 0,
+                sequence: 0,
+                closed: false,
+                server_version: String::new(),
+                needs_rollback: false,
+                max_result_rows: DEFAULT_MAX_RESULT_ROWS,
+                prepared_statement_epoch: 0,
+                query_in_flight: std::sync::atomic::AtomicBool::new(false),
+            },
+            options: None,
+        };
+        let options =
+            MySqlConnectOptions::parse("mysql://user:switch-secret@localhost/db").unwrap();
+        let handshake = Handshake {
+            server_version: "8.0.0-test".to_string(),
+            connection_id: 1,
+            auth_plugin_data: b"01234567890123456789".to_vec(),
+            capabilities: capability::CLIENT_PROTOCOL_41
+                | capability::CLIENT_SECURE_CONNECTION
+                | capability::CLIENT_PLUGIN_AUTH,
+            charset: 45,
+            status_flags: 0,
+            auth_plugin_name: "caching_sha2_password".to_string(),
+        };
+        let mut auth_switch = b"caching_sha2_password\0".to_vec();
+        auth_switch.extend_from_slice(b"01234567890123456789\0");
+
+        let err = run(conn.handle_auth_switch(&auth_switch, &options, &handshake)).unwrap_err();
+        assert!(
+            matches!(err, MySqlError::AuthenticationFailed(ref msg) if msg.contains("full auth requires secure connection")),
+            "unexpected full-auth-switch error: {err:?}"
+        );
+        drop(conn);
+        server.join().expect("join server");
     }
 
     #[test]
