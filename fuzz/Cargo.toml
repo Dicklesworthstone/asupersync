@@ -3261,6 +3261,15 @@ test = false
 doc = false
 bench = false
 
+# Drives arbitrary bytes as bounded DecodeProof artifacts through
+# DecodeProof::replay_and_verify, asserting corrupted proofs fail closed.
+[[bin]]
+name = "raptorq_decoder_corrupt_proof"
+path = "fuzz_targets/raptorq_decoder_corrupt_proof.rs"
+test = false
+doc = false
+bench = false
+
 # Tests adjusted_frame_len boundary conditions with saturating arithmetic and i64/usize conversion.
 # Exercises length adjustment overflow/underflow scenarios, frame length validation boundaries,
 # negative frame length handling, arithmetic saturation behavior, and integer conversion edge cases
