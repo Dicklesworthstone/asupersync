@@ -85,6 +85,8 @@ pub enum KafkaError {
     PolledAfterCompletion,
     /// Configuration error.
     Config(String),
+    /// Authentication failure (credentials rejected or SASL handshake failed).
+    Authentication(String),
     /// The `kafka` feature is not enabled in this build.
     ///
     /// `KafkaProducer` / `TransactionalProducer` cannot reach a real broker
@@ -111,6 +113,7 @@ impl fmt::Display for KafkaError {
                 write!(f, "Kafka future polled after completion")
             }
             Self::Config(msg) => write!(f, "Kafka configuration error: {msg}"),
+            Self::Authentication(msg) => write!(f, "Kafka authentication failed: {msg}"),
             Self::FeatureDisabled => write!(
                 f,
                 "Kafka is unavailable: the `kafka` cargo feature is not enabled in this build"
@@ -142,6 +145,8 @@ impl KafkaError {
             self,
             Self::Io(_) | Self::Broker(_) | Self::QueueFull | Self::Transaction(_)
         )
+        // Note: Authentication errors are intentionally NOT transient.
+        // Retrying invalid credentials or malformed auth responses wastes resources.
     }
 
     /// Whether this error indicates a connection-level failure.
@@ -166,6 +171,8 @@ impl KafkaError {
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         matches!(self, Self::Io(_) | Self::Broker(_) | Self::QueueFull)
+        // Note: Authentication errors are intentionally NOT retryable.
+        // Malformed SASL responses should fail fast, not retry with credentials.
     }
 }
 
@@ -347,7 +354,22 @@ fn map_rdkafka_error(err: &RdKafkaError, message: Option<&BorrowedMessage<'_>>) 
             map_error_code(*code, message.map(rdkafka::Message::topic))
         }
         RdKafkaError::Canceled => KafkaError::Cancelled,
-        _ => KafkaError::Broker(err.to_string()),
+        // Check for authentication-related errors in the error message
+        _ => {
+            let err_str = err.to_string();
+            if err_str.contains("Authentication")
+                || err_str.contains("SASL")
+                || err_str.contains("authentication")
+                || err_str.contains("Invalid credentials")
+                || err_str.contains("Broker: Authentication failed")
+                || err_str.contains("SASL_PLAINTEXT")
+                || err_str.contains("SASL_SSL")
+            {
+                KafkaError::Authentication(err_str)
+            } else {
+                KafkaError::Broker(err_str)
+            }
+        }
     }
 }
 
