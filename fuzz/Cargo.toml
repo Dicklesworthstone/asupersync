@@ -1921,6 +1921,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "raptorq_encoder_repair_symbols"
+path = "fuzz_targets/raptorq_encoder_repair_symbols.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "raptorq_encoder_transition_cases"
 path = "fuzz_targets/raptorq_encoder_transition_cases.rs"
 test = false
