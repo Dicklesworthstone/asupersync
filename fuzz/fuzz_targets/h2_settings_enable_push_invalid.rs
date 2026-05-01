@@ -9,8 +9,8 @@
 
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::Arbitrary;
+use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
 /// Mock HTTP/2 SETTINGS frame validator for testing RFC 9113 compliance.
@@ -74,28 +74,30 @@ impl MockSettingsValidator {
         let mut has_flow_control_error = false;
 
         // Check frame size limits (64KB max for SETTINGS)
-        if scenario.settings.len() > 10922 {  // 65535 / 6 bytes per setting
-            self.violations.push(SettingsViolation::InvalidMaxFrameSize {
-                actual: scenario.settings.len() as u32 * 6
-            });
+        if scenario.settings.len() > 10922 {
+            // 65535 / 6 bytes per setting
+            self.violations
+                .push(SettingsViolation::InvalidMaxFrameSize {
+                    actual: scenario.settings.len() as u32 * 6,
+                });
         }
 
         for setting in &scenario.settings {
             match self.validate_individual_setting(setting, scenario.is_server) {
                 SettingValidation::Valid(parsed) => {
                     valid_settings.push(parsed);
-                },
+                }
                 SettingValidation::ProtocolError(violation) => {
                     self.violations.push(violation);
                     has_protocol_error = true;
-                },
+                }
                 SettingValidation::FlowControlError(violation) => {
                     self.violations.push(violation);
                     has_flow_control_error = true;
-                },
+                }
                 SettingValidation::Ignored => {
                     // Unknown settings are ignored per RFC
-                },
+                }
             }
         }
 
@@ -113,12 +115,16 @@ impl MockSettingsValidator {
         } else {
             ValidationResult::Success {
                 settings: valid_settings,
-                violations: self.violations.clone(),  // May include ignored unknown settings
+                violations: self.violations.clone(), // May include ignored unknown settings
             }
         }
     }
 
-    fn validate_individual_setting(&self, setting: &SettingEntry, is_server: bool) -> SettingValidation {
+    fn validate_individual_setting(
+        &self,
+        setting: &SettingEntry,
+        is_server: bool,
+    ) -> SettingValidation {
         match setting.id {
             // SETTINGS_HEADER_TABLE_SIZE (0x1)
             0x1 => SettingValidation::Valid(ParsedSetting::HeaderTableSize(setting.value)),
@@ -127,45 +133,50 @@ impl MockSettingsValidator {
             0x2 => {
                 // RFC 9113 §6.5.2: Server MUST NOT send SETTINGS_ENABLE_PUSH
                 if is_server {
-                    return SettingValidation::ProtocolError(SettingsViolation::ServerSentEnablePush);
+                    return SettingValidation::ProtocolError(
+                        SettingsViolation::ServerSentEnablePush,
+                    );
                 }
 
                 // RFC 9113 §6.5.2: SETTINGS_ENABLE_PUSH values other than 0 or 1
                 // MUST be treated as a connection error of type PROTOCOL_ERROR
                 if self.strict_rfc_compliance && setting.value > 1 {
                     SettingValidation::ProtocolError(SettingsViolation::InvalidEnablePushValue {
-                        actual: setting.value
+                        actual: setting.value,
                     })
                 } else {
                     // Current vulnerable implementation: any non-zero -> true
                     SettingValidation::Valid(ParsedSetting::EnablePush(setting.value != 0))
                 }
-            },
+            }
 
             // SETTINGS_MAX_CONCURRENT_STREAMS (0x3)
             0x3 => SettingValidation::Valid(ParsedSetting::MaxConcurrentStreams(setting.value)),
 
             // SETTINGS_INITIAL_WINDOW_SIZE (0x4)
             0x4 => {
-                if setting.value > 0x7fff_ffff {  // 2^31 - 1
-                    SettingValidation::FlowControlError(SettingsViolation::InvalidInitialWindowSize {
-                        actual: setting.value
-                    })
+                if setting.value > 0x7fff_ffff {
+                    // 2^31 - 1
+                    SettingValidation::FlowControlError(
+                        SettingsViolation::InvalidInitialWindowSize {
+                            actual: setting.value,
+                        },
+                    )
                 } else {
                     SettingValidation::Valid(ParsedSetting::InitialWindowSize(setting.value))
                 }
-            },
+            }
 
             // SETTINGS_MAX_FRAME_SIZE (0x5)
             0x5 => {
                 if setting.value < 16384 || setting.value > 16777215 {
                     SettingValidation::ProtocolError(SettingsViolation::InvalidMaxFrameSize {
-                        actual: setting.value
+                        actual: setting.value,
                     })
                 } else {
                     SettingValidation::Valid(ParsedSetting::MaxFrameSize(setting.value))
                 }
-            },
+            }
 
             // SETTINGS_MAX_HEADER_LIST_SIZE (0x6)
             0x6 => SettingValidation::Valid(ParsedSetting::MaxHeaderListSize(setting.value)),
@@ -173,10 +184,12 @@ impl MockSettingsValidator {
             // Unknown setting IDs are ignored per RFC 7540 §6.5.2
             _ => {
                 if self.strict_rfc_compliance {
-                    self.violations.clone().push(SettingsViolation::UnknownSetting {
-                        id: setting.id,
-                        value: setting.value
-                    });
+                    self.violations
+                        .clone()
+                        .push(SettingsViolation::UnknownSetting {
+                            id: setting.id,
+                            value: setting.value,
+                        });
                 }
                 SettingValidation::Ignored
             }
@@ -251,12 +264,16 @@ impl Arbitrary<'_> for SettingEntry {
                 // SETTINGS_ENABLE_PUSH - focus on invalid values like 2, 3, etc.
                 if u.ratio(1, 3)? {
                     // Valid values
-                    if u.arbitrary()? { 1 } else { 0 }
+                    if u.arbitrary()? {
+                        1
+                    } else {
+                        0
+                    }
                 } else {
                     // Invalid values (the vulnerability case)
                     u.int_in_range(2..=u32::MAX)?
                 }
-            },
+            }
             0x4 => {
                 // SETTINGS_INITIAL_WINDOW_SIZE - test boundary values
                 if u.ratio(1, 4)? {
@@ -265,7 +282,7 @@ impl Arbitrary<'_> for SettingEntry {
                 } else {
                     u.arbitrary()?
                 }
-            },
+            }
             0x5 => {
                 // SETTINGS_MAX_FRAME_SIZE - test range boundaries
                 if u.ratio(1, 4)? {
@@ -278,7 +295,7 @@ impl Arbitrary<'_> for SettingEntry {
                     // Valid range
                     u.int_in_range(16384..=16777215)?
                 }
-            },
+            }
             _ => u.arbitrary()?,
         };
 
@@ -293,10 +310,13 @@ fn test_enable_push_validation() {
 
     // Test critical vulnerability: SETTINGS_ENABLE_PUSH=2 should be rejected
     let invalid_scenarios = vec![
-        SettingEntry { id: 0x2, value: 2 },    // The specific case mentioned in Tick #203
+        SettingEntry { id: 0x2, value: 2 }, // The specific case mentioned in Tick #203
         SettingEntry { id: 0x2, value: 3 },
         SettingEntry { id: 0x2, value: 42 },
-        SettingEntry { id: 0x2, value: u32::MAX },
+        SettingEntry {
+            id: 0x2,
+            value: u32::MAX,
+        },
     ];
 
     for setting in invalid_scenarios {
@@ -312,17 +332,25 @@ fn test_enable_push_validation() {
         match strict_result {
             ValidationResult::ProtocolError { violations, .. } => {
                 assert!(violations.iter().any(|v| matches!(v, SettingsViolation::InvalidEnablePushValue { actual } if *actual == setting.value)));
-            },
-            _ => panic!("Strict validator should reject SETTINGS_ENABLE_PUSH={}", setting.value),
+            }
+            _ => panic!(
+                "Strict validator should reject SETTINGS_ENABLE_PUSH={}",
+                setting.value
+            ),
         }
 
         // Loose validator (current implementation) accepts invalid values
         let loose_result = validator_loose.validate_settings_frame(&scenario);
         match loose_result {
             ValidationResult::Success { settings, .. } => {
-                assert!(settings.iter().any(|s| matches!(s, ParsedSetting::EnablePush(true))));
-            },
-            _ => panic!("Loose validator unexpectedly rejected SETTINGS_ENABLE_PUSH={}", setting.value),
+                assert!(settings
+                    .iter()
+                    .any(|s| matches!(s, ParsedSetting::EnablePush(true))));
+            }
+            _ => panic!(
+                "Loose validator unexpectedly rejected SETTINGS_ENABLE_PUSH={}",
+                setting.value
+            ),
         }
     }
 }
@@ -332,7 +360,7 @@ fn test_server_enable_push_forbidden() {
     let mut validator = MockSettingsValidator::new(true);
 
     let scenario = SettingsScenario {
-        is_server: true,  // Server sending SETTINGS_ENABLE_PUSH
+        is_server: true, // Server sending SETTINGS_ENABLE_PUSH
         settings: vec![SettingEntry { id: 0x2, value: 1 }],
         include_edge_cases: false,
         frame_size_hint: 100,
@@ -341,8 +369,10 @@ fn test_server_enable_push_forbidden() {
     let result = validator.validate_settings_frame(&scenario);
     match result {
         ValidationResult::ProtocolError { violations, .. } => {
-            assert!(violations.iter().any(|v| matches!(v, SettingsViolation::ServerSentEnablePush)));
-        },
+            assert!(violations
+                .iter()
+                .any(|v| matches!(v, SettingsViolation::ServerSentEnablePush)));
+        }
         _ => panic!("Should reject server sending SETTINGS_ENABLE_PUSH"),
     }
 }
@@ -355,11 +385,23 @@ fn test_comprehensive_edge_cases() {
     let scenario = SettingsScenario {
         is_server: false,
         settings: vec![
-            SettingEntry { id: 0x1, value: 4096 },                    // Valid HEADER_TABLE_SIZE
-            SettingEntry { id: 0x2, value: 2 },                       // Invalid ENABLE_PUSH
-            SettingEntry { id: 0x4, value: 0x8000_0000 },             // Invalid INITIAL_WINDOW_SIZE
-            SettingEntry { id: 0x5, value: 1000 },                    // Invalid MAX_FRAME_SIZE
-            SettingEntry { id: 0xFFFF, value: 12345 },                // Unknown setting (ignored)
+            SettingEntry {
+                id: 0x1,
+                value: 4096,
+            }, // Valid HEADER_TABLE_SIZE
+            SettingEntry { id: 0x2, value: 2 }, // Invalid ENABLE_PUSH
+            SettingEntry {
+                id: 0x4,
+                value: 0x8000_0000,
+            }, // Invalid INITIAL_WINDOW_SIZE
+            SettingEntry {
+                id: 0x5,
+                value: 1000,
+            }, // Invalid MAX_FRAME_SIZE
+            SettingEntry {
+                id: 0xFFFF,
+                value: 12345,
+            }, // Unknown setting (ignored)
         ],
         include_edge_cases: true,
         frame_size_hint: 200,
@@ -371,12 +413,18 @@ fn test_comprehensive_edge_cases() {
     match result {
         ValidationResult::FlowControlError { violations, .. } => {
             // Should have flow control error for window size, protocol errors for others
-            assert!(violations.iter().any(|v| matches!(v, SettingsViolation::InvalidInitialWindowSize { .. })));
-        },
+            assert!(violations
+                .iter()
+                .any(|v| matches!(v, SettingsViolation::InvalidInitialWindowSize { .. })));
+        }
         ValidationResult::ProtocolError { violations, .. } => {
-            assert!(violations.iter().any(|v| matches!(v, SettingsViolation::InvalidEnablePushValue { .. })));
-            assert!(violations.iter().any(|v| matches!(v, SettingsViolation::InvalidMaxFrameSize { .. })));
-        },
+            assert!(violations
+                .iter()
+                .any(|v| matches!(v, SettingsViolation::InvalidEnablePushValue { .. })));
+            assert!(violations
+                .iter()
+                .any(|v| matches!(v, SettingsViolation::InvalidMaxFrameSize { .. })));
+        }
         _ => {
             // May succeed in loose mode
         }
@@ -414,10 +462,14 @@ fuzz_target!(|scenario: SettingsScenario| {
                 ValidationResult::ProtocolError { violations, .. } => {
                     assert!(violations.iter().any(|v| matches!(v, SettingsViolation::InvalidEnablePushValue { actual } if *actual == setting.value)),
                         "Strict mode should reject SETTINGS_ENABLE_PUSH={}", setting.value);
-                },
+                }
                 _ => {
-                    if !scenario.is_server {  // Server case has different error
-                        panic!("Strict mode should reject SETTINGS_ENABLE_PUSH={}", setting.value);
+                    if !scenario.is_server {
+                        // Server case has different error
+                        panic!(
+                            "Strict mode should reject SETTINGS_ENABLE_PUSH={}",
+                            setting.value
+                        );
                     }
                 }
             }
@@ -426,10 +478,15 @@ fuzz_target!(|scenario: SettingsScenario| {
             match &loose_result {
                 ValidationResult::Success { settings, .. } => {
                     if !scenario.is_server {
-                        assert!(settings.iter().any(|s| matches!(s, ParsedSetting::EnablePush(true))),
-                            "Loose mode should accept SETTINGS_ENABLE_PUSH={} as true", setting.value);
+                        assert!(
+                            settings
+                                .iter()
+                                .any(|s| matches!(s, ParsedSetting::EnablePush(true))),
+                            "Loose mode should accept SETTINGS_ENABLE_PUSH={} as true",
+                            setting.value
+                        );
                     }
-                },
+                }
                 _ => {
                     // May be other errors like server sending ENABLE_PUSH
                 }
@@ -440,12 +497,15 @@ fuzz_target!(|scenario: SettingsScenario| {
     // RFC compliance checks
     if scenario.is_server {
         for setting in &scenario.settings {
-            if setting.id == 0x2 {  // SETTINGS_ENABLE_PUSH
+            if setting.id == 0x2 {
+                // SETTINGS_ENABLE_PUSH
                 // Both validators should reject this
                 match &strict_result {
                     ValidationResult::ProtocolError { violations, .. } => {
-                        assert!(violations.iter().any(|v| matches!(v, SettingsViolation::ServerSentEnablePush)));
-                    },
+                        assert!(violations
+                            .iter()
+                            .any(|v| matches!(v, SettingsViolation::ServerSentEnablePush)));
+                    }
                     _ => panic!("Should reject server sending SETTINGS_ENABLE_PUSH"),
                 }
             }
