@@ -1448,6 +1448,20 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h2_continuation_flood"
+path = "fuzz_targets/h2_continuation_flood.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_continuation_flood"
+path = "fuzz_targets/h2_continuation_flood.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "h2_zero_length_data"
 path = "fuzz_targets/h2_zero_length_data.rs"
 test = false
@@ -4361,6 +4375,12 @@ doc = false
 [[bin]]
 name = "h2_headers_frame_size_cap_concurrent"
 path = "fuzz_targets/h2_headers_frame_size_cap_concurrent.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "h2_priority_idle_stream"
+path = "fuzz_targets/h2_priority_idle_stream.rs"
 test = false
 doc = false
 
