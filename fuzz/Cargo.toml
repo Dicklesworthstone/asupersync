@@ -2162,6 +2162,15 @@ test = false
 doc = false
 bench = false
 
+# Focused Bind message fuzzer for parameter format/OID mismatch, length
+# overflow, and NULL marker handling in the extended-query protocol.
+[[bin]]
+name = "postgres_extended_query_bind"
+path = "fuzz_targets/postgres_extended_query_bind.rs"
+test = false
+doc = false
+bench = false
+
 [[bin]]
 name = "h2_connection_window_update"
 path = "fuzz_targets/h2_connection_window_update.rs"
