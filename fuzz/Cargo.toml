@@ -1455,13 +1455,6 @@ doc = false
 bench = false
 
 [[bin]]
-name = "h2_continuation_flood"
-path = "fuzz_targets/h2_continuation_flood.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "h2_zero_length_data"
 path = "fuzz_targets/h2_zero_length_data.rs"
 test = false
@@ -4399,5 +4392,11 @@ doc = false
 [[bin]]
 name = "grpc_compressed_flag_mismatch"
 path = "fuzz_targets/grpc_compressed_flag_mismatch.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "h2_rst_stream_flood"
+path = "fuzz_targets/h2_rst_stream_flood.rs"
 test = false
 doc = false
