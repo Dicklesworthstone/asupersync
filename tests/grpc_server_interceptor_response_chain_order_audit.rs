@@ -95,10 +95,8 @@ fn request_side_chain_runs_in_insertion_order() {
         .expect("all OK on request side");
 
     let entries = log.lock().unwrap().clone();
-    let request_entries: Vec<&String> = entries
-        .iter()
-        .filter(|s| s.ends_with("-request"))
-        .collect();
+    let request_entries: Vec<&String> =
+        entries.iter().filter(|s| s.ends_with("-request")).collect();
     assert_eq!(
         request_entries.len(),
         3,
@@ -163,10 +161,7 @@ fn full_request_response_cycle_logs_layer_count_correctly() {
 
     let entries = log.lock().unwrap().clone();
     let request_count = entries.iter().filter(|s| s.ends_with("-request")).count();
-    let response_count = entries
-        .iter()
-        .filter(|s| s.ends_with("-response"))
-        .count();
+    let response_count = entries.iter().filter(|s| s.ends_with("-response")).count();
     assert_eq!(request_count, 5, "all 5 layers ran request-side");
     assert_eq!(
         response_count, 5,
@@ -199,8 +194,7 @@ fn single_layer_request_then_response_runs_in_documented_order() {
     // simple deployment. Verify the documented hook sequence:
     // request → handler (not exercised here) → response.
     let log = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-    let layer = InterceptorLayer::new()
-        .layer(OrderRecorder::new("only", log.clone()));
+    let layer = InterceptorLayer::new().layer(OrderRecorder::new("only", log.clone()));
 
     let mut request = Request::with_metadata(Bytes::new(), Metadata::new());
     layer.intercept_request(&mut request).expect("OK");

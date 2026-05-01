@@ -66,11 +66,11 @@
 //! returns Err early if any structural issue surfaces.
 
 use asupersync::bytes::Bytes;
+use asupersync::grpc::server::{
+    DEFAULT_MAX_METADATA_SIZE, enforce_metadata_size_limit, metadata_byte_size,
+};
 use asupersync::grpc::status::Code;
 use asupersync::grpc::streaming::Metadata;
-use asupersync::grpc::server::{
-    enforce_metadata_size_limit, metadata_byte_size, DEFAULT_MAX_METADATA_SIZE,
-};
 
 #[test]
 fn default_max_metadata_size_is_8_kib() {
@@ -139,8 +139,7 @@ fn enforce_metadata_size_limit_zero_disables_cap() {
     let mut metadata = Metadata::new();
     let big_value = "Y".repeat(16 * 1024);
     assert!(metadata.insert("x-unbounded", big_value.as_str()));
-    enforce_metadata_size_limit(&metadata, 0)
-        .expect("limit=0 disables enforcement");
+    enforce_metadata_size_limit(&metadata, 0).expect("limit=0 disables enforcement");
 }
 
 #[test]
@@ -228,8 +227,7 @@ fn empty_metadata_passes_under_any_cap() {
     // any non-zero cap. A regression that mishandled empty
     // would surface here.
     let metadata = Metadata::new();
-    enforce_metadata_size_limit(&metadata, 1)
-        .expect("empty metadata under any cap");
+    enforce_metadata_size_limit(&metadata, 1).expect("empty metadata under any cap");
     enforce_metadata_size_limit(&metadata, DEFAULT_MAX_METADATA_SIZE)
         .expect("empty metadata under default cap");
 }

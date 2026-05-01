@@ -26,8 +26,9 @@ use libfuzzer_sys::fuzz_target;
 use asupersync::messaging::redis::{
     PubSubEvent, PubSubMessage, PubSubSubscriptionKind, RedisProtocolLimits, RespValue,
     decode_resp_value_for_fuzz, parse_acl_for_fuzz, parse_client_kill_for_fuzz,
-    parse_latency_for_fuzz, parse_pubsub_event_for_fuzz, parse_script_eval_for_fuzz,
-    parse_slowlog_for_fuzz, parse_zadd_for_fuzz, parse_zrangebyscore_for_fuzz,
+    parse_cluster_command_for_fuzz, parse_latency_for_fuzz, parse_pubsub_event_for_fuzz,
+    parse_script_eval_for_fuzz, parse_slowlog_for_fuzz, parse_zadd_for_fuzz,
+    parse_zrangebyscore_for_fuzz,
 };
 
 const MAX_STRUCTURED_FIELD_BYTES: usize = 96;
@@ -977,6 +978,83 @@ fn exercise_acl_parser(data: &[u8]) {
     );
 }
 
+fn hex_cluster_node_id(data: &[u8]) -> [u8; 40] {
+    let alphabet = b"0123456789abcdef";
+    let mut node_id = [b'0'; 40];
+    for (index, byte) in node_id.iter_mut().enumerate() {
+        let source = if data.is_empty() {
+            u8::try_from(index).expect("cluster node id index fits in u8")
+        } else {
+            data[index % data.len()]
+        };
+        *byte = alphabet[usize::from(source) % alphabet.len()];
+    }
+    node_id
+}
+
+fn exercise_cluster_command_parser(data: &[u8]) {
+    let payload = &data[..data.len().min(MAX_STRUCTURED_FIELD_BYTES)];
+    let node_id = hex_cluster_node_id(payload);
+
+    let myid = RespValue::Array(Some(vec![bulk_arg(b"CLUSTER"), bulk_arg(b"MYID")]));
+    let _ = parse_cluster_command_for_fuzz(myid).expect("CLUSTER MYID should parse");
+
+    let reset_default = RespValue::Array(Some(vec![bulk_arg(b"CLUSTER"), bulk_arg(b"RESET")]));
+    let _ = parse_cluster_command_for_fuzz(reset_default).expect("CLUSTER RESET should parse");
+
+    let reset_hard = RespValue::Array(Some(vec![
+        bulk_arg(b"CLUSTER"),
+        bulk_arg(b"RESET"),
+        bulk_arg(b"HARD"),
+    ]));
+    let _ = parse_cluster_command_for_fuzz(reset_hard).expect("CLUSTER RESET HARD should parse");
+
+    let count_failure_reports = RespValue::Array(Some(vec![
+        bulk_arg(b"CLUSTER"),
+        bulk_arg(b"COUNT-FAILURE-REPORTS"),
+        bulk_arg(&node_id),
+    ]));
+    let _ = parse_cluster_command_for_fuzz(count_failure_reports)
+        .expect("CLUSTER COUNT-FAILURE-REPORTS should parse");
+
+    let arbitrary_node_id = RespValue::Array(Some(vec![
+        bulk_arg(b"CLUSTER"),
+        bulk_arg(b"COUNT-FAILURE-REPORTS"),
+        bulk_arg(payload),
+    ]));
+    let _ = parse_cluster_command_for_fuzz(arbitrary_node_id);
+
+    let myid_extra = RespValue::Array(Some(vec![
+        bulk_arg(b"CLUSTER"),
+        bulk_arg(b"MYID"),
+        bulk_arg(b"extra"),
+    ]));
+    assert!(
+        parse_cluster_command_for_fuzz(myid_extra).is_err(),
+        "CLUSTER MYID must reject extra arguments"
+    );
+
+    let bad_reset_mode = RespValue::Array(Some(vec![
+        bulk_arg(b"CLUSTER"),
+        bulk_arg(b"RESET"),
+        bulk_arg(b"MAYBE"),
+    ]));
+    assert!(
+        parse_cluster_command_for_fuzz(bad_reset_mode).is_err(),
+        "CLUSTER RESET must reject unknown modes"
+    );
+
+    let bad_node_id = RespValue::Array(Some(vec![
+        bulk_arg(b"CLUSTER"),
+        bulk_arg(b"COUNT-FAILURE-REPORTS"),
+        bulk_arg(b"not-a-node-id"),
+    ]));
+    assert!(
+        parse_cluster_command_for_fuzz(bad_node_id).is_err(),
+        "CLUSTER COUNT-FAILURE-REPORTS must validate node id shape"
+    );
+}
+
 /// Test helper functions in isolation
 fn test_helper_functions(data: &[u8]) {
     // Test find_crlf with various scenarios
@@ -1144,7 +1222,10 @@ fuzz_target!(|data: &[u8]| {
     // Test 16: Redis ACL USER/CAT/reset rule parser seam
     exercise_acl_parser(data);
 
-    // Test 17: Fragmented parsing simulation (partial buffer scenarios)
+    // Test 17: Redis CLUSTER MYID/RESET/COUNT-FAILURE-REPORTS parser seam
+    exercise_cluster_command_parser(data);
+
+    // Test 18: Fragmented parsing simulation (partial buffer scenarios)
     if data.len() > 10 {
         for split_point in [1, data.len() / 4, data.len() / 2, data.len() - 1]
             .iter()
@@ -1165,7 +1246,7 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    // Test 18: Boundary value testing for limits
+    // Test 19: Boundary value testing for limits
     let boundary_limits = [
         RedisProtocolLimits {
             max_frame_size: data.len().saturating_sub(1).max(1),

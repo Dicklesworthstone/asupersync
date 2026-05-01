@@ -222,10 +222,7 @@ fn config_compression_fields_use_closed_enum() {
     // Sanity: only the closed-enum variants flow into the
     // accept list.
     let server = ServerBuilder::new()
-        .accept_compressions([
-            CompressionEncoding::Identity,
-            CompressionEncoding::Gzip,
-        ])
+        .accept_compressions([CompressionEncoding::Identity, CompressionEncoding::Gzip])
         .build();
     let config = server.config();
     for entry in &config.accept_compression {
@@ -248,8 +245,7 @@ fn default_send_compression_change_would_break_interop() {
     // default so the change would need explicit re-baseline.
     let config = ServerConfig::default();
     assert_eq!(
-        config.send_compression,
-        None,
+        config.send_compression, None,
         "default send_compression MUST stay None — flipping to a \
          compressed default would change the wire bytes for every \
          response and break vanilla gRPC clients that don't advertise \

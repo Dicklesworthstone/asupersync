@@ -47,6 +47,9 @@ tempfile = "3.25"
 # For RwLock fuzzing async operations
 futures-executor = "0.3"
 
+# For gRPC compression flag mismatch testing
+flate2 = "1.0"
+
 [dev-dependencies]
 # For seed generation and corpus management
 rand = "0.9"
@@ -4370,5 +4373,11 @@ doc = false
 [[bin]]
 name = "mutex_arc_clone_race"
 path = "fuzz_targets/mutex_arc_clone_race.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "grpc_compressed_flag_mismatch"
+path = "fuzz_targets/grpc_compressed_flag_mismatch.rs"
 test = false
 doc = false

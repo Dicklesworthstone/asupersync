@@ -108,13 +108,7 @@ fn max_request_deadline_clamps_peer_timeout() {
     assert!(metadata.insert("grpc-timeout", "99999999H"));
 
     let cap = Duration::from_secs(60);
-    let cx = CallContext::from_metadata_at_with_max_deadline(
-        metadata,
-        None,
-        Some(cap),
-        None,
-        now,
-    );
+    let cx = CallContext::from_metadata_at_with_max_deadline(metadata, None, Some(cap), None, now);
     let deadline = cx.deadline().expect("deadline set");
     let effective = deadline.saturating_duration_since(now);
     assert!(
@@ -251,7 +245,10 @@ fn handler_timeout_enforcement_is_handler_cooperative() {
     // remaining_at is None for expired deadlines.
     assert!(cx.remaining_at(deadline + Duration::from_secs(1)).is_none());
     // Pre-deadline remaining is Some.
-    assert!(cx.remaining_at(deadline - Duration::from_micros(1)).is_some());
+    assert!(
+        cx.remaining_at(deadline - Duration::from_micros(1))
+            .is_some()
+    );
 }
 
 #[test]

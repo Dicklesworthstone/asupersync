@@ -53,21 +53,18 @@
 //!
 //! Regression tests below pin (a)-(e).
 
+use asupersync::grpc::server::{DEFAULT_MAX_METADATA_SIZE, enforce_metadata_size_limit};
 use asupersync::grpc::status::Code;
 use asupersync::grpc::streaming::Metadata;
 use asupersync::grpc::{ServerBuilder, ServerConfig};
-use asupersync::grpc::server::{enforce_metadata_size_limit, DEFAULT_MAX_METADATA_SIZE};
-use asupersync::http::h2::settings::{
-    DEFAULT_MAX_HEADER_LIST_SIZE, Settings, SettingsBuilder,
-};
+use asupersync::http::h2::settings::{DEFAULT_MAX_HEADER_LIST_SIZE, Settings, SettingsBuilder};
 
 #[test]
 fn http2_default_max_header_list_size_is_64_kib() {
     // Pin (a) HTTP/2 layer: the advisory cap. Servers
     // announce this via SETTINGS frame.
     assert_eq!(
-        DEFAULT_MAX_HEADER_LIST_SIZE,
-        65536,
+        DEFAULT_MAX_HEADER_LIST_SIZE, 65536,
         "HTTP/2 SETTINGS_MAX_HEADER_LIST_SIZE default = 64 KiB \
          (advisory per RFC 7540 §6.5.2)",
     );
@@ -138,9 +135,7 @@ fn http2_settings_can_be_configured_independently() {
 fn grpc_max_metadata_size_can_be_configured_independently() {
     // Pin (d) gRPC layer: max_metadata_size builder method
     // on ServerBuilder.
-    let server = ServerBuilder::new()
-        .max_metadata_size(2 * 1024)
-        .build();
+    let server = ServerBuilder::new().max_metadata_size(2 * 1024).build();
     assert_eq!(server.config().max_metadata_size, 2 * 1024);
 }
 
@@ -193,8 +188,7 @@ fn negotiation_layers_compose_independently() {
     assert_eq!(h2.max_header_list_size, 16 * 1024);
     // The two values are independent.
     assert!(
-        u32::try_from(server.config().max_metadata_size).unwrap()
-            < h2.max_header_list_size,
+        u32::try_from(server.config().max_metadata_size).unwrap() < h2.max_header_list_size,
         "operator's gRPC cap is tighter than the HTTP/2 advisory — \
          the advisory tells the client about the connection-layer \
          limit, the gRPC cap is the per-call hard gate",

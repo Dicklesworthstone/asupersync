@@ -69,13 +69,11 @@ fn default_server_config_has_4mib_recv_and_send_caps() {
     // directions. Matches gRPC ecosystem convention.
     let config = ServerConfig::default();
     assert_eq!(
-        config.max_recv_message_size,
-        DEFAULT_MAX_MESSAGE_SIZE,
+        config.max_recv_message_size, DEFAULT_MAX_MESSAGE_SIZE,
         "default max_recv_message_size = 4 MiB",
     );
     assert_eq!(
-        config.max_send_message_size,
-        DEFAULT_MAX_MESSAGE_SIZE,
+        config.max_send_message_size, DEFAULT_MAX_MESSAGE_SIZE,
         "default max_send_message_size = 4 MiB",
     );
 }
@@ -100,10 +98,7 @@ fn server_builder_configures_send_size_cap() {
     let server = ServerBuilder::new()
         .max_send_message_size(16 * 1024 * 1024) // 16 MiB
         .build();
-    assert_eq!(
-        server.config().max_send_message_size,
-        16 * 1024 * 1024,
-    );
+    assert_eq!(server.config().max_send_message_size, 16 * 1024 * 1024,);
 }
 
 #[test]
@@ -186,10 +181,9 @@ fn codec_default_max_message_size_matches_server_config_default() {
     // We pin by grep — DEFAULT_MAX_MESSAGE_SIZE in codec.rs
     // should equal 4 MiB.
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let codec_rs = std::fs::read_to_string(
-        std::path::Path::new(manifest_dir).join("src/grpc/codec.rs"),
-    )
-    .expect("read src/grpc/codec.rs");
+    let codec_rs =
+        std::fs::read_to_string(std::path::Path::new(manifest_dir).join("src/grpc/codec.rs"))
+            .expect("read src/grpc/codec.rs");
     // Match either "4 * 1024 * 1024" (= 4 MiB) or "4194304".
     let has_4mib = codec_rs.contains("DEFAULT_MAX_MESSAGE_SIZE: usize = 4 * 1024 * 1024")
         || codec_rs.contains("DEFAULT_MAX_MESSAGE_SIZE: usize = 4194304");

@@ -50,10 +50,10 @@
 //! Regression tests below pin (a)+(b)+(c) at the public API
 //! surface — ticks #161/#168/#173/#180 cover the rest.
 
+use asupersync::grpc::Status;
+use asupersync::grpc::server::{DEFAULT_MAX_METADATA_SIZE, enforce_metadata_size_limit};
 use asupersync::grpc::status::{Code, GrpcError};
 use asupersync::grpc::streaming::Metadata;
-use asupersync::grpc::Status;
-use asupersync::grpc::server::{enforce_metadata_size_limit, DEFAULT_MAX_METADATA_SIZE};
 
 #[test]
 fn metadata_size_cap_rejection_is_always_resource_exhausted() {
@@ -263,9 +263,7 @@ fn protocol_violation_at_different_layers_uses_same_code() {
     let mut codec = GrpcCodec::with_max_size(64 * 1024);
     let bad_frame = [0x42, 0x00, 0x00, 0x00, 0x00];
     let mut buf = BytesMut::from(&bad_frame[..]);
-    let err = codec
-        .decode(&mut buf)
-        .expect_err("bad flag rejects");
+    let err = codec.decode(&mut buf).expect_err("bad flag rejects");
     let status = err.into_status();
     assert_eq!(
         status.code(),

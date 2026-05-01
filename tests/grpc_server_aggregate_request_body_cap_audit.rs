@@ -160,9 +160,7 @@ fn request_body_meter_per_call_instance_independence() {
     // Pin (h): two meters from the same config are
     // independent — adapters that maintain one per stream
     // don't share state.
-    let server = ServerBuilder::new()
-        .max_request_body_bytes(1024)
-        .build();
+    let server = ServerBuilder::new().max_request_body_bytes(1024).build();
     let mut meter_a = RequestBodyMeter::from_config(server.config());
     let mut meter_b = RequestBodyMeter::from_config(server.config());
 
@@ -174,8 +172,12 @@ fn request_body_meter_per_call_instance_independence() {
     assert_eq!(meter_a.bytes_accumulated(), 800);
     assert_eq!(meter_b.bytes_accumulated(), 800);
 
-    meter_a.record_message_bytes(225).expect_err("a at 1025 rejects");
-    meter_b.record_message_bytes(225).expect_err("b at 1025 rejects");
+    meter_a
+        .record_message_bytes(225)
+        .expect_err("a at 1025 rejects");
+    meter_b
+        .record_message_bytes(225)
+        .expect_err("b at 1025 rejects");
 }
 
 #[test]
@@ -206,10 +208,9 @@ fn server_config_max_request_body_bytes_is_documented_field() {
     // Pin: the new field is documented at the source level.
     // Pinned via grep for the bead reference.
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let server_rs = std::fs::read_to_string(
-        std::path::Path::new(manifest_dir).join("src/grpc/server.rs"),
-    )
-    .expect("read src/grpc/server.rs");
+    let server_rs =
+        std::fs::read_to_string(std::path::Path::new(manifest_dir).join("src/grpc/server.rs"))
+            .expect("read src/grpc/server.rs");
     assert!(
         server_rs.contains("br-asupersync-woj18e"),
         "max_request_body_bytes field MUST reference the fix bead so \

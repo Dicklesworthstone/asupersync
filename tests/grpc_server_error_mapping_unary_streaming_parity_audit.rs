@@ -145,8 +145,8 @@ fn every_status_code_round_trips_identically_in_both_paths() {
         // And the decoded grpc-status integer matches.
         let unary_decoded =
             decode_trailers(&unary[FRAME_HEADER_SIZE..]).expect("unary trailer decodes");
-        let streaming_decoded = decode_trailers(&streaming[FRAME_HEADER_SIZE..])
-            .expect("streaming trailer decodes");
+        let streaming_decoded =
+            decode_trailers(&streaming[FRAME_HEADER_SIZE..]).expect("streaming trailer decodes");
         assert_eq!(
             unary_decoded.status.code().as_i32(),
             streaming_decoded.status.code().as_i32(),
@@ -227,13 +227,10 @@ fn trailing_metadata_in_streaming_path_round_trips_identically() {
 
     // Decoded metadata matches.
     let decoded = decode_trailers(&unary[FRAME_HEADER_SIZE..]).expect("decode");
-    let retry_after = decoded
-        .metadata
-        .get("retry-after")
-        .and_then(|v| match v {
-            MetadataValue::Ascii(s) => Some(s.as_str()),
-            _ => None,
-        });
+    let retry_after = decoded.metadata.get("retry-after").and_then(|v| match v {
+        MetadataValue::Ascii(s) => Some(s.as_str()),
+        _ => None,
+    });
     assert_eq!(retry_after, Some("3"));
 }
 

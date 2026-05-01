@@ -63,8 +63,8 @@
 
 use asupersync::bytes::{Bytes, BytesMut};
 use asupersync::codec::{Decoder, Encoder};
-use asupersync::grpc::{GrpcCodec, GrpcMessage, IdentityCodec};
 use asupersync::grpc::codec::Codec;
+use asupersync::grpc::{GrpcCodec, GrpcMessage, IdentityCodec};
 
 #[test]
 fn identity_codec_encode_returns_input_bytes() {
@@ -167,9 +167,7 @@ fn identity_codec_through_framed_codec_round_trips_payload() {
     assert_eq!(decoded_msg.data.as_ref(), payload.as_ref());
 
     let mut inner = IdentityCodec;
-    let decoded_inner = inner
-        .decode(&decoded_msg.data)
-        .expect("Infallible");
+    let decoded_inner = inner.decode(&decoded_msg.data).expect("Infallible");
     assert_eq!(decoded_inner.as_ref(), payload.as_ref());
 }
 

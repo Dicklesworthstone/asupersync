@@ -13,7 +13,8 @@ mod tests {
 
     /// Assert a golden file test for serialized AnyValue protobuf output.
     fn assert_golden_log_body(test_name: &str, body_value: &LogRecordBodyValue) {
-        let golden_path = Path::new("tests/golden/log_body").join(format!("{test_name}.golden"));
+        let golden_path =
+            Path::new("tests/golden/otel/log_body").join(format!("{test_name}.golden"));
 
         let any_value = log_record_body_value_to_any_value(body_value);
         let mut serialized = Vec::new();
@@ -33,7 +34,7 @@ mod tests {
             panic!(
                 "Golden file missing: {}\n\
                  Run with UPDATE_GOLDENS=1 to create it\n\
-                 Then review and commit: git diff tests/golden/",
+                 Then review and commit: git diff tests/golden/otel/",
                 golden_path.display()
             )
         });

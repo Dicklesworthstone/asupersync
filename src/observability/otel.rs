@@ -5545,26 +5545,27 @@ mod otlp_wire_format_tests {
         );
     }
 
-    /// OTLP export conformance test against opentelemetry-rs reference implementation.
+    /// OTLP export conformance test against the opentelemetry-proto reference transformer.
     ///
     /// This test ensures that the same span tree produces byte-identical OTLP protobuf
-    /// output between our implementation and the opentelemetry-rs reference implementation.
+    /// output between our implementation and the upstream SDK-to-proto transformer.
     /// This is Pattern 1: Differential Testing (Reference Implementation) from the
     /// testing-conformance-harnesses methodology.
     #[test]
     #[cfg(feature = "tracing-integration")]
     fn otlp_export_conformance_byte_identical() {
-        use opentelemetry::trace::{SpanBuilder, SpanKind, Status, TraceContextExt, Tracer};
+        use opentelemetry::trace::{
+            Event, SpanContext, SpanId, SpanKind, Status, TraceFlags, TraceId, TraceState,
+        };
         use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue};
         use opentelemetry_proto::tonic::resource::v1::Resource;
-        use opentelemetry_proto::tonic::trace::v1::{
-            ExportTraceServiceRequest, ResourceSpans, ScopeSpans, Span as OtlpSpan,
-        };
+        use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span as OtlpSpan};
+        use opentelemetry_proto::transform::common::tonic::ResourceAttributesWithSchema;
+        use opentelemetry_proto::transform::trace::tonic::group_spans_by_resource_and_scope;
         use opentelemetry_sdk::Resource as SdkResource;
-        use opentelemetry_sdk::trace::{BatchSpanProcessor, TracerProvider};
+        use opentelemetry_sdk::trace::{SpanData, SpanEvents, SpanLinks};
         use prost::Message;
         use std::collections::HashMap;
-        use std::sync::{Arc, Mutex};
 
         // Shared span data for both implementations
         #[derive(Clone)]
@@ -5651,8 +5652,11 @@ mod otlp_wire_format_tests {
                         ),
                     }),
                 }],
-                dropped_attributes_count: 0,
+                ..Default::default()
             };
+
+            let sampled_known_local_flags =
+                1 | opentelemetry_proto::tonic::trace::v1::SpanFlags::ContextHasIsRemoteMask as u32;
 
             let spans: Vec<OtlpSpan> = tree.spans.iter().enumerate().map(|(idx, span)| {
                 OtlpSpan {
@@ -5662,7 +5666,7 @@ mod otlp_wire_format_tests {
                         vec![(parent + 1) as u8, 0, 0, 0, 0, 0, 0, 0]
                     }),
                     name: span.name.clone(),
-                    kind: match span.kind {
+                    kind: match &span.kind {
                         SpanKind::Internal => 1,
                         SpanKind::Server => 2,
                         SpanKind::Client => 3,
@@ -5694,23 +5698,23 @@ mod otlp_wire_format_tests {
                             dropped_attributes_count: 0,
                         }
                     }).collect(),
-                    status: Some(opentelemetry_proto::tonic::trace::v1::Status {
-                        code: match span.status {
-                            Status::Unset => 0,
-                            Status::Ok => 1,
-                            Status::Error { .. } => 2,
-                        },
-                        message: match &span.status {
-                            Status::Error { description } => description.clone(),
-                            _ => String::new(),
-                        },
-                    }),
+                        status: Some(opentelemetry_proto::tonic::trace::v1::Status {
+                            code: match span.status {
+                                Status::Unset => 0,
+                                Status::Ok => 1,
+                                Status::Error { .. } => 2,
+                            },
+                            message: match &span.status {
+                                Status::Error { description } => description.to_string(),
+                                _ => String::new(),
+                            },
+                        }),
                     dropped_attributes_count: 0,
                     dropped_events_count: 0,
                     dropped_links_count: 0,
                     links: vec![],
                     trace_state: String::new(),
-                    flags: 1, // Sampled
+                    flags: sampled_known_local_flags,
                 }
             }).collect();
 
@@ -5718,7 +5722,7 @@ mod otlp_wire_format_tests {
                 scope: Some(
                     opentelemetry_proto::tonic::common::v1::InstrumentationScope {
                         name: "asupersync".to_string(),
-                        version: "0.3.1".to_string(),
+                        version: env!("CARGO_PKG_VERSION").to_string(),
                         attributes: vec![],
                         dropped_attributes_count: 0,
                     },
@@ -5740,100 +5744,78 @@ mod otlp_wire_format_tests {
             request.encode_to_vec()
         }
 
-        // Build OTLP export with reference opentelemetry-rs implementation
+        // Build OTLP export with the opentelemetry-proto reference transformer.
         fn build_reference_otlp_export(tree: &CanonicalSpanTree) -> Vec<u8> {
-            // Create a collector that captures the OTLP bytes
-            let captured_bytes = Arc::new(Mutex::new(Vec::new()));
-            let bytes_clone = captured_bytes.clone();
-
-            // Mock exporter that captures the protobuf bytes
-            struct ByteCapturingExporter {
-                captured: Arc<Mutex<Vec<u8>>>,
+            fn span_id_from_index(idx: usize) -> SpanId {
+                SpanId::from_bytes([(idx + 1) as u8, 0, 0, 0, 0, 0, 0, 0])
             }
 
-            impl opentelemetry_sdk::export::trace::SpanExporter for ByteCapturingExporter {
-                fn export(
-                    &mut self,
-                    batch: Vec<opentelemetry_sdk::export::trace::SpanData>,
-                ) -> opentelemetry_sdk::export::trace::ExportResult {
-                    // Convert SpanData to OTLP and capture bytes
-                    use opentelemetry_proto::transform::trace::spans_to_proto;
-
-                    let resource = SdkResource::new(vec![opentelemetry::KeyValue::new(
-                        "service.name",
-                        "asupersync",
-                    )]);
-
-                    let resource_spans = spans_to_proto(resource, batch);
-                    let request = ExportTraceServiceRequest { resource_spans };
-                    let bytes = request.encode_to_vec();
-
-                    *self.captured.lock().unwrap() = bytes;
-                    Ok(())
-                }
-            }
-
-            let exporter = ByteCapturingExporter {
-                captured: bytes_clone,
-            };
-
-            let tracer_provider = TracerProvider::builder()
-                .with_simple_exporter(exporter)
-                .with_resource(SdkResource::new(vec![opentelemetry::KeyValue::new(
-                    "service.name",
-                    "asupersync",
-                )]))
+            let resource = SdkResource::builder_empty()
+                .with_attribute(opentelemetry::KeyValue::new("service.name", "asupersync"))
                 .build();
+            let resource = ResourceAttributesWithSchema::from(&resource);
+            let instrumentation_scope = opentelemetry::InstrumentationScope::builder("asupersync")
+                .with_version(env!("CARGO_PKG_VERSION"))
+                .build();
+            let trace_id =
+                TraceId::from_bytes([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
 
-            let tracer = tracer_provider.tracer("asupersync");
-
-            // Generate the same spans using the reference implementation
-            let mut span_contexts = Vec::new();
-
-            for (idx, canonical_span) in tree.spans.iter().enumerate() {
-                let span_builder = tracer
-                    .span_builder(&canonical_span.name)
-                    .with_kind(canonical_span.kind);
-
-                let span_context = if let Some(parent_idx) = canonical_span.parent_idx {
-                    // Set parent context
-                    opentelemetry::Context::current().with_span(
-                        opentelemetry::trace::noop::NoopSpan::new(
-                            span_contexts[parent_idx].clone(),
-                        ),
-                    )
-                } else {
-                    opentelemetry::Context::current()
-                };
-
-                let span = span_context.span();
-
-                for (key, value) in &canonical_span.attributes {
-                    span.set_attribute(opentelemetry::KeyValue::new(key.clone(), value.clone()));
-                }
-
-                for (event_name, event_attrs) in &canonical_span.events {
-                    let attrs: Vec<_> = event_attrs
+            let spans = tree
+                .spans
+                .iter()
+                .enumerate()
+                .map(|(idx, span)| {
+                    let mut events = SpanEvents::default();
+                    events.events = span
+                        .events
                         .iter()
-                        .map(|(k, v)| opentelemetry::KeyValue::new(k.clone(), v.clone()))
+                        .map(|(name, attrs)| {
+                            Event::new(
+                                name.clone(),
+                                UNIX_EPOCH + Duration::from_nanos(1_000_500_000),
+                                attrs
+                                    .iter()
+                                    .map(|(key, value)| {
+                                        opentelemetry::KeyValue::new(key.clone(), value.clone())
+                                    })
+                                    .collect(),
+                                0,
+                            )
+                        })
                         .collect();
-                    span.add_event_with_timestamp(
-                        event_name.clone(),
-                        std::time::SystemTime::UNIX_EPOCH
-                            + std::time::Duration::from_nanos(1000500000),
-                        attrs,
-                    );
-                }
 
-                span.set_status(canonical_span.status.clone());
-                span_contexts.push(span.span_context().clone());
-                span.end();
-            }
+                    SpanData {
+                        span_context: SpanContext::new(
+                            trace_id,
+                            span_id_from_index(idx),
+                            TraceFlags::SAMPLED,
+                            false,
+                            TraceState::default(),
+                        ),
+                        parent_span_id: span.parent_idx.map_or(SpanId::INVALID, span_id_from_index),
+                        parent_span_is_remote: false,
+                        span_kind: span.kind.clone(),
+                        name: span.name.clone().into(),
+                        start_time: UNIX_EPOCH + Duration::from_nanos(1_000_000_000),
+                        end_time: UNIX_EPOCH + Duration::from_nanos(1_001_000_000),
+                        attributes: span
+                            .attributes
+                            .iter()
+                            .map(|(key, value)| {
+                                opentelemetry::KeyValue::new(key.clone(), value.clone())
+                            })
+                            .collect(),
+                        dropped_attributes_count: 0,
+                        events,
+                        links: SpanLinks::default(),
+                        status: span.status.clone(),
+                        instrumentation_scope: instrumentation_scope.clone(),
+                    }
+                })
+                .collect();
 
-            // Force export
-            tracer_provider.force_flush();
-
-            captured_bytes.lock().unwrap().clone()
+            let resource_spans = group_spans_by_resource_and_scope(spans, &resource);
+            ExportTraceServiceRequest { resource_spans }.encode_to_vec()
         }
 
         // Run the conformance test
@@ -5866,8 +5848,14 @@ mod otlp_wire_format_tests {
                 snapshot_path => "../../tests/snapshots",
                 prepend_module_to_snapshot => false,
             }, {
-                insta::assert_yaml_snapshot!("otlp_export_conformance_failure_our", our_decoded);
-                insta::assert_yaml_snapshot!("otlp_export_conformance_failure_ref", ref_decoded);
+                insta::assert_snapshot!(
+                    "otlp_export_conformance_failure_our",
+                    format!("{our_decoded:#?}")
+                );
+                insta::assert_snapshot!(
+                    "otlp_export_conformance_failure_ref",
+                    format!("{ref_decoded:#?}")
+                );
             });
 
             panic!(
@@ -5880,10 +5868,6 @@ mod otlp_wire_format_tests {
             );
         }
 
-        // Success: byte-identical OTLP protobuf output
-        eprintln!(
-            "✅ OTLP conformance test passed: {} byte-identical protobuf output",
-            our_bytes.len()
-        );
+        assert!(!our_bytes.is_empty(), "OTLP export must not be empty");
     }
 }

@@ -134,8 +134,10 @@ fn framed_codec_with_permissive_recv_cap_accepts_above_default() {
     let mut wire = BytesMut::new();
     codec
         .encode_message(&Bytes::from(payload), &mut wire)
-        .expect("5 MiB payload accepts under configured 8 MiB cap (would \
-                 have rejected against the 4 MiB codec default pre-fix)");
+        .expect(
+            "5 MiB payload accepts under configured 8 MiB cap (would \
+                 have rejected against the 4 MiB codec default pre-fix)",
+        );
 }
 
 #[test]
@@ -214,10 +216,9 @@ fn server_config_field_doc_no_longer_says_wiring_gap() {
     // need to re-introduce the doc — pinning the absence
     // catches the regression at the field declaration.
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let server_rs = std::fs::read_to_string(
-        std::path::Path::new(manifest_dir).join("src/grpc/server.rs"),
-    )
-    .expect("read src/grpc/server.rs");
+    let server_rs =
+        std::fs::read_to_string(std::path::Path::new(manifest_dir).join("src/grpc/server.rs"))
+            .expect("read src/grpc/server.rs");
     assert!(
         !server_rs.contains("WIRING GAP"),
         "the WIRING GAP language was removed in commit f28e72e9d \

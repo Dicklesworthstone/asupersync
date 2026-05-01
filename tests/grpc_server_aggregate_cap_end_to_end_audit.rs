@@ -177,7 +177,9 @@ fn aggregate_cap_disabled_under_default_config() {
     assert!(meter.cap().is_none());
     // 4 GiB total accepts (no cap to enforce).
     for _ in 0..1024 {
-        meter.record_message_bytes(4 * 1024 * 1024).expect("None cap");
+        meter
+            .record_message_bytes(4 * 1024 * 1024)
+            .expect("None cap");
     }
     assert_eq!(meter.bytes_accumulated(), 1024 * 4 * 1024 * 1024);
 }
@@ -188,15 +190,17 @@ fn aggregate_cap_zero_blocks_any_message() {
     // message. (Operators that want "no upload allowed"
     // should use this rather than relying on `None` which
     // means UNLIMITED.)
-    let server = ServerBuilder::new()
-        .max_request_body_bytes(0)
-        .build();
+    let server = ServerBuilder::new().max_request_body_bytes(0).build();
     let mut meter = RequestBodyMeter::from_config(server.config());
-    let err = meter.record_message_bytes(1).expect_err("0 cap rejects 1 byte");
+    let err = meter
+        .record_message_bytes(1)
+        .expect_err("0 cap rejects 1 byte");
     assert_eq!(err.code(), Code::ResourceExhausted);
     // 0-byte message is OK (0 > 0 is false; strict > boundary).
     let mut fresh = RequestBodyMeter::new(Some(0));
-    fresh.record_message_bytes(0).expect("0 bytes is OK at 0 cap");
+    fresh
+        .record_message_bytes(0)
+        .expect("0 bytes is OK at 0 cap");
 }
 
 #[test]
@@ -242,7 +246,9 @@ fn aggregate_cap_does_not_silently_loosen_per_message_cap() {
     // Meter alone accepts 1 MiB (under 16 MiB aggregate).
     // The per-message rejection is enforced upstream by the
     // codec — NOT by the meter.
-    meter.record_message_bytes(1024 * 1024).expect("under aggregate cap");
+    meter
+        .record_message_bytes(1024 * 1024)
+        .expect("under aggregate cap");
 }
 
 #[test]

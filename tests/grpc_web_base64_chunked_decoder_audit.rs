@@ -138,7 +138,9 @@ fn padding_in_chunk_seals_decoder() {
 fn sealed_decoder_rejects_subsequent_push() {
     // Pin (b)+(d): post-seal push rejects with protocol error.
     let mut decoder = Base64StreamDecoder::new();
-    let _ = decoder.push(b"YQ==").expect("first push with padding seals");
+    let _ = decoder
+        .push(b"YQ==")
+        .expect("first push with padding seals");
 
     let err = decoder
         .push(b"more")
@@ -171,9 +173,7 @@ fn finish_with_one_char_tail_rejects() {
     // surfaces Err.
     let mut decoder = Base64StreamDecoder::new();
     let _ = decoder.push(b"A").expect("push 1 char (residue)");
-    let err = decoder
-        .finish()
-        .expect_err("1-char tail is invalid base64");
+    let err = decoder.finish().expect_err("1-char tail is invalid base64");
     let err_str = format!("{err:?}");
     assert!(
         err_str.contains("invalid") || err_str.contains("base64"),
@@ -202,9 +202,7 @@ fn malformed_base64_chunk_rejects_with_protocol_error() {
         .expect_err("non-base64 byte rejects");
     let err_str = format!("{err:?}");
     assert!(
-        err_str.contains("invalid")
-            || err_str.contains("base64")
-            || err_str.contains("protocol"),
+        err_str.contains("invalid") || err_str.contains("base64") || err_str.contains("protocol"),
         "malformed-base64 rejection class is protocol; got {err_str}",
     );
 }

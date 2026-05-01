@@ -146,10 +146,8 @@ fn auth_context_does_not_route_to_metadata() {
     // request's Metadata (e.g. as a base64-encoded blob)
     // would leak to the wire.
     let mut request = Request::with_metadata(Bytes::new(), Metadata::new());
-    let auth = AuthContext::with_principal("alice").with_claim(
-        "secret-claim",
-        "do-not-leak-to-wire",
-    );
+    let auth =
+        AuthContext::with_principal("alice").with_claim("secret-claim", "do-not-leak-to-wire");
     request.extensions_mut().insert_typed(auth);
 
     // Verify metadata is empty (no wire-leak).
@@ -228,8 +226,7 @@ fn auth_context_clone_is_full_value_clone() {
     // does NOT affect the original. Important because
     // refinement interceptors clone-and-modify rather than
     // mutate-in-place.
-    let original = AuthContext::with_principal("alice")
-        .with_scopes(["read"]);
+    let original = AuthContext::with_principal("alice").with_scopes(["read"]);
     let mut clone = original.clone();
     clone.scopes.push("admin".to_string());
 
@@ -276,8 +273,7 @@ fn auth_context_request_id_optional_independent_of_principal() {
     // regression that coupled them (e.g. only including
     // request_id when principal is set) would break tracing
     // for anonymous flows.
-    let auth_without_principal = AuthContext::default()
-        .with_request_id("req-anon-789");
+    let auth_without_principal = AuthContext::default().with_request_id("req-anon-789");
     assert_eq!(auth_without_principal.principal, "");
     assert_eq!(
         auth_without_principal.request_id,

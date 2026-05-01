@@ -81,7 +81,10 @@ impl Interceptor for OuterStamp {
     fn intercept_response(&self, response: &mut Response<Bytes>) -> Result<(), Status> {
         // Outer runs LAST on response — the response SHOULD
         // already have the inner's stamp.
-        let inner_stamp = response.metadata().get("x-inner-response-stamped").is_some();
+        let inner_stamp = response
+            .metadata()
+            .get("x-inner-response-stamped")
+            .is_some();
         *self.seen_response_inner_stamp.lock().unwrap() = Some(inner_stamp);
         let _ = response
             .metadata_mut()
@@ -116,7 +119,10 @@ impl Interceptor for InnerStamp {
     fn intercept_response(&self, response: &mut Response<Bytes>) -> Result<(), Status> {
         // Inner runs FIRST on response (reverse-walk) — outer's
         // response stamp MUST NOT yet be present.
-        let outer_response = response.metadata().get("x-outer-response-stamped").is_some();
+        let outer_response = response
+            .metadata()
+            .get("x-outer-response-stamped")
+            .is_some();
         *self.saw_outer_response_stamp.lock().unwrap() = Some(outer_response);
         let _ = response
             .metadata_mut()

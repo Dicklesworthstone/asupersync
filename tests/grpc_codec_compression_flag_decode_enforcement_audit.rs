@@ -226,9 +226,7 @@ fn rejection_error_message_mentions_invalid_flag_value() {
     let err_str = format!("{err:?}");
     // The flag value 0x42 = 66 should appear in the message.
     assert!(
-        err_str.contains("66")
-            || err_str.contains("0x42")
-            || err_str.contains("compression flag"),
+        err_str.contains("66") || err_str.contains("0x42") || err_str.contains("compression flag"),
         "rejection message should mention the offending flag value or \
          describe it as a compression-flag error; got: {err_str}",
     );

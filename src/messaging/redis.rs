@@ -5119,6 +5119,141 @@ pub fn parse_acl_for_fuzz(value: RespValue) -> Result<RedisAclCommand, RedisErro
 #[cfg(any(test, feature = "test-internals"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[doc(hidden)]
+pub enum RedisClusterResetMode {
+    Soft,
+    Hard,
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum RedisClusterCommand {
+    MyId,
+    Reset { mode: RedisClusterResetMode },
+    CountFailureReports { node_id: Vec<u8> },
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn decode_cluster_command_arg(value: RespValue, label: &str) -> Result<Vec<u8>, RedisError> {
+    decode_bulk_command_arg(value, "CLUSTER", label)
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn reject_cluster_extra_args(subcommand: &str, remaining: &[RespValue]) -> Result<(), RedisError> {
+    if remaining.is_empty() {
+        Ok(())
+    } else {
+        Err(RedisError::Protocol(format!(
+            "CLUSTER {subcommand} takes no arguments, got {}",
+            remaining.len()
+        )))
+    }
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn parse_cluster_reset_mode(bytes: &[u8]) -> Result<RedisClusterResetMode, RedisError> {
+    if bytes_eq_ignore_ascii_case(bytes, b"SOFT") {
+        Ok(RedisClusterResetMode::Soft)
+    } else if bytes_eq_ignore_ascii_case(bytes, b"HARD") {
+        Ok(RedisClusterResetMode::Hard)
+    } else {
+        Err(RedisError::Protocol(format!(
+            "CLUSTER RESET mode must be HARD or SOFT, got {}",
+            String::from_utf8_lossy(bytes)
+        )))
+    }
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn parse_cluster_node_id(bytes: Vec<u8>, label: &str) -> Result<Vec<u8>, RedisError> {
+    if bytes.len() != 40 || !is_ascii_hex(&bytes) {
+        Err(RedisError::Protocol(format!(
+            "CLUSTER {label} node id must be 40 ASCII hex bytes"
+        )))
+    } else {
+        Ok(bytes)
+    }
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[allow(dead_code)]
+#[doc(hidden)]
+pub fn parse_cluster_command_for_fuzz(value: RespValue) -> Result<RedisClusterCommand, RedisError> {
+    let args = match value {
+        RespValue::Array(Some(args)) => args,
+        other => {
+            return Err(RedisError::Protocol(format!(
+                "CLUSTER command must be a RESP array, got {other:?}"
+            )));
+        }
+    };
+    if args.len() < 2 {
+        return Err(RedisError::Protocol(
+            "CLUSTER requires command and subcommand".to_string(),
+        ));
+    }
+
+    let mut iter = args.into_iter();
+    let command = decode_cluster_command_arg(
+        iter.next()
+            .ok_or_else(|| RedisError::Protocol("CLUSTER missing command".to_string()))?,
+        "command",
+    )?;
+    if !bytes_eq_ignore_ascii_case(&command, b"CLUSTER") {
+        return Err(RedisError::Protocol(format!(
+            "CLUSTER command name expected, got {}",
+            String::from_utf8_lossy(&command)
+        )));
+    }
+
+    let subcommand = decode_cluster_command_arg(
+        iter.next()
+            .ok_or_else(|| RedisError::Protocol("CLUSTER missing subcommand".to_string()))?,
+        "subcommand",
+    )?;
+    let remaining: Vec<RespValue> = iter.collect();
+
+    if bytes_eq_ignore_ascii_case(&subcommand, b"MYID") {
+        reject_cluster_extra_args("MYID", &remaining)?;
+        Ok(RedisClusterCommand::MyId)
+    } else if bytes_eq_ignore_ascii_case(&subcommand, b"RESET") {
+        let mode = match remaining.as_slice() {
+            [] => RedisClusterResetMode::Soft,
+            [value] => {
+                parse_cluster_reset_mode(&decode_cluster_command_arg(value.clone(), "RESET mode")?)?
+            }
+            _ => {
+                return Err(RedisError::Protocol(format!(
+                    "CLUSTER RESET accepts at most one mode, got {}",
+                    remaining.len()
+                )));
+            }
+        };
+        Ok(RedisClusterCommand::Reset { mode })
+    } else if bytes_eq_ignore_ascii_case(&subcommand, b"COUNT-FAILURE-REPORTS") {
+        let [node_id] = remaining.as_slice() else {
+            return Err(RedisError::Protocol(format!(
+                "CLUSTER COUNT-FAILURE-REPORTS requires exactly one node id, got {}",
+                remaining.len()
+            )));
+        };
+        Ok(RedisClusterCommand::CountFailureReports {
+            node_id: parse_cluster_node_id(
+                decode_cluster_command_arg(node_id.clone(), "COUNT-FAILURE-REPORTS node id")?,
+                "COUNT-FAILURE-REPORTS",
+            )?,
+        })
+    } else {
+        Err(RedisError::Protocol(format!(
+            "CLUSTER unknown subcommand {}",
+            String::from_utf8_lossy(&subcommand)
+        )))
+    }
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
 pub enum FuzzPubSubLane {
     Channel,
     Pattern,
@@ -6239,6 +6374,110 @@ mod tests {
         assert!(matches!(
             parse_acl_for_fuzz(null_rule),
             Err(RedisError::Protocol(msg)) if msg.contains("non-null bulk string")
+        ));
+    }
+
+    #[test]
+    fn cluster_command_parser_accepts_myid_reset_and_failure_reports() {
+        let myid = RespValue::Array(Some(vec![bulk_arg("cluster"), bulk_arg("myid")]));
+        assert_eq!(
+            parse_cluster_command_for_fuzz(myid).expect("CLUSTER MYID should parse"),
+            RedisClusterCommand::MyId
+        );
+
+        let reset_default = RespValue::Array(Some(vec![bulk_arg("CLUSTER"), bulk_arg("RESET")]));
+        assert_eq!(
+            parse_cluster_command_for_fuzz(reset_default)
+                .expect("CLUSTER RESET default mode should parse"),
+            RedisClusterCommand::Reset {
+                mode: RedisClusterResetMode::Soft
+            }
+        );
+
+        let reset_hard = RespValue::Array(Some(vec![
+            bulk_arg("CLUSTER"),
+            bulk_arg("RESET"),
+            bulk_arg("HARD"),
+        ]));
+        assert_eq!(
+            parse_cluster_command_for_fuzz(reset_hard).expect("CLUSTER RESET HARD should parse"),
+            RedisClusterCommand::Reset {
+                mode: RedisClusterResetMode::Hard
+            }
+        );
+
+        let node_id = b"0123456789abcdef0123456789abcdef01234567".to_vec();
+        let count_failure_reports = RespValue::Array(Some(vec![
+            bulk_arg("CLUSTER"),
+            bulk_arg("COUNT-FAILURE-REPORTS"),
+            bulk_arg(&node_id),
+        ]));
+        assert_eq!(
+            parse_cluster_command_for_fuzz(count_failure_reports)
+                .expect("CLUSTER COUNT-FAILURE-REPORTS should parse"),
+            RedisClusterCommand::CountFailureReports { node_id }
+        );
+    }
+
+    #[test]
+    fn cluster_command_parser_rejects_malformed_arguments() {
+        let myid_extra = RespValue::Array(Some(vec![
+            bulk_arg("CLUSTER"),
+            bulk_arg("MYID"),
+            bulk_arg("extra"),
+        ]));
+        assert!(matches!(
+            parse_cluster_command_for_fuzz(myid_extra),
+            Err(RedisError::Protocol(msg)) if msg.contains("takes no arguments")
+        ));
+
+        let bad_reset_mode = RespValue::Array(Some(vec![
+            bulk_arg("CLUSTER"),
+            bulk_arg("RESET"),
+            bulk_arg("MAYBE"),
+        ]));
+        assert!(matches!(
+            parse_cluster_command_for_fuzz(bad_reset_mode),
+            Err(RedisError::Protocol(msg)) if msg.contains("HARD or SOFT")
+        ));
+
+        let missing_node_id = RespValue::Array(Some(vec![
+            bulk_arg("CLUSTER"),
+            bulk_arg("COUNT-FAILURE-REPORTS"),
+        ]));
+        assert!(matches!(
+            parse_cluster_command_for_fuzz(missing_node_id),
+            Err(RedisError::Protocol(msg)) if msg.contains("requires exactly one node id")
+        ));
+
+        let bad_node_id = RespValue::Array(Some(vec![
+            bulk_arg("CLUSTER"),
+            bulk_arg("COUNT-FAILURE-REPORTS"),
+            bulk_arg("not-a-40-byte-hex-node-id"),
+        ]));
+        assert!(matches!(
+            parse_cluster_command_for_fuzz(bad_node_id),
+            Err(RedisError::Protocol(msg)) if msg.contains("40 ASCII hex")
+        ));
+
+        let null_node_id = RespValue::Array(Some(vec![
+            bulk_arg("CLUSTER"),
+            bulk_arg("COUNT-FAILURE-REPORTS"),
+            RespValue::BulkString(None),
+        ]));
+        assert!(matches!(
+            parse_cluster_command_for_fuzz(null_node_id),
+            Err(RedisError::Protocol(msg)) if msg.contains("non-null bulk string")
+        ));
+
+        let unknown_subcommand = RespValue::Array(Some(vec![
+            bulk_arg("CLUSTER"),
+            bulk_arg("FORGET"),
+            bulk_arg("0123456789abcdef0123456789abcdef01234567"),
+        ]));
+        assert!(matches!(
+            parse_cluster_command_for_fuzz(unknown_subcommand),
+            Err(RedisError::Protocol(msg)) if msg.contains("unknown subcommand")
         ));
     }
 

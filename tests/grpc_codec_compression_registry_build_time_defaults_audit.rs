@@ -142,10 +142,15 @@ fn with_frame_hooks_some_some_installs_pair_and_sets_flag() {
     // Pin (d): with_frame_hooks(Some, Some) is the canonical
     // wiring path — compressor and decompressor come as a
     // pair, and use_compression flips to true.
-    fn dummy_compressor(input: asupersync::bytes::Bytes) -> Result<asupersync::bytes::Bytes, asupersync::grpc::status::GrpcError> {
+    fn dummy_compressor(
+        input: asupersync::bytes::Bytes,
+    ) -> Result<asupersync::bytes::Bytes, asupersync::grpc::status::GrpcError> {
         Ok(input)
     }
-    fn dummy_decompressor(input: asupersync::bytes::Bytes, _max_size: usize) -> Result<asupersync::bytes::Bytes, asupersync::grpc::status::GrpcError> {
+    fn dummy_decompressor(
+        input: asupersync::bytes::Bytes,
+        _max_size: usize,
+    ) -> Result<asupersync::bytes::Bytes, asupersync::grpc::status::GrpcError> {
         Ok(input)
     }
     let codec = FramedCodec::new(IdentityCodec)
@@ -212,7 +217,7 @@ fn with_message_size_limits_overrides_each_direction_independently() {
     // Pin (b): independent decode/encode caps.
     let codec = FramedCodec::with_message_size_limits(
         IdentityCodec,
-        512 * 1024, // encode
+        512 * 1024,      // encode
         2 * 1024 * 1024, // decode
     );
     assert_eq!(codec.max_encode_message_size(), 512 * 1024);

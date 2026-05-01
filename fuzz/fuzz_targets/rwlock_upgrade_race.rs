@@ -17,8 +17,6 @@ use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
 use asupersync::sync::RwLock;
 use asupersync::cx::Cx;
-use asupersync::util::ArenaIndex;
-use asupersync::types::{RegionId, TaskId};
 use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
 use std::sync::Arc;
 use std::collections::HashMap;
@@ -169,10 +167,7 @@ impl TrackedReader {
         let tracker_clone = tracker.clone();
 
         let read_future = Box::pin(async move {
-            let cx = Cx::new(
-                RegionId::from_arena(ArenaIndex::new(0, 0)),
-                TaskId::from_arena(ArenaIndex::new(0, 0)),
-            );
+            let cx = Cx::for_testing();
 
             match rwlock.read(&cx).await {
                 Ok(_guard) => {
@@ -211,10 +206,7 @@ impl TrackedReader {
         let completed = self.completed.clone();
 
         let upgrade_future = Box::pin(async move {
-            let cx = Cx::new(
-                RegionId::from_arena(ArenaIndex::new(0, 0)),
-                TaskId::from_arena(ArenaIndex::new(0, 0)),
-            );
+            let cx = Cx::for_testing();
 
             match rwlock.write(&cx).await {
                 Ok(_write_guard) => {
