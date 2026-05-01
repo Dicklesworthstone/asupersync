@@ -571,6 +571,58 @@ fn parse_cookie_header(raw: &str) -> HashMap<String, String> {
     parsed
 }
 
+fn invalid_content_length() -> ExtractionError {
+    ExtractionError::new(
+        super::response::StatusCode::BAD_REQUEST,
+        "invalid Content-Length header",
+    )
+}
+
+fn parse_content_length(value: &str) -> Result<usize, ExtractionError> {
+    let mut parsed = None;
+
+    for raw_part in value.split(',') {
+        let part = raw_part.trim();
+        if part.is_empty() {
+            return Err(invalid_content_length());
+        }
+
+        let declared = part
+            .parse::<usize>()
+            .map_err(|_| invalid_content_length())?;
+        if let Some(previous) = parsed {
+            if previous != declared {
+                return Err(ExtractionError::new(
+                    super::response::StatusCode::BAD_REQUEST,
+                    "conflicting Content-Length header values",
+                ));
+            }
+        } else {
+            parsed = Some(declared);
+        }
+    }
+
+    parsed.ok_or_else(invalid_content_length)
+}
+
+/// Validates that request body length matches Content-Length, when present.
+fn validate_content_length(req: &Request) -> Result<(), ExtractionError> {
+    if let Some(cl_value) = header_value_ci(req, "content-length") {
+        let declared_length = parse_content_length(cl_value)?;
+        let actual_length = req.body.len();
+        if actual_length != declared_length {
+            return Err(ExtractionError::new(
+                super::response::StatusCode::BAD_REQUEST,
+                format!(
+                    "Content-Length mismatch: declared {} bytes, received {} bytes",
+                    declared_length, actual_length
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 // ─── BodyLimits ──────────────────────────────────────────────────────────────
 
 /// Default maximum JSON body size (10 MiB).
@@ -681,6 +733,9 @@ impl<T: serde::de::DeserializeOwned> FromRequest for Json<T> {
             ));
         }
 
+        // Reject invalid or mismatched framing metadata before parsing body bytes.
+        validate_content_length(&req)?;
+
         let Some(ct) = header_value_ci(&req, "content-type") else {
             return Err(ExtractionError::new(
                 super::response::StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -743,6 +798,9 @@ impl<T: DeserializeOwned> FromRequest for Form<T> {
                 ),
             ));
         }
+
+        // Reject invalid or mismatched framing metadata before parsing body bytes.
+        validate_content_length(&req)?;
 
         // br-asupersync-mxqraw: Content-Type MUST be present AND must be
         // application/x-www-form-urlencoded. Previously we accepted any
@@ -835,6 +893,9 @@ impl FromRequest for RawBody {
             ));
         }
 
+        // Reject invalid or mismatched framing metadata before exposing body bytes.
+        validate_content_length(&req)?;
+
         Ok(Self(req.body))
     }
 }
@@ -922,6 +983,21 @@ mod tests {
         let err = Path::<u64>::from_request_parts(&req).unwrap_err();
         assert_eq!(err.status, crate::web::response::StatusCode::BAD_REQUEST);
         assert!(err.message.contains("invalid path parameters"));
+    }
+
+    #[test]
+    fn content_length_parser_accepts_single_and_identical_combined_values() {
+        assert_eq!(parse_content_length("42").unwrap(), 42);
+        assert_eq!(parse_content_length("42, 42").unwrap(), 42);
+        assert_eq!(parse_content_length("0042, 42").unwrap(), 42);
+    }
+
+    #[test]
+    fn content_length_parser_rejects_invalid_or_conflicting_values() {
+        for value in ["", "5, ", "5, 6", "not-a-number", "-1"] {
+            let err = parse_content_length(value).unwrap_err();
+            assert_eq!(err.status, crate::web::response::StatusCode::BAD_REQUEST);
+        }
     }
 
     #[test]
@@ -1344,7 +1420,7 @@ mod tests {
     fn form_scalar_extraction_does_not_ignore_field_names() {
         let req = Request::new("POST", "/form")
             .with_header("content-type", "application/x-www-form-urlencoded")
-            .with_body(Bytes::from_static(b"token=true"));
+            .with_body(Bytes::from_static(b"flag=true"));
         let err = Form::<bool>::from_request(req).unwrap_err();
         assert_eq!(err.status, crate::web::response::StatusCode::BAD_REQUEST);
         assert!(err.message.contains("invalid form data"));
@@ -1467,9 +1543,9 @@ mod tests {
 
     #[test]
     fn cookie_jar_last_duplicate_wins() {
-        let req = Request::new("GET", "/").with_header("cookie", "token=old; token=new");
+        let req = Request::new("GET", "/").with_header("cookie", "mode=old; mode=new");
         let jar = CookieJar::from_request_parts(&req).unwrap();
-        assert_eq!(jar.get("token"), Some("new"));
+        assert_eq!(jar.get("mode"), Some("new"));
     }
 
     #[test]
