@@ -59,8 +59,6 @@ use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-#[cfg(feature = "metrics")]
-use url::Url;
 
 // =============================================================================
 // Cardinality Management
@@ -763,7 +761,6 @@ impl OtlpHttpExporter {
         cx: &crate::cx::Cx,
         request_body: Vec<u8>,
     ) -> Result<(), ExportError> {
-        use crate::time::sleep;
         use std::cmp;
 
         let mut retry_count = 0;
@@ -789,7 +786,10 @@ impl OtlpHttpExporter {
                         cmp::min(retry_after, self.max_retry_delay)
                     } else {
                         // Exponential backoff with jitter for 502/503/504
-                        let jitter = Duration::from_millis(fastrand::u64(0..=100));
+                        let jitter = Duration::from_millis(deterministic_retry_jitter_ms(
+                            retry_count,
+                            status_code,
+                        ));
                         let delay_with_jitter = current_delay + jitter;
                         cmp::min(delay_with_jitter, self.max_retry_delay)
                     };
@@ -798,7 +798,7 @@ impl OtlpHttpExporter {
                     current_delay = cmp::min(current_delay * 2, self.max_retry_delay);
 
                     // Sleep before retry
-                    sleep(cx, delay).await;
+                    crate::time::sleep(cx.now(), delay).await;
                 }
                 Err(e) => {
                     // Non-retryable error (e.g., 4xx, other 5xx, network)
@@ -810,13 +810,7 @@ impl OtlpHttpExporter {
 
     async fn send_request_once(&self, cx: &crate::cx::Cx, body: &[u8]) -> Result<(), OtlpError> {
         use crate::http::h1::http_client::HttpClient;
-
-        // Parse endpoint URL
-        #[cfg(feature = "metrics")]
-        let url = self
-            .endpoint
-            .parse::<Url>()
-            .map_err(|e| OtlpError::non_retryable(format!("Invalid OTLP endpoint URL: {}", e)))?;
+        use crate::http::h1::types::Method;
 
         #[cfg(not(feature = "metrics"))]
         return Err(OtlpError::non_retryable(
@@ -828,12 +822,18 @@ impl OtlpHttpExporter {
             let client = HttpClient::new();
 
             // Send request with timeout
-            let response = crate::time::timeout(cx, self.timeout, async {
+            let response = crate::time::timeout(cx.now(), self.timeout, async {
                 client
-                    .post(cx, &self.endpoint)
-                    .header("Content-Type", "application/x-protobuf")
-                    .body(body.to_vec())
-                    .send()
+                    .request(
+                        cx,
+                        Method::Post,
+                        &self.endpoint,
+                        vec![(
+                            "Content-Type".to_owned(),
+                            "application/x-protobuf".to_owned(),
+                        )],
+                        body.to_vec(),
+                    )
                     .await
             })
             .await
@@ -847,8 +847,9 @@ impl OtlpHttpExporter {
                     // Rate limited - check for Retry-After header
                     let retry_after = response
                         .headers
-                        .get("retry-after")
-                        .and_then(|h| h.parse::<u64>().ok())
+                        .iter()
+                        .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
+                        .and_then(|(_, value)| value.parse::<u64>().ok())
                         .map(Duration::from_secs);
                     Err(OtlpError::retryable(response.status, retry_after))
                 }
@@ -880,24 +881,7 @@ impl OtlpHttpExporter {
 }
 
 impl MetricsExporter for OtlpHttpExporter {
-    fn export(&self, metrics: &MetricsSnapshot) -> Result<(), ExportError> {
-        // Build OTLP metrics request
-        let request = super::otlp_request_builder::metrics_request_from_snapshot(
-            metrics,
-            "asupersync",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-            "asupersync.observability.otel",
-        );
-
-        // Serialize to protobuf
-        use prost::Message;
-        let request_body = request.encode_to_vec();
-
-        // For sync export, we need to use a blocking operation
-        // In production, this should use an async runtime
+    fn export(&self, _metrics: &MetricsSnapshot) -> Result<(), ExportError> {
         Err(ExportError::new(
             "OTLP HTTP export requires async context - use send_otlp_protobuf() directly",
         ))
@@ -913,10 +897,15 @@ impl MetricsExporter for OtlpHttpExporter {
 #[derive(Debug, Clone)]
 pub enum OtlpError {
     /// Non-retryable export error.
-    NonRetryable { message: String },
+    NonRetryable {
+        /// Human-readable reason the export must not be retried.
+        message: String,
+    },
     /// Retryable export error with optional retry delay.
     Retryable {
+        /// HTTP status code returned by the collector.
         status_code: u16,
+        /// Optional delay parsed from a Retry-After response header.
         retry_after: Option<Duration>,
     },
 }
@@ -970,10 +959,13 @@ impl From<OtlpError> for ExportError {
     }
 }
 
+fn deterministic_retry_jitter_ms(retry_count: u32, status_code: u16) -> u64 {
+    (u64::from(retry_count) * 37 + u64::from(status_code) * 17) % 101
+}
+
 #[cfg(all(test, feature = "metrics"))]
 mod otlp_retry_tests {
     use super::*;
-    use crate::time::sleep;
 
     /// Mock HTTP response for testing retry logic.
     #[derive(Debug, Clone)]
@@ -2667,6 +2659,14 @@ pub mod span_semantics {
         pub parent_context: Option<SpanContext>,
         /// Propagated baggage entries.
         pub baggage: HashMap<String, String>,
+        /// Count of attributes dropped because the span exceeded
+        /// `max_attributes`. Surfaces as the OTLP wire field
+        /// `Span.dropped_attributes_count` so receivers can detect
+        /// truncation. Per OTLP spec, when the SDK drops an
+        /// attribute due to a per-span limit, this counter MUST
+        /// be bumped; emitting 0 while attributes were silently
+        /// dropped is a wire-format conformance bug.
+        pub dropped_attributes_count: u32,
         max_attributes: usize,
         max_events: usize,
         max_attribute_length: Option<usize>,
@@ -2823,6 +2823,7 @@ pub mod span_semantics {
                 status: Status::Unset,
                 parent_context,
                 baggage,
+                dropped_attributes_count: 0,
                 max_attributes,
                 max_events,
                 max_attribute_length,
