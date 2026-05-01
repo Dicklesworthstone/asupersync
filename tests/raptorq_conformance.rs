@@ -2040,20 +2040,7 @@ mod differential_harness {
             .collect()
     }
 
-    #[test]
-    fn differential_pipeline_source_encoded_symbols_match_raptorq_rs_k4096() {
-        let case = DifferentialCase {
-            scenario_id: "RQ-D2-SOURCE-K4096-RAPTORQ-RS",
-            k: 4096,
-            symbol_size: 64,
-            seed: 0x6330_4096,
-            drop_modulus: None,
-            drop_remainder: 0,
-            repair_budget: RepairBudget::None,
-            expect_success: true,
-            expected_error_kind: None,
-        };
-
+    fn assert_pipeline_source_packets_match_raptorq_rs(case: DifferentialCase) {
         let source = make_source_data(case.k, case.symbol_size, case.seed.wrapping_mul(17));
         let emitted = pipeline_source_packets(case, &source);
         let reference = reference_source_packets_with_raptorq_rs(case, &source);
@@ -2119,6 +2106,36 @@ mod differential_harness {
                 case.scenario_id
             );
         }
+    }
+
+    #[test]
+    fn differential_pipeline_source_encoded_symbols_match_raptorq_rs_k4096() {
+        assert_pipeline_source_packets_match_raptorq_rs(DifferentialCase {
+            scenario_id: "RQ-D2-SOURCE-K4096-RAPTORQ-RS",
+            k: 4096,
+            symbol_size: 64,
+            seed: 0x6330_4096,
+            drop_modulus: None,
+            drop_remainder: 0,
+            repair_budget: RepairBudget::None,
+            expect_success: true,
+            expected_error_kind: None,
+        });
+    }
+
+    #[test]
+    fn differential_pipeline_source_encoded_symbols_match_raptorq_rs_k8192_t4096() {
+        assert_pipeline_source_packets_match_raptorq_rs(DifferentialCase {
+            scenario_id: "RQ-D2-SOURCE-K8192-T4096-RAPTORQ-RS",
+            k: 8192,
+            symbol_size: 4096,
+            seed: 0x6330_8192,
+            drop_modulus: None,
+            drop_remainder: 0,
+            repair_budget: RepairBudget::None,
+            expect_success: true,
+            expected_error_kind: None,
+        });
     }
 
     #[test]
