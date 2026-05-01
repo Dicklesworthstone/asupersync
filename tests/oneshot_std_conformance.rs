@@ -545,34 +545,142 @@ fn conformance_comprehensive_matrix() {
     }
 }
 
-/// Generate oneshot conformance coverage report.
+/// Verify that the documented coverage matrix is executable.
 #[test]
-fn generate_oneshot_conformance_report() {
-    println!("\n=== Oneshot Conformance Coverage Report ===\n");
-
-    println!("| Test Case | Send First? | Cancellation | Early Drop | Status |");
-    println!("|-----------|-------------|--------------|------------|--------|");
-
+fn oneshot_conformance_coverage_matrix_is_executable() {
     let test_cases = vec![
-        ("Send Then Receive", "✓", "✗", "✗"),
-        ("Receive Then Send", "✗", "✗", "✗"),
-        ("Sender Dropped Early", "✗", "✗", "Sender"),
-        ("Receiver Dropped Early", "✓", "✗", "Receiver"),
-        ("Receiver Cancelled", "✓", "✓", "✗"),
-        ("Simultaneous Timing", "~", "✗", "✗"),
+        (
+            "send_then_receive",
+            1,
+            false,
+            false,
+            false,
+            0,
+            10,
+            OneshotOutcome::ReceivedValue(1),
+        ),
+        (
+            "receive_then_send",
+            2,
+            false,
+            false,
+            false,
+            10,
+            0,
+            OneshotOutcome::ReceivedValue(2),
+        ),
+        (
+            "sender_dropped_early",
+            3,
+            false,
+            true,
+            false,
+            0,
+            5,
+            OneshotOutcome::ReceivedError,
+        ),
+        (
+            "receiver_dropped_early",
+            4,
+            false,
+            false,
+            true,
+            5,
+            0,
+            OneshotOutcome::SendFailed,
+        ),
+        (
+            "receiver_cancelled",
+            5,
+            true,
+            false,
+            false,
+            0,
+            5,
+            OneshotOutcome::Cancelled,
+        ),
+        (
+            "simultaneous_timing",
+            6,
+            false,
+            false,
+            false,
+            5,
+            5,
+            OneshotOutcome::ReceivedValue(6),
+        ),
     ];
 
-    for (name, send_first, cancellation, early_drop) in test_cases {
-        println!(
-            "| {} | {} | {} | {} | ✅ PASS |",
-            name, send_first, cancellation, early_drop
+    let mut covered_send_first = false;
+    let mut covered_receive_first = false;
+    let mut covered_cancellation = false;
+    let mut covered_sender_drop = false;
+    let mut covered_receiver_drop = false;
+    let mut covered_simultaneous = false;
+
+    for (
+        scenario,
+        send_value,
+        cancel_receiver,
+        drop_sender_early,
+        drop_receiver_early,
+        send_delay_ms,
+        recv_delay_ms,
+        expected,
+    ) in test_cases
+    {
+        covered_send_first |= send_delay_ms < recv_delay_ms;
+        covered_receive_first |= send_delay_ms > recv_delay_ms;
+        covered_cancellation |= cancel_receiver;
+        covered_sender_drop |= drop_sender_early;
+        covered_receiver_drop |= drop_receiver_early;
+        covered_simultaneous |= send_delay_ms == recv_delay_ms;
+
+        let config = OneshotTestConfig {
+            scenario: scenario.to_string(),
+            send_value,
+            cancel_receiver,
+            drop_sender_early,
+            drop_receiver_early,
+            send_delay_ms,
+            recv_delay_ms,
+        };
+
+        let result = OneshotConformanceContext::new(config).run_differential_test();
+
+        assert_oneshot_conformance(&result, scenario);
+        assert_eq!(
+            result.asupersync_result, expected,
+            "{scenario}: unexpected asupersync outcome"
+        );
+        assert_eq!(
+            result.tokio_result, expected,
+            "{scenario}: unexpected tokio outcome"
         );
     }
 
-    println!("\n✅ All oneshot conformance tests passing");
-    println!("📊 Coverage: 6/6 test scenarios (100%)");
-    println!("🔄 Send/recv ordering: IDENTICAL");
-    println!("🚫 Cancel injection handling: CONFORMANT");
-    println!("📡 Channel lifecycle: EQUIVALENT");
-    println!("⚡ Observable outcomes: MATCHING");
+    assert!(
+        covered_send_first,
+        "coverage matrix missing send-first case"
+    );
+    assert!(
+        covered_receive_first,
+        "coverage matrix missing receive-first case"
+    );
+    assert!(
+        covered_cancellation,
+        "coverage matrix missing cancellation case"
+    );
+    assert!(
+        covered_sender_drop,
+        "coverage matrix missing sender-drop case"
+    );
+    assert!(
+        covered_receiver_drop,
+        "coverage matrix missing receiver-drop case"
+    );
+    assert!(
+        covered_simultaneous,
+        "coverage matrix missing simultaneous timing case"
+    );
 }
