@@ -216,6 +216,30 @@ pub struct ServerConfig {
     /// Wired into the per-call codec via [`Server::framed_codec`]
     /// (see [`Self::max_recv_message_size`] for the contract).
     pub max_send_message_size: usize,
+    /// Optional aggregate-bytes cap for the entire request body
+    /// of a single call (sum across all decoded messages on a
+    /// client-streaming or unary call).
+    ///
+    /// `None` = no aggregate cap (preserves pre-fix behavior; the
+    /// per-message [`Self::max_recv_message_size`] cap and the
+    /// `MAX_STREAM_BUFFERED` per-stream item count are the only
+    /// upload-direction bounds).
+    /// `Some(cap)` = transport adapters track the cumulative
+    /// decoded-bytes count via [`RequestBodyMeter`] and reject
+    /// the call with `Status::resource_exhausted` once the
+    /// total exceeds `cap`.
+    ///
+    /// Defaults to `None`. Operators that want a stricter
+    /// per-call upload ceiling beyond
+    /// `max_recv_message_size × MAX_STREAM_BUFFERED` set this
+    /// explicitly. The cap is independent of the per-message
+    /// cap — a 256 KiB per-message cap with a 4 MiB aggregate
+    /// cap means each message ≤ 256 KiB AND total bytes across
+    /// all messages on the call ≤ 4 MiB.
+    ///
+    /// Closes the P3 finding from tick #203 audit
+    /// (br-asupersync-woj18e).
+    pub max_request_body_bytes: Option<usize>,
     /// Initial connection window size.
     pub initial_connection_window_size: u32,
     /// Initial stream window size.
@@ -411,11 +435,96 @@ pub fn enforce_metadata_size_limit(
     Ok(())
 }
 
+/// Per-call cumulative-bytes meter for the aggregate request-body
+/// upload cap (br-asupersync-woj18e).
+///
+/// Transport adapters that decode a stream of LPM messages into a
+/// `StreamingRequest` MUST instantiate one `RequestBodyMeter` per
+/// call (configured from [`ServerConfig::max_request_body_bytes`])
+/// and call [`Self::record_message_bytes`] after EACH successful
+/// message decode. The first message that pushes the cumulative
+/// total past the configured cap returns
+/// `Err(Status::resource_exhausted(...))` — the adapter then
+/// surfaces the rejection to the call.
+///
+/// `None` cap = no enforcement (the meter records but never
+/// rejects). This is the default — operators must opt in via
+/// [`ServerBuilder::max_request_body_bytes`].
+#[derive(Debug, Clone, Copy)]
+pub struct RequestBodyMeter {
+    cap: Option<usize>,
+    accumulated: usize,
+}
+
+impl RequestBodyMeter {
+    /// Construct a new meter with the configured cap.
+    ///
+    /// `cap = None` disables enforcement (calls to
+    /// `record_message_bytes` always succeed).
+    #[must_use]
+    pub fn new(cap: Option<usize>) -> Self {
+        Self {
+            cap,
+            accumulated: 0,
+        }
+    }
+
+    /// Construct a meter from a [`ServerConfig`].
+    #[must_use]
+    pub fn from_config(config: &ServerConfig) -> Self {
+        Self::new(config.max_request_body_bytes)
+    }
+
+    /// Accumulated bytes across all messages recorded so far.
+    #[must_use]
+    pub fn bytes_accumulated(&self) -> usize {
+        self.accumulated
+    }
+
+    /// Configured cap (None = disabled).
+    #[must_use]
+    pub fn cap(&self) -> Option<usize> {
+        self.cap
+    }
+
+    /// Record `bytes` decoded from the next message in the call.
+    ///
+    /// Returns `Ok(())` if the cumulative total stays within the
+    /// configured cap (or if the cap is `None`). Returns
+    /// `Err(Status::resource_exhausted(...))` if the cumulative
+    /// total exceeds the cap — the adapter MUST surface this
+    /// rejection to the call.
+    ///
+    /// The meter saturates on overflow — even a `bytes = usize::MAX`
+    /// argument cannot wrap the accumulator past the cap-check.
+    pub fn record_message_bytes(&mut self, bytes: usize) -> Result<(), Status> {
+        self.accumulated = self.accumulated.saturating_add(bytes);
+        if let Some(cap) = self.cap
+            && self.accumulated > cap
+        {
+            return Err(Status::resource_exhausted(format!(
+                "request body exceeds max_request_body_bytes: {actual} bytes > {cap} bytes \
+                 (aggregate of all decoded messages on this call; \
+                 see ServerConfig::max_request_body_bytes)",
+                actual = self.accumulated,
+                cap = cap,
+            )));
+        }
+        Ok(())
+    }
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             max_recv_message_size: 4 * 1024 * 1024, // 4 MB
             max_send_message_size: 4 * 1024 * 1024, // 4 MB
+            // Default None preserves pre-fix behavior. Operators
+            // who want a stricter per-call upload ceiling beyond
+            // the per-message × buffer-count product opt in via
+            // ServerBuilder::max_request_body_bytes
+            // (br-asupersync-woj18e).
+            max_request_body_bytes: None,
             initial_connection_window_size: 1024 * 1024,
             initial_stream_window_size: 1024 * 1024,
             max_concurrent_streams: 100,
@@ -542,6 +651,18 @@ impl ServerBuilder {
     #[must_use]
     pub fn max_send_message_size(mut self, size: usize) -> Self {
         self.config.max_send_message_size = size;
+        self
+    }
+
+    /// Set an aggregate-bytes cap on the request body of a single
+    /// call (sum across all decoded messages).
+    ///
+    /// See [`ServerConfig::max_request_body_bytes`] for the full
+    /// contract. `None` (the default) means no aggregate cap.
+    /// (br-asupersync-woj18e)
+    #[must_use]
+    pub fn max_request_body_bytes(mut self, size: usize) -> Self {
+        self.config.max_request_body_bytes = Some(size);
         self
     }
 
