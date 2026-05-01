@@ -1368,6 +1368,17 @@ pub struct MySqlConnection {
     options: Option<MySqlConnectOptions>,
 }
 
+/// Parsed MySQL Protocol 41 handshake data exposed for fuzz oracles.
+#[doc(hidden)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FuzzHandshakeProtocol41 {
+    pub server_capabilities: u32,
+    pub client_capabilities: u32,
+    pub negotiated_capabilities: u32,
+    pub auth_plugin_name: String,
+    pub auth_plugin_data_len: usize,
+}
+
 impl fmt::Debug for MySqlConnection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MySqlConnection")
@@ -1777,16 +1788,7 @@ impl MySqlConnection {
         buf.set_sequence(self.inner.sequence);
 
         // Client capabilities
-        let mut client_caps = capability::CLIENT_PROTOCOL_41
-            | capability::CLIENT_SECURE_CONNECTION
-            | capability::CLIENT_PLUGIN_AUTH
-            | capability::CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA
-            | capability::CLIENT_TRANSACTIONS
-            | capability::CLIENT_MULTI_RESULTS;
-
-        if options.database.is_some() {
-            client_caps |= capability::CLIENT_CONNECT_WITH_DB;
-        }
+        let client_caps = Self::client_handshake_response_capabilities(options.database.is_some());
 
         // CLIENT_SSL is only valid in the separate MySQL SSL Request packet,
         // before TLS wraps the stream. Do not set it on the plaintext full
@@ -1860,6 +1862,22 @@ impl MySqlConnection {
     #[inline]
     const fn negotiated_capabilities(server_caps: u32, client_caps: u32) -> u32 {
         server_caps & client_caps
+    }
+
+    #[inline]
+    const fn client_handshake_response_capabilities(connects_with_db: bool) -> u32 {
+        let mut client_caps = capability::CLIENT_PROTOCOL_41
+            | capability::CLIENT_SECURE_CONNECTION
+            | capability::CLIENT_PLUGIN_AUTH
+            | capability::CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA
+            | capability::CLIENT_TRANSACTIONS
+            | capability::CLIENT_MULTI_RESULTS;
+
+        if connects_with_db {
+            client_caps |= capability::CLIENT_CONNECT_WITH_DB;
+        }
+
+        client_caps
     }
 
     #[inline]
@@ -4515,6 +4533,92 @@ impl Drop for MySqlTransaction<'_> {
 #[doc(hidden)]
 pub fn fuzz_parse_ok_packet_fields(data: &[u8]) -> Result<(u64, u16), MySqlError> {
     MySqlConnection::parse_ok_packet(data).map(|packet| (packet.affected_rows, packet.status_flags))
+}
+
+#[doc(hidden)]
+pub fn fuzz_parse_handshake_protocol_41(
+    data: &[u8],
+    connects_with_db: bool,
+) -> Result<FuzzHandshakeProtocol41, MySqlError> {
+    const MIN_HANDSHAKE_SIZE: usize = 35;
+    if data.len() < MIN_HANDSHAKE_SIZE {
+        return Err(MySqlError::InvalidPacket(format!(
+            "handshake packet too short: {} bytes, minimum required: {}",
+            data.len(),
+            MIN_HANDSHAKE_SIZE
+        )));
+    }
+
+    let mut reader = PacketReader::new(data);
+
+    let protocol_version = reader.read_byte()?;
+    if protocol_version != 10 {
+        return Err(MySqlError::Protocol(format!(
+            "unsupported protocol version: {protocol_version}"
+        )));
+    }
+
+    let _server_version = reader.read_null_terminated()?;
+    let _connection_id = reader.read_u32_le()?;
+    let auth_data_1 = reader.read_bytes(8)?;
+    let _filler = reader.read_byte()?;
+    let cap_lower = reader.read_u16_le()?;
+    let _charset = reader.read_byte()?;
+    let _status_flags = reader.read_u16_le()?;
+    let cap_upper = reader.read_u16_le()?;
+    let server_capabilities = u32::from(cap_lower) | (u32::from(cap_upper) << 16);
+
+    let missing_required_caps = (capability::CLIENT_PROTOCOL_41
+        | capability::CLIENT_SECURE_CONNECTION)
+        & !server_capabilities;
+    if missing_required_caps != 0 {
+        let mut missing = Vec::new();
+        if missing_required_caps & capability::CLIENT_PROTOCOL_41 != 0 {
+            missing.push("CLIENT_PROTOCOL_41");
+        }
+        if missing_required_caps & capability::CLIENT_SECURE_CONNECTION != 0 {
+            missing.push("CLIENT_SECURE_CONNECTION");
+        }
+        return Err(MySqlError::Protocol(format!(
+            "server handshake missing required capabilities: {}",
+            missing.join(", ")
+        )));
+    }
+
+    let auth_data_len = reader.read_byte()?;
+    let _reserved = reader.read_bytes(10)?;
+
+    let mut auth_plugin_data_len = auth_data_1.len();
+    if server_capabilities & capability::CLIENT_SECURE_CONNECTION != 0 {
+        let part2_len = std::cmp::max(13, auth_data_len.saturating_sub(8)) as usize;
+        let auth_data_2 = reader.read_bytes(part2_len.min(reader.remaining()))?;
+        let end = if auth_data_2.last() == Some(&0) {
+            auth_data_2.len() - 1
+        } else {
+            auth_data_2.len()
+        };
+        auth_plugin_data_len += end;
+    }
+
+    let auth_plugin_name =
+        if server_capabilities & capability::CLIENT_PLUGIN_AUTH != 0 && reader.remaining() > 0 {
+            reader.read_null_terminated()?.to_string()
+        } else {
+            "mysql_native_password".to_string()
+        };
+
+    let client_capabilities =
+        MySqlConnection::client_handshake_response_capabilities(connects_with_db);
+    let negotiated_capabilities =
+        MySqlConnection::negotiated_capabilities(server_capabilities, client_capabilities);
+
+    Ok(FuzzHandshakeProtocol41 {
+        server_capabilities,
+        client_capabilities,
+        negotiated_capabilities,
+        auth_plugin_name,
+        auth_plugin_data_len,
+    })
 }
 
 #[doc(hidden)]
