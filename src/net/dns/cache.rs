@@ -236,7 +236,11 @@ impl DnsCache {
             return;
         }
 
-        let ttl = self.clamp_ttl(self.config.negative_ttl);
+        let ttl = self.clamp_negative_ttl(self.config.negative_ttl);
+        if ttl.is_zero() {
+            self.remove(host);
+            return;
+        }
         self.put_ip_entry(host, CachedIpEntry::NegativeNoRecords, ttl);
     }
 
@@ -289,6 +293,12 @@ impl DnsCache {
 
     fn clamp_ttl(&self, ttl: Duration) -> Duration {
         ttl.max(self.config.min_ttl).min(self.config.max_ttl)
+    }
+
+    fn clamp_negative_ttl(&self, ttl: Duration) -> Duration {
+        // `negative_ttl` is already an explicit policy knob for NXDOMAIN/no-record
+        // caching. The positive-answer minimum TTL must not extend failures.
+        ttl.min(self.config.max_ttl)
     }
 
     fn evict_expired_locked(
@@ -579,6 +589,53 @@ mod tests {
             stats.evictions
         );
         crate::test_complete!("cache_negative_no_records_hits_and_expires");
+    }
+
+    #[test]
+    fn cache_negative_ttl_is_not_floored_by_positive_min_ttl() {
+        init_test("cache_negative_ttl_is_not_floored_by_positive_min_ttl");
+        set_test_time(0);
+        let config = CacheConfig {
+            min_ttl: Duration::from_secs(60),
+            negative_ttl: Duration::from_secs(30),
+            ..Default::default()
+        };
+        let cache = DnsCache::with_time_getter(config, test_time);
+
+        cache.put_negative_ip_no_records("missing.example");
+
+        set_test_time(Duration::from_secs(29).as_nanos().min(u128::from(u64::MAX)) as u64);
+        let before_negative_ttl = cache.get_ip_result("missing.example");
+        crate::assert_with_log!(
+            matches!(before_negative_ttl, Some(Err(DnsError::NoRecords(_)))),
+            "negative entry remains before configured negative_ttl",
+            true,
+            format!("{before_negative_ttl:?}")
+        );
+
+        set_test_time(Duration::from_secs(31).as_nanos().min(u128::from(u64::MAX)) as u64);
+        let after_negative_ttl = cache.get_ip_result("missing.example");
+        crate::assert_with_log!(
+            after_negative_ttl.is_none(),
+            "negative entry expires at configured negative_ttl, not positive min_ttl",
+            true,
+            after_negative_ttl.is_none()
+        );
+
+        let stats = cache.stats();
+        crate::assert_with_log!(
+            stats.size == 0,
+            "expired negative entry evicted",
+            0,
+            stats.size
+        );
+        crate::assert_with_log!(
+            stats.evictions == 1,
+            "negative expiry counted once",
+            1,
+            stats.evictions
+        );
+        crate::test_complete!("cache_negative_ttl_is_not_floored_by_positive_min_ttl");
     }
 
     #[test]
