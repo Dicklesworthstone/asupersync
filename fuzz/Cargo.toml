@@ -4324,3 +4324,9 @@ name = "mutex_drop_after_panic"
 path = "fuzz_targets/mutex_drop_after_panic.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "h2_settings_enable_push_invalid"
+path = "fuzz_targets/h2_settings_enable_push_invalid.rs"
+test = false
+doc = false

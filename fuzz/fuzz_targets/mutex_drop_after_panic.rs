@@ -155,14 +155,15 @@ fuzz_target!(|data: &[u8]| {
             }
 
             let panic_result = catch_unwind(AssertUnwindSafe(|| {
+                let cx = asupersync::Cx::for_testing();
                 match pattern {
                     PanicPattern::PanicAfterLock => {
-                        let _guard = mutex.lock();
+                        let _guard = futures::executor::block_on(mutex.lock(&cx)).expect("Lock should succeed");
                         panic!("Intentional panic after acquiring lock");
                     },
 
                     PanicPattern::PanicDuringWork { work_delay } => {
-                        let mut guard = mutex.lock();
+                        let mut guard = futures::executor::block_on(mutex.lock(&cx)).expect("Lock should succeed");
                         if work_delay > 0 {
                             thread::sleep(Duration::from_micros(work_delay as u64));
                         }
@@ -173,15 +174,13 @@ fuzz_target!(|data: &[u8]| {
                     PanicPattern::PanicDuringAcquisition => {
                         // This is tricky - we'll panic during a custom operation
                         // that involves lock acquisition
-                        let _guard = mutex.lock();
+                        let _guard = futures::executor::block_on(mutex.lock(&cx)).expect("Lock should succeed");
                         // Simulate some complex operation that panics
-                        if true { // Always panic for this pattern
-                            panic!("Intentional panic during acquisition");
-                        }
+                        panic!("Intentional panic during acquisition");
                     },
 
                     PanicPattern::WorkThenPanic { work_items } => {
-                        let mut guard = mutex.lock();
+                        let mut guard = futures::executor::block_on(mutex.lock(&cx)).expect("Lock should succeed");
                         for _ in 0..work_items {
                             *guard = guard.wrapping_add(1);
                             thread::sleep(Duration::from_micros(10));
@@ -231,11 +230,11 @@ fuzz_target!(|data: &[u8]| {
                         Ok(_guard) => {
                             results.lock_successes.fetch_add(1, Ordering::SeqCst);
                         },
-                        Err(asupersync::sync::TryLockError::Poisoned(_)) => {
+                        Err(asupersync::sync::TryLockError::Poisoned) => {
                             results.lock_poison_errors.fetch_add(1, Ordering::SeqCst);
                             results.poison_detected.fetch_add(1, Ordering::SeqCst);
                         },
-                        Err(asupersync::sync::TryLockError::WouldBlock) => {
+                        Err(asupersync::sync::TryLockError::Locked) => {
                             // Mutex is currently locked by another thread
                         },
                     }
@@ -246,7 +245,8 @@ fuzz_target!(|data: &[u8]| {
 
                     // Use catch_unwind in case the poison handling itself has issues
                     let lock_result = catch_unwind(AssertUnwindSafe(|| {
-                        mutex.lock()
+                        let cx = asupersync::Cx::for_testing();
+                        futures::executor::block_on(mutex.lock(&cx))
                     }));
 
                     match lock_result {
@@ -280,12 +280,12 @@ fuzz_target!(|data: &[u8]| {
                                 results.lock_successes.fetch_add(1, Ordering::SeqCst);
                                 break;
                             },
-                            Err(asupersync::sync::TryLockError::Poisoned(_)) => {
+                            Err(asupersync::sync::TryLockError::Poisoned) => {
                                 results.lock_poison_errors.fetch_add(1, Ordering::SeqCst);
                                 results.poison_detected.fetch_add(1, Ordering::SeqCst);
                                 break;
                             },
-                            Err(asupersync::sync::TryLockError::WouldBlock) => {
+                            Err(asupersync::sync::TryLockError::Locked) => {
                                 attempts += 1;
                                 if attempts >= max_attempts {
                                     results.lock_timeouts.fetch_add(1, Ordering::SeqCst);
@@ -305,12 +305,12 @@ fuzz_target!(|data: &[u8]| {
                             Ok(_guard) => {
                                 results.lock_successes.fetch_add(1, Ordering::SeqCst);
                             },
-                            Err(asupersync::sync::TryLockError::Poisoned(_)) => {
+                            Err(asupersync::sync::TryLockError::Poisoned) => {
                                 results.lock_poison_errors.fetch_add(1, Ordering::SeqCst);
                                 results.poison_detected.fetch_add(1, Ordering::SeqCst);
                                 break; // Stop on poison
                             },
-                            Err(asupersync::sync::TryLockError::WouldBlock) => {
+                            Err(asupersync::sync::TryLockError::Locked) => {
                                 // Continue trying
                             },
                         }
@@ -323,10 +323,10 @@ fuzz_target!(|data: &[u8]| {
                         Ok(_guard) => {
                             // Not poisoned (or was recovered)
                         },
-                        Err(asupersync::sync::TryLockError::Poisoned(_)) => {
+                        Err(asupersync::sync::TryLockError::Poisoned) => {
                             results.poison_detected.fetch_add(1, Ordering::SeqCst);
                         },
-                        Err(asupersync::sync::TryLockError::WouldBlock) => {
+                        Err(asupersync::sync::TryLockError::Locked) => {
                             // Can't determine poison state while locked
                         },
                     }
