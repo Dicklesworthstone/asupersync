@@ -2222,4 +2222,79 @@ mod tests {
             "metamorphic_value_ready_receive_invariant_under_post_send_receiver_cancellation"
         );
     }
+
+    /// Audit test for sender drop during receiver poll cancellation correctness.
+    ///
+    /// Verifies that when sender drops WITHOUT sending while receiver is actively polling,
+    /// the receiver immediately returns Err(Closed) rather than hanging. This tests the
+    /// critical race condition where sender drop happens DURING receiver's poll execution.
+    #[test]
+    fn audit_sender_drop_during_receiver_poll() {
+        init_test("audit_sender_drop_during_receiver_poll");
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<u32>();
+
+        // Set up infrastructure to detect wakeups
+        let notify_count = Arc::new(AtomicUsize::new(0));
+        let poll_waker = counting_waker(Arc::clone(&notify_count));
+        let mut task_cx = Context::from_waker(&poll_waker);
+
+        // Create receiver future
+        let mut recv_fut = Box::pin(rx.recv(&cx));
+
+        // Step 1: Start receiving (should pend since no value sent)
+        let initial_poll = recv_fut.as_mut().poll(&mut task_cx);
+        assert!(
+            matches!(initial_poll, Poll::Pending),
+            "receiver should be pending initially: {:?}",
+            initial_poll
+        );
+
+        // Verify receiver is properly waiting
+        assert_eq!(
+            notify_count.load(Ordering::SeqCst),
+            0,
+            "no notifications yet"
+        );
+
+        // Step 2: Drop sender WITHOUT sending - this simulates the race condition
+        // where sender drops during receiver's poll/wait cycle
+        drop(tx);
+
+        // Step 3: Verify receiver was woken by sender drop
+        let wakeup_count = notify_count.load(Ordering::SeqCst);
+        assert_eq!(
+            wakeup_count, 1,
+            "receiver should be woken exactly once by sender drop"
+        );
+
+        // Step 4: Poll receiver again - should return Closed immediately, NOT hang
+        let final_poll = recv_fut.as_mut().poll(&mut task_cx);
+        let is_closed = matches!(final_poll, Poll::Ready(Err(RecvError::Closed)));
+        assert!(
+            is_closed,
+            "receiver should return Err(Closed) immediately after sender drop, got: {:?}",
+            final_poll
+        );
+
+        // Drop the future to release the mutable borrow on rx
+        drop(recv_fut);
+
+        // Step 5: Verify channel state consistency
+        assert!(rx.is_closed(), "receiver should report channel as closed");
+        assert!(
+            matches!(rx.try_recv(), Err(TryRecvError::Closed)),
+            "try_recv should also return Closed"
+        );
+
+        // Step 6: Verify no additional spurious wakeups
+        let final_count = notify_count.load(Ordering::SeqCst);
+        assert_eq!(
+            final_count, 1,
+            "should have exactly 1 wakeup total, got {}",
+            final_count
+        );
+
+        crate::test_complete!("audit_sender_drop_during_receiver_poll");
+    }
 }
