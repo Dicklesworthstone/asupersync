@@ -1767,6 +1767,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "jetstream_durable_consumer_recreate"
+path = "fuzz_targets/jetstream_durable_consumer_recreate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "jetstream_subject_name_parser"
 path = "fuzz_targets/jetstream_subject_name_parser.rs"
 test = false
