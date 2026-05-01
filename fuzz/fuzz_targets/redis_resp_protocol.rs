@@ -27,7 +27,7 @@ use asupersync::messaging::redis::{
     PubSubEvent, PubSubMessage, PubSubSubscriptionKind, RedisProtocolLimits, RespValue,
     decode_resp_value_for_fuzz, parse_client_kill_for_fuzz, parse_latency_for_fuzz,
     parse_pubsub_event_for_fuzz, parse_script_eval_for_fuzz, parse_slowlog_for_fuzz,
-    parse_zadd_for_fuzz,
+    parse_zadd_for_fuzz, parse_zrangebyscore_for_fuzz,
 };
 
 const MAX_STRUCTURED_FIELD_BYTES: usize = 96;
@@ -804,6 +804,86 @@ fn exercise_zadd_option_parser(data: &[u8]) {
     );
 }
 
+fn exercise_zrangebyscore_parser(data: &[u8]) {
+    let payload = &data[..data.len().min(MAX_STRUCTURED_FIELD_BYTES)];
+    let finite_bound = format!("{}.{}", payload.len(), data.first().copied().unwrap_or(0));
+    let valid_command = RespValue::Array(Some(vec![
+        bulk_arg(b"ZRANGEBYSCORE"),
+        bulk_arg(b"zset"),
+        bulk_arg(b"(1"),
+        bulk_arg(b"+inf"),
+        bulk_arg(b"WITHSCORES"),
+        bulk_arg(b"LIMIT"),
+        bulk_arg(b"0"),
+        bulk_arg(finite_bound.as_bytes()),
+    ]));
+    let parsed = parse_zrangebyscore_for_fuzz(valid_command)
+        .expect("sanitized ZRANGEBYSCORE command should parse");
+    assert_eq!(parsed.key, b"zset".to_vec());
+    assert!(parsed.with_scores);
+    assert!(parsed.limit.is_some());
+
+    let arbitrary_min = RespValue::Array(Some(vec![
+        bulk_arg(b"ZRANGEBYSCORE"),
+        bulk_arg(b"zset"),
+        bulk_arg(payload),
+        bulk_arg(b"+inf"),
+    ]));
+    let _ = parse_zrangebyscore_for_fuzz(arbitrary_min);
+
+    let limit_before_withscores = RespValue::Array(Some(vec![
+        bulk_arg(b"ZRANGEBYSCORE"),
+        bulk_arg(b"zset"),
+        bulk_arg(b"-inf"),
+        bulk_arg(b"(42"),
+        bulk_arg(b"LIMIT"),
+        bulk_arg(b"1"),
+        bulk_arg(b"-1"),
+        bulk_arg(b"WITHSCORES"),
+    ]));
+    let parsed = parse_zrangebyscore_for_fuzz(limit_before_withscores)
+        .expect("ZRANGEBYSCORE LIMIT before WITHSCORES should parse");
+    assert!(parsed.with_scores);
+    assert_eq!(parsed.limit.expect("LIMIT should be present").count, -1);
+
+    let duplicate_withscores = RespValue::Array(Some(vec![
+        bulk_arg(b"ZRANGEBYSCORE"),
+        bulk_arg(b"zset"),
+        bulk_arg(b"-inf"),
+        bulk_arg(b"+inf"),
+        bulk_arg(b"WITHSCORES"),
+        bulk_arg(b"WITHSCORES"),
+    ]));
+    assert!(
+        parse_zrangebyscore_for_fuzz(duplicate_withscores).is_err(),
+        "ZRANGEBYSCORE duplicate WITHSCORES must fail closed"
+    );
+
+    let incomplete_limit = RespValue::Array(Some(vec![
+        bulk_arg(b"ZRANGEBYSCORE"),
+        bulk_arg(b"zset"),
+        bulk_arg(b"-inf"),
+        bulk_arg(b"+inf"),
+        bulk_arg(b"LIMIT"),
+        bulk_arg(b"0"),
+    ]));
+    assert!(
+        parse_zrangebyscore_for_fuzz(incomplete_limit).is_err(),
+        "ZRANGEBYSCORE LIMIT requires offset and count"
+    );
+
+    let nan_bound = RespValue::Array(Some(vec![
+        bulk_arg(b"ZRANGEBYSCORE"),
+        bulk_arg(b"zset"),
+        bulk_arg(b"NaN"),
+        bulk_arg(b"+inf"),
+    ]));
+    assert!(
+        parse_zrangebyscore_for_fuzz(nan_bound).is_err(),
+        "ZRANGEBYSCORE NaN bounds must fail closed"
+    );
+}
+
 /// Test helper functions in isolation
 fn test_helper_functions(data: &[u8]) {
     // Test find_crlf with various scenarios
@@ -965,7 +1045,10 @@ fuzz_target!(|data: &[u8]| {
     // Test 14: Redis SLOWLOG/LATENCY observability parser seams
     exercise_slowlog_latency_parsers(data);
 
-    // Test 15: Fragmented parsing simulation (partial buffer scenarios)
+    // Test 15: Redis ZRANGEBYSCORE range parser seam
+    exercise_zrangebyscore_parser(data);
+
+    // Test 16: Fragmented parsing simulation (partial buffer scenarios)
     if data.len() > 10 {
         for split_point in [1, data.len() / 4, data.len() / 2, data.len() - 1]
             .iter()
@@ -986,7 +1069,7 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    // Test 14: Boundary value testing for limits
+    // Test 17: Boundary value testing for limits
     let boundary_limits = [
         RedisProtocolLimits {
             max_frame_size: data.len().saturating_sub(1).max(1),

@@ -3798,6 +3798,45 @@ fn parse_unsigned_decimal_arg(command: &str, bytes: &[u8], label: &str) -> Resul
 }
 
 #[cfg(any(test, feature = "test-internals"))]
+fn parse_signed_decimal_arg(command: &str, bytes: &[u8], label: &str) -> Result<i64, RedisError> {
+    if bytes.is_empty() {
+        return Err(RedisError::Protocol(format!(
+            "{command} {label} must not be empty"
+        )));
+    }
+
+    let (negative, digits) = match bytes[0] {
+        b'-' => (true, &bytes[1..]),
+        b'+' => (false, &bytes[1..]),
+        _ => (false, bytes),
+    };
+    if digits.is_empty() {
+        return Err(RedisError::Protocol(format!(
+            "{command} {label} sign must be followed by digits"
+        )));
+    }
+
+    let mut acc = 0i64;
+    for &byte in digits {
+        if !byte.is_ascii_digit() {
+            return Err(RedisError::Protocol(format!(
+                "{command} {label} contains non-digit byte 0x{byte:02x}"
+            )));
+        }
+        let digit = i64::from(byte - b'0');
+        acc = if negative {
+            acc.checked_mul(10)
+                .and_then(|value| value.checked_sub(digit))
+        } else {
+            acc.checked_mul(10)
+                .and_then(|value| value.checked_add(digit))
+        }
+        .ok_or_else(|| RedisError::Protocol(format!("{command} {label} overflow")))?;
+    }
+    Ok(acc)
+}
+
+#[cfg(any(test, feature = "test-internals"))]
 fn validate_client_kill_addr(bytes: &[u8], label: &str) -> Result<Vec<u8>, RedisError> {
     let Some(colon) = bytes.iter().rposition(|&byte| byte == b':') else {
         return Err(RedisError::Protocol(format!(
@@ -4485,6 +4524,204 @@ pub fn parse_zadd_for_fuzz(value: RespValue) -> Result<RedisZaddCommand, RedisEr
         key,
         options,
         entries,
+    })
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum RedisZrangeByScoreBound {
+    Inclusive(Vec<u8>),
+    Exclusive(Vec<u8>),
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct RedisZrangeByScoreLimit {
+    pub offset: i64,
+    pub count: i64,
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct RedisZrangeByScoreCommand {
+    pub key: Vec<u8>,
+    pub min: RedisZrangeByScoreBound,
+    pub max: RedisZrangeByScoreBound,
+    pub with_scores: bool,
+    pub limit: Option<RedisZrangeByScoreLimit>,
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn parse_zrangebyscore_bound_for_fuzz(
+    bound: Vec<u8>,
+    label: &str,
+) -> Result<RedisZrangeByScoreBound, RedisError> {
+    if bound.is_empty() {
+        return Err(RedisError::Protocol(format!(
+            "ZRANGEBYSCORE {label} bound must not be empty"
+        )));
+    }
+
+    let exclusive = bound[0] == b'(';
+    let body = if exclusive { &bound[1..] } else { &bound[..] };
+    if body.is_empty() {
+        return Err(RedisError::Protocol(format!(
+            "ZRANGEBYSCORE {label} exclusive bound must include a score"
+        )));
+    }
+    if bytes_eq_ignore_ascii_case(body, b"-inf")
+        || bytes_eq_ignore_ascii_case(body, b"+inf")
+        || bytes_eq_ignore_ascii_case(body, b"inf")
+    {
+        return Ok(if exclusive {
+            RedisZrangeByScoreBound::Exclusive(body.to_vec())
+        } else {
+            RedisZrangeByScoreBound::Inclusive(bound)
+        });
+    }
+
+    let text = std::str::from_utf8(body).map_err(|_| {
+        RedisError::Protocol(format!("ZRANGEBYSCORE {label} bound must be UTF-8 ASCII"))
+    })?;
+    if !text.is_ascii() {
+        return Err(RedisError::Protocol(format!(
+            "ZRANGEBYSCORE {label} bound must be ASCII"
+        )));
+    }
+    let value = text.parse::<f64>().map_err(|_| {
+        RedisError::Protocol(format!("ZRANGEBYSCORE invalid {label} bound: {text}"))
+    })?;
+    if !value.is_finite() {
+        return Err(RedisError::Protocol(format!(
+            "ZRANGEBYSCORE {label} bound must be finite or +/-inf"
+        )));
+    }
+
+    Ok(if exclusive {
+        RedisZrangeByScoreBound::Exclusive(body.to_vec())
+    } else {
+        RedisZrangeByScoreBound::Inclusive(bound)
+    })
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[allow(clippy::too_many_lines)]
+#[doc(hidden)]
+pub fn parse_zrangebyscore_for_fuzz(
+    value: RespValue,
+) -> Result<RedisZrangeByScoreCommand, RedisError> {
+    let args = match value {
+        RespValue::Array(Some(args)) => args,
+        other => {
+            return Err(RedisError::Protocol(format!(
+                "ZRANGEBYSCORE command must be a RESP array, got {other:?}"
+            )));
+        }
+    };
+    if args.len() < 4 {
+        return Err(RedisError::Protocol(
+            "ZRANGEBYSCORE requires command, key, min, and max".to_string(),
+        ));
+    }
+
+    let mut iter = args.into_iter();
+    let command = decode_bulk_command_arg(
+        iter.next()
+            .ok_or_else(|| RedisError::Protocol("ZRANGEBYSCORE missing command".to_string()))?,
+        "ZRANGEBYSCORE",
+        "command",
+    )?;
+    if !bytes_eq_ignore_ascii_case(&command, b"ZRANGEBYSCORE") {
+        return Err(RedisError::Protocol(format!(
+            "ZRANGEBYSCORE command name expected, got {}",
+            String::from_utf8_lossy(&command)
+        )));
+    }
+
+    let key = decode_bulk_command_arg(
+        iter.next()
+            .ok_or_else(|| RedisError::Protocol("ZRANGEBYSCORE missing key".to_string()))?,
+        "ZRANGEBYSCORE",
+        "key",
+    )?;
+    let min = parse_zrangebyscore_bound_for_fuzz(
+        decode_bulk_command_arg(
+            iter.next()
+                .ok_or_else(|| RedisError::Protocol("ZRANGEBYSCORE missing min".to_string()))?,
+            "ZRANGEBYSCORE",
+            "min",
+        )?,
+        "min",
+    )?;
+    let max = parse_zrangebyscore_bound_for_fuzz(
+        decode_bulk_command_arg(
+            iter.next()
+                .ok_or_else(|| RedisError::Protocol("ZRANGEBYSCORE missing max".to_string()))?,
+            "ZRANGEBYSCORE",
+            "max",
+        )?,
+        "max",
+    )?;
+    let remaining: Vec<Vec<u8>> = iter
+        .enumerate()
+        .map(|(index, value)| {
+            decode_bulk_command_arg(value, "ZRANGEBYSCORE", &format!("option[{index}]"))
+        })
+        .collect::<Result<_, _>>()?;
+
+    let mut with_scores = false;
+    let mut limit = None;
+    let mut pos = 0usize;
+    while pos < remaining.len() {
+        let option = &remaining[pos];
+        if bytes_eq_ignore_ascii_case(option, b"WITHSCORES") {
+            if with_scores {
+                return Err(RedisError::Protocol(
+                    "ZRANGEBYSCORE WITHSCORES appears more than once".to_string(),
+                ));
+            }
+            with_scores = true;
+            pos += 1;
+        } else if bytes_eq_ignore_ascii_case(option, b"LIMIT") {
+            if limit.is_some() {
+                return Err(RedisError::Protocol(
+                    "ZRANGEBYSCORE LIMIT appears more than once".to_string(),
+                ));
+            }
+            let [offset_bytes, count_bytes] = remaining.get(pos + 1..pos + 3).ok_or_else(|| {
+                RedisError::Protocol("ZRANGEBYSCORE LIMIT requires offset and count".to_string())
+            })?
+            else {
+                return Err(RedisError::Protocol(
+                    "ZRANGEBYSCORE LIMIT requires offset and count".to_string(),
+                ));
+            };
+            let offset = parse_signed_decimal_arg("ZRANGEBYSCORE", offset_bytes, "LIMIT offset")?;
+            if offset < 0 {
+                return Err(RedisError::Protocol(
+                    "ZRANGEBYSCORE LIMIT offset must be non-negative".to_string(),
+                ));
+            }
+            let count = parse_signed_decimal_arg("ZRANGEBYSCORE", count_bytes, "LIMIT count")?;
+            limit = Some(RedisZrangeByScoreLimit { offset, count });
+            pos += 3;
+        } else {
+            return Err(RedisError::Protocol(format!(
+                "ZRANGEBYSCORE unknown option {}",
+                String::from_utf8_lossy(option)
+            )));
+        }
+    }
+
+    Ok(RedisZrangeByScoreCommand {
+        key,
+        min,
+        max,
+        with_scores,
+        limit,
     })
 }
 
@@ -5273,6 +5510,150 @@ mod tests {
         assert!(matches!(
             parse_zadd_for_fuzz(null_member),
             Err(RedisError::Protocol(msg)) if msg.contains("ZADD arg[1]")
+        ));
+    }
+
+    #[test]
+    fn zrangebyscore_parser_accepts_bounds_and_options() {
+        let command = RespValue::Array(Some(vec![
+            bulk_arg("ZRANGEBYSCORE"),
+            bulk_arg("zset"),
+            bulk_arg("(1.5"),
+            bulk_arg("+inf"),
+            bulk_arg("WITHSCORES"),
+            bulk_arg("LIMIT"),
+            bulk_arg("0"),
+            bulk_arg("-1"),
+        ]));
+
+        let parsed =
+            parse_zrangebyscore_for_fuzz(command).expect("valid ZRANGEBYSCORE should parse");
+
+        assert_eq!(parsed.key, b"zset".to_vec());
+        assert_eq!(
+            parsed.min,
+            RedisZrangeByScoreBound::Exclusive(b"1.5".to_vec())
+        );
+        assert_eq!(
+            parsed.max,
+            RedisZrangeByScoreBound::Inclusive(b"+inf".to_vec())
+        );
+        assert!(parsed.with_scores);
+        assert_eq!(
+            parsed.limit,
+            Some(RedisZrangeByScoreLimit {
+                offset: 0,
+                count: -1
+            })
+        );
+    }
+
+    #[test]
+    fn zrangebyscore_parser_accepts_options_in_any_order() {
+        let command = RespValue::Array(Some(vec![
+            bulk_arg("zrangebyscore"),
+            bulk_arg("zset"),
+            bulk_arg("-inf"),
+            bulk_arg("(42"),
+            bulk_arg("LIMIT"),
+            bulk_arg("+2"),
+            bulk_arg("10"),
+            bulk_arg("WITHSCORES"),
+        ]));
+
+        let parsed =
+            parse_zrangebyscore_for_fuzz(command).expect("valid ZRANGEBYSCORE should parse");
+
+        assert_eq!(
+            parsed.min,
+            RedisZrangeByScoreBound::Inclusive(b"-inf".to_vec())
+        );
+        assert_eq!(
+            parsed.max,
+            RedisZrangeByScoreBound::Exclusive(b"42".to_vec())
+        );
+        assert!(parsed.with_scores);
+        assert_eq!(
+            parsed.limit,
+            Some(RedisZrangeByScoreLimit {
+                offset: 2,
+                count: 10
+            })
+        );
+    }
+
+    #[test]
+    fn zrangebyscore_parser_rejects_malformed_command_shapes() {
+        let missing_max = RespValue::Array(Some(vec![
+            bulk_arg("ZRANGEBYSCORE"),
+            bulk_arg("zset"),
+            bulk_arg("-inf"),
+        ]));
+        assert!(matches!(
+            parse_zrangebyscore_for_fuzz(missing_max),
+            Err(RedisError::Protocol(msg)) if msg.contains("requires command, key, min, and max")
+        ));
+
+        let duplicate_withscores = RespValue::Array(Some(vec![
+            bulk_arg("ZRANGEBYSCORE"),
+            bulk_arg("zset"),
+            bulk_arg("-inf"),
+            bulk_arg("+inf"),
+            bulk_arg("WITHSCORES"),
+            bulk_arg("WITHSCORES"),
+        ]));
+        assert!(matches!(
+            parse_zrangebyscore_for_fuzz(duplicate_withscores),
+            Err(RedisError::Protocol(msg)) if msg.contains("appears more than once")
+        ));
+
+        let incomplete_limit = RespValue::Array(Some(vec![
+            bulk_arg("ZRANGEBYSCORE"),
+            bulk_arg("zset"),
+            bulk_arg("-inf"),
+            bulk_arg("+inf"),
+            bulk_arg("LIMIT"),
+            bulk_arg("0"),
+        ]));
+        assert!(matches!(
+            parse_zrangebyscore_for_fuzz(incomplete_limit),
+            Err(RedisError::Protocol(msg)) if msg.contains("requires offset and count")
+        ));
+
+        let negative_offset = RespValue::Array(Some(vec![
+            bulk_arg("ZRANGEBYSCORE"),
+            bulk_arg("zset"),
+            bulk_arg("-inf"),
+            bulk_arg("+inf"),
+            bulk_arg("LIMIT"),
+            bulk_arg("-1"),
+            bulk_arg("10"),
+        ]));
+        assert!(matches!(
+            parse_zrangebyscore_for_fuzz(negative_offset),
+            Err(RedisError::Protocol(msg)) if msg.contains("offset must be non-negative")
+        ));
+
+        let nan_min = RespValue::Array(Some(vec![
+            bulk_arg("ZRANGEBYSCORE"),
+            bulk_arg("zset"),
+            bulk_arg("NaN"),
+            bulk_arg("+inf"),
+        ]));
+        assert!(matches!(
+            parse_zrangebyscore_for_fuzz(nan_min),
+            Err(RedisError::Protocol(msg)) if msg.contains("finite or +/-inf")
+        ));
+
+        let null_max = RespValue::Array(Some(vec![
+            bulk_arg("ZRANGEBYSCORE"),
+            bulk_arg("zset"),
+            bulk_arg("-inf"),
+            RespValue::BulkString(None),
+        ]));
+        assert!(matches!(
+            parse_zrangebyscore_for_fuzz(null_max),
+            Err(RedisError::Protocol(msg)) if msg.contains("ZRANGEBYSCORE max")
         ));
     }
 
