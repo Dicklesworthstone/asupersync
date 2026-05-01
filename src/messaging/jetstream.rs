@@ -1299,19 +1299,7 @@ impl Consumer {
             let _ = &err;
         }
 
-        // Check for potential DeliverByStartTime edge case:
-        // If we got no messages and operation timed out, this might indicate
-        // that the consumer's start time precedes the stream's first available
-        // sequence (after retention/age purge). This is a common issue that
-        // should be clearly reported rather than silently returning empty results.
-        if messages.is_empty() && pull_state.termination() == PullSubscriberTermination::TimedOut {
-            return Err(JsError::Api {
-                code: 408,
-                description: "Pull operation timed out with no messages. If using DeliverByStartTime, verify that the start time does not precede the stream's first available sequence after retention purges.".to_string(),
-            });
-        }
-
-        pull_state.result().map(|()| messages)
+        finish_pull(messages, pull_state)
     }
 
     fn parse_js_message(msg: Message) -> Option<JsMessage> {
@@ -1349,6 +1337,15 @@ impl Consumer {
             ack_state: AtomicU8::new(ACK_STATE_PENDING),
         })
     }
+}
+
+fn finish_pull(
+    messages: Vec<JsMessage>,
+    pull_state: PullSubscriberState,
+) -> Result<Vec<JsMessage>, JsError> {
+    // A client-side fetch timeout only bounds this pull request. It is not
+    // enough evidence to classify the consumer or stream as invalid.
+    pull_state.result().map(|()| messages)
 }
 
 #[derive(Debug)]
@@ -2596,6 +2593,17 @@ mod tests {
         assert_eq!(state.termination(), PullSubscriberTermination::Error);
         assert_eq!(state.received(), 1);
         assert!(matches!(state.result(), Err(JsError::InvalidConfig(msg)) if msg == "boom"));
+    }
+
+    #[test]
+    fn pull_timeout_without_messages_finishes_as_empty_batch() {
+        let mut state = PullSubscriberState::new(1);
+        state.observe_timeout();
+
+        let messages = finish_pull(Vec::new(), state)
+            .expect("an empty pull timeout is not proof of a JetStream API error");
+
+        assert!(messages.is_empty());
     }
 
     #[test]
