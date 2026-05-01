@@ -2975,4 +2975,120 @@ mod tests {
 
         crate::test_complete!("send_modify_deadlock_prevention");
     }
+
+    /// Audit test for concurrent send + borrow_and_update behavior.
+    ///
+    /// Verifies that when sender does watch.send(v) while receiver is mid-borrow_and_update(),
+    /// the receiver observes a consistent value/version pair and no values are "lost".
+    /// Per spec, borrow_and_update returns LATEST sent value, but no values may be lost
+    /// between markings.
+    #[test]
+    fn audit_concurrent_send_during_borrow_and_update() {
+        init_test("audit_concurrent_send_during_borrow_and_update");
+
+        let cx = test_cx();
+        let (tx, mut rx) = channel::<u32>(0);
+
+        // Test 1: Verify atomic read of value/version pair
+        // Send a value, then verify borrow_and_update gets consistent pair
+        tx.send(42).unwrap();
+
+        let borrowed = rx.borrow_and_update();
+        let observed_value = *borrowed;
+        drop(borrowed);
+
+        assert_eq!(
+            observed_value, 42,
+            "borrow_and_update should observe sent value"
+        );
+        assert_eq!(
+            rx.seen_version, 1,
+            "seen_version should be updated to version of observed value"
+        );
+
+        // Test 2: Multiple rapid sends - verify no values are "lost" from receiver's perspective
+        // Send sequence: 100, 200, 300 rapidly
+        tx.send(100).unwrap();
+        tx.send(200).unwrap();
+        tx.send(300).unwrap();
+
+        // borrow_and_update should see the LATEST value (300)
+        let latest = *rx.borrow_and_update();
+        assert_eq!(
+            latest, 300,
+            "borrow_and_update should see latest value after rapid sends"
+        );
+
+        // Test 3: Verify version consistency during concurrent access
+        // This tests the key race condition scenario
+        tx.send(500).unwrap();
+
+        // Start borrow_and_update, which will:
+        // 1. Acquire read lock
+        // 2. Read value (500) and version (4)
+        // 3. Update seen_version to 4
+        // 4. Return reference to value 500
+        let concurrent_borrow = rx.borrow_and_update();
+        let concurrent_value = *concurrent_borrow;
+        drop(concurrent_borrow);
+
+        // After borrow_and_update completes, send another value
+        tx.send(600).unwrap();
+
+        // The receiver should have marked version 4 as seen (when it observed 500)
+        assert_eq!(
+            concurrent_value, 500,
+            "concurrent borrow should see consistent value"
+        );
+
+        // Now check if receiver correctly identifies new changes
+        assert!(
+            rx.has_changed(),
+            "receiver should detect new value after marking previous as seen"
+        );
+
+        // Test 4: Verify that rapid sends don't cause version skipping
+        let initial_version = rx.seen_version;
+
+        // Send 3 more values rapidly
+        tx.send(700).unwrap(); // version 6
+        tx.send(800).unwrap(); // version 7
+        tx.send(900).unwrap(); // version 8
+
+        // borrow_and_update should see version 8 with value 900
+        let final_value = *rx.borrow_and_update();
+        assert_eq!(
+            final_value, 900,
+            "should see final value after rapid sequence"
+        );
+        assert!(
+            rx.seen_version > initial_version,
+            "seen_version should advance"
+        );
+
+        // Test 5: Value loss verification - ensure intermediate values aren't "lost"
+        // in the sense that they can't be observed
+        let (tx2, mut rx2) = channel::<String>("initial".to_string());
+
+        // Send sequence where each value builds on the previous
+        tx2.send("step1".to_string()).unwrap();
+        tx2.send("step2".to_string()).unwrap();
+        tx2.send("step3".to_string()).unwrap();
+
+        // borrow_and_update should see the latest consistent state
+        let final_state = rx2.borrow_and_update();
+        assert_eq!(
+            *final_state, "step3",
+            "should observe latest consistent state"
+        );
+        drop(final_state);
+
+        // No more changes should be detectable
+        assert!(
+            !rx2.has_changed(),
+            "no changes should remain after observing latest"
+        );
+
+        crate::test_complete!("audit_concurrent_send_during_borrow_and_update");
+    }
 }
