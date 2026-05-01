@@ -7,14 +7,11 @@
 //! - Proper panic propagation and poison state persistence
 
 use asupersync::cx::Cx;
-use asupersync::sync::mutex::{
+use asupersync::sync::{
     LockError, Mutex as AsupersyncMutex, TryLockError as AsupersyncTryLockError,
 };
 use asupersync::types::{Budget, RegionId, TaskId};
 use asupersync::util::ArenaIndex;
-use futures::task::noop_waker;
-use std::future::Future;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex, PoisonError, TryLockError as StdTryLockError};
 use std::task::{Context, Poll};
@@ -26,6 +23,8 @@ use std::time::Duration;
 struct PoisonConformanceResult {
     /// Test scenario identifier
     scenario: String,
+    /// Whether this scenario intentionally panicked while holding the mutex
+    should_panic: bool,
     /// Whether asupersync mutex became poisoned
     asupersync_poisoned: bool,
     /// Whether std mutex became poisoned
@@ -70,6 +69,7 @@ impl PoisonConformanceContext {
 
         PoisonConformanceResult {
             scenario: self.config.scenario.clone(),
+            should_panic: self.config.should_panic,
             asupersync_poisoned: asupersync_result.0,
             std_poisoned: std_result.0,
             asupersync_next_lock_error: asupersync_result.1,
@@ -98,8 +98,7 @@ impl PoisonConformanceContext {
 
             // Block on async lock using simple polling
             let mut lock_future = mutex_clone.lock(&cx);
-            let waker = noop_waker();
-            let mut context = Context::from_waker(&waker);
+            let mut context = Context::from_waker(std::task::Waker::noop());
 
             let _guard = loop {
                 match Pin::new(&mut lock_future).poll(&mut context) {
@@ -119,13 +118,10 @@ impl PoisonConformanceContext {
             }
         });
 
-        // Wait for thread and catch panic
-        let panic_result = catch_unwind(AssertUnwindSafe(|| handle.join()));
-
         if should_panic {
-            assert!(panic_result.is_err(), "Thread should have panicked");
+            assert!(handle.join().is_err(), "Thread should have panicked");
         } else {
-            assert!(panic_result.is_ok(), "Thread should not have panicked");
+            handle.join().expect("Thread should not have panicked");
         }
 
         // Small delay to ensure poison state propagates
@@ -143,8 +139,7 @@ impl PoisonConformanceContext {
             );
 
             let mut lock_future = mutex.lock(&cx);
-            let waker = noop_waker();
-            let mut context = Context::from_waker(&waker);
+            let mut context = Context::from_waker(std::task::Waker::noop());
 
             match Pin::new(&mut lock_future).poll(&mut context) {
                 Poll::Ready(Err(LockError::Poisoned)) => true,
@@ -185,13 +180,10 @@ impl PoisonConformanceContext {
             }
         });
 
-        // Wait for thread and catch panic
-        let panic_result = catch_unwind(AssertUnwindSafe(|| handle.join()));
-
         if should_panic {
-            assert!(panic_result.is_err(), "Thread should have panicked");
+            assert!(handle.join().is_err(), "Thread should have panicked");
         } else {
-            assert!(panic_result.is_ok(), "Thread should not have panicked");
+            handle.join().expect("Thread should not have panicked");
         }
 
         // Small delay to ensure poison state propagates
@@ -241,7 +233,7 @@ fn assert_poison_conformance(result: &PoisonConformanceResult, test_name: &str) 
     );
 
     // If poison should have occurred, verify it did
-    if result.scenario.contains("panic") {
+    if result.should_panic {
         assert!(
             result.asupersync_poisoned,
             "{}: asupersync should be poisoned after panic",
@@ -360,36 +352,44 @@ fn conformance_comprehensive_poison_matrix() {
     }
 }
 
-/// Generate poison conformance coverage report.
+/// Verify the documented poison coverage matrix instead of printing a report
+/// that can pass without exercising any implementation behavior.
 #[test]
-fn generate_poison_conformance_report() {
-    println!("\n=== Mutex Poison Conformance Coverage Report ===\n");
-
-    println!("| Test Case | Panic? | Expected Poison | Lock Error | Try Lock Error | Status |");
-    println!("|-----------|--------|----------------|------------|----------------|--------|");
-
+fn poison_coverage_matrix_exercises_all_scenarios() {
     let test_cases = vec![
-        ("No Panic", false, false, false, false),
-        ("Panic During Lock", true, true, true, true),
-        ("Poison Persistence", true, true, true, true),
-        ("Normal Operation", false, false, false, false),
+        PoisonTestConfig {
+            scenario: "no_panic".to_string(),
+            should_panic: false,
+            initial_value: 42,
+            panic_message: String::new(),
+        },
+        PoisonTestConfig {
+            scenario: "panic_during_lock".to_string(),
+            should_panic: true,
+            initial_value: 100,
+            panic_message: "Test panic for poison".to_string(),
+        },
+        PoisonTestConfig {
+            scenario: "poison_persistence".to_string(),
+            should_panic: true,
+            initial_value: 200,
+            panic_message: "Persistent poison test".to_string(),
+        },
+        PoisonTestConfig {
+            scenario: "normal_operation".to_string(),
+            should_panic: false,
+            initial_value: 1,
+            panic_message: String::new(),
+        },
     ];
 
-    for (name, panic, poison, lock_err, try_err) in test_cases {
-        println!(
-            "| {} | {} | {} | {} | {} | ✅ PASS |",
-            name,
-            if panic { "✓" } else { "✗" },
-            if poison { "✓" } else { "✗" },
-            if lock_err { "✓" } else { "✗" },
-            if try_err { "✓" } else { "✗" }
-        );
-    }
+    assert_eq!(test_cases.len(), 4, "coverage matrix should stay explicit");
 
-    println!("\n✅ All poison conformance tests passing");
-    println!("📊 Coverage: 4/4 test scenarios (100%)");
-    println!("☠️  Poison detection conformance: VERIFIED");
-    println!("🔒 Lock error propagation: IDENTICAL");
-    println!("⚡ Try-lock poison handling: CONSISTENT");
-    println!("🔄 Poison state persistence: CONFIRMED");
+    for config in test_cases {
+        let scenario = config.scenario.clone();
+        let ctx = PoisonConformanceContext::new(config);
+        let result = ctx.run_differential_test();
+
+        assert_poison_conformance(&result, &scenario);
+    }
 }
