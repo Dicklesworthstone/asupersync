@@ -2864,6 +2864,17 @@ pub mod span_semantics {
                 self.attributes
                     .insert(key.clone(), attribute_value_text(&value));
                 self.attribute_values.insert(key, value);
+            } else {
+                // br-asupersync-attr-drop-count: bump the OTLP
+                // dropped_attributes_count when a NEW attribute is
+                // dropped because the span is at the per-span cap.
+                // Saturating add prevents wraparound at u32::MAX
+                // (a 4-billion-attribute span is implausible, but
+                // saturating is the correct semantic — the OTLP
+                // spec says "MUST track count of dropped"; once
+                // we exceed u32::MAX, capping at MAX is the closest
+                // legal representation).
+                self.dropped_attributes_count = self.dropped_attributes_count.saturating_add(1);
             }
         }
 
@@ -5401,6 +5412,12 @@ pub mod otlp_request_builder {
             start_time_unix_nano: unix_nanos(span.start_time),
             end_time_unix_nano: unix_nanos(span.end_time.expect("ended span")),
             attributes: ordered_proto_attributes(&span.attributes),
+            // br-asupersync-attr-drop-count: propagate per-span
+            // attribute drop count to the OTLP wire so receivers
+            // can detect truncation. A regression that reverted
+            // this to 0 (or relied on ..Default::default()) would
+            // silently lose the count.
+            dropped_attributes_count: span.dropped_attributes_count,
             events: span
                 .events
                 .iter()
@@ -5692,6 +5709,12 @@ mod otlp_wire_format_tests {
             start_time_unix_nano: unix_nanos(span.start_time),
             end_time_unix_nano: unix_nanos(span.end_time.expect("ended span")),
             attributes: ordered_proto_attributes(&span.attributes),
+            // br-asupersync-attr-drop-count: propagate per-span
+            // attribute drop count to the OTLP wire so receivers
+            // can detect truncation. A regression that reverted
+            // this to 0 (or relied on ..Default::default()) would
+            // silently lose the count.
+            dropped_attributes_count: span.dropped_attributes_count,
             events: span
                 .events
                 .iter()
