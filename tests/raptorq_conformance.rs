@@ -2788,24 +2788,30 @@ mod differential_harness {
         );
     }
 
-    #[test]
-    fn differential_decoder_matches_raptorq_rs_k8192_insufficient_symbols() {
-        const SCENARIO_ID: &str = "RQ-D2-DIFF-K8192-INSUFFICIENT-RAPTORQ-RS";
-        const K: usize = 8192;
-        const SYMBOL_SIZE: usize = 8;
-
-        let decoder = InactivationDecoder::new(K, SYMBOL_SIZE, 0x6330_8192);
+    fn assert_decoder_matches_raptorq_rs_insufficient_source_packet(
+        scenario_id: &str,
+        k: usize,
+        symbol_size: usize,
+        seed: u64,
+        expected_k_prime: usize,
+    ) {
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
         assert_eq!(
             decoder.params().k_prime,
-            8194,
-            "scenario={SCENARIO_ID} must exercise the rounded K=8192 RFC row"
+            expected_k_prime,
+            "scenario={scenario_id} must exercise the expected rounded RFC row"
         );
 
-        let payload = vec![0x42, 0x53, 0x64, 0x75, 0x86, 0x97, 0xA8, 0xB9];
+        let payload: Vec<u8> = (0..symbol_size)
+            .map(|idx| {
+                u8::try_from((idx.saturating_mul(17).saturating_add(0x42)) % 256)
+                    .expect("payload byte fits u8")
+            })
+            .collect();
         assert_eq!(
             payload.len(),
-            SYMBOL_SIZE,
-            "scenario={SCENARIO_ID} payload must match the K=8192 symbol size"
+            symbol_size,
+            "scenario={scenario_id} payload must match the symbol size"
         );
         let (columns, coefficients) = decoder.source_equation(0);
         let received = [ReceivedSymbol {
@@ -2827,25 +2833,25 @@ mod differential_harness {
                 assert_eq!(
                     actual,
                     received.len(),
-                    "scenario={SCENARIO_ID} must report the supplied symbol count"
+                    "scenario={scenario_id} must report the supplied symbol count"
                 );
                 assert_eq!(
                     expected, required,
-                    "scenario={SCENARIO_ID} must report the K=8192 effective decode threshold"
+                    "scenario={scenario_id} must report the effective decode threshold"
                 );
             }
             other => {
-                panic!("scenario={SCENARIO_ID} expected insufficient-symbol failure, got {other:?}")
+                panic!("scenario={scenario_id} expected insufficient-symbol failure, got {other:?}")
             }
         }
 
         let reference_config = RaptorqRsObjectTransmissionInformation::new(
             u64::try_from(
-                K.checked_mul(SYMBOL_SIZE)
+                k.checked_mul(symbol_size)
                     .expect("transfer length fits usize"),
             )
             .expect("transfer length fits u64"),
-            u16::try_from(SYMBOL_SIZE).expect("symbol size fits u16"),
+            u16::try_from(symbol_size).expect("symbol size fits u16"),
             1,
             1,
             1,
@@ -2857,7 +2863,29 @@ mod differential_harness {
         ));
         assert!(
             reference_bytes.is_none(),
-            "scenario={SCENARIO_ID} raptorq-rs must also fail to decode one K=8192 source packet"
+            "scenario={scenario_id} raptorq-rs must also fail to decode one source packet"
+        );
+    }
+
+    #[test]
+    fn differential_decoder_matches_raptorq_rs_k8192_insufficient_symbols() {
+        assert_decoder_matches_raptorq_rs_insufficient_source_packet(
+            "RQ-D2-DIFF-K8192-INSUFFICIENT-RAPTORQ-RS",
+            8192,
+            8,
+            0x6330_8192,
+            8194,
+        );
+    }
+
+    #[test]
+    fn differential_decoder_matches_raptorq_rs_k16384_insufficient_symbols() {
+        assert_decoder_matches_raptorq_rs_insufficient_source_packet(
+            "RQ-D2-DIFF-K16384-INSUFFICIENT-RAPTORQ-RS",
+            16384,
+            4,
+            0x6330_4000,
+            16505,
         );
     }
 
