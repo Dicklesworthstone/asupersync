@@ -4276,3 +4276,9 @@ name = "h1_content_length_body_mismatch"
 path = "fuzz_targets/h1_content_length_body_mismatch.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "h1_malformed_lf_terminator"
+path = "fuzz_targets/h1_malformed_lf_terminator.rs"
+test = false
+doc = false
