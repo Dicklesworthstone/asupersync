@@ -26,47 +26,26 @@
 //!       x-request-id headers cannot exhaust server memory because
 //!       the cap fires at the metadata-decode boundary.
 //!
-//!   (c) **⚠️ P3 trust gap — `TracingInterceptor` preserves
-//!       client-supplied x-request-id verbatim.** The current
-//!       implementation at interceptor.rs:392-401 is "generate
-//!       new ID iff ABSENT":
+//!   (c) **Unsigned request-id tampering: BLOCKED BY DEFAULT.**
+//!       `TracingInterceptor` treats the default boundary as
+//!       untrusted. A client-supplied x-request-id is regenerated
+//!       unless the operator explicitly selects trusted-edge
+//!       preservation or installs a signature verifier:
 //!
 //!       ```ignore
-//!       if self.generate_request_id
-//!           && request.metadata().get("x-request-id").is_none()
-//!       {
-//!           let id = format!("req-{:016x}", ...);
-//!           let _ = request.metadata_mut().insert("x-request-id", id);
-//!       }
+//!       TracingInterceptor::new()
+//!           .with_trusted_client_request_ids();
+//!       TracingInterceptor::new()
+//!           .with_request_id_signature_verifier(...);
 //!       ```
 //!
-//!       That is the propagation-friendly default for distributed
-//!       tracing — upstream gateways generate a correlation ID and
-//!       downstream services preserve it. It is the correct
-//!       posture for trusted-edge deployments where the client is
-//!       a known internal tier behind a WAF/mTLS.
-//!
-//!       For UNTRUSTED-edge deployments (public-facing gRPC where
-//!       the immediate caller is a browser / 3rd-party), the
-//!       operator's framing — "respect if signed, otherwise
-//!       replace" — is NOT implemented. There is:
-//!         * No signature verification on x-request-id.
-//!         * No length cap beyond the metadata-frame size cap.
-//!         * No charset whitelist beyond visible-ASCII.
-//!       Mitigations available today:
-//!         (i) install a custom `Interceptor` that calls
-//!             `metadata_mut().insert_or_replace("x-request-id", ...)`
-//!             unconditionally (regenerate-mode), or
-//!         (ii) strip x-request-id at the WAF/edge before it
-//!              reaches the gRPC server.
-//!
-//!       Documented as P3 doc gap.
+//!       This matches the operator's framing: respect a client
+//!       request ID only if it is signed or the ingress boundary is
+//!       already trusted; otherwise replace it.
 //!
 //! Regression tests below pin (a), (b), and (c).
-//! Test (c) is a NEGATIVE pin — it asserts the current
-//! "preserve verbatim" behavior so a future commit that ADDED
-//! signature-validating logic to `TracingInterceptor` would force
-//! an intentional re-baseline AND a re-audit of the trust model.
+//! Test (c) asserts the fail-closed default plus the two explicit
+//! preservation modes.
 
 use asupersync::bytes::Bytes;
 use asupersync::grpc::streaming::{Metadata, MetadataValue, Request};
@@ -103,10 +82,9 @@ fn metadata_insert_strips_crlf_in_x_request_id() {
 
 #[test]
 fn tracing_interceptor_generates_id_when_absent() {
-    // Pin (c) — happy path: when no client-supplied x-request-id,
-    // TracingInterceptor generates a new server-side ID with the
-    // documented "req-{16-hex}" shape. This is the trusted-edge
-    // case (e.g. internal mesh, no upstream gateway).
+    // Pin (c) — when no client-supplied x-request-id is present,
+    // TracingInterceptor generates a server-side ID with the documented
+    // "req-{16-hex}" shape.
     let interceptor = TracingInterceptor::new();
     let mut request = Request::with_metadata(Bytes::new(), Metadata::new());
     interceptor
@@ -134,18 +112,11 @@ fn tracing_interceptor_generates_id_when_absent() {
 }
 
 #[test]
-fn tracing_interceptor_preserves_client_supplied_id_verbatim() {
-    // Pin (c) — the audit's KEY finding: TracingInterceptor
-    // PRESERVES a client-supplied x-request-id without
-    // verification, signature check, or replacement. This is
-    // the documented behavior for trusted-edge / propagation
-    // deployments and is the operator's P3 doc-gap concern for
-    // untrusted-edge deployments.
-    //
-    // A regression that ADDED auto-regeneration ("always
-    // overwrite") OR signature validation would break this pin
-    // and force an intentional re-baseline. That's the right
-    // gate for a security-sensitive change.
+fn tracing_interceptor_replaces_unsigned_client_supplied_id_by_default() {
+    // Pin (c) — default boundary is untrusted. A client-supplied
+    // unsigned x-request-id must not be trusted as a correlation
+    // authority because it lets an external peer tamper with trace
+    // joins. The default replaces it with a generated server ID.
     let interceptor = TracingInterceptor::new();
     let mut metadata = Metadata::new();
     let inserted = metadata.insert("x-request-id", "client-supplied-trace-id");
@@ -159,18 +130,54 @@ fn tracing_interceptor_preserves_client_supplied_id_verbatim() {
     let id = request
         .metadata()
         .get("x-request-id")
-        .expect("client-supplied x-request-id must be preserved");
+        .expect("unsigned client-supplied x-request-id must be replaced");
     match id {
         MetadataValue::Ascii(s) => {
             assert_eq!(
-                s, "client-supplied-trace-id",
-                "TracingInterceptor preserves client-supplied x-request-id \
-                 VERBATIM. This is the propagation-friendly default; \
-                 untrusted-edge deployments must install a regenerate-mode \
-                 interceptor or strip x-request-id at the WAF.",
+                s, "req-0000000000000001",
+                "TracingInterceptor must replace unsigned client-supplied \
+                 x-request-id by default.",
             );
         }
         other => panic!("expected Ascii, got {other:?}"),
+    }
+}
+
+#[test]
+fn tracing_interceptor_preserves_signed_client_supplied_id() {
+    let interceptor =
+        TracingInterceptor::new().with_request_id_signature_verifier(|id: &str, sig: &str| {
+            id == "client-supplied-trace-id" && sig == "valid-signature"
+        });
+    let mut metadata = Metadata::new();
+    assert!(metadata.insert("x-request-id", "client-supplied-trace-id"));
+    assert!(metadata.insert("x-request-id-signature", "valid-signature"));
+    let mut request = Request::with_metadata(Bytes::new(), metadata);
+
+    interceptor
+        .intercept_request(&mut request)
+        .expect("intercept_request must Ok");
+
+    match request.metadata().get("x-request-id") {
+        Some(MetadataValue::Ascii(s)) => assert_eq!(s, "client-supplied-trace-id"),
+        other => panic!("expected signed request id to be preserved, got {other:?}"),
+    }
+}
+
+#[test]
+fn tracing_interceptor_trusted_edge_preserves_client_supplied_id() {
+    let interceptor = TracingInterceptor::new().with_trusted_client_request_ids();
+    let mut metadata = Metadata::new();
+    assert!(metadata.insert("x-request-id", "trusted-edge-trace-id"));
+    let mut request = Request::with_metadata(Bytes::new(), metadata);
+
+    interceptor
+        .intercept_request(&mut request)
+        .expect("intercept_request must Ok");
+
+    match request.metadata().get("x-request-id") {
+        Some(MetadataValue::Ascii(s)) => assert_eq!(s, "trusted-edge-trace-id"),
+        other => panic!("expected trusted-edge request id to be preserved, got {other:?}"),
     }
 }
 
@@ -220,14 +227,9 @@ fn metadata_insert_strips_non_ascii_bytes_from_request_id() {
 }
 
 #[test]
-fn tracing_interceptor_preserves_zero_length_client_id_then_generates() {
-    // Negative pin: an EMPTY client-supplied x-request-id is still
-    // technically "present" for the .is_none() check, so the
-    // interceptor preserves it as empty. A regression that started
-    // treating empty-string as "missing" and auto-generated would
-    // break this pin and require an intentional re-baseline (it
-    // would actually be an improvement for the untrusted-edge
-    // story, but it would change observable behavior).
+fn tracing_interceptor_replaces_zero_length_client_id() {
+    // Empty x-request-id is not useful correlation material and must not
+    // count as a trusted upstream value at an untrusted edge.
     let interceptor = TracingInterceptor::new();
     let mut metadata = Metadata::new();
     assert!(metadata.insert("x-request-id", ""));
@@ -240,12 +242,10 @@ fn tracing_interceptor_preserves_zero_length_client_id_then_generates() {
     match request.metadata().get("x-request-id") {
         Some(MetadataValue::Ascii(s)) => {
             assert_eq!(
-                s, "",
-                "zero-length client-supplied id is preserved (counts as \
-                 present for the is_none() check). Pin documents the \
-                 current 'preserve verbatim' contract.",
+                s, "req-0000000000000001",
+                "zero-length client-supplied id must be replaced with a generated ID.",
             );
         }
-        other => panic!("expected Ascii (empty), got {other:?}"),
+        other => panic!("expected generated ASCII request id, got {other:?}"),
     }
 }

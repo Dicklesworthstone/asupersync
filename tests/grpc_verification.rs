@@ -1360,13 +1360,23 @@ fn grpc_verify_042_tracing_interceptor() {
     };
     assert!(id1.starts_with("req-"));
 
-    // Existing request ID is preserved
+    // Unsigned client IDs are replaced by default at an untrusted edge.
     let mut req2 = Request::new(Bytes::new());
     req2.metadata_mut().insert("x-request-id", "custom-id");
     interceptor.intercept_request(&mut req2).unwrap();
     match req2.metadata().get("x-request-id") {
+        Some(MetadataValue::Ascii(s)) => assert_eq!(s, "req-0000000000000002"),
+        other => panic!("expected regenerated request id, got: {other:?}"),
+    }
+
+    // Trusted-edge mode preserves an upstream ID deliberately.
+    let trusted = trace_interceptor().with_trusted_client_request_ids();
+    let mut req3 = Request::new(Bytes::new());
+    req3.metadata_mut().insert("x-request-id", "custom-id");
+    trusted.intercept_request(&mut req3).unwrap();
+    match req3.metadata().get("x-request-id") {
         Some(MetadataValue::Ascii(s)) => assert_eq!(s, "custom-id"),
-        other => panic!("expected custom-id, got: {other:?}"),
+        other => panic!("expected trusted custom-id, got: {other:?}"),
     }
 
     test_complete!("grpc_verify_042_tracing_interceptor");
