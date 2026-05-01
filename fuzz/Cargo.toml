@@ -4312,3 +4312,15 @@ name = "notify_drop_pending_fut"
 path = "fuzz_targets/notify_drop_pending_fut.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "oneshot_sender_drop_receiver_poll"
+path = "fuzz_targets/oneshot_sender_drop_receiver_poll.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "mutex_drop_after_panic"
+path = "fuzz_targets/mutex_drop_after_panic.rs"
+test = false
+doc = false
