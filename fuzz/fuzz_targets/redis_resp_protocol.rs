@@ -25,8 +25,8 @@ use libfuzzer_sys::fuzz_target;
 // Import the Redis module to test
 use asupersync::messaging::redis::{
     PubSubEvent, PubSubMessage, PubSubSubscriptionKind, RedisProtocolLimits, RespValue,
-    decode_resp_value_for_fuzz, parse_pubsub_event_for_fuzz, parse_script_eval_for_fuzz,
-    parse_zadd_for_fuzz,
+    decode_resp_value_for_fuzz, parse_client_kill_for_fuzz, parse_pubsub_event_for_fuzz,
+    parse_script_eval_for_fuzz, parse_zadd_for_fuzz,
 };
 
 const MAX_STRUCTURED_FIELD_BYTES: usize = 96;
@@ -550,6 +550,90 @@ fn exercise_script_eval_parser(data: &[u8]) {
     );
 }
 
+fn exercise_client_kill_parser(data: &[u8]) {
+    let payload = &data[..data.len().min(MAX_STRUCTURED_FIELD_BYTES)];
+    let port = 1 + usize::from(data.first().copied().unwrap_or(0));
+    let legacy_addr = format!("127.0.0.1:{port}");
+    let legacy_command = RespValue::Array(Some(vec![
+        bulk_arg(b"CLIENT"),
+        bulk_arg(b"KILL"),
+        bulk_arg(legacy_addr.as_bytes()),
+    ]));
+    let parsed =
+        parse_client_kill_for_fuzz(legacy_command).expect("legacy CLIENT KILL should parse");
+    assert_eq!(parsed.legacy_addr, Some(legacy_addr.into_bytes()));
+    assert!(parsed.filters.is_empty());
+
+    let user = if payload.is_empty() {
+        b"default".as_slice()
+    } else {
+        payload
+    };
+    let valid_filters = RespValue::Array(Some(vec![
+        bulk_arg(b"CLIENT"),
+        bulk_arg(b"KILL"),
+        bulk_arg(b"ID"),
+        bulk_arg(b"42"),
+        bulk_arg(b"TYPE"),
+        bulk_arg(b"replica"),
+        bulk_arg(b"USER"),
+        bulk_arg(user),
+        bulk_arg(b"ADDR"),
+        bulk_arg(b"10.0.0.1:6379"),
+        bulk_arg(b"LADDR"),
+        bulk_arg(b"[::1]:6379"),
+        bulk_arg(b"SKIPME"),
+        bulk_arg(b"NO"),
+        bulk_arg(b"MAXAGE"),
+        bulk_arg(b"60"),
+    ]));
+    let parsed =
+        parse_client_kill_for_fuzz(valid_filters).expect("CLIENT KILL filters should parse");
+    assert!(parsed.legacy_addr.is_none());
+    assert_eq!(parsed.filters.len(), 6);
+
+    let arbitrary_user = RespValue::Array(Some(vec![
+        bulk_arg(b"CLIENT"),
+        bulk_arg(b"KILL"),
+        bulk_arg(b"USER"),
+        bulk_arg(payload),
+    ]));
+    let _ = parse_client_kill_for_fuzz(arbitrary_user);
+
+    let unpaired_filter = RespValue::Array(Some(vec![
+        bulk_arg(b"CLIENT"),
+        bulk_arg(b"KILL"),
+        bulk_arg(b"ID"),
+        bulk_arg(b"7"),
+        bulk_arg(b"TYPE"),
+    ]));
+    assert!(
+        parse_client_kill_for_fuzz(unpaired_filter).is_err(),
+        "CLIENT KILL filter mode requires paired filters"
+    );
+
+    let bad_skipme = RespValue::Array(Some(vec![
+        bulk_arg(b"CLIENT"),
+        bulk_arg(b"KILL"),
+        bulk_arg(b"SKIPME"),
+        bulk_arg(b"MAYBE"),
+    ]));
+    assert!(
+        parse_client_kill_for_fuzz(bad_skipme).is_err(),
+        "CLIENT KILL SKIPME must fail closed on non-YES/NO values"
+    );
+
+    let bad_legacy_addr = RespValue::Array(Some(vec![
+        bulk_arg(b"CLIENT"),
+        bulk_arg(b"KILL"),
+        bulk_arg(b"127.0.0.1"),
+    ]));
+    assert!(
+        parse_client_kill_for_fuzz(bad_legacy_addr).is_err(),
+        "legacy CLIENT KILL address must include a port"
+    );
+}
+
 fn exercise_zadd_option_parser(data: &[u8]) {
     let payload = &data[..data.len().min(MAX_STRUCTURED_FIELD_BYTES)];
     let finite_score = format!("{}.{}", payload.len(), data.first().copied().unwrap_or(0));
@@ -798,7 +882,10 @@ fuzz_target!(|data: &[u8]| {
     // Test 12: Redis ZADD option parser seam
     exercise_zadd_option_parser(data);
 
-    // Test 13: Fragmented parsing simulation (partial buffer scenarios)
+    // Test 13: Redis CLIENT KILL filter parser seam
+    exercise_client_kill_parser(data);
+
+    // Test 14: Fragmented parsing simulation (partial buffer scenarios)
     if data.len() > 10 {
         for split_point in [1, data.len() / 4, data.len() / 2, data.len() - 1]
             .iter()

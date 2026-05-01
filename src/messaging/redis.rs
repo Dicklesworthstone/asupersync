@@ -3740,6 +3740,245 @@ pub fn parse_script_eval_for_fuzz(value: RespValue) -> Result<RedisScriptEvalCom
 #[cfg(any(test, feature = "test-internals"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[doc(hidden)]
+pub enum RedisClientKillTargetType {
+    Normal,
+    Master,
+    Slave,
+    Replica,
+    PubSub,
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum RedisClientKillFilter {
+    Id(u64),
+    ClientType(RedisClientKillTargetType),
+    User(Vec<u8>),
+    Addr(Vec<u8>),
+    LocalAddr(Vec<u8>),
+    SkipMe(bool),
+    MaxAge(u64),
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct RedisClientKillCommand {
+    pub legacy_addr: Option<Vec<u8>>,
+    pub filters: Vec<RedisClientKillFilter>,
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn decode_client_kill_arg(value: RespValue, label: &str) -> Result<Vec<u8>, RedisError> {
+    decode_bulk_command_arg(value, "CLIENT KILL", label)
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn parse_unsigned_decimal_arg(command: &str, bytes: &[u8], label: &str) -> Result<u64, RedisError> {
+    if bytes.is_empty() {
+        return Err(RedisError::Protocol(format!(
+            "{command} {label} must not be empty"
+        )));
+    }
+
+    let mut acc = 0u64;
+    for &byte in bytes {
+        if !byte.is_ascii_digit() {
+            return Err(RedisError::Protocol(format!(
+                "{command} {label} contains non-digit byte 0x{byte:02x}"
+            )));
+        }
+        acc = acc
+            .checked_mul(10)
+            .and_then(|value| value.checked_add(u64::from(byte - b'0')))
+            .ok_or_else(|| RedisError::Protocol(format!("{command} {label} overflow")))?;
+    }
+    Ok(acc)
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn validate_client_kill_addr(bytes: &[u8], label: &str) -> Result<Vec<u8>, RedisError> {
+    let Some(colon) = bytes.iter().rposition(|&byte| byte == b':') else {
+        return Err(RedisError::Protocol(format!(
+            "CLIENT KILL {label} must be ip:port"
+        )));
+    };
+    if colon == 0 || colon + 1 == bytes.len() {
+        return Err(RedisError::Protocol(format!(
+            "CLIENT KILL {label} must include host and port"
+        )));
+    }
+    let port = &bytes[colon + 1..];
+    if !port.iter().all(u8::is_ascii_digit) {
+        return Err(RedisError::Protocol(format!(
+            "CLIENT KILL {label} port must be decimal"
+        )));
+    }
+    let parsed_port = parse_unsigned_decimal_arg("CLIENT KILL", port, label)?;
+    if parsed_port > u64::from(u16::MAX) {
+        return Err(RedisError::Protocol(format!(
+            "CLIENT KILL {label} port exceeds 65535"
+        )));
+    }
+    Ok(bytes.to_vec())
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn parse_client_kill_type(bytes: &[u8]) -> Result<RedisClientKillTargetType, RedisError> {
+    if bytes_eq_ignore_ascii_case(bytes, b"NORMAL") {
+        Ok(RedisClientKillTargetType::Normal)
+    } else if bytes_eq_ignore_ascii_case(bytes, b"MASTER") {
+        Ok(RedisClientKillTargetType::Master)
+    } else if bytes_eq_ignore_ascii_case(bytes, b"SLAVE") {
+        Ok(RedisClientKillTargetType::Slave)
+    } else if bytes_eq_ignore_ascii_case(bytes, b"REPLICA") {
+        Ok(RedisClientKillTargetType::Replica)
+    } else if bytes_eq_ignore_ascii_case(bytes, b"PUBSUB") {
+        Ok(RedisClientKillTargetType::PubSub)
+    } else {
+        Err(RedisError::Protocol(format!(
+            "CLIENT KILL TYPE must be NORMAL, MASTER, SLAVE, REPLICA, or PUBSUB, got {}",
+            String::from_utf8_lossy(bytes)
+        )))
+    }
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn parse_client_kill_skipme(bytes: &[u8]) -> Result<bool, RedisError> {
+    if bytes_eq_ignore_ascii_case(bytes, b"YES") {
+        Ok(true)
+    } else if bytes_eq_ignore_ascii_case(bytes, b"NO") {
+        Ok(false)
+    } else {
+        Err(RedisError::Protocol(format!(
+            "CLIENT KILL SKIPME must be YES or NO, got {}",
+            String::from_utf8_lossy(bytes)
+        )))
+    }
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn parse_client_kill_filter(
+    filter: &[u8],
+    value: Vec<u8>,
+) -> Result<RedisClientKillFilter, RedisError> {
+    if bytes_eq_ignore_ascii_case(filter, b"ID") {
+        Ok(RedisClientKillFilter::Id(parse_unsigned_decimal_arg(
+            "CLIENT KILL",
+            &value,
+            "ID",
+        )?))
+    } else if bytes_eq_ignore_ascii_case(filter, b"TYPE") {
+        Ok(RedisClientKillFilter::ClientType(parse_client_kill_type(
+            &value,
+        )?))
+    } else if bytes_eq_ignore_ascii_case(filter, b"USER") {
+        if value.is_empty() {
+            return Err(RedisError::Protocol(
+                "CLIENT KILL USER must not be empty".to_string(),
+            ));
+        }
+        Ok(RedisClientKillFilter::User(value))
+    } else if bytes_eq_ignore_ascii_case(filter, b"ADDR") {
+        Ok(RedisClientKillFilter::Addr(validate_client_kill_addr(
+            &value, "ADDR",
+        )?))
+    } else if bytes_eq_ignore_ascii_case(filter, b"LADDR") {
+        Ok(RedisClientKillFilter::LocalAddr(validate_client_kill_addr(
+            &value, "LADDR",
+        )?))
+    } else if bytes_eq_ignore_ascii_case(filter, b"SKIPME") {
+        Ok(RedisClientKillFilter::SkipMe(parse_client_kill_skipme(
+            &value,
+        )?))
+    } else if bytes_eq_ignore_ascii_case(filter, b"MAXAGE") {
+        Ok(RedisClientKillFilter::MaxAge(parse_unsigned_decimal_arg(
+            "CLIENT KILL",
+            &value,
+            "MAXAGE",
+        )?))
+    } else {
+        Err(RedisError::Protocol(format!(
+            "CLIENT KILL unknown filter {}",
+            String::from_utf8_lossy(filter)
+        )))
+    }
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[allow(dead_code)]
+#[doc(hidden)]
+pub fn parse_client_kill_for_fuzz(value: RespValue) -> Result<RedisClientKillCommand, RedisError> {
+    let args = match value {
+        RespValue::Array(Some(args)) => args,
+        other => {
+            return Err(RedisError::Protocol(format!(
+                "CLIENT KILL command must be a RESP array, got {other:?}"
+            )));
+        }
+    };
+    if args.len() < 3 {
+        return Err(RedisError::Protocol(
+            "CLIENT KILL requires CLIENT, KILL, and a selector".to_string(),
+        ));
+    }
+
+    let mut iter = args.into_iter();
+    let command = decode_client_kill_arg(
+        iter.next()
+            .ok_or_else(|| RedisError::Protocol("CLIENT KILL missing command".to_string()))?,
+        "command",
+    )?;
+    if !bytes_eq_ignore_ascii_case(&command, b"CLIENT") {
+        return Err(RedisError::Protocol(format!(
+            "CLIENT KILL command name expected CLIENT, got {}",
+            String::from_utf8_lossy(&command)
+        )));
+    }
+
+    let subcommand = decode_client_kill_arg(
+        iter.next()
+            .ok_or_else(|| RedisError::Protocol("CLIENT KILL missing subcommand".to_string()))?,
+        "subcommand",
+    )?;
+    if !bytes_eq_ignore_ascii_case(&subcommand, b"KILL") {
+        return Err(RedisError::Protocol(format!(
+            "CLIENT KILL subcommand expected KILL, got {}",
+            String::from_utf8_lossy(&subcommand)
+        )));
+    }
+
+    let remaining: Vec<Vec<u8>> = iter
+        .enumerate()
+        .map(|(index, value)| decode_client_kill_arg(value, &format!("selector[{index}]")))
+        .collect::<Result<_, _>>()?;
+    if remaining.len() == 1 {
+        return Ok(RedisClientKillCommand {
+            legacy_addr: Some(validate_client_kill_addr(&remaining[0], "legacy address")?),
+            filters: Vec::new(),
+        });
+    }
+    if remaining.len() % 2 != 0 {
+        return Err(RedisError::Protocol(
+            "CLIENT KILL filter mode requires filter/value pairs".to_string(),
+        ));
+    }
+
+    let mut filters = Vec::with_capacity(remaining.len() / 2);
+    for pair in remaining.chunks_exact(2) {
+        filters.push(parse_client_kill_filter(&pair[0], pair[1].clone())?);
+    }
+
+    Ok(RedisClientKillCommand {
+        legacy_addr: None,
+        filters,
+    })
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
 pub enum RedisZaddInsertMode {
     Upsert,
     Nx,
@@ -4381,6 +4620,106 @@ mod tests {
         assert!(matches!(
             parse_script_eval_for_fuzz(null_arg),
             Err(RedisError::Protocol(msg)) if msg.contains("non-null bulk string")
+        ));
+    }
+
+    #[test]
+    fn client_kill_parser_accepts_legacy_address_selector() {
+        let command = RespValue::Array(Some(vec![
+            bulk_arg("CLIENT"),
+            bulk_arg("KILL"),
+            bulk_arg("127.0.0.1:12345"),
+        ]));
+
+        let parsed = parse_client_kill_for_fuzz(command).expect("legacy CLIENT KILL should parse");
+
+        assert_eq!(parsed.legacy_addr, Some(b"127.0.0.1:12345".to_vec()));
+        assert!(parsed.filters.is_empty());
+    }
+
+    #[test]
+    fn client_kill_parser_accepts_filter_pairs() {
+        let command = RespValue::Array(Some(vec![
+            bulk_arg("client"),
+            bulk_arg("kill"),
+            bulk_arg("ID"),
+            bulk_arg("42"),
+            bulk_arg("TYPE"),
+            bulk_arg("pubsub"),
+            bulk_arg("USER"),
+            bulk_arg("default"),
+            bulk_arg("ADDR"),
+            bulk_arg("10.0.0.2:6379"),
+            bulk_arg("LADDR"),
+            bulk_arg("[::1]:6379"),
+            bulk_arg("SKIPME"),
+            bulk_arg("no"),
+            bulk_arg("MAXAGE"),
+            bulk_arg("60"),
+        ]));
+
+        let parsed =
+            parse_client_kill_for_fuzz(command).expect("CLIENT KILL filter pairs should parse");
+
+        assert!(parsed.legacy_addr.is_none());
+        assert_eq!(
+            parsed.filters,
+            vec![
+                RedisClientKillFilter::Id(42),
+                RedisClientKillFilter::ClientType(RedisClientKillTargetType::PubSub),
+                RedisClientKillFilter::User(b"default".to_vec()),
+                RedisClientKillFilter::Addr(b"10.0.0.2:6379".to_vec()),
+                RedisClientKillFilter::LocalAddr(b"[::1]:6379".to_vec()),
+                RedisClientKillFilter::SkipMe(false),
+                RedisClientKillFilter::MaxAge(60),
+            ]
+        );
+    }
+
+    #[test]
+    fn client_kill_parser_rejects_malformed_selectors() {
+        let unpaired_filter = RespValue::Array(Some(vec![
+            bulk_arg("CLIENT"),
+            bulk_arg("KILL"),
+            bulk_arg("ID"),
+            bulk_arg("7"),
+            bulk_arg("TYPE"),
+        ]));
+        assert!(matches!(
+            parse_client_kill_for_fuzz(unpaired_filter),
+            Err(RedisError::Protocol(msg)) if msg.contains("filter/value pairs")
+        ));
+
+        let bad_skipme = RespValue::Array(Some(vec![
+            bulk_arg("CLIENT"),
+            bulk_arg("KILL"),
+            bulk_arg("SKIPME"),
+            bulk_arg("MAYBE"),
+        ]));
+        assert!(matches!(
+            parse_client_kill_for_fuzz(bad_skipme),
+            Err(RedisError::Protocol(msg)) if msg.contains("YES or NO")
+        ));
+
+        let bad_legacy_addr = RespValue::Array(Some(vec![
+            bulk_arg("CLIENT"),
+            bulk_arg("KILL"),
+            bulk_arg("127.0.0.1"),
+        ]));
+        assert!(matches!(
+            parse_client_kill_for_fuzz(bad_legacy_addr),
+            Err(RedisError::Protocol(msg)) if msg.contains("ip:port")
+        ));
+
+        let unknown_filter = RespValue::Array(Some(vec![
+            bulk_arg("CLIENT"),
+            bulk_arg("KILL"),
+            bulk_arg("BOGUS"),
+            bulk_arg("value"),
+        ]));
+        assert!(matches!(
+            parse_client_kill_for_fuzz(unknown_filter),
+            Err(RedisError::Protocol(msg)) if msg.contains("unknown filter")
         ));
     }
 
