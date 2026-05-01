@@ -230,6 +230,33 @@ fn find_crlf(buf: &[u8], start: usize) -> Option<usize> {
     None
 }
 
+fn validate_resp3_big_number_payload(payload: &str) -> Result<(), RedisError> {
+    let digits = match payload.as_bytes() {
+        [] => {
+            return Err(RedisError::Protocol(
+                "RESP3 big number must not be empty".to_string(),
+            ));
+        }
+        [b'+' | b'-', rest @ ..] => {
+            if rest.is_empty() {
+                return Err(RedisError::Protocol(
+                    "RESP3 big number sign must be followed by digits".to_string(),
+                ));
+            }
+            rest
+        }
+        bytes => bytes,
+    };
+
+    if digits.iter().all(u8::is_ascii_digit) {
+        Ok(())
+    } else {
+        Err(RedisError::Protocol(
+            "RESP3 big number must contain only decimal digits after an optional sign".to_string(),
+        ))
+    }
+}
+
 /// RESP (REdis Serialization Protocol) value.
 ///
 /// Covers RESP2 and the RESP3 type extensions negotiated via `HELLO 3`
@@ -1070,16 +1097,16 @@ impl RespValue {
                         next: end + 2,
                     })
                 }
-                // RESP3 big number — `(<digits>\r\n`.
+                // RESP3 big number — `([+|-]<digits>\r\n`.
                 b'(' => {
                     let Some(end) = find_crlf(buf, i + 1) else {
                         return Ok(Decoded::NeedMore);
                     };
                     let s = std::str::from_utf8(&buf[i + 1..end])
-                        .map_err(|_| RedisError::Protocol("invalid UTF-8 in big number".into()))?
-                        .to_string();
+                        .map_err(|_| RedisError::Protocol("invalid UTF-8 in big number".into()))?;
+                    validate_resp3_big_number_payload(s)?;
                     Ok(Decoded::Ok {
-                        value: RespValue::BigNumber(s),
+                        value: RespValue::BigNumber(s.to_string()),
                         next: end + 2,
                     })
                 }
@@ -4728,6 +4755,370 @@ pub fn parse_zrangebyscore_for_fuzz(
 #[cfg(any(test, feature = "test-internals"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[doc(hidden)]
+pub enum RedisAclUserState {
+    On,
+    Off,
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum RedisAclResetKind {
+    All,
+    Keys,
+    Channels,
+    Passwords,
+    Selectors,
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum RedisAclRule {
+    UserState(RedisAclUserState),
+    Reset(RedisAclResetKind),
+    NoPass,
+    AllKeys,
+    AllChannels,
+    AllCommands,
+    NoCommands,
+    KeyPattern(Vec<u8>),
+    ReadKeyPattern(Vec<u8>),
+    WriteKeyPattern(Vec<u8>),
+    ChannelPattern(Vec<u8>),
+    Command { allow: bool, name: Vec<u8> },
+    Category { allow: bool, name: Vec<u8> },
+    Password { add: bool, value: Vec<u8> },
+    PasswordHash { add: bool, value: Vec<u8> },
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum RedisAclLogSelector {
+    Default,
+    Count(u64),
+    Reset,
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum RedisAclCommand {
+    Cat {
+        category: Option<Vec<u8>>,
+    },
+    GetUser {
+        user: Vec<u8>,
+    },
+    Users,
+    Log {
+        selector: RedisAclLogSelector,
+    },
+    SetUser {
+        user: Vec<u8>,
+        rules: Vec<RedisAclRule>,
+    },
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn decode_acl_arg(value: RespValue, label: &str) -> Result<Vec<u8>, RedisError> {
+    decode_bulk_command_arg(value, "ACL", label)
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn require_acl_arg(label: &str, bytes: Vec<u8>) -> Result<Vec<u8>, RedisError> {
+    if bytes.is_empty() {
+        Err(RedisError::Protocol(format!(
+            "ACL {label} must not be empty"
+        )))
+    } else {
+        Ok(bytes)
+    }
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn reject_acl_extra_args(subcommand: &str, remaining: &[RespValue]) -> Result<(), RedisError> {
+    if remaining.is_empty() {
+        Ok(())
+    } else {
+        Err(RedisError::Protocol(format!(
+            "ACL {subcommand} takes no arguments, got {}",
+            remaining.len()
+        )))
+    }
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn require_acl_rule_body(rule: &[u8], body: &[u8], label: &str) -> Result<Vec<u8>, RedisError> {
+    if body.is_empty() {
+        Err(RedisError::Protocol(format!(
+            "ACL SETUSER rule {} has empty {label}",
+            String::from_utf8_lossy(rule)
+        )))
+    } else {
+        Ok(body.to_vec())
+    }
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn is_ascii_hex(bytes: &[u8]) -> bool {
+    bytes.iter().all(u8::is_ascii_hexdigit)
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn parse_acl_hash_rule(rule: &[u8], add: bool) -> Result<RedisAclRule, RedisError> {
+    let value = require_acl_rule_body(rule, &rule[1..], "password hash")?;
+    if value.len() != 64 || !is_ascii_hex(&value) {
+        return Err(RedisError::Protocol(
+            "ACL SETUSER password hashes must be 64 ASCII hex bytes".to_string(),
+        ));
+    }
+    Ok(RedisAclRule::PasswordHash { add, value })
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn parse_acl_command_or_category_rule(
+    rule: &[u8],
+    allow: bool,
+) -> Result<RedisAclRule, RedisError> {
+    let body = require_acl_rule_body(rule, &rule[1..], "command or category")?;
+    if let Some(category) = body.strip_prefix(b"@") {
+        Ok(RedisAclRule::Category {
+            allow,
+            name: require_acl_rule_body(rule, category, "category")?,
+        })
+    } else {
+        Ok(RedisAclRule::Command { allow, name: body })
+    }
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn parse_acl_key_permission_rule(rule: &[u8]) -> Result<RedisAclRule, RedisError> {
+    if let Some(pattern) = rule.strip_prefix(b"%R~") {
+        Ok(RedisAclRule::ReadKeyPattern(require_acl_rule_body(
+            rule,
+            pattern,
+            "read key pattern",
+        )?))
+    } else if let Some(pattern) = rule.strip_prefix(b"%W~") {
+        Ok(RedisAclRule::WriteKeyPattern(require_acl_rule_body(
+            rule,
+            pattern,
+            "write key pattern",
+        )?))
+    } else if let Some(pattern) = rule.strip_prefix(b"%RW~") {
+        Ok(RedisAclRule::KeyPattern(require_acl_rule_body(
+            rule,
+            pattern,
+            "read/write key pattern",
+        )?))
+    } else {
+        Err(RedisError::Protocol(format!(
+            "ACL SETUSER unsupported key permission rule {}",
+            String::from_utf8_lossy(rule)
+        )))
+    }
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn parse_acl_rule(rule: Vec<u8>) -> Result<RedisAclRule, RedisError> {
+    if rule.is_empty() {
+        return Err(RedisError::Protocol(
+            "ACL SETUSER rule must not be empty".to_string(),
+        ));
+    }
+
+    if bytes_eq_ignore_ascii_case(&rule, b"on") {
+        Ok(RedisAclRule::UserState(RedisAclUserState::On))
+    } else if bytes_eq_ignore_ascii_case(&rule, b"off") {
+        Ok(RedisAclRule::UserState(RedisAclUserState::Off))
+    } else if bytes_eq_ignore_ascii_case(&rule, b"reset") {
+        Ok(RedisAclRule::Reset(RedisAclResetKind::All))
+    } else if bytes_eq_ignore_ascii_case(&rule, b"resetkeys") {
+        Ok(RedisAclRule::Reset(RedisAclResetKind::Keys))
+    } else if bytes_eq_ignore_ascii_case(&rule, b"resetchannels") {
+        Ok(RedisAclRule::Reset(RedisAclResetKind::Channels))
+    } else if bytes_eq_ignore_ascii_case(&rule, b"resetpass") {
+        Ok(RedisAclRule::Reset(RedisAclResetKind::Passwords))
+    } else if bytes_eq_ignore_ascii_case(&rule, b"clearselectors") {
+        Ok(RedisAclRule::Reset(RedisAclResetKind::Selectors))
+    } else if bytes_eq_ignore_ascii_case(&rule, b"nopass") {
+        Ok(RedisAclRule::NoPass)
+    } else if bytes_eq_ignore_ascii_case(&rule, b"allkeys") {
+        Ok(RedisAclRule::AllKeys)
+    } else if bytes_eq_ignore_ascii_case(&rule, b"allchannels") {
+        Ok(RedisAclRule::AllChannels)
+    } else if bytes_eq_ignore_ascii_case(&rule, b"allcommands") {
+        Ok(RedisAclRule::AllCommands)
+    } else if bytes_eq_ignore_ascii_case(&rule, b"nocommands") {
+        Ok(RedisAclRule::NoCommands)
+    } else if let Some(pattern) = rule.strip_prefix(b"~") {
+        Ok(RedisAclRule::KeyPattern(require_acl_rule_body(
+            &rule,
+            pattern,
+            "key pattern",
+        )?))
+    } else if let Some(pattern) = rule.strip_prefix(b"&") {
+        Ok(RedisAclRule::ChannelPattern(require_acl_rule_body(
+            &rule,
+            pattern,
+            "channel pattern",
+        )?))
+    } else if rule.starts_with(b"%") {
+        parse_acl_key_permission_rule(&rule)
+    } else if rule.starts_with(b"+") {
+        parse_acl_command_or_category_rule(&rule, true)
+    } else if rule.starts_with(b"-") {
+        parse_acl_command_or_category_rule(&rule, false)
+    } else if let Some(password) = rule.strip_prefix(b">") {
+        Ok(RedisAclRule::Password {
+            add: true,
+            value: require_acl_rule_body(&rule, password, "password")?,
+        })
+    } else if let Some(password) = rule.strip_prefix(b"<") {
+        Ok(RedisAclRule::Password {
+            add: false,
+            value: require_acl_rule_body(&rule, password, "password")?,
+        })
+    } else if rule.starts_with(b"#") {
+        parse_acl_hash_rule(&rule, true)
+    } else if rule.starts_with(b"!") {
+        parse_acl_hash_rule(&rule, false)
+    } else {
+        Err(RedisError::Protocol(format!(
+            "ACL SETUSER unknown rule {}",
+            String::from_utf8_lossy(&rule)
+        )))
+    }
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[allow(dead_code)]
+#[doc(hidden)]
+pub fn parse_acl_for_fuzz(value: RespValue) -> Result<RedisAclCommand, RedisError> {
+    let args = match value {
+        RespValue::Array(Some(args)) => args,
+        other => {
+            return Err(RedisError::Protocol(format!(
+                "ACL command must be a RESP array, got {other:?}"
+            )));
+        }
+    };
+    if args.len() < 2 {
+        return Err(RedisError::Protocol(
+            "ACL requires command and subcommand".to_string(),
+        ));
+    }
+
+    let mut iter = args.into_iter();
+    let command = decode_acl_arg(
+        iter.next()
+            .ok_or_else(|| RedisError::Protocol("ACL missing command".to_string()))?,
+        "command",
+    )?;
+    if !bytes_eq_ignore_ascii_case(&command, b"ACL") {
+        return Err(RedisError::Protocol(format!(
+            "ACL command name expected, got {}",
+            String::from_utf8_lossy(&command)
+        )));
+    }
+
+    let subcommand = decode_acl_arg(
+        iter.next()
+            .ok_or_else(|| RedisError::Protocol("ACL missing subcommand".to_string()))?,
+        "subcommand",
+    )?;
+    let remaining: Vec<RespValue> = iter.collect();
+
+    if bytes_eq_ignore_ascii_case(&subcommand, b"CAT") {
+        match remaining.as_slice() {
+            [] => Ok(RedisAclCommand::Cat { category: None }),
+            [category] => Ok(RedisAclCommand::Cat {
+                category: Some(require_acl_arg(
+                    "CAT category",
+                    decode_acl_arg(category.clone(), "CAT category")?,
+                )?),
+            }),
+            _ => Err(RedisError::Protocol(format!(
+                "ACL CAT accepts at most one category, got {}",
+                remaining.len()
+            ))),
+        }
+    } else if bytes_eq_ignore_ascii_case(&subcommand, b"GETUSER") {
+        let [user] = remaining.as_slice() else {
+            return Err(RedisError::Protocol(format!(
+                "ACL GETUSER requires exactly one user, got {}",
+                remaining.len()
+            )));
+        };
+        Ok(RedisAclCommand::GetUser {
+            user: require_acl_arg(
+                "GETUSER user",
+                decode_acl_arg(user.clone(), "GETUSER user")?,
+            )?,
+        })
+    } else if bytes_eq_ignore_ascii_case(&subcommand, b"USERS") {
+        reject_acl_extra_args("USERS", &remaining)?;
+        Ok(RedisAclCommand::Users)
+    } else if bytes_eq_ignore_ascii_case(&subcommand, b"LOG") {
+        let selector = match remaining.as_slice() {
+            [] => RedisAclLogSelector::Default,
+            [value] => {
+                let arg = require_acl_arg(
+                    "LOG selector",
+                    decode_acl_arg(value.clone(), "LOG selector")?,
+                )?;
+                if bytes_eq_ignore_ascii_case(&arg, b"RESET") {
+                    RedisAclLogSelector::Reset
+                } else {
+                    RedisAclLogSelector::Count(parse_unsigned_decimal_arg(
+                        "ACL",
+                        &arg,
+                        "LOG count",
+                    )?)
+                }
+            }
+            _ => {
+                return Err(RedisError::Protocol(format!(
+                    "ACL LOG accepts at most one selector, got {}",
+                    remaining.len()
+                )));
+            }
+        };
+        Ok(RedisAclCommand::Log { selector })
+    } else if bytes_eq_ignore_ascii_case(&subcommand, b"SETUSER") {
+        let [user, rest @ ..] = remaining.as_slice() else {
+            return Err(RedisError::Protocol(
+                "ACL SETUSER requires a user".to_string(),
+            ));
+        };
+        let user = require_acl_arg(
+            "SETUSER user",
+            decode_acl_arg(user.clone(), "SETUSER user")?,
+        )?;
+        let rules = rest
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                parse_acl_rule(decode_acl_arg(
+                    value.clone(),
+                    &format!("SETUSER rule[{index}]"),
+                )?)
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(RedisAclCommand::SetUser { user, rules })
+    } else {
+        Err(RedisError::Protocol(format!(
+            "ACL unknown subcommand {}",
+            String::from_utf8_lossy(&subcommand)
+        )))
+    }
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[doc(hidden)]
 pub enum FuzzPubSubLane {
     Channel,
     Pattern,
@@ -5658,6 +6049,200 @@ mod tests {
     }
 
     #[test]
+    fn acl_parser_accepts_users_categories_resets_and_log_selectors() {
+        let getuser = RespValue::Array(Some(vec![
+            bulk_arg("ACL"),
+            bulk_arg("GETUSER"),
+            bulk_arg("default"),
+        ]));
+        assert_eq!(
+            parse_acl_for_fuzz(getuser).expect("ACL GETUSER should parse"),
+            RedisAclCommand::GetUser {
+                user: b"default".to_vec()
+            }
+        );
+
+        let users = RespValue::Array(Some(vec![bulk_arg("acl"), bulk_arg("users")]));
+        assert_eq!(
+            parse_acl_for_fuzz(users).expect("ACL USERS should parse"),
+            RedisAclCommand::Users
+        );
+
+        let cat = RespValue::Array(Some(vec![
+            bulk_arg("ACL"),
+            bulk_arg("CAT"),
+            bulk_arg("read"),
+        ]));
+        assert_eq!(
+            parse_acl_for_fuzz(cat).expect("ACL CAT category should parse"),
+            RedisAclCommand::Cat {
+                category: Some(b"read".to_vec())
+            }
+        );
+
+        let setuser = RespValue::Array(Some(vec![
+            bulk_arg("ACL"),
+            bulk_arg("SETUSER"),
+            bulk_arg("app"),
+            bulk_arg("on"),
+            bulk_arg("resetpass"),
+            bulk_arg("resetkeys"),
+            bulk_arg("resetchannels"),
+            bulk_arg("clearselectors"),
+            bulk_arg("+@read"),
+            bulk_arg("-@dangerous"),
+            bulk_arg("+get"),
+            bulk_arg("-config|set"),
+            bulk_arg("~cache:*"),
+            bulk_arg("%R~ro:*"),
+            bulk_arg("%W~wo:*"),
+            bulk_arg("&updates:*"),
+            bulk_arg(">secret"),
+            bulk_arg("#0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+        ]));
+
+        let parsed = parse_acl_for_fuzz(setuser).expect("ACL SETUSER rules should parse");
+        assert_eq!(
+            parsed,
+            RedisAclCommand::SetUser {
+                user: b"app".to_vec(),
+                rules: vec![
+                    RedisAclRule::UserState(RedisAclUserState::On),
+                    RedisAclRule::Reset(RedisAclResetKind::Passwords),
+                    RedisAclRule::Reset(RedisAclResetKind::Keys),
+                    RedisAclRule::Reset(RedisAclResetKind::Channels),
+                    RedisAclRule::Reset(RedisAclResetKind::Selectors),
+                    RedisAclRule::Category {
+                        allow: true,
+                        name: b"read".to_vec()
+                    },
+                    RedisAclRule::Category {
+                        allow: false,
+                        name: b"dangerous".to_vec()
+                    },
+                    RedisAclRule::Command {
+                        allow: true,
+                        name: b"get".to_vec()
+                    },
+                    RedisAclRule::Command {
+                        allow: false,
+                        name: b"config|set".to_vec()
+                    },
+                    RedisAclRule::KeyPattern(b"cache:*".to_vec()),
+                    RedisAclRule::ReadKeyPattern(b"ro:*".to_vec()),
+                    RedisAclRule::WriteKeyPattern(b"wo:*".to_vec()),
+                    RedisAclRule::ChannelPattern(b"updates:*".to_vec()),
+                    RedisAclRule::Password {
+                        add: true,
+                        value: b"secret".to_vec()
+                    },
+                    RedisAclRule::PasswordHash {
+                        add: true,
+                        value: b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                            .to_vec()
+                    },
+                ]
+            }
+        );
+
+        let log_reset = RespValue::Array(Some(vec![
+            bulk_arg("ACL"),
+            bulk_arg("LOG"),
+            bulk_arg("RESET"),
+        ]));
+        assert_eq!(
+            parse_acl_for_fuzz(log_reset).expect("ACL LOG RESET should parse"),
+            RedisAclCommand::Log {
+                selector: RedisAclLogSelector::Reset
+            }
+        );
+
+        let log_count =
+            RespValue::Array(Some(vec![bulk_arg("ACL"), bulk_arg("LOG"), bulk_arg("3")]));
+        assert_eq!(
+            parse_acl_for_fuzz(log_count).expect("ACL LOG count should parse"),
+            RedisAclCommand::Log {
+                selector: RedisAclLogSelector::Count(3)
+            }
+        );
+    }
+
+    #[test]
+    fn acl_parser_rejects_malformed_users_categories_and_reset_rules() {
+        let empty_category =
+            RespValue::Array(Some(vec![bulk_arg("ACL"), bulk_arg("CAT"), bulk_arg("")]));
+        assert!(matches!(
+            parse_acl_for_fuzz(empty_category),
+            Err(RedisError::Protocol(msg)) if msg.contains("CAT category")
+        ));
+
+        let empty_user = RespValue::Array(Some(vec![
+            bulk_arg("ACL"),
+            bulk_arg("GETUSER"),
+            bulk_arg(""),
+        ]));
+        assert!(matches!(
+            parse_acl_for_fuzz(empty_user),
+            Err(RedisError::Protocol(msg)) if msg.contains("GETUSER user")
+        ));
+
+        let empty_category_rule = RespValue::Array(Some(vec![
+            bulk_arg("ACL"),
+            bulk_arg("SETUSER"),
+            bulk_arg("app"),
+            bulk_arg("+@"),
+        ]));
+        assert!(matches!(
+            parse_acl_for_fuzz(empty_category_rule),
+            Err(RedisError::Protocol(msg)) if msg.contains("empty category")
+        ));
+
+        let empty_reset_rule = RespValue::Array(Some(vec![
+            bulk_arg("ACL"),
+            bulk_arg("SETUSER"),
+            bulk_arg("app"),
+            bulk_arg("resetkeys"),
+            bulk_arg("~"),
+        ]));
+        assert!(matches!(
+            parse_acl_for_fuzz(empty_reset_rule),
+            Err(RedisError::Protocol(msg)) if msg.contains("empty key pattern")
+        ));
+
+        let bad_hash = RespValue::Array(Some(vec![
+            bulk_arg("ACL"),
+            bulk_arg("SETUSER"),
+            bulk_arg("app"),
+            bulk_arg("#not-a-sha256-hex-digest"),
+        ]));
+        assert!(matches!(
+            parse_acl_for_fuzz(bad_hash),
+            Err(RedisError::Protocol(msg)) if msg.contains("64 ASCII hex")
+        ));
+
+        let bad_log_selector = RespValue::Array(Some(vec![
+            bulk_arg("ACL"),
+            bulk_arg("LOG"),
+            bulk_arg("maybe"),
+        ]));
+        assert!(matches!(
+            parse_acl_for_fuzz(bad_log_selector),
+            Err(RedisError::Protocol(msg)) if msg.contains("non-digit")
+        ));
+
+        let null_rule = RespValue::Array(Some(vec![
+            bulk_arg("ACL"),
+            bulk_arg("SETUSER"),
+            bulk_arg("app"),
+            RespValue::BulkString(None),
+        ]));
+        assert!(matches!(
+            parse_acl_for_fuzz(null_rule),
+            Err(RedisError::Protocol(msg)) if msg.contains("non-null bulk string")
+        ));
+    }
+
+    #[test]
     fn resp2_reference_vectors_match_redis_rs_value_model() {
         // Lock the RESP2 fallback parser to the same shared low-level value
         // model that redis-rs exposes for the direct subset here. Avoid the
@@ -5859,6 +6444,11 @@ mod tests {
                 RespValue::BigNumber("-3492890328409238509324850943850943825024385".to_string()),
                 b"(-3492890328409238509324850943850943825024385\r\n",
             ),
+            (
+                "big_number_explicit_plus",
+                RespValue::BigNumber("+42".to_string()),
+                b"(+42\r\n",
+            ),
         ];
 
         for (name, value, expected) in cases {
@@ -5881,6 +6471,24 @@ mod tests {
                 consumed,
                 expected.len(),
                 "RESP3 {name} decoder must consume the full reference vector"
+            );
+        }
+    }
+
+    #[test]
+    fn resp3_big_number_rejects_non_protocol_decimal_payloads() {
+        for (name, wire) in [
+            ("empty", b"(\r\n".as_slice()),
+            ("plus_only", b"(+\r\n"),
+            ("minus_only", b"(-\r\n"),
+            ("double_plus", b"(++1\r\n"),
+            ("minus_plus", b"(-+1\r\n"),
+            ("fractional", b"(1.5\r\n"),
+            ("alpha", b"(12abc\r\n"),
+        ] {
+            assert!(
+                matches!(RespValue::try_decode(wire), Err(RedisError::Protocol(_))),
+                "RESP3 BigNumber {name} payload should be rejected"
             );
         }
     }
