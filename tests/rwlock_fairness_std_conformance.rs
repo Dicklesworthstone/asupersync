@@ -13,7 +13,7 @@ use std::sync::RwLock as StdRwLock;
 use std::sync::{Arc, Barrier, Mutex as StdMutex};
 use std::task::{Context, Poll, Waker};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Result of a rwlock fairness conformance test comparing both implementations.
 #[derive(Debug, Clone, PartialEq)]
@@ -28,8 +28,8 @@ struct RwLockConformanceResult {
     writer_acquisitions: usize,
     /// Order in which acquisitions completed (thread_id, is_writer)
     completion_order: Vec<(usize, bool)>,
-    /// Total test duration
-    duration: Duration,
+    /// Final value after all writers completed
+    final_value: u32,
 }
 
 /// Test configuration for fairness comparison
@@ -48,7 +48,7 @@ struct FairnessTest {
 /// Tracks the order of lock completions
 #[derive(Debug)]
 struct CompletionTracker {
-    completions: StdMutex<Vec<(usize, bool, Instant)>>,
+    completions: StdMutex<Vec<(usize, bool, usize)>>,
 }
 
 impl CompletionTracker {
@@ -59,15 +59,14 @@ impl CompletionTracker {
     }
 
     fn record_completion(&self, thread_id: usize, is_writer: bool) {
-        self.completions
-            .lock()
-            .unwrap()
-            .push((thread_id, is_writer, Instant::now()));
+        let mut completions = self.completions.lock().unwrap();
+        let sequence = completions.len();
+        completions.push((thread_id, is_writer, sequence));
     }
 
     fn get_completion_order(&self) -> Vec<(usize, bool)> {
         let mut completions = self.completions.lock().unwrap().clone();
-        completions.sort_by_key(|(_, _, timestamp)| *timestamp);
+        completions.sort_by_key(|(_, _, sequence)| *sequence);
         completions
             .into_iter()
             .map(|(id, is_writer, _)| (id, is_writer))
@@ -80,7 +79,6 @@ fn test_async_rwlock_fairness(config: &FairnessTest) -> RwLockConformanceResult 
     let rwlock = Arc::new(AsyncRwLock::new(0u32));
     let tracker = Arc::new(CompletionTracker::new());
     let start_barrier = Arc::new(Barrier::new(config.reader_count + config.writer_count + 1));
-    let start_time = Instant::now();
 
     let mut handles = Vec::new();
 
@@ -106,8 +104,8 @@ fn test_async_rwlock_fairness(config: &FairnessTest) -> RwLockConformanceResult 
 
             // Simple polling loop
             loop {
-                let waker = noop_waker();
-                let mut context = Context::from_waker(&waker);
+                let waker = Waker::noop();
+                let mut context = Context::from_waker(waker);
 
                 match Pin::new(&mut read_future).poll(&mut context) {
                     Poll::Ready(Ok(guard)) => {
@@ -150,8 +148,8 @@ fn test_async_rwlock_fairness(config: &FairnessTest) -> RwLockConformanceResult 
 
             // Simple polling loop
             loop {
-                let waker = noop_waker();
-                let mut context = Context::from_waker(&waker);
+                let waker = Waker::noop();
+                let mut context = Context::from_waker(waker);
 
                 match Pin::new(&mut write_future).poll(&mut context) {
                     Poll::Ready(Ok(mut guard)) => {
@@ -190,6 +188,9 @@ fn test_async_rwlock_fairness(config: &FairnessTest) -> RwLockConformanceResult 
         .iter()
         .filter(|(_, is_writer)| *is_writer)
         .count();
+    let final_value = *rwlock
+        .try_read()
+        .expect("async rwlock readable after all workers finish");
 
     RwLockConformanceResult {
         scenario: "async_rwlock".to_string(),
@@ -197,7 +198,7 @@ fn test_async_rwlock_fairness(config: &FairnessTest) -> RwLockConformanceResult 
         reader_acquisitions,
         writer_acquisitions,
         completion_order,
-        duration: start_time.elapsed(),
+        final_value,
     }
 }
 
@@ -206,7 +207,6 @@ fn test_std_rwlock_fairness(config: &FairnessTest) -> RwLockConformanceResult {
     let rwlock = Arc::new(StdRwLock::new(0u32));
     let tracker = Arc::new(CompletionTracker::new());
     let start_barrier = Arc::new(Barrier::new(config.reader_count + config.writer_count + 1));
-    let start_time = Instant::now();
 
     let mut handles = Vec::new();
 
@@ -276,6 +276,9 @@ fn test_std_rwlock_fairness(config: &FairnessTest) -> RwLockConformanceResult {
         .iter()
         .filter(|(_, is_writer)| *is_writer)
         .count();
+    let final_value = *rwlock
+        .read()
+        .expect("std rwlock readable after all workers finish");
 
     RwLockConformanceResult {
         scenario: "std_rwlock".to_string(),
@@ -283,7 +286,7 @@ fn test_std_rwlock_fairness(config: &FairnessTest) -> RwLockConformanceResult {
         reader_acquisitions,
         writer_acquisitions,
         completion_order,
-        duration: start_time.elapsed(),
+        final_value,
     }
 }
 
@@ -292,6 +295,20 @@ fn compare_fairness_results(
     async_result: &RwLockConformanceResult,
     std_result: &RwLockConformanceResult,
 ) -> Result<(), String> {
+    if async_result.scenario != "async_rwlock" {
+        return Err(format!(
+            "Unexpected async scenario label: {}",
+            async_result.scenario
+        ));
+    }
+
+    if std_result.scenario != "std_rwlock" {
+        return Err(format!(
+            "Unexpected std scenario label: {}",
+            std_result.scenario
+        ));
+    }
+
     // Both should complete all operations
     if async_result.total_operations
         != async_result.reader_acquisitions + async_result.writer_acquisitions
@@ -303,6 +320,28 @@ fn compare_fairness_results(
         != std_result.reader_acquisitions + std_result.writer_acquisitions
     {
         return Err("Std RwLock: total operations != sum of acquisitions".to_string());
+    }
+
+    if async_result.completion_order.len() != async_result.total_operations {
+        return Err("Async RwLock: completion order length mismatch".to_string());
+    }
+
+    if std_result.completion_order.len() != std_result.total_operations {
+        return Err("Std RwLock: completion order length mismatch".to_string());
+    }
+
+    if async_result.final_value != async_result.writer_acquisitions as u32 {
+        return Err(format!(
+            "Async RwLock final value {} != writer acquisitions {}",
+            async_result.final_value, async_result.writer_acquisitions
+        ));
+    }
+
+    if std_result.final_value != std_result.writer_acquisitions as u32 {
+        return Err(format!(
+            "Std RwLock final value {} != writer acquisitions {}",
+            std_result.final_value, std_result.writer_acquisitions
+        ));
     }
 
     // Both should have same number of total operations
@@ -327,19 +366,6 @@ fn compare_fairness_results(
             async_result.writer_acquisitions, std_result.writer_acquisitions
         ));
     }
-
-    println!(
-        "Async RwLock completion order: {:?}",
-        async_result.completion_order
-    );
-    println!(
-        "Std RwLock completion order: {:?}",
-        std_result.completion_order
-    );
-    println!(
-        "Async duration: {:?}, Std duration: {:?}",
-        async_result.duration, std_result.duration
-    );
 
     Ok(())
 }
