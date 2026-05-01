@@ -15,8 +15,6 @@ mod tests {
         test_nested_map_basic();
         test_nested_set_basic();
         test_edge_cases();
-
-        println!("RESP3 nested Map/Set conformance: All tests passed");
     }
 
     fn test_complex_mixed_scenario() {
