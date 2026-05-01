@@ -561,14 +561,3 @@ ignored_unit_patterns = "allow"
 redundant_pattern_matching = "allow"
 manual_let_else = "allow"
 struct_field_names = "allow"
-
-# Tick #178 — HTTP/2 CONTINUATION frame size limit fuzzer
-# Tests arbitrary continuation byte count sequences to validate aggregate
-# header-list-size limit enforcement. Ensures ENHANCE_YOUR_CALM error for
-# accumulated fragments exceeding max_header_list_size * 4 (capped at 256KB).
-[[bin]]
-name = "h2_continuation_frame_size_limit"
-path = "fuzz_targets/h2_continuation_frame_size_limit.rs"
-test = false
-doc = false
-bench = false
