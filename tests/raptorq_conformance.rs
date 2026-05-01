@@ -1738,14 +1738,18 @@ mod pipeline_e2e {
 #[cfg(feature = "test-internals")]
 mod differential_harness {
     use super::*;
+    use asupersync::config::EncodingConfig;
+    use asupersync::encoding::EncodingPipeline;
     use asupersync::raptorq::linalg::{DenseRow, GaussianResult, GaussianSolver};
     use asupersync::raptorq::test_log_schema::{
         UnitDecodeStats, UnitGovernanceDecision, UnitLogEntry, validate_unit_log_json,
     };
+    use asupersync::types::resource::{PoolConfig, SymbolPool};
+    use asupersync::types::{ObjectId, Symbol, SymbolKind};
     use raptorq::{
         Decoder as RaptorqRsDecoder, EncodingPacket as RaptorqRsEncodingPacket,
         ObjectTransmissionInformation as RaptorqRsObjectTransmissionInformation,
-        PayloadId as RaptorqRsPayloadId, SourceBlockEncoder as RaptorqRsSourceBlockEncoder,
+        PayloadId as RaptorqRsPayloadId,
     };
 
     const DIFF_REPLAY_REF: &str = "replay:rq-d2-diff-harness-v1";
@@ -1983,21 +1987,138 @@ mod differential_harness {
         case: DifferentialCase,
         source: &[Vec<u8>],
     ) -> Vec<RaptorqRsEncodingPacket> {
-        let transfer_length = case
+        // raptorq-rs source_packets() is this PayloadId + payload mapping,
+        // but SourceBlockEncoder::new2() also precomputes repair state. Keep
+        // source-packet parity tests focused on the source packet contract.
+        assert_eq!(
+            source.len(),
+            case.k,
+            "scenario={} reference source must contain K symbols",
+            case.scenario_id
+        );
+        source
+            .iter()
+            .enumerate()
+            .map(|(esi, symbol)| {
+                RaptorqRsEncodingPacket::new(
+                    RaptorqRsPayloadId::new(0, u32::try_from(esi).expect("ESI fits u32")),
+                    symbol.clone(),
+                )
+            })
+            .collect()
+    }
+
+    fn pipeline_source_packets(case: DifferentialCase, source: &[Vec<u8>]) -> Vec<Symbol> {
+        let max_block_size = case
             .k
             .checked_mul(case.symbol_size)
-            .expect("transfer length overflow");
-        let symbol_size = u16::try_from(case.symbol_size).expect("symbol size must fit in u16");
-        let config = RaptorqRsObjectTransmissionInformation::new(
-            transfer_length as u64,
-            symbol_size,
-            1,
-            1,
-            1,
-        );
+            .expect("max block size overflow");
         let source_bytes = flatten_source_bytes(source);
-        let encoder = RaptorqRsSourceBlockEncoder::new2(0, &config, &source_bytes);
-        encoder.source_packets()
+        let mut pipeline = EncodingPipeline::new(
+            EncodingConfig {
+                repair_overhead: 1.0,
+                max_block_size,
+                symbol_size: u16::try_from(case.symbol_size).expect("symbol size fits u16"),
+                encoding_parallelism: 1,
+                decoding_parallelism: 1,
+            },
+            SymbolPool::new(PoolConfig::default()),
+        );
+
+        pipeline
+            .encode_with_repair(ObjectId::new_for_test(case.seed), &source_bytes, 0)
+            .map(|result| {
+                result
+                    .unwrap_or_else(|err| {
+                        panic!(
+                            "scenario={} pipeline encode failed: {err}",
+                            case.scenario_id
+                        )
+                    })
+                    .into_symbol()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn differential_pipeline_source_encoded_symbols_match_raptorq_rs_k4096() {
+        let case = DifferentialCase {
+            scenario_id: "RQ-D2-SOURCE-K4096-RAPTORQ-RS",
+            k: 4096,
+            symbol_size: 64,
+            seed: 0x6330_4096,
+            drop_modulus: None,
+            drop_remainder: 0,
+            repair_budget: RepairBudget::None,
+            expect_success: true,
+            expected_error_kind: None,
+        };
+
+        let source = make_source_data(case.k, case.symbol_size, case.seed.wrapping_mul(17));
+        let emitted = pipeline_source_packets(case, &source);
+        let reference = reference_source_packets_with_raptorq_rs(case, &source);
+
+        assert_eq!(
+            emitted.len(),
+            case.k,
+            "scenario={} pipeline must emit exactly K source symbols",
+            case.scenario_id
+        );
+        assert_eq!(
+            reference.len(),
+            case.k,
+            "scenario={} raptorq-rs must emit exactly K source packets",
+            case.scenario_id
+        );
+
+        for (idx, (our_packet, reference_packet)) in
+            emitted.iter().zip(reference.iter()).enumerate()
+        {
+            let expected = &source[idx];
+            let reference_esi = reference_packet.payload_id().encoding_symbol_id() as usize;
+
+            assert_eq!(
+                our_packet.kind(),
+                SymbolKind::Source,
+                "scenario={} pipeline packet {idx} must be a source symbol",
+                case.scenario_id
+            );
+            assert_eq!(
+                our_packet.sbn(),
+                0,
+                "scenario={} pipeline packet {idx} must belong to source block 0",
+                case.scenario_id
+            );
+            assert_eq!(
+                our_packet.esi(),
+                idx as u32,
+                "scenario={} pipeline source ESI must equal its source index",
+                case.scenario_id
+            );
+            assert_eq!(
+                reference_esi, idx,
+                "scenario={} raptorq-rs source ESI must equal its source index",
+                case.scenario_id
+            );
+            assert_eq!(
+                our_packet.data(),
+                expected,
+                "scenario={} pipeline packet {idx} must equal the original source symbol",
+                case.scenario_id
+            );
+            assert_eq!(
+                reference_packet.data(),
+                expected,
+                "scenario={} raptorq-rs packet {idx} must equal the original source symbol",
+                case.scenario_id
+            );
+            assert_eq!(
+                our_packet.data(),
+                reference_packet.data(),
+                "scenario={} encoded source payload must match raptorq-rs at index {idx}",
+                case.scenario_id
+            );
+        }
     }
 
     #[test]
