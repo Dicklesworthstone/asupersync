@@ -25,7 +25,7 @@ use libfuzzer_sys::fuzz_target;
 // Import the Redis module to test
 use asupersync::messaging::redis::{
     PubSubEvent, PubSubMessage, PubSubSubscriptionKind, RedisProtocolLimits, RespValue,
-    parse_pubsub_event_for_fuzz,
+    decode_resp_value_for_fuzz, parse_pubsub_event_for_fuzz,
 };
 
 const MAX_STRUCTURED_FIELD_BYTES: usize = 96;
@@ -405,6 +405,81 @@ fn exercise_structured_resp3_pushes(data: &[u8]) {
     }
 }
 
+fn append_stream_chunk(wire: &mut Vec<u8>, chunk: &[u8]) {
+    wire.push(b';');
+    wire.extend_from_slice(chunk.len().to_string().as_bytes());
+    wire.extend_from_slice(b"\r\n");
+    wire.extend_from_slice(chunk);
+    wire.extend_from_slice(b"\r\n");
+}
+
+fn exercise_resp3_streamed_types(data: &[u8]) {
+    let payload = &data[..data.len().min(MAX_STRUCTURED_FIELD_BYTES)];
+    let split = payload.len() / 2;
+    let limits = RedisProtocolLimits::new()
+        .max_frame_size(payload.len().saturating_add(256))
+        .max_nesting_depth(8)
+        .max_array_len(8)
+        .max_bulk_string_len(payload.len().max(1));
+
+    let mut blob_wire = b"$?\r\n".to_vec();
+    if split > 0 {
+        append_stream_chunk(&mut blob_wire, &payload[..split]);
+    }
+    if split < payload.len() {
+        append_stream_chunk(&mut blob_wire, &payload[split..]);
+    }
+    blob_wire.extend_from_slice(b";0\r\n");
+
+    let decoded_blob = decode_resp_value_for_fuzz(&blob_wire, limits)
+        .expect("valid RESP3 streamed blob should not error")
+        .expect("valid RESP3 streamed blob should be complete");
+    assert_eq!(decoded_blob.1, blob_wire.len());
+    assert_eq!(
+        decoded_blob.0,
+        RespValue::BulkString(Some(payload.to_vec()))
+    );
+
+    let streamed_values: [(&[u8], RespValue); 3] = [
+        (
+            b"*?\r\n:1\r\n#f\r\n.\r\n",
+            RespValue::Array(Some(vec![RespValue::Integer(1), RespValue::Boolean(false)])),
+        ),
+        (
+            b"~?\r\n+alpha\r\n+beta\r\n.\r\n",
+            RespValue::Set(vec![
+                RespValue::SimpleString("alpha".to_string()),
+                RespValue::SimpleString("beta".to_string()),
+            ]),
+        ),
+        (
+            b"%?\r\n+field\r\n:7\r\n.\r\n",
+            RespValue::Map(vec![(
+                RespValue::SimpleString("field".to_string()),
+                RespValue::Integer(7),
+            )]),
+        ),
+    ];
+
+    for (wire, expected) in streamed_values {
+        let decoded = decode_resp_value_for_fuzz(wire, limits)
+            .expect("valid RESP3 streamed aggregate should not error")
+            .expect("valid RESP3 streamed aggregate should be complete");
+        assert_eq!(decoded.0, expected);
+        assert_eq!(decoded.1, wire.len());
+    }
+
+    assert!(
+        decode_resp_value_for_fuzz(b"$?\r\n;3\r\nabc\r\n", limits)
+            .expect("incomplete RESP3 streamed blob should not error")
+            .is_none()
+    );
+    assert!(
+        decode_resp_value_for_fuzz(b"%?\r\n+key\r\n.\r\n", limits).is_err(),
+        "streamed map with odd value count must fail closed"
+    );
+}
+
 /// Test helper functions in isolation
 fn test_helper_functions(data: &[u8]) {
     // Test find_crlf with various scenarios
@@ -551,7 +626,10 @@ fuzz_target!(|data: &[u8]| {
     // Test 9: Structured RESP3 pubsub push notifications
     exercise_structured_resp3_pushes(data);
 
-    // Test 10: Fragmented parsing simulation (partial buffer scenarios)
+    // Test 10: RESP3 streamed string/aggregate parser seam
+    exercise_resp3_streamed_types(data);
+
+    // Test 11: Fragmented parsing simulation (partial buffer scenarios)
     if data.len() > 10 {
         for split_point in [1, data.len() / 4, data.len() / 2, data.len() - 1]
             .iter()
@@ -572,7 +650,7 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    // Test 11: Boundary value testing for limits
+    // Test 12: Boundary value testing for limits
     let boundary_limits = [
         RedisProtocolLimits {
             max_frame_size: data.len().saturating_sub(1).max(1),

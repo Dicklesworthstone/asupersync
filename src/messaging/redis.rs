@@ -432,6 +432,79 @@ impl RespValue {
             Ok { value: RespValue, next: usize },
         }
 
+        fn parse_resp_len(bytes: &[u8], label: &str) -> Result<usize, RedisError> {
+            let len = parse_i64_ascii(bytes)?;
+            if len < 0 {
+                return Err(RedisError::Protocol(format!(
+                    "invalid {label} length: {len}"
+                )));
+            }
+            usize::try_from(len)
+                .map_err(|_| RedisError::Protocol(format!("invalid {label} length: {len}")))
+        }
+
+        fn stream_end_state(buf: &[u8], i: usize) -> Result<Option<bool>, RedisError> {
+            if buf.get(i) != Some(&b'.') {
+                return Ok(Some(false));
+            }
+            if buf.len() < i + 3 {
+                return Ok(None);
+            }
+            if &buf[i..i + 3] == b".\r\n" {
+                return Ok(Some(true));
+            }
+            Err(RedisError::Protocol(
+                "invalid RESP3 streamed aggregate terminator".to_string(),
+            ))
+        }
+
+        fn check_streamed_blob_complete(
+            buf: &[u8],
+            mut i: usize,
+            limits: &RedisProtocolLimits,
+        ) -> Result<Option<usize>, RedisError> {
+            let mut total_len = 0usize;
+            loop {
+                if i >= buf.len() {
+                    return Ok(None);
+                }
+                if buf[i] != b';' {
+                    return Err(RedisError::Protocol(format!(
+                        "RESP3 streamed blob chunk must start with ';', got 0x{:02x}",
+                        buf[i]
+                    )));
+                }
+                let Some(end) = find_crlf(buf, i + 1) else {
+                    return Ok(None);
+                };
+                let len = parse_resp_len(&buf[i + 1..end], "streamed blob chunk")?;
+                i = end + 2;
+                if len == 0 {
+                    return Ok(Some(i));
+                }
+                total_len = total_len.checked_add(len).ok_or_else(|| {
+                    RedisError::Protocol("streamed blob length overflow".to_string())
+                })?;
+                if total_len > limits.max_bulk_string_len {
+                    return Err(RedisError::Protocol(format!(
+                        "streamed blob length {total_len} exceeds maximum {}",
+                        limits.max_bulk_string_len
+                    )));
+                }
+                let end_data = i.saturating_add(len);
+                let end_crlf = end_data.saturating_add(2);
+                if buf.len() < end_crlf {
+                    return Ok(None);
+                }
+                if buf.get(end_data) != Some(&b'\r') || buf.get(end_data + 1) != Some(&b'\n') {
+                    return Err(RedisError::Protocol(
+                        "streamed blob chunk missing trailing CRLF".to_string(),
+                    ));
+                }
+                i = end_crlf;
+            }
+        }
+
         // Fast-path to check if the complete structure is in the buffer without
         // allocating any intermediate values. This prevents O(N^2) allocations
         // on large fragmented arrays (Schlemiel the Painter's parsing).
@@ -482,6 +555,9 @@ impl RespValue {
                     let Some(end) = find_crlf(buf, i + 1) else {
                         return Ok(None);
                     };
+                    if buf[i] == b'$' && &buf[i + 1..end] == b"?" {
+                        return check_streamed_blob_complete(buf, end + 2, limits);
+                    }
                     let len = parse_i64_ascii(&buf[i + 1..end])?;
                     if len == -1 && buf[i] == b'$' {
                         return Ok(Some(end + 2));
@@ -511,9 +587,60 @@ impl RespValue {
                 // (RESP2) plus Set, Push (RESP3 — N items) and Map,
                 // Attribute (RESP3 — N pairs = 2N children).
                 b'*' | b'~' | b'>' | b'%' | b'|' => {
+                    let tag = buf[i];
                     let Some(end) = find_crlf(buf, i + 1) else {
                         return Ok(None);
                     };
+                    if &buf[i + 1..end] == b"?" {
+                        if !matches!(tag, b'*' | b'~' | b'%') {
+                            return Err(RedisError::Protocol(format!(
+                                "RESP3 streamed aggregate not supported for type byte 0x{:02x}",
+                                tag
+                            )));
+                        }
+                        let max_children = if tag == b'%' {
+                            limits.max_array_len.saturating_mul(2)
+                        } else {
+                            limits.max_array_len
+                        };
+                        let mut children = 0usize;
+                        i = end + 2;
+                        loop {
+                            if i >= buf.len() {
+                                return Ok(None);
+                            }
+                            match stream_end_state(buf, i)? {
+                                None => return Ok(None),
+                                Some(true) => {
+                                    if tag == b'%' && children % 2 != 0 {
+                                        return Err(RedisError::Protocol(
+                                            "RESP3 streamed map ended after an odd number of values"
+                                                .to_string(),
+                                        ));
+                                    }
+                                    return Ok(Some(i + 3));
+                                }
+                                Some(false) => {}
+                            }
+                            if children >= max_children {
+                                return Err(RedisError::Protocol(format!(
+                                    "streamed aggregate length exceeds maximum {}",
+                                    limits.max_array_len
+                                )));
+                            }
+                            match check_complete(buf, i, depth + 1, limits)? {
+                                None => return Ok(None),
+                                Some(next) => {
+                                    i = next;
+                                    children = children.checked_add(1).ok_or_else(|| {
+                                        RedisError::Protocol(
+                                            "streamed aggregate length overflow".to_string(),
+                                        )
+                                    })?;
+                                }
+                            }
+                        }
+                    }
                     let n = parse_i64_ascii(&buf[i + 1..end])?;
                     if n == -1 && buf[i] == b'*' {
                         return Ok(Some(end + 2));
@@ -533,7 +660,9 @@ impl RespValue {
                         )));
                     }
                     let children = if matches!(buf[i], b'%' | b'|') {
-                        n * 2
+                        n.checked_mul(2).ok_or_else(|| {
+                            RedisError::Protocol("aggregate length overflow".to_string())
+                        })?
                     } else {
                         n
                     };
@@ -613,6 +742,56 @@ impl RespValue {
                     let Some(end) = find_crlf(buf, i + 1) else {
                         return Ok(Decoded::NeedMore);
                     };
+                    if &buf[i + 1..end] == b"?" {
+                        let mut data = Vec::new();
+                        let mut pos = end + 2;
+                        loop {
+                            if pos >= buf.len() {
+                                return Ok(Decoded::NeedMore);
+                            }
+                            if buf[pos] != b';' {
+                                return Err(RedisError::Protocol(format!(
+                                    "RESP3 streamed blob chunk must start with ';', got 0x{:02x}",
+                                    buf[pos]
+                                )));
+                            }
+                            let Some(chunk_end) = find_crlf(buf, pos + 1) else {
+                                return Ok(Decoded::NeedMore);
+                            };
+                            let len =
+                                parse_resp_len(&buf[pos + 1..chunk_end], "streamed blob chunk")?;
+                            pos = chunk_end + 2;
+                            if len == 0 {
+                                return Ok(Decoded::Ok {
+                                    value: RespValue::BulkString(Some(data)),
+                                    next: pos,
+                                });
+                            }
+                            let next_len = data.len().checked_add(len).ok_or_else(|| {
+                                RedisError::Protocol("streamed blob length overflow".to_string())
+                            })?;
+                            if next_len > limits.max_bulk_string_len {
+                                return Err(RedisError::Protocol(format!(
+                                    "streamed blob length {next_len} exceeds maximum {}",
+                                    limits.max_bulk_string_len
+                                )));
+                            }
+                            let end_data = pos.saturating_add(len);
+                            let end_crlf = end_data.saturating_add(2);
+                            if buf.len() < end_crlf {
+                                return Ok(Decoded::NeedMore);
+                            }
+                            if buf.get(end_data) != Some(&b'\r')
+                                || buf.get(end_data + 1) != Some(&b'\n')
+                            {
+                                return Err(RedisError::Protocol(
+                                    "streamed blob chunk missing trailing CRLF".to_string(),
+                                ));
+                            }
+                            data.extend_from_slice(&buf[pos..end_data]);
+                            pos = end_crlf;
+                        }
+                    }
                     let len = parse_i64_ascii(&buf[i + 1..end])?;
                     if len == -1 {
                         return Ok(Decoded::Ok {
@@ -655,6 +834,48 @@ impl RespValue {
                     let Some(end) = find_crlf(buf, i + 1) else {
                         return Ok(Decoded::NeedMore);
                     };
+                    if &buf[i + 1..end] == b"?" {
+                        if !matches!(tag, b'*' | b'~') {
+                            return Err(RedisError::Protocol(format!(
+                                "RESP3 streamed aggregate not supported for type byte 0x{tag:02x}"
+                            )));
+                        }
+                        let mut items = Vec::new();
+                        let mut pos = end + 2;
+                        loop {
+                            if pos >= buf.len() {
+                                return Ok(Decoded::NeedMore);
+                            }
+                            match stream_end_state(buf, pos)? {
+                                None => return Ok(Decoded::NeedMore),
+                                Some(true) => {
+                                    let value = if tag == b'*' {
+                                        RespValue::Array(Some(items))
+                                    } else {
+                                        RespValue::Set(items)
+                                    };
+                                    return Ok(Decoded::Ok {
+                                        value,
+                                        next: pos + 3,
+                                    });
+                                }
+                                Some(false) => {}
+                            }
+                            if items.len() >= limits.max_array_len {
+                                return Err(RedisError::Protocol(format!(
+                                    "streamed aggregate length exceeds maximum {}",
+                                    limits.max_array_len
+                                )));
+                            }
+                            match decode_at(buf, pos, depth + 1, limits)? {
+                                Decoded::NeedMore => return Ok(Decoded::NeedMore),
+                                Decoded::Ok { value, next } => {
+                                    items.push(value);
+                                    pos = next;
+                                }
+                            }
+                        }
+                    }
                     let n = parse_i64_ascii(&buf[i + 1..end])?;
                     if n == -1 && tag == b'*' {
                         return Ok(Decoded::Ok {
@@ -703,6 +924,61 @@ impl RespValue {
                     let Some(end) = find_crlf(buf, i + 1) else {
                         return Ok(Decoded::NeedMore);
                     };
+                    if &buf[i + 1..end] == b"?" {
+                        if tag != b'%' {
+                            return Err(RedisError::Protocol(format!(
+                                "RESP3 streamed aggregate not supported for type byte 0x{tag:02x}"
+                            )));
+                        }
+                        let mut pairs = Vec::new();
+                        let mut pos = end + 2;
+                        loop {
+                            if pos >= buf.len() {
+                                return Ok(Decoded::NeedMore);
+                            }
+                            match stream_end_state(buf, pos)? {
+                                None => return Ok(Decoded::NeedMore),
+                                Some(true) => {
+                                    return Ok(Decoded::Ok {
+                                        value: RespValue::Map(pairs),
+                                        next: pos + 3,
+                                    });
+                                }
+                                Some(false) => {}
+                            }
+                            if pairs.len() >= limits.max_array_len {
+                                return Err(RedisError::Protocol(format!(
+                                    "streamed aggregate length exceeds maximum {}",
+                                    limits.max_array_len
+                                )));
+                            }
+                            let key = match decode_at(buf, pos, depth + 1, limits)? {
+                                Decoded::NeedMore => return Ok(Decoded::NeedMore),
+                                Decoded::Ok { value, next } => {
+                                    pos = next;
+                                    value
+                                }
+                            };
+                            match stream_end_state(buf, pos)? {
+                                None => return Ok(Decoded::NeedMore),
+                                Some(true) => {
+                                    return Err(RedisError::Protocol(
+                                        "RESP3 streamed map ended after a key without a value"
+                                            .to_string(),
+                                    ));
+                                }
+                                Some(false) => {}
+                            }
+                            let val = match decode_at(buf, pos, depth + 1, limits)? {
+                                Decoded::NeedMore => return Ok(Decoded::NeedMore),
+                                Decoded::Ok { value, next } => {
+                                    pos = next;
+                                    value
+                                }
+                            };
+                            pairs.push((key, val));
+                        }
+                    }
                     let n = parse_i64_ascii(&buf[i + 1..end])?;
                     if n < 0 {
                         return Err(RedisError::Protocol(format!(
@@ -3133,6 +3409,16 @@ pub fn parse_pubsub_event_for_fuzz(value: RespValue) -> Result<PubSubEvent, Redi
 }
 
 #[cfg(any(test, feature = "test-internals"))]
+#[allow(dead_code)]
+#[doc(hidden)]
+pub fn decode_resp_value_for_fuzz(
+    buf: &[u8],
+    limits: RedisProtocolLimits,
+) -> Result<Option<(RespValue, usize)>, RedisError> {
+    RespValue::try_decode_with_limits(buf, &limits)
+}
+
+#[cfg(any(test, feature = "test-internals"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[doc(hidden)]
 pub enum FuzzPubSubLane {
@@ -3671,6 +3957,113 @@ mod tests {
                 "RESP3 {name} decoder must consume the full reference vector"
             );
         }
+    }
+
+    #[test]
+    fn resp3_streamed_blob_string_decodes_to_bulk_string() {
+        let wire = b"$?\r\n;4\r\nHell\r\n;6\r\no worl\r\n;1\r\nd\r\n;0\r\n";
+
+        let (decoded, consumed) = RespValue::try_decode(wire)
+            .unwrap()
+            .expect("complete RESP3 streamed blob should decode");
+
+        assert_eq!(
+            decoded,
+            RespValue::BulkString(Some(b"Hello world".to_vec()))
+        );
+        assert_eq!(consumed, wire.len());
+        assert_eq!(decoded.encode(), b"$11\r\nHello world\r\n");
+    }
+
+    #[test]
+    fn resp3_empty_streamed_blob_decodes_to_empty_bulk_string() {
+        let wire = b"$?\r\n;0\r\n";
+
+        let (decoded, consumed) = RespValue::try_decode(wire)
+            .unwrap()
+            .expect("complete empty RESP3 streamed blob should decode");
+
+        assert_eq!(decoded, RespValue::BulkString(Some(Vec::new())));
+        assert_eq!(consumed, wire.len());
+        assert_eq!(decoded.encode(), b"$0\r\n\r\n");
+    }
+
+    #[test]
+    fn resp3_streamed_array_set_and_map_decode_until_end_marker() {
+        let array_wire = b"*?\r\n:1\r\n$3\r\ntwo\r\n#t\r\n.\r\n";
+        let (array, array_consumed) = RespValue::try_decode(array_wire)
+            .unwrap()
+            .expect("complete RESP3 streamed array should decode");
+        assert_eq!(
+            array,
+            RespValue::Array(Some(vec![
+                RespValue::Integer(1),
+                RespValue::BulkString(Some(b"two".to_vec())),
+                RespValue::Boolean(true),
+            ]))
+        );
+        assert_eq!(array_consumed, array_wire.len());
+
+        let set_wire = b"~?\r\n+orange\r\n+apple\r\n.\r\n";
+        let (set, set_consumed) = RespValue::try_decode(set_wire)
+            .unwrap()
+            .expect("complete RESP3 streamed set should decode");
+        assert_eq!(
+            set,
+            RespValue::Set(vec![
+                RespValue::SimpleString("orange".to_string()),
+                RespValue::SimpleString("apple".to_string()),
+            ])
+        );
+        assert_eq!(set_consumed, set_wire.len());
+
+        let map_wire = b"%?\r\n+first\r\n:1\r\n+second\r\n:2\r\n.\r\n";
+        let (map, map_consumed) = RespValue::try_decode(map_wire)
+            .unwrap()
+            .expect("complete RESP3 streamed map should decode");
+        assert_eq!(
+            map,
+            RespValue::Map(vec![
+                (
+                    RespValue::SimpleString("first".to_string()),
+                    RespValue::Integer(1)
+                ),
+                (
+                    RespValue::SimpleString("second".to_string()),
+                    RespValue::Integer(2),
+                ),
+            ])
+        );
+        assert_eq!(map_consumed, map_wire.len());
+    }
+
+    #[test]
+    fn resp3_streamed_types_fail_closed_on_incomplete_or_malformed_frames() {
+        assert!(
+            RespValue::try_decode(b"$?\r\n;4\r\nHell\r\n")
+                .unwrap()
+                .is_none(),
+            "streamed blob without zero-length chunk remains incomplete"
+        );
+
+        let odd_map = RespValue::try_decode(b"%?\r\n+key\r\n.\r\n")
+            .expect_err("streamed map with key but no value must fail closed");
+        assert!(matches!(odd_map, RedisError::Protocol(msg) if msg.contains("odd")));
+
+        let unsupported_push = RespValue::try_decode(b">?\r\n+message\r\n.\r\n")
+            .expect_err("streamed push is outside the RESP3 streamed aggregate set");
+        assert!(
+            matches!(unsupported_push, RedisError::Protocol(msg) if msg.contains("not supported"))
+        );
+    }
+
+    #[test]
+    fn resp3_streamed_blob_respects_total_bulk_limit() {
+        let limits = RedisProtocolLimits::new().max_bulk_string_len(4);
+        let err =
+            RespValue::try_decode_with_limits(b"$?\r\n;3\r\nabc\r\n;2\r\nde\r\n;0\r\n", &limits)
+                .expect_err("streamed blob total length must obey max_bulk_string_len");
+        assert!(matches!(err, RedisError::Protocol(msg) if msg.contains("streamed blob length")));
     }
 
     #[test]
