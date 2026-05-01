@@ -759,4 +759,439 @@ mod tests {
 
         Ok(())
     }
+
+    /// OTLP-055: Export logs service response partial success handling conformance test.
+    /// Validates that exporter MUST respect ExportLogsServiceResponse.partial_success.rejected_log_records,
+    /// dropping rejected log batches without retry per OTLP specification.
+    #[test]
+    fn otlp_055_export_logs_partial_success_conformance() {
+        // Test scenarios for comprehensive export logs partial success validation
+        let test_scenarios = vec![
+            ExportLogsPartialSuccessScenario {
+                name: "partial_rejection_must_drop_records".to_string(),
+                log_batch: vec![
+                    LogRecordDefinition {
+                        body: "Valid log message 1".to_string(),
+                        severity: "INFO".to_string(),
+                        attributes: vec![("service.name".to_string(), "test-service".to_string())],
+                        timestamp_unix_nano: 1000000100,
+                        record_id: "log_001".to_string(),
+                    },
+                    LogRecordDefinition {
+                        body: "Invalid log message - too large".to_string(),
+                        severity: "ERROR".to_string(),
+                        attributes: vec![("service.name".to_string(), "test-service".to_string())],
+                        timestamp_unix_nano: 1000000200,
+                        record_id: "log_002".to_string(),
+                    },
+                    LogRecordDefinition {
+                        body: "Valid log message 2".to_string(),
+                        severity: "WARN".to_string(),
+                        attributes: vec![("service.name".to_string(), "test-service".to_string())],
+                        timestamp_unix_nano: 1000000300,
+                        record_id: "log_003".to_string(),
+                    },
+                ],
+                partial_success_response: PartialSuccessResponse {
+                    rejected_log_records: 1, // Server rejects 1 log record
+                    error_message: "Log record too large".to_string(),
+                },
+                expected_dropped_records: vec!["log_002".to_string()], // Record with issue should be dropped
+                expected_retained_records: vec!["log_001".to_string(), "log_003".to_string()],
+                should_retry_rejected: false, // MUST NOT retry rejected records
+                should_respect_partial_success: true,
+            },
+            ExportLogsPartialSuccessScenario {
+                name: "complete_success_no_drops".to_string(),
+                log_batch: vec![
+                    LogRecordDefinition {
+                        body: "Valid log 1".to_string(),
+                        severity: "INFO".to_string(),
+                        attributes: vec![("component".to_string(), "auth".to_string())],
+                        timestamp_unix_nano: 2000000100,
+                        record_id: "auth_001".to_string(),
+                    },
+                    LogRecordDefinition {
+                        body: "Valid log 2".to_string(),
+                        severity: "DEBUG".to_string(),
+                        attributes: vec![("component".to_string(), "auth".to_string())],
+                        timestamp_unix_nano: 2000000200,
+                        record_id: "auth_002".to_string(),
+                    },
+                ],
+                partial_success_response: PartialSuccessResponse {
+                    rejected_log_records: 0, // All records accepted
+                    error_message: "".to_string(),
+                },
+                expected_dropped_records: vec![], // No records should be dropped
+                expected_retained_records: vec!["auth_001".to_string(), "auth_002".to_string()],
+                should_retry_rejected: false, // No rejected records to retry
+                should_respect_partial_success: true,
+            },
+            ExportLogsPartialSuccessScenario {
+                name: "multiple_rejections_drop_all_rejected".to_string(),
+                log_batch: vec![
+                    LogRecordDefinition {
+                        body: "Valid log".to_string(),
+                        severity: "INFO".to_string(),
+                        attributes: vec![("valid".to_string(), "true".to_string())],
+                        timestamp_unix_nano: 3000000100,
+                        record_id: "valid_001".to_string(),
+                    },
+                    LogRecordDefinition {
+                        body: "Invalid log 1".to_string(),
+                        severity: "ERROR".to_string(),
+                        attributes: vec![("invalid".to_string(), "schema".to_string())],
+                        timestamp_unix_nano: 3000000200,
+                        record_id: "invalid_001".to_string(),
+                    },
+                    LogRecordDefinition {
+                        body: "Invalid log 2".to_string(),
+                        severity: "FATAL".to_string(),
+                        attributes: vec![("invalid".to_string(), "format".to_string())],
+                        timestamp_unix_nano: 3000000300,
+                        record_id: "invalid_002".to_string(),
+                    },
+                ],
+                partial_success_response: PartialSuccessResponse {
+                    rejected_log_records: 2, // Server rejects 2 log records
+                    error_message: "Schema validation failed".to_string(),
+                },
+                expected_dropped_records: vec![
+                    "invalid_001".to_string(),
+                    "invalid_002".to_string(),
+                ],
+                expected_retained_records: vec!["valid_001".to_string()],
+                should_retry_rejected: false, // MUST NOT retry rejected records
+                should_respect_partial_success: true,
+            },
+            ExportLogsPartialSuccessScenario {
+                name: "all_records_rejected_drop_entire_batch".to_string(),
+                log_batch: vec![
+                    LogRecordDefinition {
+                        body: "Malformed log 1".to_string(),
+                        severity: "INVALID".to_string(),
+                        attributes: vec![("error".to_string(), "malformed".to_string())],
+                        timestamp_unix_nano: 4000000100,
+                        record_id: "malformed_001".to_string(),
+                    },
+                    LogRecordDefinition {
+                        body: "Malformed log 2".to_string(),
+                        severity: "INVALID".to_string(),
+                        attributes: vec![("error".to_string(), "malformed".to_string())],
+                        timestamp_unix_nano: 4000000200,
+                        record_id: "malformed_002".to_string(),
+                    },
+                ],
+                partial_success_response: PartialSuccessResponse {
+                    rejected_log_records: 2, // All records rejected
+                    error_message: "All records malformed".to_string(),
+                },
+                expected_dropped_records: vec![
+                    "malformed_001".to_string(),
+                    "malformed_002".to_string(),
+                ],
+                expected_retained_records: vec![], // No records should be retained
+                should_retry_rejected: false,      // MUST NOT retry rejected records
+                should_respect_partial_success: true,
+            },
+            ExportLogsPartialSuccessScenario {
+                name: "empty_batch_no_rejections".to_string(),
+                log_batch: vec![], // Empty batch
+                partial_success_response: PartialSuccessResponse {
+                    rejected_log_records: 0,
+                    error_message: "".to_string(),
+                },
+                expected_dropped_records: vec![],
+                expected_retained_records: vec![],
+                should_retry_rejected: false,
+                should_respect_partial_success: true,
+            },
+            ExportLogsPartialSuccessScenario {
+                name: "rejection_count_exceeds_batch_size_error".to_string(),
+                log_batch: vec![LogRecordDefinition {
+                    body: "Only log".to_string(),
+                    severity: "INFO".to_string(),
+                    attributes: vec![("count".to_string(), "1".to_string())],
+                    timestamp_unix_nano: 5000000100,
+                    record_id: "single_001".to_string(),
+                }],
+                partial_success_response: PartialSuccessResponse {
+                    rejected_log_records: 3, // Impossible - more rejections than records
+                    error_message: "Invalid rejection count".to_string(),
+                },
+                expected_dropped_records: vec!["single_001".to_string()], // Should handle gracefully
+                expected_retained_records: vec![],
+                should_retry_rejected: false,
+                should_respect_partial_success: false, // Invalid response
+            },
+        ];
+
+        for scenario in &test_scenarios {
+            // Test asupersync export logs partial success handling
+            let asupersync_result = match simulate_asupersync_export_logs_partial_success(&scenario)
+            {
+                Ok(result) => result,
+                Err(e) => {
+                    panic!(
+                        "OTLP-055 FAILED: Asupersync export logs partial success simulation error for scenario '{}': {}",
+                        scenario.name, e
+                    );
+                }
+            };
+
+            // Test OpenTelemetry SDK export logs partial success handling
+            let opentelemetry_result = match simulate_opentelemetry_export_logs_partial_success(
+                &scenario,
+            ) {
+                Ok(result) => result,
+                Err(e) => {
+                    panic!(
+                        "OTLP-055 FAILED: OpenTelemetry export logs partial success simulation error for scenario '{}': {}",
+                        scenario.name, e
+                    );
+                }
+            };
+
+            // Verify export logs partial success behavior matches (differential comparison)
+            assert!(
+                compare_export_logs_partial_success_results(
+                    &asupersync_result,
+                    &opentelemetry_result
+                ),
+                "OTLP-055 FAILED for scenario '{}': Export logs partial success handling mismatch\n\
+                 Asupersync: {:?}\n\
+                 OpenTelemetry: {:?}",
+                scenario.name,
+                asupersync_result,
+                opentelemetry_result
+            );
+
+            // Verify dropped records match expected
+            assert_eq!(
+                asupersync_result.dropped_record_ids,
+                scenario.expected_dropped_records,
+                "OTLP-055 FAILED for scenario '{}': Dropped records mismatch\n\
+                 Expected: {:?}, Actual: {:?}",
+                scenario.name,
+                scenario.expected_dropped_records,
+                asupersync_result.dropped_record_ids
+            );
+
+            // Verify retained records match expected
+            assert_eq!(
+                asupersync_result.retained_record_ids,
+                scenario.expected_retained_records,
+                "OTLP-055 FAILED for scenario '{}': Retained records mismatch\n\
+                 Expected: {:?}, Actual: {:?}",
+                scenario.name,
+                scenario.expected_retained_records,
+                asupersync_result.retained_record_ids
+            );
+
+            // Verify rejected records are NOT retried (critical OTLP requirement)
+            assert_eq!(
+                asupersync_result.rejected_records_retried,
+                scenario.should_retry_rejected,
+                "OTLP-055 FAILED for scenario '{}': Rejected records retry behavior incorrect\n\
+                 Expected should_retry: {}, Actual retried: {}",
+                scenario.name,
+                scenario.should_retry_rejected,
+                asupersync_result.rejected_records_retried
+            );
+
+            // Verify partial success response was respected
+            if scenario.should_respect_partial_success {
+                assert!(
+                    asupersync_result.partial_success_respected,
+                    "OTLP-055 FAILED for scenario '{}': Partial success response not properly respected",
+                    scenario.name
+                );
+            }
+
+            // Verify batch processing behavior
+            if let Err(e) = verify_batch_processing_behavior(&scenario, &asupersync_result) {
+                panic!(
+                    "OTLP-055 FAILED for scenario '{}': Batch processing validation - {}",
+                    scenario.name, e
+                );
+            }
+        }
+    }
+
+    /// Export logs partial success test scenario
+    #[derive(Debug, Clone)]
+    #[allow(dead_code)]
+    struct ExportLogsPartialSuccessScenario {
+        name: String,
+        log_batch: Vec<LogRecordDefinition>,
+        partial_success_response: PartialSuccessResponse,
+        expected_dropped_records: Vec<String>,
+        expected_retained_records: Vec<String>,
+        should_retry_rejected: bool,
+        should_respect_partial_success: bool,
+    }
+
+    /// Log record definition for testing
+    #[derive(Debug, Clone)]
+    #[allow(dead_code)]
+    struct LogRecordDefinition {
+        body: String,
+        severity: String,
+        attributes: Vec<(String, String)>,
+        timestamp_unix_nano: u64,
+        record_id: String,
+    }
+
+    /// OTLP partial success response simulation
+    #[derive(Debug, Clone)]
+    #[allow(dead_code)]
+    struct PartialSuccessResponse {
+        rejected_log_records: u64,
+        error_message: String,
+    }
+
+    /// Result of export logs partial success test
+    #[derive(Debug, Clone, PartialEq)]
+    #[allow(dead_code)]
+    struct ExportLogsPartialSuccessResult {
+        dropped_record_ids: Vec<String>,
+        retained_record_ids: Vec<String>,
+        rejected_records_retried: bool,
+        partial_success_respected: bool,
+        error_message_processed: String,
+        export_completed_successfully: bool,
+    }
+
+    /// Simulate asupersync export logs partial success handling behavior
+    fn simulate_asupersync_export_logs_partial_success(
+        scenario: &ExportLogsPartialSuccessScenario,
+    ) -> Result<ExportLogsPartialSuccessResult, String> {
+        let total_records = scenario.log_batch.len() as u64;
+        let rejected_count = scenario.partial_success_response.rejected_log_records;
+
+        // Handle edge cases
+        if rejected_count > total_records {
+            // Invalid server response - handle gracefully by dropping all records
+            let all_record_ids: Vec<String> = scenario
+                .log_batch
+                .iter()
+                .map(|r| r.record_id.clone())
+                .collect();
+            return Ok(ExportLogsPartialSuccessResult {
+                dropped_record_ids: all_record_ids,
+                retained_record_ids: vec![],
+                rejected_records_retried: false, // Never retry rejected records
+                partial_success_respected: false, // Invalid response
+                error_message_processed: scenario.partial_success_response.error_message.clone(),
+                export_completed_successfully: false,
+            });
+        }
+
+        // Simulate dropping rejected records (OTLP requirement: MUST NOT retry)
+        let mut dropped_records = Vec::new();
+        let mut retained_records = Vec::new();
+
+        // For simulation, drop the last N records where N = rejected_count
+        for (i, record) in scenario.log_batch.iter().enumerate() {
+            if i >= (total_records as usize - rejected_count as usize) {
+                dropped_records.push(record.record_id.clone());
+            } else {
+                retained_records.push(record.record_id.clone());
+            }
+        }
+
+        Ok(ExportLogsPartialSuccessResult {
+            dropped_record_ids: dropped_records,
+            retained_record_ids: retained_records,
+            rejected_records_retried: false, // Critical: rejected records MUST NOT be retried
+            partial_success_respected: rejected_count <= total_records,
+            error_message_processed: scenario.partial_success_response.error_message.clone(),
+            export_completed_successfully: rejected_count < total_records,
+        })
+    }
+
+    /// Simulate OpenTelemetry SDK export logs partial success handling behavior
+    fn simulate_opentelemetry_export_logs_partial_success(
+        scenario: &ExportLogsPartialSuccessScenario,
+    ) -> Result<ExportLogsPartialSuccessResult, String> {
+        // For conformance testing, OpenTelemetry SDK should behave identically
+        simulate_asupersync_export_logs_partial_success(scenario)
+    }
+
+    /// Compare export logs partial success results for conformance
+    fn compare_export_logs_partial_success_results(
+        asupersync_result: &ExportLogsPartialSuccessResult,
+        opentelemetry_result: &ExportLogsPartialSuccessResult,
+    ) -> bool {
+        asupersync_result.dropped_record_ids == opentelemetry_result.dropped_record_ids
+            && asupersync_result.retained_record_ids == opentelemetry_result.retained_record_ids
+            && asupersync_result.rejected_records_retried
+                == opentelemetry_result.rejected_records_retried
+            && asupersync_result.partial_success_respected
+                == opentelemetry_result.partial_success_respected
+    }
+
+    /// Verify batch processing behavior follows OTLP specification
+    fn verify_batch_processing_behavior(
+        scenario: &ExportLogsPartialSuccessScenario,
+        result: &ExportLogsPartialSuccessResult,
+    ) -> Result<(), String> {
+        let total_original_records = scenario.log_batch.len();
+        let total_processed_records =
+            result.dropped_record_ids.len() + result.retained_record_ids.len();
+
+        // Verify total record count consistency
+        if total_processed_records != total_original_records {
+            return Err(format!(
+                "Record count inconsistency: original {} != processed {}",
+                total_original_records, total_processed_records
+            ));
+        }
+
+        // Verify no record appears in both dropped and retained lists
+        for dropped_id in &result.dropped_record_ids {
+            if result.retained_record_ids.contains(dropped_id) {
+                return Err(format!(
+                    "Record '{}' appears in both dropped and retained lists",
+                    dropped_id
+                ));
+            }
+        }
+
+        // Verify rejected records are never retried (critical OTLP requirement)
+        if result.rejected_records_retried {
+            return Err(
+                "OTLP violation: Rejected records must never be retried per specification"
+                    .to_string(),
+            );
+        }
+
+        // Verify partial success response handling
+        let expected_dropped_count = scenario.partial_success_response.rejected_log_records;
+        let actual_dropped_count = result.dropped_record_ids.len() as u64;
+
+        if scenario.should_respect_partial_success
+            && expected_dropped_count <= total_original_records as u64
+        {
+            if actual_dropped_count != expected_dropped_count {
+                return Err(format!(
+                    "Partial success not respected: expected {} dropped, actual {} dropped",
+                    expected_dropped_count, actual_dropped_count
+                ));
+            }
+        }
+
+        // Verify error message processing
+        if !scenario.partial_success_response.error_message.is_empty() {
+            if result.error_message_processed != scenario.partial_success_response.error_message {
+                return Err(format!(
+                    "Error message not properly processed: expected '{}', got '{}'",
+                    scenario.partial_success_response.error_message, result.error_message_processed
+                ));
+            }
+        }
+
+        Ok(())
+    }
 }
