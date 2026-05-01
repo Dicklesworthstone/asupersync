@@ -4072,7 +4072,8 @@ pub mod span_semantics {
             }
 
             // Test string array mapping
-            let string_array_body = LogRecordBodyValue::StringArray(vec!["a".to_string(), "b".to_string()]);
+            let string_array_body =
+                LogRecordBodyValue::StringArray(vec!["a".to_string(), "b".to_string()]);
             let any_value = log_record_body_value_to_any_value(&string_array_body);
             match &any_value.value {
                 Some(ProtoValue::ArrayValue(array)) => {
@@ -4082,7 +4083,7 @@ pub mod span_semantics {
                     } else {
                         panic!("Expected first array element to be StringValue");
                     }
-                },
+                }
                 _ => panic!("Expected ArrayValue, got {:?}", any_value.value),
             }
 
@@ -4090,12 +4091,15 @@ pub mod span_semantics {
             let test_body = LogRecordBodyValue::String("test".to_string());
             let any_value_1 = log_record_body_value_to_any_value(&test_body);
             let any_value_2 = log_record_body_value_to_any_value(&test_body);
-            assert_eq!(any_value_1, any_value_2, "LogRecord body value conversion must be deterministic");
+            assert_eq!(
+                any_value_1, any_value_2,
+                "LogRecord body value conversion must be deterministic"
+            );
         }
 
         #[test]
         fn gauge_double_update_value_sequence_conformance() {
-            use super::super::{MetricsSnapshot, GaugeDataPoint};
+            use super::super::{GaugeDataPoint, MetricsSnapshot};
 
             // Test that applying the same gauge value sequence twice produces identical results
             let value_sequence = vec![10, 20, 15, 30, 25];
@@ -4115,26 +4119,44 @@ pub mod span_semantics {
             }
 
             // Both snapshots should be identical
-            assert_eq!(snapshot1.gauges, snapshot2.gauges, "Gauge double-update must be deterministic");
+            assert_eq!(
+                snapshot1.gauges, snapshot2.gauges,
+                "Gauge double-update must be deterministic"
+            );
 
             // Final value should match the last value in the sequence
             let expected_final_value = *value_sequence.last().unwrap();
             let actual_final_value = snapshot1.gauges.last().unwrap().2;
-            assert_eq!(actual_final_value, expected_final_value, "Gauge final value must match sequence end");
+            assert_eq!(
+                actual_final_value, expected_final_value,
+                "Gauge final value must match sequence end"
+            );
 
             // Number of gauge entries should match sequence length
-            assert_eq!(snapshot1.gauges.len(), value_sequence.len(), "Gauge entry count must match sequence length");
+            assert_eq!(
+                snapshot1.gauges.len(),
+                value_sequence.len(),
+                "Gauge entry count must match sequence length"
+            );
 
             // Test edge cases
             let mut empty_snapshot = MetricsSnapshot::new();
             empty_snapshot.add_gauge("empty_test", vec![], 0);
-            assert_eq!(empty_snapshot.gauges.len(), 1, "Empty labels gauge should work");
+            assert_eq!(
+                empty_snapshot.gauges.len(),
+                1,
+                "Empty labels gauge should work"
+            );
 
             // Test negative values
             let mut negative_snapshot = MetricsSnapshot::new();
             negative_snapshot.add_gauge("negative_test", vec![], -100);
             negative_snapshot.add_gauge("negative_test", vec![], i64::MIN);
-            assert_eq!(negative_snapshot.gauges.last().unwrap().2, i64::MIN, "Negative gauge values should work");
+            assert_eq!(
+                negative_snapshot.gauges.last().unwrap().2,
+                i64::MIN,
+                "Negative gauge values should work"
+            );
         }
 
         #[test]
@@ -4166,13 +4188,26 @@ pub mod span_semantics {
                 };
 
                 // Both scopes should be identical
-                assert_eq!(scope1, scope2, "InstrumentationScope construction must be deterministic for {}@{}", scope_name, scope_version);
+                assert_eq!(
+                    scope1, scope2,
+                    "InstrumentationScope construction must be deterministic for {}@{}",
+                    scope_name, scope_version
+                );
 
                 // Verify fields are correctly set
                 assert_eq!(scope1.name, scope_name, "Scope name must match input");
-                assert_eq!(scope1.version, scope_version, "Scope version must match input");
-                assert!(scope1.attributes.is_empty(), "Default scope should have empty attributes");
-                assert_eq!(scope1.dropped_attributes_count, 0, "Default scope should have zero dropped attributes");
+                assert_eq!(
+                    scope1.version, scope_version,
+                    "Scope version must match input"
+                );
+                assert!(
+                    scope1.attributes.is_empty(),
+                    "Default scope should have empty attributes"
+                );
+                assert_eq!(
+                    scope1.dropped_attributes_count, 0,
+                    "Default scope should have zero dropped attributes"
+                );
 
                 // Test serialization determinism
                 use prost::Message;
@@ -4180,7 +4215,11 @@ pub mod span_semantics {
                 let mut buf2 = Vec::new();
                 scope1.encode(&mut buf1).unwrap();
                 scope2.encode(&mut buf2).unwrap();
-                assert_eq!(buf1, buf2, "InstrumentationScope serialization must be deterministic for {}@{}", scope_name, scope_version);
+                assert_eq!(
+                    buf1, buf2,
+                    "InstrumentationScope serialization must be deterministic for {}@{}",
+                    scope_name, scope_version
+                );
             }
 
             // Test scope equality semantics
@@ -4209,17 +4248,23 @@ pub mod span_semantics {
             assert_eq!(scope_a, scope_a, "Scope should equal itself");
 
             // Different version should not be equal
-            assert_ne!(scope_a, scope_b, "Scopes with different versions should not be equal");
+            assert_ne!(
+                scope_a, scope_b,
+                "Scopes with different versions should not be equal"
+            );
 
             // Different name should not be equal
-            assert_ne!(scope_a, scope_c, "Scopes with different names should not be equal");
+            assert_ne!(
+                scope_a, scope_c,
+                "Scopes with different names should not be equal"
+            );
         }
 
         #[test]
         fn periodic_reader_export_batch_conformance() {
-            use std::time::{Duration, Instant};
-            use std::sync::{Arc, Mutex};
             use std::collections::VecDeque;
+            use std::sync::{Arc, Mutex};
+            use std::time::{Duration, Instant};
 
             // Mock periodic exporter that tracks export timing
             #[derive(Clone)]
@@ -4243,7 +4288,7 @@ pub mod span_semantics {
                     let exports = self.exports.lock().unwrap();
                     let mut intervals = Vec::new();
                     for i in 1..exports.len() {
-                        let duration = exports[i].0.duration_since(exports[i-1].0);
+                        let duration = exports[i].0.duration_since(exports[i - 1].0);
                         intervals.push(duration);
                     }
                     intervals
@@ -4316,26 +4361,36 @@ pub mod span_semantics {
                 assert!(
                     diff <= tolerance,
                     "Export interval {:?} deviates too much from expected {:?} (diff: {:?})",
-                    interval, expected, diff
+                    interval,
+                    expected,
+                    diff
                 );
             }
 
             // Test edge case: no metrics (should not export)
             let empty_exporter = MockPeriodicExporter::new();
             // Don't call export_metrics - simulate no metrics available
-            assert_eq!(empty_exporter.get_export_count(), 0, "No exports should occur when no metrics are available");
+            assert_eq!(
+                empty_exporter.get_export_count(),
+                0,
+                "No exports should occur when no metrics are available"
+            );
 
             // Test edge case: single large batch
             let batch_exporter = MockPeriodicExporter::new();
             batch_exporter.export_metrics(1000);
-            assert_eq!(batch_exporter.get_export_count(), 1, "Large batch should result in single export");
+            assert_eq!(
+                batch_exporter.get_export_count(),
+                1,
+                "Large batch should result in single export"
+            );
         }
 
         #[test]
         fn span_events_array_conformance() {
             use super::super::SpanEvent;
-            use std::time::{SystemTime, UNIX_EPOCH, Duration};
             use std::collections::HashMap;
+            use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
             // Test that same Event sequence produces identical span events array
             let test_sequences = vec![
@@ -4360,21 +4415,17 @@ pub mod span_semantics {
                 // Empty sequence
                 vec![],
                 // Single event
-                vec![
-                    SpanEvent {
-                        name: "single".to_string(),
-                        timestamp: UNIX_EPOCH + Duration::from_millis(500),
-                        attributes: HashMap::new(),
-                    },
-                ],
+                vec![SpanEvent {
+                    name: "single".to_string(),
+                    timestamp: UNIX_EPOCH + Duration::from_millis(500),
+                    attributes: HashMap::new(),
+                }],
                 // Unicode events
-                vec![
-                    SpanEvent {
-                        name: "测试".to_string(),
-                        timestamp: UNIX_EPOCH + Duration::from_secs(1),
-                        attributes: [("键".to_string(), "值".to_string())].into(),
-                    },
-                ],
+                vec![SpanEvent {
+                    name: "测试".to_string(),
+                    timestamp: UNIX_EPOCH + Duration::from_secs(1),
+                    attributes: [("键".to_string(), "值".to_string())].into(),
+                }],
             ];
 
             for (i, sequence) in test_sequences.iter().enumerate() {
@@ -4393,24 +4444,21 @@ pub mod span_semantics {
                 for (j, (event1, event2)) in sequence1.iter().zip(sequence2.iter()).enumerate() {
                     // Event names should match
                     assert_eq!(
-                        event1.name,
-                        event2.name,
+                        event1.name, event2.name,
                         "Span event name differs at index {} in sequence {}: '{}' vs '{}'",
                         j, i, event1.name, event2.name
                     );
 
                     // Timestamps should match
                     assert_eq!(
-                        event1.timestamp,
-                        event2.timestamp,
+                        event1.timestamp, event2.timestamp,
                         "Span event timestamp differs at index {} in sequence {}",
                         j, i
                     );
 
                     // Attributes should match
                     assert_eq!(
-                        event1.attributes,
-                        event2.attributes,
+                        event1.attributes, event2.attributes,
                         "Span event attributes differ at index {} in sequence {}",
                         j, i
                     );
@@ -4440,8 +4488,7 @@ pub mod span_semantics {
             for (i, event) in ordered_events.iter().enumerate() {
                 let expected_names = ["first", "second", "third"];
                 assert_eq!(
-                    event.name,
-                    expected_names[i],
+                    event.name, expected_names[i],
                     "Event ordering not preserved at index {}",
                     i
                 );
@@ -4456,7 +4503,8 @@ pub mod span_semantics {
                     ("path".to_string(), "/api/users".to_string()),
                     ("status_code".to_string(), "200".to_string()),
                     ("response_time_ms".to_string(), "45".to_string()),
-                ].into(),
+                ]
+                .into(),
             };
 
             let complex_event2 = SpanEvent {
@@ -4467,12 +4515,12 @@ pub mod span_semantics {
                     ("path".to_string(), "/api/users".to_string()),
                     ("status_code".to_string(), "200".to_string()),
                     ("response_time_ms".to_string(), "45".to_string()),
-                ].into(),
+                ]
+                .into(),
             };
 
             assert_eq!(
-                complex_event.attributes,
-                complex_event2.attributes,
+                complex_event.attributes, complex_event2.attributes,
                 "Complex event attributes must be identical for same input"
             );
         }
@@ -4495,19 +4543,15 @@ pub mod span_semantics {
             let test_link_arrays = vec![
                 // Empty links
                 vec![],
-
                 // Single link
-                vec![
-                    TestSpanLink {
-                        trace_id: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
-                        span_id: [1, 2, 3, 4, 5, 6, 7, 8],
-                        trace_state: "key=value".to_string(),
-                        attributes: [("type".to_string(), "child".to_string())].into(),
-                        dropped_attributes_count: 0,
-                        flags: 1,
-                    }
-                ],
-
+                vec![TestSpanLink {
+                    trace_id: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+                    span_id: [1, 2, 3, 4, 5, 6, 7, 8],
+                    trace_state: "key=value".to_string(),
+                    attributes: [("type".to_string(), "child".to_string())].into(),
+                    dropped_attributes_count: 0,
+                    flags: 1,
+                }],
                 // Multiple links
                 vec![
                     TestSpanLink {
@@ -4525,8 +4569,8 @@ pub mod span_semantics {
                         attributes: [("link".to_string(), "sibling".to_string())].into(),
                         dropped_attributes_count: 0,
                         flags: 0,
-                    }
-                ]
+                    },
+                ],
             ];
 
             for (i, link_array) in test_link_arrays.iter().enumerate() {
@@ -4545,48 +4589,42 @@ pub mod span_semantics {
                 for (j, (link1, link2)) in links1.iter().zip(links2.iter()).enumerate() {
                     // Trace IDs should match
                     assert_eq!(
-                        link1.trace_id,
-                        link2.trace_id,
+                        link1.trace_id, link2.trace_id,
                         "Span link trace ID differs at index {} in array {}: {:?} vs {:?}",
                         j, i, link1.trace_id, link2.trace_id
                     );
 
                     // Span IDs should match
                     assert_eq!(
-                        link1.span_id,
-                        link2.span_id,
+                        link1.span_id, link2.span_id,
                         "Span link span ID differs at index {} in array {}: {:?} vs {:?}",
                         j, i, link1.span_id, link2.span_id
                     );
 
                     // Trace state should match
                     assert_eq!(
-                        link1.trace_state,
-                        link2.trace_state,
+                        link1.trace_state, link2.trace_state,
                         "Span link trace state differs at index {} in array {}: '{}' vs '{}'",
                         j, i, link1.trace_state, link2.trace_state
                     );
 
                     // Attributes should match
                     assert_eq!(
-                        link1.attributes,
-                        link2.attributes,
+                        link1.attributes, link2.attributes,
                         "Span link attributes differ at index {} in array {}",
                         j, i
                     );
 
                     // Dropped attributes count should match
                     assert_eq!(
-                        link1.dropped_attributes_count,
-                        link2.dropped_attributes_count,
+                        link1.dropped_attributes_count, link2.dropped_attributes_count,
                         "Span link dropped attributes count differs at index {} in array {}: {} vs {}",
                         j, i, link1.dropped_attributes_count, link2.dropped_attributes_count
                     );
 
                     // Flags should match
                     assert_eq!(
-                        link1.flags,
-                        link2.flags,
+                        link1.flags, link2.flags,
                         "Span link flags differ at index {} in array {}: {} vs {}",
                         j, i, link1.flags, link2.flags
                     );
@@ -4614,7 +4652,10 @@ pub mod span_semantics {
                 flags: 0,
             };
 
-            assert_eq!(zero_link, zero_link2, "Zero ID span links must be identical");
+            assert_eq!(
+                zero_link, zero_link2,
+                "Zero ID span links must be identical"
+            );
 
             // Maximum values
             let max_link = TestSpanLink {
@@ -4627,7 +4668,10 @@ pub mod span_semantics {
             };
 
             let max_link2 = max_link.clone();
-            assert_eq!(max_link, max_link2, "Max values span links must be identical");
+            assert_eq!(
+                max_link, max_link2,
+                "Max values span links must be identical"
+            );
 
             // Test ordering preservation
             let ordered_links = vec![
@@ -4661,8 +4705,7 @@ pub mod span_semantics {
             let expected_states = ["first", "second", "third"];
             for (i, link) in ordered_links.iter().enumerate() {
                 assert_eq!(
-                    link.trace_state,
-                    expected_states[i],
+                    link.trace_state, expected_states[i],
                     "Link ordering not preserved at index {}",
                     i
                 );
