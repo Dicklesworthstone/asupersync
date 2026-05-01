@@ -25,7 +25,7 @@ use libfuzzer_sys::fuzz_target;
 // Import the Redis module to test
 use asupersync::messaging::redis::{
     PubSubEvent, PubSubMessage, PubSubSubscriptionKind, RedisProtocolLimits, RespValue,
-    decode_resp_value_for_fuzz, parse_pubsub_event_for_fuzz,
+    decode_resp_value_for_fuzz, parse_pubsub_event_for_fuzz, parse_script_eval_for_fuzz,
 };
 
 const MAX_STRUCTURED_FIELD_BYTES: usize = 96;
@@ -480,6 +480,75 @@ fn exercise_resp3_streamed_types(data: &[u8]) {
     );
 }
 
+fn bulk_arg(bytes: &[u8]) -> RespValue {
+    RespValue::BulkString(Some(bytes.to_vec()))
+}
+
+fn append_lua_quoted_bytes(script: &mut Vec<u8>, bytes: &[u8]) {
+    script.push(b'\'');
+    for &byte in bytes {
+        match byte {
+            b'\'' | b'\\' => {
+                script.push(b'\\');
+                script.push(byte);
+            }
+            b'\n' => script.extend_from_slice(b"\\n"),
+            b'\r' => script.extend_from_slice(b"\\r"),
+            0x20..=0x7e => script.push(byte),
+            _ => script.push(b'_'),
+        }
+    }
+    script.push(b'\'');
+}
+
+fn exercise_script_eval_parser(data: &[u8]) {
+    let payload = &data[..data.len().min(MAX_STRUCTURED_FIELD_BYTES)];
+    let mut valid_script = b"local value = ".to_vec();
+    append_lua_quoted_bytes(&mut valid_script, payload);
+    valid_script.extend_from_slice(b"\nreturn value");
+
+    let valid_command = RespValue::Array(Some(vec![
+        bulk_arg(b"EVAL"),
+        bulk_arg(&valid_script),
+        bulk_arg(b"1"),
+        bulk_arg(b"key"),
+        bulk_arg(payload),
+    ]));
+    let parsed = parse_script_eval_for_fuzz(valid_command)
+        .expect("sanitized SCRIPT EVAL command should parse");
+    assert_eq!(parsed.keys, vec![b"key".to_vec()]);
+    assert_eq!(parsed.argv, vec![payload.to_vec()]);
+    assert_eq!(parsed.lua.lines, 2);
+
+    let arbitrary_script = RespValue::Array(Some(vec![
+        bulk_arg(b"EVAL_RO"),
+        bulk_arg(payload),
+        bulk_arg(b"0"),
+    ]));
+    let _ = parse_script_eval_for_fuzz(arbitrary_script);
+
+    let mismatched_numkeys = RespValue::Array(Some(vec![
+        bulk_arg(b"EVAL"),
+        bulk_arg(b"return 1"),
+        bulk_arg(b"2"),
+        bulk_arg(b"only-one-key"),
+    ]));
+    assert!(
+        parse_script_eval_for_fuzz(mismatched_numkeys).is_err(),
+        "SCRIPT EVAL numkeys larger than provided key count must fail closed"
+    );
+
+    let unterminated_script = RespValue::Array(Some(vec![
+        bulk_arg(b"EVAL"),
+        bulk_arg(b"return 'unterminated"),
+        bulk_arg(b"0"),
+    ]));
+    assert!(
+        parse_script_eval_for_fuzz(unterminated_script).is_err(),
+        "unterminated Lua strings must fail closed"
+    );
+}
+
 /// Test helper functions in isolation
 fn test_helper_functions(data: &[u8]) {
     // Test find_crlf with various scenarios
@@ -629,7 +698,10 @@ fuzz_target!(|data: &[u8]| {
     // Test 10: RESP3 streamed string/aggregate parser seam
     exercise_resp3_streamed_types(data);
 
-    // Test 11: Fragmented parsing simulation (partial buffer scenarios)
+    // Test 11: Redis SCRIPT EVAL command and Lua parser seam
+    exercise_script_eval_parser(data);
+
+    // Test 12: Fragmented parsing simulation (partial buffer scenarios)
     if data.len() > 10 {
         for split_point in [1, data.len() / 4, data.len() / 2, data.len() - 1]
             .iter()
@@ -650,7 +722,7 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    // Test 12: Boundary value testing for limits
+    // Test 13: Boundary value testing for limits
     let boundary_limits = [
         RedisProtocolLimits {
             max_frame_size: data.len().saturating_sub(1).max(1),

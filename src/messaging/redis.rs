@@ -3419,6 +3419,316 @@ pub fn decode_resp_value_for_fuzz(
 }
 
 #[cfg(any(test, feature = "test-internals"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct RedisLuaScriptStats {
+    pub bytes: usize,
+    pub lines: usize,
+    pub comments: usize,
+    pub string_literals: usize,
+    pub max_delimiter_depth: usize,
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub struct RedisScriptEvalCommand {
+    pub readonly: bool,
+    pub script: Vec<u8>,
+    pub numkeys: usize,
+    pub keys: Vec<Vec<u8>>,
+    pub argv: Vec<Vec<u8>>,
+    pub lua: RedisLuaScriptStats,
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn bytes_eq_ignore_ascii_case(left: &[u8], right: &[u8]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn decode_command_arg(value: RespValue, label: &str) -> Result<Vec<u8>, RedisError> {
+    match value {
+        RespValue::BulkString(Some(bytes)) => Ok(bytes),
+        other => Err(RedisError::Protocol(format!(
+            "SCRIPT EVAL {label} must be a non-null bulk string, got {other:?}"
+        ))),
+    }
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn parse_usize_command_arg(bytes: &[u8], label: &str) -> Result<usize, RedisError> {
+    if bytes.is_empty() {
+        return Err(RedisError::Protocol(format!(
+            "SCRIPT EVAL {label} must not be empty"
+        )));
+    }
+
+    let mut acc = 0usize;
+    for &byte in bytes {
+        if !byte.is_ascii_digit() {
+            return Err(RedisError::Protocol(format!(
+                "SCRIPT EVAL {label} contains non-digit byte 0x{byte:02x}"
+            )));
+        }
+        acc = acc
+            .checked_mul(10)
+            .and_then(|value| value.checked_add(usize::from(byte - b'0')))
+            .ok_or_else(|| RedisError::Protocol(format!("SCRIPT EVAL {label} overflow")))?;
+    }
+    Ok(acc)
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn lua_long_bracket_level(script: &[u8], start: usize) -> Option<usize> {
+    if script.get(start) != Some(&b'[') {
+        return None;
+    }
+    let mut pos = start + 1;
+    while script.get(pos) == Some(&b'=') {
+        pos += 1;
+    }
+    if script.get(pos) == Some(&b'[') {
+        Some(pos - start - 1)
+    } else {
+        None
+    }
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn skip_lua_long_bracket(script: &[u8], start: usize, level: usize) -> Result<usize, RedisError> {
+    let mut pos = start + level + 2;
+    while pos < script.len() {
+        if script[pos] == b']' {
+            let mut candidate = pos + 1;
+            let mut matched = true;
+            for _ in 0..level {
+                if script.get(candidate) != Some(&b'=') {
+                    matched = false;
+                    break;
+                }
+                candidate += 1;
+            }
+            if matched && script.get(candidate) == Some(&b']') {
+                return Ok(candidate + 1);
+            }
+        }
+        pos += 1;
+    }
+    Err(RedisError::Protocol(
+        "SCRIPT EVAL Lua long bracket literal is unterminated".to_string(),
+    ))
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn count_newlines(bytes: &[u8]) -> usize {
+    memchr::memchr_iter(b'\n', bytes).count()
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn matching_lua_opener(close: u8) -> Option<u8> {
+    match close {
+        b')' => Some(b'('),
+        b']' => Some(b'['),
+        b'}' => Some(b'{'),
+        _ => None,
+    }
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[allow(clippy::too_many_lines)]
+fn scan_lua_script_for_fuzz(script: &[u8]) -> Result<RedisLuaScriptStats, RedisError> {
+    if script.len() > DEFAULT_MAX_RESP_FRAME_SIZE {
+        return Err(RedisError::Protocol(format!(
+            "SCRIPT EVAL Lua script length {} exceeds maximum {}",
+            script.len(),
+            DEFAULT_MAX_RESP_FRAME_SIZE
+        )));
+    }
+
+    let mut stats = RedisLuaScriptStats {
+        bytes: script.len(),
+        lines: usize::from(!script.is_empty()),
+        comments: 0,
+        string_literals: 0,
+        max_delimiter_depth: 0,
+    };
+    let mut stack = Vec::new();
+    let mut pos = 0usize;
+
+    while pos < script.len() {
+        match script[pos] {
+            b'\n' => {
+                stats.lines += 1;
+                pos += 1;
+            }
+            b'-' if script.get(pos + 1) == Some(&b'-') => {
+                stats.comments += 1;
+                if let Some(level) = lua_long_bracket_level(script, pos + 2) {
+                    let end = skip_lua_long_bracket(script, pos + 2, level)?;
+                    stats.lines += count_newlines(&script[pos..end]);
+                    pos = end;
+                } else {
+                    pos += 2;
+                    while pos < script.len() && script[pos] != b'\n' {
+                        pos += 1;
+                    }
+                }
+            }
+            b'\'' | b'"' => {
+                let quote = script[pos];
+                stats.string_literals += 1;
+                pos += 1;
+                loop {
+                    if pos >= script.len() {
+                        return Err(RedisError::Protocol(
+                            "SCRIPT EVAL Lua short string is unterminated".to_string(),
+                        ));
+                    }
+                    match script[pos] {
+                        b'\\' => {
+                            pos += 1;
+                            if pos >= script.len() {
+                                return Err(RedisError::Protocol(
+                                    "SCRIPT EVAL Lua escape sequence is unterminated".to_string(),
+                                ));
+                            }
+                            pos += 1;
+                        }
+                        b'\r' | b'\n' => {
+                            return Err(RedisError::Protocol(
+                                "SCRIPT EVAL Lua short string contains raw newline".to_string(),
+                            ));
+                        }
+                        byte if byte == quote => {
+                            pos += 1;
+                            break;
+                        }
+                        _ => pos += 1,
+                    }
+                }
+            }
+            b'[' => {
+                if let Some(level) = lua_long_bracket_level(script, pos) {
+                    stats.string_literals += 1;
+                    let end = skip_lua_long_bracket(script, pos, level)?;
+                    stats.lines += count_newlines(&script[pos..end]);
+                    pos = end;
+                } else {
+                    stack.push(b'[');
+                    stats.max_delimiter_depth = stats.max_delimiter_depth.max(stack.len());
+                    pos += 1;
+                }
+            }
+            b'(' | b'{' => {
+                stack.push(script[pos]);
+                stats.max_delimiter_depth = stats.max_delimiter_depth.max(stack.len());
+                pos += 1;
+            }
+            b')' | b']' | b'}' => {
+                let Some(expected) = matching_lua_opener(script[pos]) else {
+                    return Err(RedisError::Protocol(
+                        "SCRIPT EVAL Lua delimiter parser reached unknown closer".to_string(),
+                    ));
+                };
+                if stack.pop() != Some(expected) {
+                    return Err(RedisError::Protocol(
+                        "SCRIPT EVAL Lua delimiters are unbalanced".to_string(),
+                    ));
+                }
+                pos += 1;
+            }
+            _ => pos += 1,
+        }
+    }
+
+    if !stack.is_empty() {
+        return Err(RedisError::Protocol(
+            "SCRIPT EVAL Lua delimiters are unbalanced".to_string(),
+        ));
+    }
+
+    Ok(stats)
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[allow(dead_code)]
+#[doc(hidden)]
+pub fn parse_script_eval_for_fuzz(value: RespValue) -> Result<RedisScriptEvalCommand, RedisError> {
+    let args = match value {
+        RespValue::Array(Some(args)) => args,
+        other => {
+            return Err(RedisError::Protocol(format!(
+                "SCRIPT EVAL command must be a RESP array, got {other:?}"
+            )));
+        }
+    };
+
+    if args.len() < 3 {
+        return Err(RedisError::Protocol(
+            "SCRIPT EVAL command requires command, script, and numkeys".to_string(),
+        ));
+    }
+
+    let mut iter = args.into_iter();
+    let command = decode_command_arg(
+        iter.next().ok_or_else(|| {
+            RedisError::Protocol("SCRIPT EVAL command missing command name".to_string())
+        })?,
+        "command",
+    )?;
+    let readonly = if bytes_eq_ignore_ascii_case(&command, b"EVAL") {
+        false
+    } else if bytes_eq_ignore_ascii_case(&command, b"EVAL_RO") {
+        true
+    } else {
+        return Err(RedisError::Protocol(format!(
+            "SCRIPT EVAL command must be EVAL or EVAL_RO, got {}",
+            String::from_utf8_lossy(&command)
+        )));
+    };
+
+    let script = decode_command_arg(
+        iter.next()
+            .ok_or_else(|| RedisError::Protocol("SCRIPT EVAL missing script".to_string()))?,
+        "script",
+    )?;
+    let numkeys_bytes = decode_command_arg(
+        iter.next()
+            .ok_or_else(|| RedisError::Protocol("SCRIPT EVAL missing numkeys".to_string()))?,
+        "numkeys",
+    )?;
+    let numkeys = parse_usize_command_arg(&numkeys_bytes, "numkeys")?;
+    let remaining: Vec<Vec<u8>> = iter
+        .enumerate()
+        .map(|(index, value)| decode_command_arg(value, &format!("arg[{index}]")))
+        .collect::<Result<_, _>>()?;
+    if remaining.len() < numkeys {
+        return Err(RedisError::Protocol(format!(
+            "SCRIPT EVAL numkeys {numkeys} exceeds remaining argument count {}",
+            remaining.len()
+        )));
+    }
+
+    let lua = scan_lua_script_for_fuzz(&script)?;
+    let keys = remaining[..numkeys].to_vec();
+    let argv = remaining[numkeys..].to_vec();
+
+    Ok(RedisScriptEvalCommand {
+        readonly,
+        script,
+        numkeys,
+        keys,
+        argv,
+        lua,
+    })
+}
+
+#[cfg(any(test, feature = "test-internals"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[doc(hidden)]
 pub enum FuzzPubSubLane {
@@ -3729,6 +4039,87 @@ mod tests {
             ]))
         );
         assert_eq!(n, 18);
+    }
+
+    fn bulk_arg(bytes: impl AsRef<[u8]>) -> RespValue {
+        RespValue::BulkString(Some(bytes.as_ref().to_vec()))
+    }
+
+    #[test]
+    fn script_eval_parser_splits_script_keys_and_argv() {
+        let command = RespValue::Array(Some(vec![
+            bulk_arg("EVAL"),
+            bulk_arg("return redis.call('GET', KEYS[1])"),
+            bulk_arg("2"),
+            bulk_arg("key-a"),
+            bulk_arg("key-b"),
+            bulk_arg("arg-a"),
+        ]));
+
+        let parsed = parse_script_eval_for_fuzz(command).expect("valid EVAL command should parse");
+
+        assert!(!parsed.readonly);
+        assert_eq!(parsed.numkeys, 2);
+        assert_eq!(parsed.keys, vec![b"key-a".to_vec(), b"key-b".to_vec()]);
+        assert_eq!(parsed.argv, vec![b"arg-a".to_vec()]);
+        assert_eq!(parsed.lua.string_literals, 1);
+        assert_eq!(parsed.lua.max_delimiter_depth, 2);
+    }
+
+    #[test]
+    fn script_eval_parser_accepts_eval_ro_long_comments_and_long_strings() {
+        let script =
+            b"--[=[ comment with bracket text ]=]\nlocal value = [==[payload]==]\nreturn value";
+        let command = RespValue::Array(Some(vec![
+            bulk_arg("eval_ro"),
+            bulk_arg(script),
+            bulk_arg("0"),
+            bulk_arg("arg-only"),
+        ]));
+
+        let parsed =
+            parse_script_eval_for_fuzz(command).expect("valid EVAL_RO command should parse");
+
+        assert!(parsed.readonly);
+        assert_eq!(parsed.keys, Vec::<Vec<u8>>::new());
+        assert_eq!(parsed.argv, vec![b"arg-only".to_vec()]);
+        assert_eq!(parsed.lua.comments, 1);
+        assert_eq!(parsed.lua.string_literals, 1);
+        assert_eq!(parsed.lua.lines, 3);
+    }
+
+    #[test]
+    fn script_eval_parser_rejects_malformed_command_shapes() {
+        let bad_numkeys = RespValue::Array(Some(vec![
+            bulk_arg("EVAL"),
+            bulk_arg("return 1"),
+            bulk_arg("2"),
+            bulk_arg("only-one-key"),
+        ]));
+        assert!(matches!(
+            parse_script_eval_for_fuzz(bad_numkeys),
+            Err(RedisError::Protocol(msg)) if msg.contains("exceeds remaining")
+        ));
+
+        let bad_lua = RespValue::Array(Some(vec![
+            bulk_arg("EVAL"),
+            bulk_arg("return 'unterminated"),
+            bulk_arg("0"),
+        ]));
+        assert!(matches!(
+            parse_script_eval_for_fuzz(bad_lua),
+            Err(RedisError::Protocol(msg)) if msg.contains("unterminated")
+        ));
+
+        let null_arg = RespValue::Array(Some(vec![
+            bulk_arg("EVAL"),
+            RespValue::BulkString(None),
+            bulk_arg("0"),
+        ]));
+        assert!(matches!(
+            parse_script_eval_for_fuzz(null_arg),
+            Err(RedisError::Protocol(msg)) if msg.contains("non-null bulk string")
+        ));
     }
 
     #[test]
