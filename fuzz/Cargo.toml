@@ -4356,7 +4356,19 @@ test = false
 doc = false
 
 [[bin]]
+name = "h2_headers_frame_size_cap_concurrent"
+path = "fuzz_targets/h2_headers_frame_size_cap_concurrent.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "oneshot_sender_close_receiver_poll"
 path = "fuzz_targets/oneshot_sender_close_receiver_poll.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "mutex_arc_clone_race"
+path = "fuzz_targets/mutex_arc_clone_race.rs"
 test = false
 doc = false
