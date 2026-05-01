@@ -949,6 +949,12 @@ impl KafkaSaslMechanism {
 }
 
 /// SASL/SCRAM credentials for Kafka clients.
+///
+/// The Kafka feature delegates SCRAM handshakes to librdkafka today. Any
+/// repo-local SCRAM implementation must reject salts shorter than 8 bytes,
+/// reject iteration counts outside `4096..=65536`, verify server-final proofs
+/// with a constant-time comparison, and keep authentication on `SASL_SSL`
+/// instead of introducing a plaintext SASL transport.
 #[derive(Clone, PartialEq, Eq)]
 pub struct KafkaSaslConfig {
     /// SCRAM mechanism.
