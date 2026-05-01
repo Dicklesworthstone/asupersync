@@ -204,7 +204,7 @@ fn sanitize_cstring(bytes: Vec<u8>) -> String {
         .into_iter()
         .filter(|&byte| byte != 0)
         .take(MAX_NAME_BYTES)
-        .map(|byte| char::from(byte % 0x80))
+        .map(|byte| char::from(1 + (byte % 0x7f)))
         .collect()
 }
 
