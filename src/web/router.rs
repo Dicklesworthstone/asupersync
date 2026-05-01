@@ -784,6 +784,45 @@ mod tests {
     }
 
     #[test]
+    fn route_priority_wildcard_cannot_shadow_parameter_auth_path() {
+        use crate::web::extract::Path;
+        use crate::web::handler::FnHandler1;
+
+        fn public_wildcard(
+            Path(_params): Path<std::collections::HashMap<String, String>>,
+        ) -> StatusCode {
+            StatusCode::OK
+        }
+
+        fn protected_param(Path(_tenant): Path<String>) -> StatusCode {
+            StatusCode::UNAUTHORIZED
+        }
+
+        let router = Router::new()
+            .route(
+                "/admin/*",
+                get(FnHandler1::<
+                    _,
+                    Path<std::collections::HashMap<String, String>>,
+                >::new(public_wildcard))
+                .post(FnHandler1::<
+                    _,
+                    Path<std::collections::HashMap<String, String>>,
+                >::new(public_wildcard)),
+            )
+            .route(
+                "/admin/:tenant/secret",
+                get(FnHandler1::<_, Path<String>>::new(protected_param)),
+            );
+
+        let resp = router.handle(Request::new("GET", "/admin/acme/secret"));
+        assert_eq!(resp.status, StatusCode::UNAUTHORIZED);
+
+        let resp = router.handle(Request::new("POST", "/admin/acme/secret"));
+        assert_eq!(resp.status, StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[test]
     fn nested_router() {
         let api = Router::new().route("/users", get(FnHandler::new(ok_handler)));
 
