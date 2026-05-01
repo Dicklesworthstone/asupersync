@@ -2926,6 +2926,22 @@ mod tests {
     }
 
     #[test]
+    fn producer_config_rejects_mixed_loopback_and_remote_plaintext_bootstrap() {
+        let mixed = ProducerConfig::new(vec![
+            "127.0.0.1:9092".into(),
+            "broker.example.com:9092".into(),
+        ]);
+
+        let err = mixed
+            .validate()
+            .expect_err("any remote plaintext bootstrap server must fail closed");
+        assert!(
+            matches!(&err, KafkaError::Config(msg) if msg.contains("broker.example.com") && msg.contains("TLS or SASL_SSL")),
+            "error should identify the rejected remote plaintext broker: {err}"
+        );
+    }
+
+    #[test]
     fn kafka_client_consumer_group_id_requires_nonempty_client_id() {
         let err = kafka_client_consumer_group_id(&ProducerConfig::default(), "orders").expect_err(
             "KafkaClient consumer wrapper must fail closed without a caller-scoped identity",
