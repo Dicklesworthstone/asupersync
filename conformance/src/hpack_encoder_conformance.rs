@@ -35,10 +35,22 @@ impl fmt::Display for EncoderTestVerdict {
 pub struct HpackEncoderConformanceCase {
     pub id: String,
     pub description: String,
+    /// Initial dynamic table size to construct the encoder/decoder with.
+    ///
+    /// This is distinct from `max_table_size`: h2's encoder tests can start
+    /// with a non-default table size without emitting an on-wire table-size
+    /// update first.
+    pub initial_max_table_size: Option<usize>,
+    /// Header blocks encoded before `headers` to establish dynamic table state.
+    pub prelude_blocks: Vec<Vec<Header>>,
     pub headers: Vec<Header>,
     pub max_table_size: Option<usize>,
     pub use_huffman: bool,
     pub expected_identical: bool, // Whether outputs should be byte-identical
+    /// Golden bytes captured from hyperium/h2 for the final `headers` block.
+    pub h2_golden_output: Option<Vec<u8>>,
+    /// Golden dynamic table byte size after the final h2 encode.
+    pub h2_golden_table_size: Option<usize>,
 }
 
 /// Result of running a single encoder test case.
@@ -95,6 +107,8 @@ impl HpackEncoderConformanceTester {
             HpackEncoderConformanceCase {
                 id: "ENC-001".to_string(),
                 description: "Simple header without indexing".to_string(),
+                initial_max_table_size: None,
+                prelude_blocks: Vec::new(),
                 headers: vec![Header {
                     name: "custom-header".to_string(),
                     value: "custom-value".to_string(),
@@ -102,10 +116,14 @@ impl HpackEncoderConformanceTester {
                 max_table_size: None,
                 use_huffman: false,
                 expected_identical: true,
+                h2_golden_output: None,
+                h2_golden_table_size: None,
             },
             HpackEncoderConformanceCase {
                 id: "ENC-002".to_string(),
                 description: "Common headers using static table".to_string(),
+                initial_max_table_size: None,
+                prelude_blocks: Vec::new(),
                 headers: vec![
                     Header {
                         name: ":method".to_string(),
@@ -127,10 +145,14 @@ impl HpackEncoderConformanceTester {
                 max_table_size: None,
                 use_huffman: false,
                 expected_identical: true,
+                h2_golden_output: None,
+                h2_golden_table_size: None,
             },
             HpackEncoderConformanceCase {
                 id: "ENC-003".to_string(),
                 description: "Headers with Huffman encoding".to_string(),
+                initial_max_table_size: None,
+                prelude_blocks: Vec::new(),
                 headers: vec![
                     Header {
                         name: "user-agent".to_string(),
@@ -144,10 +166,14 @@ impl HpackEncoderConformanceTester {
                 max_table_size: None,
                 use_huffman: true,
                 expected_identical: true,
+                h2_golden_output: None,
+                h2_golden_table_size: None,
             },
             HpackEncoderConformanceCase {
                 id: "ENC-004".to_string(),
                 description: "Dynamic table indexing".to_string(),
+                initial_max_table_size: None,
+                prelude_blocks: Vec::new(),
                 headers: vec![
                     Header {
                         name: "x-custom-header".to_string(),
@@ -165,10 +191,14 @@ impl HpackEncoderConformanceTester {
                 max_table_size: Some(4096),
                 use_huffman: false,
                 expected_identical: true,
+                h2_golden_output: None,
+                h2_golden_table_size: None,
             },
             HpackEncoderConformanceCase {
                 id: "ENC-005".to_string(),
                 description: "Small dynamic table eviction".to_string(),
+                initial_max_table_size: None,
+                prelude_blocks: Vec::new(),
                 headers: vec![
                     Header {
                         name: "large-header-name-that-exceeds".to_string(),
@@ -182,18 +212,26 @@ impl HpackEncoderConformanceTester {
                 max_table_size: Some(128), // Small table to force eviction
                 use_huffman: false,
                 expected_identical: true,
+                h2_golden_output: None,
+                h2_golden_table_size: None,
             },
             HpackEncoderConformanceCase {
                 id: "ENC-006".to_string(),
                 description: "Empty headers list".to_string(),
+                initial_max_table_size: None,
+                prelude_blocks: Vec::new(),
                 headers: vec![],
                 max_table_size: None,
                 use_huffman: false,
                 expected_identical: true,
+                h2_golden_output: None,
+                h2_golden_table_size: None,
             },
             HpackEncoderConformanceCase {
                 id: "ENC-007".to_string(),
                 description: "Headers with empty values".to_string(),
+                initial_max_table_size: None,
+                prelude_blocks: Vec::new(),
                 headers: vec![
                     Header {
                         name: "empty-value".to_string(),
@@ -207,10 +245,14 @@ impl HpackEncoderConformanceTester {
                 max_table_size: None,
                 use_huffman: false,
                 expected_identical: true,
+                h2_golden_output: None,
+                h2_golden_table_size: None,
             },
             HpackEncoderConformanceCase {
                 id: "ENC-008".to_string(),
                 description: "Duplicate header names".to_string(),
+                initial_max_table_size: None,
+                prelude_blocks: Vec::new(),
                 headers: vec![
                     Header {
                         name: "cookie".to_string(),
@@ -228,6 +270,35 @@ impl HpackEncoderConformanceTester {
                 max_table_size: None,
                 use_huffman: false,
                 expected_identical: true,
+                h2_golden_output: None,
+                h2_golden_table_size: None,
+            },
+            HpackEncoderConformanceCase {
+                id: "ENC-009".to_string(),
+                description: "hyperium/h2 dynamic table eviction preserves evicted name reference"
+                    .to_string(),
+                initial_max_table_size: Some(76),
+                prelude_blocks: vec![
+                    vec![Header {
+                        name: "foo".to_string(),
+                        value: "bar".to_string(),
+                    }],
+                    vec![Header {
+                        name: "bar".to_string(),
+                        value: "foo".to_string(),
+                    }],
+                ],
+                headers: vec![Header {
+                    name: "foo".to_string(),
+                    value: "baz".to_string(),
+                }],
+                max_table_size: None,
+                use_huffman: true,
+                expected_identical: true,
+                // hyperium/h2 0.4.13 hpack::encoder::test_evicting_headers_when_multiple_of_same_name_are_in_table
+                // emits: dynamic name index 63, extended integer zero, Huffman "baz".
+                h2_golden_output: Some(vec![0x7f, 0x00, 0x83, 0x8c, 0x7e, 0xff]),
+                h2_golden_table_size: Some(76),
             },
         ]
     }
@@ -258,33 +329,57 @@ impl HpackEncoderConformanceTester {
     /// Run a single encoder conformance test case.
     async fn run_single_test(&self, case: &HpackEncoderConformanceCase) -> HpackEncoderTestResult {
         // Test our encoder
-        let mut asupersync_encoder = AsupersyncEncoder::new();
+        let mut asupersync_encoder = match case.initial_max_table_size {
+            Some(size) => AsupersyncEncoder::with_max_size(size),
+            None => AsupersyncEncoder::new(),
+        };
         if let Some(size) = case.max_table_size {
             asupersync_encoder.set_max_table_size(size);
         }
         asupersync_encoder.set_use_huffman(case.use_huffman);
+
+        let mut prelude_outputs = Vec::with_capacity(case.prelude_blocks.len());
+        for headers in &case.prelude_blocks {
+            let mut prelude_buf = BytesMut::new();
+            asupersync_encoder.encode(headers, &mut prelude_buf);
+            prelude_outputs.push(prelude_buf.to_vec());
+        }
 
         let mut asupersync_buf = BytesMut::new();
         asupersync_encoder.encode(&case.headers, &mut asupersync_buf);
         let asupersync_output = asupersync_buf.to_vec();
         let asupersync_table_size = asupersync_encoder.dynamic_table_size();
 
-        let roundtrip_error = decode_asupersync_output(&asupersync_output, &case.headers).err();
-        let h2_output = Vec::new();
-        let h2_table_size = 0;
-        let bytes_match = false;
-        let table_size_match = true;
+        let roundtrip_error =
+            decode_asupersync_sequence(case, &prelude_outputs, &asupersync_output).err();
+        let h2_output = case.h2_golden_output.clone().unwrap_or_default();
+        let h2_table_size = case.h2_golden_table_size.unwrap_or(0);
+        let bytes_match = case
+            .h2_golden_output
+            .as_ref()
+            .is_some_and(|expected| expected == &asupersync_output);
+        let table_size_match = case
+            .h2_golden_table_size
+            .is_none_or(|expected| expected == asupersync_table_size);
 
-        let (verdict, error) = if let Some(error) = roundtrip_error {
-            (EncoderTestVerdict::Fail, Some(error))
-        } else {
-            (
+        let (verdict, error) = match (&case.h2_golden_output, roundtrip_error) {
+            (_, Some(error)) => (EncoderTestVerdict::Fail, Some(error)),
+            (Some(_), None) if bytes_match && table_size_match => {
+                (EncoderTestVerdict::Pass, None)
+            }
+            (Some(expected), None) => (
+                EncoderTestVerdict::Fail,
+                Some(format!(
+                    "asupersync HPACK output diverged from h2 golden: actual={asupersync_output:?}, expected={expected:?}, actual_table_size={asupersync_table_size}, expected_table_size={h2_table_size}"
+                )),
+            ),
+            (None, None) => (
                 EncoderTestVerdict::Skipped,
                 Some(
                     "h2 crate HPACK encoder internals are private; byte-differential reference output is unavailable"
                         .to_string(),
                 ),
-            )
+            ),
         };
 
         HpackEncoderTestResult {
@@ -412,15 +507,39 @@ impl HpackEncoderConformanceTester {
     }
 }
 
-fn decode_asupersync_output(encoded: &[u8], expected: &[Header]) -> Result<(), String> {
-    let mut decoder = HpackDecoder::new();
+fn decode_asupersync_sequence(
+    case: &HpackEncoderConformanceCase,
+    prelude_outputs: &[Vec<u8>],
+    encoded: &[u8],
+) -> Result<(), String> {
+    let mut decoder = match case.initial_max_table_size {
+        Some(size) => HpackDecoder::with_max_size(size),
+        None => HpackDecoder::new(),
+    };
+
+    if let Some(size) = case.max_table_size {
+        decoder.set_allowed_table_size(size);
+    }
+
+    for (index, (prelude, expected)) in prelude_outputs.iter().zip(&case.prelude_blocks).enumerate()
+    {
+        let mut src = Bytes::copy_from_slice(prelude);
+        let decoded = decoder.decode(&mut src).map_err(|err| err.to_string())?;
+        if decoded != *expected {
+            return Err(format!(
+                "asupersync HPACK prelude block {index} round trip differed: decoded={decoded:?}, expected={expected:?}"
+            ));
+        }
+    }
+
     let mut src = Bytes::copy_from_slice(encoded);
     let decoded = decoder.decode(&mut src).map_err(|err| err.to_string())?;
-    if decoded == expected {
+    if decoded == case.headers {
         Ok(())
     } else {
         Err(format!(
-            "asupersync HPACK encode/decode round trip differed: decoded={decoded:?}, expected={expected:?}"
+            "asupersync HPACK encode/decode round trip differed: decoded={decoded:?}, expected={:?}",
+            case.headers
         ))
     }
 }
@@ -428,5 +547,32 @@ fn decode_asupersync_output(encoded: &[u8], expected: &[Header]) -> Result<(), S
 impl Default for HpackEncoderConformanceTester {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EncoderTestVerdict, HpackEncoderConformanceTester};
+
+    #[tokio::test]
+    async fn h2_dynamic_eviction_golden_case_passes() {
+        let tester = HpackEncoderConformanceTester::new();
+        let case = tester
+            .test_cases
+            .iter()
+            .find(|case| case.id == "ENC-009")
+            .expect("ENC-009 golden case present");
+
+        let result = tester.run_single_test(case).await;
+
+        assert_eq!(result.verdict, EncoderTestVerdict::Pass);
+        assert_eq!(
+            result.asupersync_output,
+            vec![0x7f, 0x00, 0x83, 0x8c, 0x7e, 0xff]
+        );
+        assert_eq!(result.h2_output, result.asupersync_output);
+        assert!(result.bytes_match);
+        assert!(result.table_size_match);
+        assert_eq!(result.asupersync_table_size, 76);
     }
 }
