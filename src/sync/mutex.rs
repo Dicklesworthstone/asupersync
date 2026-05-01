@@ -1848,124 +1848,67 @@ mod tests {
         assert!(poisoned.to_string().contains("poisoned"));
     }
 
-    /// Audit test for lock acquisition fairness under cancellation.
-    ///
-    /// Verifies that when 3+ tasks contend for the same Mutex and one is cancelled
-    /// mid-acquire, the next task in FIFO order acquires the lock (correct behavior:
-    /// cancelled task removes itself from queue, next waiter gets priority).
     #[test]
     fn audit_mutex_fifo_fairness_with_cancellation() {
-        let mut runtime = crate::lab::LabRuntime::new(crate::lab::LabConfig::new(42));
-        let region = runtime
-            .state
-            .create_root_region(crate::types::Budget::INFINITE);
+        init_test("audit_mutex_fifo_fairness_with_cancellation");
 
-        let mutex = Arc::new(Mutex::new(0u32));
-        let completed_tasks = Arc::new(StdMutex::new(Vec::new()));
+        let holder_cx = test_cx();
+        let cancelled_cx = Cx::new(
+            RegionId::from_arena(ArenaIndex::new(0, 101)),
+            TaskId::from_arena(ArenaIndex::new(0, 101)),
+            Budget::INFINITE,
+        );
+        let third_cx = Cx::new(
+            RegionId::from_arena(ArenaIndex::new(0, 102)),
+            TaskId::from_arena(ArenaIndex::new(0, 102)),
+            Budget::INFINITE,
+        );
+        let fourth_cx = Cx::new(
+            RegionId::from_arena(ArenaIndex::new(0, 103)),
+            TaskId::from_arena(ArenaIndex::new(0, 103)),
+            Budget::INFINITE,
+        );
+        let mutex = Mutex::new(0u32);
 
-        // Task 1: Hold the lock initially
-        let mutex1 = Arc::clone(&mutex);
-        let completed1 = Arc::clone(&completed_tasks);
-        let (task1_id, _task1_handle) = runtime
-            .state
-            .create_task(region, crate::types::Budget::INFINITE, async move {
-                let _guard = mutex1.lock(&test_cx()).await.expect("task1 lock");
-                completed1.lock().unwrap().push("task1");
-                // Hold for 2 time units to ensure other tasks queue up
-                crate::time::sleep(
-                    crate::time::wall_now(),
-                    std::time::Duration::from_millis(2)
-                ).await;
-                // Lock released when guard drops
-                Ok::<_, crate::error::Error>(())
-            })
-            .unwrap();
+        let mut holder_fut = mutex.lock(&holder_cx);
+        let holder_guard = poll_once(&mut holder_fut)
+            .expect("holder should acquire immediately")
+            .expect("holder lock should succeed");
 
-        // Task 2: Will be cancelled while waiting
-        let mutex2 = Arc::clone(&mutex);
-        let completed2 = Arc::clone(&completed_tasks);
-        let (task2_id, task2_handle) = runtime
-            .state
-            .create_task(region, crate::types::Budget::INFINITE, async move {
-                let result = mutex2.lock(&test_cx()).await;
-                match result {
-                    Ok(_guard) => {
-                        completed2.lock().unwrap().push("task2");
-                        Ok::<_, crate::error::Error>(())
-                    }
-                    Err(LockError::Cancelled) => {
-                        completed2.lock().unwrap().push("task2_cancelled");
-                        Ok::<_, crate::error::Error>(())
-                    }
-                    Err(e) => Err(crate::error::Error::cancelled(&format!("{e:?}"))),
-                }
-            })
-            .unwrap();
+        let mut cancelled_waiter = mutex.lock(&cancelled_cx);
+        let mut third_waiter = mutex.lock(&third_cx);
+        let mut fourth_waiter = mutex.lock(&fourth_cx);
 
-        // Task 3: Should acquire after task2 is cancelled (FIFO order preserved)
-        let mutex3 = Arc::clone(&mutex);
-        let completed3 = Arc::clone(&completed_tasks);
-        let (task3_id, _task3_handle) = runtime
-            .state
-            .create_task(region, crate::types::Budget::INFINITE, async move {
-                let _guard = mutex3.lock(&test_cx()).await.expect("task3 lock");
-                completed3.lock().unwrap().push("task3");
-                Ok::<_, crate::error::Error>(())
-            })
-            .unwrap();
+        assert!(poll_once(&mut cancelled_waiter).is_none());
+        assert!(poll_once(&mut third_waiter).is_none());
+        assert!(poll_once(&mut fourth_waiter).is_none());
+        assert_eq!(mutex.waiters(), 3, "three waiters should queue");
 
-        // Task 4: Should acquire after task3 (verify queue integrity)
-        let mutex4 = Arc::clone(&mutex);
-        let completed4 = Arc::clone(&completed_tasks);
-        let (task4_id, _task4_handle) = runtime
-            .state
-            .create_task(region, crate::types::Budget::INFINITE, async move {
-                let _guard = mutex4.lock(&test_cx()).await.expect("task4 lock");
-                completed4.lock().unwrap().push("task4");
-                Ok::<_, crate::error::Error>(())
-            })
-            .unwrap();
+        cancelled_cx.set_cancel_requested(true);
+        assert!(matches!(
+            poll_once(&mut cancelled_waiter),
+            Some(Err(LockError::Cancelled))
+        ));
+        assert_eq!(mutex.waiters(), 2, "cancelled waiter should be removed");
 
-        // Schedule tasks in sequence to ensure proper queue order
-        runtime.scheduler.lock().schedule(task1_id, 0);
-        runtime.scheduler.lock().schedule(task2_id, 1); // Starts waiting after task1 has lock
-        runtime.scheduler.lock().schedule(task3_id, 2); // Queues after task2
-        runtime.scheduler.lock().schedule(task4_id, 3); // Queues after task3
+        drop(holder_guard);
 
-        // Let task1 start and hold the lock, tasks 2,3,4 queue up
-        runtime.advance_time_by(std::time::Duration::from_millis(1));
+        assert!(
+            poll_once(&mut fourth_waiter).is_none(),
+            "fourth waiter must not bypass the earlier live waiter"
+        );
 
-        // Verify tasks 2,3,4 are waiting (check mutex state)
-        assert_eq!(mutex.waiters(), 3, "3 tasks should be waiting for the lock");
+        let third_guard = poll_once(&mut third_waiter)
+            .expect("third waiter should acquire after holder drops")
+            .expect("third lock should succeed");
+        drop(third_guard);
 
-        // Cancel task2 while it's waiting
-        task2_handle.cancel(crate::types::CancelReason::default());
+        let fourth_guard = poll_once(&mut fourth_waiter)
+            .expect("fourth waiter should acquire after third drops")
+            .expect("fourth lock should succeed");
+        drop(fourth_guard);
 
-        // Advance time to let task1 finish and release lock
-        runtime.advance_time_by(std::time::Duration::from_millis(2));
-
-        // Run until all tasks complete
-        runtime.run_until_quiescent();
-
-        // Verify execution order: task1 → task2_cancelled → task3 → task4
-        let execution_order = completed_tasks.lock().unwrap();
-
-        // Expected order based on FIFO fairness:
-        // 1. task1 completes first (held lock)
-        // 2. task2_cancelled (cancelled while waiting)
-        // 3. task3 acquires next (was behind task2 in queue, gets lock after cancellation)
-        // 4. task4 acquires last (was behind task3 in queue)
-
-        assert_eq!(execution_order.len(), 4, "All 4 tasks should have completed");
-        assert_eq!(execution_order[0], "task1", "Task1 should complete first");
-        assert_eq!(execution_order[1], "task2_cancelled", "Task2 should be cancelled");
-        assert_eq!(execution_order[2], "task3", "Task3 should acquire lock after task2 cancellation (FIFO preserved)");
-        assert_eq!(execution_order[3], "task4", "Task4 should acquire lock last");
-
-        // Verify mutex is unlocked and no waiters remain
-        assert!(!mutex.is_locked(), "Mutex should be unlocked after all tasks complete");
-        assert_eq!(mutex.waiters(), 0, "No waiters should remain");
-
-        println!("FIFO fairness verified: cancelled task removed from queue, next task in order acquired lock");
+        assert!(!mutex.is_locked(), "mutex should be unlocked");
+        assert_eq!(mutex.waiters(), 0, "no waiters should remain");
     }
 }

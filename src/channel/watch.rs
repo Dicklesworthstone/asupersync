@@ -2986,7 +2986,6 @@ mod tests {
     fn audit_concurrent_send_during_borrow_and_update() {
         init_test("audit_concurrent_send_during_borrow_and_update");
 
-        let cx = test_cx();
         let (tx, mut rx) = channel::<u32>(0);
 
         // Test 1: Verify atomic read of value/version pair

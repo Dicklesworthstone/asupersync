@@ -906,6 +906,50 @@ mod tests {
         assert_eq!(table.pending_obligations(id), Some(0));
     }
 
+    /// REGRESSION: Region close MUST block when obligations remain.
+    ///
+    /// Per AGENTS.md core invariant "no obligation leaks", region close
+    /// must be blocked until all obligations are resolved. This test
+    /// verifies the blocking behavior is correctly implemented.
+    #[test]
+    fn regression_region_close_blocks_on_pending_obligations() {
+        let mut table = RegionTable::new();
+        let region = table.create_root(Budget::default(), Time::ZERO);
+        let region_record = table.get(region.arena_index()).unwrap();
+
+        // Reserve an obligation (simulating a held lock)
+        assert!(region_record.try_reserve_obligation().is_ok());
+        assert_eq!(table.pending_obligations(region), Some(1));
+
+        // Begin region close
+        assert!(region_record.begin_close(None));
+        assert!(region_record.begin_finalize());
+
+        // CRITICAL: Close must block while obligation remains
+        assert!(
+            !region_record.complete_close(),
+            "Region close MUST block when obligations are pending"
+        );
+        assert_eq!(
+            region_record.state(),
+            crate::record::region::RegionState::Finalizing
+        );
+
+        // Resolve the obligation
+        region_record.resolve_obligation();
+        assert_eq!(table.pending_obligations(region), Some(0));
+
+        // Now close should succeed
+        assert!(
+            region_record.complete_close(),
+            "Region close should succeed after obligations are resolved"
+        );
+        assert_eq!(
+            region_record.state(),
+            crate::record::region::RegionState::Closed
+        );
+    }
+
     #[test]
     fn close_quiescence_race_spawn_after_begin_close_blocked() {
         // Test the specific race: region begins close, then child tries to spawn
@@ -918,15 +962,12 @@ mod tests {
             .unwrap();
 
         // Step 1: Begin close on parent (this sets state to Closing)
-        let parent_record = table.get(parent.arena_index()).unwrap();
-        let child_record = table.get(child.arena_index()).unwrap();
-
         // Verify initial state
         assert_eq!(table.state(parent), Some(RegionState::Open));
         assert_eq!(table.state(child), Some(RegionState::Open));
 
         // Begin close on parent
-        let close_result = parent_record.begin_close(None);
+        let close_result = table.get(parent.arena_index()).unwrap().begin_close(None);
         assert!(close_result, "Parent close should succeed");
         assert_eq!(table.state(parent), Some(RegionState::Closing));
 
@@ -952,7 +993,7 @@ mod tests {
         let grandchild = grandchild_on_child.unwrap();
 
         // Step 4: Now begin close on child as well
-        let child_close = child_record.begin_close(None);
+        let child_close = table.get(child.arena_index()).unwrap().begin_close(None);
         assert!(child_close, "Child close should succeed");
         assert_eq!(table.state(child), Some(RegionState::Closing));
 
@@ -968,8 +1009,11 @@ mod tests {
         );
 
         // Step 6: Verify quiescence check sees all children
-        parent_record.begin_finalize();
-        let parent_close_attempt = parent_record.complete_close();
+        let parent_close_attempt = {
+            let parent_record = table.get(parent.arena_index()).unwrap();
+            parent_record.begin_finalize();
+            parent_record.complete_close()
+        };
         assert!(
             !parent_close_attempt,
             "Parent should not close while child and grandchild are still live"
@@ -985,17 +1029,23 @@ mod tests {
         assert_eq!(child_children[0], grandchild);
 
         // Step 7: Clean up grandchild first
-        child_record.begin_finalize();
-        child_record.remove_child(grandchild);
-        let child_close_attempt = child_record.complete_close();
+        let child_close_attempt = {
+            let child_record = table.get(child.arena_index()).unwrap();
+            child_record.begin_finalize();
+            child_record.remove_child(grandchild);
+            child_record.complete_close()
+        };
         assert!(
             child_close_attempt,
             "Child should close after grandchild removed"
         );
 
         // Step 8: Now parent should be able to close
-        parent_record.remove_child(child);
-        let final_parent_close = parent_record.complete_close();
+        let final_parent_close = {
+            let parent_record = table.get(parent.arena_index()).unwrap();
+            parent_record.remove_child(child);
+            parent_record.complete_close()
+        };
         assert!(
             final_parent_close,
             "Parent should close after child removed"

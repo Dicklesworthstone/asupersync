@@ -5596,158 +5596,112 @@ mod tests {
     }
 
     /// Audit test for object pool acquisition FIFO behavior when exhausted.
-    ///
-    /// Verifies that when pool is exhausted and new acquire is requested,
-    /// callers wait in FIFO order (correct), not LIFO (could starve) or
-    /// panic (definitely wrong). Per asupersync sync semantics, must be
-    /// FIFO with cancel-aware behavior.
     #[test]
     fn audit_pool_exhausted_fifo_acquisition() {
         init_test("audit_pool_exhausted_fifo_acquisition");
 
-        // Create pool with capacity 1 to force exhaustion
         let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(1));
-        let cx = test_cx();
+        let cx = Cx::for_testing();
+        let held = futures_lite::future::block_on(pool.acquire(&cx)).expect("first acquire");
+        let waker = noop_pool_waker();
+        let mut task_cx = Context::from_waker(&waker);
+        let mut first_waiter = pool.acquire(&cx);
+        let mut second_waiter = pool.acquire(&cx);
 
-        let acquisition_order = Arc::new(StdMutex::new(Vec::new()));
+        assert!(first_waiter.as_mut().poll(&mut task_cx).is_pending());
+        assert!(second_waiter.as_mut().poll(&mut task_cx).is_pending());
+        assert_eq!(pool.stats().waiters, 2, "two waiters should be queued");
 
-        // Hold the only resource to exhaust the pool
-        let held_resource = futures_lite::future::block_on(pool.acquire(&cx))
-            .expect("first acquire should succeed");
+        held.return_to_pool();
 
-        // Verify pool is exhausted
-        assert!(pool.try_acquire().is_none(), "pool should be exhausted");
-        assert_eq!(pool.stats().active, 1, "one resource should be active");
-        assert_eq!(pool.stats().idle, 0, "no idle resources");
+        assert!(
+            second_waiter.as_mut().poll(&mut task_cx).is_pending(),
+            "later waiter must not bypass the earlier queued waiter"
+        );
 
-        // Create 3 waiters that will queue up in FIFO order
-        let mut handles = Vec::new();
-        for waiter_id in 1..=3 {
-            let pool_clone = pool.clone();
-            let order_clone = Arc::clone(&acquisition_order);
-            let cx_clone = cx.clone();
+        let first_resource = match first_waiter.as_mut().poll(&mut task_cx) {
+            Poll::Ready(Ok(resource)) => resource,
+            Poll::Ready(Err(error)) => {
+                panic!("first waiter should acquire returned resource, got error: {error}")
+            }
+            Poll::Pending => panic!("first waiter should acquire returned resource"),
+        };
+        assert_eq!(pool.stats().waiters, 1, "second waiter remains queued");
 
-            let handle = std::thread::spawn(move || {
-                let resource = futures_lite::future::block_on(pool_clone.acquire(&cx_clone))
-                    .expect("waiter should eventually acquire");
+        first_resource.return_to_pool();
 
-                // Record acquisition order
-                order_clone.lock().unwrap().push(waiter_id);
+        let second_resource = match second_waiter.as_mut().poll(&mut task_cx) {
+            Poll::Ready(Ok(resource)) => resource,
+            Poll::Ready(Err(error)) => {
+                panic!("second waiter should acquire after first return, got error: {error}")
+            }
+            Poll::Pending => panic!("second waiter should acquire after first return"),
+        };
+        second_resource.return_to_pool();
 
-                // Hold briefly to ensure order is recorded
-                std::thread::sleep(std::time::Duration::from_millis(1));
-
-                // Return resource for next waiter
-                resource.return_to_pool();
-            });
-            handles.push(handle);
-        }
-
-        // Give waiters time to queue up
-        std::thread::sleep(std::time::Duration::from_millis(10));
-
-        // Verify 3 waiters are queued
-        assert_eq!(pool.stats().wait_count, 3, "3 waiters should be queued");
-
-        // Release the held resource to unblock waiters
-        held_resource.return_to_pool();
-
-        // Wait for all waiters to complete
-        for handle in handles {
-            handle.join().expect("waiter thread should complete");
-        }
-
-        // Verify FIFO order: waiters should acquire in order 1, 2, 3
-        let final_order = acquisition_order.lock().unwrap();
-        assert_eq!(final_order.len(), 3, "all 3 waiters should have acquired");
-        assert_eq!(*final_order, vec![1, 2, 3],
-            "waiters should acquire in FIFO order (1, 2, 3), got: {:?}", *final_order);
-
-        // Verify pool is back to clean state
-        assert_eq!(pool.stats().active, 0, "no active resources");
-        assert_eq!(pool.stats().wait_count, 0, "no waiting requesters");
-
-        println!("FIFO behavior verified: exhausted pool serves waiters in correct order");
+        let stats = pool.stats();
+        assert_eq!(stats.waiters, 0, "all waiters should be drained");
+        assert_eq!(stats.active, 0, "no active resources");
+        assert_eq!(stats.idle, 1, "single resource should return to idle");
     }
 
     /// Audit test for pool acquisition with cancellation preserving FIFO fairness.
-    ///
-    /// Verifies that when a waiter is cancelled while waiting, remaining waiters
-    /// maintain FIFO order without starvation or fairness violations.
     #[test]
     fn audit_pool_cancellation_preserves_fifo() {
         init_test("audit_pool_cancellation_preserves_fifo");
 
         let pool = GenericPool::new(simple_factory, PoolConfig::with_max_size(1));
-        let cx = test_cx();
-        let acquisition_order = Arc::new(StdMutex::new(Vec::new()));
+        let cx = Cx::for_testing();
+        let held = futures_lite::future::block_on(pool.acquire(&cx)).expect("first acquire");
+        let waker = noop_pool_waker();
+        let mut task_cx = Context::from_waker(&waker);
+        let mut first_waiter = pool.acquire(&cx);
+        let mut cancelled_waiter = pool.acquire(&cx);
+        let mut third_waiter = pool.acquire(&cx);
 
-        // Hold the only resource
-        let _held = futures_lite::future::block_on(pool.acquire(&cx))
-            .expect("first acquire");
+        assert!(first_waiter.as_mut().poll(&mut task_cx).is_pending());
+        assert!(cancelled_waiter.as_mut().poll(&mut task_cx).is_pending());
+        assert!(third_waiter.as_mut().poll(&mut task_cx).is_pending());
+        assert_eq!(pool.stats().waiters, 3, "three waiters should be queued");
 
-        // Start 3 waiters: waiter2 will be cancelled, waiter1 and waiter3 should proceed in order
-        let mut handles = Vec::new();
+        drop(cancelled_waiter);
+        assert_eq!(
+            pool.stats().waiters,
+            2,
+            "dropping a queued acquire must remove only that waiter"
+        );
 
-        // Waiter 1 - should acquire first when resource becomes available
-        let pool1 = pool.clone();
-        let order1 = Arc::clone(&acquisition_order);
-        let cx1 = cx.clone();
-        handles.push(std::thread::spawn(move || {
-            let resource = futures_lite::future::block_on(pool1.acquire(&cx1))
-                .expect("waiter1 should acquire");
-            order1.lock().unwrap().push(1);
-            resource.return_to_pool();
-        }));
+        held.return_to_pool();
 
-        // Waiter 2 - will be cancelled (simulated by timeout)
-        let pool2 = pool.clone();
-        let order2 = Arc::clone(&acquisition_order);
-        let cx2 = cx.clone();
-        handles.push(std::thread::spawn(move || {
-            // Simulate cancellation with very short timeout
-            let short_config = PoolConfig::with_max_size(1)
-                .acquire_timeout(std::time::Duration::from_millis(1));
-            let short_pool = GenericPool::new(simple_factory, short_config);
+        assert!(
+            third_waiter.as_mut().poll(&mut task_cx).is_pending(),
+            "later waiter must remain queued until the earlier live waiter acquires"
+        );
 
-            match futures_lite::future::block_on(short_pool.acquire(&cx2)) {
-                Ok(_) => panic!("waiter2 should timeout/cancel"),
-                Err(_) => {
-                    order2.lock().unwrap().push(2); // Record cancellation
-                }
+        let first_resource = match first_waiter.as_mut().poll(&mut task_cx) {
+            Poll::Ready(Ok(resource)) => resource,
+            Poll::Ready(Err(error)) => {
+                panic!("first live waiter should acquire first, got error: {error}")
             }
-        }));
+            Poll::Pending => panic!("first live waiter should acquire first"),
+        };
+        first_resource.return_to_pool();
 
-        // Waiter 3 - should acquire after waiter1 (FIFO preserved despite waiter2 cancellation)
-        let pool3 = pool.clone();
-        let order3 = Arc::clone(&acquisition_order);
-        let cx3 = cx.clone();
-        handles.push(std::thread::spawn(move || {
-            let resource = futures_lite::future::block_on(pool3.acquire(&cx3))
-                .expect("waiter3 should acquire");
-            order3.lock().unwrap().push(3);
-            resource.return_to_pool();
-        }));
+        let third_resource = match third_waiter.as_mut().poll(&mut task_cx) {
+            Poll::Ready(Ok(resource)) => resource,
+            Poll::Ready(Err(error)) => {
+                panic!("third waiter should acquire after first returns, got error: {error}")
+            }
+            Poll::Pending => panic!("third waiter should acquire after first returns"),
+        };
+        third_resource.return_to_pool();
 
-        // Give threads time to start and queue
-        std::thread::sleep(std::time::Duration::from_millis(5));
-
-        // Wait for threads to complete
-        for handle in handles {
-            handle.join().expect("thread should complete");
-        }
-
-        // Check order: should be 1 (acquired first), 2 (cancelled), 3 (acquired second)
-        // This verifies FIFO is preserved even with cancellation in the middle
-        let final_order = acquisition_order.lock().unwrap();
-
-        // The exact timing of when cancellation is recorded vs acquisition order
-        // may vary, but the key invariant is that waiter3 gets resource after waiter1,
-        // demonstrating FIFO fairness is preserved
-        assert!(final_order.contains(&1), "waiter1 should have acquired");
-        assert!(final_order.contains(&3), "waiter3 should have acquired");
-        assert_eq!(final_order.len(), 3, "all 3 events should be recorded");
-
-        println!("Cancel-aware FIFO verified: cancellation preserves queue fairness");
+        let stats = pool.stats();
+        assert_eq!(stats.waiters, 0, "cancelled waiter must not leak");
+        assert_eq!(stats.active, 0, "no active resources remain");
+        assert_eq!(
+            stats.idle, 1,
+            "resource should be reusable after cancellation"
+        );
     }
 }
