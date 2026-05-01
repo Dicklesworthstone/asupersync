@@ -40,6 +40,101 @@ const DEFAULT_MAX_FILE_SIZE: u64 = 256 * 1024 * 1024;
 const CONTENT_TYPE_OPTIONS_HEADER: &str = "x-content-type-options";
 const CONTENT_TYPE_OPTIONS_NOSNIFF: &str = "nosniff";
 
+/// A byte range for partial content requests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ByteRange {
+    start: usize,
+    end: usize, // inclusive
+}
+
+/// Error types for Range header parsing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RangeError {
+    InvalidSyntax,
+    NotSatisfiable,
+}
+
+/// Parse Range header and return satisfiable byte ranges.
+/// RFC 9110 §14.1.2 Range specification.
+fn parse_ranges(range_header: &str, file_size: u64) -> Result<Vec<ByteRange>, RangeError> {
+    let range_header = range_header.trim();
+    if !range_header.starts_with("bytes=") {
+        return Err(RangeError::InvalidSyntax);
+    }
+
+    let ranges_str = &range_header[6..]; // Skip "bytes="
+    let mut ranges = Vec::new();
+
+    for range_spec in ranges_str.split(',') {
+        let range_spec = range_spec.trim();
+
+        if let Some(dash_pos) = range_spec.find('-') {
+            let (start_str, end_str) = range_spec.split_at(dash_pos);
+            let end_str = &end_str[1..]; // Skip the dash
+
+            if start_str.is_empty() && end_str.is_empty() {
+                return Err(RangeError::InvalidSyntax);
+            }
+
+            let range = if start_str.is_empty() {
+                // Suffix range: bytes=-500 (last 500 bytes)
+                if let Ok(suffix_length) = end_str.parse::<u64>() {
+                    if suffix_length == 0 || suffix_length > file_size {
+                        continue; // Skip invalid suffix ranges
+                    }
+                    ByteRange {
+                        start: (file_size - suffix_length) as usize,
+                        end: (file_size - 1) as usize,
+                    }
+                } else {
+                    return Err(RangeError::InvalidSyntax);
+                }
+            } else if end_str.is_empty() {
+                // Prefix range: bytes=500- (from byte 500 to end)
+                if let Ok(start) = start_str.parse::<u64>() {
+                    if start >= file_size {
+                        continue; // Skip ranges beyond file size
+                    }
+                    ByteRange {
+                        start: start as usize,
+                        end: (file_size - 1) as usize,
+                    }
+                } else {
+                    return Err(RangeError::InvalidSyntax);
+                }
+            } else {
+                // Full range: bytes=0-499
+                let start = start_str
+                    .parse::<u64>()
+                    .map_err(|_| RangeError::InvalidSyntax)?;
+                let end = end_str
+                    .parse::<u64>()
+                    .map_err(|_| RangeError::InvalidSyntax)?;
+
+                if start > end || start >= file_size {
+                    continue; // Skip invalid or unsatisfiable ranges
+                }
+
+                let actual_end = std::cmp::min(end, file_size - 1);
+                ByteRange {
+                    start: start as usize,
+                    end: actual_end as usize,
+                }
+            };
+
+            ranges.push(range);
+        } else {
+            return Err(RangeError::InvalidSyntax);
+        }
+    }
+
+    if ranges.is_empty() {
+        Err(RangeError::NotSatisfiable)
+    } else {
+        Ok(ranges)
+    }
+}
+
 // ─── StaticFiles ────────────────────────────────────────────────────────────
 
 /// Configuration for static file serving.
@@ -215,6 +310,7 @@ impl StaticFiles {
                 return self.apply_custom_headers(
                     Response::empty(StatusCode::NOT_MODIFIED)
                         .header("etag", &etag)
+                        .header("accept-ranges", "bytes")
                         .header("cache-control", format!("public, max-age={}", self.max_age)),
                 );
             }
@@ -225,9 +321,129 @@ impl StaticFiles {
         let response = Response::new(StatusCode::OK, body)
             .header("content-type", mime)
             .header("etag", &etag)
+            .header("accept-ranges", "bytes")
             .header("cache-control", format!("public, max-age={}", self.max_age));
 
         self.apply_custom_headers(response)
+    }
+
+    /// Serve a file with Range request support (RFC 9110 §15.3.7).
+    fn serve_range(
+        &self,
+        path: &Path,
+        range_header: &str,
+        if_none_match: Option<&str>,
+    ) -> Response {
+        let Some(path) = self.validated_current_path(path) else {
+            return Response::empty(StatusCode::NOT_FOUND);
+        };
+
+        let Ok(mut file) = open_static_file(&path) else {
+            return Response::empty(StatusCode::NOT_FOUND);
+        };
+
+        let metadata = match file.metadata() {
+            Ok(meta) => meta,
+            Err(_) => return Response::empty(StatusCode::INTERNAL_SERVER_ERROR),
+        };
+
+        let file_size = metadata.len();
+        if file_size > self.max_file_size {
+            return Response::empty(StatusCode::PAYLOAD_TOO_LARGE);
+        }
+
+        // Parse Range header
+        let ranges = match parse_ranges(range_header, file_size) {
+            Ok(ranges) if !ranges.is_empty() => ranges,
+            Ok(_) | Err(RangeError::InvalidSyntax) => {
+                // Invalid or empty ranges - return 416 Range Not Satisfiable
+                return Response::empty(StatusCode::RANGE_NOT_SATISFIABLE)
+                    .header("content-range", format!("bytes */{}", file_size))
+                    .header("accept-ranges", "bytes");
+            }
+            Err(RangeError::NotSatisfiable) => {
+                return Response::empty(StatusCode::RANGE_NOT_SATISFIABLE)
+                    .header("content-range", format!("bytes */{}", file_size))
+                    .header("accept-ranges", "bytes");
+            }
+        };
+
+        // Check If-None-Match for conditional requests
+        let mut file_content = Vec::new();
+        if let Err(_) = file.read_to_end(&mut file_content) {
+            return Response::empty(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+
+        if let Some(client_etag) = if_none_match {
+            let current_etag = generate_etag(&file_content);
+            if client_etag == current_etag {
+                return Response::empty(StatusCode::NOT_MODIFIED)
+                    .header("etag", current_etag)
+                    .header("cache-control", format!("public, max-age={}", self.max_age))
+                    .header("accept-ranges", "bytes");
+            }
+        }
+
+        if ranges.len() == 1 {
+            // Single range - return 206 Partial Content
+            let range = &ranges[0];
+            let range_data = &file_content[range.start..=range.end];
+            let content_type = guess_mime(&path);
+
+            let response = Response::new(
+                StatusCode::PARTIAL_CONTENT,
+                Bytes::from(range_data.to_vec()),
+            )
+            .header("content-type", content_type)
+            .header("content-length", range_data.len().to_string())
+            .header(
+                "content-range",
+                format!("bytes {}-{}/{}", range.start, range.end, file_size),
+            )
+            .header("accept-ranges", "bytes")
+            .header("etag", generate_etag(&file_content))
+            .header("cache-control", format!("public, max-age={}", self.max_age));
+
+            self.apply_custom_headers(response)
+        } else {
+            // Multiple ranges - return multipart/byteranges
+            let boundary = "asupersync_range_boundary";
+            let content_type = guess_mime(&path);
+            let mut multipart_body = Vec::new();
+
+            for range in &ranges {
+                multipart_body.extend_from_slice(b"--");
+                multipart_body.extend_from_slice(boundary.as_bytes());
+                multipart_body.extend_from_slice(b"\r\n");
+                multipart_body.extend_from_slice(b"Content-Type: ");
+                multipart_body.extend_from_slice(content_type.as_bytes());
+                multipart_body.extend_from_slice(b"\r\n");
+                multipart_body.extend_from_slice(b"Content-Range: bytes ");
+                multipart_body.extend_from_slice(
+                    format!("{}-{}/{}", range.start, range.end, file_size).as_bytes(),
+                );
+                multipart_body.extend_from_slice(b"\r\n\r\n");
+                multipart_body.extend_from_slice(&file_content[range.start..=range.end]);
+                multipart_body.extend_from_slice(b"\r\n");
+            }
+
+            multipart_body.extend_from_slice(b"--");
+            multipart_body.extend_from_slice(boundary.as_bytes());
+            multipart_body.extend_from_slice(b"--\r\n");
+
+            let body_len = multipart_body.len();
+            let response = Response::new(StatusCode::PARTIAL_CONTENT, Bytes::from(multipart_body))
+                .header(
+                    "content-type",
+                    format!("multipart/byteranges; boundary={}", boundary),
+                )
+                .header("content-length", body_len.to_string())
+                .header("accept-ranges", "bytes")
+                .header("etag", generate_etag(&file_content))
+                .header("cache-control", format!("public, max-age={}", self.max_age));
+
+            self.apply_custom_headers(response)
+        }
     }
 
     /// Create a handler that serves static files.
@@ -269,12 +485,24 @@ impl Handler for StaticFilesHandler {
     fn call(&self, req: super::extract::Request) -> Response {
         let head_only = req.method.eq_ignore_ascii_case("HEAD");
         let if_none_match = req.header("if-none-match").map(str::to_owned);
+        let range_header = req.header("range");
         let request_path = &req.path;
 
-        let mut response = self.config.resolve_path(request_path).map_or_else(
-            || Response::empty(StatusCode::NOT_FOUND),
-            |file_path| self.config.serve_file(&file_path, if_none_match.as_deref()),
-        );
+        let mut response = match self.config.resolve_path(request_path) {
+            Some(file_path) => {
+                if let Some(range_str) = range_header {
+                    self.config
+                        .serve_range(&file_path, range_str, if_none_match.as_deref())
+                } else {
+                    let mut resp = self.config.serve_file(&file_path, if_none_match.as_deref());
+                    // Add Accept-Ranges header to advertise range support
+                    resp.set_header("accept-ranges", "bytes");
+                    resp
+                }
+            }
+            None => Response::empty(StatusCode::NOT_FOUND),
+        };
+
         if head_only {
             if !response.body.is_empty() && !response.has_header("content-length") {
                 response.set_header("content-length", response.body.len().to_string());

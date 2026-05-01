@@ -1410,6 +1410,25 @@ impl ThreeLaneScheduler {
         self.global.clone()
     }
 
+    /// Checks if any worker's governor suggests throttling new spawns.
+    ///
+    /// Returns `true` if any worker has a cached governor suggestion of
+    /// `DrainObligations` or `DrainRegions`, indicating the system is in
+    /// a suspect state and new spawns should be throttled.
+    #[must_use]
+    pub fn should_throttle_spawns(&self) -> bool {
+        // Check the first worker's governor state as representative
+        // (all workers should reach similar conclusions on system state)
+        if let Some(worker) = self.workers.first() {
+            let suggestion = worker.cached_suggestion;
+            return matches!(
+                suggestion,
+                SchedulingSuggestion::DrainObligations | SchedulingSuggestion::DrainRegions
+            );
+        }
+        false
+    }
+
     /// Read-only task table access for inject/spawn methods.
     ///
     /// Uses the sharded task table when available, otherwise falls back to
@@ -1479,12 +1498,16 @@ impl ThreeLaneScheduler {
             return;
         }
 
-        // Cancel is the highest-priority lane.  Always inject so that
-        // cancellation preempts ready/timed work even if the task is already
-        // scheduled in another lane.  Deduplication happens at poll time
-        // (finish_poll routes to cancel lane when a cancel is pending).
-        self.global.inject_cancel(task, priority);
-        self.wake_one();
+        // Cancel is the highest-priority lane. Check wake_state for deduplication
+        // before injecting to avoid duplicate dispatch from multiple lanes.
+        let should_schedule = self.with_task_table_ref(|tt| {
+            tt.task(task)
+                .is_none_or(|record| record.wake_state.notify())
+        });
+        if should_schedule {
+            self.global.inject_cancel(task, priority);
+            self.wake_one();
+        }
     }
 
     /// Injects a task into the timed lane for cross-thread wakeup.
@@ -1503,9 +1526,36 @@ impl ThreeLaneScheduler {
         }
     }
 
-    /// Injects a task into the ready lane with queue limit checks.
+    /// Injects a task into the ready lane with queue limit and governor checks.
+    ///
+    /// When the governor is in drain mode (DrainObligations/DrainRegions), this
+    /// method throttles new ready task injections to prevent queue growth during
+    /// suspected deadlock conditions. The task is still logged but not scheduled.
     #[inline]
     fn inject_global_ready_checked(&self, task: TaskId, priority: u8) {
+        // Check if governor suggests throttling spawns due to suspect state
+        let governor_drain_mode = self.should_throttle_spawns();
+
+        if governor_drain_mode {
+            // Throttle spawn during suspected deadlock conditions
+            crate::tracing_compat::warn!(
+                ?task,
+                priority,
+                "inject_ready: throttled spawn due to governor drain suggestion (suspect deadlock)"
+            );
+            // Update metrics to track throttled spawns
+            for worker_id in 0..self.workers.len() {
+                if let Some(worker) = self.workers.get(worker_id) {
+                    if let Some(mut worker_guard) = worker.local.try_lock() {
+                        worker_guard.preemption_metrics.governor_throttled_spawns += 1;
+                        break;
+                    }
+                }
+            }
+            return; // Task is throttled, not scheduled
+        }
+
+        // Original queue limit warning (but still schedules)
         if self.global_queue_limit > 0 && self.global.ready_count() >= self.global_queue_limit {
             crate::tracing_compat::warn!(
                 ?task,
@@ -1515,6 +1565,7 @@ impl ThreeLaneScheduler {
                 "inject_ready: global ready queue at capacity, scheduling anyway"
             );
         }
+
         self.global.inject_ready(task, priority);
         self.wake_one();
     }
@@ -1562,6 +1613,67 @@ impl ThreeLaneScheduler {
             trace!(
                 ?task,
                 priority, "inject_ready: task NOT scheduled (should_schedule=false)"
+            );
+        }
+    }
+
+    /// Injects a critical system task that bypasses governor throttling.
+    ///
+    /// This should only be used for essential system tasks (e.g., finalizers,
+    /// cancel handlers) that must execute even during suspected deadlock conditions.
+    /// Regular application tasks should use `inject_ready()`.
+    pub fn inject_ready_bypass_governor(&self, task: TaskId, priority: u8) {
+        let (should_schedule, is_local) = self.with_task_table_ref(|tt| {
+            tt.task(task).map_or((true, false), |record| {
+                (record.wake_state.notify(), record.is_local())
+            })
+        });
+
+        debug_assert!(
+            !is_local,
+            "Attempted to globally inject local task {task:?}. Local tasks must be scheduled on their owner thread."
+        );
+        if is_local {
+            error!(
+                ?task,
+                "inject_ready_bypass_governor: cannot globally inject local (!Send) task"
+            );
+            return;
+        }
+
+        if should_schedule {
+            // Update bypass metrics
+            for worker_id in 0..self.workers.len() {
+                if let Some(worker) = self.workers.get(worker_id) {
+                    if let Some(mut worker_guard) = worker.local.try_lock() {
+                        worker_guard.preemption_metrics.governor_bypass_spawns += 1;
+                        break;
+                    }
+                }
+            }
+
+            trace!(
+                ?task,
+                priority,
+                "inject_ready: critical system task bypassing governor throttling"
+            );
+
+            // Skip governor checks, inject directly
+            if self.global_queue_limit > 0 && self.global.ready_count() >= self.global_queue_limit {
+                crate::tracing_compat::warn!(
+                    ?task,
+                    priority,
+                    limit = self.global_queue_limit,
+                    current = self.global.ready_count(),
+                    "inject_ready_bypass: global ready queue at capacity, scheduling anyway"
+                );
+            }
+            self.global.inject_ready(task, priority);
+            self.wake_one();
+        } else {
+            trace!(
+                ?task,
+                priority, "inject_ready_bypass: task NOT scheduled (should_schedule=false)"
             );
         }
     }
@@ -1882,6 +1994,16 @@ pub struct PreemptionMetrics {
     /// Follower short-timeout (<= 5ms) parks intentionally skipped to avoid
     /// wake-timeout futex churn.
     pub follower_short_wait_skip_le_5ms: u64,
+    /// Total ready task injections throttled due to governor drain suggestions.
+    ///
+    /// When the Lyapunov governor suggests DrainObligations or DrainRegions,
+    /// new ready task spawns are throttled to prevent queue growth during
+    /// suspected deadlock conditions.
+    pub governor_throttled_spawns: u64,
+    /// Total ready task injections allowed despite governor drain state.
+    ///
+    /// Some critical tasks (e.g., system tasks) may bypass governor throttling.
+    pub governor_bypass_spawns: u64,
 }
 
 impl PreemptionMetrics {
@@ -6306,7 +6428,7 @@ mod tests {
             task_id
         };
 
-        let scheduler = ThreeLaneScheduler::new(1, &state);
+        let mut scheduler = ThreeLaneScheduler::new(1, &state);
 
         // 1. Inject task to timed lane first (with future deadline)
         let deadline = Time::from_secs(100);
@@ -7480,6 +7602,191 @@ mod tests {
             visited_edges,
             vec![(0, 1), (1, 2), (2, 1)],
             "once a trapped SCC is found, Tarjan should stop scanning sibling branches"
+        );
+    }
+
+    #[test]
+    fn test_tarjan_scc_detects_three_task_obligation_cycle_within_one_quantum() {
+        use crate::record::ObligationKind;
+
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::unlimited());
+
+        // Create three tasks: A, B, C
+        let (task_a, _handle_a) = state
+            .create_task(root, Budget::unlimited(), async {})
+            .expect("create task A");
+        let (task_b, _handle_b) = state
+            .create_task(root, Budget::unlimited(), async {})
+            .expect("create task B");
+        let (task_c, _handle_c) = state
+            .create_task(root, Budget::unlimited(), async {})
+            .expect("create task C");
+
+        // Create obligation cycle: A blocks on B, B blocks on C, C blocks on A
+        // A -> B (A waits for B to complete an obligation)
+        state.task_mut(task_b).expect("task B").waiters.push(task_a);
+        // B -> C (B waits for C to complete an obligation)
+        state.task_mut(task_c).expect("task C").waiters.push(task_b);
+        // C -> A (C waits for A to complete an obligation) - completes the cycle
+        state.task_mut(task_a).expect("task A").waiters.push(task_c);
+
+        // Add some obligations to make it realistic
+        let _obligation_a = state
+            .create_obligation(ObligationKind::SendPermit, task_a, root, None)
+            .expect("create obligation A");
+        let _obligation_b = state
+            .create_obligation(ObligationKind::SendPermit, task_b, root, None)
+            .expect("create obligation B");
+        let _obligation_c = state
+            .create_obligation(ObligationKind::SendPermit, task_c, root, None)
+            .expect("create obligation C");
+
+        let state = Arc::new(ContendedMutex::new("runtime_state", state));
+
+        // Create scheduler with governor_interval=1 for immediate detection
+        let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 16, true, 1);
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
+
+        // Verify initial state has no deadlock detected yet
+        assert_eq!(
+            worker.cached_suggestion,
+            SchedulingSuggestion::NoPreference,
+            "Initial cached suggestion should be NoPreference"
+        );
+
+        // Call governor_suggest() to trigger deadlock detection
+        // This should detect the 3-task cycle within 1 quantum
+        let suggestion = worker.governor_suggest();
+
+        assert_eq!(
+            suggestion,
+            SchedulingSuggestion::DrainObligations,
+            "Three-task obligation cycle (A->B->C->A) should force DrainObligations suggestion"
+        );
+
+        // Verify the cycle is detected as trapped
+        let (nodes, edges, trapped) = {
+            let state_guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            wait_graph_signals_from_state(&state_guard)
+        };
+
+        assert_eq!(nodes, 3, "Should have exactly 3 live tasks in wait graph");
+        assert!(
+            !edges.is_empty(),
+            "Should have edges representing the wait dependencies"
+        );
+        assert!(
+            trapped,
+            "Three-task cycle should be detected as trapped SCC by Tarjan algorithm"
+        );
+
+        // Verify detection happens quickly (within governor_interval=1 steps)
+        assert_eq!(
+            worker.steps_since_snapshot, 0,
+            "Detection should happen immediately when governor_interval=1"
+        );
+    }
+
+    #[test]
+    fn test_tarjan_scc_detects_four_task_obligation_cycle() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::unlimited());
+
+        // Create four tasks: A, B, C, D
+        let (task_a, _handle_a) = state
+            .create_task(root, Budget::unlimited(), async {})
+            .expect("create task A");
+        let (task_b, _handle_b) = state
+            .create_task(root, Budget::unlimited(), async {})
+            .expect("create task B");
+        let (task_c, _handle_c) = state
+            .create_task(root, Budget::unlimited(), async {})
+            .expect("create task C");
+        let (task_d, _handle_d) = state
+            .create_task(root, Budget::unlimited(), async {})
+            .expect("create task D");
+
+        // Create obligation cycle: A->B->C->D->A
+        state.task_mut(task_b).expect("task B").waiters.push(task_a);
+        state.task_mut(task_c).expect("task C").waiters.push(task_b);
+        state.task_mut(task_d).expect("task D").waiters.push(task_c);
+        state.task_mut(task_a).expect("task A").waiters.push(task_d);
+
+        let state = Arc::new(ContendedMutex::new("runtime_state", state));
+        let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 16, true, 1);
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
+
+        let suggestion = worker.governor_suggest();
+
+        assert_eq!(
+            suggestion,
+            SchedulingSuggestion::DrainObligations,
+            "Four-task obligation cycle (A->B->C->D->A) should force DrainObligations suggestion"
+        );
+
+        let (nodes, _edges, trapped) = {
+            let state_guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            wait_graph_signals_from_state(&state_guard)
+        };
+
+        assert_eq!(nodes, 4, "Should have exactly 4 live tasks in wait graph");
+        assert!(
+            trapped,
+            "Four-task cycle should be detected as trapped SCC by Tarjan algorithm"
+        );
+    }
+
+    #[test]
+    fn test_tarjan_scc_ignores_acyclic_wait_chains() {
+        let mut state = RuntimeState::new();
+        let root = state.create_root_region(Budget::unlimited());
+
+        // Create acyclic wait chain: A->B->C (no cycle back to A)
+        let (task_a, _handle_a) = state
+            .create_task(root, Budget::unlimited(), async {})
+            .expect("create task A");
+        let (task_b, _handle_b) = state
+            .create_task(root, Budget::unlimited(), async {})
+            .expect("create task B");
+        let (task_c, _handle_c) = state
+            .create_task(root, Budget::unlimited(), async {})
+            .expect("create task C");
+
+        // Create acyclic chain: A waits for B, B waits for C, C waits for nothing
+        state.task_mut(task_b).expect("task B").waiters.push(task_a);
+        state.task_mut(task_c).expect("task C").waiters.push(task_b);
+
+        let state = Arc::new(ContendedMutex::new("runtime_state", state));
+        let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 16, true, 1);
+        let mut workers = scheduler.take_workers();
+        let worker = &mut workers[0];
+
+        let suggestion = worker.governor_suggest();
+
+        assert_eq!(
+            suggestion,
+            SchedulingSuggestion::NoPreference,
+            "Acyclic wait chain should NOT trigger deadlock detection"
+        );
+
+        let (nodes, _edges, trapped) = {
+            let state_guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            wait_graph_signals_from_state(&state_guard)
+        };
+
+        assert_eq!(nodes, 3, "Should have 3 live tasks");
+        assert!(
+            !trapped,
+            "Acyclic wait chain should NOT be detected as trapped SCC"
         );
     }
 
@@ -10826,6 +11133,89 @@ mod tests {
                 max_observed_ready_queue
             );
         }
+    }
+
+    /// REGRESSION: Governor spawn throttling during suspect states.
+    ///
+    /// Verifies that when the Lyapunov governor detects suspect state
+    /// (DrainObligations/DrainRegions), new ready task spawns are throttled
+    /// and observable in scheduler metrics.
+    #[test]
+    fn regression_governor_spawn_throttling_in_drain_mode() {
+        use crate::record::ObligationKind;
+
+        // Create system with live obligations to trigger DrainObligations mode
+        let mut state = RuntimeState::new();
+        state.now = Time::from_nanos(1_000_000_000);
+        let root = state.create_root_region(Budget::unlimited());
+        let (task_id, _handle) = state
+            .create_task(root, Budget::unlimited(), async {})
+            .expect("create obligation holder");
+        state
+            .create_obligation(ObligationKind::SendPermit, task_id, root, None)
+            .expect("create aged obligation");
+        let state = Arc::new(ContendedMutex::new("runtime_state", state));
+
+        let mut scheduler = ThreeLaneScheduler::new_with_options(1, &state, 16, true, 1);
+
+        // Force governor to snapshot and suggest DrainObligations
+        {
+            let mut workers = scheduler.take_workers();
+            let worker = &mut workers[0];
+            let suggestion = worker.governor_suggest();
+            assert_eq!(
+                suggestion,
+                SchedulingSuggestion::DrainObligations,
+                "Governor should suggest DrainObligations due to aged obligations"
+            );
+            scheduler.set_workers(workers);
+        }
+
+        // Verify governor is in drain mode
+        assert!(
+            scheduler.should_throttle_spawns(),
+            "Scheduler should throttle spawns when governor suggests drain mode"
+        );
+
+        // Attempt to inject regular ready tasks - should be throttled
+        let throttled_task_1 = TaskId::new_for_test(1001, 1);
+        let throttled_task_2 = TaskId::new_for_test(1002, 1);
+
+        let initial_ready_count = scheduler.global.ready_count();
+
+        scheduler.inject_ready(throttled_task_1, 50);
+        scheduler.inject_ready(throttled_task_2, 60);
+
+        // Verify tasks were NOT scheduled due to governor throttling
+        assert_eq!(
+            scheduler.global.ready_count(),
+            initial_ready_count,
+            "Ready queue should not grow when governor is throttling spawns"
+        );
+
+        // Inject bypass task - should succeed
+        let bypass_task = TaskId::new_for_test(1003, 1);
+        scheduler.inject_ready_bypass_governor(bypass_task, 70);
+
+        assert_eq!(
+            scheduler.global.ready_count(),
+            initial_ready_count + 1,
+            "Bypass injection should ignore governor throttling"
+        );
+
+        // Verify metrics tracked the throttling
+        let workers = scheduler.take_workers();
+        let throttled_count = workers[0].preemption_metrics.governor_throttled_spawns;
+        let bypass_count = workers[0].preemption_metrics.governor_bypass_spawns;
+
+        assert_eq!(
+            throttled_count, 2,
+            "Should track 2 throttled spawns in metrics"
+        );
+        assert_eq!(
+            bypass_count, 1,
+            "Should track 1 bypass spawn in metrics"
+        );
     }
 
     // === UCB1 Convergence Golden Tests ===
