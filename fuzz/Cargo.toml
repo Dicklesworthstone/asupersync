@@ -542,6 +542,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "jetstream_pull_consumer_max_waiting"
+path = "fuzz_targets/jetstream_pull_consumer_max_waiting.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_http_compression_decompression"
 path = "fuzz_targets/http_compression_decompression.rs"
 test = false
