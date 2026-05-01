@@ -110,6 +110,8 @@ fn reference_decode_with_raptorq_rs(
         RaptorqRsObjectTransmissionInformation::new(transfer_length as u64, symbol_size, 1, 1, 1);
     let mut decoder = RaptorqRsDecoder::new(config);
     let dropped: BTreeSet<_> = drop_indices.iter().copied().collect();
+    let repair_payload_id_delta = u32::try_from(encoder.params().k_prime - encoder.params().k)
+        .expect("repair ESI delta must fit in u32 for raptorq-rs");
 
     for (esi, data) in source.iter().enumerate() {
         if !dropped.contains(&esi) {
@@ -125,8 +127,11 @@ fn reference_decode_with_raptorq_rs(
     let k_u32 = u32::try_from(source.len()).expect("K must fit in u32");
     for repair_offset in 0..repair_count {
         let esi = k_u32 + u32::try_from(repair_offset).expect("repair offset must fit in u32");
+        let reference_esi = esi
+            .checked_add(repair_payload_id_delta)
+            .expect("repair ESI must fit in raptorq-rs payload id space");
         let packet = RaptorqRsEncodingPacket::new(
-            RaptorqRsPayloadId::new(0, esi),
+            RaptorqRsPayloadId::new(0, reference_esi),
             encoder.repair_symbol(esi),
         );
         if let Some(decoded) = decoder.decode(packet) {
@@ -184,6 +189,8 @@ fn reference_decode_with_raptorq_rs_from_selection(
     let config =
         RaptorqRsObjectTransmissionInformation::new(transfer_length as u64, symbol_size, 1, 1, 1);
     let mut decoder = RaptorqRsDecoder::new(config);
+    let repair_payload_id_delta = u32::try_from(encoder.params().k_prime - encoder.params().k)
+        .expect("repair ESI delta must fit in u32 for raptorq-rs");
 
     for packet in selection {
         let encoding_packet = match *packet {
@@ -191,10 +198,15 @@ fn reference_decode_with_raptorq_rs_from_selection(
                 RaptorqRsPayloadId::new(0, u32::try_from(esi).expect("source ESI must fit in u32")),
                 source[esi].clone(),
             ),
-            PacketSelection::Repair(esi) => RaptorqRsEncodingPacket::new(
-                RaptorqRsPayloadId::new(0, esi),
-                encoder.repair_symbol(esi),
-            ),
+            PacketSelection::Repair(esi) => {
+                let reference_esi = esi
+                    .checked_add(repair_payload_id_delta)
+                    .expect("repair ESI must fit in raptorq-rs payload id space");
+                RaptorqRsEncodingPacket::new(
+                    RaptorqRsPayloadId::new(0, reference_esi),
+                    encoder.repair_symbol(esi),
+                )
+            }
         };
         if let Some(decoded) = decoder.decode(encoding_packet) {
             return decoded;

@@ -542,26 +542,25 @@ fn gf256_mul_slice_inplace(data: &mut [u8], c: Gf256) {
 ///
 /// RFC 6330 Section 5.3.3.3: LDPC pre-coding relationships.
 ///
-/// Two parts:
-/// 1. For i = 0..K'-1: each intermediate symbol C[i] participates
-///    in 3 LDPC rows via a circulant pattern with step a = 1 + floor(i/S).
-/// 2. Identity block: row i has coefficient 1 in column K'+i, tying
-///    each LDPC row to its check symbol C[K'+i].
-///
-/// Identity blocks are placed at non-overlapping column ranges:
-///   LT: 0..K'-1, LDPC: K'..K'+S-1, HDPC: K'+S..L-1
+/// Three parts:
+/// 1. `G_LDPC,1`: columns `0..B` participate in 3 LDPC rows via
+///    the RFC circulant pattern with step `a = 1 + floor(i/S)`.
+/// 2. `I_S`: row `i` has coefficient 1 in column `B+i`.
+/// 3. `G_LDPC,2`: each row connects to two PI columns at `W..W+P`.
 fn build_ldpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, _seed: u64) {
     let s = params.s;
-    let k_prime = params.k_prime;
+    let b = params.b;
+    let w = params.w;
+    let p = params.p;
 
-    // Part 1: Circulant connections over all K' intermediate symbols.
-    // RFC 6330 Section 5.3.3.3: For i = 0, ..., K'-1
+    // Part 1: Circulant connections over the first B LT symbols.
+    // RFC 6330 Section 5.3.3.3: For i = 0, ..., B-1
     //   a = 1 + floor(i/S)
     //   b_val = i % S
     //   D[b_val] = D[b_val] + C[i]; b_val = (b_val + a) % S
     //   D[b_val] = D[b_val] + C[i]; b_val = (b_val + a) % S
     //   D[b_val] = D[b_val] + C[i]
-    for i in 0..k_prime {
+    for i in 0..b {
         let a = 1 + i / s.max(1);
         let mut row = i % s;
         matrix.add_assign(row, i, Gf256::ONE);
@@ -571,12 +570,15 @@ fn build_ldpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, _se
         matrix.add_assign(row, i, Gf256::ONE);
     }
 
-    // Part 2: LDPC check symbol identity block.
-    // Each LDPC row i is tied to check symbol C[K'+i], placed at column K'+i
-    // so that identity blocks (LT: 0..K'-1, LDPC: K'..K'+S-1, HDPC: K'+S..L-1)
-    // are non-overlapping and cover all L columns.
+    // Part 2: LDPC check-symbol identity block, columns B..W-1.
     for i in 0..s {
-        matrix.set(i, k_prime + i, Gf256::ONE);
+        matrix.set(i, b + i, Gf256::ONE);
+    }
+
+    // Part 3: PI links, columns W..W+P-1.
+    for i in 0..s {
+        matrix.set(i, (i % p) + w, Gf256::ONE);
+        matrix.set(i, ((i + 1) % p) + w, Gf256::ONE);
     }
 }
 
@@ -603,46 +605,36 @@ fn build_hdpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, _se
         return;
     }
 
-    // Step 1: Build MT matrix (H x (K'+S)) in a temporary buffer.
-    let mut mt = vec![Gf256::ZERO; h * ks];
+    // Step 1: Build G_HDPC directly with the RFC recurrence used by the
+    // reference implementation. It is equivalent to GAMMA x MT but avoids a
+    // transposition-prone explicit matrix multiply.
+    let mut hdpc = vec![vec![Gf256::ZERO; ks]; h];
+    for (row_idx, row) in hdpc.iter_mut().enumerate() {
+        row[ks - 1] = Gf256::ALPHA.pow((row_idx % 255) as u8);
+    }
 
-    for j in 0..ks.saturating_sub(1) {
-        let rand1 = rand((j + 1) as u32, 6, h as u32) as usize;
-        let rand2 = if h > 1 {
-            rand((j + 1) as u32, 7, (h - 1) as u32) as usize
+    for col in (0..ks.saturating_sub(1)).rev() {
+        for row in &mut hdpc {
+            row[col] = Gf256::ALPHA * row[col + 1];
+        }
+
+        let rand6 = rand((col + 1) as u32, 6, h as u32) as usize;
+        let rand7 = if h > 1 {
+            rand((col + 1) as u32, 7, (h - 1) as u32) as usize
         } else {
             0
         };
-        let i2 = (rand1 + rand2 + 1) % h;
-
-        mt[rand1 * ks + j] += Gf256::ONE;
-        if i2 != rand1 {
-            mt[i2 * ks + j] += Gf256::ONE;
-        }
+        let row1 = rand6;
+        let row2 = (rand6 + rand7 + 1) % h;
+        hdpc[row1][col] += Gf256::ONE;
+        hdpc[row2][col] += Gf256::ONE;
     }
 
-    // Last column: MT[i, K'+S-1] = alpha^i (Vandermonde column)
-    if ks > 0 {
-        let last_col = ks - 1;
-        for i in 0..h {
-            mt[i * ks + last_col] = Gf256::ALPHA.pow((i % 255) as u8);
-        }
-    }
-
-    // Step 2: Compute GAMMA x MT and write into the constraint matrix.
-    // GAMMA[i][j] = alpha^(i-j) for j <= i, 0 otherwise (lower triangular).
-    for r in 0..h {
-        for c in 0..ks {
-            let mut val = Gf256::ZERO;
-            for t in 0..=r {
-                let mt_val = mt[t * ks + c];
-                if !mt_val.is_zero() {
-                    let gamma_coeff = Gf256::ALPHA.pow(((r - t) % 255) as u8);
-                    val += gamma_coeff * mt_val;
-                }
-            }
+    // Step 2: Copy G_HDPC into rows S..S+H.
+    for (row, values) in hdpc.iter().enumerate() {
+        for (col, &val) in values.iter().enumerate() {
             if !val.is_zero() {
-                matrix.set(s + r, c, val);
+                matrix.set(s + row, col, val);
             }
         }
     }
@@ -657,17 +649,9 @@ fn build_hdpc_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, _se
 
 /// Build LT constraint rows for systematic symbols (rows S+H..S+H+K').
 ///
-/// For systematic encoding, source symbol i maps directly to intermediate
-/// symbol i. Each LT row i has exactly a 1 in column i, creating an
-/// identity block. Combined with the LDPC and HDPC identity blocks,
-/// the column coverage is:
-///
-///   LT identity:   columns 0..K'-1
-///   LDPC identity:  columns K'..K'+S-1
-///   HDPC identity:  columns K'+S..L-1
-///
-/// This ensures all L columns are covered by non-overlapping identity
-/// entries, making the matrix structurally full rank.
+/// For systematic encoding, the known source and padding symbols are encoded
+/// symbol IDs `0..K'-1`; each row is therefore the RFC tuple expansion for that
+/// encoding symbol ID.
 fn build_lt_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, _seed: u64) {
     let s = params.s;
     let h = params.h;
@@ -675,7 +659,10 @@ fn build_lt_rows(matrix: &mut ConstraintMatrix, params: &SystematicParams, _seed
 
     for i in 0..k_prime {
         let row = s + h + i;
-        matrix.set(row, i, Gf256::ONE);
+        let esi = u32::try_from(i).expect("K' row index must fit in u32");
+        for col in repair_indices_for_esi(params.j, params.w, params.p, esi) {
+            matrix.set(row, col, Gf256::ONE);
+        }
     }
 }
 

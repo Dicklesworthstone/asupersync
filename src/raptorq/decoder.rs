@@ -16,6 +16,7 @@ use crate::raptorq::proof::{
     DecodeConfig, DecodeProof, EliminationTrace, FailureReason, InactivationStrategy, PeelingTrace,
     ReceivedSummary,
 };
+use crate::raptorq::rfc6330::repair_indices_for_esi;
 use crate::raptorq::systematic::{ConstraintMatrix, SystematicError, SystematicParams};
 use crate::raptorq::{decision_contract, decision_contract::GovernanceSnapshot};
 use crate::types::ObjectId;
@@ -53,7 +54,8 @@ pub struct ReceivedSymbol {
     /// Whether this is a source symbol (ESI < K).
     pub is_source: bool,
     /// Column indices that this symbol depends on (intermediate symbol indices).
-    /// For source symbols, this is just `[esi]`. For repair, computed from LT encoding.
+    /// For source symbols, legacy callers may leave this as `[esi]`; the decoder
+    /// derives the canonical RFC tuple equation from `esi`.
     pub columns: Vec<usize>,
     /// GF(256) coefficients for each column (same length as `columns`).
     /// For XOR-based LT, all coefficients are 1.
@@ -1370,16 +1372,6 @@ impl InactivationDecoder {
                 });
             }
 
-            for &column in &sym.columns {
-                if column >= l {
-                    return Err(DecodeError::ColumnIndexOutOfRange {
-                        esi: sym.esi,
-                        column,
-                        max_valid: l,
-                    });
-                }
-            }
-
             if sym.is_source {
                 let esi = sym.esi as usize;
                 if esi >= k {
@@ -1388,14 +1380,27 @@ impl InactivationDecoder {
                         max_valid: k,
                     });
                 }
-                if sym.columns.len() != 1
-                    || sym.coefficients.len() != 1
-                    || sym.columns[0] != esi
-                    || sym.coefficients[0] != Gf256::ONE
-                {
+                let (expected_cols, expected_coefs) = self.source_equation(sym.esi);
+                let legacy_identity = sym.columns.len() == 1
+                    && sym.coefficients.len() == 1
+                    && sym.columns[0] == esi
+                    && sym.coefficients[0] == Gf256::ONE;
+                let canonical_equation =
+                    sym.columns == expected_cols && sym.coefficients == expected_coefs;
+                if !legacy_identity && !canonical_equation {
                     return Err(DecodeError::InvalidSourceSymbolEquation {
                         esi: sym.esi,
                         expected_column: esi,
+                    });
+                }
+            }
+
+            for &column in &sym.columns {
+                if column >= l {
+                    return Err(DecodeError::ColumnIndexOutOfRange {
+                        esi: sym.esi,
+                        column,
+                        max_valid: l,
                     });
                 }
             }
@@ -1415,28 +1420,15 @@ impl InactivationDecoder {
         let mut reconstructed = vec![0u8; symbol_size];
 
         for sym in symbols {
-            if sym.is_source
-                && sym.columns.len() == 1
-                && sym.coefficients.len() == 1
-                && (sym.esi as usize) < self.params.k
-                && sym.columns[0] == sym.esi as usize
-                && sym.coefficients[0] == Gf256::ONE
-            {
-                let source_col = sym.columns[0];
-                let expected = &intermediate[source_col];
-                if let Some(byte_index) = first_mismatch_byte(expected, &sym.data) {
-                    return Err(DecodeError::CorruptDecodedOutput {
-                        esi: sym.esi,
-                        byte_index,
-                        expected: expected[byte_index],
-                        actual: sym.data[byte_index],
-                    });
-                }
-                continue;
-            }
-
             reconstructed.fill(0);
-            for (&column, &coefficient) in sym.columns.iter().zip(sym.coefficients.iter()) {
+            let source_equation_storage;
+            let (columns, coefficients): (&[usize], &[Gf256]) = if sym.is_source {
+                source_equation_storage = self.source_equation(sym.esi);
+                (&source_equation_storage.0, &source_equation_storage.1)
+            } else {
+                (&sym.columns, &sym.coefficients)
+            };
+            for (&column, &coefficient) in columns.iter().zip(coefficients.iter()) {
                 if coefficient.is_zero() {
                     continue;
                 }
@@ -1463,7 +1455,6 @@ impl InactivationDecoder {
     /// to supply them explicitly.
     /// Returns the decoded source symbols on success.
     pub fn decode(&self, symbols: &[ReceivedSymbol]) -> Result<DecodeResult, DecodeError> {
-        let k = self.params.k;
         let symbol_size = self.params.symbol_size;
 
         self.validate_input(symbols)?;
@@ -1485,7 +1476,7 @@ impl InactivationDecoder {
             .collect();
         self.verify_decoded_output(symbols, &intermediate)?;
 
-        let source: Vec<Vec<u8>> = intermediate[..k].to_vec();
+        let source = self.reconstruct_source_symbols(&intermediate);
 
         Ok(DecodeResult {
             intermediate,
@@ -1518,7 +1509,6 @@ impl InactivationDecoder {
         symbols: &[ReceivedSymbol],
         batch_size: usize,
     ) -> Result<DecodeResult, DecodeError> {
-        let k = self.params.k;
         let symbol_size = self.params.symbol_size;
 
         self.validate_input(symbols)?;
@@ -1564,8 +1554,7 @@ impl InactivationDecoder {
             let base_eq_idx = state.equations.len();
             // Assembly: add this batch of symbols as equations.
             for sym in chunk {
-                let eq = Equation::new(sym.columns.clone(), sym.coefficients.clone());
-                state.equations.push(eq);
+                state.equations.push(self.received_symbol_equation(sym));
                 state.rhs.push(sym.data.clone());
             }
             queued.resize(state.equations.len(), false);
@@ -1618,7 +1607,7 @@ impl InactivationDecoder {
             .collect();
         self.verify_decoded_output(symbols, &intermediate)?;
 
-        let source: Vec<Vec<u8>> = intermediate[..k].to_vec();
+        let source = self.reconstruct_source_symbols(&intermediate);
 
         Ok(DecodeResult {
             intermediate,
@@ -1756,7 +1745,7 @@ impl InactivationDecoder {
             return Err((err, proof_builder.build()));
         }
 
-        let source: Vec<Vec<u8>> = intermediate[..k].to_vec();
+        let source = self.reconstruct_source_symbols(&intermediate);
 
         // Mark success with a deterministic binding to the recovered payload.
         proof_builder.set_success(&source);
@@ -1786,8 +1775,7 @@ impl InactivationDecoder {
 
         // Add received symbol equations
         for sym in symbols {
-            let eq = Equation::new(sym.columns.clone(), sym.coefficients.clone());
-            equations.push(eq);
+            equations.push(self.received_symbol_equation(sym));
             rhs.push(sym.data.clone());
         }
 
@@ -1795,8 +1783,10 @@ impl InactivationDecoder {
         // appends padded LT rows K..K' with an explicit zero RHS; synthesize
         // those rows here so the direct decoder path matches the encoder's
         // constraint system even when callers only provide real source symbols.
-        for column in self.params.k..self.params.k_prime {
-            equations.push(Equation::new(vec![column], vec![Gf256::ONE]));
+        for esi in self.params.k..self.params.k_prime {
+            let esi = u32::try_from(esi).expect("K' padding ESI must fit in u32");
+            let (columns, coefficients) = self.systematic_equation(esi);
+            equations.push(Equation::new(columns, coefficients));
             rhs.push(vec![0u8; symbol_size]);
         }
 
@@ -2675,33 +2665,59 @@ impl InactivationDecoder {
         self.repair_equation(esi).unwrap()
     }
 
+    fn received_symbol_equation(&self, sym: &ReceivedSymbol) -> Equation {
+        if sym.is_source {
+            let (columns, coefficients) = self.source_equation(sym.esi);
+            Equation::new(columns, coefficients)
+        } else {
+            Equation::new(sym.columns.clone(), sym.coefficients.clone())
+        }
+    }
+
+    fn reconstruct_source_symbols(&self, intermediate: &[Vec<u8>]) -> Vec<Vec<u8>> {
+        let mut source = Vec::with_capacity(self.params.k);
+        for esi in 0..self.params.k {
+            let esi = u32::try_from(esi).expect("source ESI must fit in u32");
+            let (columns, coefficients) = self.source_equation(esi);
+            let mut symbol = vec![0u8; self.params.symbol_size];
+            for (&column, &coefficient) in columns.iter().zip(coefficients.iter()) {
+                gf256_addmul_slice(&mut symbol, &intermediate[column], coefficient);
+            }
+            source.push(symbol);
+        }
+        source
+    }
+
+    fn systematic_equation(&self, esi: u32) -> (Vec<usize>, Vec<Gf256>) {
+        assert!(
+            (esi as usize) < self.params.k_prime,
+            "systematic ESI must be < K'"
+        );
+        let columns = repair_indices_for_esi(self.params.j, self.params.w, self.params.p, esi);
+        let coefficients = vec![Gf256::ONE; columns.len()];
+        (columns, coefficients)
+    }
+
     /// Generate equations for all K source symbols.
     ///
-    /// In systematic encoding, source symbol i maps directly to intermediate
-    /// symbol i with no additional connections. This matches the encoder's
-    /// `build_lt_rows` which simply sets `intermediate[i] = source[i]`.
-    ///
-    /// Returns a vector of K equations, where index i is the equation for
-    /// source ESI i.
+    /// RFC 6330 systematic source symbols are encoded symbol IDs `0..K-1`;
+    /// each source row is the corresponding tuple expansion over intermediate
+    /// symbols.
     #[must_use]
     pub fn all_source_equations(&self) -> Vec<(Vec<usize>, Vec<Gf256>)> {
-        let k = self.params.k;
-
-        // Systematic encoding: source symbol i maps directly to intermediate[i]
-        // No additional LT connections - the encoder's build_lt_rows just does
-        // matrix.set(row, i, Gf256::ONE) for each source symbol.
-        (0..k).map(|i| (vec![i], vec![Gf256::ONE])).collect()
+        (0..self.params.k)
+            .map(|i| self.source_equation(u32::try_from(i).expect("source ESI must fit in u32")))
+            .collect()
     }
 
     /// Get the equation for a specific source symbol ESI.
     ///
-    /// In systematic encoding, source symbol `esi` maps directly to
-    /// intermediate symbol `esi` with coefficient 1.
+    /// In systematic encoding, source symbol `esi` maps through the RFC 6330
+    /// tuple expansion for encoded symbol ID `esi`.
     #[must_use]
     pub fn source_equation(&self, esi: u32) -> (Vec<usize>, Vec<Gf256>) {
         assert!((esi as usize) < self.params.k, "source ESI must be < K");
-        // Systematic: source[esi] = intermediate[esi]
-        (vec![esi as usize], vec![Gf256::ONE])
+        self.systematic_equation(esi)
     }
 }
 
@@ -3375,6 +3391,8 @@ mod tests {
         );
         let mut decoder = RaptorqRsDecoder::new(config);
         let dropped: BTreeSet<_> = drop_indices.iter().copied().collect();
+        let repair_payload_id_delta = u32::try_from(encoder.params().k_prime - encoder.params().k)
+            .expect("repair ESI delta must fit in u32 for raptorq-rs");
 
         for (esi, data) in source.iter().enumerate() {
             if !dropped.contains(&esi) {
@@ -3390,8 +3408,11 @@ mod tests {
         let k_u32 = u32::try_from(source.len()).expect("K must fit in u32");
         for repair_offset in 0..repair_count {
             let esi = k_u32 + u32::try_from(repair_offset).expect("repair index must fit in u32");
+            let reference_esi = esi
+                .checked_add(repair_payload_id_delta)
+                .expect("repair ESI must fit in raptorq-rs payload id space");
             let packet = RaptorqRsEncodingPacket::new(
-                RaptorqRsPayloadId::new(0, esi),
+                RaptorqRsPayloadId::new(0, reference_esi),
                 encoder.repair_symbol(esi),
             );
             if let Some(decoded) = decoder.decode(packet) {
@@ -4312,6 +4333,45 @@ mod tests {
             ours.source, source,
             "a single repair packet must recover the original K=1 source symbol"
         );
+    }
+
+    #[test]
+    fn differential_k2_degenerate_repairs_match_raptorq_rs() {
+        let k = 2;
+        let symbol_size = 32;
+        let seed = 0x6330_0002_u64;
+        let source = make_source_data(k, symbol_size);
+        let encoder = SystematicEncoder::new(&source, symbol_size, seed).unwrap();
+        let decoder = InactivationDecoder::new(k, symbol_size, seed);
+
+        for (case, drop_indices, repair_count) in [
+            ("drop_first_source", &[0usize][..], 1usize),
+            ("drop_second_source", &[1usize][..], 1usize),
+            ("repair_only", &[0usize, 1usize][..], 3usize),
+        ] {
+            let received = build_mixed_received_symbols(
+                &decoder,
+                &encoder,
+                &source,
+                drop_indices,
+                repair_count,
+            );
+            let ours = decoder.decode(&received).unwrap_or_else(|err| {
+                panic!("K=2 {case} differential decode must succeed: {err:?}")
+            });
+            let reference =
+                reference_decode_with_raptorq_rs(&source, &encoder, drop_indices, repair_count);
+
+            assert_eq!(
+                ours.source.concat(),
+                reference,
+                "our decoder must match raptorq-rs for degenerate K=2 case {case}"
+            );
+            assert_eq!(
+                ours.source, source,
+                "K=2 case {case} must recover the original source symbols"
+            );
+        }
     }
 
     #[test]
@@ -6412,18 +6472,27 @@ mod tests {
     // ── all_source_equations / source_equation coverage (br-3narc.2.7) ──
 
     #[test]
-    fn all_source_equations_returns_identity_map() {
+    fn all_source_equations_returns_rfc_tuple_rows() {
         let k = 8;
         let decoder = InactivationDecoder::new(k, 32, 42);
         let equations = decoder.all_source_equations();
 
         assert_eq!(equations.len(), k, "should return exactly K equations");
         for (i, (cols, coefs)) in equations.iter().enumerate() {
-            assert_eq!(cols, &[i], "source equation {i} should map to column {i}");
+            let expected_cols = repair_indices_for_esi(
+                decoder.params().j,
+                decoder.params().w,
+                decoder.params().p,
+                u32::try_from(i).expect("source ESI must fit in u32"),
+            );
+            assert_eq!(
+                cols, &expected_cols,
+                "source equation {i} should use the RFC tuple row"
+            );
             assert_eq!(
                 coefs,
-                &[Gf256::ONE],
-                "source equation {i} should have unit coefficient"
+                &vec![Gf256::ONE; expected_cols.len()],
+                "source equation {i} should have unit coefficients"
             );
         }
     }

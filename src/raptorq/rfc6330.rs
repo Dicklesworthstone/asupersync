@@ -402,7 +402,7 @@ pub fn try_tuple(
     let random_input = constant_offset.wrapping_add(encoding_symbol_id.wrapping_mul(linear_factor));
 
     let degree_input = rand(random_input, 0, 1 << 20);
-    let lt_degree = deg(degree_input);
+    let lt_degree = deg(degree_input).min(lt_width - 2);
     let lt_step = 1 + rand(random_input, 1, lt_width_u32 - 1) as usize;
     let lt_start = rand(random_input, 2, lt_width_u32) as usize;
     let pi_degree = if lt_degree < 4 {
