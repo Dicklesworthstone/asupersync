@@ -3031,6 +3031,16 @@ test = false
 doc = false
 bench = false
 
+# gRPC compressed-flag length bomb fuzzer.
+# Verifies a Compressed-Flag=1 frame declaring MAX_INT length but ending early
+# is rejected from the prefix without allocating the declared body.
+[[bin]]
+name = "grpc_message_compressed_flag_bomb"
+path = "fuzz_targets/grpc_message_compressed_flag_bomb.rs"
+test = false
+doc = false
+bench = false
+
 # Structure-aware JetStream ConsumerInfo/StreamInfo wire decoder fuzzer.
 # Tests src/messaging/jetstream.rs JSON response parsing with intelligent input generation
 # for stream state, consumer config, API errors, and metadata extraction.
