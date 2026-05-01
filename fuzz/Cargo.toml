@@ -777,6 +777,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "raptorq_systematic_indices"
+path = "fuzz_targets/raptorq_systematic_indices.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_raptorq_rfc6330"
 path = "fuzz_targets/raptorq_rfc6330.rs"
 test = false
