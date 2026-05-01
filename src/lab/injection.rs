@@ -511,7 +511,23 @@ impl LabInjectionRunner {
         let recording_injector = CancellationInjector::recording();
 
         let instrumented = test_fn(recording_injector.clone(), &mut runtime, &mut oracles);
-        let _ = Self::poll_to_completion(instrumented);
+        if Self::poll_to_completion(instrumented, self.config.max_steps_per_run).is_err() {
+            let strategy_name = format!("{:?}", self.config.strategy);
+            let recorded_points = recording_injector.recorded_points();
+            return LabInjectionReport::from_results(
+                vec![LabInjectionResult {
+                    injection: InjectionResult {
+                        injection_point: 0,
+                        outcome: InjectionOutcome::Timeout,
+                        await_points_before: recorded_points.len(),
+                    },
+                    oracle_violations: Vec::new(),
+                }],
+                recorded_points.len(),
+                &strategy_name,
+                self.config.seed,
+            );
+        }
 
         let recorded_points = recording_injector.recorded_points();
         let total_await_points = recorded_points.len();
@@ -539,7 +555,8 @@ impl LabInjectionRunner {
 
             // Run the test
             let instrumented = test_fn(injector.clone(), &mut runtime, &mut oracles);
-            let (mut outcome, poll_result) = Self::run_with_panic_catch(instrumented);
+            let (mut outcome, poll_result) =
+                Self::run_with_panic_catch(instrumented, self.config.max_steps_per_run);
 
             // A successful run must actually inject cancellation at the target point.
             // If the future completed normally, the target point was not reached.
@@ -609,23 +626,25 @@ impl LabInjectionRunner {
     /// Polls an instrumented future to completion with panic catching.
     fn run_with_panic_catch<F, T>(
         future: InstrumentedFuture<F>,
+        max_polls: Option<u64>,
     ) -> (InjectionOutcome, Option<InstrumentedPollResult<T>>)
     where
         F: Future<Output = T>,
         T: std::fmt::Debug,
     {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            Self::poll_to_completion(future)
+            Self::poll_to_completion(future, max_polls)
         }));
 
         match result {
-            Ok(poll_result) => {
+            Ok(Ok(poll_result)) => {
                 let outcome = match &poll_result {
                     InstrumentedPollResult::Inner(_)
                     | InstrumentedPollResult::CancellationInjected(_) => InjectionOutcome::Success,
                 };
                 (outcome, Some(poll_result))
             }
+            Ok(Err(outcome)) => (outcome, None),
             Err(e) => {
                 let message = e
                     .downcast_ref::<&str>()
@@ -640,16 +659,22 @@ impl LabInjectionRunner {
     /// Polls an instrumented future to completion.
     fn poll_to_completion<F: Future>(
         future: InstrumentedFuture<F>,
-    ) -> InstrumentedPollResult<F::Output> {
+        max_polls: Option<u64>,
+    ) -> Result<InstrumentedPollResult<F::Output>, InjectionOutcome> {
         use std::task::{Context, Poll, Waker};
 
         let waker = Waker::noop();
         let mut cx = Context::from_waker(waker);
         let mut pinned = Box::pin(future);
+        let mut polls = 0u64;
 
         loop {
+            if max_polls.is_some_and(|max| polls >= max) {
+                return Err(InjectionOutcome::Timeout);
+            }
+            polls = polls.saturating_add(1);
             match pinned.as_mut().poll(&mut cx) {
-                Poll::Ready(output) => return output,
+                Poll::Ready(output) => return Ok(output),
                 Poll::Pending => {}
             }
         }
@@ -798,6 +823,20 @@ mod tests {
         }
     }
 
+    struct NeverReadyFuture;
+
+    impl Future for NeverReadyFuture {
+        type Output = i32;
+
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Self::Output> {
+            cx.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    }
+
     #[test]
     fn lab_injection_config_builder() {
         let config = LabInjectionConfig::new(42)
@@ -932,6 +971,26 @@ mod tests {
             InjectionOutcome::AssertionFailed(_)
         ));
         assert_eq!(report.results[1].injection.injection_point, 2);
+    }
+
+    #[test]
+    fn lab_injection_max_steps_bounds_recording_poll_loop() {
+        let config = LabInjectionConfig::new(42)
+            .with_strategy(InjectionStrategy::AllPoints)
+            .max_steps_per_run(3);
+        let mut runner = LabInjectionRunner::new(config);
+
+        let report =
+            runner.run_simple(|injector| InstrumentedFuture::new(NeverReadyFuture, injector));
+
+        assert_eq!(report.total_await_points, 3);
+        assert_eq!(report.tests_run, 1);
+        assert_eq!(report.failures, 1);
+        assert!(matches!(
+            report.results[0].injection.outcome,
+            InjectionOutcome::Timeout
+        ));
+        assert_eq!(runner.current_mode(), InjectionMode::Recording);
     }
 
     #[test]
