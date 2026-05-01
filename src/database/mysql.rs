@@ -1213,24 +1213,28 @@ impl MySqlConnectOptions {
         // Parse query parameters
         if !params.is_empty() {
             for pair in params.split('&') {
-                let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-                match key {
+                let (raw_key, raw_value) = pair.split_once('=').unwrap_or((pair, ""));
+                let key = percent_decode(raw_key);
+                let value = percent_decode(raw_value);
+                match key.as_str() {
                     "ssl-mode" | "sslmode" => {
-                        ssl_mode = match value {
-                            "disabled" | "DISABLED" => SslMode::Disabled,
-                            "preferred" | "PREFERRED" => SslMode::Preferred,
-                            "required" | "REQUIRED" => SslMode::Required,
-                            _ => {
-                                return Err(MySqlError::InvalidUrl(format!(
-                                    "unknown ssl-mode: {value}"
-                                )));
-                            }
-                        };
+                        if value.eq_ignore_ascii_case("disabled") {
+                            ssl_mode = SslMode::Disabled;
+                        } else if value.eq_ignore_ascii_case("preferred") {
+                            ssl_mode = SslMode::Preferred;
+                        } else if value.eq_ignore_ascii_case("required") {
+                            ssl_mode = SslMode::Required;
+                        } else {
+                            return Err(MySqlError::InvalidUrl(format!(
+                                "unknown ssl-mode: {value}"
+                            )));
+                        }
                     }
                     "connect_timeout" => {
-                        if let Ok(secs) = value.parse::<u64>() {
-                            connect_timeout = Some(std::time::Duration::from_secs(secs));
-                        }
+                        let secs = value.parse::<u64>().map_err(|_| {
+                            MySqlError::InvalidUrl(format!("invalid connect_timeout: {value}"))
+                        })?;
+                        connect_timeout = Some(std::time::Duration::from_secs(secs));
                     }
                     _ => {
                         // Unknown parameters are silently ignored for forward-compat.
@@ -6003,6 +6007,33 @@ mod tests {
         assert_eq!(
             opts.connect_timeout,
             Some(std::time::Duration::from_secs(5))
+        );
+    }
+
+    #[test]
+    fn test_connect_options_invalid_connect_timeout_rejected() {
+        let result =
+            MySqlConnectOptions::parse("mysql://user@localhost/db?connect_timeout=not-a-number");
+        match result {
+            Err(MySqlError::InvalidUrl(msg)) => {
+                assert!(msg.contains("invalid connect_timeout"));
+                assert!(msg.contains("not-a-number"));
+            }
+            other => panic!("expected invalid connect_timeout URL error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_connect_options_percent_decodes_query_keys_and_values() {
+        let opts = MySqlConnectOptions::parse("mysql://user@localhost/db?ssl%2Dmode=PrEfErReD")
+            .expect("percent-encoded ssl-mode query");
+        assert_eq!(opts.ssl_mode, SslMode::Preferred);
+
+        let opts = MySqlConnectOptions::parse("mysql://user@localhost/db?connect%5Ftimeout=7")
+            .expect("percent-encoded connect_timeout query");
+        assert_eq!(
+            opts.connect_timeout,
+            Some(std::time::Duration::from_secs(7))
         );
     }
 
