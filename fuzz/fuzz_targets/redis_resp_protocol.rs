@@ -224,7 +224,7 @@ fn generate_valid_resp_samples(data: &[u8]) -> Vec<Vec<u8>> {
 
     // Use part of input data as string content (if valid UTF-8)
     if let Ok(s) = std::str::from_utf8(data.get(..data.len().min(50)).unwrap_or(&[])) {
-        let content = s.replace('\r', "").replace('\n', "");
+        let content = s.replace(['\r', '\n'], "");
         if !content.is_empty() {
             samples.push(format!("+{content}\r\n").into_bytes());
             samples.push(format!("-ERR {content}\r\n").into_bytes());

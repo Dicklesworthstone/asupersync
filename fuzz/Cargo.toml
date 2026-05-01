@@ -4330,3 +4330,9 @@ name = "h2_settings_enable_push_invalid"
 path = "fuzz_targets/h2_settings_enable_push_invalid.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "h2_settings_header_table_size_underflow"
+path = "fuzz_targets/h2_settings_header_table_size_underflow.rs"
+test = false
+doc = false
