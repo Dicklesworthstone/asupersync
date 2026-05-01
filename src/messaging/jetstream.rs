@@ -1299,6 +1299,18 @@ impl Consumer {
             let _ = &err;
         }
 
+        // Check for potential DeliverByStartTime edge case:
+        // If we got no messages and operation timed out, this might indicate
+        // that the consumer's start time precedes the stream's first available
+        // sequence (after retention/age purge). This is a common issue that
+        // should be clearly reported rather than silently returning empty results.
+        if messages.is_empty() && pull_state.termination() == PullSubscriberTermination::TimedOut {
+            return Err(JsError::Api {
+                code: 408,
+                description: "Pull operation timed out with no messages. If using DeliverByStartTime, verify that the start time does not precede the stream's first available sequence after retention purges.".to_string(),
+            });
+        }
+
         pull_state.result().map(|()| messages)
     }
 
