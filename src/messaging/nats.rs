@@ -392,8 +392,17 @@ pub struct ServerInfo {
 }
 
 impl ServerInfo {
-    /// Parse INFO JSON payload (minimal parser, no serde dependency).
-    fn parse(json: &str) -> Self {
+    /// Parse INFO JSON payload, rejecting malformed or non-object frames.
+    fn parse(json: &str) -> Result<Self, NatsError> {
+        let value = serde_json::from_str::<serde_json::Value>(json).map_err(|err| {
+            NatsError::Protocol(format!("malformed INFO JSON from server: {err}"))
+        })?;
+        if !value.is_object() {
+            return Err(NatsError::Protocol(
+                "malformed INFO JSON from server: expected object".to_string(),
+            ));
+        }
+
         let mut info = Self::default();
 
         // Simple JSON field extraction (no nested objects)
@@ -422,7 +431,7 @@ impl ServerInfo {
             info.headers = v;
         }
 
-        info
+        Ok(info)
     }
 }
 
@@ -1207,7 +1216,7 @@ impl NatsClient {
             .strip_prefix("INFO ")
             .ok_or_else(|| NatsError::Protocol("malformed INFO".to_string()))?;
 
-        let info = ServerInfo::parse(json);
+        let info = ServerInfo::parse(json)?;
         self.read_buf.consume(end + 2);
         Ok(Some(NatsMessage::Info(info)))
     }
@@ -2565,7 +2574,7 @@ mod tests {
     #[test]
     fn test_server_info_parse() {
         let json = r#"{"server_id":"id123","server_name":"test","version":"2.9.0","proto":1,"max_payload":1048576,"tls_required":false}"#;
-        let info = ServerInfo::parse(json);
+        let info = ServerInfo::parse(json).expect("valid INFO JSON");
         assert_eq!(info.server_id, "id123");
         assert_eq!(info.server_name, "test");
         assert_eq!(info.version, "2.9.0");
@@ -2727,7 +2736,7 @@ mod tests {
     #[test]
     fn test_server_info_parse_minimal() {
         let json = "{}";
-        let info = ServerInfo::parse(json);
+        let info = ServerInfo::parse(json).expect("valid empty INFO JSON");
         assert_eq!(info.server_id, "");
         assert_eq!(info.max_payload, 0);
         assert!(!info.tls_required);
@@ -2736,7 +2745,7 @@ mod tests {
     #[test]
     fn test_server_info_parse_with_tls() {
         let json = r#"{"tls_required":true,"tls_available":true}"#;
-        let info = ServerInfo::parse(json);
+        let info = ServerInfo::parse(json).expect("valid TLS INFO JSON");
         assert!(info.tls_required);
         assert!(info.tls_available);
     }
@@ -3443,7 +3452,7 @@ mod tests {
     #[test]
     fn server_info_parse_full() {
         let json = r#"{"server_id":"abc","server_name":"srv","version":"2.10","proto":1,"max_payload":1048576}"#;
-        let info = ServerInfo::parse(json);
+        let info = ServerInfo::parse(json).expect("valid INFO JSON");
         assert_eq!(info.server_id, "abc");
         assert_eq!(info.server_name, "srv");
         assert_eq!(info.version, "2.10");
@@ -3453,9 +3462,28 @@ mod tests {
 
     #[test]
     fn server_info_parse_empty() {
-        let info = ServerInfo::parse("{}");
+        let info = ServerInfo::parse("{}").expect("valid empty INFO JSON");
         assert!(info.server_id.is_empty());
         assert_eq!(info.proto, 0);
+    }
+
+    #[test]
+    fn server_info_parse_rejects_malformed_json() {
+        let err = ServerInfo::parse(r#"{"server_id":"abc""#)
+            .expect_err("malformed INFO JSON must fail closed");
+        assert!(
+            matches!(err, NatsError::Protocol(ref message) if message.contains("malformed INFO JSON")),
+            "expected malformed INFO protocol error, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn server_info_parse_rejects_non_object_json() {
+        let err = ServerInfo::parse("[]").expect_err("INFO JSON must be an object");
+        assert!(
+            matches!(err, NatsError::Protocol(ref message) if message.contains("expected object")),
+            "expected non-object INFO protocol error, got {err:?}"
+        );
     }
 
     #[test]
@@ -3541,7 +3569,7 @@ mod tests {
     #[test]
     fn test_server_info_parse_max_payload() {
         let json = r#"{"max_payload":524288}"#;
-        let info = ServerInfo::parse(json);
+        let info = ServerInfo::parse(json).expect("valid max_payload INFO JSON");
         assert_eq!(info.max_payload, 524_288);
     }
 
