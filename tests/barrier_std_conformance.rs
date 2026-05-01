@@ -7,15 +7,13 @@
 //! - Proper reset behavior between generations
 
 use asupersync::cx::Cx;
-use asupersync::sync::barrier::{Barrier as AsupersyncBarrier, BarrierWaitResult};
+use asupersync::sync::Barrier as AsupersyncBarrier;
 use asupersync::types::{Budget, RegionId, TaskId};
 use asupersync::util::ArenaIndex;
-use futures::task::noop_waker;
-use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier as StdBarrier, BarrierWaitResult as StdBarrierWaitResult};
-use std::task::{Context, Poll, Waker};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier as StdBarrier};
+use std::task::{Context, Poll};
 use std::thread;
 
 /// Result of a barrier conformance test comparing both implementations.
@@ -108,8 +106,7 @@ impl BarrierConformanceContext {
 
                         // Use simple blocking approach for conformance test
                         let mut wait_future = barrier.wait(&cx);
-                        let waker = noop_waker();
-                        let mut context = Context::from_waker(&waker);
+                        let mut context = Context::from_waker(std::task::Waker::noop());
 
                         let result = loop {
                             match Pin::new(&mut wait_future).poll(&mut context) {
@@ -406,32 +403,59 @@ fn conformance_comprehensive_matrix() {
     }
 }
 
-/// Generate conformance coverage report.
+/// Verify the documented coverage matrix instead of printing a report that can
+/// pass without exercising any implementation behavior.
 #[test]
-fn generate_conformance_report() {
-    println!("\n=== Barrier Conformance Coverage Report ===\n");
-
-    println!("| Test Case | Parties | Generations | Delay Pattern | Status |");
-    println!("|-----------|---------|-------------|---------------|--------|");
-
+fn conformance_coverage_matrix_exercises_all_scenarios() {
     let test_cases = vec![
-        ("Basic Sync", 3, 1, "None"),
-        ("Staggered Arrivals", 4, 1, "0,100,200,300μs"),
-        ("Multiple Generations", 2, 3, "0,50μs"),
-        ("Single Party", 1, 1, "None"),
-        ("Large Party Count", 8, 1, "0-70μs incremental"),
+        (
+            "basic_sync",
+            ConformanceTestConfig {
+                parties: 3,
+                generations: 1,
+                arrival_delays_us: vec![0, 0, 0],
+            },
+        ),
+        (
+            "staggered_arrivals",
+            ConformanceTestConfig {
+                parties: 4,
+                generations: 1,
+                arrival_delays_us: vec![0, 100, 200, 300],
+            },
+        ),
+        (
+            "multiple_generations",
+            ConformanceTestConfig {
+                parties: 2,
+                generations: 3,
+                arrival_delays_us: vec![0, 50],
+            },
+        ),
+        (
+            "single_party",
+            ConformanceTestConfig {
+                parties: 1,
+                generations: 1,
+                arrival_delays_us: vec![0],
+            },
+        ),
+        (
+            "large_party_count",
+            ConformanceTestConfig {
+                parties: 8,
+                generations: 1,
+                arrival_delays_us: vec![0, 10, 20, 30, 40, 50, 60, 70],
+            },
+        ),
     ];
 
-    for (name, parties, generations, pattern) in test_cases {
-        println!(
-            "| {} | {} | {} | {} | ✅ PASS |",
-            name, parties, generations, pattern
-        );
-    }
+    assert_eq!(test_cases.len(), 5, "coverage matrix should stay explicit");
 
-    println!("\n✅ All conformance tests passing");
-    println!("📊 Coverage: 5/5 test scenarios (100%)");
-    println!("🎯 Leader designation conformance: VERIFIED");
-    println!("⏰ Release order consistency: CONFIRMED");
-    println!("🔄 Multi-generation reset behavior: VALIDATED");
+    for (name, config) in test_cases {
+        let ctx = BarrierConformanceContext::new(config);
+        let (asupersync_results, std_results) = ctx.run_differential_test();
+
+        assert_barrier_conformance(&asupersync_results, &std_results, name);
+    }
 }
