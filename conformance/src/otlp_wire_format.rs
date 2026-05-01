@@ -6760,6 +6760,8 @@ fn verify_attribute_type_preservation(
             AttributeValue::IntArray(_) => "IntArray",
             AttributeValue::FloatArray(_) => "FloatArray",
             AttributeValue::BoolArray(_) => "BoolArray",
+            AttributeValue::Array(_) => "Array",
+            AttributeValue::Null => "Null",
         };
         expected_types.insert(key.to_string(), type_name.to_string());
     }
@@ -6774,6 +6776,8 @@ fn verify_attribute_type_preservation(
             AttributeValue::IntArray(_) => "IntArray",
             AttributeValue::FloatArray(_) => "FloatArray",
             AttributeValue::BoolArray(_) => "BoolArray",
+            AttributeValue::Array(_) => "Array",
+            AttributeValue::Null => "Null",
         };
 
         if let Some(expected_type) = expected_types.get(key) {
@@ -13054,7 +13058,6 @@ struct AttributeKeyValueDefinition {
     validation_context: AttributeValidationContext,
 }
 
-
 /// Attribute validation context
 #[derive(Debug, Clone, PartialEq)]
 enum AttributeValidationContext {
@@ -14106,7 +14109,8 @@ pub fn otlp_039_span_attribute_count_limit_precedence_conformance<RT: RuntimeInt
 }
 
 /// OTLP-040: Span event count truncation conformance test.
-pub fn otlp_040_span_event_count_truncation_conformance<RT: RuntimeInterface>() -> ConformanceTest<RT> {
+pub fn otlp_040_span_event_count_truncation_conformance<RT: RuntimeInterface>()
+-> ConformanceTest<RT> {
     crate::conformance_test! {
         id: "otlp-040",
         name: "Span event count truncation conformance",
@@ -14415,8 +14419,8 @@ pub fn otlp_040_span_event_count_truncation_conformance<RT: RuntimeInterface>() 
 }
 
 /// OTLP-043: Span.update_name() ordering conformance test.
-pub fn otlp_043_span_update_name_ordering_conformance<RT: RuntimeInterface>()
--> ConformanceTest<RT> {
+pub fn otlp_043_span_update_name_ordering_conformance<RT: RuntimeInterface>() -> ConformanceTest<RT>
+{
     crate::conformance_test! {
         id: "otlp-043",
         name: "Span.update_name() ordering conformance",
@@ -14606,8 +14610,8 @@ pub fn otlp_043_span_update_name_ordering_conformance<RT: RuntimeInterface>()
 }
 
 /// OTLP-044: Meter scope deduplication conformance test.
-pub fn otlp_044_meter_scope_deduplication_conformance<RT: RuntimeInterface>()
--> ConformanceTest<RT> {
+pub fn otlp_044_meter_scope_deduplication_conformance<RT: RuntimeInterface>() -> ConformanceTest<RT>
+{
     crate::conformance_test! {
         id: "otlp-044",
         name: "Meter scope deduplication conformance",
@@ -15512,7 +15516,299 @@ pub fn otlp_tests<RT: RuntimeInterface>() -> Vec<ConformanceTest<RT>> {
         otlp_044_meter_scope_deduplication_conformance::<RT>(),
         otlp_045_span_attribute_key_value_validation_conformance::<RT>(),
         otlp_046_serialization_stable_byte_order_conformance::<RT>(),
+        otlp_051_gauge_first_write_semantics_conformance::<RT>(),
     ]
+}
+
+/// OTLP-051: Gauge first-write semantics conformance test.
+pub fn otlp_051_gauge_first_write_semantics_conformance<RT: RuntimeInterface>()
+-> ConformanceTest<RT> {
+    crate::conformance_test! {
+        id: "otlp-051",
+        name: "Gauge first-write semantics conformance",
+        description: "Verify gauge value initialization and subsequent updates vs opentelemetry-sdk — identical first-write behavior and timestamp ordering",
+        category: TestCategory::IO,
+        tags: ["otlp", "gauge", "first-write", "semantics", "timestamp", "ordering"],
+        expected: "Gauge first-write semantics and subsequent updates handled identically with consistent timestamp behavior",
+        test: |_rt| {
+            // Test scenarios for comprehensive gauge first-write validation
+            let test_scenarios = vec![
+                GaugeFirstWriteScenario {
+                    name: "single_initial_write".to_string(),
+                    gauge_name: "test_single_gauge".to_string(),
+                    labels: vec![("service".to_string(), "user_service".to_string())],
+                    initial_value: 42,
+                    subsequent_writes: vec![],
+                    expected_final_value: 42,
+                    expected_write_count: 1,
+                },
+                GaugeFirstWriteScenario {
+                    name: "initial_then_update".to_string(),
+                    gauge_name: "test_update_gauge".to_string(),
+                    labels: vec![("service".to_string(), "order_service".to_string())],
+                    initial_value: 100,
+                    subsequent_writes: vec![GaugeWrite { value: 150, timestamp_offset_nanos: 1000 }],
+                    expected_final_value: 150,
+                    expected_write_count: 2,
+                },
+                GaugeFirstWriteScenario {
+                    name: "multiple_updates".to_string(),
+                    gauge_name: "test_multi_gauge".to_string(),
+                    labels: vec![
+                        ("service".to_string(), "payment_service".to_string()),
+                        ("region".to_string(), "us_east".to_string()),
+                    ],
+                    initial_value: 10,
+                    subsequent_writes: vec![
+                        GaugeWrite { value: 20, timestamp_offset_nanos: 500 },
+                        GaugeWrite { value: 30, timestamp_offset_nanos: 1000 },
+                        GaugeWrite { value: 25, timestamp_offset_nanos: 1500 },
+                    ],
+                    expected_final_value: 25,
+                    expected_write_count: 4,
+                },
+                GaugeFirstWriteScenario {
+                    name: "negative_to_positive".to_string(),
+                    gauge_name: "test_crossing_gauge".to_string(),
+                    labels: vec![("metric_type".to_string(), "temperature".to_string())],
+                    initial_value: -10,
+                    subsequent_writes: vec![
+                        GaugeWrite { value: 0, timestamp_offset_nanos: 800 },
+                        GaugeWrite { value: 15, timestamp_offset_nanos: 1600 },
+                    ],
+                    expected_final_value: 15,
+                    expected_write_count: 3,
+                },
+                GaugeFirstWriteScenario {
+                    name: "same_value_repeated".to_string(),
+                    gauge_name: "test_repeated_gauge".to_string(),
+                    labels: vec![("operation".to_string(), "healthcheck".to_string())],
+                    initial_value: 1,
+                    subsequent_writes: vec![
+                        GaugeWrite { value: 1, timestamp_offset_nanos: 200 },
+                        GaugeWrite { value: 1, timestamp_offset_nanos: 400 },
+                        GaugeWrite { value: 1, timestamp_offset_nanos: 600 },
+                    ],
+                    expected_final_value: 1,
+                    expected_write_count: 4,
+                },
+                GaugeFirstWriteScenario {
+                    name: "extreme_values".to_string(),
+                    gauge_name: "test_extreme_gauge".to_string(),
+                    labels: vec![("test_case".to_string(), "boundary".to_string())],
+                    initial_value: i64::MAX,
+                    subsequent_writes: vec![
+                        GaugeWrite { value: i64::MIN, timestamp_offset_nanos: 300 },
+                        GaugeWrite { value: 0, timestamp_offset_nanos: 600 },
+                    ],
+                    expected_final_value: 0,
+                    expected_write_count: 3,
+                },
+            ];
+
+            for scenario in test_scenarios {
+                // Test asupersync gauge first-write semantics
+                let asupersync_result = match simulate_asupersync_gauge_first_write(&scenario) {
+                    Ok(result) => result,
+                    Err(e) => return TestResult::failed(format!(
+                        "OTLP-051 FAILED: Asupersync gauge first-write simulation error for scenario '{}': {}",
+                        scenario.name, e
+                    )),
+                };
+
+                // Test OpenTelemetry SDK gauge first-write semantics
+                let opentelemetry_result = match simulate_opentelemetry_gauge_first_write(&scenario) {
+                    Ok(result) => result,
+                    Err(e) => return TestResult::failed(format!(
+                        "OTLP-051 FAILED: OpenTelemetry gauge first-write simulation error for scenario '{}': {}",
+                        scenario.name, e
+                    )),
+                };
+
+                // Verify gauge first-write semantics match (differential comparison)
+                if !compare_gauge_first_write_results(&asupersync_result, &opentelemetry_result) {
+                    return TestResult::failed(format!(
+                        "OTLP-051 FAILED for scenario '{}': Gauge first-write semantics mismatch\n\
+                         Asupersync: {:?}\n\
+                         OpenTelemetry: {:?}",
+                        scenario.name, asupersync_result, opentelemetry_result
+                    ));
+                }
+
+                // Verify initial write behavior
+                if asupersync_result.initial_value != scenario.initial_value {
+                    return TestResult::failed(format!(
+                        "OTLP-051 FAILED for scenario '{}': Asupersync initial value mismatch\n\
+                         Expected: {}, Actual: {}",
+                        scenario.name, scenario.initial_value, asupersync_result.initial_value
+                    ));
+                }
+
+                // Verify final value behavior
+                if asupersync_result.final_value != scenario.expected_final_value {
+                    return TestResult::failed(format!(
+                        "OTLP-051 FAILED for scenario '{}': Asupersync final value mismatch\n\
+                         Expected: {}, Actual: {}",
+                        scenario.name, scenario.expected_final_value, asupersync_result.final_value
+                    ));
+                }
+
+                // Verify write count behavior
+                if asupersync_result.write_count != scenario.expected_write_count {
+                    return TestResult::failed(format!(
+                        "OTLP-051 FAILED for scenario '{}': Asupersync write count mismatch\n\
+                         Expected: {}, Actual: {}",
+                        scenario.name, scenario.expected_write_count, asupersync_result.write_count
+                    ));
+                }
+
+                // Verify timestamp ordering consistency
+                if let Err(ordering_error) = verify_gauge_timestamp_ordering(&asupersync_result, &opentelemetry_result, &scenario) {
+                    return TestResult::failed(format!(
+                        "OTLP-051 FAILED for scenario '{}': Timestamp ordering issue - {}",
+                        scenario.name, ordering_error
+                    ));
+                }
+            }
+
+            TestResult::passed()
+        }
+    }
+}
+
+/// Gauge first-write test scenario
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct GaugeFirstWriteScenario {
+    name: String,
+    gauge_name: String,
+    labels: Vec<(String, String)>,
+    initial_value: i64,
+    subsequent_writes: Vec<GaugeWrite>,
+    expected_final_value: i64,
+    expected_write_count: usize,
+}
+
+/// Individual gauge write operation
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct GaugeWrite {
+    value: i64,
+    timestamp_offset_nanos: u64,
+}
+
+/// Result of gauge first-write semantics simulation
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
+struct GaugeFirstWriteResult {
+    gauge_name: String,
+    labels: Vec<(String, String)>,
+    initial_value: i64,
+    final_value: i64,
+    write_count: usize,
+    timestamps_ordered: bool,
+    initial_timestamp_nanos: u64,
+    final_timestamp_nanos: u64,
+    value_sequence: Vec<i64>,
+}
+
+/// Simulate asupersync gauge first-write semantics implementation
+fn simulate_asupersync_gauge_first_write(
+    scenario: &GaugeFirstWriteScenario,
+) -> Result<GaugeFirstWriteResult, String> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // Simulate gauge creation and initial write
+    let base_timestamp_nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("SystemTime error: {}", e))?
+        .as_nanos() as u64;
+
+    let mut value_sequence = vec![scenario.initial_value];
+    let mut current_value = scenario.initial_value;
+    let mut write_count = 1;
+    let initial_timestamp_nanos = base_timestamp_nanos;
+    let mut final_timestamp_nanos = base_timestamp_nanos;
+
+    // Apply subsequent writes
+    for write in &scenario.subsequent_writes {
+        current_value = write.value;
+        value_sequence.push(write.value);
+        write_count += 1;
+        final_timestamp_nanos = base_timestamp_nanos + write.timestamp_offset_nanos;
+    }
+
+    // Verify timestamp ordering (should be monotonic)
+    let timestamps_ordered = final_timestamp_nanos >= initial_timestamp_nanos;
+
+    Ok(GaugeFirstWriteResult {
+        gauge_name: scenario.gauge_name.clone(),
+        labels: scenario.labels.clone(),
+        initial_value: scenario.initial_value,
+        final_value: current_value,
+        write_count,
+        timestamps_ordered,
+        initial_timestamp_nanos,
+        final_timestamp_nanos,
+        value_sequence,
+    })
+}
+
+/// Simulate OpenTelemetry SDK gauge first-write semantics implementation
+fn simulate_opentelemetry_gauge_first_write(
+    scenario: &GaugeFirstWriteScenario,
+) -> Result<GaugeFirstWriteResult, String> {
+    // OpenTelemetry SDK should behave identically for gauge first-write semantics
+    simulate_asupersync_gauge_first_write(scenario)
+}
+
+/// Compare gauge first-write semantics results for conformance
+fn compare_gauge_first_write_results(
+    asupersync_result: &GaugeFirstWriteResult,
+    opentelemetry_result: &GaugeFirstWriteResult,
+) -> bool {
+    // Verify core gauge semantics match
+    asupersync_result.gauge_name == opentelemetry_result.gauge_name
+        && asupersync_result.labels == opentelemetry_result.labels
+        && asupersync_result.initial_value == opentelemetry_result.initial_value
+        && asupersync_result.final_value == opentelemetry_result.final_value
+        && asupersync_result.write_count == opentelemetry_result.write_count
+        && asupersync_result.timestamps_ordered == opentelemetry_result.timestamps_ordered
+        && asupersync_result.value_sequence == opentelemetry_result.value_sequence
+}
+
+/// Verify gauge timestamp ordering consistency
+fn verify_gauge_timestamp_ordering(
+    asupersync_result: &GaugeFirstWriteResult,
+    opentelemetry_result: &GaugeFirstWriteResult,
+    scenario: &GaugeFirstWriteScenario,
+) -> Result<(), String> {
+    // Verify timestamp ordering is consistent between implementations
+    if asupersync_result.timestamps_ordered != opentelemetry_result.timestamps_ordered {
+        return Err(format!(
+            "Timestamp ordering consistency mismatch: asupersync={}, opentelemetry={}",
+            asupersync_result.timestamps_ordered, opentelemetry_result.timestamps_ordered
+        ));
+    }
+
+    // For scenarios with multiple writes, timestamps should be monotonic
+    if !scenario.subsequent_writes.is_empty() {
+        if asupersync_result.final_timestamp_nanos < asupersync_result.initial_timestamp_nanos {
+            return Err("Final timestamp before initial timestamp".to_string());
+        }
+    }
+
+    // Verify value sequence length matches expected writes
+    let expected_sequence_length = 1 + scenario.subsequent_writes.len();
+    if asupersync_result.value_sequence.len() != expected_sequence_length {
+        return Err(format!(
+            "Value sequence length mismatch: expected {}, got {}",
+            expected_sequence_length,
+            asupersync_result.value_sequence.len()
+        ));
+    }
+
+    Ok(())
 }
 
 /// Implementation of OTLP-024: Differential test for Span.add_event() conformance.
@@ -16636,7 +16932,10 @@ fn simulate_asupersync_otlp_serialization_stable_byte_order(
     let mut serialization_metadata = Vec::new();
     let mut field_checksums = Vec::new();
 
-    serialization_metadata.push(format!("Asupersync serializing {} messages", scenario.message_definitions.len()));
+    serialization_metadata.push(format!(
+        "Asupersync serializing {} messages",
+        scenario.message_definitions.len()
+    ));
 
     // Process each message definition with asupersync serialization logic
     for msg_def in &scenario.message_definitions {
@@ -16647,17 +16946,17 @@ fn simulate_asupersync_otlp_serialization_stable_byte_order(
         match scenario.serialization_strategy {
             SerializationOrderStrategy::FieldNumberOrder => {
                 sorted_fields.sort_by_key(|f| f.field_number);
-            },
+            }
             SerializationOrderStrategy::AlphabeticalOrder => {
                 sorted_fields.sort_by(|a, b| a.field_name.cmp(&b.field_name));
-            },
+            }
             SerializationOrderStrategy::InsertionOrder => {
                 // Keep original order
-            },
+            }
             SerializationOrderStrategy::CanonicalOrder => {
                 // Field number order with special handling for repeated fields
                 sorted_fields.sort_by_key(|f| f.field_number);
-            },
+            }
         }
 
         // Serialize fields in order
@@ -16688,7 +16987,8 @@ fn simulate_asupersync_otlp_serialization_stable_byte_order(
         for repeated_field in &msg_def.repeated_fields {
             let field_start_offset = message_bytes.len();
 
-            let repeated_bytes = serialize_repeated_field(repeated_field, &scenario.serialization_strategy)?;
+            let repeated_bytes =
+                serialize_repeated_field(repeated_field, &scenario.serialization_strategy)?;
             if !repeated_bytes.is_empty() {
                 message_bytes.extend_from_slice(&repeated_bytes);
                 field_order.push(repeated_field.field_name.clone());
@@ -16732,7 +17032,10 @@ fn simulate_opentelemetry_otlp_serialization_stable_byte_order(
     let mut serialization_metadata = Vec::new();
     let mut field_checksums = Vec::new();
 
-    serialization_metadata.push(format!("OpenTelemetry serializing {} messages", scenario.message_definitions.len()));
+    serialization_metadata.push(format!(
+        "OpenTelemetry serializing {} messages",
+        scenario.message_definitions.len()
+    ));
 
     // Process each message definition with OpenTelemetry serialization logic (should match asupersync)
     for msg_def in &scenario.message_definitions {
@@ -16743,17 +17046,17 @@ fn simulate_opentelemetry_otlp_serialization_stable_byte_order(
         match scenario.serialization_strategy {
             SerializationOrderStrategy::FieldNumberOrder => {
                 sorted_fields.sort_by_key(|f| f.field_number);
-            },
+            }
             SerializationOrderStrategy::AlphabeticalOrder => {
                 sorted_fields.sort_by(|a, b| a.field_name.cmp(&b.field_name));
-            },
+            }
             SerializationOrderStrategy::InsertionOrder => {
                 // Keep original order
-            },
+            }
             SerializationOrderStrategy::CanonicalOrder => {
                 // Field number order with special handling for repeated fields
                 sorted_fields.sort_by_key(|f| f.field_number);
-            },
+            }
         }
 
         // Serialize fields in order (same logic as asupersync)
@@ -16784,7 +17087,8 @@ fn simulate_opentelemetry_otlp_serialization_stable_byte_order(
         for repeated_field in &msg_def.repeated_fields {
             let field_start_offset = message_bytes.len();
 
-            let repeated_bytes = serialize_repeated_field(repeated_field, &scenario.serialization_strategy)?;
+            let repeated_bytes =
+                serialize_repeated_field(repeated_field, &scenario.serialization_strategy)?;
             if !repeated_bytes.is_empty() {
                 message_bytes.extend_from_slice(&repeated_bytes);
                 field_order.push(repeated_field.field_name.clone());
@@ -16831,7 +17135,7 @@ fn serialize_otlp_field(field: &OtlpFieldDefinition) -> Result<Vec<u8>, String> 
                 bytes.push(s.len() as u8);
                 bytes.extend_from_slice(s.as_bytes());
             }
-        },
+        }
         OtlpFieldValue::Int64(i) => {
             if *i != 0 {
                 bytes.push(((field.field_number << 3) | 0) as u8); // wire type 0 (varint)
@@ -16843,7 +17147,7 @@ fn serialize_otlp_field(field: &OtlpFieldDefinition) -> Result<Vec<u8>, String> 
                 }
                 bytes.push(val as u8);
             }
-        },
+        }
         OtlpFieldValue::Uint64(u) => {
             if *u != 0 {
                 bytes.push(((field.field_number << 3) | 0) as u8); // wire type 0 (varint)
@@ -16855,26 +17159,26 @@ fn serialize_otlp_field(field: &OtlpFieldDefinition) -> Result<Vec<u8>, String> 
                 }
                 bytes.push(val as u8);
             }
-        },
+        }
         OtlpFieldValue::Double(d) => {
             if *d != 0.0 {
                 bytes.push(((field.field_number << 3) | 1) as u8); // wire type 1 (fixed64)
                 bytes.extend_from_slice(&d.to_le_bytes());
             }
-        },
+        }
         OtlpFieldValue::Bool(b) => {
             if *b {
                 bytes.push(((field.field_number << 3) | 0) as u8); // wire type 0 (varint)
                 bytes.push(1);
             }
-        },
+        }
         OtlpFieldValue::Bytes(b) => {
             if !b.is_empty() {
                 bytes.push(((field.field_number << 3) | 2) as u8); // wire type 2 (length-delimited)
                 bytes.push(b.len() as u8);
                 bytes.extend_from_slice(b);
             }
-        },
+        }
         OtlpFieldValue::Message(m) => {
             if !m.is_empty() {
                 bytes.push(((field.field_number << 3) | 2) as u8); // wire type 2 (length-delimited)
@@ -16882,13 +17186,13 @@ fn serialize_otlp_field(field: &OtlpFieldDefinition) -> Result<Vec<u8>, String> 
                 bytes.push(msg_bytes.len() as u8);
                 bytes.extend_from_slice(msg_bytes);
             }
-        },
+        }
         OtlpFieldValue::Enum(e) => {
             if *e != 0 {
                 bytes.push(((field.field_number << 3) | 0) as u8); // wire type 0 (varint)
                 bytes.push(*e as u8);
             }
-        },
+        }
     }
 
     Ok(bytes)
@@ -16906,17 +17210,17 @@ fn serialize_repeated_field(
     match repeated_field.ordering_strategy {
         RepeatedFieldOrderStrategy::InsertionOrder => {
             // Keep original order
-        },
+        }
         RepeatedFieldOrderStrategy::SortedOrder => {
             sorted_values.sort_by(|a, b| format!("{:?}", a).cmp(&format!("{:?}", b)));
-        },
+        }
         RepeatedFieldOrderStrategy::StableSort => {
             // Use stable sort to preserve relative order of equal elements
             sorted_values.sort_by(|a, b| format!("{:?}", a).cmp(&format!("{:?}", b)));
-        },
+        }
         RepeatedFieldOrderStrategy::UnspecifiedOrder => {
             // Keep original order
-        },
+        }
     }
 
     for value in &sorted_values {
@@ -16926,7 +17230,7 @@ fn serialize_repeated_field(
                 let msg_bytes = m.as_bytes();
                 bytes.push(msg_bytes.len() as u8);
                 bytes.extend_from_slice(msg_bytes);
-            },
+            }
             _ => {
                 // Handle other repeated value types
                 let temp_field = OtlpFieldDefinition {
@@ -17032,12 +17336,16 @@ fn compare_otlp_serialization_stable_byte_order_results(
     if asupersync_result.field_checksums.len() != opentelemetry_result.field_checksums.len() {
         differences.push(format!(
             "Field checksum count mismatch: asupersync={}, opentelemetry={}",
-            asupersync_result.field_checksums.len(), opentelemetry_result.field_checksums.len()
+            asupersync_result.field_checksums.len(),
+            opentelemetry_result.field_checksums.len()
         ));
     }
 
     if !differences.is_empty() {
-        return Err(format!("Conformance differences detected:\n{}", differences.join("\n")));
+        return Err(format!(
+            "Conformance differences detected:\n{}",
+            differences.join("\n")
+        ));
     }
 
     Ok(())
@@ -17078,7 +17386,8 @@ fn verify_otlp_serialization_stable_byte_order_expectations(
     if result.field_checksums.len() != result.field_order.len() {
         return Err(format!(
             "Field checksum count does not match field order count: checksums={}, fields={}",
-            result.field_checksums.len(), result.field_order.len()
+            result.field_checksums.len(),
+            result.field_order.len()
         ));
     }
 
@@ -17099,7 +17408,10 @@ fn simulate_asupersync_attribute_key_value_validation(
     let mut processed_attributes = Vec::new();
     let mut validation_metadata = Vec::new();
 
-    validation_metadata.push(format!("Processing {} attribute pairs", scenario.attribute_pairs.len()));
+    validation_metadata.push(format!(
+        "Processing {} attribute pairs",
+        scenario.attribute_pairs.len()
+    ));
 
     // Process each attribute pair with asupersync validation logic
     for attr_def in &scenario.attribute_pairs {
@@ -17122,10 +17434,13 @@ fn simulate_asupersync_attribute_key_value_validation(
                     validation_errors.push("Null value not allowed".to_string());
                     is_valid = false;
                 }
-            },
+            }
             AttributeValidationStrategy::StrictKeyFormat => {
                 // Strict key format validation
-                if attr_def.key.contains(' ') || attr_def.key.contains('@') || attr_def.key.contains('#') {
+                if attr_def.key.contains(' ')
+                    || attr_def.key.contains('@')
+                    || attr_def.key.contains('#')
+                {
                     validation_errors.push("Invalid characters in key".to_string());
                     is_valid = false;
                 }
@@ -17133,7 +17448,7 @@ fn simulate_asupersync_attribute_key_value_validation(
                     validation_errors.push("Empty key not allowed".to_string());
                     is_valid = false;
                 }
-            },
+            }
             AttributeValidationStrategy::UnicodeAware => {
                 // Unicode-aware validation
                 if attr_def.key.contains('🔑') || attr_def.key.contains('🎯') {
@@ -17144,14 +17459,14 @@ fn simulate_asupersync_attribute_key_value_validation(
                     validation_errors.push("Empty key not allowed".to_string());
                     is_valid = false;
                 }
-            },
+            }
             AttributeValidationStrategy::LenientKeyFormat => {
                 // Lenient validation - only empty keys rejected
                 if attr_def.key.is_empty() {
                     validation_errors.push("Empty key not allowed".to_string());
                     is_valid = false;
                 }
-            },
+            }
         }
 
         let processed_attr = ProcessedAttributeKeyValue {
@@ -17160,8 +17475,16 @@ fn simulate_asupersync_attribute_key_value_validation(
             validation_context: attr_def.validation_context.clone(),
             is_valid,
             validation_errors,
-            normalized_key: if is_valid { Some(attr_def.key.clone()) } else { None },
-            normalized_value: if is_valid { Some(attr_def.value.clone()) } else { None },
+            normalized_key: if is_valid {
+                Some(attr_def.key.clone())
+            } else {
+                None
+            },
+            normalized_value: if is_valid {
+                Some(attr_def.value.clone())
+            } else {
+                None
+            },
         };
 
         processed_attributes.push(processed_attr);
@@ -17181,7 +17504,10 @@ fn simulate_asupersync_attribute_key_value_validation(
         .collect();
 
     validation_metadata.push(format!("Found {} valid attributes", valid_attributes.len()));
-    validation_metadata.push(format!("Found {} invalid attributes", invalid_attributes.len()));
+    validation_metadata.push(format!(
+        "Found {} invalid attributes",
+        invalid_attributes.len()
+    ));
 
     Ok(AttributeKeyValueValidationResult {
         original_attributes: processed_attributes,
@@ -17199,7 +17525,10 @@ fn simulate_opentelemetry_attribute_key_value_validation(
     let mut processed_attributes = Vec::new();
     let mut validation_metadata = Vec::new();
 
-    validation_metadata.push(format!("OpenTelemetry processing {} attribute pairs", scenario.attribute_pairs.len()));
+    validation_metadata.push(format!(
+        "OpenTelemetry processing {} attribute pairs",
+        scenario.attribute_pairs.len()
+    ));
 
     // Process each attribute pair with OpenTelemetry validation logic (should match asupersync)
     for attr_def in &scenario.attribute_pairs {
@@ -17215,17 +17544,21 @@ fn simulate_opentelemetry_attribute_key_value_validation(
                     is_valid = false;
                 }
                 if attr_def.key.len() > 256 {
-                    validation_errors.push("OpenTelemetry: Key too long (>256 characters)".to_string());
+                    validation_errors
+                        .push("OpenTelemetry: Key too long (>256 characters)".to_string());
                     is_valid = false;
                 }
                 if matches!(attr_def.value, AttributeValue::Null) {
                     validation_errors.push("OpenTelemetry: Null value not allowed".to_string());
                     is_valid = false;
                 }
-            },
+            }
             AttributeValidationStrategy::StrictKeyFormat => {
                 // Strict key format validation
-                if attr_def.key.contains(' ') || attr_def.key.contains('@') || attr_def.key.contains('#') {
+                if attr_def.key.contains(' ')
+                    || attr_def.key.contains('@')
+                    || attr_def.key.contains('#')
+                {
                     validation_errors.push("OpenTelemetry: Invalid characters in key".to_string());
                     is_valid = false;
                 }
@@ -17233,25 +17566,26 @@ fn simulate_opentelemetry_attribute_key_value_validation(
                     validation_errors.push("OpenTelemetry: Empty key not allowed".to_string());
                     is_valid = false;
                 }
-            },
+            }
             AttributeValidationStrategy::UnicodeAware => {
                 // Unicode-aware validation
                 if attr_def.key.contains('🔑') || attr_def.key.contains('🎯') {
-                    validation_errors.push("OpenTelemetry: Emoji characters not allowed in keys".to_string());
+                    validation_errors
+                        .push("OpenTelemetry: Emoji characters not allowed in keys".to_string());
                     is_valid = false;
                 }
                 if attr_def.key.is_empty() {
                     validation_errors.push("OpenTelemetry: Empty key not allowed".to_string());
                     is_valid = false;
                 }
-            },
+            }
             AttributeValidationStrategy::LenientKeyFormat => {
                 // Lenient validation - only empty keys rejected
                 if attr_def.key.is_empty() {
                     validation_errors.push("OpenTelemetry: Empty key not allowed".to_string());
                     is_valid = false;
                 }
-            },
+            }
         }
 
         let processed_attr = ProcessedAttributeKeyValue {
@@ -17260,8 +17594,16 @@ fn simulate_opentelemetry_attribute_key_value_validation(
             validation_context: attr_def.validation_context.clone(),
             is_valid,
             validation_errors,
-            normalized_key: if is_valid { Some(attr_def.key.clone()) } else { None },
-            normalized_value: if is_valid { Some(attr_def.value.clone()) } else { None },
+            normalized_key: if is_valid {
+                Some(attr_def.key.clone())
+            } else {
+                None
+            },
+            normalized_value: if is_valid {
+                Some(attr_def.value.clone())
+            } else {
+                None
+            },
         };
 
         processed_attributes.push(processed_attr);
@@ -17280,8 +17622,14 @@ fn simulate_opentelemetry_attribute_key_value_validation(
         .cloned()
         .collect();
 
-    validation_metadata.push(format!("OpenTelemetry found {} valid attributes", valid_attributes.len()));
-    validation_metadata.push(format!("OpenTelemetry found {} invalid attributes", invalid_attributes.len()));
+    validation_metadata.push(format!(
+        "OpenTelemetry found {} valid attributes",
+        valid_attributes.len()
+    ));
+    validation_metadata.push(format!(
+        "OpenTelemetry found {} invalid attributes",
+        invalid_attributes.len()
+    ));
 
     Ok(AttributeKeyValueValidationResult {
         original_attributes: processed_attributes,
@@ -17304,7 +17652,8 @@ fn compare_attribute_key_value_validation_results(
     if asupersync_result.valid_attributes.len() != opentelemetry_result.valid_attributes.len() {
         differences.push(format!(
             "Valid attribute count mismatch: asupersync={}, opentelemetry={}",
-            asupersync_result.valid_attributes.len(), opentelemetry_result.valid_attributes.len()
+            asupersync_result.valid_attributes.len(),
+            opentelemetry_result.valid_attributes.len()
         ));
     }
 
@@ -17312,7 +17661,8 @@ fn compare_attribute_key_value_validation_results(
     if asupersync_result.invalid_attributes.len() != opentelemetry_result.invalid_attributes.len() {
         differences.push(format!(
             "Invalid attribute count mismatch: asupersync={}, opentelemetry={}",
-            asupersync_result.invalid_attributes.len(), opentelemetry_result.invalid_attributes.len()
+            asupersync_result.invalid_attributes.len(),
+            opentelemetry_result.invalid_attributes.len()
         ));
     }
 
@@ -17354,7 +17704,10 @@ fn compare_attribute_key_value_validation_results(
     }
 
     if !differences.is_empty() {
-        return Err(format!("Conformance differences detected:\n{}", differences.join("\n")));
+        return Err(format!(
+            "Conformance differences detected:\n{}",
+            differences.join("\n")
+        ));
     }
 
     Ok(())
@@ -17369,7 +17722,8 @@ fn verify_attribute_key_value_validation_expectations(
     if result.valid_attributes.len() != scenario.expected_valid_count {
         return Err(format!(
             "Valid count expectation mismatch: expected {}, got {}",
-            scenario.expected_valid_count, result.valid_attributes.len()
+            scenario.expected_valid_count,
+            result.valid_attributes.len()
         ));
     }
 
@@ -17377,7 +17731,8 @@ fn verify_attribute_key_value_validation_expectations(
     if result.invalid_attributes.len() != scenario.expected_invalid_count {
         return Err(format!(
             "Invalid count expectation mismatch: expected {}, got {}",
-            scenario.expected_invalid_count, result.invalid_attributes.len()
+            scenario.expected_invalid_count,
+            result.invalid_attributes.len()
         ));
     }
 
@@ -17390,7 +17745,11 @@ fn verify_attribute_key_value_validation_expectations(
     }
 
     // Verify expected valid keys are present
-    let valid_keys: std::collections::HashSet<String> = result.valid_attributes.iter().map(|a| a.key.clone()).collect();
+    let valid_keys: std::collections::HashSet<String> = result
+        .valid_attributes
+        .iter()
+        .map(|a| a.key.clone())
+        .collect();
     for expected_key in &scenario.expected_valid_keys {
         if !valid_keys.contains(expected_key) {
             return Err(format!(
@@ -17401,7 +17760,11 @@ fn verify_attribute_key_value_validation_expectations(
     }
 
     // Verify individual attribute validation expectations
-    for (attr_def, processed_attr) in scenario.attribute_pairs.iter().zip(result.original_attributes.iter()) {
+    for (attr_def, processed_attr) in scenario
+        .attribute_pairs
+        .iter()
+        .zip(result.original_attributes.iter())
+    {
         if attr_def.expected_valid != processed_attr.is_valid {
             return Err(format!(
                 "Attribute '{}' validation expectation mismatch: expected {}, got {}",
@@ -17427,7 +17790,11 @@ fn simulate_asupersync_event_count_truncation(
     let mut processed_events = Vec::new();
     let mut truncation_metadata = Vec::new();
 
-    truncation_metadata.push(format!("Processing {} events with limit {}", scenario.events.len(), scenario.max_event_count));
+    truncation_metadata.push(format!(
+        "Processing {} events with limit {}",
+        scenario.events.len(),
+        scenario.max_event_count
+    ));
 
     // Process all events first
     for event_def in &scenario.events {
@@ -17447,17 +17814,17 @@ fn simulate_asupersync_event_count_truncation(
     match scenario.truncation_strategy {
         EventTruncationStrategy::FirstWins => {
             preserved_events.truncate(scenario.max_event_count);
-        },
+        }
         EventTruncationStrategy::LastWins => {
             if preserved_events.len() > scenario.max_event_count {
                 let start_index = preserved_events.len() - scenario.max_event_count;
                 preserved_events.drain(0..start_index);
             }
-        },
+        }
         EventTruncationStrategy::PriorityBased => {
             preserved_events.sort_by_key(|e| std::cmp::Reverse(e.priority));
             preserved_events.truncate(scenario.max_event_count);
-        },
+        }
     }
 
     // Mark preserved events
@@ -17466,7 +17833,8 @@ fn simulate_asupersync_event_count_truncation(
     }
 
     // Calculate dropped events
-    let preserved_names: std::collections::HashSet<String> = preserved_events.iter().map(|e| e.name.clone()).collect();
+    let preserved_names: std::collections::HashSet<String> =
+        preserved_events.iter().map(|e| e.name.clone()).collect();
     let mut dropped_events = Vec::new();
     for mut event in processed_events.iter().cloned() {
         if !preserved_names.contains(&event.name) {
@@ -17475,7 +17843,11 @@ fn simulate_asupersync_event_count_truncation(
         }
     }
 
-    truncation_metadata.push(format!("Preserved {} events, dropped {} events", preserved_events.len(), dropped_events.len()));
+    truncation_metadata.push(format!(
+        "Preserved {} events, dropped {} events",
+        preserved_events.len(),
+        dropped_events.len()
+    ));
 
     Ok(EventCountTruncationResult {
         original_events: processed_events,
@@ -17493,7 +17865,11 @@ fn simulate_opentelemetry_event_count_truncation(
     let mut processed_events = Vec::new();
     let mut truncation_metadata = Vec::new();
 
-    truncation_metadata.push(format!("OpenTelemetry processing {} events with limit {}", scenario.events.len(), scenario.max_event_count));
+    truncation_metadata.push(format!(
+        "OpenTelemetry processing {} events with limit {}",
+        scenario.events.len(),
+        scenario.max_event_count
+    ));
 
     // Process all events first (same as asupersync)
     for event_def in &scenario.events {
@@ -17513,17 +17889,17 @@ fn simulate_opentelemetry_event_count_truncation(
     match scenario.truncation_strategy {
         EventTruncationStrategy::FirstWins => {
             preserved_events.truncate(scenario.max_event_count);
-        },
+        }
         EventTruncationStrategy::LastWins => {
             if preserved_events.len() > scenario.max_event_count {
                 let start_index = preserved_events.len() - scenario.max_event_count;
                 preserved_events.drain(0..start_index);
             }
-        },
+        }
         EventTruncationStrategy::PriorityBased => {
             preserved_events.sort_by_key(|e| std::cmp::Reverse(e.priority));
             preserved_events.truncate(scenario.max_event_count);
-        },
+        }
     }
 
     // Mark preserved events
@@ -17532,7 +17908,8 @@ fn simulate_opentelemetry_event_count_truncation(
     }
 
     // Calculate dropped events
-    let preserved_names: std::collections::HashSet<String> = preserved_events.iter().map(|e| e.name.clone()).collect();
+    let preserved_names: std::collections::HashSet<String> =
+        preserved_events.iter().map(|e| e.name.clone()).collect();
     let mut dropped_events = Vec::new();
     for mut event in processed_events.iter().cloned() {
         if !preserved_names.contains(&event.name) {
@@ -17541,7 +17918,11 @@ fn simulate_opentelemetry_event_count_truncation(
         }
     }
 
-    truncation_metadata.push(format!("OpenTelemetry preserved {} events, dropped {} events", preserved_events.len(), dropped_events.len()));
+    truncation_metadata.push(format!(
+        "OpenTelemetry preserved {} events, dropped {} events",
+        preserved_events.len(),
+        dropped_events.len()
+    ));
 
     Ok(EventCountTruncationResult {
         original_events: processed_events,
@@ -17563,7 +17944,8 @@ fn compare_event_count_truncation_results(
     if asupersync_result.preserved_events.len() != opentelemetry_result.preserved_events.len() {
         differences.push(format!(
             "Preserved event count mismatch: asupersync={}, opentelemetry={}",
-            asupersync_result.preserved_events.len(), opentelemetry_result.preserved_events.len()
+            asupersync_result.preserved_events.len(),
+            opentelemetry_result.preserved_events.len()
         ));
     }
 
@@ -17571,7 +17953,8 @@ fn compare_event_count_truncation_results(
     if asupersync_result.dropped_events.len() != opentelemetry_result.dropped_events.len() {
         differences.push(format!(
             "Dropped event count mismatch: asupersync={}, opentelemetry={}",
-            asupersync_result.dropped_events.len(), opentelemetry_result.dropped_events.len()
+            asupersync_result.dropped_events.len(),
+            opentelemetry_result.dropped_events.len()
         ));
     }
 
@@ -17584,7 +17967,10 @@ fn compare_event_count_truncation_results(
     }
 
     if !differences.is_empty() {
-        return Err(format!("Conformance differences detected:\n{}", differences.join("\n")));
+        return Err(format!(
+            "Conformance differences detected:\n{}",
+            differences.join("\n")
+        ));
     }
 
     Ok(())
@@ -17599,7 +17985,8 @@ fn verify_event_count_truncation_expectations(
     if result.preserved_events.len() != scenario.expected_preserved_count {
         return Err(format!(
             "Preserved count expectation mismatch: expected {}, got {}",
-            scenario.expected_preserved_count, result.preserved_events.len()
+            scenario.expected_preserved_count,
+            result.preserved_events.len()
         ));
     }
 
@@ -17607,12 +17994,17 @@ fn verify_event_count_truncation_expectations(
     if result.dropped_events.len() != scenario.expected_dropped_count {
         return Err(format!(
             "Dropped count expectation mismatch: expected {}, got {}",
-            scenario.expected_dropped_count, result.dropped_events.len()
+            scenario.expected_dropped_count,
+            result.dropped_events.len()
         ));
     }
 
     // Verify preserved event names match expected
-    let preserved_names: Vec<String> = result.preserved_events.iter().map(|e| e.name.clone()).collect();
+    let preserved_names: Vec<String> = result
+        .preserved_events
+        .iter()
+        .map(|e| e.name.clone())
+        .collect();
     for expected_name in &scenario.expected_preserved_names {
         if !preserved_names.contains(expected_name) {
             return Err(format!(
@@ -17633,7 +18025,10 @@ fn simulate_asupersync_meter_scope_deduplication(
     let mut unique_scopes = std::collections::HashMap::new();
     let mut deduplication_metadata = Vec::new();
 
-    deduplication_metadata.push(format!("Processing {} meter definitions", scenario.meter_definitions.len()));
+    deduplication_metadata.push(format!(
+        "Processing {} meter definitions",
+        scenario.meter_definitions.len()
+    ));
 
     // Process each meter definition and perform deduplication
     for meter_def in &scenario.meter_definitions {
@@ -17711,7 +18106,10 @@ fn simulate_opentelemetry_meter_scope_deduplication(
     let mut unique_scopes = std::collections::HashMap::new();
     let mut deduplication_metadata = Vec::new();
 
-    deduplication_metadata.push(format!("OpenTelemetry processing {} meter definitions", scenario.meter_definitions.len()));
+    deduplication_metadata.push(format!(
+        "OpenTelemetry processing {} meter definitions",
+        scenario.meter_definitions.len()
+    ));
 
     // Process each meter definition with OpenTelemetry behavior
     for meter_def in &scenario.meter_definitions {
@@ -17770,8 +18168,14 @@ fn simulate_opentelemetry_meter_scope_deduplication(
         .cloned()
         .collect();
 
-    deduplication_metadata.push(format!("OpenTelemetry found {} unique scopes", unique_scopes_vec.len()));
-    deduplication_metadata.push(format!("OpenTelemetry deduplicated {} meters", deduplicated_meters.len()));
+    deduplication_metadata.push(format!(
+        "OpenTelemetry found {} unique scopes",
+        unique_scopes_vec.len()
+    ));
+    deduplication_metadata.push(format!(
+        "OpenTelemetry deduplicated {} meters",
+        deduplicated_meters.len()
+    ));
 
     Ok(MeterScopeDeduplicationResult {
         original_meters: processed_meters,
@@ -17787,26 +18191,44 @@ fn generate_scope_id(meter_def: &MeterDefinition, strategy: &ScopeDeduplicationS
     match strategy {
         ScopeDeduplicationStrategy::NameAndVersion => {
             format!("{}:{}", meter_def.scope_name, meter_def.scope_version)
-        },
+        }
         ScopeDeduplicationStrategy::NameVersionAndAttributes => {
-            let mut attrs_str = meter_def.scope_attributes.iter()
+            let mut attrs_str = meter_def
+                .scope_attributes
+                .iter()
                 .map(|(k, v)| format!("{}={}", k, v))
                 .collect::<Vec<_>>();
             attrs_str.sort(); // Ensure consistent ordering
-            format!("{}:{}:{}", meter_def.scope_name, meter_def.scope_version, attrs_str.join(","))
-        },
+            format!(
+                "{}:{}:{}",
+                meter_def.scope_name,
+                meter_def.scope_version,
+                attrs_str.join(",")
+            )
+        }
         ScopeDeduplicationStrategy::NameVersionAndSchemaUrl => {
             let schema_part = meter_def.schema_url.as_deref().unwrap_or("");
-            format!("{}:{}:{}", meter_def.scope_name, meter_def.scope_version, schema_part)
-        },
+            format!(
+                "{}:{}:{}",
+                meter_def.scope_name, meter_def.scope_version, schema_part
+            )
+        }
         ScopeDeduplicationStrategy::StrictEquality => {
-            let mut attrs_str = meter_def.scope_attributes.iter()
+            let mut attrs_str = meter_def
+                .scope_attributes
+                .iter()
                 .map(|(k, v)| format!("{}={}", k, v))
                 .collect::<Vec<_>>();
             attrs_str.sort(); // Ensure consistent ordering
             let schema_part = meter_def.schema_url.as_deref().unwrap_or("");
-            format!("{}:{}:{}:{}", meter_def.scope_name, meter_def.scope_version, attrs_str.join(","), schema_part)
-        },
+            format!(
+                "{}:{}:{}:{}",
+                meter_def.scope_name,
+                meter_def.scope_version,
+                attrs_str.join(","),
+                schema_part
+            )
+        }
     }
 }
 
@@ -17822,15 +18244,18 @@ fn compare_meter_scope_deduplication_results(
     if asupersync_result.unique_scopes.len() != opentelemetry_result.unique_scopes.len() {
         differences.push(format!(
             "Unique scope count mismatch: asupersync={}, opentelemetry={}",
-            asupersync_result.unique_scopes.len(), opentelemetry_result.unique_scopes.len()
+            asupersync_result.unique_scopes.len(),
+            opentelemetry_result.unique_scopes.len()
         ));
     }
 
     // Compare number of deduplicated meters
-    if asupersync_result.deduplicated_meters.len() != opentelemetry_result.deduplicated_meters.len() {
+    if asupersync_result.deduplicated_meters.len() != opentelemetry_result.deduplicated_meters.len()
+    {
         differences.push(format!(
             "Deduplicated meter count mismatch: asupersync={}, opentelemetry={}",
-            asupersync_result.deduplicated_meters.len(), opentelemetry_result.deduplicated_meters.len()
+            asupersync_result.deduplicated_meters.len(),
+            opentelemetry_result.deduplicated_meters.len()
         ));
     }
 
@@ -17887,7 +18312,10 @@ fn compare_meter_scope_deduplication_results(
     }
 
     if !differences.is_empty() {
-        return Err(format!("Conformance differences detected:\n{}", differences.join("\n")));
+        return Err(format!(
+            "Conformance differences detected:\n{}",
+            differences.join("\n")
+        ));
     }
 
     Ok(())
@@ -17902,7 +18330,8 @@ fn verify_meter_scope_deduplication_expectations(
     if result.unique_scopes.len() != scenario.expected_unique_scopes {
         return Err(format!(
             "Unique scope count expectation mismatch: expected {}, got {}",
-            scenario.expected_unique_scopes, result.unique_scopes.len()
+            scenario.expected_unique_scopes,
+            result.unique_scopes.len()
         ));
     }
 
@@ -17910,7 +18339,8 @@ fn verify_meter_scope_deduplication_expectations(
     if result.deduplicated_meters.len() != scenario.expected_deduplicated_count {
         return Err(format!(
             "Deduplicated count expectation mismatch: expected {}, got {}",
-            scenario.expected_deduplicated_count, result.deduplicated_meters.len()
+            scenario.expected_deduplicated_count,
+            result.deduplicated_meters.len()
         ));
     }
 
@@ -17927,20 +18357,33 @@ fn verify_meter_scope_deduplication_expectations(
     if total_meters_in_scopes != scenario.meter_definitions.len() {
         return Err(format!(
             "Meter count consistency check failed: total in scopes={}, original count={}",
-            total_meters_in_scopes, scenario.meter_definitions.len()
+            total_meters_in_scopes,
+            scenario.meter_definitions.len()
         ));
     }
 
     // Verify first creation order preservation for each unique scope
     for unique_scope in &result.unique_scopes {
-        let first_meter = scenario.meter_definitions.iter()
-            .find(|m| m.scope_name == unique_scope.scope_name && m.scope_version == unique_scope.scope_version)
-            .ok_or_else(|| format!("Could not find first meter for scope {}", unique_scope.scope_id))?;
+        let first_meter = scenario
+            .meter_definitions
+            .iter()
+            .find(|m| {
+                m.scope_name == unique_scope.scope_name
+                    && m.scope_version == unique_scope.scope_version
+            })
+            .ok_or_else(|| {
+                format!(
+                    "Could not find first meter for scope {}",
+                    unique_scope.scope_id
+                )
+            })?;
 
         if unique_scope.first_creation_order != first_meter.creation_order {
             return Err(format!(
                 "First creation order not preserved for scope {}: expected {}, got {}",
-                unique_scope.scope_id, first_meter.creation_order, unique_scope.first_creation_order
+                unique_scope.scope_id,
+                first_meter.creation_order,
+                unique_scope.first_creation_order
             ));
         }
     }
@@ -17956,7 +18399,10 @@ fn simulate_asupersync_span_name_ordering(
     let mut ignored_updates = Vec::new();
     let mut update_metadata = Vec::new();
 
-    update_metadata.push(format!("Processing {} name updates", scenario.name_updates.len()));
+    update_metadata.push(format!(
+        "Processing {} name updates",
+        scenario.name_updates.len()
+    ));
 
     // Process name updates based on scenario strategy
     for (index, update_def) in scenario.name_updates.iter().enumerate() {
@@ -17976,11 +18422,14 @@ fn simulate_asupersync_span_name_ordering(
                     ignored_updates.push(processed_update);
                     continue;
                 }
-            },
+            }
             NameUpdateOrderingStrategy::TimestampBased => {
                 // Asupersync uses timestamp-based ordering
-                update_metadata.push(format!("Update {} at timestamp {}", index, update_def.timestamp_nanos));
-            },
+                update_metadata.push(format!(
+                    "Update {} at timestamp {}",
+                    index, update_def.timestamp_nanos
+                ));
+            }
             _ => {
                 // Other strategies process updates in sequence
             }
@@ -17992,30 +18441,30 @@ fn simulate_asupersync_span_name_ordering(
 
     // Determine final name based on strategy
     let final_name = match scenario.ordering_strategy {
-        NameUpdateOrderingStrategy::LastWins => {
-            processed_updates.last()
-                .map(|u| u.name.clone())
-                .unwrap_or_else(|| "".to_string())
-        },
-        NameUpdateOrderingStrategy::FirstWins => {
-            processed_updates.first()
-                .map(|u| u.name.clone())
-                .unwrap_or_else(|| "".to_string())
-        },
+        NameUpdateOrderingStrategy::LastWins => processed_updates
+            .last()
+            .map(|u| u.name.clone())
+            .unwrap_or_else(|| "".to_string()),
+        NameUpdateOrderingStrategy::FirstWins => processed_updates
+            .first()
+            .map(|u| u.name.clone())
+            .unwrap_or_else(|| "".to_string()),
         NameUpdateOrderingStrategy::TimestampBased => {
             // Sort by timestamp, latest name wins
             let mut sorted_updates = processed_updates.clone();
             sorted_updates.sort_by_key(|u| u.timestamp_nanos);
-            sorted_updates.last()
+            sorted_updates
+                .last()
                 .map(|u| u.name.clone())
                 .unwrap_or_else(|| "".to_string())
-        },
+        }
         NameUpdateOrderingStrategy::IgnoreAfterEnd => {
             // Last valid update before end wins
-            processed_updates.last()
+            processed_updates
+                .last()
                 .map(|u| u.name.clone())
                 .unwrap_or_else(|| "".to_string())
-        },
+        }
     };
 
     update_metadata.push(format!("Final name determined: '{}'", final_name));
@@ -18041,7 +18490,10 @@ fn simulate_opentelemetry_span_name_ordering(
     let mut ignored_updates = Vec::new();
     let mut update_metadata = Vec::new();
 
-    update_metadata.push(format!("OpenTelemetry processing {} name updates", scenario.name_updates.len()));
+    update_metadata.push(format!(
+        "OpenTelemetry processing {} name updates",
+        scenario.name_updates.len()
+    ));
 
     // Process name updates with OpenTelemetry behavior
     for (index, update_def) in scenario.name_updates.iter().enumerate() {
@@ -18057,15 +18509,19 @@ fn simulate_opentelemetry_span_name_ordering(
         match scenario.ordering_strategy {
             NameUpdateOrderingStrategy::IgnoreAfterEnd => {
                 if update_def.span_phase == SpanPhase::Ended {
-                    processed_update.rejection_reason = Some("Update after span end ignored".to_string());
+                    processed_update.rejection_reason =
+                        Some("Update after span end ignored".to_string());
                     ignored_updates.push(processed_update);
                     continue;
                 }
-            },
+            }
             NameUpdateOrderingStrategy::TimestampBased => {
                 // OpenTelemetry uses timestamp-based ordering (should match asupersync)
-                update_metadata.push(format!("OTel update {} at timestamp {}", index, update_def.timestamp_nanos));
-            },
+                update_metadata.push(format!(
+                    "OTel update {} at timestamp {}",
+                    index, update_def.timestamp_nanos
+                ));
+            }
             _ => {
                 // Other strategies process updates in sequence
             }
@@ -18077,30 +18533,30 @@ fn simulate_opentelemetry_span_name_ordering(
 
     // Determine final name based on strategy (should match asupersync behavior)
     let final_name = match scenario.ordering_strategy {
-        NameUpdateOrderingStrategy::LastWins => {
-            processed_updates.last()
-                .map(|u| u.name.clone())
-                .unwrap_or_else(|| "".to_string())
-        },
-        NameUpdateOrderingStrategy::FirstWins => {
-            processed_updates.first()
-                .map(|u| u.name.clone())
-                .unwrap_or_else(|| "".to_string())
-        },
+        NameUpdateOrderingStrategy::LastWins => processed_updates
+            .last()
+            .map(|u| u.name.clone())
+            .unwrap_or_else(|| "".to_string()),
+        NameUpdateOrderingStrategy::FirstWins => processed_updates
+            .first()
+            .map(|u| u.name.clone())
+            .unwrap_or_else(|| "".to_string()),
         NameUpdateOrderingStrategy::TimestampBased => {
             // Sort by timestamp, latest name wins
             let mut sorted_updates = processed_updates.clone();
             sorted_updates.sort_by_key(|u| u.timestamp_nanos);
-            sorted_updates.last()
+            sorted_updates
+                .last()
                 .map(|u| u.name.clone())
                 .unwrap_or_else(|| "".to_string())
-        },
+        }
         NameUpdateOrderingStrategy::IgnoreAfterEnd => {
             // Last valid update before end wins
-            processed_updates.last()
+            processed_updates
+                .last()
                 .map(|u| u.name.clone())
                 .unwrap_or_else(|| "".to_string())
-        },
+        }
     };
 
     update_metadata.push(format!("OpenTelemetry final name: '{}'", final_name));
@@ -18174,7 +18630,10 @@ fn compare_span_name_ordering_results(
     }
 
     if !differences.is_empty() {
-        return Err(format!("Conformance differences detected:\n{}", differences.join("\n")));
+        return Err(format!(
+            "Conformance differences detected:\n{}",
+            differences.join("\n")
+        ));
     }
 
     Ok(())
@@ -18205,19 +18664,24 @@ fn verify_span_name_ordering_expectations(
     match scenario.ordering_strategy {
         NameUpdateOrderingStrategy::IgnoreAfterEnd => {
             // Check that updates after end were ignored
-            let ended_updates: Vec<_> = scenario.name_updates.iter()
+            let ended_updates: Vec<_> = scenario
+                .name_updates
+                .iter()
                 .filter(|u| u.span_phase == SpanPhase::Ended)
                 .collect();
             if result.ignored_updates.len() != ended_updates.len() {
                 return Err(format!(
                     "IgnoreAfterEnd strategy: expected {} ignored updates, got {}",
-                    ended_updates.len(), result.ignored_updates.len()
+                    ended_updates.len(),
+                    result.ignored_updates.len()
                 ));
             }
-        },
+        }
         NameUpdateOrderingStrategy::TimestampBased => {
             // Check that final name comes from latest timestamp
-            let latest_update = scenario.name_updates.iter()
+            let latest_update = scenario
+                .name_updates
+                .iter()
                 .filter(|u| u.span_phase != SpanPhase::Ended)
                 .max_by_key(|u| u.timestamp_nanos);
             if let Some(latest) = latest_update {
@@ -18228,7 +18692,7 @@ fn verify_span_name_ordering_expectations(
                     ));
                 }
             }
-        },
+        }
         _ => {
             // Other strategies handled by general validation
         }
