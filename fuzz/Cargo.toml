@@ -4270,3 +4270,9 @@ name = "h2_data_padding_validation"
 path = "fuzz_targets/h2_data_padding_validation.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "h1_content_length_body_mismatch"
+path = "fuzz_targets/h1_content_length_body_mismatch.rs"
+test = false
+doc = false
