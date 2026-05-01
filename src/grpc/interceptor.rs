@@ -356,12 +356,55 @@ where
     FnInterceptor::new(f)
 }
 
+const REQUEST_ID_METADATA_KEY: &str = "x-request-id";
+const REQUEST_ID_SIGNATURE_METADATA_KEY: &str = "x-request-id-signature";
+
+/// Verifies a client-supplied request ID and companion signature.
+///
+/// The verifier is intentionally tiny: deployments decide how signatures are
+/// encoded and which key material is trusted. The interceptor only enforces
+/// the fail-closed rule that unsigned or unverifiable request IDs are replaced
+/// at an untrusted edge.
+pub trait RequestIdSignatureVerifier: Send + Sync + 'static {
+    /// Returns true when `signature` authenticates `request_id`.
+    fn verify_request_id(&self, request_id: &str, signature: &str) -> bool;
+}
+
+impl<F> RequestIdSignatureVerifier for F
+where
+    F: for<'a, 'b> Fn(&'a str, &'b str) -> bool + Send + Sync + 'static,
+{
+    fn verify_request_id(&self, request_id: &str, signature: &str) -> bool {
+        self(request_id, signature)
+    }
+}
+
+#[derive(Clone)]
+enum RequestIdTrustPolicy {
+    UntrustedEdge,
+    TrustedEdge,
+    Signed {
+        verifier: Arc<dyn RequestIdSignatureVerifier>,
+    },
+}
+
+impl std::fmt::Debug for RequestIdTrustPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UntrustedEdge => f.write_str("UntrustedEdge"),
+            Self::TrustedEdge => f.write_str("TrustedEdge"),
+            Self::Signed { .. } => f.write_str("Signed { verifier: ... }"),
+        }
+    }
+}
+
 /// Tracing interceptor that adds request IDs to metadata.
 #[derive(Debug, Clone)]
 pub struct TracingInterceptor {
     /// Whether to generate request IDs.
     generate_request_id: bool,
     next_request_id: Arc<AtomicU64>,
+    request_id_trust_policy: RequestIdTrustPolicy,
 }
 
 impl Default for TracingInterceptor {
@@ -377,6 +420,7 @@ impl TracingInterceptor {
         Self {
             generate_request_id: true,
             next_request_id: Arc::new(AtomicU64::new(1)),
+            request_id_trust_policy: RequestIdTrustPolicy::UntrustedEdge,
         }
     }
 
@@ -386,16 +430,73 @@ impl TracingInterceptor {
         self.generate_request_id = enabled;
         self
     }
+
+    /// Preserve existing client request IDs from a trusted ingress boundary.
+    ///
+    /// Use this only when an upstream component already authenticated and
+    /// normalized `x-request-id`. The default untrusted-edge policy replaces
+    /// unsigned client IDs.
+    #[must_use]
+    pub fn with_trusted_client_request_ids(mut self) -> Self {
+        self.request_id_trust_policy = RequestIdTrustPolicy::TrustedEdge;
+        self
+    }
+
+    /// Preserve client request IDs only when the companion signature verifies.
+    ///
+    /// The verifier receives the ASCII `x-request-id` value and the ASCII
+    /// `x-request-id-signature` value. Missing, binary, empty, or rejected
+    /// signatures cause the request ID to be regenerated.
+    #[must_use]
+    pub fn with_request_id_signature_verifier<V>(mut self, verifier: V) -> Self
+    where
+        V: RequestIdSignatureVerifier,
+    {
+        self.request_id_trust_policy = RequestIdTrustPolicy::Signed {
+            verifier: Arc::new(verifier),
+        };
+        self
+    }
+
+    fn should_preserve_request_id(&self, request: &Request<Bytes>) -> bool {
+        let Some(MetadataValue::Ascii(request_id)) =
+            request.metadata().get(REQUEST_ID_METADATA_KEY)
+        else {
+            return false;
+        };
+        if request_id.is_empty() {
+            return false;
+        }
+
+        match &self.request_id_trust_policy {
+            RequestIdTrustPolicy::UntrustedEdge => false,
+            RequestIdTrustPolicy::TrustedEdge => true,
+            RequestIdTrustPolicy::Signed { verifier } => {
+                let Some(MetadataValue::Ascii(signature)) =
+                    request.metadata().get(REQUEST_ID_SIGNATURE_METADATA_KEY)
+                else {
+                    return false;
+                };
+                !signature.is_empty() && verifier.verify_request_id(request_id, signature)
+            }
+        }
+    }
+
+    fn next_generated_request_id(&self) -> String {
+        format!(
+            "req-{:016x}",
+            self.next_request_id.fetch_add(1, Ordering::Relaxed)
+        )
+    }
 }
 
 impl Interceptor for TracingInterceptor {
     fn intercept_request(&self, request: &mut Request<Bytes>) -> Result<(), Status> {
-        if self.generate_request_id && request.metadata().get("x-request-id").is_none() {
-            let id = format!(
-                "req-{:016x}",
-                self.next_request_id.fetch_add(1, Ordering::Relaxed)
-            );
-            let _ = request.metadata_mut().insert("x-request-id", id);
+        if self.generate_request_id && !self.should_preserve_request_id(request) {
+            let id = self.next_generated_request_id();
+            let metadata = request.metadata_mut();
+            let _ = metadata.remove(REQUEST_ID_SIGNATURE_METADATA_KEY);
+            let _ = metadata.insert_or_replace(REQUEST_ID_METADATA_KEY, id);
         }
         Ok(())
     }
@@ -1733,21 +1834,119 @@ mod tests {
     }
 
     #[test]
-    fn tracing_interceptor_preserves_existing_request_id() {
-        init_test("tracing_interceptor_preserves_existing_request_id");
+    fn tracing_interceptor_replaces_unsigned_client_request_id_by_default() {
+        init_test("tracing_interceptor_replaces_unsigned_client_request_id_by_default");
         let interceptor = trace_interceptor();
 
         let mut request = Request::new(Bytes::new());
         request
             .metadata_mut()
-            .insert("x-request-id", "req-custom".to_string());
+            .insert(REQUEST_ID_METADATA_KEY, "req-client");
         interceptor.intercept_request(&mut request).unwrap();
 
         let ok = matches!(
-            request.metadata().get("x-request-id"),
+            request.metadata().get(REQUEST_ID_METADATA_KEY),
+            Some(MetadataValue::Ascii(id)) if id == "req-0000000000000001"
+        );
+        crate::assert_with_log!(ok, "unsigned client request id replaced", true, ok);
+        crate::test_complete!("tracing_interceptor_replaces_unsigned_client_request_id_by_default");
+    }
+
+    #[test]
+    fn tracing_interceptor_preserves_signed_request_id() {
+        init_test("tracing_interceptor_preserves_signed_request_id");
+        let interceptor =
+            trace_interceptor().with_request_id_signature_verifier(|id: &str, sig: &str| {
+                id == "req-client" && sig == "valid"
+            });
+
+        let mut request = Request::new(Bytes::new());
+        request
+            .metadata_mut()
+            .insert(REQUEST_ID_METADATA_KEY, "req-client");
+        request
+            .metadata_mut()
+            .insert(REQUEST_ID_SIGNATURE_METADATA_KEY, "valid");
+        interceptor.intercept_request(&mut request).unwrap();
+
+        let ok = matches!(
+            request.metadata().get(REQUEST_ID_METADATA_KEY),
+            Some(MetadataValue::Ascii(id)) if id == "req-client"
+        );
+        crate::assert_with_log!(ok, "signed request id preserved", true, ok);
+        crate::test_complete!("tracing_interceptor_preserves_signed_request_id");
+    }
+
+    #[test]
+    fn tracing_interceptor_replaces_invalid_signature_request_id() {
+        init_test("tracing_interceptor_replaces_invalid_signature_request_id");
+        let interceptor =
+            trace_interceptor().with_request_id_signature_verifier(|_: &str, _: &str| false);
+
+        let mut request = Request::new(Bytes::new());
+        request
+            .metadata_mut()
+            .insert(REQUEST_ID_METADATA_KEY, "req-client");
+        request
+            .metadata_mut()
+            .insert(REQUEST_ID_SIGNATURE_METADATA_KEY, "invalid");
+        interceptor.intercept_request(&mut request).unwrap();
+
+        let replaced = matches!(
+            request.metadata().get(REQUEST_ID_METADATA_KEY),
+            Some(MetadataValue::Ascii(id)) if id == "req-0000000000000001"
+        );
+        let signature_scrubbed = request
+            .metadata()
+            .get(REQUEST_ID_SIGNATURE_METADATA_KEY)
+            .is_none();
+        crate::assert_with_log!(replaced, "invalid signature id replaced", true, replaced);
+        crate::assert_with_log!(
+            signature_scrubbed,
+            "invalid signature scrubbed",
+            true,
+            signature_scrubbed
+        );
+        crate::test_complete!("tracing_interceptor_replaces_invalid_signature_request_id");
+    }
+
+    #[test]
+    fn tracing_interceptor_replaces_empty_signed_request_id() {
+        init_test("tracing_interceptor_replaces_empty_signed_request_id");
+        let interceptor =
+            trace_interceptor().with_request_id_signature_verifier(|_: &str, _: &str| true);
+
+        let mut request = Request::new(Bytes::new());
+        request.metadata_mut().insert(REQUEST_ID_METADATA_KEY, "");
+        request
+            .metadata_mut()
+            .insert(REQUEST_ID_SIGNATURE_METADATA_KEY, "valid");
+        interceptor.intercept_request(&mut request).unwrap();
+
+        let ok = matches!(
+            request.metadata().get(REQUEST_ID_METADATA_KEY),
+            Some(MetadataValue::Ascii(id)) if id == "req-0000000000000001"
+        );
+        crate::assert_with_log!(ok, "empty request id replaced", true, ok);
+        crate::test_complete!("tracing_interceptor_replaces_empty_signed_request_id");
+    }
+
+    #[test]
+    fn tracing_interceptor_trusted_edge_preserves_existing_request_id() {
+        init_test("tracing_interceptor_trusted_edge_preserves_existing_request_id");
+        let interceptor = trace_interceptor().with_trusted_client_request_ids();
+
+        let mut request = Request::new(Bytes::new());
+        request
+            .metadata_mut()
+            .insert(REQUEST_ID_METADATA_KEY, "req-custom");
+        interceptor.intercept_request(&mut request).unwrap();
+
+        let ok = matches!(
+            request.metadata().get(REQUEST_ID_METADATA_KEY),
             Some(MetadataValue::Ascii(id)) if id == "req-custom"
         );
-        crate::assert_with_log!(ok, "preserved request id", true, ok);
-        crate::test_complete!("tracing_interceptor_preserves_existing_request_id");
+        crate::assert_with_log!(ok, "trusted-edge request id preserved", true, ok);
+        crate::test_complete!("tracing_interceptor_trusted_edge_preserves_existing_request_id");
     }
 }
