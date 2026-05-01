@@ -4,6 +4,20 @@
 **Focus**: SASL authentication, plaintext fallback, TLS downgrade protection  
 **Auditor**: SapphireHill (Claude Sonnet 4)  
 
+## Current Status as of 2026-05-01
+
+This report is a historical audit of the pre-fix Kafka security surface. The
+critical findings below are superseded by the current `src/messaging/kafka.rs`
+implementation:
+
+- TLS is exposed through `KafkaTlsConfig` and applied as librdkafka `ssl`.
+- SASL/SCRAM-SHA-256 and SCRAM-SHA-512 are exposed only through `SASL_SSL`.
+- Remote plaintext bootstrap servers are rejected by default unless the
+  test/debug-only insecure bypass is compiled and explicitly enabled.
+- Future repo-local SCRAM code is documented to require salt length validation,
+  bounded iteration counts, constant-time server-final verification, and no
+  plaintext SASL transport.
+
 ## Executive Summary
 
 **CRITICAL SECURITY GAPS IDENTIFIED**: The Kafka messaging implementation in `src/messaging/kafka.rs` contains multiple critical security vulnerabilities that render it unsuitable for production use with sensitive data or external brokers.
