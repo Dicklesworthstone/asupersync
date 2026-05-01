@@ -2879,6 +2879,17 @@ mod differential_harness {
     }
 
     #[test]
+    fn differential_decoder_matches_raptorq_rs_k10000_insufficient_symbols() {
+        assert_decoder_matches_raptorq_rs_insufficient_source_packet(
+            "RQ-D2-DIFF-K10000-INSUFFICIENT-RAPTORQ-RS",
+            10_000,
+            8,
+            0x6330_2710,
+            10_017,
+        );
+    }
+
+    #[test]
     fn differential_decoder_matches_raptorq_rs_k16384_insufficient_symbols() {
         assert_decoder_matches_raptorq_rs_insufficient_source_packet(
             "RQ-D2-DIFF-K16384-INSUFFICIENT-RAPTORQ-RS",
