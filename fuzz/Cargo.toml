@@ -12,7 +12,7 @@ edition = "2024"
 cargo-fuzz = true
 
 [dependencies]
-asupersync = { path = "..", features = ["compression", "tls", "metrics", "tracing-integration", "test-internals", "trace-compression", "io-uring", "simd-intrinsics", "fuzz"] }
+asupersync = { path = "..", features = ["compression", "tls", "metrics", "tracing-integration", "test-internals", "trace-compression", "io-uring", "simd-intrinsics", "fuzz", "mysql"] }
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
 libc = "0.2"
@@ -245,6 +245,13 @@ bench = false
 [[bin]]
 name = "mysql_packet_header_error"
 path = "fuzz_targets/mysql_packet_header_error.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mysql_handshake_protocol_41"
+path = "fuzz_targets/mysql_handshake_protocol_41.rs"
 test = false
 doc = false
 bench = false
@@ -1222,6 +1229,13 @@ bench = false
 [[bin]]
 name = "h2_hpack"
 path = "fuzz_targets/h2_hpack.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "h2_hpack_table_size_update_underflow"
+path = "fuzz_targets/h2_hpack_table_size_update_underflow.rs"
 test = false
 doc = false
 bench = false
