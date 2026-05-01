@@ -268,18 +268,21 @@ impl<S: SymbolStream + Unpin> RaptorQReceiver<S> {
                     continue;
                 }
 
-                if let Some(ctx) = &self.security {
+                let symbol_verified = if let Some(ctx) = &self.security {
                     ctx.verify_authenticated_symbol(&mut auth_symbol)
                         .map_err(|err| {
                             Error::new(ErrorKind::CorruptedSymbol).with_message(err.to_string())
                         })?;
-                    authenticated &= auth_symbol.is_verified();
-                }
+                    auth_symbol.is_verified()
+                } else {
+                    false
+                };
 
                 match decoder.feed(auth_symbol).map_err(Error::from)? {
                     SymbolAcceptResult::Accepted { .. }
                     | SymbolAcceptResult::DecodingStarted { .. }
                     | SymbolAcceptResult::BlockComplete { .. } => {
+                        authenticated &= symbol_verified;
                         symbols_received += 1;
                         if let Some(ref mut m) = self.metrics {
                             m.counter("raptorq.symbols_received").increment();
@@ -1468,6 +1471,58 @@ mod tests {
         assert_eq!(
             recv.symbols_received, outcome.source_symbols,
             "duplicate symbols must not count as used-for-decoding"
+        );
+    }
+
+    #[test]
+    fn test_receive_object_bad_permissive_duplicate_does_not_poison_authenticated_flag() {
+        let cx: Cx = Cx::for_testing();
+        let sink = VecSink::new();
+        let mut sender = RaptorQSender::new(
+            RaptorQConfig::default(),
+            sink,
+            Some(SecurityContext::for_testing(42)),
+            None,
+        );
+
+        let data = vec![0xC3u8; 1024];
+        let object_id = ObjectId::new_for_test(47);
+        let outcome = sender.send_object(&cx, object_id, &data).unwrap();
+        let params = params_for(
+            object_id,
+            data.len(),
+            sender.config().encoding.symbol_size,
+            outcome.source_symbols,
+        );
+
+        let mut symbols: Vec<AuthenticatedSymbol> =
+            sender.transport_mut().symbols.drain(..).collect();
+        symbols.truncate(outcome.source_symbols);
+        let good_first = symbols[0].clone();
+        let bad_duplicate = AuthenticatedSymbol::from_parts(
+            good_first.clone().into_symbol(),
+            AuthenticationTag::zero(),
+        );
+        let mut stream_symbols = vec![good_first, bad_duplicate];
+        stream_symbols.extend(symbols);
+
+        let stream = VecStream::new(stream_symbols);
+        let permissive_security = SecurityContext::for_testing_with_mode(42, AuthMode::Permissive);
+        let mut receiver = RaptorQReceiver::new(
+            RaptorQConfig::default(),
+            stream,
+            Some(permissive_security),
+            None,
+        );
+
+        let recv = receiver
+            .receive_object(&cx, &params)
+            .expect("bad duplicate should be ignored after permissive auth check");
+
+        assert_eq!(&recv.data[..data.len()], &data);
+        assert!(
+            recv.authenticated,
+            "a rejected duplicate must not mark the decoded object unauthenticated"
         );
     }
 
