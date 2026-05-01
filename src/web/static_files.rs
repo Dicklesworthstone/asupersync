@@ -37,6 +37,9 @@ const DEFAULT_MAX_AGE: u32 = 3600;
 /// Default maximum file size to serve (256 MiB).
 const DEFAULT_MAX_FILE_SIZE: u64 = 256 * 1024 * 1024;
 
+const CONTENT_TYPE_OPTIONS_HEADER: &str = "x-content-type-options";
+const CONTENT_TYPE_OPTIONS_NOSNIFF: &str = "nosniff";
+
 // ─── StaticFiles ────────────────────────────────────────────────────────────
 
 /// Configuration for static file serving.
@@ -65,12 +68,18 @@ impl StaticFiles {
     /// Create a new static file server rooted at the given directory.
     #[must_use]
     pub fn new(root: impl Into<PathBuf>) -> Self {
+        let mut custom_headers = HashMap::new();
+        custom_headers.insert(
+            CONTENT_TYPE_OPTIONS_HEADER.to_string(),
+            CONTENT_TYPE_OPTIONS_NOSNIFF.to_string(),
+        );
+
         Self {
             root: root.into(),
             max_age: DEFAULT_MAX_AGE,
             max_file_size: DEFAULT_MAX_FILE_SIZE,
             index_file: Some("index.html".to_string()),
-            custom_headers: HashMap::new(),
+            custom_headers,
         }
     }
 
@@ -104,6 +113,13 @@ impl StaticFiles {
         self.custom_headers
             .insert(name.into().to_ascii_lowercase(), value.into());
         self
+    }
+
+    fn apply_custom_headers(&self, mut response: Response) -> Response {
+        for (k, v) in &self.custom_headers {
+            response = response.header(k, v);
+        }
+        response
     }
 
     /// Resolve a request path to a file, applying security checks.
@@ -196,24 +212,22 @@ impl StaticFiles {
         // Check If-None-Match.
         if let Some(client_etag) = if_none_match {
             if etag_matches(client_etag, &etag) {
-                return Response::empty(StatusCode::NOT_MODIFIED)
-                    .header("etag", &etag)
-                    .header("cache-control", format!("public, max-age={}", self.max_age));
+                return self.apply_custom_headers(
+                    Response::empty(StatusCode::NOT_MODIFIED)
+                        .header("etag", &etag)
+                        .header("cache-control", format!("public, max-age={}", self.max_age)),
+                );
             }
         }
 
         let mime = guess_mime(&path);
 
-        let mut response = Response::new(StatusCode::OK, body)
+        let response = Response::new(StatusCode::OK, body)
             .header("content-type", mime)
             .header("etag", &etag)
             .header("cache-control", format!("public, max-age={}", self.max_age));
 
-        for (k, v) in &self.custom_headers {
-            response = response.header(k, v);
-        }
-
-        response
+        self.apply_custom_headers(response)
     }
 
     /// Create a handler that serves static files.
@@ -843,6 +857,10 @@ mod tests {
         assert_eq!(std::str::from_utf8(&resp.body).unwrap(), "Hello, world!");
         assert!(resp.headers.contains_key("etag"));
         assert!(resp.headers.contains_key("cache-control"));
+        assert_eq!(
+            resp.headers.get("x-content-type-options").unwrap(),
+            "nosniff"
+        );
     }
 
     #[test]
@@ -872,6 +890,10 @@ mod tests {
         let resp2 = sf.serve_file(&path, Some(&etag));
         assert_eq!(resp2.status, StatusCode::NOT_MODIFIED);
         assert!(resp2.body.is_empty());
+        assert_eq!(
+            resp2.headers.get("x-content-type-options").unwrap(),
+            "nosniff"
+        );
     }
 
     #[test]
@@ -884,6 +906,10 @@ mod tests {
         assert_eq!(resp.status, StatusCode::NOT_MODIFIED);
         assert!(resp.body.is_empty());
         assert!(resp.headers.contains_key("etag"));
+        assert_eq!(
+            resp.headers.get("x-content-type-options").unwrap(),
+            "nosniff"
+        );
     }
 
     #[test]
@@ -905,6 +931,18 @@ mod tests {
         let path = sf.resolve_path("/hello.txt").unwrap();
         let resp = sf.serve_file(&path, None);
         assert_eq!(resp.headers.get("x-custom").unwrap(), "value");
+    }
+
+    #[test]
+    fn serve_custom_headers_can_override_nosniff() {
+        let dir = setup_dir();
+        let sf = StaticFiles::new(dir.path()).header("X-Content-Type-Options", "custom-policy");
+        let path = sf.resolve_path("/hello.txt").unwrap();
+        let resp = sf.serve_file(&path, None);
+        assert_eq!(
+            resp.headers.get("x-content-type-options").unwrap(),
+            "custom-policy"
+        );
     }
 
     // ================================================================
@@ -950,6 +988,10 @@ mod tests {
         assert_eq!(
             head_resp.headers.get("cache-control"),
             get_resp.headers.get("cache-control")
+        );
+        assert_eq!(
+            head_resp.headers.get("x-content-type-options"),
+            get_resp.headers.get("x-content-type-options")
         );
     }
 
@@ -1005,6 +1047,10 @@ mod tests {
         assert!(head_resp.body.is_empty());
         assert!(head_resp.headers.contains_key("etag"));
         assert!(head_resp.headers.contains_key("cache-control"));
+        assert_eq!(
+            head_resp.headers.get("x-content-type-options").unwrap(),
+            "nosniff"
+        );
     }
 
     // ================================================================
