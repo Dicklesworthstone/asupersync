@@ -4288,3 +4288,15 @@ name = "h1_transfer_encoding_precedence"
 path = "fuzz_targets/h1_transfer_encoding_precedence.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "h2_continuation_timeout"
+path = "fuzz_targets/h2_continuation_timeout.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "h1_keep_alive_http10_default"
+path = "fuzz_targets/h1_keep_alive_http10_default.rs"
+test = false
+doc = false
