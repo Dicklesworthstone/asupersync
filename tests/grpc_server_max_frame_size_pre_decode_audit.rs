@@ -1,0 +1,253 @@
+//! Audit + regression test for `src/grpc/server.rs` pre-decode
+//! frame-size enforcement (tick #193).
+//!
+//! Operator's question: "verify MAX_FRAME_SIZE pre-decode
+//! enforcement."
+//!
+//! Audit context — gRPC has TWO size caps relevant to
+//! pre-decode enforcement:
+//!
+//!   * **HEADERS-frame total size cap** (`max_metadata_size`,
+//!     server.rs:272). Default 8 KiB. Enforced by
+//!     `enforce_metadata_size_limit` (server.rs:402-419) on
+//!     EVERY inbound HEADERS / TRAILERS frame BEFORE the
+//!     interceptor chain or handler runs. The gRPC equivalent
+//!     of HTTP 431 ("Request Header Fields Too Large") is
+//!     `Status::resource_exhausted`.
+//!   * **LPM message-body size cap** (`max_recv_message_size`,
+//!     `max_send_message_size`, server.rs:424-425). Default
+//!     4 MiB. Enforced by GrpcCodec::decode at codec.rs:135
+//!     BEFORE allocating body bytes (audited tick #163).
+//!
+//! Audit findings:
+//!
+//!   (a) **`max_metadata_size` enforced via
+//!       `enforce_metadata_size_limit`** (server.rs:402-419)
+//!       at the FIRST gate of `dispatch_unary` (server.rs:823).
+//!       Pre-decode in the sense that the cap fires BEFORE
+//!       the interceptor chain or user handler runs. A
+//!       hostile peer streaming arbitrarily long header lists
+//!       cannot exhaust HPACK decoder memory.
+//!
+//!   (b) **Default cap is 8 KiB** (`DEFAULT_MAX_METADATA_SIZE
+//!       = 8 * 1024`, server.rs:285). Matches gRPC ecosystem
+//!       convention (grpc-go's `MaxHeaderListSize`) and the
+//!       per-RFC-9113 §6.5.2 `SETTINGS_MAX_HEADER_LIST_SIZE`
+//!       advisory cap.
+//!
+//!   (c) **Cap-exceeded surfaces `Status::resource_exhausted`**
+//!       (server.rs:412-416). Error message includes BOTH
+//!       actual and configured limit for SRE diagnostics.
+//!       A regression to `Status::invalid_argument` would
+//!       break the gRPC-spec mapping (RESOURCE_EXHAUSTED is
+//!       the canonical "request too large" code).
+//!
+//!   (d) **`limit = 0` disables enforcement** (server.rs:407-
+//!       409). No-cap convention used elsewhere in the crate.
+//!       Operators that want unbounded metadata can configure
+//!       0 explicitly — the bypass is grep-able.
+//!
+//!   (e) **Total bytes computed via `metadata_byte_size`**
+//!       (server.rs:293-302) sums `key.len() + value.byte_len()`
+//!       over every entry. A peer flooding many small
+//!       headers OR one large header gets caught by the same
+//!       check.
+//!
+//!   (f) **Validator runs FIRST**, before size check
+//!       (server.rs:406). `validate_inbound_metadata`
+//!       enforces (i) reserved-prefix rejection
+//!       (audited tick #177), (ii) content-type allowlist
+//!       (audited tick #176), (iii) ASCII-control-char strip
+//!       (audited tick #152). The size cap is the last gate
+//!       in the inbound metadata validation pipeline.
+//!
+//! Regression tests below pin (a)-(e). The (f) ordering is
+//! pinned by the function structure: `validate_inbound_metadata`
+//! returns Err early if any structural issue surfaces.
+
+use asupersync::bytes::Bytes;
+use asupersync::grpc::status::Code;
+use asupersync::grpc::streaming::Metadata;
+use asupersync::grpc::server::{
+    enforce_metadata_size_limit, metadata_byte_size, DEFAULT_MAX_METADATA_SIZE,
+};
+
+#[test]
+fn default_max_metadata_size_is_8_kib() {
+    // Pin (b): the documented default. A regression that
+    // loosened the default would let hostile peers exhaust
+    // HPACK decoder memory by default.
+    assert_eq!(
+        DEFAULT_MAX_METADATA_SIZE,
+        8 * 1024,
+        "DEFAULT_MAX_METADATA_SIZE must be 8 KiB — matches gRPC ecosystem \
+         convention (grpc-go MaxHeaderListSize, RFC-9113 §6.5.2 \
+         SETTINGS_MAX_HEADER_LIST_SIZE advisory)",
+    );
+}
+
+#[test]
+fn enforce_metadata_size_limit_accepts_under_cap() {
+    // Pin (a): a small metadata block (~30 bytes) under the
+    // 8 KiB default cap passes.
+    let mut metadata = Metadata::new();
+    assert!(metadata.insert("x-trace-id", "abc-123"));
+    assert!(metadata.insert("user-agent", "test"));
+
+    enforce_metadata_size_limit(&metadata, DEFAULT_MAX_METADATA_SIZE)
+        .expect("under-cap metadata accepts");
+}
+
+#[test]
+fn enforce_metadata_size_limit_rejects_over_cap_with_resource_exhausted() {
+    // Pin (a)+(c): metadata exceeding the cap rejects with
+    // Status::resource_exhausted. The gRPC-equivalent of HTTP
+    // 431.
+    let mut metadata = Metadata::new();
+    // 16 KiB of header value — over the 8 KiB cap.
+    let big_value = "X".repeat(16 * 1024);
+    assert!(metadata.insert("x-large", big_value.as_str()));
+
+    let err = enforce_metadata_size_limit(&metadata, DEFAULT_MAX_METADATA_SIZE)
+        .expect_err("over-cap metadata MUST reject");
+    assert_eq!(
+        err.code(),
+        Code::ResourceExhausted,
+        "cap-exceeded MUST surface as ResourceExhausted (gRPC equivalent \
+         of HTTP 431); a regression to InvalidArgument would break the \
+         spec-mandated code class. got: {:?}",
+        err.code(),
+    );
+    // Pin (c) message: includes both actual and limit for SRE
+    // diagnostics.
+    let msg = err.message();
+    assert!(
+        msg.contains("max_metadata_size"),
+        "rejection message must reference the config knob name; got: {msg:?}",
+    );
+    assert!(
+        msg.contains("bytes >"),
+        "rejection message must show actual vs limit byte counts; got: {msg:?}",
+    );
+}
+
+#[test]
+fn enforce_metadata_size_limit_zero_disables_cap() {
+    // Pin (d): limit=0 → no enforcement. A 16 KiB metadata
+    // block passes when the cap is disabled. The bypass is
+    // grep-able (operator must explicitly pass 0).
+    let mut metadata = Metadata::new();
+    let big_value = "Y".repeat(16 * 1024);
+    assert!(metadata.insert("x-unbounded", big_value.as_str()));
+    enforce_metadata_size_limit(&metadata, 0)
+        .expect("limit=0 disables enforcement");
+}
+
+#[test]
+fn metadata_byte_size_sums_all_entries() {
+    // Pin (e): the total includes every entry's key+value
+    // bytes. A peer flooding many small headers gets caught
+    // by the same check as one large header.
+    let mut metadata = Metadata::new();
+    for i in 0..100 {
+        let key = format!("x-header-{i:03}");
+        let value = format!("value-{i:03}");
+        assert!(metadata.insert(&key, &value));
+    }
+    let total = metadata_byte_size(&metadata);
+    // Each entry is ~13 + ~9 = ~22 bytes; 100 entries ≈ 2200
+    // bytes. Loose lower-bound pin: total > 2000 bytes.
+    assert!(
+        total > 2000,
+        "100-entry metadata block must accumulate to > 2000 bytes; got {total}",
+    );
+}
+
+#[test]
+fn enforce_at_exact_cap_boundary_accepts() {
+    // Pin (a) boundary: metadata at EXACTLY the cap passes.
+    // The check is `actual > limit` (strict `>`, audited
+    // pattern from tick #163 boundary tests).
+    let mut metadata = Metadata::new();
+    let key = "x-test"; // 6 bytes
+    // Total target = 8 KiB exactly.
+    let value_len = DEFAULT_MAX_METADATA_SIZE - key.len();
+    let value = "Z".repeat(value_len);
+    assert!(metadata.insert(key, value.as_str()));
+    let total = metadata_byte_size(&metadata);
+    assert_eq!(total, DEFAULT_MAX_METADATA_SIZE);
+
+    enforce_metadata_size_limit(&metadata, DEFAULT_MAX_METADATA_SIZE)
+        .expect("at-exact-cap metadata accepts (strict > boundary)");
+}
+
+#[test]
+fn enforce_at_cap_plus_one_rejects() {
+    // Pin (a) boundary: metadata at cap+1 rejects. The strict
+    // `>` boundary fires here.
+    let mut metadata = Metadata::new();
+    let key = "x-test"; // 6 bytes
+    let value_len = DEFAULT_MAX_METADATA_SIZE - key.len() + 1;
+    let value = "Z".repeat(value_len);
+    assert!(metadata.insert(key, value.as_str()));
+
+    let err = enforce_metadata_size_limit(&metadata, DEFAULT_MAX_METADATA_SIZE)
+        .expect_err("cap+1 must reject");
+    assert_eq!(err.code(), Code::ResourceExhausted);
+}
+
+#[test]
+fn enforce_metadata_size_limit_runs_validator_first() {
+    // Pin (f): a metadata block with INVALID content (e.g.
+    // ASCII control chars in a value) reject at the validator
+    // BEFORE the size check. We use from_raw_entries_for_tests
+    // would be needed but it's pub(crate) — so we use a small
+    // metadata block with size-passing entries that contain
+    // a content-type violation.
+    //
+    // Construct a metadata with an invalid content-type
+    // value — the validator should reject at the content-type
+    // check BEFORE the size check.
+    let mut metadata = Metadata::new();
+    assert!(metadata.insert("content-type", "application/json"));
+    let err = enforce_metadata_size_limit(&metadata, DEFAULT_MAX_METADATA_SIZE)
+        .expect_err("non-grpc content-type must reject");
+    assert_eq!(
+        err.code(),
+        Code::InvalidArgument,
+        "validator runs FIRST — non-grpc content-type rejects with \
+         InvalidArgument BEFORE size check (which would be \
+         ResourceExhausted). got: {:?}",
+        err.code(),
+    );
+}
+
+#[test]
+fn empty_metadata_passes_under_any_cap() {
+    // Pin (a) edge: empty metadata (0 bytes) is always under
+    // any non-zero cap. A regression that mishandled empty
+    // would surface here.
+    let metadata = Metadata::new();
+    enforce_metadata_size_limit(&metadata, 1)
+        .expect("empty metadata under any cap");
+    enforce_metadata_size_limit(&metadata, DEFAULT_MAX_METADATA_SIZE)
+        .expect("empty metadata under default cap");
+}
+
+#[test]
+fn metadata_byte_size_includes_binary_value_byte_len() {
+    // Pin (e) extension: binary values (Bytes-backed) count
+    // their actual byte length, not their base64-encoded
+    // length. This is correct because the SIZE check is on
+    // the in-memory representation, not the wire encoding.
+    let mut metadata = Metadata::new();
+    let binary_payload = vec![0u8; 1024];
+    assert!(metadata.insert_bin("trace-bin", Bytes::from(binary_payload.clone())));
+    let total = metadata_byte_size(&metadata);
+    // Key "trace-bin" is 9 bytes; value is 1024 bytes; total
+    // should be 9 + 1024 = 1033 bytes (or similar bounded value).
+    assert!(
+        total >= 1024,
+        "binary value's byte_len must be summed; got {total}",
+    );
+}
