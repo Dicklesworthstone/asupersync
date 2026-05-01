@@ -751,6 +751,22 @@ mod tests {
     }
 
     #[test]
+    fn resolve_unicode_dot_traversal_blocked_after_percent_decode() {
+        let dir = setup_dir();
+        let sf = StaticFiles::new(dir.path());
+
+        assert!(sf.resolve_path("/%E2%80%A4%E2%80%A4/etc/passwd").is_none());
+        assert!(
+            sf.resolve_path("/sub/%EF%B9%92%EF%B9%92/hello.txt")
+                .is_none()
+        );
+        assert!(
+            sf.resolve_path("/sub/%EF%BC%8E%EF%BC%8E/hello.txt")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn resolve_invalid_percent_encoding_does_not_alias_other_path() {
         let dir = setup_dir();
         let sf = StaticFiles::new(dir.path());
