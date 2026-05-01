@@ -1546,6 +1546,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h2_settings_max_header_list_size_overflow"
+path = "fuzz_targets/h2_settings_max_header_list_size_overflow.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "h1_transfer_encoding_identity"
 path = "fuzz_targets/h1_transfer_encoding_identity.rs"
 test = false
@@ -4324,6 +4331,13 @@ name = "h2_trailers_end_stream_validation"
 path = "fuzz_targets/h2_trailers_end_stream_validation.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "h2_trailers_after_data"
+path = "fuzz_targets/h2_trailers_after_data.rs"
+test = false
+doc = false
+bench = false
 
 [[bin]]
 name = "h2_window_update_delta_zero"
