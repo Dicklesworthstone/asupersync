@@ -24,11 +24,12 @@ use libfuzzer_sys::fuzz_target;
 /// - Memory exhaustion protection verification
 // Import the Redis module to test
 use asupersync::messaging::redis::{
-    PubSubEvent, PubSubMessage, PubSubSubscriptionKind, RedisProtocolLimits, RespValue,
-    decode_resp_value_for_fuzz, parse_acl_for_fuzz, parse_client_kill_for_fuzz,
-    parse_client_tracking_push_for_fuzz, parse_cluster_command_for_fuzz, parse_latency_for_fuzz,
-    parse_pubsub_event_for_fuzz, parse_resp3_non_pubsub_push_for_fuzz, parse_script_eval_for_fuzz,
-    parse_slowlog_for_fuzz, parse_zadd_for_fuzz, parse_zrangebyscore_for_fuzz,
+    PubSubEvent, PubSubMessage, PubSubSubscriptionKind, RedisClientTrackingPush,
+    RedisProtocolLimits, RedisResp3NonPubSubPush, RespValue, decode_resp_value_for_fuzz,
+    parse_acl_for_fuzz, parse_client_kill_for_fuzz, parse_client_tracking_push_for_fuzz,
+    parse_cluster_command_for_fuzz, parse_latency_for_fuzz, parse_pubsub_event_for_fuzz,
+    parse_resp3_non_pubsub_push_for_fuzz, parse_script_eval_for_fuzz, parse_slowlog_for_fuzz,
+    parse_zadd_for_fuzz, parse_zrangebyscore_for_fuzz,
 };
 
 const MAX_STRUCTURED_FIELD_BYTES: usize = 96;
@@ -486,6 +487,15 @@ fn exercise_resp3_non_pubsub_push_parser(data: &[u8]) {
     ]);
     let _ = parse_resp3_non_pubsub_push_for_fuzz(tracking_push)
         .expect("client tracking push should parse through non-pubsub seam");
+
+    let redirect_broken = RespValue::Push(vec![RespValue::BulkString(Some(
+        b"tracking-redir-broken".to_vec(),
+    ))]);
+    assert_eq!(
+        parse_resp3_non_pubsub_push_for_fuzz(redirect_broken)
+            .expect("client tracking redirect-broken push should parse through non-pubsub seam"),
+        RedisResp3NonPubSubPush::ClientTracking(RedisClientTrackingPush::RedirectBroken)
+    );
 
     let pubsub_push = RespValue::Push(vec![
         RespValue::BulkString(Some(b"message".to_vec())),
