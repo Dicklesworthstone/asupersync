@@ -6,11 +6,10 @@
 //! - Consistent initialization semantics
 //! - Proper thread safety and coordination
 
-use asupersync::sync::once_cell::{OnceCell as AsupersyncOnceCell, OnceCellError};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use asupersync::sync::OnceCell as AsupersyncOnceCell;
 use std::sync::{Arc, OnceLock as StdOnceLock};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Result of a OnceCell conformance test comparing both implementations.
 #[derive(Debug, Clone, PartialEq)]
@@ -19,12 +18,12 @@ struct OnceCellConformanceResult {
     thread_id: usize,
     /// Operation type
     operation: ConformanceOp,
+    /// Position of this operation within the thread's configured sequence
+    operation_index: usize,
     /// Result of asupersync OnceCell operation
     asupersync_result: OpResult,
     /// Result of std OnceLock operation
     std_result: OpResult,
-    /// Timestamp when operation completed
-    timestamp: Duration,
     /// Final observed value
     final_value: Option<u32>,
 }
@@ -82,7 +81,6 @@ impl OnceCellConformanceContext {
     /// Test asupersync OnceCell behavior.
     fn test_asupersync_once_cell(&self) -> Vec<OnceCellConformanceResult> {
         let cell = Arc::new(AsupersyncOnceCell::<u32>::new());
-        let start_time = Instant::now();
         let results = Arc::new(parking_lot::Mutex::new(Vec::new()));
 
         let handles: Vec<_> = (0..self.config.thread_count)
@@ -103,9 +101,7 @@ impl OnceCellConformanceContext {
                         thread::sleep(Duration::from_micros(delay));
                     }
 
-                    for operation in operations {
-                        let timestamp = start_time.elapsed();
-
+                    for (operation_index, operation) in operations.into_iter().enumerate() {
                         let asupersync_result = match &operation {
                             ConformanceOp::GetOrInit { init_value } => {
                                 let value = *init_value;
@@ -127,9 +123,9 @@ impl OnceCellConformanceContext {
                         results.lock().push(OnceCellConformanceResult {
                             thread_id,
                             operation: operation.clone(),
+                            operation_index,
                             asupersync_result: asupersync_result.clone(),
                             std_result: asupersync_result, // Placeholder - will be overwritten
-                            timestamp,
                             final_value,
                         });
                     }
@@ -143,15 +139,13 @@ impl OnceCellConformanceContext {
         }
 
         let mut results = results.lock().clone();
-        // Sort by timestamp for consistent ordering
-        results.sort_by_key(|r| (r.timestamp.as_nanos(), r.thread_id));
+        results.sort_by_key(|r| (r.thread_id, r.operation_index));
         results
     }
 
     /// Test std::sync::OnceLock behavior.
     fn test_std_once_lock(&self) -> Vec<OnceCellConformanceResult> {
         let cell = Arc::new(StdOnceLock::<u32>::new());
-        let start_time = Instant::now();
         let results = Arc::new(parking_lot::Mutex::new(Vec::new()));
 
         let handles: Vec<_> = (0..self.config.thread_count)
@@ -172,9 +166,7 @@ impl OnceCellConformanceContext {
                         thread::sleep(Duration::from_micros(delay));
                     }
 
-                    for operation in operations {
-                        let timestamp = start_time.elapsed();
-
+                    for (operation_index, operation) in operations.into_iter().enumerate() {
                         let std_result = match &operation {
                             ConformanceOp::GetOrInit { init_value } => {
                                 let value = *init_value;
@@ -196,9 +188,9 @@ impl OnceCellConformanceContext {
                         results.lock().push(OnceCellConformanceResult {
                             thread_id,
                             operation: operation.clone(),
+                            operation_index,
                             asupersync_result: std_result.clone(), // Placeholder
                             std_result,
-                            timestamp,
                             final_value,
                         });
                     }
@@ -212,8 +204,7 @@ impl OnceCellConformanceContext {
         }
 
         let mut results = results.lock().clone();
-        // Sort by timestamp for consistent ordering
-        results.sort_by_key(|r| (r.timestamp.as_nanos(), r.thread_id));
+        results.sort_by_key(|r| (r.thread_id, r.operation_index));
         results
     }
 }
@@ -246,6 +237,12 @@ fn assert_once_cell_conformance(
         assert_eq!(
             asupersync_result.operation, std_result.operation,
             "{} op {}: Operation differs",
+            test_name, i
+        );
+
+        assert_eq!(
+            asupersync_result.operation_index, std_result.operation_index,
+            "{} op {}: Operation index differs",
             test_name, i
         );
 
@@ -492,33 +489,80 @@ fn conformance_comprehensive_matrix() {
     }
 }
 
-/// Generate conformance coverage report.
+/// Verify the documented coverage matrix instead of printing a report that can
+/// pass without exercising any implementation behavior.
 #[test]
-fn generate_conformance_report() {
-    println!("\n=== OnceCell Conformance Coverage Report ===\n");
-
-    println!("| Test Case | Threads | Operations | Delay Pattern | Status |");
-    println!("|-----------|---------|------------|---------------|--------|");
-
+fn conformance_coverage_matrix_exercises_all_scenarios() {
     let test_cases = vec![
-        ("Basic Initialization", 1, "Get→GetOrInit→Get", "None"),
-        ("Concurrent Init", 3, "GetOrInit×3", "0,10,20μs"),
-        ("Set vs Init Race", 2, "Set+GetOrInit+Get", "0,5μs"),
-        ("Multiple Gets", 4, "GetOrInit+Get×3", "None"),
-        ("Set After Init", 1, "GetOrInit→Set×2→Get", "None"),
+        (
+            "basic_initialization",
+            ConformanceTestConfig {
+                thread_count: 1,
+                operations_per_thread: vec![
+                    ConformanceOp::Get,
+                    ConformanceOp::GetOrInit { init_value: 42 },
+                    ConformanceOp::Get,
+                ],
+                stagger_delays: vec![0],
+            },
+        ),
+        (
+            "concurrent_initialization",
+            ConformanceTestConfig {
+                thread_count: 3,
+                operations_per_thread: vec![
+                    ConformanceOp::GetOrInit { init_value: 100 },
+                    ConformanceOp::Get,
+                ],
+                stagger_delays: vec![0, 10, 20],
+            },
+        ),
+        (
+            "set_vs_init_race",
+            ConformanceTestConfig {
+                thread_count: 2,
+                operations_per_thread: vec![
+                    ConformanceOp::Set { value: 200 },
+                    ConformanceOp::GetOrInit { init_value: 300 },
+                    ConformanceOp::Get,
+                ],
+                stagger_delays: vec![0, 5],
+            },
+        ),
+        (
+            "multiple_gets_after_init",
+            ConformanceTestConfig {
+                thread_count: 4,
+                operations_per_thread: vec![
+                    ConformanceOp::GetOrInit { init_value: 500 },
+                    ConformanceOp::Get,
+                    ConformanceOp::Get,
+                    ConformanceOp::Get,
+                ],
+                stagger_delays: vec![0, 0, 0, 0],
+            },
+        ),
+        (
+            "set_after_initialization",
+            ConformanceTestConfig {
+                thread_count: 1,
+                operations_per_thread: vec![
+                    ConformanceOp::GetOrInit { init_value: 600 },
+                    ConformanceOp::Set { value: 700 },
+                    ConformanceOp::Set { value: 800 },
+                    ConformanceOp::Get,
+                ],
+                stagger_delays: vec![0],
+            },
+        ),
     ];
 
-    for (name, threads, operations, pattern) in test_cases {
-        println!(
-            "| {} | {} | {} | {} | ✅ PASS |",
-            name, threads, operations, pattern
-        );
-    }
+    assert_eq!(test_cases.len(), 5, "coverage matrix should stay explicit");
 
-    println!("\n✅ All conformance tests passing");
-    println!("📊 Coverage: 5/5 test scenarios (100%)");
-    println!("🎯 Initialization order conformance: VERIFIED");
-    println!("🏁 Race condition handling: IDENTICAL");
-    println!("🔒 Thread safety semantics: CONSISTENT");
-    println!("⚡ Observable operation order: MATCHED");
+    for (name, config) in test_cases {
+        let ctx = OnceCellConformanceContext::new(config);
+        let (asupersync_results, std_results) = ctx.run_differential_test();
+
+        assert_once_cell_conformance(&asupersync_results, &std_results, name);
+    }
 }
