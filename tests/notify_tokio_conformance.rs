@@ -64,6 +64,39 @@ impl NotificationTracker {
     }
 }
 
+fn expected_notified_waiters(config: &NotifyTest) -> usize {
+    config.waiter_count.min(config.notification_count)
+}
+
+async fn wait_for_expected_notifications(
+    tracker: &NotificationTracker,
+    expected: usize,
+    timeout: Duration,
+) {
+    let deadline = Instant::now() + timeout;
+    while tracker.get_notification_order().len() < expected {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for {expected} notify completions"
+        );
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
+
+async fn finish_waiters(handles: Vec<tokio::task::JoinHandle<()>>) {
+    for handle in &handles {
+        handle.abort();
+    }
+
+    for handle in handles {
+        match handle.await {
+            Ok(()) => {}
+            Err(err) if err.is_cancelled() => {}
+            Err(err) => panic!("notify waiter task failed: {err}"),
+        }
+    }
+}
+
 /// Run notify test on asupersync Notify using thread-based async runtime
 fn test_async_notify_conformance(config: &NotifyTest) -> NotifyConformanceResult {
     // Create a simple single-threaded async runtime
@@ -117,10 +150,13 @@ fn test_async_notify_conformance(config: &NotifyTest) -> NotifyConformanceResult
             notify.notify_one();
         }
 
-        // Wait for all waiters to complete
-        for handle in handles {
-            handle.await.unwrap();
-        }
+        wait_for_expected_notifications(
+            &tracker,
+            expected_notified_waiters(&config),
+            Duration::from_secs(1),
+        )
+        .await;
+        finish_waiters(handles).await;
 
         let notification_order = tracker.get_notification_order();
 
@@ -188,10 +224,13 @@ fn test_tokio_notify_conformance(config: &NotifyTest) -> NotifyConformanceResult
             }
         }
 
-        // Wait for all waiters to complete
-        for handle in handles {
-            handle.await.unwrap();
-        }
+        wait_for_expected_notifications(
+            &tracker,
+            expected_notified_waiters(&config),
+            Duration::from_secs(1),
+        )
+        .await;
+        finish_waiters(handles).await;
 
         let notification_order = tracker.get_notification_order();
 
@@ -213,52 +252,60 @@ fn compare_notify_results(
     // Both should send same number of notifications
     if async_result.notifications_sent != tokio_result.notifications_sent {
         return Err(format!(
-            "Notification count differs: async={}, tokio={}",
-            async_result.notifications_sent, tokio_result.notifications_sent
+            "Notification count differs: async={}, tokio={}; {}",
+            async_result.notifications_sent,
+            tokio_result.notifications_sent,
+            notify_debug_summary(async_result, tokio_result)
         ));
     }
 
     // Both should notify same number of waiters (up to available waiters)
     if async_result.waiters_notified != tokio_result.waiters_notified {
         return Err(format!(
-            "Notified waiters differ: async={}, tokio={}",
-            async_result.waiters_notified, tokio_result.waiters_notified
+            "Notified waiters differ: async={}, tokio={}; {}",
+            async_result.waiters_notified,
+            tokio_result.waiters_notified,
+            notify_debug_summary(async_result, tokio_result)
         ));
     }
 
-    // Check that the notification order patterns are consistent
-    // We allow some timing variation but the relative order should be similar
-    println!(
-        "Async Notify order: {:?}",
-        async_result
-            .notification_order
-            .iter()
-            .map(|(id, _)| id)
-            .collect::<Vec<_>>()
-    );
-    println!(
-        "Tokio Notify order: {:?}",
-        tokio_result
-            .notification_order
-            .iter()
-            .map(|(id, _)| id)
-            .collect::<Vec<_>>()
-    );
-    println!(
-        "Async duration: {:?}, Tokio duration: {:?}",
-        async_result.duration, tokio_result.duration
-    );
-
     // Basic sanity checks
     if async_result.waiters_notified == 0 && async_result.notifications_sent > 0 {
-        return Err("Async notify sent notifications but no waiters were notified".to_string());
+        return Err(format!(
+            "Async notify sent notifications but no waiters were notified; {}",
+            notify_debug_summary(async_result, tokio_result)
+        ));
     }
 
     if tokio_result.waiters_notified == 0 && tokio_result.notifications_sent > 0 {
-        return Err("Tokio notify sent notifications but no waiters were notified".to_string());
+        return Err(format!(
+            "Tokio notify sent notifications but no waiters were notified; {}",
+            notify_debug_summary(async_result, tokio_result)
+        ));
     }
 
     Ok(())
+}
+
+fn notify_debug_summary(
+    async_result: &NotifyConformanceResult,
+    tokio_result: &NotifyConformanceResult,
+) -> String {
+    let async_order = async_result
+        .notification_order
+        .iter()
+        .map(|(id, _)| *id)
+        .collect::<Vec<_>>();
+    let tokio_order = tokio_result
+        .notification_order
+        .iter()
+        .map(|(id, _)| *id)
+        .collect::<Vec<_>>();
+
+    format!(
+        "async scenario={} order={async_order:?} duration={:?}; tokio scenario={} order={tokio_order:?} duration={:?}",
+        async_result.scenario, async_result.duration, tokio_result.scenario, tokio_result.duration
+    )
 }
 
 #[test]
