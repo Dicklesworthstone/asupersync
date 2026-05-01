@@ -3695,6 +3695,18 @@ mod tests {
         )
     }
 
+    fn deterministic_bytes(seed: u64, len: usize, salt: u64) -> Vec<u8> {
+        let mut state = seed ^ salt ^ ((len as u64) << 32);
+        (0..len)
+            .map(|index| {
+                state = state
+                    .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                    .wrapping_add(0xBF58_476D_1CE4_E5B9 ^ index as u64);
+                (state.rotate_left((index % 64) as u32) >> 56) as u8
+            })
+            .collect()
+    }
+
     fn x86_profile_pack_policy_fixture() -> DualKernelPolicy {
         let metadata = profile_pack_metadata(Gf256ProfilePackId::X86Avx2BalancedV1);
         DualKernelPolicy {
@@ -5223,6 +5235,59 @@ mod tests {
                     simd_dst, scalar_dst,
                     "addmul mismatch: len={len}, c={c_val}; {context}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn deterministic_corpus_mul_addmul_matches_scalar_reference() {
+        let replay_ref = "replay:rq-u-gf256-simd-scalar-corpus-v1";
+        let seeds = [0u64, 1, 0x5EED_F00D, 0xA5A5_5A5A_D3C1_B2E0];
+        let lengths = [
+            0usize, 1, 2, 7, 8, 15, 16, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 255, 256, 257,
+            511, 512, 513, 1024, 1537,
+        ];
+        let scalars = [0u8, 1, 2, 3, 5, 7, 11, 29, 127, 128, 199, 255];
+
+        for seed in seeds {
+            for len in lengths {
+                let original = deterministic_bytes(seed, len, 0xC011_EC7);
+                let src = deterministic_bytes(seed, len, 0xADD0_4D17);
+                for scalar in scalars {
+                    let context = failure_context(
+                        "RQ-U-GF256-SIMD-SCALAR-CORPUS",
+                        seed,
+                        &format!("len={len},scalar={scalar}"),
+                        replay_ref,
+                    );
+                    let c = Gf256(scalar);
+                    let table = mul_table_for(c);
+                    let nib = NibbleTables::for_scalar(c);
+
+                    let mut dispatch_mul = original.clone();
+                    let mut scalar_mul = original.clone();
+                    let mut wide_mul = original.clone();
+                    gf256_mul_slice(&mut dispatch_mul, c);
+                    gf256_mul_slice_scalar(&mut scalar_mul, c);
+                    mul_with_table_wide(&mut wide_mul, &nib, table);
+                    assert_eq!(dispatch_mul, scalar_mul, "dispatch mul mismatch; {context}");
+                    assert_eq!(wide_mul, scalar_mul, "wide mul mismatch; {context}");
+
+                    let mut dispatch_addmul = original.clone();
+                    let mut scalar_addmul = original.clone();
+                    let mut wide_addmul = original.clone();
+                    gf256_addmul_slice(&mut dispatch_addmul, &src, c);
+                    gf256_addmul_slice_scalar(&mut scalar_addmul, &src, c);
+                    addmul_with_table_wide(&mut wide_addmul, &src, &nib, table);
+                    assert_eq!(
+                        dispatch_addmul, scalar_addmul,
+                        "dispatch addmul mismatch; {context}"
+                    );
+                    assert_eq!(
+                        wide_addmul, scalar_addmul,
+                        "wide addmul mismatch; {context}"
+                    );
+                }
             }
         }
     }
