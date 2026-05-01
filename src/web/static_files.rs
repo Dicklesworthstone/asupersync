@@ -58,20 +58,15 @@ enum RangeError {
 /// RFC 9110 §14.1.2 Range specification.
 fn parse_ranges(range_header: &str, file_size: u64) -> Result<Vec<ByteRange>, RangeError> {
     let range_header = range_header.trim();
-    if !range_header.starts_with("bytes=") {
+    let Some(ranges_str) = range_header.strip_prefix("bytes=") else {
         return Err(RangeError::InvalidSyntax);
-    }
-
-    let ranges_str = &range_header[6..]; // Skip "bytes="
+    };
     let mut ranges = Vec::new();
 
     for range_spec in ranges_str.split(',') {
         let range_spec = range_spec.trim();
 
-        if let Some(dash_pos) = range_spec.find('-') {
-            let (start_str, end_str) = range_spec.split_at(dash_pos);
-            let end_str = &end_str[1..]; // Skip the dash
-
+        if let Some((start_str, end_str)) = range_spec.split_once('-') {
             if start_str.is_empty() && end_str.is_empty() {
                 return Err(RangeError::InvalidSyntax);
             }
@@ -79,11 +74,12 @@ fn parse_ranges(range_header: &str, file_size: u64) -> Result<Vec<ByteRange>, Ra
             let range = if start_str.is_empty() {
                 // Suffix range: bytes=-500 (last 500 bytes)
                 if let Ok(suffix_length) = end_str.parse::<u64>() {
-                    if suffix_length == 0 || suffix_length > file_size {
+                    if suffix_length == 0 || file_size == 0 {
                         continue; // Skip invalid suffix ranges
                     }
+                    let start = file_size.saturating_sub(suffix_length);
                     ByteRange {
-                        start: (file_size - suffix_length) as usize,
+                        start: start as usize,
                         end: (file_size - 1) as usize,
                     }
                 } else {
@@ -357,36 +353,41 @@ impl StaticFiles {
             Ok(ranges) if !ranges.is_empty() => ranges,
             Ok(_) | Err(RangeError::InvalidSyntax) => {
                 // Invalid or empty ranges - return 416 Range Not Satisfiable
-                return Response::empty(StatusCode::RANGE_NOT_SATISFIABLE)
-                    .header("content-range", format!("bytes */{}", file_size))
-                    .header("accept-ranges", "bytes");
+                return self.apply_custom_headers(
+                    Response::empty(StatusCode::RANGE_NOT_SATISFIABLE)
+                        .header("content-range", format!("bytes */{}", file_size))
+                        .header("accept-ranges", "bytes"),
+                );
             }
             Err(RangeError::NotSatisfiable) => {
-                return Response::empty(StatusCode::RANGE_NOT_SATISFIABLE)
-                    .header("content-range", format!("bytes */{}", file_size))
-                    .header("accept-ranges", "bytes");
+                return self.apply_custom_headers(
+                    Response::empty(StatusCode::RANGE_NOT_SATISFIABLE)
+                        .header("content-range", format!("bytes */{}", file_size))
+                        .header("accept-ranges", "bytes"),
+                );
             }
         };
 
         // Check If-None-Match for conditional requests
         let mut file_content = Vec::new();
-        if let Err(_) = file.read_to_end(&mut file_content) {
+        if file.read_to_end(&mut file_content).is_err() {
             return Response::empty(StatusCode::INTERNAL_SERVER_ERROR);
         }
+        let etag = generate_etag(&file_content);
 
         if let Some(client_etag) = if_none_match {
-            let current_etag = generate_etag(&file_content);
-            if client_etag == current_etag {
-                return Response::empty(StatusCode::NOT_MODIFIED)
-                    .header("etag", current_etag)
-                    .header("cache-control", format!("public, max-age={}", self.max_age))
-                    .header("accept-ranges", "bytes");
+            if etag_matches(client_etag, &etag) {
+                return self.apply_custom_headers(
+                    Response::empty(StatusCode::NOT_MODIFIED)
+                        .header("etag", &etag)
+                        .header("cache-control", format!("public, max-age={}", self.max_age))
+                        .header("accept-ranges", "bytes"),
+                );
             }
         }
 
-        if ranges.len() == 1 {
+        if let [range] = ranges.as_slice() {
             // Single range - return 206 Partial Content
-            let range = &ranges[0];
             let range_data = &file_content[range.start..=range.end];
             let content_type = guess_mime(&path);
 
@@ -401,7 +402,7 @@ impl StaticFiles {
                 format!("bytes {}-{}/{}", range.start, range.end, file_size),
             )
             .header("accept-ranges", "bytes")
-            .header("etag", generate_etag(&file_content))
+            .header("etag", &etag)
             .header("cache-control", format!("public, max-age={}", self.max_age));
 
             self.apply_custom_headers(response)
@@ -439,7 +440,7 @@ impl StaticFiles {
                 )
                 .header("content-length", body_len.to_string())
                 .header("accept-ranges", "bytes")
-                .header("etag", generate_etag(&file_content))
+                .header("etag", &etag)
                 .header("cache-control", format!("public, max-age={}", self.max_age));
 
             self.apply_custom_headers(response)

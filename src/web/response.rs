@@ -31,6 +31,8 @@ impl StatusCode {
     pub const ACCEPTED: Self = Self(202);
     /// 204 No Content
     pub const NO_CONTENT: Self = Self(204);
+    /// 206 Partial Content
+    pub const PARTIAL_CONTENT: Self = Self(206);
 
     // 3xx Redirection
     /// 301 Moved Permanently
@@ -65,6 +67,8 @@ impl StatusCode {
     pub const PAYLOAD_TOO_LARGE: Self = Self(413);
     /// 415 Unsupported Media Type
     pub const UNSUPPORTED_MEDIA_TYPE: Self = Self(415);
+    /// 416 Range Not Satisfiable
+    pub const RANGE_NOT_SATISFIABLE: Self = Self(416);
     /// 422 Unprocessable Entity
     pub const UNPROCESSABLE_ENTITY: Self = Self(422);
     /// 429 Too Many Requests
@@ -744,14 +748,12 @@ const fn is_valid_header_value_byte(b: u8) -> bool {
 /// the response state is always serializable and matches the symmetric
 /// sanitization applied to header values.
 fn sanitize_header_name(name: String) -> String {
-    // Apply same sanitization as header values for consistency - reject any
-    // byte that isn't valid in HTTP header field-name per RFC 9110 §5.1:
-    // field-name = token = 1*tchar where tchar = "!" / "#" / "$" / "%" / "&" /
-    // "'" / "*" / "+" / "-" / "." / "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
+    // Apply the same sanitization shape as header values for consistency.
+    // RFC 9110 field names are tokens: alphanumeric bytes plus the visible
+    // punctuation accepted in the match below.
     name.bytes()
         .filter(|&b| {
-            // Valid tchar bytes: ALPHA / DIGIT / "!" / "#" / "$" / "%" / "&" /
-            // "'" / "*" / "+" / "-" / "." / "^" / "_" / "`" / "|" / "~"
+            // Valid token bytes: ALPHA, DIGIT, and the allowed punctuation set.
             matches!(b,
                 b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' |
                 b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' |
