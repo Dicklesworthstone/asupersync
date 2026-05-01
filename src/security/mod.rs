@@ -60,7 +60,10 @@
 //! let authenticated = ctx.sign_symbol(&symbol);
 //!
 //! // Verify on receive
-//! let verified = ctx.verify_authenticated_symbol(&authenticated)?;
+//! let mut received =
+//!     AuthenticatedSymbol::from_parts(authenticated.clone().into_symbol(), *authenticated.tag());
+//! ctx.verify_authenticated_symbol(&mut received)?;
+//! assert!(received.is_verified());
 //! ```
 
 pub mod authenticated;
