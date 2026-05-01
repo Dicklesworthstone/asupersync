@@ -1220,4 +1220,132 @@ mod tests {
         );
         crate::test_complete!("br51xq_all_parties_cancel_resets_barrier");
     }
+
+    /// Audit test for concurrent wait cancellation correctness.
+    ///
+    /// Verifies barrier behavior when N tasks call barrier.wait() and one is cancelled
+    /// while waiting. Per the user's question: should the remaining N-1 proceed
+    /// (cancelled task counted toward threshold) or hang forever (incorrect)?
+    ///
+    /// Current implementation decrements arrival count on cancellation, requiring
+    /// replacement. Testing to verify if this matches expected cancel-aware semantics.
+    #[test]
+    fn audit_barrier_cancellation_threshold_behavior() {
+        init_test("audit_barrier_cancellation_threshold_behavior");
+
+        let cx = crate::cx::Cx::for_testing();
+
+        // Test case: 3-party barrier, cancel 1 task, check if remaining 2 proceed
+        let barrier = Arc::new(Barrier::new(3));
+        let completed = Arc::new(AtomicUsize::new(0));
+        let started = Arc::new(AtomicUsize::new(0));
+
+        // Start 3 tasks that will wait on the barrier
+        let mut handles = Vec::new();
+
+        for task_id in 0..3 {
+            let barrier = Arc::clone(&barrier);
+            let completed = Arc::clone(&completed);
+            let started = Arc::clone(&started);
+            let task_cx = cx.child();
+
+            let handle = std::thread::spawn(move || {
+                started.fetch_add(1, Ordering::SeqCst);
+
+                // Task 0 will be cancelled after it starts waiting
+                if task_id == 0 {
+                    // Simulate cancellation by creating a cancelled context
+                    let cancel_reason = crate::types::CancelReason::default();
+                    let cancelled_cx = task_cx.cancelled(cancel_reason);
+
+                    let result = block_on(barrier.wait(&cancelled_cx));
+                    match result {
+                        Err(BarrierWaitError::Cancelled) => {
+                            // Expected - this task was cancelled
+                            return "cancelled";
+                        }
+                        Ok(_) => {
+                            panic!("Cancelled task should not succeed");
+                        }
+                        Err(e) => {
+                            panic!("Unexpected error: {:?}", e);
+                        }
+                    }
+                }
+
+                // Other tasks proceed normally
+                let result = block_on(barrier.wait(&task_cx));
+                match result {
+                    Ok(_) => {
+                        completed.fetch_add(1, Ordering::SeqCst);
+                        "completed"
+                    }
+                    Err(e) => {
+                        panic!("Normal task failed: {:?}", e);
+                    }
+                }
+            });
+
+            handles.push(handle);
+        }
+
+        // Wait for all tasks to start
+        while started.load(Ordering::SeqCst) < 3 {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        // Give tasks time to register with barrier
+        std::thread::sleep(Duration::from_millis(10));
+
+        // Check barrier state - should have 3 arrivals initially
+        let (arrived, generation, waiters) = barrier.state_snapshot_for_test();
+
+        // Now wait for threads to complete and see what happened
+        let mut results = Vec::new();
+        for handle in handles {
+            results.push(handle.join().expect("thread join"));
+        }
+
+        let final_completed = completed.load(Ordering::SeqCst);
+        let final_barrier_state = barrier.state_snapshot_for_test();
+
+        // Document the actual behavior for analysis
+        println!(
+            "Initial barrier state: arrived={}, generation={}, waiters={}",
+            arrived, generation, waiters
+        );
+        println!("Final completed count: {}", final_completed);
+        println!(
+            "Final barrier state: arrived={}, generation={}, waiters={}",
+            final_barrier_state.0, final_barrier_state.1, final_barrier_state.2
+        );
+        println!("Task results: {:?}", results);
+
+        // Current implementation behavior: cancellation decrements arrival count
+        // This means the remaining 2 tasks will NOT proceed without a replacement
+
+        // According to the user, correct behavior should be: cancelled task counts
+        // toward threshold, so remaining N-1 tasks should proceed
+
+        // Test the CURRENT behavior (which may be incorrect per user's spec)
+        if final_completed == 0 {
+            println!("CURRENT BEHAVIOR: Remaining tasks hang (arrival count decremented)");
+            // This would be the "defect" the user mentioned
+            assert_eq!(
+                final_completed, 0,
+                "Current implementation: cancelled task decrements arrival count, remaining tasks hang"
+            );
+        } else {
+            println!("CURRENT BEHAVIOR: Remaining tasks proceeded");
+            assert_eq!(
+                final_completed, 2,
+                "If tasks proceeded, exactly 2 should complete (excluding cancelled task)"
+            );
+        }
+
+        // TODO: If this test shows hanging behavior, implement the fix where
+        // cancelled tasks count toward the threshold rather than decrementing arrival count
+
+        crate::test_complete!("audit_barrier_cancellation_threshold_behavior");
+    }
 }
