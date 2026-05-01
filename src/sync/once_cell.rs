@@ -2045,4 +2045,79 @@ mod tests {
             "metamorphic_init_then_get_equivalence_under_concurrent_first_init_race"
         );
     }
+
+    /// Audit test for concurrent get_or_init panic recovery semantics.
+    ///
+    /// Verifies that when N tasks race on get_or_init() and the initializer panics,
+    /// the SECOND attempt re-runs the initializer (correct) rather than returning
+    /// a poisoned cell forever (incorrect for asupersync semantics).
+    #[test]
+    fn audit_concurrent_get_or_init_panic_recovery() {
+        init_test("audit_concurrent_get_or_init_panic_recovery");
+        let cell = Arc::new(OnceCell::<u32>::new());
+        let panic_gate = Arc::new(AtomicBool::new(false));
+        let barrier = Arc::new(std::sync::Barrier::new(4)); // 3 racers + main thread
+
+        // Spawn 3 racing tasks that will all try to initialize
+        let handles: Vec<_> = (0..3)
+            .map(|task_id| {
+                let cell = Arc::clone(&cell);
+                let panic_gate = Arc::clone(&panic_gate);
+                let barrier = Arc::clone(&barrier);
+
+                thread::spawn(move || {
+                    // Wait for all racers to be ready
+                    barrier.wait();
+
+                    // First task will panic, others will retry
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        cell.get_or_init_blocking(|| {
+                            if task_id == 0 && !panic_gate.load(Ordering::SeqCst) {
+                                // First attempt panics
+                                panic_gate.store(true, Ordering::SeqCst);
+                                panic!("boom");
+                            }
+                            // Subsequent attempts succeed
+                            42u32
+                        })
+                    }));
+
+                    match result {
+                        Ok(value) => *value,
+                        Err(_) => {
+                            // If we panicked, try again - this should work
+                            *cell.get_or_init_blocking(|| 42u32)
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        // Start the race
+        barrier.wait();
+
+        // Collect results from all tasks
+        let results: Vec<u32> = handles
+            .into_iter()
+            .map(|h| h.join().expect("task should complete"))
+            .collect();
+
+        // Verify all tasks got the same value (cell was properly initialized)
+        assert!(results.iter().all(|&v| v == 42), "all tasks should see same value: {:?}", results);
+
+        // Verify the cell is properly initialized
+        assert!(cell.is_initialized(), "cell should be initialized after panic recovery");
+        assert_eq!(*cell.get().unwrap(), 42, "cell should contain correct value");
+
+        // Verify state is INITIALIZED, not poisoned
+        assert_eq!(cell.state.load(Ordering::Acquire), INITIALIZED, "cell should be in INITIALIZED state");
+
+        // Verify subsequent access works normally
+        let final_value = cell.get_or_init_blocking(|| {
+            panic!("should not be called on already-initialized cell")
+        });
+        assert_eq!(*final_value, 42, "subsequent access should work normally");
+
+        crate::test_complete!("audit_concurrent_get_or_init_panic_recovery");
+    }
 }

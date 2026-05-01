@@ -2837,6 +2837,11 @@ mod metamorphic_tests {
     // Test Infrastructure
     // ============================================================================
 
+    fn init_test(name: &str) {
+        crate::test_utils::init_test_logging();
+        crate::test_phase!(name);
+    }
+
     /// Create a test context for deterministic scheduling.
     fn test_cx() -> Cx {
         Cx::new(
@@ -2856,6 +2861,15 @@ mod metamorphic_tests {
                 Poll::Ready(v) => return v,
                 Poll::Pending => {}
             }
+        }
+    }
+
+    fn poll_once<T>(future: &mut (impl Future<Output = T> + Unpin)) -> Option<T> {
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        match std::pin::Pin::new(future).poll(&mut cx) {
+            Poll::Ready(value) => Some(value),
+            Poll::Pending => None,
         }
     }
 
@@ -3886,5 +3900,108 @@ mod metamorphic_tests {
                 );
             }
         }
+    }
+
+    /// Writer starvation prevention audit test.
+    ///
+    /// Verifies that when readers continuously attempt to acquire read locks,
+    /// queued writers still get scheduled and cannot wait forever. This test
+    /// validates the core fairness invariant: after a writer is queued,
+    /// new readers must block until the writer runs.
+    #[test]
+    fn audit_rwlock_writer_starvation_prevention() {
+        init_test("audit_rwlock_writer_starvation_prevention");
+        let cx = test_cx();
+        let lock = RwLock::new(42u64);
+
+        // Step 1: Acquire initial read lock to force writer to queue
+        let initial_reader = block_on(lock.read(&cx)).expect("initial reader should acquire");
+
+        // Step 2: Queue a writer (will be blocked by the active reader)
+        let mut writer_fut = lock.write(&cx);
+        let writer_pending = poll_once(&mut writer_fut).is_none();
+        assert!(
+            writer_pending,
+            "writer should be pending while reader is active"
+        );
+
+        // Verify writer_waiters count increased
+        {
+            let state = lock.state.lock();
+            assert!(
+                state.writer_waiters > 0,
+                "writer_waiters should be > 0 after queuing writer, got {}",
+                state.writer_waiters
+            );
+        }
+
+        // Step 3: Try to acquire new read locks - these should be BLOCKED
+        // even though no writer is currently active, because writer_waiters > 0
+        let mut new_reader_fut1 = lock.read(&cx);
+        let reader1_blocked = poll_once(&mut new_reader_fut1).is_none();
+        assert!(
+            reader1_blocked,
+            "new reader should be blocked when writer_waiters > 0"
+        );
+
+        let mut new_reader_fut2 = lock.read(&cx);
+        let reader2_blocked = poll_once(&mut new_reader_fut2).is_none();
+        assert!(
+            reader2_blocked,
+            "second new reader should also be blocked when writer_waiters > 0"
+        );
+
+        // Step 4: Verify try_read() also correctly blocks due to waiting writers
+        let try_read_result = lock.try_read();
+        assert!(
+            matches!(try_read_result, Err(TryReadError::Locked)),
+            "try_read should fail with Locked when writers are waiting, got {:?}",
+            try_read_result
+        );
+
+        // Step 5: Release the initial reader - this should wake the writer, NOT the new readers
+        drop(initial_reader);
+
+        // Step 6: Writer should now be able to acquire the lock
+        let writer_guard = poll_once(&mut writer_fut);
+        assert!(
+            writer_guard.is_some() && writer_guard.as_ref().unwrap().is_ok(),
+            "writer should acquire lock after initial reader releases"
+        );
+
+        // Step 7: New readers should still be blocked while writer is active
+        let reader1_still_blocked = poll_once(&mut new_reader_fut1).is_none();
+        let reader2_still_blocked = poll_once(&mut new_reader_fut2).is_none();
+        assert!(
+            reader1_still_blocked && reader2_still_blocked,
+            "readers should remain blocked while writer is active"
+        );
+
+        // Step 8: Release the writer - now the queued readers should be able to acquire
+        drop(writer_guard.unwrap().unwrap());
+
+        let reader1_acquired = poll_once(&mut new_reader_fut1);
+        let reader2_acquired = poll_once(&mut new_reader_fut2);
+        assert!(
+            reader1_acquired.is_some() && reader1_acquired.as_ref().unwrap().is_ok(),
+            "reader1 should acquire after writer releases"
+        );
+        assert!(
+            reader2_acquired.is_some() && reader2_acquired.as_ref().unwrap().is_ok(),
+            "reader2 should acquire after writer releases"
+        );
+
+        // Step 9: Verify final state is clean
+        {
+            let state = lock.state.lock();
+            assert_eq!(
+                state.writer_waiters, 0,
+                "writer_waiters should be 0 after writer completes"
+            );
+            assert_eq!(state.readers, 2, "should have 2 active readers");
+            assert!(!state.writer_active, "no writer should be active");
+        }
+
+        crate::test_complete!("audit_rwlock_writer_starvation_prevention");
     }
 }

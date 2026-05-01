@@ -905,4 +905,103 @@ mod tests {
         let id = table.create_root(Budget::default(), Time::ZERO);
         assert_eq!(table.pending_obligations(id), Some(0));
     }
+
+    #[test]
+    fn close_quiescence_race_spawn_after_begin_close_blocked() {
+        // Test the specific race: region begins close, then child tries to spawn
+        // grandchild. The double-check pattern should prevent the spawn.
+
+        let mut table = RegionTable::new();
+        let parent = table.create_root(Budget::default(), Time::ZERO);
+        let child = table
+            .create_child(parent, Budget::default(), Time::ZERO)
+            .unwrap();
+
+        // Step 1: Begin close on parent (this sets state to Closing)
+        let parent_record = table.get(parent.arena_index()).unwrap();
+        let child_record = table.get(child.arena_index()).unwrap();
+
+        // Verify initial state
+        assert_eq!(table.state(parent), Some(RegionState::Open));
+        assert_eq!(table.state(child), Some(RegionState::Open));
+
+        // Begin close on parent
+        let close_result = parent_record.begin_close(None);
+        assert!(close_result, "Parent close should succeed");
+        assert_eq!(table.state(parent), Some(RegionState::Closing));
+
+        // Step 2: Now try to add grandchild to the parent (should fail)
+        let grandchild_result = table.create_child(parent, Budget::default(), Time::ZERO);
+        assert!(
+            matches!(
+                grandchild_result,
+                Err(RegionCreateError::ParentClosed { .. })
+            ),
+            "Creating grandchild should fail after parent close, got: {:?}",
+            grandchild_result
+        );
+
+        // Step 3: Try to add grandchild to the child region (should succeed since child is still Open)
+        let grandchild_on_child = table.create_child(child, Budget::default(), Time::ZERO);
+        assert!(
+            grandchild_on_child.is_ok(),
+            "Creating grandchild on still-open child should succeed, got: {:?}",
+            grandchild_on_child
+        );
+
+        let grandchild = grandchild_on_child.unwrap();
+
+        // Step 4: Now begin close on child as well
+        let child_close = child_record.begin_close(None);
+        assert!(child_close, "Child close should succeed");
+        assert_eq!(table.state(child), Some(RegionState::Closing));
+
+        // Step 5: Try to add great-grandchild to child (should fail now)
+        let great_grandchild_result = table.create_child(child, Budget::default(), Time::ZERO);
+        assert!(
+            matches!(
+                great_grandchild_result,
+                Err(RegionCreateError::ParentClosed { .. })
+            ),
+            "Creating great-grandchild should fail after child close, got: {:?}",
+            great_grandchild_result
+        );
+
+        // Step 6: Verify quiescence check sees all children
+        parent_record.begin_finalize();
+        let parent_close_attempt = parent_record.complete_close();
+        assert!(
+            !parent_close_attempt,
+            "Parent should not close while child and grandchild are still live"
+        );
+
+        // Verify parent sees both child regions
+        let parent_children = table.child_ids(parent).unwrap();
+        assert_eq!(parent_children.len(), 1, "Parent should have 1 child");
+        assert_eq!(parent_children[0], child);
+
+        let child_children = table.child_ids(child).unwrap();
+        assert_eq!(child_children.len(), 1, "Child should have 1 grandchild");
+        assert_eq!(child_children[0], grandchild);
+
+        // Step 7: Clean up grandchild first
+        child_record.begin_finalize();
+        child_record.remove_child(grandchild);
+        let child_close_attempt = child_record.complete_close();
+        assert!(
+            child_close_attempt,
+            "Child should close after grandchild removed"
+        );
+
+        // Step 8: Now parent should be able to close
+        parent_record.remove_child(child);
+        let final_parent_close = parent_record.complete_close();
+        assert!(
+            final_parent_close,
+            "Parent should close after child removed"
+        );
+
+        assert_eq!(table.state(parent), Some(RegionState::Closed));
+        assert_eq!(table.state(child), Some(RegionState::Closed));
+    }
 }

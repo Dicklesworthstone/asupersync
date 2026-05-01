@@ -2073,4 +2073,130 @@ mod tests {
             "umesjh: single notify_one must survive a chain of waiter drops"
         );
     }
+
+    /// Audit test for notify_one() vs notify_waiters() ordering invariant.
+    ///
+    /// Verifies that when N waiters are queued and notify_one() is called K times rapidly,
+    /// exactly K waiters wake in FIFO order — not all N (that would be notify_waiters semantics).
+    /// This test validates the core distinction between single-waiter and broadcast notification.
+    #[test]
+    fn audit_notify_one_fifo_ordering_exactly_k_waiters() {
+        init_test("audit_notify_one_fifo_ordering_exactly_k_waiters");
+        let notify = Notify::new();
+
+        const N_WAITERS: usize = 7;
+        const K_NOTIFY_CALLS: usize = 4;
+
+        // Step 1: Create N waiters, all pending
+        let mut waiters: Vec<_> = (0..N_WAITERS).map(|i| (i, notify.notified())).collect();
+
+        // Poll each waiter to register them in FIFO order
+        for (id, waiter) in &mut waiters {
+            let is_pending = poll_once(waiter).is_pending();
+            assert!(is_pending, "waiter {} should initially be pending", id);
+        }
+
+        // Verify initial state: all waiters registered, none notified
+        assert_eq!(
+            notify.waiter_count(),
+            N_WAITERS,
+            "should have N registered waiters"
+        );
+
+        // Step 2: Make K rapid notify_one() calls
+        for call_num in 0..K_NOTIFY_CALLS {
+            notify.notify_one();
+            // Verify we don't accidentally wake all waiters
+            let awake_count = waiters
+                .iter_mut()
+                .map(|(_, waiter)| poll_once(waiter).is_ready() as usize)
+                .sum::<usize>();
+
+            assert_eq!(
+                awake_count,
+                call_num + 1,
+                "after {} notify_one calls, exactly {} waiters should be ready, but {} are ready",
+                call_num + 1,
+                call_num + 1,
+                awake_count
+            );
+        }
+
+        // Step 3: Verify exactly K waiters are ready, exactly (N-K) are still pending
+        let final_ready_states: Vec<bool> = waiters
+            .iter_mut()
+            .map(|(_, waiter)| poll_once(waiter).is_ready())
+            .collect();
+
+        let ready_count = final_ready_states.iter().filter(|&&ready| ready).count();
+        let pending_count = final_ready_states.iter().filter(|&&ready| !ready).count();
+
+        assert_eq!(
+            ready_count, K_NOTIFY_CALLS,
+            "exactly {} waiters should be ready after {} notify_one calls, got {}",
+            K_NOTIFY_CALLS, K_NOTIFY_CALLS, ready_count
+        );
+
+        assert_eq!(
+            pending_count,
+            N_WAITERS - K_NOTIFY_CALLS,
+            "exactly {} waiters should still be pending, got {}",
+            N_WAITERS - K_NOTIFY_CALLS,
+            pending_count
+        );
+
+        // Step 4: Verify FIFO ordering - first K waiters should be ready, rest pending
+        for (i, &is_ready) in final_ready_states.iter().enumerate() {
+            let expected_ready = i < K_NOTIFY_CALLS;
+            assert_eq!(
+                is_ready, expected_ready,
+                "waiter {} FIFO ordering violation: expected ready={}, got ready={}",
+                i, expected_ready, is_ready
+            );
+        }
+
+        // Step 5: Verify remaining waiters can still be notified
+        assert_eq!(
+            notify.waiter_count(),
+            N_WAITERS - K_NOTIFY_CALLS,
+            "waiter count should reflect remaining pending waiters"
+        );
+
+        // Wake one more and verify it's the next in FIFO order (waiter K)
+        notify.notify_one();
+        let waiter_k_ready = poll_once(&mut waiters[K_NOTIFY_CALLS].1).is_ready();
+        assert!(
+            waiter_k_ready,
+            "waiter {} should be the next to wake in FIFO order",
+            K_NOTIFY_CALLS
+        );
+
+        // Step 6: Contrast with notify_waiters() - should wake ALL remaining
+        let remaining_count = N_WAITERS - K_NOTIFY_CALLS - 1; // -1 for the one we just woke
+        if remaining_count > 0 {
+            let before_broadcast = waiters[(K_NOTIFY_CALLS + 1)..]
+                .iter_mut()
+                .map(|(_, waiter)| poll_once(waiter).is_ready())
+                .collect::<Vec<bool>>();
+
+            assert!(
+                before_broadcast.iter().all(|&ready| !ready),
+                "remaining waiters should still be pending before notify_waiters"
+            );
+
+            notify.notify_waiters();
+
+            let after_broadcast = waiters[(K_NOTIFY_CALLS + 1)..]
+                .iter_mut()
+                .map(|(_, waiter)| poll_once(waiter).is_ready())
+                .collect::<Vec<bool>>();
+
+            assert!(
+                after_broadcast.iter().all(|&ready| ready),
+                "notify_waiters should wake ALL remaining waiters, demonstrating the semantic difference"
+            );
+        }
+
+        crate::test_complete!("audit_notify_one_fifo_ordering_exactly_k_waiters");
+    }
 }

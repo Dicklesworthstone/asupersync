@@ -2733,4 +2733,85 @@ mod tests {
         let long_hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0";
         assert!(ProofHash::from_hex(long_hex).is_none());
     }
+
+    #[test]
+    fn source_payload_hash_mismatch_fails_verification() {
+        // Test that hash mismatches are properly detected in fail-closed manner
+        let config = make_test_config();
+
+        // Create original proof with one source payload
+        let source1 = vec![vec![1, 2, 3, 4], vec![5, 6, 7, 8]];
+        let mut builder1 = DecodeProof::builder(config.clone());
+        builder1.set_received(ReceivedSummary::from_received(std::iter::empty()));
+        builder1.set_success(&source1);
+        let proof1 = builder1.build();
+
+        // Create proof with different source payload (different hash)
+        let source2 = vec![vec![1, 2, 3, 5], vec![5, 6, 7, 8]]; // Minimal change
+        let mut builder2 = DecodeProof::builder(config);
+        builder2.set_received(ReceivedSummary::from_received(std::iter::empty()));
+        builder2.set_success(&source2);
+        let proof2 = builder2.build();
+
+        // Verify hashes are different
+        let hash1 = if let ProofOutcome::Success {
+            source_payload_hash,
+            ..
+        } = &proof1.outcome
+        {
+            *source_payload_hash
+        } else {
+            panic!("Expected Success outcome");
+        };
+        let hash2 = if let ProofOutcome::Success {
+            source_payload_hash,
+            ..
+        } = &proof2.outcome
+        {
+            *source_payload_hash
+        } else {
+            panic!("Expected Success outcome");
+        };
+        assert_ne!(
+            hash1, hash2,
+            "Different sources must produce different hashes"
+        );
+
+        // Verify verification fails when comparing proofs with different hashes
+        let comparison_result = compare_proofs(&proof1, &proof2);
+        assert!(
+            comparison_result.is_err(),
+            "Hash mismatch should cause verification failure"
+        );
+
+        // Verify the error specifically mentions outcome mismatch
+        let err = comparison_result.unwrap_err();
+        if let ReplayError::Mismatch { field, .. } = err {
+            assert_eq!(
+                field, "outcome",
+                "Error should identify outcome field as mismatched"
+            );
+        } else {
+            panic!("Expected Mismatch error, got: {:?}", err);
+        }
+    }
+
+    #[test]
+    fn empty_source_payload_produces_valid_nonzero_hash() {
+        // Verify that empty source produces a valid hash (not zero due to domain separator)
+        let empty_source: Vec<Vec<u8>> = Vec::new();
+        let hash = recovered_source_hash(&empty_source);
+        assert_ne!(
+            hash, 0,
+            "Empty source should produce non-zero hash due to domain separator"
+        );
+
+        // Verify different empty-like sources produce different hashes
+        let empty_symbol = vec![Vec::new()]; // One empty symbol
+        let empty_symbol_hash = recovered_source_hash(&empty_symbol);
+        assert_ne!(
+            hash, empty_symbol_hash,
+            "Different empty payloads should produce different hashes"
+        );
+    }
 }
