@@ -784,6 +784,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "h2_dynamic_table_eviction"
+path = "fuzz_targets/h2_dynamic_table_eviction.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_websocket_deflate"
 path = "fuzz_targets/websocket_deflate.rs"
 test = false
