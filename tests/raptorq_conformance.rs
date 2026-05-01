@@ -2789,6 +2789,79 @@ mod differential_harness {
     }
 
     #[test]
+    fn differential_decoder_matches_raptorq_rs_k8192_insufficient_symbols() {
+        const SCENARIO_ID: &str = "RQ-D2-DIFF-K8192-INSUFFICIENT-RAPTORQ-RS";
+        const K: usize = 8192;
+        const SYMBOL_SIZE: usize = 8;
+
+        let decoder = InactivationDecoder::new(K, SYMBOL_SIZE, 0x6330_8192);
+        assert_eq!(
+            decoder.params().k_prime,
+            8194,
+            "scenario={SCENARIO_ID} must exercise the rounded K=8192 RFC row"
+        );
+
+        let payload = vec![0x42, 0x53, 0x64, 0x75, 0x86, 0x97, 0xA8, 0xB9];
+        assert_eq!(
+            payload.len(),
+            SYMBOL_SIZE,
+            "scenario={SCENARIO_ID} payload must match the K=8192 symbol size"
+        );
+        let (columns, coefficients) = decoder.source_equation(0);
+        let received = [ReceivedSymbol {
+            esi: 0,
+            is_source: true,
+            columns,
+            coefficients,
+            data: payload.clone(),
+        }];
+        let params = decoder.params();
+        let implicit_padding = params.k_prime.saturating_sub(params.k);
+        let required = params.l.saturating_sub(implicit_padding);
+
+        match decoder.decode(&received) {
+            Err(DecodeError::InsufficientSymbols {
+                received: actual,
+                required: expected,
+            }) => {
+                assert_eq!(
+                    actual,
+                    received.len(),
+                    "scenario={SCENARIO_ID} must report the supplied symbol count"
+                );
+                assert_eq!(
+                    expected, required,
+                    "scenario={SCENARIO_ID} must report the K=8192 effective decode threshold"
+                );
+            }
+            other => {
+                panic!("scenario={SCENARIO_ID} expected insufficient-symbol failure, got {other:?}")
+            }
+        }
+
+        let reference_config = RaptorqRsObjectTransmissionInformation::new(
+            u64::try_from(
+                K.checked_mul(SYMBOL_SIZE)
+                    .expect("transfer length fits usize"),
+            )
+            .expect("transfer length fits u64"),
+            u16::try_from(SYMBOL_SIZE).expect("symbol size fits u16"),
+            1,
+            1,
+            1,
+        );
+        let mut reference = RaptorqRsDecoder::new(reference_config);
+        let reference_bytes = reference.decode(RaptorqRsEncodingPacket::new(
+            RaptorqRsPayloadId::new(0, 0),
+            payload,
+        ));
+        assert!(
+            reference_bytes.is_none(),
+            "scenario={SCENARIO_ID} raptorq-rs must also fail to decode one K=8192 source packet"
+        );
+    }
+
+    #[test]
     fn differential_loss_matrix_matches_raptorq_rs() {
         for &(case, drop_seed, drop_per_mille) in &[
             (
