@@ -235,22 +235,18 @@ fn build_received_symbols(
     source: &[Vec<u8>],
     drop_source_indices: &[usize],
     max_repair_esi: u32,
-    seed: u64,
+    _seed: u64,
 ) -> Vec<ReceivedSymbol> {
     let k = source.len();
-    let params = decoder.params();
-    let base_rows = params.s + params.h;
-    let constraints = ConstraintMatrix::build(params, seed);
 
     // Start with constraint symbols (LDPC + HDPC parity checks with zero RHS).
     let mut received = decoder.constraint_symbols();
 
-    // Add source symbols with their LT encoding equations from the constraint
-    // matrix (rows S+H .. S+H+K-1), not identity equations.
+    // Add source symbols with the same canonical RFC tuple equations the
+    // decoder validates and uses for reconstruction.
     for (i, data) in source.iter().enumerate() {
         if !drop_source_indices.contains(&i) {
-            let row = base_rows + i;
-            let (columns, coefficients) = constraint_row_equation(&constraints, row);
+            let (columns, coefficients) = decoder.source_equation(i as u32);
             received.push(ReceivedSymbol {
                 esi: i as u32,
                 is_source: true,
@@ -1311,18 +1307,13 @@ mod pipeline_e2e {
     ) -> Vec<ReceivedSymbol> {
         let seed = seed_for_block(object_id, sbn);
         let decoder = InactivationDecoder::new(k, symbol_size, seed);
-        let params = decoder.params();
-        let base_rows = params.s + params.h;
-        let constraints = ConstraintMatrix::build(params, seed);
 
         let mut received = decoder.constraint_symbols();
 
         for symbol in symbols.iter().filter(|sym| sym.sbn() == sbn) {
             match symbol.kind() {
                 SymbolKind::Source => {
-                    let esi = symbol.esi() as usize;
-                    let row = base_rows + esi;
-                    let (columns, coefficients) = constraint_row_equation(&constraints, row);
+                    let (columns, coefficients) = decoder.source_equation(symbol.esi());
                     received.push(ReceivedSymbol {
                         esi: symbol.esi(),
                         is_source: true,
@@ -1965,9 +1956,16 @@ mod differential_harness {
             }
         }
 
+        let padding_delta = u32::try_from(
+            SystematicParams::for_source_block(case.k, case.symbol_size).k_prime - case.k,
+        )
+        .expect("systematic padding delta must fit in u32");
         for esi in (case.k as u32)..repair_esi_upper {
+            let reference_esi = esi
+                .checked_add(padding_delta)
+                .expect("reference repair ESI must not overflow");
             packets.push(RaptorqRsEncodingPacket::new(
-                RaptorqRsPayloadId::new(0, esi),
+                RaptorqRsPayloadId::new(0, reference_esi),
                 encoder.repair_symbol(esi),
             ));
         }
@@ -2792,7 +2790,7 @@ mod differential_harness {
 
     #[test]
     fn differential_loss_matrix_matches_raptorq_rs() {
-        for &(case, drop_seed) in &[
+        for &(case, drop_seed, drop_per_mille) in &[
             (
                 DifferentialCase {
                     scenario_id: "RQ-D2-DIFF-K10-LOSS30-RAPTORQ-RS",
@@ -2806,6 +2804,7 @@ mod differential_harness {
                     expected_error_kind: None,
                 },
                 0xA1B2_C310_u64,
+                300,
             ),
             (
                 DifferentialCase {
@@ -2820,6 +2819,22 @@ mod differential_harness {
                     expected_error_kind: None,
                 },
                 0xA1B2_C342_u64,
+                300,
+            ),
+            (
+                DifferentialCase {
+                    scenario_id: "RQ-D2-DIFF-K42-LOSS70-RAPTORQ-RS",
+                    k: 42,
+                    symbol_size: 64,
+                    seed: 0x6330_7042,
+                    drop_modulus: None,
+                    drop_remainder: 0,
+                    repair_budget: RepairBudget::ByDropped { extra: 12 },
+                    expect_success: true,
+                    expected_error_kind: None,
+                },
+                0xA1B2_C742_u64,
+                700,
             ),
             (
                 DifferentialCase {
@@ -2834,13 +2849,19 @@ mod differential_harness {
                     expected_error_kind: None,
                 },
                 0xA1B2_C842_u64,
+                300,
             ),
         ] {
             let source = make_source_data(case.k, case.symbol_size, case.seed.wrapping_mul(17));
             let encoder = SystematicEncoder::new(&source, case.symbol_size, case.seed)
                 .unwrap_or_else(|| panic!("scenario={} failed to build encoder", case.scenario_id));
             let decoder = InactivationDecoder::new(case.k, case.symbol_size, case.seed);
-            let drop_indices = exact_random_drop_indices(case.k, 300, drop_seed);
+            let drop_indices = exact_random_drop_indices(case.k, drop_per_mille, drop_seed);
+            let loss_pct = drop_indices
+                .len()
+                .saturating_mul(100)
+                .checked_div(case.k)
+                .unwrap_or(0);
             let repair_esi_upper = max_repair_esi(case, decoder.params().l, drop_indices.len());
             let received = build_received_symbols(
                 &encoder,
@@ -2866,18 +2887,18 @@ mod differential_harness {
 
             assert_eq!(
                 our_bytes, expected_bytes,
-                "scenario={} our decoder must recover the exact source block at 30% loss",
-                case.scenario_id
+                "scenario={} our decoder must recover the exact source block at {loss_pct}% loss",
+                case.scenario_id,
             );
             assert_eq!(
                 reference_bytes, expected_bytes,
-                "scenario={} raptorq-rs must recover the exact source block at 30% loss",
-                case.scenario_id
+                "scenario={} raptorq-rs must recover the exact source block at {loss_pct}% loss",
+                case.scenario_id,
             );
             assert_eq!(
                 our_bytes, reference_bytes,
-                "scenario={} decoders must emit byte-identical output at 30% loss",
-                case.scenario_id
+                "scenario={} decoders must emit byte-identical output at {loss_pct}% loss",
+                case.scenario_id,
             );
         }
     }
