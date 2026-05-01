@@ -147,28 +147,30 @@ fn recv_cap_can_be_higher_than_default() {
 }
 
 #[test]
-fn server_size_caps_are_documented_p1_wiring_gap() {
-    // Pin (d) the WIRING GAP. The doc comment on
-    // ServerConfig::max_recv_message_size at server.rs:200-217
-    // documents that the field is STORED but NOT read by the
-    // dispatch path. A future fix that wires it in will need
-    // to update this comment AND re-baseline this test.
-    //
-    // We pin by grep-equivalent string presence in the source —
-    // a regression that REMOVED the wiring-gap documentation
-    // without fixing the underlying bug would surface here.
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let server_rs = std::fs::read_to_string(
-        std::path::Path::new(manifest_dir).join("src/grpc/server.rs"),
-    )
-    .expect("read src/grpc/server.rs");
-    assert!(
-        server_rs.contains("WIRING GAP"),
-        "server.rs MUST keep the documented WIRING GAP note on \
-         max_recv_message_size until the dispatch path is wired to read \
-         the config field. Removing the doc without fixing the bug would \
-         leave operators expecting a configurable cap that doesn't \
-         enforce.",
+fn server_framed_codec_helper_wires_configured_caps() {
+    // Pin (d) — POST-FIX (br-asupersync-srizvf): the previously-
+    // documented WIRING GAP is closed by the new
+    // `Server::framed_codec` helper. Constructing a codec via
+    // this helper threads the configured caps into
+    // FramedCodec::with_message_size_limits, so an operator's
+    // override actually takes effect.
+    use asupersync::grpc::IdentityCodec;
+    let server = ServerBuilder::new()
+        .max_recv_message_size(256 * 1024)
+        .max_send_message_size(512 * 1024)
+        .build();
+    let codec = server.framed_codec(IdentityCodec);
+    assert_eq!(
+        codec.max_decode_message_size(),
+        256 * 1024,
+        "framed_codec must thread max_recv_message_size into the \
+         decode-side cap (closes asupersync-srizvf)",
+    );
+    assert_eq!(
+        codec.max_encode_message_size(),
+        512 * 1024,
+        "framed_codec must thread max_send_message_size into the \
+         encode-side cap",
     );
 }
 

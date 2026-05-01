@@ -12,6 +12,7 @@ use crate::bytes::Bytes;
 use crate::cx::{Cx, cap};
 
 use super::client::CompressionEncoding;
+use super::codec::{Codec, FramedCodec};
 use super::reflection::ReflectionService;
 use super::service::{NamedService, ServiceHandler};
 use super::status::{GrpcError, Status, TransportErrorKind};
@@ -199,29 +200,21 @@ impl ConnectionRegistry {
 pub struct ServerConfig {
     /// Maximum message size for receiving, in bytes.
     ///
-    /// **WIRING GAP (2026-04-29):** this field is configured via
-    /// [`ServerBuilder::max_recv_message_size`] and stored, but
-    /// `grep -rn 'max_recv_message_size' src/grpc/server.rs` shows
-    /// no enforcement code path inside server dispatch reads it. The
-    /// CLIENT side wires its symmetric `max_recv_message_size` into
-    /// the codec at `src/grpc/client.rs:109`; the server side does
-    /// not. The on-the-wire defense currently relies on the codec's
-    /// own `DEFAULT_MAX_MESSAGE_SIZE` (4 MiB, matching this field's
-    /// default), so a server that uses the default value is
-    /// protected, but any operator who LOWERS this expecting a
-    /// stricter cap (or RAISES it expecting larger messages to
-    /// flow) will silently get the codec default instead. Filed as
-    /// a P1 security audit finding; see the
-    /// `[security-audit-for-saas] grpc/server max_recv_message_size
-    /// unwired` bead for the fix track.
+    /// Wired into the per-call codec via [`Server::framed_codec`]
+    /// (the canonical helper for transport adapters). Adapters
+    /// that construct their own codec MUST pass this value to
+    /// [`super::codec::FramedCodec::with_message_size_limits`]
+    /// or call the helper. The client-side analog at
+    /// [`super::client::ChannelConfig::max_recv_message_size`]
+    /// follows the same contract.
+    ///
+    /// Defaults to 4 MiB (matches gRPC ecosystem convention and the
+    /// codec's own `DEFAULT_MAX_MESSAGE_SIZE`).
     pub max_recv_message_size: usize,
     /// Maximum message size for sending, in bytes.
     ///
-    /// Same wiring gap as [`Self::max_recv_message_size`]: stored on
-    /// the config but not propagated into the codec's send path
-    /// inside this file. The codec enforces its own
-    /// `DEFAULT_MAX_MESSAGE_SIZE` so the protection is not absent —
-    /// only the per-server override is.
+    /// Wired into the per-call codec via [`Server::framed_codec`]
+    /// (see [`Self::max_recv_message_size`] for the contract).
     pub max_send_message_size: usize,
     /// Initial connection window size.
     pub initial_connection_window_size: u32,
@@ -724,6 +717,32 @@ impl Server {
         &self.config
     }
 
+    /// Construct a per-call [`FramedCodec`] wired with the server's
+    /// configured `max_send_message_size` and `max_recv_message_size`.
+    ///
+    /// This is the canonical helper transport adapters MUST use when
+    /// constructing the codec for a dispatched call — it closes the
+    /// pre-fix wiring gap where adapters that built a `FramedCodec`
+    /// without reading the server config silently inherited the
+    /// codec's own `DEFAULT_MAX_MESSAGE_SIZE` (4 MiB) instead of the
+    /// operator's configured cap.
+    ///
+    /// The compression hooks remain the adapter's responsibility:
+    /// the adapter parses `grpc-encoding` from request metadata,
+    /// looks up the matching compressor/decompressor via
+    /// [`CompressionEncoding::frame_compressor`] /
+    /// [`CompressionEncoding::frame_decompressor`], and chains them
+    /// onto the returned codec via
+    /// [`FramedCodec::with_frame_hooks`].
+    #[must_use]
+    pub fn framed_codec<C: Codec>(&self, inner: C) -> FramedCodec<C> {
+        FramedCodec::with_message_size_limits(
+            inner,
+            self.config.max_send_message_size,
+            self.config.max_recv_message_size,
+        )
+    }
+
     /// Get the registered services.
     #[must_use]
     pub fn services(&self) -> &BTreeMap<String, Arc<dyn ServiceHandler>> {
@@ -1191,13 +1210,7 @@ impl CallContext {
     ) -> Self {
         // Back-compat: no server-side max-deadline cap. Forwards
         // to the new `_with_max_deadline` variant with cap=None.
-        Self::from_metadata_at_with_max_deadline(
-            metadata,
-            default_timeout,
-            None,
-            peer_addr,
-            now,
-        )
+        Self::from_metadata_at_with_max_deadline(metadata, default_timeout, None, peer_addr, now)
     }
 
     /// tick #139: variant of [`Self::from_metadata_at`] that accepts a
