@@ -1267,6 +1267,7 @@ impl MySqlConnectOptions {
 // ============================================================================
 
 /// Initial handshake data from server.
+#[derive(Debug)]
 struct Handshake {
     server_version: String,
     connection_id: u32,
@@ -4287,6 +4288,7 @@ mod param_flag {
 /// When pooling connections, use [`MySqlConnectionManager`] so prepared
 /// handles are invalidated across pool handoff and cannot leak into a
 /// later logical session on the same physical connection.
+#[derive(Debug)]
 pub struct MySqlStatement {
     /// Server-side statement ID.
     statement_id: u32,
@@ -7487,13 +7489,13 @@ mod tests {
     fn test_mysql_auth_rejects_short_nonce() {
         let err = mysql_native_auth("secret", b"short").unwrap_err();
         assert!(
-            matches!(err, MySqlError::Protocol(msg) if msg.contains("nonce too short")),
+            matches!(err, MySqlError::Protocol(ref msg) if msg.contains("nonce too short")),
             "unexpected short-nonce error: {err:?}"
         );
 
         let err = caching_sha2_auth("secret", b"short").unwrap_err();
         assert!(
-            matches!(err, MySqlError::Protocol(msg) if msg.contains("nonce too short")),
+            matches!(err, MySqlError::Protocol(ref msg) if msg.contains("nonce too short")),
             "unexpected short-nonce error: {err:?}"
         );
     }
@@ -7504,13 +7506,13 @@ mod tests {
 
         let err = mysql_native_auth("secret", &nonce).unwrap_err();
         assert!(
-            matches!(err, MySqlError::Protocol(msg) if msg.contains("insufficient entropy")),
+            matches!(err, MySqlError::Protocol(ref msg) if msg.contains("insufficient entropy")),
             "unexpected low-entropy error: {err:?}"
         );
 
         let err = caching_sha2_auth("secret", &nonce).unwrap_err();
         assert!(
-            matches!(err, MySqlError::Protocol(msg) if msg.contains("insufficient entropy")),
+            matches!(err, MySqlError::Protocol(ref msg) if msg.contains("insufficient entropy")),
             "unexpected low-entropy error: {err:?}"
         );
     }
@@ -7522,7 +7524,7 @@ mod tests {
             validate_auth_plugin_switch("caching_sha2_password", "mysql_native_password", &opts)
                 .unwrap_err();
         assert!(
-            matches!(err, MySqlError::UnsupportedAuthPlugin(msg) if msg.contains("auth switch downgrade")),
+            matches!(err, MySqlError::UnsupportedAuthPlugin(ref msg) if msg.contains("auth switch downgrade")),
             "unexpected downgrade error: {err:?}"
         );
     }
@@ -7555,7 +7557,7 @@ mod tests {
 
         let err = run(conn.send_handshake_response(&options, &handshake)).unwrap_err();
         assert!(
-            matches!(err, MySqlError::UnsupportedAuthPlugin(plugin) if plugin == "sha256_password"),
+            matches!(err, MySqlError::UnsupportedAuthPlugin(ref plugin) if plugin == "sha256_password"),
             "unexpected plugin error: {err:?}"
         );
     }
@@ -7580,7 +7582,7 @@ mod tests {
 
         let err = run(conn.handle_auth_switch(&auth_switch, &options, &handshake)).unwrap_err();
         assert!(
-            matches!(err, MySqlError::UnsupportedAuthPlugin(plugin) if plugin == "sha256_password"),
+            matches!(err, MySqlError::UnsupportedAuthPlugin(ref plugin) if plugin == "sha256_password"),
             "unexpected plugin error: {err:?}"
         );
     }
@@ -7603,7 +7605,7 @@ mod tests {
 
         let err = run(conn.send_handshake_response(&options, &handshake)).unwrap_err();
         assert!(
-            matches!(err, MySqlError::UnsupportedAuthPlugin(plugin) if plugin == "arbitrary_server_plugin"),
+            matches!(err, MySqlError::UnsupportedAuthPlugin(ref plugin) if plugin == "arbitrary_server_plugin"),
             "unexpected plugin error: {err:?}"
         );
         assert_eq!(
@@ -7632,7 +7634,7 @@ mod tests {
 
         let err = run(conn.handle_auth_switch(&auth_switch, &options, &handshake)).unwrap_err();
         assert!(
-            matches!(err, MySqlError::UnsupportedAuthPlugin(plugin) if plugin == "arbitrary_server_plugin"),
+            matches!(err, MySqlError::UnsupportedAuthPlugin(ref plugin) if plugin == "arbitrary_server_plugin"),
             "unexpected plugin error: {err:?}"
         );
         assert_eq!(
@@ -7660,7 +7662,7 @@ mod tests {
         let err =
             run(conn.handle_caching_sha2_more_data(&[0x04], &options, &handshake)).unwrap_err();
         assert!(
-            matches!(err, MySqlError::AuthenticationFailed(msg) if msg.contains("requires secure connection")),
+            matches!(err, MySqlError::AuthenticationFailed(ref msg) if msg.contains("requires secure connection")),
             "unexpected full-auth error: {err:?}"
         );
     }
@@ -7990,14 +7992,13 @@ mod tests {
             options: None,
         };
 
-        let cx = Cx::for_testing();
         let result = run(conn.read_handshake());
 
         server.join().expect("join server");
 
         // Should reject malformed packet with specific error
         match result {
-            Outcome::Err(MySqlError::InvalidPacket(msg)) => {
+            Err(MySqlError::InvalidPacket(msg)) => {
                 assert!(
                     msg.contains("handshake packet too short"),
                     "Expected handshake size error, got: {msg}"
@@ -8074,7 +8075,7 @@ mod tests {
         server.join().expect("join server");
 
         match result {
-            Outcome::Err(MySqlError::Protocol(msg)) => {
+            Err(MySqlError::Protocol(msg)) => {
                 assert!(msg.contains("missing required capabilities"));
                 assert!(msg.contains(missing_capability));
             }
@@ -8166,9 +8167,6 @@ mod tests {
         // MySQL status flag constants based on official protocol spec
         const SERVER_STATUS_IN_TRANS: u16 = 0x0001;
         const SERVER_STATUS_AUTOCOMMIT: u16 = 0x0002;
-        const SERVER_MORE_RESULTS_EXISTS: u16 = 0x0008;
-        const SERVER_STATUS_NO_GOOD_INDEX_USED: u16 = 0x0010;
-        const SERVER_STATUS_NO_INDEX_USED: u16 = 0x0020;
 
         // MariaDB-specific flag that differs from MySQL
         const MARIADB_SERVER_STATUS_ANSI_QUOTES: u16 = 0x0004;
