@@ -1150,7 +1150,7 @@ impl PostgresCopyConformanceHarness {
                 };
             }
 
-            // Verify declared length matches
+            // Verify declared length matches PostgreSQL's type-excluded message length.
             let declared_length = u32::from_be_bytes([
                 copy_data_msg[1],
                 copy_data_msg[2],
@@ -1158,7 +1158,7 @@ impl PostgresCopyConformanceHarness {
                 copy_data_msg[4],
             ]) as usize;
 
-            if declared_length != size {
+            if declared_length != size + 4 {
                 return PostgresCopyResult {
                     test_id: "copy_data_chunk_size_limits".to_string(),
                     description: "CopyData chunks must handle various size limits".to_string(),

@@ -24,8 +24,8 @@
 #![allow(clippy::pedantic, clippy::nursery)]
 
 use asupersync::codec::raptorq::{EncodingConfig, EncodingPipeline};
-use asupersync::types::ObjectId;
 use asupersync::types::resource::{PoolConfig, SymbolPool};
+use asupersync::types::{ObjectId, SymbolKind};
 use std::fmt::Write as _;
 
 /// Test case: K=4 source symbols, 2 repair symbols, 8-byte symbol size
@@ -60,13 +60,13 @@ fn generate_rfc6330_section6_test_case() -> String {
 
     let object_id = ObjectId::new_for_test(0x6330_0006); // RFC 6330 section 6 marker
 
-    render_systematic_repair_trace(&mut pipeline, object_id, &test_payload)
+    render_systematic_repair_trace(&mut pipeline, object_id, &test_payload, 2)
 }
 
 /// Creates a pipeline configured specifically for RFC 6330 §6 testing
 fn create_rfc6330_test_pipeline() -> EncodingPipeline {
     let config = EncodingConfig {
-        repair_overhead: 0.5,    // 50% overhead = 2 repair symbols for K=4
+        repair_overhead: 1.5,    // 50% overhead = 2 repair symbols for K=4
         max_block_size: 32,      // Forces single block with K=4 at symbol_size=8
         symbol_size: 8,          // 8-byte symbols
         encoding_parallelism: 1, // Deterministic single-thread encoding
@@ -80,6 +80,7 @@ fn render_systematic_repair_trace(
     pipeline: &mut EncodingPipeline,
     object_id: ObjectId,
     data: &[u8],
+    expected_repair_count: usize,
 ) -> String {
     let mut out = String::new();
     writeln!(
@@ -89,8 +90,9 @@ fn render_systematic_repair_trace(
     .unwrap();
     writeln!(
         &mut out,
-        "# Input: {} bytes, expected K=4, repair=2",
-        data.len()
+        "# Input: {} bytes, expected K=4, repair={}",
+        data.len(),
+        expected_repair_count
     )
     .unwrap();
     writeln!(
@@ -100,7 +102,8 @@ fn render_systematic_repair_trace(
     .unwrap();
     writeln!(
         &mut out,
-        "# Repair symbols: ESI 4-5 (must be linearly independent)"
+        "# Repair symbols: ESI 4-{} (must be linearly independent)",
+        3 + expected_repair_count
     )
     .unwrap();
     writeln!(&mut out).unwrap();
@@ -117,7 +120,7 @@ fn render_systematic_repair_trace(
 
         // RFC 6330 §6 validation
         match kind {
-            k if k.to_string().contains("Systematic") => {
+            SymbolKind::Source => {
                 systematic_count += 1;
                 assert!(esi < 4, "Systematic symbol ESI {} should be < K=4", esi);
 
@@ -148,23 +151,13 @@ fn render_systematic_repair_trace(
                     .unwrap();
                 }
             }
-            k if k.to_string().contains("Repair") => {
+            SymbolKind::Repair => {
                 repair_count += 1;
                 assert!(esi >= 4, "Repair symbol ESI {} should be >= K=4", esi);
                 writeln!(
                     &mut out,
                     "repair esi={:04} data_hex={}",
                     esi,
-                    hex_encode(symbol_data)
-                )
-                .unwrap();
-            }
-            _ => {
-                writeln!(
-                    &mut out,
-                    "unknown_kind esi={:04} kind={:?} data_hex={}",
-                    esi,
-                    kind,
                     hex_encode(symbol_data)
                 )
                 .unwrap();
@@ -194,8 +187,8 @@ fn render_systematic_repair_trace(
         "RFC 6330 §6: Expected exactly K=4 systematic symbols"
     );
     assert_eq!(
-        repair_count, 2,
-        "Expected exactly 2 repair symbols (50% overhead)"
+        repair_count, expected_repair_count,
+        "Expected exactly {expected_repair_count} repair symbols"
     );
     writeln!(&mut out, "rfc6330_section6_compliance=PASS").unwrap();
 
@@ -252,11 +245,23 @@ mod rfc6330_section6_conformance_tests {
 
     #[test]
     fn test_rfc6330_pipeline_config() {
-        let pipeline = create_rfc6330_test_pipeline();
-        // Verify configuration produces expected symbol counts
-        // This test validates the test setup itself
-        assert_eq!(pipeline.config().symbol_size, 8);
-        assert_eq!(pipeline.config().max_block_size, 32);
+        let mut pipeline = create_rfc6330_test_pipeline();
+        let test_payload: Vec<u8> = (0x41..=0x60).collect();
+        let trace = render_systematic_repair_trace(
+            &mut pipeline,
+            ObjectId::new_for_test(0x6330_0006),
+            &test_payload,
+            2,
+        );
+
+        assert!(
+            trace.contains("systematic_symbols=4 repair_symbols=2"),
+            "test config should produce K=4 source symbols and 2 repair symbols"
+        );
+        assert!(
+            trace.contains("pipeline_stats bytes_in=32 blocks=1 source_symbols=4 repair_symbols=2"),
+            "test config should force one 32-byte block with 8-byte symbols"
+        );
     }
 
     /// Metamorphic property: systematic symbols must be invariant under repair count changes
@@ -264,31 +269,39 @@ mod rfc6330_section6_conformance_tests {
     fn test_systematic_symbols_invariant_under_repair_changes() {
         let test_data = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ123456"; // 32 bytes
 
-        // Generate with repair_overhead = 0.5 (2 repair symbols)
+        // Generate with repair_overhead = 1.5 (2 repair symbols)
         let mut pipeline1 = create_rfc6330_test_pipeline();
-        let trace1 =
-            render_systematic_repair_trace(&mut pipeline1, ObjectId::new_for_test(0x1), test_data);
+        let trace1 = render_systematic_repair_trace(
+            &mut pipeline1,
+            ObjectId::new_for_test(0x1),
+            test_data,
+            2,
+        );
 
-        // Generate with repair_overhead = 1.0 (4 repair symbols)
+        // Generate with repair_overhead = 2.0 (4 repair symbols)
         let config2 = EncodingConfig {
-            repair_overhead: 1.0,
+            repair_overhead: 2.0,
             max_block_size: 32,
             symbol_size: 8,
             encoding_parallelism: 1,
             decoding_parallelism: 1,
         };
         let mut pipeline2 = EncodingPipeline::new(config2, SymbolPool::new(PoolConfig::default()));
-        let trace2 =
-            render_systematic_repair_trace(&mut pipeline2, ObjectId::new_for_test(0x1), test_data);
+        let trace2 = render_systematic_repair_trace(
+            &mut pipeline2,
+            ObjectId::new_for_test(0x1),
+            test_data,
+            4,
+        );
 
         // Extract systematic symbol lines from both traces
         let systematic1: Vec<&str> = trace1
             .lines()
-            .filter(|line| line.starts_with("systematic"))
+            .filter(|line| line.starts_with("systematic esi="))
             .collect();
         let systematic2: Vec<&str> = trace2
             .lines()
-            .filter(|line| line.starts_with("systematic"))
+            .filter(|line| line.starts_with("systematic esi="))
             .collect();
 
         // RFC 6330 §6: systematic symbols must be identical regardless of repair count
