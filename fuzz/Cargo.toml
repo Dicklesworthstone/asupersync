@@ -4240,6 +4240,13 @@ test = false
 doc = false
 
 [[bin]]
+name = "h2_settings_initial_window_size_overflow"
+path = "fuzz_targets/h2_settings_initial_window_size_overflow.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "h2_settings_header_table_size_update"
 path = "fuzz_targets/h2_settings_header_table_size_update.rs"
 test = false
