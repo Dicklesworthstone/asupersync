@@ -26,9 +26,9 @@ use libfuzzer_sys::fuzz_target;
 use asupersync::messaging::redis::{
     PubSubEvent, PubSubMessage, PubSubSubscriptionKind, RedisProtocolLimits, RespValue,
     decode_resp_value_for_fuzz, parse_acl_for_fuzz, parse_client_kill_for_fuzz,
-    parse_cluster_command_for_fuzz, parse_latency_for_fuzz, parse_pubsub_event_for_fuzz,
-    parse_script_eval_for_fuzz, parse_slowlog_for_fuzz, parse_zadd_for_fuzz,
-    parse_zrangebyscore_for_fuzz,
+    parse_client_tracking_push_for_fuzz, parse_cluster_command_for_fuzz, parse_latency_for_fuzz,
+    parse_pubsub_event_for_fuzz, parse_script_eval_for_fuzz, parse_slowlog_for_fuzz,
+    parse_zadd_for_fuzz, parse_zrangebyscore_for_fuzz,
 };
 
 const MAX_STRUCTURED_FIELD_BYTES: usize = 96;
@@ -406,6 +406,61 @@ fn exercise_structured_resp3_pushes(data: &[u8]) {
             );
         }
     }
+}
+
+fn exercise_client_tracking_push_parser(data: &[u8]) {
+    let payload = &data[..data.len().min(MAX_STRUCTURED_FIELD_BYTES)];
+    let split = payload.len() / 2;
+    let first_key = &payload[..split];
+    let second_key = &payload[split..];
+
+    let invalidate_keys = RespValue::Push(vec![
+        RespValue::BulkString(Some(b"invalidate".to_vec())),
+        RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(first_key.to_vec())),
+            RespValue::BulkString(Some(second_key.to_vec())),
+        ])),
+    ]);
+    let encoded = invalidate_keys.encode();
+    assert_eq!(encoded.first(), Some(&b'>'));
+    let decoded = RespValue::try_decode(&encoded)
+        .expect("client tracking push should decode")
+        .expect("encoded client tracking push should be complete");
+    assert_eq!(decoded.0, invalidate_keys);
+    let _ = parse_client_tracking_push_for_fuzz(decoded.0)
+        .expect("client tracking invalidate push should parse");
+
+    let flush = RespValue::Push(vec![
+        RespValue::BulkString(Some(b"invalidate".to_vec())),
+        RespValue::Null,
+    ]);
+    let _ = parse_client_tracking_push_for_fuzz(flush)
+        .expect("client tracking null invalidation should parse");
+
+    let redirect_broken = RespValue::Push(vec![RespValue::BulkString(Some(
+        b"tracking-redir-broken".to_vec(),
+    ))]);
+    let _ = parse_client_tracking_push_for_fuzz(redirect_broken)
+        .expect("client tracking redirect-broken push should parse");
+
+    let bad_key = RespValue::Push(vec![
+        RespValue::BulkString(Some(b"invalidate".to_vec())),
+        RespValue::Array(Some(vec![RespValue::Integer(1)])),
+    ]);
+    assert!(
+        parse_client_tracking_push_for_fuzz(bad_key).is_err(),
+        "client tracking invalidation keys must be payloads"
+    );
+
+    let pubsub_shape = RespValue::Array(Some(vec![
+        RespValue::BulkString(Some(b"message".to_vec())),
+        RespValue::BulkString(Some(b"__redis__:invalidate".to_vec())),
+        RespValue::Array(Some(vec![RespValue::BulkString(Some(payload.to_vec()))])),
+    ]));
+    assert!(
+        parse_client_tracking_push_for_fuzz(pubsub_shape).is_err(),
+        "RESP2 redirect pubsub messages are not RESP3 tracking pushes"
+    );
 }
 
 fn append_stream_chunk(wire: &mut Vec<u8>, chunk: &[u8]) {
@@ -1225,7 +1280,10 @@ fuzz_target!(|data: &[u8]| {
     // Test 17: Redis CLUSTER MYID/RESET/COUNT-FAILURE-REPORTS parser seam
     exercise_cluster_command_parser(data);
 
-    // Test 18: Fragmented parsing simulation (partial buffer scenarios)
+    // Test 18: Redis CLIENT TRACKING RESP3 push parser seam
+    exercise_client_tracking_push_parser(data);
+
+    // Test 19: Fragmented parsing simulation (partial buffer scenarios)
     if data.len() > 10 {
         for split_point in [1, data.len() / 4, data.len() / 2, data.len() - 1]
             .iter()
@@ -1246,7 +1304,7 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    // Test 19: Boundary value testing for limits
+    // Test 20: Boundary value testing for limits
     let boundary_limits = [
         RedisProtocolLimits {
             max_frame_size: data.len().saturating_sub(1).max(1),

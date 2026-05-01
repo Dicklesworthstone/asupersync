@@ -1281,6 +1281,14 @@ pub enum PubSubEvent {
     Pong(Option<Vec<u8>>),
 }
 
+#[cfg(any(test, feature = "test-internals"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum RedisClientTrackingPush {
+    Invalidate { keys: Option<Vec<Vec<u8>>> },
+    RedirectBroken,
+}
+
 fn expect_ok_response(resp: &RespValue, command: &str) -> Result<(), RedisError> {
     if resp.is_ok() {
         Ok(())
@@ -3433,6 +3441,65 @@ impl RedisPubSub {
 /// Redis push/array event parser without widening the production API.
 pub fn parse_pubsub_event_for_fuzz(value: RespValue) -> Result<PubSubEvent, RedisError> {
     RedisPubSub::parse_event(value)
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+fn decode_tracking_invalidation_keys(value: RespValue) -> Result<Option<Vec<Vec<u8>>>, RedisError> {
+    match value {
+        RespValue::Null | RespValue::Array(None) | RespValue::BulkString(None) => Ok(None),
+        RespValue::Array(Some(keys)) => keys
+            .into_iter()
+            .map(|key| RedisPubSub::decode_payload(key, "client tracking invalidate key"))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some),
+        other => Err(RedisError::Protocol(format!(
+            "client tracking invalidate payload must be an array or null, got {other:?}"
+        ))),
+    }
+}
+
+#[cfg(any(test, feature = "test-internals"))]
+#[allow(dead_code)]
+#[doc(hidden)]
+pub fn parse_client_tracking_push_for_fuzz(
+    value: RespValue,
+) -> Result<RedisClientTrackingPush, RedisError> {
+    let items = match value {
+        RespValue::Push(items) => items,
+        other => {
+            return Err(RedisError::Protocol(format!(
+                "client tracking notification must be a RESP3 push, got {other:?}"
+            )));
+        }
+    };
+
+    let mut iter = items.into_iter();
+    let kind = RedisPubSub::decode_text(
+        RedisPubSub::next_required(&mut iter, "client tracking push missing kind")?,
+        "client tracking kind",
+    )?;
+
+    if kind.eq_ignore_ascii_case("invalidate") {
+        let keys = decode_tracking_invalidation_keys(RedisPubSub::next_required(
+            &mut iter,
+            "client tracking invalidate missing key payload",
+        )?)?;
+        RedisPubSub::ensure_no_trailing(
+            &mut iter,
+            "client tracking invalidate has unexpected trailing fields",
+        )?;
+        Ok(RedisClientTrackingPush::Invalidate { keys })
+    } else if kind.eq_ignore_ascii_case("tracking-redir-broken") {
+        RedisPubSub::ensure_no_trailing(
+            &mut iter,
+            "client tracking redirect-broken has unexpected trailing fields",
+        )?;
+        Ok(RedisClientTrackingPush::RedirectBroken)
+    } else {
+        Err(RedisError::Protocol(format!(
+            "unsupported client tracking push kind: {kind}"
+        )))
+    }
 }
 
 #[cfg(any(test, feature = "test-internals"))]
@@ -7253,6 +7320,72 @@ mod tests {
         .expect_err("unknown event should fail");
 
         assert!(matches!(err, RedisError::Protocol(_)));
+    }
+
+    #[test]
+    fn client_tracking_push_parse_invalidate_keys() {
+        let event = parse_client_tracking_push_for_fuzz(RespValue::Push(vec![
+            RespValue::BulkString(Some(b"invalidate".to_vec())),
+            RespValue::Array(Some(vec![
+                RespValue::BulkString(Some(b"user:1".to_vec())),
+                RespValue::SimpleString("config:active".to_string()),
+            ])),
+        ]))
+        .expect("client tracking invalidation should parse");
+
+        assert_eq!(
+            event,
+            RedisClientTrackingPush::Invalidate {
+                keys: Some(vec![b"user:1".to_vec(), b"config:active".to_vec()])
+            }
+        );
+    }
+
+    #[test]
+    fn client_tracking_push_parse_flush_and_redirect_broken() {
+        let flush = parse_client_tracking_push_for_fuzz(RespValue::Push(vec![
+            RespValue::BulkString(Some(b"invalidate".to_vec())),
+            RespValue::Null,
+        ]))
+        .expect("null invalidation should parse as a cache flush");
+        assert_eq!(flush, RedisClientTrackingPush::Invalidate { keys: None });
+
+        let broken =
+            parse_client_tracking_push_for_fuzz(RespValue::Push(vec![RespValue::BulkString(
+                Some(b"tracking-redir-broken".to_vec()),
+            )]))
+            .expect("tracking-redir-broken should parse");
+        assert_eq!(broken, RedisClientTrackingPush::RedirectBroken);
+    }
+
+    #[test]
+    fn client_tracking_push_rejects_malformed_frames() {
+        let non_push = parse_client_tracking_push_for_fuzz(RespValue::Array(Some(vec![
+            RespValue::BulkString(Some(b"invalidate".to_vec())),
+            RespValue::Array(Some(vec![])),
+        ])));
+        assert!(
+            non_push.is_err(),
+            "tracking notifications must be RESP3 pushes"
+        );
+
+        let bad_key_payload = parse_client_tracking_push_for_fuzz(RespValue::Push(vec![
+            RespValue::BulkString(Some(b"invalidate".to_vec())),
+            RespValue::Array(Some(vec![RespValue::Integer(7)])),
+        ]));
+        assert!(
+            bad_key_payload.is_err(),
+            "invalidation keys must be payloads"
+        );
+
+        let trailing_redirect = parse_client_tracking_push_for_fuzz(RespValue::Push(vec![
+            RespValue::BulkString(Some(b"tracking-redir-broken".to_vec())),
+            RespValue::BulkString(Some(b"extra".to_vec())),
+        ]));
+        assert!(
+            trailing_redirect.is_err(),
+            "tracking-redir-broken must reject trailing fields"
+        );
     }
 
     #[test]
