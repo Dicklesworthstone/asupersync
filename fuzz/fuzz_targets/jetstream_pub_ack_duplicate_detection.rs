@@ -1,84 +1,55 @@
 #![no_main]
 
-//! Focused fuzz target for JetStream PubAck duplicate detection logic.
+//! Focused fuzz target for JetStream PubAck duplicate detection.
 //!
-//! This target specifically tests the `parse_pub_ack` function's duplicate field
-//! parsing using the `extract_json_bool` helper. Separate from existing JetStream
-//! fuzzers that cover ACK control tokens and general JSON API parsing.
-//!
-//! Target edge cases:
-//! - Boolean variants: true, false, True, FALSE, 1, 0, null
-//! - JSON escaping and unicode whitespace around duplicate field
-//! - Malformed JSON structures with valid duplicate fields
-//! - Edge cases in pattern matching ("duplicate": vs "duplicated")
-//! - Field ordering and multiple duplicate fields
-//! - Boundary conditions in string parsing
-//!
-//! Usage: cargo fuzz run jetstream_pub_ack_duplicate_detection
+//! The production parser is intentionally exposed through `fuzz_parse_pub_ack`.
+//! This target drives that parser directly instead of shadowing its
+//! `"duplicate"` extraction logic with a local mock.
 
 use arbitrary::{Arbitrary, Unstructured};
-use asupersync::messaging::jetstream::JetStreamContext;
-use asupersync::messaging::nats::NatsClient;
+use asupersync::messaging::jetstream::fuzz_parse_pub_ack;
 use libfuzzer_sys::fuzz_target;
 
-/// Maximum payload size for reasonable fuzzing performance
+/// Maximum payload size for reasonable fuzzing performance.
 const MAX_PAYLOAD_SIZE: usize = 4096;
+const MAX_STRING_CHARS: usize = 128;
+const MAX_REPEATED_FIELDS: usize = 4;
 
-/// Structure-aware generator for PubAck JSON with focus on duplicate field
 #[derive(Arbitrary, Debug, Clone)]
 struct PubAckFuzzCase {
-    /// The duplicate field variant to test
     duplicate_variant: DuplicateFieldVariant,
-    /// Required fields for valid PubAck structure
     base_fields: BaseFields,
-    /// JSON structure corruption parameters
     corruption: JsonCorruption,
 }
 
-/// Different ways to represent the duplicate field
 #[derive(Arbitrary, Debug, Clone)]
 enum DuplicateFieldVariant {
-    /// Standard boolean values
     StandardTrue,
     StandardFalse,
-    /// Capitalization variants
-    TitleCaseTrue,    // True
-    UpperCaseFalse,   // FALSE
-    MixedCase,        // tRuE, fAlSe
-    /// Numeric representations (should fail)
-    Zero,             // 0
-    One,              // 1
-    /// Other JSON types (should fail)
+    TitleCaseTrue,
+    UpperCaseFalse,
+    MixedCase,
+    Zero,
+    One,
     Null,
-    String(String),   // "true", "false", "maybe"
-    /// Missing field (should default to false)
+    String(String),
     Missing,
-    /// Multiple duplicate fields (JSON parsing edge case)
-    Multiple(Vec<String>),
-    /// Whitespace and escaping edge cases
-    WithWhitespace,
-    WithEscaping,
+    Multiple(Vec<DuplicateFieldLiteral>),
+    SpacedBeforeColonTrue,
+    EscapedTrueString,
 }
 
-/// Required fields to make a valid-ish PubAck structure
 #[derive(Arbitrary, Debug, Clone)]
 struct BaseFields {
-    /// Stream name
     stream: String,
-    /// Sequence number (can be invalid for testing)
     seq: u64,
-    /// Whether to include error field (changes parsing path)
     include_error: bool,
 }
 
-/// Parameters for corrupting JSON structure while preserving parsability
 #[derive(Arbitrary, Debug, Clone)]
 struct JsonCorruption {
-    /// Extra whitespace around duplicate field
     extra_whitespace: WhitespaceVariant,
-    /// Field ordering
     field_order: FieldOrder,
-    /// JSON syntax edge cases
     syntax_variant: JsonSyntaxVariant,
 }
 
@@ -89,14 +60,13 @@ enum WhitespaceVariant {
     Tabs,
     Newlines,
     Mixed,
-    Unicode,  // Non-ASCII whitespace
 }
 
 #[derive(Arbitrary, Debug, Clone)]
 enum FieldOrder {
-    DuplicateFirst,
-    DuplicateMiddle,
-    DuplicateLast,
+    First,
+    Middle,
+    Last,
 }
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -108,48 +78,34 @@ enum JsonSyntaxVariant {
     MixedQuotes,
 }
 
+#[derive(Arbitrary, Debug, Clone)]
+enum DuplicateFieldLiteral {
+    True,
+    False,
+    Zero,
+    One,
+    Null,
+    String(String),
+}
+
 impl PubAckFuzzCase {
-    /// Generate a JSON payload targeting the duplicate detection logic
     fn generate_json(&self) -> String {
         let mut json = String::new();
         json.push('{');
 
-        // Build fields in specified order
         let mut fields = Vec::new();
-
-        // Base fields
         if !self.base_fields.include_error {
-            fields.push(format!("\"stream\":\"{}\"", self.escape_json(&self.base_fields.stream)));
+            fields.push(format!(
+                "\"stream\":\"{}\"",
+                escape_json(&self.base_fields.stream)
+            ));
             fields.push(format!("\"seq\":{}", self.base_fields.seq));
         } else {
-            // Include error field to test error parsing path
-            fields.push("\"error\":{\"code\":500}".to_string());
+            fields.push("\"error\":{\"code\":500,\"description\":\"fuzz\"}".to_string());
         }
 
-        // Generate duplicate field based on variant
-        let duplicate_field = self.generate_duplicate_field();
+        self.insert_duplicate_fields(&mut fields);
 
-        // Insert duplicate field based on ordering
-        match self.corruption.field_order {
-            FieldOrder::DuplicateFirst => {
-                if let Some(dup) = duplicate_field {
-                    fields.insert(0, dup);
-                }
-            },
-            FieldOrder::DuplicateMiddle => {
-                if let Some(dup) = duplicate_field {
-                    let mid = fields.len() / 2;
-                    fields.insert(mid, dup);
-                }
-            },
-            FieldOrder::DuplicateLast => {
-                if let Some(dup) = duplicate_field {
-                    fields.push(dup);
-                }
-            },
-        }
-
-        // Apply syntax corruption and join fields
         let separator = match self.corruption.syntax_variant {
             JsonSyntaxVariant::Standard => ",",
             JsonSyntaxVariant::ExtraCommas => ",,",
@@ -164,150 +120,174 @@ impl PubAckFuzzCase {
         json
     }
 
-    /// Generate the duplicate field based on variant
-    fn generate_duplicate_field(&self) -> Option<String> {
-        let whitespace = self.get_whitespace();
+    fn insert_duplicate_fields(&self, fields: &mut Vec<String>) {
+        let duplicate_fields = self.generate_duplicate_fields();
+        if duplicate_fields.is_empty() {
+            return;
+        }
 
-        match &self.duplicate_variant {
-            DuplicateFieldVariant::StandardTrue => {
-                Some(format!("\"duplicate\":{whitespace}true"))
-            },
-            DuplicateFieldVariant::StandardFalse => {
-                Some(format!("\"duplicate\":{whitespace}false"))
-            },
-            DuplicateFieldVariant::TitleCaseTrue => {
-                Some(format!("\"duplicate\":{whitespace}True"))
-            },
-            DuplicateFieldVariant::UpperCaseFalse => {
-                Some(format!("\"duplicate\":{whitespace}FALSE"))
-            },
-            DuplicateFieldVariant::MixedCase => {
-                Some(format!("\"duplicate\":{whitespace}tRuE"))
-            },
-            DuplicateFieldVariant::Zero => {
-                Some(format!("\"duplicate\":{whitespace}0"))
-            },
-            DuplicateFieldVariant::One => {
-                Some(format!("\"duplicate\":{whitespace}1"))
-            },
-            DuplicateFieldVariant::Null => {
-                Some(format!("\"duplicate\":{whitespace}null"))
-            },
-            DuplicateFieldVariant::String(s) => {
-                Some(format!("\"duplicate\":{whitespace}\"{}\"", self.escape_json(s)))
-            },
-            DuplicateFieldVariant::Missing => {
-                None
-            },
-            DuplicateFieldVariant::Multiple(values) => {
-                // Create multiple duplicate fields (invalid JSON but tests parser resilience)
-                Some(values.iter().map(|v| format!("\"duplicate\":{whitespace}\"{}\"", self.escape_json(v))).collect::<Vec<_>>().join(","))
-            },
-            DuplicateFieldVariant::WithWhitespace => {
-                Some(format!("\"duplicate\" \t\n : \t\n true \t\n"))
-            },
-            DuplicateFieldVariant::WithEscaping => {
-                Some(format!("\"duplicate\":{whitespace}\"\\u0074\\u0072\\u0075\\u0065\""))
-            },
+        match self.corruption.field_order {
+            FieldOrder::First => {
+                for field in duplicate_fields.into_iter().rev() {
+                    fields.insert(0, field);
+                }
+            }
+            FieldOrder::Middle => {
+                let mid = fields.len() / 2;
+                for (offset, field) in duplicate_fields.into_iter().enumerate() {
+                    fields.insert(mid + offset, field);
+                }
+            }
+            FieldOrder::Last => fields.extend(duplicate_fields),
         }
     }
 
-    /// Get whitespace string based on variant
-    fn get_whitespace(&self) -> &'static str {
+    fn generate_duplicate_fields(&self) -> Vec<String> {
+        let whitespace = self.value_whitespace();
+
+        match &self.duplicate_variant {
+            DuplicateFieldVariant::StandardTrue => vec![format!("\"duplicate\":{whitespace}true")],
+            DuplicateFieldVariant::StandardFalse => {
+                vec![format!("\"duplicate\":{whitespace}false")]
+            }
+            DuplicateFieldVariant::TitleCaseTrue => {
+                vec![format!("\"duplicate\":{whitespace}True")]
+            }
+            DuplicateFieldVariant::UpperCaseFalse => {
+                vec![format!("\"duplicate\":{whitespace}FALSE")]
+            }
+            DuplicateFieldVariant::MixedCase => vec![format!("\"duplicate\":{whitespace}tRuE")],
+            DuplicateFieldVariant::Zero => vec![format!("\"duplicate\":{whitespace}0")],
+            DuplicateFieldVariant::One => vec![format!("\"duplicate\":{whitespace}1")],
+            DuplicateFieldVariant::Null => vec![format!("\"duplicate\":{whitespace}null")],
+            DuplicateFieldVariant::String(value) => {
+                vec![format!(
+                    "\"duplicate\":{whitespace}\"{}\"",
+                    escape_json(value)
+                )]
+            }
+            DuplicateFieldVariant::Missing => Vec::new(),
+            DuplicateFieldVariant::Multiple(values) => values
+                .iter()
+                .take(MAX_REPEATED_FIELDS)
+                .map(|value| format!("\"duplicate\":{whitespace}{}", value.as_json_value()))
+                .collect(),
+            DuplicateFieldVariant::SpacedBeforeColonTrue => {
+                vec![format!("\"duplicate\" :{whitespace}true")]
+            }
+            DuplicateFieldVariant::EscapedTrueString => {
+                vec![format!(
+                    "\"duplicate\":{whitespace}\"\\u0074\\u0072\\u0075\\u0065\""
+                )]
+            }
+        }
+    }
+
+    fn expected_duplicate_for_canonical_shape(&self) -> Option<bool> {
+        if self.base_fields.include_error {
+            return None;
+        }
+        if !matches!(self.corruption.syntax_variant, JsonSyntaxVariant::Standard) {
+            return None;
+        }
+
+        match &self.duplicate_variant {
+            DuplicateFieldVariant::StandardTrue => Some(true),
+            DuplicateFieldVariant::StandardFalse | DuplicateFieldVariant::Missing => Some(false),
+            DuplicateFieldVariant::TitleCaseTrue
+            | DuplicateFieldVariant::UpperCaseFalse
+            | DuplicateFieldVariant::MixedCase
+            | DuplicateFieldVariant::Zero
+            | DuplicateFieldVariant::One
+            | DuplicateFieldVariant::Null
+            | DuplicateFieldVariant::String(_)
+            | DuplicateFieldVariant::Multiple(_)
+            | DuplicateFieldVariant::SpacedBeforeColonTrue
+            | DuplicateFieldVariant::EscapedTrueString => None,
+        }
+    }
+
+    fn value_whitespace(&self) -> &'static str {
         match self.corruption.extra_whitespace {
             WhitespaceVariant::None => "",
             WhitespaceVariant::Spaces => "   ",
             WhitespaceVariant::Tabs => "\t\t",
             WhitespaceVariant::Newlines => "\n\n",
             WhitespaceVariant::Mixed => " \t\n ",
-            WhitespaceVariant::Unicode => "\u{2000}\u{2001}\u{2002}", // En quad, em quad, en space
         }
-    }
-
-    /// Basic JSON string escaping
-    fn escape_json(&self, s: &str) -> String {
-        s.replace('\\', "\\\\")
-         .replace('"', "\\\"")
-         .replace('\n', "\\n")
-         .replace('\r', "\\r")
-         .replace('\t', "\\t")
     }
 }
 
-/// Test the PubAck parsing with focus on duplicate field edge cases
-fn test_pub_ack_duplicate_detection(payload: &[u8]) {
-    // Guard against oversized inputs
+impl DuplicateFieldLiteral {
+    fn as_json_value(&self) -> String {
+        match self {
+            Self::True => "true".to_string(),
+            Self::False => "false".to_string(),
+            Self::Zero => "0".to_string(),
+            Self::One => "1".to_string(),
+            Self::Null => "null".to_string(),
+            Self::String(value) => format!("\"{}\"", escape_json(value)),
+        }
+    }
+}
+
+fn escape_json(input: &str) -> String {
+    let mut escaped = String::new();
+    for ch in input.chars().take(MAX_STRING_CHARS) {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn exercise_parser(payload: &[u8]) {
     if payload.len() > MAX_PAYLOAD_SIZE {
         return;
     }
 
-    // Try to parse as PubAck - we expect this to either succeed or fail gracefully
-    // The key is that it should never panic or cause undefined behavior
+    let _ = fuzz_parse_pub_ack(payload);
+}
 
-    // We can't easily create a JetStreamContext for testing, so we need to test
-    // the parsing logic more directly. Let's see if we can access the parse function
-    // through any public interface or create a minimal test context.
+fn exercise_structured_case(case: &PubAckFuzzCase) {
+    let generated_json = case.generate_json();
+    let result = fuzz_parse_pub_ack(generated_json.as_bytes());
 
-    // For now, we'll test the basic robustness by ensuring the payload is valid UTF-8
-    // and doesn't cause issues in string operations that would be done in parsing.
-    if let Ok(json_str) = std::str::from_utf8(payload) {
-        // Test the pattern matching logic similar to extract_json_bool
-        test_duplicate_field_extraction(json_str);
+    if let Some(expected_duplicate) = case.expected_duplicate_for_canonical_shape() {
+        let ack = result.expect("canonical generated PubAck should parse");
+        assert_eq!(ack.seq, case.base_fields.seq);
+        assert_eq!(ack.duplicate, expected_duplicate);
     }
 }
 
-/// Test the duplicate field extraction logic directly
-fn test_duplicate_field_extraction(json: &str) {
-    // Test for the exact pattern used in extract_json_bool
-    let pattern = "\"duplicate\":";
-    if let Some(start_pos) = json.find(pattern) {
-        let start = start_pos + pattern.len();
-        if start < json.len() {
-            let rest = &json[start..];
-            let trimmed = rest.trim_start();
-
-            // Test the same logic as extract_json_bool without panicking
-            let _result = if trimmed.starts_with("true") {
-                Some(true)
-            } else if trimmed.starts_with("false") {
-                Some(false)
-            } else {
-                None
-            };
-        }
-    }
-
-    // Also test pattern variants that might cause issues
-    let variant_patterns = [
-        "\"duplicate\" :",
-        "\"duplicate\"\t:",
-        "\"duplicate\"\n:",
-        "\"duplicate\"\r:",
-        "\"duplicated\":",  // Similar field name
-        "\"duplicate_flag\":",
+fn exercise_curated_cases() {
+    let cases: &[(&[u8], bool)] = &[
+        (br#"{"stream":"ORDERS","seq":42,"duplicate":true}"#, true),
+        (br#"{"stream":"ORDERS","seq":42,"duplicate":   true}"#, true),
+        (br#"{"stream":"ORDERS","seq":42,"duplicate":false}"#, false),
+        (br#"{"stream":"ORDERS","seq":42}"#, false),
+        (br#"{"stream":"ORDERS","seq":42,"duplicated":true}"#, false),
     ];
 
-    for variant in &variant_patterns {
-        if let Some(start_pos) = json.find(variant) {
-            let start = start_pos + variant.len();
-            if start < json.len() {
-                // Test bounds safety
-                let _rest = &json[start..];
-            }
-        }
+    for (payload, expected_duplicate) in cases {
+        let ack = fuzz_parse_pub_ack(payload).expect("curated PubAck fixture should parse");
+        assert_eq!(ack.duplicate, *expected_duplicate);
     }
+
+    assert!(fuzz_parse_pub_ack(br#"{"error":{"code":500,"description":"fuzz"}}"#).is_err());
 }
 
 fuzz_target!(|data: &[u8]| {
-    // First test with raw input
-    test_pub_ack_duplicate_detection(data);
+    exercise_curated_cases();
+    exercise_parser(data);
 
-    // Then test with structure-aware generation if we can parse the input
-    if data.len() >= std::mem::size_of::<PubAckFuzzCase>() {
-        let mut u = Unstructured::new(data);
-        if let Ok(fuzz_case) = PubAckFuzzCase::arbitrary(&mut u) {
-            let generated_json = fuzz_case.generate_json();
-            test_pub_ack_duplicate_detection(generated_json.as_bytes());
-        }
+    let mut u = Unstructured::new(data);
+    if let Ok(fuzz_case) = PubAckFuzzCase::arbitrary(&mut u) {
+        exercise_structured_case(&fuzz_case);
     }
 });
