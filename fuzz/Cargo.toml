@@ -4282,3 +4282,9 @@ name = "h1_malformed_lf_terminator"
 path = "fuzz_targets/h1_malformed_lf_terminator.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "h1_transfer_encoding_precedence"
+path = "fuzz_targets/h1_transfer_encoding_precedence.rs"
+test = false
+doc = false
