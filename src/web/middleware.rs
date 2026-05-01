@@ -2704,6 +2704,32 @@ mod tests {
         assert_eq!(after_expiry.call(new_req).status, StatusCode::OK);
     }
 
+    #[test]
+    fn auth_rotation_prune_removes_expired_tokens_without_dropping_replacement() {
+        let mut policy = AuthPolicy::exact_bearer_until("old-token", Time::from_secs(20));
+        policy.rotate_exact_bearer("new-token", Time::from_secs(40), Time::from_secs(10));
+        policy.prune_expired(Time::from_secs(20));
+
+        let AuthPolicy::ExactBearer(tokens) = &policy else {
+            panic!("rotation must preserve exact-bearer policy");
+        };
+        assert_eq!(
+            tokens.iter().map(BearerToken::token).collect::<Vec<_>>(),
+            vec!["new-token"],
+            "prune should remove expired old tokens and keep active replacements"
+        );
+
+        let mw = AuthMiddleware::with_time_getter(
+            FnHandler::new(ok_handler),
+            policy,
+            auth_test_time_20s,
+        );
+        let old_req = Request::new("GET", "/auth").with_header("authorization", "Bearer old-token");
+        let new_req = Request::new("GET", "/auth").with_header("authorization", "Bearer new-token");
+        assert_eq!(mw.call(old_req).status, StatusCode::UNAUTHORIZED);
+        assert_eq!(mw.call(new_req).status, StatusCode::OK);
+    }
+
     // --- LoadShedMiddleware ---
 
     #[test]
